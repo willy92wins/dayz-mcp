@@ -4518,7 +4518,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Raycast through the server bridge using from/to world positions. "
-            "Public arg is from (alias of from_pos)."
+            "Public arg is from (alias of from_pos). "
+            "With method='rvproxy', a requested radius=0 currently runs with an "
+            "effective radius of 0.05 m (the bridge initializes the radius at "
+            "0.05 and replaces it only when the requested value is positive); "
+            "positive values pass through. "
+            "pos is the engine-returned position copied without contact-point "
+            "reconstruction: no universal sphere-centre or contact-point "
+            "semantics are established (vanilla names it a collision position). "
+            "With method='bullet', the implementation performs a raycast and "
+            "does not use radius. "
+            "A reported floor experiment suggested a sweep-centre offset for "
+            "that geometry; that interpretation is not promised for all "
+            "surfaces, and engine measurements are required before any "
+            "contact_pos addition."
         )
     )
     async def scene_raycast(
@@ -6077,6 +6090,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "has killed the live client (ficha 8f76). "
         "session_locked means the Windows session is locked: both window-grab backends need the interactive desktop, retrying does not help until the session is unlocked, so unattended runs must keep it unlocked. "
         "dayz_test_run waits up to 30 s for an unlocked non-black host desktop before launching a client (session_locked / desktop_all_black / desktop_probe_timeout / desktop_probe_failed) so a capture tandem does not burn runs only to return frame_client_all_black. Non-Windows desktop_probe_unsupported does not block. "
+        "The preflight is a point-in-time check of current desktop accessibility and brightness: it neither keeps the display awake nor guarantees later client captures (a report links a display that entered power-save after the probe to frame_client_all_black; that cause is not reproduced). "
         "An unfocused DayZDiag client renders at about 20 fps, so client-side timing depends on which window owns the foreground. "
         "Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
         "pixels repeat the previous capture of the same window, false that the render advanced, and null that no comparison was possible (first capture, an "
