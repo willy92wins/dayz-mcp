@@ -318,6 +318,28 @@ class ReusedPidTest(unittest.TestCase):
         )
 
 
+def _held_elsewhere(lock: object) -> bool:
+    """Whether another thread holds lock; portable to Lock and RLock.
+
+    RLock.locked() does not exist before Python 3.14, and from the holding
+    thread a reentrant acquire always succeeds, so probe from a helper thread.
+    """
+    import threading
+
+    result: list[bool] = []
+
+    def probe() -> None:
+        got = lock.acquire(blocking=False)  # type: ignore[attr-defined]
+        if got:
+            lock.release()  # type: ignore[attr-defined]
+        result.append(not got)
+
+    helper = threading.Thread(target=probe)
+    helper.start()
+    helper.join()
+    return result[0]
+
+
 class BindingChangeTest(unittest.TestCase):
     def test_d17ca_binding_change_discards_death_observation(self) -> None:
         # The destination that changed while the probe ran cannot inherit the
@@ -329,7 +351,7 @@ class BindingChangeTest(unittest.TestCase):
         observed: list[bool] = []
 
         def rebind_mid_probe(run_id: str, destination=None) -> str:
-            observed.append(state._lock.locked())
+            observed.append(_held_elsewhere(state._lock))
             state.retire_role(run_id, "client", "rebound")
             state.install_bound_peer(
                 instance=INST_CLIENT_2,
@@ -358,7 +380,7 @@ class BindingChangeTest(unittest.TestCase):
         original = lifecycle.classify_registered_client_liveness
 
         def watch(run_id: str, destination=None) -> str:
-            seen.append(lifecycle._operation_lock.locked())
+            seen.append(_held_elsewhere(lifecycle._operation_lock))
             return original(run_id)
 
         lifecycle.classify_registered_client_liveness = watch  # type: ignore[method-assign]
