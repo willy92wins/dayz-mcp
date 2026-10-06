@@ -60,6 +60,8 @@ MAX_LITERAL_CHUNK = 200
 # Dispatch() before its terminal unknown_command. Sorted ascending. Owned here;
 # not derived from loopback, the app, or the bridge.
 EXPECTED_SERVER_CAPABILITIES = (
+    "bot_start",
+    "bot_stop",
     "entities_query",
     "exec_enforce",
     "hands_take",
@@ -73,6 +75,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "object_inspect",
     "player_godmode",
     "player_heal",
+    "player_kill",
     "player_teleport",
     "query_all_players",
     "query_get_in_condition",

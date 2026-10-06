@@ -152,8 +152,10 @@ def translate(text, name, parameters, method_names):
     assert indent == 1
     if len(lines) == 1:
         lines.append("    pass")
-    namespace = {}
-    exec(compile("\n".join(lines) + "\n", "<Enforce-source:" + name + ">", "exec"), {}, namespace)
+    namespace = {
+        "MCPBotControl": SimpleNamespace(ShutdownAll=lambda *_args, **_kwargs: None),
+    }
+    exec(compile("\n".join(lines) + "\n", "<Enforce-source:" + name + ">", "exec"), namespace, namespace)
     return namespace[name]
 
 

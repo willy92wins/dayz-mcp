@@ -54,7 +54,9 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 
 _REMOTE_ERROR_CODES = frozenset({
     "audit_failed",
+    "arg_contract_mismatch",
     "bad_args",
+    "bridge_capability_missing",
     "bad_content_length",
     "bad_id",
     "bad_json",

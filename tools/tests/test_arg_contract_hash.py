@@ -34,10 +34,13 @@ class ArgContractHashTest(unittest.TestCase):
     def test_python_hash_matches_canonical_fixture(self) -> None:
         self.assertEqual(
             server_module.server_arg_contract_canonical(),
+            "bot_start=action,bot_ttl_s,object_id\n"
+            "bot_stop=object_id\n"
+            "player_kill=uid\n"
             "vehicle_prepare_fixture=mode,pos,radius,type",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3c77a99c95fd05a4"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "e5a0ed288dbae72f"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

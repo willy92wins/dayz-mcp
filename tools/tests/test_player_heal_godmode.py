@@ -675,9 +675,9 @@ class HealGodmodeCensusTest(unittest.TestCase):
         for command in COMMANDS:
             with self.subTest(command=command):
                 self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3c77a99c95fd05a4")
-        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "3c77a99c95fd05a4";', self.bridge)
-        self.assertIn('const string MCP_BRIDGE_VERSION = "10";', _source(MESSAGES_PATH))
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "e5a0ed288dbae72f")
+        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "e5a0ed288dbae72f";', self.bridge)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', _source(MESSAGES_PATH))
 
 
 # --- the heal, run --------------------------------------------------------------

@@ -92,6 +92,10 @@ PRUNABLE_FIELDS = (
     # ui_click fills it in mode="complete" only: direct mode leaves it unset.
     "click_sequence",
     # player_heal fills it with the vitals before and after the heal (bef7).
+    # player_kill fills it when death was attempted (f4de).
+    "player_kill",
+    # bot_start / bot_stop fill it on success (120f).
+    "bot",
     "player_heal",
     # player_godmode fills it with the state before and after the switch (3136).
     "player_godmode",

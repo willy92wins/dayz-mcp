@@ -92,6 +92,8 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    BOT_START_ACTIONS,
+    BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
@@ -341,6 +343,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # instead of the player named: an unknown key is refused, not dropped.
     "player_heal",
     "player_godmode",
+    # A mistyped uid key must not be dropped: kill has no first-player fallback.
+    "player_kill",
+    "bot_start",
+    "bot_stop",
 )
 
 
@@ -5735,6 +5741,99 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_godmode", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Kill one connected player on the server by "
+            "PlayerIdentity.GetPlainId(). uid is required and never falls back "
+            "to the first human. The body is killed with SetHealth(0), the same "
+            "primitive the vanilla emote kill uses, so the normal death path "
+            "runs. A body in godmode is released for that hit; the identity's "
+            "remembered godmode choice is not changed and still applies on "
+            "player_respawn. This does not respawn. The answer is player_kill: "
+            "uid, health_before, health_after, alive_before, alive_after, "
+            "killed, godmode_policy_preserved. Success means that body is dead "
+            "with health at zero. The client death screen and the new character "
+            "are separate. Errors: bad_args, player_not_found, no_identity, "
+            "player_dead, kill_not_applied. A timeout means the outcome is "
+            "unknown; read the player before trying again."
+        )
+    )
+    async def player_kill(
+        uid: StrictStr,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(uid, str) or uid == "":
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        args = {"uid": uid}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("player_kill", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Start one debug-bot action on a survivor dummy "
+            "this bridge spawned with world_spawn. object_id is that registry "
+            "id. The dummy must be a living PlayerBase with no connected "
+            "identity. action is one of the 1.30 debug transitions "
+            "(PLAYER_BOT_RANDOMIZE_STANCE, PLAYER_BOT_RANDOMIZE_MOVEMENT, "
+            "PLAYER_BOT_SPAM_USER_ACTIONS, "
+            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
+            "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN, PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT, PLAYER_BOT_TEST_SWAP_G2H, "
+            "PLAYER_BOT_TEST_SWAP_INTERNAL). ttl_s is how long the server keeps "
+            "it running, from just above 0 to 30 seconds, default 5. A second "
+            "start while one is active is bot_busy. On 1.29, and on a 1.30 "
+            "build without the bot macros, the answer is bot_unavailable and "
+            "nothing is initialized. The answer is bot: object_id, action, "
+            "started, ttl_s. started means the bot FSM accepted the transition, "
+            "not that the action's effect happened. Errors: bad_args, "
+            "bot_unavailable, object_not_found, not_dummy_player, player_dead, "
+            "bot_busy, bot_action_rejected."
+        )
+    )
+    async def bot_start(
+        object_id: StrictInt,
+        action: str,
+        ttl_s: StrictFloat = 5.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        if not isinstance(action, str) or action not in BOT_START_ACTIONS:
+            raise ToolError(
+                _bad_args("action", action, "be one of the debug-bot action names")
+            )
+        if isinstance(ttl_s, bool) or not isinstance(ttl_s, (int, float)):
+            raise ToolError(_bad_args("ttl_s", ttl_s, "be a number of seconds"))
+        ttl_value = float(ttl_s)
+        if ttl_value != ttl_value or ttl_value <= 0.0 or ttl_value > BOT_TTL_MAX_S:
+            raise ToolError(
+                _bad_args("ttl_s", ttl_s, "be a finite number of seconds in (0, 30]")
+            )
+        args = {"object_id": object_id, "action": action, "bot_ttl_s": ttl_value}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("bot_start", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Stop the debug-bot action on a world_spawn "
+            "dummy, if one is running. An initialized idle dummy answers "
+            "success with stopped false. On 1.29 the answer is bot_unavailable "
+            "and nothing is initialized. The answer is bot: object_id, stopped, "
+            "released_by. Errors: bad_args, bot_unavailable, object_not_found, "
+            "not_dummy_player, player_dead."
+        )
+    )
+    async def bot_stop(
+        object_id: StrictInt,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        args = {"object_id": object_id}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("bot_stop", args, "server", _timeout(timeout_s))
 
     # Read or write entity animation phase.
     @app.tool(

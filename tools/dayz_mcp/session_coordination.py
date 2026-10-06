@@ -1269,6 +1269,16 @@ class SessionCoordinator:
                 payload["cleanup_degraded"] = degraded
             return 200, payload
 
+    def active_lease_id(
+        self, client: ClientIdentity, lease_token: str | None
+    ) -> str | None:
+        """Lease id for a token that would pass authorize, without renewing it."""
+        with self._condition:
+            lease, _error = self._validate_token_locked(client, lease_token)
+        if lease is None:
+            return None
+        return lease.lease_id
+
     def release(
         self,
         client: ClientIdentity,
@@ -2581,7 +2591,12 @@ class SessionCoordinator:
         cleanup_duration_s = max(0.0, time.monotonic() - cleanup_started_at)
         cleanup_summary = {
             key: cleanup_result[key]
-            for key in ("cancelled", "vehicle_release_enqueued", "runs_released")
+            for key in (
+                "cancelled",
+                "vehicle_release_enqueued",
+                "bot_stop_enqueued",
+                "runs_released",
+            )
             if key in cleanup_result
             and isinstance(cleanup_result[key], (int, list))
             and not isinstance(cleanup_result[key], bool)
@@ -2655,7 +2670,12 @@ class SessionCoordinator:
                 )
                 cleanup_summary = {
                     key: result[key]
-                    for key in ("cancelled", "vehicle_release_enqueued", "runs_released")
+                    for key in (
+                "cancelled",
+                "vehicle_release_enqueued",
+                "bot_stop_enqueued",
+                "runs_released",
+            )
                     if key in result
                     and isinstance(result[key], (int, list))
                     and not isinstance(result[key], bool)

@@ -231,6 +231,9 @@ def _has_ready_snapshot_shape(status: object) -> bool:
 # `_compare_bridge_capabilities` fails closed on absent/wrong values for the
 # server peer. Client peer has no ach gate yet.
 SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
+    "bot_start": ("action", "bot_ttl_s", "object_id"),
+    "bot_stop": ("object_id",),
+    "player_kill": ("uid",),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
 }
 
@@ -268,6 +271,8 @@ EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 # poll instead of on the first failed call.
 _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
+        "bot_start": "bot_start",
+        "bot_stop": "bot_stop",
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
         "hands_take": "hands_take",
@@ -281,6 +286,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "object_inspect": "object_inspect",
         "player_godmode": "player_godmode",
         "player_heal": "player_heal",
+        "player_kill": "player_kill",
         "player_teleport": "player_teleport",
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",

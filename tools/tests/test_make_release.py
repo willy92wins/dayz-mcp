@@ -255,7 +255,7 @@ class MakeReleaseTest(unittest.TestCase):
             (
                 release.read_bridge_version,
                 'const string MCP_BRIDGE_VERSION = "9";\n'
-                'const string MCP_BRIDGE_VERSION = "10";\n',
+                'const string MCP_BRIDGE_VERSION = "11";\n',
                 "bridge_version_parse_failed",
             ),
         )

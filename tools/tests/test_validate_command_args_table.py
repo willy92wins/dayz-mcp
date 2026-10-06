@@ -417,6 +417,32 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("uid_wrong_type", {"full": True, "uid": 1}, (False, "bad_args")),
         ("extra_key", {"full": True, "extra": None}, (False, "bad_args")),
     ),
+    "player_kill": (
+        ("valid_uid", {"uid": "player-1"}, (True, None)),
+        ("empty_uid", {"uid": ""}, (False, "bad_args")),
+        ("missing_uid", {}, (False, "bad_args")),
+        ("uid_wrong_type", {"uid": 1}, (False, "bad_args")),
+        ("extra_key", {"uid": "player-1", "id": "player-1"}, (False, "bad_args")),
+    ),
+    "bot_start": (
+        (
+            "valid",
+            {
+                "object_id": 1,
+                "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT",
+                "bot_ttl_s": 5.0,
+            },
+            (True, None),
+        ),
+        ("ttl_zero", {"object_id": 1, "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT", "bot_ttl_s": 0}, (False, "bad_args")),
+        ("stop_action", {"object_id": 1, "action": "PLAYER_BOT_STOP_CURRENT", "bot_ttl_s": 5}, (False, "bad_args")),
+        ("missing_ttl", {"object_id": 1, "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT"}, (False, "bad_args")),
+    ),
+    "bot_stop": (
+        ("valid", {"object_id": 1}, (True, None)),
+        ("zero_id", {"object_id": 0}, (False, "bad_args")),
+        ("missing", {}, (False, "bad_args")),
+    ),
     "player_godmode": (
         ("valid_off", {"godmode": False}, (True, None)),
         ("valid_on_with_uid", {"godmode": True, "uid": "player-1"}, (True, None)),
