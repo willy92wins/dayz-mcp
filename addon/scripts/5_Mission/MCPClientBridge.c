@@ -416,6 +416,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const float CAMERA_JOB_TIMEOUT_S = 5.0;
 	protected const float CAMERA_SETTLE_STEP_S = 0.05;
 	protected const int CAMERA_DEFAULT_SETTLE_TICKS = 3;
+	// 0 keeps CAMERA_DEFAULT_SETTLE_TICKS. 600 is 30 s of settle.
+	protected const int CAMERA_SETTLE_TICKS_MAX = 600;
 	protected const int CAMERA_MODE_ORIENT = 1;
 	protected const int CAMERA_MODE_LOOKAT = 2;
 	protected const int CAMERA_MODE_MATRIX = 3;
@@ -1797,7 +1799,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		job.args = command.args;
 		job.phase = CAMERA_PHASE_APPLY;
 		job.sample_s_target = ResolveSettleSeconds(command.args);
-		job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;
+		// Settle plus the same five seconds of apply/report slack. A fixed
+		// five-second deadline cancelled a 200-tick settle (10 s) unfinished.
+		job.deadline_s = m_JobRunner.GetElapsedS() + job.sample_s_target + CAMERA_JOB_TIMEOUT_S;
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
@@ -5699,6 +5703,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		// A camera_set timeout does not prove the camera was not applied:
+		// apply can have succeeded before the settle deadline.
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = false;
@@ -5834,6 +5840,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		if (args.fov < 0.0 || !IsFiniteFloat(args.fov))
+		{
+			validation.error = "bad_args";
+			return validation;
+		}
+
+		// Absent JSON integers arrive as 0, which keeps the three-tick default.
+		if (args.settle_ticks < 0 || args.settle_ticks > CAMERA_SETTLE_TICKS_MAX)
 		{
 			validation.error = "bad_args";
 			return validation;

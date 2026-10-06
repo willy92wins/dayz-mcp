@@ -794,6 +794,54 @@ _PLAYER_ROLES = frozenset({"client", "offline"})
 # 250f: past this many remembered exclusions, the ones no active run holds any
 # more are pruned. Live ones are never dropped (review #125 R3).
 _EXCLUSION_PRUNE_AT = 256
+# Active-run client observations. Daemon memory only. A restart starts empty.
+# Identities no active run still holds are the ones a full table drops.
+_CLIENT_ROLE_OBSERVATION_BOUND = 32
+# Observation strength for one client identity. A death is terminal and an
+# alive probe beats an unknown one, so a weaker observation never erases a
+# stronger stored one.
+_CLIENT_STATE_STRENGTH = {"dead": 2, "alive": 1}
+
+
+def _merge_client_observations(
+    previous: dict[str, object] | None,
+    observation: dict[str, object],
+) -> dict[str, object]:
+    """Fold one probe result into the latest stored observation.
+
+    The probe ran outside the table lock, so by the time it is stored another
+    reader may already have published a stronger row for the same identity.
+    The merged row never regresses: a weaker or older state does not replace
+    a stronger one. Recorded death evidence is write-once: an existing
+    first-death stamp, exit code or exit time is kept, and an incoming
+    observation only fills a field that is still missing. A conflicting
+    exact exit value is ignored.
+    """
+
+    merged = dict(observation)
+    if not isinstance(previous, dict):
+        return merged
+    new_state = merged.get("state")
+    old_state = previous.get("state")
+    if _CLIENT_STATE_STRENGTH.get(new_state, 0) < _CLIENT_STATE_STRENGTH.get(
+        old_state, 0
+    ):
+        merged["state"] = old_state
+    prev_dead = previous.get("first_observed_dead_at_utc")
+    if isinstance(prev_dead, str) and prev_dead:
+        merged["first_observed_dead_at_utc"] = prev_dead
+    for field in ("exit_code", "exit_time_utc"):
+        if previous.get(field) is not None:
+            merged[field] = previous.get(field)
+        elif merged.get(field) is None:
+            merged[field] = previous.get(field)
+    new_seen = merged.get("observed_at_utc")
+    old_seen = previous.get("observed_at_utc")
+    if isinstance(new_seen, str) and isinstance(old_seen, str) and new_seen < old_seen:
+        # A reader that probed before the stored row was published still
+        # observed: the stamp never moves backwards.
+        merged["observed_at_utc"] = old_seen
+    return merged
 
 
 def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
@@ -2158,6 +2206,15 @@ class ProcessLifecycle:
         self._reaped_owners: dict[
             tuple[str, str], tuple[str, str, tuple[ProcessRecord, ...]]
         ] = {}
+        # Per client-process identity (generation, run, pid, creation time).
+        # A reused pid is a different key. Status reads this; it never
+        # terminates. Ordered so the bound drops the oldest identity.
+        self._client_role_observations: dict[
+            tuple[str, str, int, str], dict[str, object]
+        ] = {}
+        # Status readers merge, store and copy under this lock. Probes stay
+        # outside it.
+        self._client_observation_lock = threading.Lock()
         # fb-20260904-200821-dae1 part 2: the clock of not_before_utc in the
         # launch intent. Instance state so a test can drive it.
         self._launch_intent_clock: Callable[[], float] = time.time
@@ -2321,7 +2378,197 @@ class ProcessLifecycle:
     def _projected_run(self, run: RunRecord) -> dict[str, object]:
         row = dataclasses.asdict(run)
         row.update(_generation_projection(run, self._current_generation()))
+        row["client_diagnostics"] = self._client_role_diagnostics(run)
         return row
+
+    @staticmethod
+    def _observation_now() -> str:
+        stamp = time.time()
+        whole = time.gmtime(stamp)
+        millis = int((stamp - math.floor(stamp)) * 1000)
+        return time.strftime("%Y-%m-%dT%H:%M:%S", whole) + f".{millis:03d}Z"
+
+    def _active_client_observation_keys(self) -> set[tuple[str, str, int, str]]:
+        active: set[tuple[str, str, int, str]] = set()
+        try:
+            runs = self.manifest.list_runs()
+        except Exception:
+            return active
+        generation = self._current_generation()
+        for run in runs:
+            if run.state not in _ACTIVE_STATES:
+                continue
+            for record in run.processes:
+                if record.role != "client":
+                    continue
+                active.add(
+                    (generation, run.run_id, record.pid, record.creation_time_utc)
+                )
+        return active
+
+    def _remember_client_observation(
+        self,
+        key: tuple[str, str, int, str],
+        observation: dict[str, object],
+    ) -> dict[str, object]:
+        """Merge one probe result into the table and return the merged row.
+
+        The probe ran outside this lock. The latest stored row is re-read
+        under it, so a reader that probed before a sibling published a
+        stronger observation cannot erase that evidence with a weaker one.
+        """
+
+        active = self._active_client_observation_keys()
+        with self._client_observation_lock:
+            stored = self._client_role_observations.get(key)
+            row = _merge_client_observations(
+                stored if isinstance(stored, dict) else None,
+                observation,
+            )
+            table = self._client_role_observations
+            table[key] = row
+            if len(table) <= _CLIENT_ROLE_OBSERVATION_BOUND:
+                return dict(row)
+            for old in list(table):
+                if len(table) <= _CLIENT_ROLE_OBSERVATION_BOUND:
+                    break
+                if old in active:
+                    continue
+                table.pop(old, None)
+            while len(table) > _CLIENT_ROLE_OBSERVATION_BOUND:
+                table.pop(next(iter(table)))
+            return dict(row)
+
+    def _retained_client_observations(
+        self,
+        generation: str,
+        run_id: str,
+        current_keys: set[tuple[str, str, int, str]],
+    ) -> list[dict[str, object]]:
+        with self._client_observation_lock:
+            stored = [
+                (key, dict(row))
+                for key, row in self._client_role_observations.items()
+                if isinstance(row, dict)
+            ]
+        retained: list[dict[str, object]] = []
+        for key, row in stored:
+            if key in current_keys:
+                continue
+            if key[0] != generation or key[1] != run_id:
+                continue
+            row["current"] = False
+            retained.append(row)
+        return retained
+
+    def _observe_client_record(self, run: RunRecord, record: ProcessRecord) -> dict[str, object]:
+        """Identity-aware liveness of one registered client. Never terminates."""
+
+        generation = self._current_generation()
+        key = (generation, run.run_id, record.pid, record.creation_time_utc)
+        state = "unknown"
+        exit_code: int | None = None
+        exit_time_utc: str | None = None
+        if self._quarantined():
+            # Quarantine blocks the guard. Status stays a read.
+            state = "unknown"
+            now = self._observation_now()
+        else:
+            try:
+                actual = self.guard.snapshot(record.pid)
+            except Exception:
+                actual = None
+            # After the probe returns, so a death stamp cannot precede the
+            # moment this probe saw the process gone.
+            now = self._observation_now()
+            if not isinstance(actual, dict):
+                state = "unknown"
+            elif (
+                actual.get("error") == "process_not_found"
+                and actual.get("exit_code") == 4
+            ):
+                state = "dead"
+            elif actual.get("exit_code") == 3 or actual.get("error"):
+                state = "unknown"
+            elif self._identity_matches(record, actual):
+                state = "alive"
+            elif actual.get("identity_complete") is True:
+                # The pid belongs to someone else. The old client is gone.
+                state = "dead"
+            else:
+                state = "unknown"
+            if (
+                state == "dead"
+                and isinstance(actual, dict)
+                and actual.get("error") != "process_identity_mismatch"
+                and not (
+                    actual.get("identity_complete") is True
+                    and not self._identity_matches(record, actual)
+                )
+            ):
+                # The guard's own exit_code (3 or 4) is not the process exit.
+                # A reused pid's snapshot is a different process: do not copy it.
+                observed = actual.get("process_exit_code")
+                observed_at = actual.get("exit_time_utc")
+                if (
+                    isinstance(observed, int)
+                    and not isinstance(observed, bool)
+                ):
+                    exit_code = observed
+                if isinstance(observed_at, str) and observed_at:
+                    exit_time_utc = observed_at
+        first_dead = now if state == "dead" else None
+        row: dict[str, object] = {
+            "role": "client",
+            "state": state,
+            "pid": record.pid,
+            "creation_time_utc": record.creation_time_utc,
+            "executable_sha256": record.executable_sha256,
+            "command_line_sha256": record.command_line_sha256,
+            "identity_scheme": record.identity_scheme,
+            "observed_at_utc": now,
+            "first_observed_dead_at_utc": first_dead,
+            "exit_code": exit_code,
+            "exit_time_utc": exit_time_utc,
+            "current": True,
+        }
+        # The probe ran unlocked. Merge, store and the returned copy share
+        # one critical section, so a late weak probe cannot erase a death
+        # another reader published while it was in flight.
+        return self._remember_client_observation(key, row)
+
+    def _client_role_diagnostics(self, run: RunRecord) -> list[dict[str, object]]:
+        generation = self._current_generation()
+        current: list[dict[str, object]] = []
+        current_keys: set[tuple[str, str, int, str]] = set()
+        for record in run.processes:
+            if record.role != "client":
+                continue
+            current_keys.add(
+                (generation, run.run_id, record.pid, record.creation_time_utc)
+            )
+            current.append(self._observe_client_record(run, record))
+        retained = self._retained_client_observations(
+            generation, run.run_id, current_keys
+        )
+        if not current and not retained:
+            return [
+                {
+                    "role": "client",
+                    "state": "not_started",
+                    "pid": None,
+                    "creation_time_utc": None,
+                    "executable_sha256": None,
+                    "command_line_sha256": None,
+                    "identity_scheme": None,
+                    "observed_at_utc": self._observation_now(),
+                    "first_observed_dead_at_utc": None,
+                    "exit_code": None,
+                    "exit_time_utc": None,
+                    "current": False,
+                }
+            ]
+        return retained + current
 
     def _publish_retired_diagnostics(self) -> list[dict[str, object]]:
         with self._activity_lock:

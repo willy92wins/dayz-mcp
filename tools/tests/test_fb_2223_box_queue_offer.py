@@ -237,6 +237,15 @@ class _BoxHarness:
         self.box_calls.append(dict(kwargs))
         if kwargs.get("done"):
             self.done.append(kwargs.get("ticket"))
+        if not (
+            kwargs.get("wait")
+            or kwargs.get("done")
+            or kwargs.get("claim")
+            or kwargs.get("ticket")
+        ):
+            # Like the daemon's /session/status: without a box flag or a ticket
+            # the read reports the box and does not join the FIFO.
+            return self.snapshot()
         result = self.coordinator.box_wait_touch(
             identity,
             kwargs.get("ticket"),
