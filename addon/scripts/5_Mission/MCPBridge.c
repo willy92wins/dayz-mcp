@@ -33,12 +33,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_godmode,player_heal,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "3c77a99c95fd05a4";
+	protected const string SERVER_ARG_CONTRACT_HASH = "e5a0ed288dbae72f";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -118,6 +118,7 @@ class MCPBridge : Managed
 	{
 		m_Tick = m_Tick + 1;
 		m_ElapsedS = m_ElapsedS + timeslice;
+		MCPBotControl.Tick(this, m_ElapsedS);
 
 		if (!m_Configured)
 		{
@@ -544,6 +545,18 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchPlayerGodmode(command, result);
 		}
+		else if (command.cmd == "player_kill")
+		{
+			postNow = DispatchPlayerKill(command, result);
+		}
+		else if (command.cmd == "bot_start")
+		{
+			postNow = DispatchBotStart(command, result);
+		}
+		else if (command.cmd == "bot_stop")
+		{
+			postNow = DispatchBotStop(command, result);
+		}
 		else if (command.cmd == "object_anim")
 		{
 			postNow = DispatchObjectAnim(command, result);
@@ -666,6 +679,7 @@ class MCPBridge : Managed
 		int objectId = command.args.object_id;
 		result.object_id = objectId;
 		result.deleted = 0;
+		MCPBotControl.OnObjectGone(this, objectId);
 
 		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
 		{
@@ -1527,6 +1541,240 @@ class MCPBridge : Managed
 		result.player_godmode = godmodeReport;
 		result.ok = true;
 		return true;
+	}
+
+	// player_kill (inbox f4de). uid is required: an empty uid must not select the
+	// first human. Death is SetHealth(0), the server primitive EmoteManager.KillPlayer
+	// uses (emotemanager.c). EEKilled is not called. Body godmode is released for
+	// the hit only; the identity's remembered choice is not written. No respawn.
+	protected bool DispatchPlayerKill(MCPCommand command, MCPResult result)
+	{
+		string killUid;
+		Human killHuman;
+		PlayerBase killPlayer;
+		PlayerIdentity killIdentity;
+		bool damageAllowed;
+		MCPPlayerKill killReport;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		killUid = command.args.uid;
+		if (killUid == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		killHuman = FindHumanByUid(killUid);
+		if (!killHuman)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		killPlayer = PlayerBase.Cast(killHuman);
+		if (!killPlayer)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		killIdentity = killPlayer.GetIdentity();
+		if (!killIdentity)
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+		if (killIdentity.GetPlainId() != killUid)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		if (!killPlayer.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+
+		damageAllowed = killPlayer.GetAllowDamage();
+		killReport = new MCPPlayerKill();
+		killReport.uid = killUid;
+		killReport.health_before = killPlayer.GetHealth("", "");
+		killReport.alive_before = killPlayer.IsAlive();
+		killReport.godmode_policy_preserved = true;
+		MCPGodmode.ReleaseBody(killPlayer, "player_kill");
+		killPlayer.SetHealth(0);
+		killReport.health_after = killPlayer.GetHealth("", "");
+		killReport.alive_after = killPlayer.IsAlive();
+		killReport.killed = !killReport.alive_after && killReport.health_after <= 0.0;
+		result.player_kill = killReport;
+		if (!killReport.killed)
+		{
+			killPlayer.SetAllowDamage(damageAllowed);
+			result.ok = false;
+			result.error = "kill_not_applied";
+			return true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+	// bot_start (inbox 120f). Wire shape is checked before any dummy init.
+	// On a build without the 1.30 bot macros, Available() is false and the
+	// answer is bot_unavailable with no mutation.
+	protected bool DispatchBotStart(MCPCommand command, MCPResult result)
+	{
+		string botError;
+		bool botStarted;
+		MCPBotReport botReport;
+		if (!BotStartArgsOk(command))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPBotControl.Available())
+		{
+			result.ok = false;
+			result.error = "bot_unavailable";
+			return true;
+		}
+		botStarted = false;
+		botError = MCPBotControl.Start(this, command.args.object_id, command.args.action, command.args.bot_ttl_s, m_ElapsedS, command.id, botStarted);
+		if (botError != "")
+		{
+			result.ok = false;
+			result.error = botError;
+			return true;
+		}
+		botReport = new MCPBotReport();
+		botReport.object_id = command.args.object_id;
+		botReport.action = command.args.action;
+		botReport.started = botStarted;
+		botReport.ttl_s = command.args.bot_ttl_s;
+		result.bot = botReport;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchBotStop(MCPCommand command, MCPResult result)
+	{
+		string botError;
+		bool botStopped;
+		string botReleasedBy;
+		MCPBotReport botReport;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPBotControl.Available())
+		{
+			result.ok = false;
+			result.error = "bot_unavailable";
+			return true;
+		}
+		botStopped = false;
+		botReleasedBy = "";
+		botError = MCPBotControl.Stop(this, command.args.object_id, botStopped, botReleasedBy);
+		if (botError != "")
+		{
+			result.ok = false;
+			result.error = botError;
+			return true;
+		}
+		botReport = new MCPBotReport();
+		botReport.object_id = command.args.object_id;
+		botReport.stopped = botStopped;
+		botReport.released_by = botReleasedBy;
+		result.bot = botReport;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool BotActionAllowed(string action)
+	{
+		if (action == "PLAYER_BOT_RANDOMIZE_STANCE")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_RANDOMIZE_MOVEMENT")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_SPAM_USER_ACTIONS")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SPAWN_OPEN")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SPAWN_OPEN_EAT")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SWAP_G2H")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SWAP_INTERNAL")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected bool BotStartArgsOk(MCPCommand command)
+	{
+		float ttl;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			return false;
+		}
+		if (!BotActionAllowed(command.args.action))
+		{
+			return false;
+		}
+		ttl = command.args.bot_ttl_s;
+		if (!IsFiniteFloat(ttl))
+		{
+			return false;
+		}
+		if (ttl <= 0.0 || ttl > 30.0)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	Object RuntimeObjectById(int objectId)
+	{
+		if (objectId <= 0 || !m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			return null;
+		}
+		return m_RuntimeObjects.Get(objectId);
 	}
 
 	// player_heal vitals of one server PlayerBase (MCPPlayerVitals, MCPMessages.c).
@@ -4144,6 +4392,7 @@ class MCPBridge : Managed
 
 	void Shutdown()
 	{
+		MCPBotControl.ShutdownAll(this);
 		// A completed cached callback is no longer in m_CallbackRefs.
 		if (m_PollCallback)
 		{

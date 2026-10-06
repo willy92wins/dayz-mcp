@@ -7,6 +7,8 @@
   "note": "peer + command -> public tool, or null when the command is deliberately not exposed. Never derived from app.list_tools(), from loopback's command lists or from the PBO: the census exists so it can disagree with what the daemon registers.",
   "peers": {
     "server": {
+      "bot_start": "bot_start",
+      "bot_stop": "bot_stop",
       "entities_query": "entities_query",
       "exec_enforce": null,
       "hands_take": "hands_take",
@@ -20,6 +22,7 @@
       "object_inspect": "object_inspect",
       "player_godmode": "player_godmode",
       "player_heal": "player_heal",
+      "player_kill": "player_kill",
       "player_teleport": "player_teleport",
       "query_all_players": "query_all_players",
       "query_get_in_condition": "query_get_in_condition",

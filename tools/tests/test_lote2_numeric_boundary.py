@@ -98,7 +98,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 2 from bef7 and 3136 (player_heal timeout_s, player_godmode timeout_s;
         # uid is a string and full and on are bools, not in this census).
         # + 2 from fde3 (action_use component_index, cursor_pos).
-        self.assertEqual(len(rows), 168)
+        # + 6 from f4de/120f (player_kill timeout_s, bot_start object_id/ttl_s/timeout_s,
+        # bot_stop object_id/timeout_s). uid and action are strings.
+        self.assertEqual(len(rows), 174)
         self.assertIn(("action_use", "component_index", "int"), rows)
         self.assertIn(("action_use", "cursor_pos", "vector"), rows)
         self.assertIn(("player_heal", "timeout_s", "float"), rows)

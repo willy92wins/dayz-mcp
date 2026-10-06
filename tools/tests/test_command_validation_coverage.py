@@ -186,6 +186,16 @@ def _minimal_args(cmd: str) -> dict:
             "component_index": 0,
             "cursor_pos": [0.0, 0.0, 0.0],
         }
+    if cmd == "player_kill":
+        return {"uid": "player-1"}
+    if cmd == "bot_start":
+        return {
+            "object_id": 1,
+            "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT",
+            "bot_ttl_s": 5.0,
+        }
+    if cmd == "bot_stop":
+        return {"object_id": 1}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

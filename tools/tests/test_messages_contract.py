@@ -16,7 +16,7 @@ from tests._addon_paths import addon_root
 
 
 MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
-EXPECTED_VERSION = "10"
+EXPECTED_VERSION = "11"
 
 
 def _without_comments(source: str) -> str:
@@ -135,7 +135,7 @@ EXPECTED_RESULT_ANCHORS = [
 
 def _known_good_source() -> str:
     return '''
-const string MCP_BRIDGE_VERSION = "10";
+const string MCP_BRIDGE_VERSION = "11";
 class MCPEntityHit { string type; string classname; bool has_cargo; ref array<float> pos; float distance; };
 class MCPArgs { string mode; string path; string root; bool bubble; void MCPArgs() { path = ""; } };
 class MCPUiRequestEcho { string requested_path; string requested_root; string requested_text; string matched_path; };
@@ -191,7 +191,7 @@ class MessagesContractTest(unittest.TestCase):
             "telemetry_seated_mutated": source.replace("bool found; bool seated", "bool found; string seated"),
             "telemetry_seat_mutated": source.replace("bool seated; string seat", "bool seated; int seat"),
             "telemetry_classname_mutated": source.replace("string seat; string classname", "string seat; bool classname"),
-            "version_bumped": source.replace('MCP_BRIDGE_VERSION = "10"', 'MCP_BRIDGE_VERSION = "11"'),
+            "version_bumped": source.replace('MCP_BRIDGE_VERSION = "11"', 'MCP_BRIDGE_VERSION = "12"'),
         }
         for name, mutant in mutants.items():
             with self.subTest(mutant=name):

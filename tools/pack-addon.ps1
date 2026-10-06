@@ -127,10 +127,13 @@ function Get-StagedFileRecords([string]$Root) {
       }
     }
   }
+  # Ordinal order, the same as git and Python's sorted(): Sort-Object compares by culture and puts
+  # MCP_BotControl.c before MCPBridge.c, so the manifest order would depend on the host's culture.
   $sorted = New-Object System.Collections.Generic.List[object]
-  foreach ($entry in ($items | Sort-Object -Property path)) {
+  foreach ($entry in $items) {
     $sorted.Add($entry)
   }
+  $sorted.Sort([System.Comparison[object]]{ param($a, $b) [string]::CompareOrdinal([string]$a.path, [string]$b.path) })
   return ,$sorted
 }
 

@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "10";
+const string MCP_BRIDGE_VERSION = "11";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -189,6 +189,9 @@ class MCPArgs
 	// player_godmode: the state to set, true for godmode on. The tool always
 	// sends it; an absent key reads false, which is vanilla damage.
 	bool godmode;
+	// bot_start: seconds the server keeps the debug action running. An absent
+	// key reads 0, which the bridge refuses. bot_stop does not read it.
+	float bot_ttl_s;
 
 	void MCPArgs()
 	{
@@ -869,6 +872,34 @@ class MCPPlayerGodmode
 	bool after;
 };
 
+// player_kill reply. health_* is GetHealth("", "") around SetHealth(0).
+// alive_* is IsAlive() at those same reads. killed is true only when the body
+// is dead and its health is not above zero. godmode_policy_preserved is true
+// when the identity's remembered choice was not written. Primitives only.
+class MCPPlayerKill
+{
+	string uid;
+	float health_before;
+	float health_after;
+	bool alive_before;
+	bool alive_after;
+	bool killed;
+	bool godmode_policy_preserved;
+};
+
+// bot_start / bot_stop reply. started is the FSM accept bit. stopped is false
+// on an idempotent stop of an idle dummy. released_by names stop, ttl, death,
+// deleted, shutdown or idle. Primitives only.
+class MCPBotReport
+{
+	int object_id;
+	string action;
+	bool started;
+	float ttl_s;
+	bool stopped;
+	string released_by;
+};
+
 class MCPResult
 {
 	int id;
@@ -970,6 +1001,10 @@ class MCPResult
 	ref MCPWorldTime world_time;
 	// ui_click mode="complete" read-back. Unassigned in direct mode and on other commands.
 	ref MCPUiClickSequence click_sequence;
+	// player_kill reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerKill player_kill;
+	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
+	ref MCPBotReport bot;
 	// player_heal reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerHeal player_heal;
 	// player_godmode reply. Unassigned on its refusals and on other commands.

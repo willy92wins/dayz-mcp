@@ -246,6 +246,7 @@ COERCIBLE_ALLOWLIST: dict[tuple[str, str], str] = {}
 COERCIBLE_ALLOWLIST.update(
     {
         ("action_use", "action"): "free text Enforce action class name",
+        ("bot_start", "action"): _ENUM_LIKE_STR,
         ("action_use", "classname"): "free text target GetType()",
         ("anim_timeline", "mode"): _ENUM_LIKE_STR,
         ("anim_timeline", "trace_id"): "free text trace id",

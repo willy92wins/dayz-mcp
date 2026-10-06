@@ -721,7 +721,7 @@ class CompleteReplyClassesTest(unittest.TestCase):
         )
         # A reply member and a bridge-internal walk change neither the wire
         # version nor the arguments MCPArgs already carried (mode, bubble).
-        self.assertIn('const string MCP_BRIDGE_VERSION = "10";', self.messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', self.messages)
 
 
 class CompletePruneTest(unittest.TestCase):
