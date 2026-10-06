@@ -1,0 +1,18 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_capture_frame_state_isolation: rc=0
+Ran 3 tests in 4.611s
+
+OK
+--- tests.test_capture_frame_state_isolation on Python 3.11: rc=0 OK
+--- tests.test_mcp_capture: rc=0
+Ran 26 tests in 1.597s
+
+OK (skipped=9)
+--- tests.test_mcp_capture on Python 3.11: rc=0 OK (skipped=9)
+--- tests.test_tool_description_caveats: rc=0
+Ran 12 tests in 0.156s
+
+OK
+--- tests.test_tool_description_caveats on Python 3.11: rc=0 OK
+--- fast tier: ran=5826 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

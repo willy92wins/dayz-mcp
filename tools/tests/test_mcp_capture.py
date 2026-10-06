@@ -13,6 +13,7 @@ from unittest import mock
 from PIL import Image, ImageDraw
 
 import mcp_capture
+from tests._frame_state_isolation import isolate_capture_frame_state, note_frame_state_dir
 from tests._tiers import slow_test
 
 
@@ -61,6 +62,9 @@ class _HangingGrab:
 
 
 class MCPCaptureTest(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_capture_frame_state(self)
+
     @slow_test
     def test_grab_self_test_covers_client_area_liveness_contract(self) -> None:
         proc = subprocess.run(
@@ -424,6 +428,9 @@ def _backend(client: object):
 class CaptureDualCropSpaceTest(unittest.TestCase):
     """capture_dual crop_space contract: client viewport by default, strict and fail-closed, with an
     auditable surface map; window keeps the legacy fail-open crop."""
+
+    def setUp(self) -> None:
+        isolate_capture_frame_state(self)
 
     def _capture(self, client: object = _DEFAULT_CLIENT, **kwargs: object):
         if client is _DEFAULT_CLIENT:
@@ -891,6 +898,9 @@ class CaptureDualCropSpaceTest(unittest.TestCase):
 
 
 class AllBlackFrameReportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_capture_frame_state(self)
+
     def test_an_all_black_frame_reports_whether_the_frame_was_advancing(self) -> None:
         window = {
             "pid": 4242,
@@ -917,6 +927,7 @@ class AllBlackFrameReportTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="frame_state_") as tmp:
             state_path = os.path.join(tmp, "capture-frame-state.json")
+            note_frame_state_dir(tmp)
             with mock.patch.dict(os.environ, {"DAYZ_MCP_FRAME_STATE_PATH": state_path}):
                 with mock.patch.object(
                     mcp_capture, "_run_window_capture", side_effect=black_frame
