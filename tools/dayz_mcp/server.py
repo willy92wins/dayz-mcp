@@ -4786,10 +4786,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         failed["reason"] = cannot
                     return annotated(failed)
             elif wait_s > 0.0:
-                # Same admission as queue, before the box is asked to go free,
-                # through the same plain status read: the box FIFO is joined only
-                # by the wait itself.
-                peeked = await peek_box()
+                # Same admission as queue, before the box is asked to go free.
+                # session_box_status is the wait's own read, without joining.
+                async with client.tool_lock:
+                    peeked_status = await client.session_box_status()
+                peeked = _box_from_status(
+                    peeked_status if isinstance(peeked_status, dict) else {}
+                )
             # An eligible client extension does not wait out the server it keeps.
             skip_box_wait = extension_exempt(peeked) if wait_s > 0.0 or on_busy == "queue" else False
             if not skip_box_wait and (on_busy == "queue" or wait_s > 0.0):
