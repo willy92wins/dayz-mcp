@@ -139,6 +139,11 @@ class MCPArgs
 	// action_use_door. Enforce ints default to 0, and 0 is a valid door, so
 	// the command name, not this field, turns door mode on.
 	int door_index;
+	// action_use_component. 0 is a valid component, so the command name, not
+	// this field, turns component mode on. cursor_pos is the world-space
+	// point the action measures; absent JSON leaves the array null.
+	int component_index;
+	ref array<float> cursor_pos;
 	// ui_dialog (wire v1.1). title is reused above. kind is this class only.
 	string kind;
 	string message;
@@ -928,9 +933,11 @@ class MCPResult
 	string target;
 	float distance;
 	bool started;
-	// action_use_door. Same default-0 rule as MCPArgs.door_index: 0 is a valid
-	// door and a valid component, so the command name, not these fields, is
-	// what turns door mode on. Filled only by that command.
+	// action_use_door / action_use_component. Same default-0 rule as
+	// MCPArgs.door_index: 0 is a valid door and a valid component, so
+	// the command name, not these fields, is what turns the mode on.
+	// door_index is filled only by action_use_door. component_index is
+	// filled by action_use_door and action_use_component.
 	int door_index;
 	int component_index;
 	// ui_dialog nested payload. Unassigned on other commands.

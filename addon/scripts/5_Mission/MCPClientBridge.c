@@ -447,7 +447,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// A component that is not that door returns -1 (actionopendoors.c:39-45),
 	// so the scan cannot stop on -1. Past this cap the result is
 	// door_component_not_found. One native call per index, once per command.
-	protected const int ACTION_USE_DOOR_COMPONENT_CAP = 512;
+	// 2048 covers a door whose only matching component is above 511 (index
+	// 876 on the reported building). It is not a component-count API: none
+	// was established, and the first match still wins.
+	protected const int ACTION_USE_DOOR_COMPONENT_CAP = 2048;
 	// input_describe: printable ASCII name, and the selected alternative's keys.
 	protected const int INPUT_NAME_MAX = 128;
 	protected const int INPUT_KEY_MAX = 16;
@@ -466,7 +469,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_move,player_respawn,player_trace," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_move," + "player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1170,6 +1173,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			postNow = DispatchActionUse(command, result);
 		}
 		else if (command.cmd == "action_use_door")
+		{
+			postNow = DispatchActionUse(command, result);
+		}
+		else if (command.cmd == "action_use_component")
 		{
 			postNow = DispatchActionUse(command, result);
 		}
@@ -3855,6 +3862,45 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				cursorHitPos = doorBuilding.ModelToWorld(doorModelPos);
 				actionTarget = new ActionTarget(doorBuilding, null, doorComponent, cursorHitPos, 0);
 				result.component_index = doorComponent;
+			}
+			else if (command.cmd == "action_use_component")
+			{
+				// Echo before any refusal. 0 is a valid component, so an early
+				// return must not look like "component 0" by default alone.
+				int wantedComponent = command.args.component_index;
+				result.component_index = wantedComponent;
+				if (command.args.classname == "" || wantedComponent < 0)
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+
+				vector suppliedCursor;
+				if (!ArrayToVector(command.args.cursor_pos, suppliedCursor))
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+
+				// One lookup. GetActionComponentNameList returns -1 when the
+				// index is not found, 0 for a valid default component, and 1
+				// for a valid named component (object.c:197-198). 0 is kept:
+				// an empty name list is that default, not a missing component.
+				// cursor_pos is the caller's point; the selection centre is
+				// not guessed.
+				array<string> componentNames = new array<string>();
+				int componentState = targetObj.GetActionComponentNameList(wantedComponent, componentNames);
+				if (componentState < 0)
+				{
+					result.ok = false;
+					result.error = "component_not_found";
+					return true;
+				}
+
+				cursorHitPos = suppliedCursor;
+				actionTarget = new ActionTarget(targetObj, null, wantedComponent, cursorHitPos, 0);
 			}
 			else
 			{

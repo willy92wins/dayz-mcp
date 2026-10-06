@@ -179,6 +179,13 @@ def _minimal_args(cmd: str) -> dict:
         return {"action": "use", "target": "hands"}
     if cmd == "action_use_door":
         return {"action": "use", "classname": "Land_House_2W03", "door_index": 0}
+    if cmd == "action_use_component":
+        return {
+            "action": "use",
+            "classname": "Land_House_2W03",
+            "component_index": 0,
+            "cursor_pos": [0.0, 0.0, 0.0],
+        }
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

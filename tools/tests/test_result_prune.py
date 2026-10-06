@@ -190,8 +190,11 @@ class ResultPruneTest(unittest.TestCase):
 
         pruned = prune_unfilled_fields("object_delete", result)
 
-        for field in ("deleted", "found", "object_id", "type", "phase"):
+        # phase is owned by object_anim (7f27). deleted stays because
+        # object_delete writes it. found and object_id stay unmanaged.
+        for field in ("deleted", "found", "object_id", "type"):
             self.assertIn(field, pruned, field)
+        self.assertNotIn("phase", pruned)
 
     def test_every_public_verb_keeps_ok_and_loses_only_empty_refs(self) -> None:
         # H9: one assertion per public verb, driven off the real whitelist so a
@@ -219,6 +222,8 @@ class ResultPruneTest(unittest.TestCase):
         verbs = (loopback.SERVER_COMMANDS | loopback.CLIENT_COMMANDS) - {
             "action_use_door"
         }
+        component_owners = {"action_use_door", "action_use_component"}
+        action_owners = result_prune.OWNED_SCALAR_FIELDS["started"]
         self.assertIn("action_use", verbs)
         for verb in sorted(verbs):
             with self.subTest(verb=verb):
@@ -229,10 +234,15 @@ class ResultPruneTest(unittest.TestCase):
                     ),
                 )
                 self.assertNotIn("door_index", pruned)
-                self.assertNotIn("component_index", pruned)
-                # Every other scalar keeps rule 1.
-                self.assertIs(pruned["started"], False)
-                self.assertEqual(pruned["distance"], 0.0)
+                if verb not in component_owners:
+                    self.assertNotIn("component_index", pruned)
+                # started and distance are owned by the action commands (7f27).
+                if verb in action_owners:
+                    self.assertIs(pruned["started"], False)
+                    self.assertEqual(pruned["distance"], 0.0)
+                else:
+                    self.assertNotIn("started", pruned)
+                    self.assertNotIn("distance", pruned)
 
     def test_action_use_door_keeps_door_zero_and_component_zero(self) -> None:
         # Door 0 and component 0 are real, and the action_use tool compares the
@@ -247,19 +257,23 @@ class ResultPruneTest(unittest.TestCase):
                 )
                 self.assertEqual(pruned["door_index"], door)
                 self.assertEqual(pruned["component_index"], component)
-        # Each owned scalar maps to a set of owners since a412; the door
-        # fields still have exactly one.
-        for field in ("door_index", "component_index"):
-            self.assertEqual(
-                result_prune.OWNED_SCALAR_FIELDS[field], frozenset({"action_use_door"})
-            )
+        # door_index still has exactly one owner. component_index is also
+        # written by action_use_component (fde3).
+        self.assertEqual(
+            result_prune.OWNED_SCALAR_FIELDS["door_index"],
+            frozenset({"action_use_door"}),
+        )
+        self.assertEqual(
+            result_prune.OWNED_SCALAR_FIELDS["component_index"],
+            frozenset({"action_use_door", "action_use_component"}),
+        )
 
     def test_vehicle_scalars_have_exactly_their_writing_commands_as_owners(self) -> None:
         self.assertEqual(
             {
                 field: set(owners)
                 for field, owners in result_prune.OWNED_SCALAR_FIELDS.items()
-                if field not in ("door_index", "component_index")
+                if field in VEHICLE_SCALAR_OWNERS
             },
             VEHICLE_SCALAR_OWNERS,
         )
@@ -377,6 +391,125 @@ class ResultPruneTest(unittest.TestCase):
             addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
         ).read_text(encoding="utf-8")
         self.assertEqual(PRUNABLE_FIELDS, _mcp_result_ref_members(messages))
+
+
+# 7f27: scalars whose writers the census names, and one value each.
+GENERIC_SCALAR_OWNERS = {
+    "clicked": ({"ui_click"}, 0),
+    "handler": ({"ui_click"}, ""),
+    "user_id": ({"ui_click"}, 0),
+    "delivered": ({"key_press"}, 0),
+    "dik": ({"key_press"}, 0),
+    "requested": ({"player_respawn"}, 0),
+    "action": (
+        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        "",
+    ),
+    "target": (
+        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        "",
+    ),
+    "distance": (
+        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        0.0,
+    ),
+    "started": (
+        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        False,
+    ),
+    "confirmed": ({"hands_take", "weapon_state"}, 0),
+    "sent": ({"exec_enforce", "notify_players"}, 0),
+    "deleted": ({"object_delete"}, 0),
+    "y": ({"surface_query"}, 0.0),
+    "phase": ({"object_anim"}, 0.0),
+    "source": ({"object_anim"}, ""),
+    "deferred": ({"inventory_give"}, 0),
+    "count_total": ({"entities_query"}, 0),
+    "component_index": ({"action_use_door", "action_use_component"}, 0),
+}
+
+# Deliberately not owned. A stale 0 here is still not dropped.
+UNRESOLVED_RESIDUAL_FIELDS = ("accepted", "found", "object_id")
+
+
+class GenericScalarOwnershipTest(unittest.TestCase):
+    def test_each_added_field_is_kept_for_owners_and_removed_from_nonowners(self) -> None:
+        for field, (owners, default) in sorted(GENERIC_SCALAR_OWNERS.items()):
+            self.assertEqual(result_prune.OWNED_SCALAR_FIELDS[field], frozenset(owners))
+            for command in sorted(owners):
+                with self.subTest(field=field, command=command, role="owner"):
+                    self.assertIn(command, ALL_COMMANDS)
+                    pruned = prune_unfilled_fields(command, _wire_result(**{field: default}))
+                    self.assertIn(field, pruned)
+                    self.assertEqual(pruned[field], default)
+            for command in sorted(ALL_COMMANDS - owners):
+                with self.subTest(field=field, command=command, role="nonowner"):
+                    pruned = prune_unfilled_fields(
+                        command, _wire_result(**{field: default, field + "_set": True})
+                    )
+                    self.assertNotIn(field, pruned)
+                    # A non-default value is still noise on a command that
+                    # never writes the field.
+                    pruned_set = prune_unfilled_fields(
+                        command, _wire_result(**{field: default or "filled"})
+                    )
+                    self.assertNotIn(field, pruned_set)
+
+    def test_residual_fields_survive_on_a_command_that_does_not_write_them(self) -> None:
+        pruned = prune_unfilled_fields(
+            "vehicle_telemetry",
+            _wire_result(accepted=0, found=False, object_id=0, clicked=0, handler="", user_id=0),
+        )
+        for field in UNRESOLVED_RESIDUAL_FIELDS:
+            self.assertIn(field, pruned, field)
+        self.assertNotIn("clicked", pruned)
+        self.assertNotIn("handler", pruned)
+        self.assertNotIn("user_id", pruned)
+        for field in UNRESOLVED_RESIDUAL_FIELDS:
+            self.assertNotIn(field, result_prune.OWNED_SCALAR_FIELDS)
+
+
+class PruneResultPathTest(unittest.IsolatedAsyncioTestCase):
+    """The four call_bridge result paths all prune before the caller sees the dict."""
+
+    async def test_embedded_wait_and_probe_drop_unrelated_click_defaults(self) -> None:
+        from types import SimpleNamespace
+
+        from dayz_mcp.server import ServerConfig, build_app
+
+        _app, runtime = build_app(
+            ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+        wire = {"ok": 1, "clicked": 0, "handler": "", "user_id": 0, "count_total": 3}
+        runtime.loopback = SimpleNamespace(
+            state=SimpleNamespace(take_result=lambda *_args, **_kwargs: dict(wire))
+        )
+        waited = await runtime.wait_for_result("entities_query", 1, "server", 1.0)
+        probed = await runtime.probe_bridge_result("entities_query", 2, "server")
+        for result in (waited, probed):
+            self.assertEqual(result["count_total"], 3)
+            self.assertNotIn("clicked", result)
+            self.assertNotIn("handler", result)
+            self.assertNotIn("user_id", result)
+
+    async def test_client_wait_and_probe_drop_unrelated_click_defaults(self) -> None:
+        import time
+
+        from dayz_mcp.server import ClientRuntime
+
+        runtime = object.__new__(ClientRuntime)
+        runtime._time_fn = time.monotonic
+        wire = {"ok": 1, "clicked": 0, "handler": "", "user_id": 0, "y": 12.5}
+
+        def _call(*_args, **_kwargs):
+            return 200, {"status": "done", "result": dict(wire)}
+
+        runtime._call = _call
+        waited = await runtime._await_result("surface_query", 1, "server", 1.0)
+        probed = await runtime.probe_bridge_result("surface_query", 2, "server")
+        for result in (waited, probed):
+            self.assertEqual(result["y"], 12.5)
+            self.assertNotIn("clicked", result)
 
 
 if __name__ == "__main__":

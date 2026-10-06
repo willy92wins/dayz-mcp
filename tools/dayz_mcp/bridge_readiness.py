@@ -299,6 +299,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     },
     "client": {
         "action_use": "action_use",
+        "action_use_component": "action_use",
         "action_use_door": "action_use",
         "action_use_target": "action_use",
         "anim_timeline": "anim_timeline",

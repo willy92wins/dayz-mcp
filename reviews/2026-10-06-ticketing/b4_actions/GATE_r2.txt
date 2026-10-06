@@ -1,0 +1,12 @@
+--- enforce linter: errors=2 baseline=2 new=0
+--- tests.test_action_use_component: rc=0
+Ran 10 tests in 1.248s
+
+OK
+--- tests.test_result_prune: rc=0
+Ran 24 tests in 2.210s
+
+OK
+--- waiting for a free fast-tier slot (other batches are gating)
+--- fast tier: ran=5603 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
