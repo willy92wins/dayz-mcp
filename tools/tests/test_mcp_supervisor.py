@@ -109,7 +109,9 @@ class FakeWorker:
         if not self._auto_answer:
             return
         ident = message.get("id")
-        if ident in (REPLAY_ID, HEARTBEAT_ID):
+        if isinstance(ident, str) and ident.startswith("__dayz_mcp_supervisor_"):
+            # Replay, heartbeat, and the status read used to annotate a
+            # synthesized result. {"ok": True} is not an active lease.
             self.answer(ident, {"ok": True})
 
     def answer(self, ident: object, result: object) -> None:

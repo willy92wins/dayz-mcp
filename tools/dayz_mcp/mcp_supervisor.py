@@ -54,7 +54,13 @@ from typing import Callable, Protocol
 # has no pending request for logs it as a protocol fault, which the spike hit.
 REPLAY_ID = "__dayz_mcp_supervisor_replay__"
 HEARTBEAT_ID = "__dayz_mcp_supervisor_heartbeat__"
-_RESERVED_IDS = frozenset({REPLAY_ID, HEARTBEAT_ID})
+STATUS_ID = "__dayz_mcp_supervisor_status__"
+_RESERVED_IDS = frozenset({REPLAY_ID, HEARTBEAT_ID, STATUS_ID})
+_OBSERVE_PREFIX = "__dayz_mcp_supervisor_obs_"
+
+
+def _is_observe_id(ident: object) -> bool:
+    return isinstance(ident, str) and ident.startswith(_OBSERVE_PREFIX)
 
 RELOAD_TOOL_NAME = "server_reload"
 RELOAD_TOOL = {
@@ -74,6 +80,9 @@ DRAIN_TIMEOUT_S = 30.0
 STDIN_CLOSE_GRACE_S = 5.0
 REPLAY_TIMEOUT_S = 15.0
 HEARTBEAT_TIMEOUT_S = 5.0
+# Bound for the session_status the supervisor reads before it annotates a
+# result it synthesized. A heartbeat receipt is not a TTL.
+LEASE_STATUS_TIMEOUT_S = 1.0
 
 
 class WorkerProcess(Protocol):
@@ -110,6 +119,13 @@ class _Generation:
     # Ids the failure path detached and answered; the pump swallows a late response
     # for one of these so the host never sees a second terminal answer.
     detached: set[object] = field(default_factory=set)
+    # Bodies of reserved supervisor requests. The pump does not forward them.
+    reserved_bodies: dict[object, dict] = field(default_factory=dict)
+    # Lease id the worker process currently holds, from the freshest local
+    # probe. It is never ownership proof on its own: a TTL requires the
+    # status's own lease id to match the local id read around the status.
+    local_lease_id: str | None = None
+    expired_observe_ids: set[object] = field(default_factory=set)
     # Set before a planned retirement closes stdin, so the pump reads the EOF that
     # follows as the expected end and not as a transport failure.
     retired: bool = False
@@ -154,6 +170,7 @@ class Supervisor:
         stdin_close_grace_s: float = STDIN_CLOSE_GRACE_S,
         replay_timeout_s: float = REPLAY_TIMEOUT_S,
         heartbeat_timeout_s: float = HEARTBEAT_TIMEOUT_S,
+        lease_status_timeout_s: float = LEASE_STATUS_TIMEOUT_S,
     ) -> None:
         self._spawn = spawn
         self._out = out_stream
@@ -163,6 +180,7 @@ class Supervisor:
         self._stdin_close_grace_s = stdin_close_grace_s
         self._replay_timeout_s = replay_timeout_s
         self._heartbeat_timeout_s = heartbeat_timeout_s
+        self._lease_status_timeout_s = lease_status_timeout_s
 
         self._out_lock = threading.Lock()
         self._state = threading.Condition()
@@ -308,12 +326,17 @@ class Supervisor:
                 with self._state:
                     generation.inflight.pop(ident, None)
                     superseded = ident in generation.detached
+                    observe = _is_observe_id(ident)
+                    if observe and ident in generation.expired_observe_ids:
+                        generation.reserved_bodies.pop(ident, None)
+                    elif (ident in _RESERVED_IDS or observe) and isinstance(message, dict):
+                        generation.reserved_bodies[ident] = message
                     self._state.notify_all()
                 if superseded:
                     # A terminal failure already answered this request; relaying this
                     # late response would give the host a second terminal answer.
                     continue
-                if ident in _RESERVED_IDS:
+                if ident in _RESERVED_IDS or _is_observe_id(ident):
                     # The supervisor asked for this, not the host. Forwarding it makes
                     # the client log a response with no pending request.
                     continue
@@ -514,17 +537,130 @@ class Supervisor:
                 return False
         return True
 
+    def _observe_seq(self) -> str:
+        self._observe_n = getattr(self, "_observe_n", 0) + 1
+        return f"{_OBSERVE_PREFIX}{self._observe_n}"
+
+    def _unknown_if_held(self, generation: _Generation) -> dict | None:
+        with self._state:
+            held = generation.local_lease_id
+        if not isinstance(held, str) or not held:
+            return None
+        return {"lease_ttl_s": None, "lease_ttl_status": "unknown"}
+
+    def _ask_worker(self, generation: _Generation, tool_name: str, deadline: float) -> dict | None:
+        """One correlated tools/call. A late body for an expired id is ignored."""
+
+        ident = self._observe_seq()
+        request = {
+            "jsonrpc": "2.0",
+            "id": ident,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": {}},
+        }
+        with self._state:
+            if generation.failed or generation.retired:
+                return None
+            generation.inflight[ident] = "tools/call"
+        if not self._send_worker(generation, (json.dumps(request) + "\n").encode("utf-8")):
+            with self._state:
+                generation.inflight.pop(ident, None)
+                generation.expired_observe_ids.add(ident)
+            return None
+        with self._state:
+            while ident in generation.inflight and ident not in generation.detached:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    generation.inflight.pop(ident, None)
+                    generation.expired_observe_ids.add(ident)
+                    generation.reserved_bodies.pop(ident, None)
+                    return None
+                self._state.wait(timeout=min(remaining, 0.05))
+            if ident in generation.detached:
+                generation.expired_observe_ids.add(ident)
+                return None
+            return generation.reserved_bodies.pop(ident, None)
+
+    def _observe_lease_ttl(self, generation: _Generation) -> dict | None:
+        """Local lease id, authoritative status, local lease id again.
+
+        A TTL is published only when the status's own active lease id equals
+        the worker's current generation-local lease id, read right before the
+        status and re-read right after it. A mismatch, an ownership change, or
+        missing evidence is the unknown annotation -- never another lease's
+        TTL, and never a stale cache as ownership proof. A heartbeat is not a
+        TTL. Never called on the generation's pump thread: that thread is the
+        one that would have to deliver the answer. Each call uses its own id
+        so a late body cannot satisfy the next observation.
+        """
+
+        from dayz_mcp.lease_result_ttl import (
+            LEASE_LOCAL_TOOL,
+            LEASE_TTL_OBSERVE_TOOL,
+            classify_status,
+            parse_tool_status,
+        )
+
+        if generation.pump is threading.current_thread():
+            return self._unknown_if_held(generation)
+        deadline = self._monotonic() + self._lease_status_timeout_s
+
+        def _local_lease() -> tuple[str | None, bool]:
+            message = self._ask_worker(generation, LEASE_LOCAL_TOOL, deadline)
+            body = parse_tool_status(message) if message is not None else None
+            if not isinstance(body, dict):
+                return None, False
+            found = body.get("local_lease_id")
+            if isinstance(found, str) and found:
+                return found, True
+            return None, True
+
+        local_before, seen_before = _local_lease()
+        with self._state:
+            if seen_before:
+                generation.local_lease_id = local_before
+        if not seen_before:
+            return self._unknown_if_held(generation)
+        status_message = self._ask_worker(generation, LEASE_TTL_OBSERVE_TOOL, deadline)
+        status = parse_tool_status(status_message) if status_message is not None else None
+        if status is None:
+            return self._unknown_if_held(generation)
+        local_after, seen_after = _local_lease()
+        with self._state:
+            if seen_after:
+                generation.local_lease_id = local_after
+        if not seen_after or local_after != local_before:
+            # Ownership changed or its evidence went missing while the status
+            # was in flight: the observed TTL may belong to a lease this
+            # result never held.
+            return {"lease_ttl_s": None, "lease_ttl_status": "unknown"}
+        if local_before is None:
+            # The worker holds no lease: the field stays absent, and another
+            # owner's status is not a TTL.
+            return None
+        return classify_status(status, local_before)
+
     def _reply(self, request_id: object, payload: dict, *, is_error: bool) -> None:
+        from dayz_mcp.lease_result_ttl import render_supervisor_result
+
         if is_error:
             self._log(f"server_reload: {payload}")
+        with self._state:
+            generation = self._current
+        annotation = None
+        if (
+            generation is not None
+            and not generation.failed
+            and not generation.retired
+        ):
+            annotation = self._observe_lease_ttl(generation)
         self._send_host(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(payload)}],
-                    "isError": is_error,
-                },
+                "result": render_supervisor_result(
+                    payload, annotation, is_error=is_error
+                ),
             }
         )
 

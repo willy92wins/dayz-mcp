@@ -397,8 +397,10 @@ class ControlClient:
             self._request_once, path, request_payload, effective_timeout
         )
 
-    async def session_status(self) -> dict[str, object]:
-        return await self._session_call("/session/status")
+    async def session_status(self, *, timeout_s: float | None = None) -> dict[str, object]:
+        # timeout_s lets a result decorator observe TTL without the client's
+        # full control budget and without spawning a daemon.
+        return await self._session_call("/session/status", timeout_s=timeout_s)
 
     async def client_dumps_open(self, baseline: dict[str, object]) -> dict[str, object]:
         return await self._session_call(
