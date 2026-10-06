@@ -224,6 +224,75 @@ def _is_trusted_gac_microsoft_visual_basic(path: str, windows_directory: str) ->
     )
 
 
+def _is_trusted_gac_resource_satellite(path: str, windows_directory: str) -> bool:
+    # Localized .NET resource satellites (*.resources) load into the
+    # AddonBuilder toolchain when an exception is formatted under a
+    # non-English OS UI culture. Observed 2026-10-01 (gate #61, culture es):
+    #   GAC_MSIL\mscorlib.resources\v4.0_4.0.0.0_es_b77a5c561934e089\
+    #   GAC_MSIL\Microsoft.VisualBasic.resources\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\
+    # The host machine carries ~180 *.resources assemblies in GAC_MSIL across
+    # three official token families (b77a5c561934e089, b03f5f7f11d50a3a,
+    # 31bf3856ad364e35), so a per-assembly allowlist would chase loads one
+    # rejection at a time. This rule instead trusts the whole
+    # admin-protected satellite subtree with structural validation — the
+    # same trust model already applied to System32, WinSxS and NativeImages.
+    # Required shape, exactly four levels under the pinned root:
+    #   GAC_MSIL\<X.resources>\<v4.0_version_culture_token>\<X.resources.dll>
+    # where the basename must equal the assembly directory + ".dll"
+    # (self-consistency: a foreign basename inside a trusted directory is
+    # still rejected), the version directory must be exactly
+    # v4.0_<digits.quad>_<BCP-47 ASCII subtags>_<16 hex chars>, and only
+    # ".resources" directories qualify (code assemblies like
+    # System.Resources.Reader stay out). Evil sibling roots, foreign
+    # basenames, deeper nesting and malformed fields stay rejected.
+    # The whole path must be ASCII, as the 230 satellite paths measured on the
+    # host on 2026-10-06 are; a satellite under a non-ASCII name or a non-ASCII
+    # Windows directory is rejected (fail closed). casefold() and lower()
+    # equate some non-ASCII letters with ASCII ones
+    # (U+017F LONG S casefolds to "s", U+212A KELVIN SIGN lowers to "k"),
+    # while Windows compares names with its own uppercase table and does not,
+    # so "C:\Window<U+017F>\..." is a separate tree any authenticated user
+    # can create.
+    if not path.isascii():
+        return False
+    expected = ntpath.normpath(
+        ntpath.join(
+            windows_directory, "Microsoft.NET", "assembly", "GAC_MSIL"
+        )
+    )
+    normalized = ntpath.normpath(path)
+    parent, basename = ntpath.split(normalized)
+    version_directory = ntpath.basename(parent)
+    assembly_directory = ntpath.basename(ntpath.dirname(parent))
+    # parent = <GAC_MSIL>\<assembly>\<version dir>; one more dirname gets the
+    # assembly directory, one more the pinned GAC_MSIL root.
+    gac_directory = ntpath.dirname(ntpath.dirname(parent))
+    if ntpath.normcase(gac_directory) != ntpath.normcase(expected):
+        return False
+    if not assembly_directory.casefold().endswith(".resources"):
+        return False
+    if basename.casefold() != assembly_directory.casefold() + ".dll":
+        return False
+    fields = version_directory.split("_")
+    if len(fields) != 4 or fields[0] != "v4.0":
+        return False
+    version_parts = fields[1].split(".")
+    if len(version_parts) != 4 or not all(
+        part.isascii() and part.isdigit() and len(part) > 0
+        for part in version_parts
+    ):
+        return False
+    if len(fields[3]) != 16 or not all(
+        character in "0123456789abcdefABCDEF" for character in fields[3]
+    ):
+        return False
+    subtags = fields[2].split("-")
+    return all(
+        subtag.isascii() and subtag.isalnum() and 1 <= len(subtag) <= 8
+        for subtag in subtags
+    )
+
+
 @dataclass(frozen=True)
 class DebugProcessDescriptor:
     kind: BrokerKind
@@ -280,6 +349,7 @@ class DebugImageAuthority:
             )
             or _is_trusted_winsxs_common_controls(path, str(windows_directory))
             or _is_trusted_gac_microsoft_visual_basic(path, str(windows_directory))
+            or _is_trusted_gac_resource_satellite(path, str(windows_directory))
         )
 
     def approve_announced_process(
