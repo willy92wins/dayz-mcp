@@ -250,7 +250,17 @@ class InventoryAttachAppToolTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             runtime,
             "call_bridge",
-            new=AsyncMock(return_value={"ok": 1, "dest": "attachment"}),
+            new=AsyncMock(
+                return_value={
+                    "ok": 1,
+                    "object_id": 7,
+                    "inventory_attach": {
+                        "dest": "attachment",
+                        "slot": "SparkPlug",
+                        "item_object_id": 99,
+                    },
+                }
+            ),
         ) as call:
             await app.call_tool(COMMAND, {**expected, "timeout_s": 1.0})
         call.assert_awaited_once_with(COMMAND, expected, "server", 1.0)
@@ -266,7 +276,12 @@ class InventoryAttachAppToolTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             runtime,
             "call_bridge",
-            new=AsyncMock(return_value={"ok": 1, "dest": "cargo"}),
+            new=AsyncMock(
+                return_value={
+                    "ok": 1,
+                    "inventory_attach": {"dest": "cargo", "slot": "", "item_object_id": 99},
+                }
+            ),
         ) as call:
             await app.call_tool(COMMAND, {**expected, "timeout_s": 1.0})
         call.assert_awaited_once_with(COMMAND, expected, "server", 1.0)

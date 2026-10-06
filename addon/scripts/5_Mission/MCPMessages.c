@@ -551,10 +551,14 @@ class MCPUiClickSequence
 	}
 };
 
+// dest and slot name where the item was created. item_object_id is that item's
+// same-run registry id (the inventory_attach command id). It is not the
+// destination owner: MCPResult.object_id stays the owner. 0 means unset.
 class MCPInventoryAttachReceipt
 {
 	string dest;
 	string slot;
+	int item_object_id;
 };
 
 // input_describe: one key of the selected alternative. index is BindKeyCount's index.
