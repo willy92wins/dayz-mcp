@@ -329,6 +329,37 @@ class _OpenedLauncher:
         return self._root_image_approved
 
 
+class _SynchronousRequestWriter:
+    """Request-writer double that reports completion without a worker thread.
+
+    ``finish_request_writer`` joins the writer twice with ``_DEBUG_DRAIN_SECONDS``
+    as the timeout. With a zero drain both joins can run before the real
+    ``_PublicRequestWriter`` thread has been scheduled and fail the run with
+    ``native_launcher_request_writer_stuck``. Ownership scenarios that pin
+    handle cleanup instead of writer timing use this double so completion never
+    depends on thread scheduling.
+    """
+
+    def __init__(self, source_handle: int, request: bytes) -> None:
+        self.source_handle = source_handle
+        self.request = request
+        self.cancel_calls = 0
+
+    @property
+    def done(self) -> bool:
+        return True
+
+    @property
+    def error(self) -> object:
+        return None
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+
+    def join(self, timeout: float) -> bool:
+        return True
+
+
 class NativeLauncherBackendTests(unittest.TestCase):
     @staticmethod
     def _backend() -> Any:
@@ -1678,8 +1709,17 @@ class NativeDebugOwnershipTests(unittest.TestCase):
         ]
         original_kernel32 = backend._kernel32
         original_debug_drain = backend._DEBUG_DRAIN_SECONDS
+        original_writer = backend._PublicRequestWriter
+        writers: list[_SynchronousRequestWriter] = []
+
+        class OwnedWriter(_SynchronousRequestWriter):
+            def __init__(self, source_handle: int, request: bytes) -> None:
+                super().__init__(source_handle, request)
+                writers.append(self)
+
         backend._kernel32 = fake
         backend._DEBUG_DRAIN_SECONDS = 0.0
+        backend._PublicRequestWriter = OwnedWriter
         try:
             created = self._create(backend, fake)
             result = backend._supervise_created_launcher(
@@ -1692,9 +1732,97 @@ class NativeDebugOwnershipTests(unittest.TestCase):
                 cancel_signal=threading.Event(),
             )
         finally:
+            backend._PublicRequestWriter = original_writer
             backend._DEBUG_DRAIN_SECONDS = original_debug_drain
             backend._kernel32 = original_kernel32
         self.assertEqual(result, 0)
+        self.assertEqual(backend._DEBUG_DRAIN_SECONDS, 5.0)
+        self.assertEqual(len(writers), 1)
+        self.assertEqual(writers[0].request, b"{}")
+        self.assertIn(501, fake.closed)
+        self.assertIn(803, fake.closed)
+        self.assertIn(813, fake.closed)
+        self.assertNotIn("active_zero", fake.events)
+
+    def test_zero_drain_joins_report_stuck_when_writer_thread_lags(self) -> None:
+        """The race the ownership test used to depend on, forced deterministic.
+
+        The writer thread is parked until both zero-time joins have run, so an
+        unfinished writer fails the run with
+        ``native_launcher_request_writer_stuck`` instead of returning the root
+        exit code.
+        """
+        backend = self._backend()
+        fake = _FakeKernel32()
+        fake.pipe_bytes[23] = bytearray(_announcement_frame())
+        fake.completion_events = [
+            (True, 6, 501, 703),
+            (True, 6, 501, 900),
+        ]
+        fake.debug_events = [
+            backend.NativeDebugEvent(
+                "CREATE_PROCESS",
+                pid=703,
+                tid=704,
+                process_handle=801,
+                thread_handle=802,
+                file_handle=803,
+            ),
+            backend.NativeDebugEvent(
+                "CREATE_PROCESS",
+                pid=900,
+                tid=901,
+                process_handle=811,
+                thread_handle=812,
+                file_handle=813,
+            ),
+            backend.NativeDebugEvent("EXIT_PROCESS", pid=900, tid=901, exit_code=0),
+            backend.NativeDebugEvent("EXIT_PROCESS", pid=703, tid=704, exit_code=0),
+        ]
+        release_writer = threading.Event()
+        lagging_writers: list[Any] = []
+        real_writer = backend._PublicRequestWriter
+
+        class LaggingWriter(real_writer):
+            def __init__(self, source_handle: int, request: bytes) -> None:
+                super().__init__(source_handle, request)
+                lagging_writers.append(self)
+
+            def _run(self) -> None:
+                # Park the write until the test releases it: the writer thread
+                # loses the scheduling race against both zero-time joins.
+                if not release_writer.wait(10.0):
+                    return
+                super()._run()
+
+        original_kernel32 = backend._kernel32
+        original_debug_drain = backend._DEBUG_DRAIN_SECONDS
+        backend._kernel32 = fake
+        backend._DEBUG_DRAIN_SECONDS = 0.0
+        backend._PublicRequestWriter = LaggingWriter
+        try:
+            created = self._create(backend, fake)
+            with self.assertRaisesRegex(
+                backend.NativeLauncherBackendError,
+                "native_launcher_request_writer_stuck",
+            ):
+                backend._supervise_created_launcher(
+                    created,
+                    canonical_request=b"{}",
+                    runtime_pipes=backend.NativeRuntimePipes(
+                        11, 21, 22, 12, 23, 13, 14, 24, 15, 25
+                    ),
+                    image_authority=_ImageAuthority(),
+                    cancel_signal=threading.Event(),
+                )
+        finally:
+            release_writer.set()
+            for writer in lagging_writers:
+                writer.join(10.0)
+            backend._PublicRequestWriter = real_writer
+            backend._DEBUG_DRAIN_SECONDS = original_debug_drain
+            backend._kernel32 = original_kernel32
+        self.assertEqual(len(lagging_writers), 1)
         self.assertEqual(backend._DEBUG_DRAIN_SECONDS, 5.0)
 
     def test_second_wait_empty_handles_is_missing_zero_not_a_longer_drain(self) -> None:
