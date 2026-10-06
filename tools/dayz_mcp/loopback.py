@@ -657,7 +657,8 @@ def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
-        "settle_ticks": _integer_in_range(),
+        # 0 keeps the bridge default of three ticks. 600 is 30 s of settle.
+        "settle_ticks": _integer_in_range(minimum=0, maximum=600),
     }
     for field in vectors:
         validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3

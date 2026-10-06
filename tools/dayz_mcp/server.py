@@ -3588,6 +3588,87 @@ def _parse_client_start_budget_s(value: object) -> float | None:
     return converted
 
 
+_ACTIVE_BOX_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
+)
+
+
+def _explicit_client_extension_row(
+    box: object,
+    *,
+    mode: object,
+    run_id: object,
+    project: object,
+    caller_session: str | None,
+) -> dict[str, Any] | None:
+    """The caller's own released run, when this call only replaces its client.
+
+    Prefix match selects the row. It does not authorise a process change:
+    adopt and start still require the daemon's full session id.
+    """
+
+    if mode != "client" or not isinstance(run_id, str) or not run_id:
+        return None
+    if not isinstance(project, str) or not project:
+        return None
+    row = _box_run(box, run_id)
+    if row is None or row.get("state") != "RUNNING_IDLE":
+        return None
+    if row.get("mod") != "@" + project:
+        return None
+    if not caller_launched_row(row, caller_session):
+        return None
+    return row
+
+
+def _client_extension_blocked(box: object, row: dict[str, Any]) -> bool:
+    """Other managed runs, foreign DayZ, unknown scans, and transitions.
+
+    The requested row itself is RUNNING_IDLE here. A protected ownerless run
+    is not this function's job: the launcher is the only caller who reached it.
+    """
+
+    if not isinstance(box, dict):
+        return True
+    if box.get("scan_known") is False or box.get("port_scan_known") is False:
+        return True
+    foreign = box.get("foreign")
+    if not isinstance(foreign, list) or foreign:
+        return True
+    runs = box.get("runs")
+    if not isinstance(runs, list):
+        return True
+    requested = row.get("run_id")
+    for item in runs:
+        if not isinstance(item, dict):
+            return True
+        if item.get("run_id") == requested:
+            continue
+        if item.get("state") in _ACTIVE_BOX_STATES:
+            return True
+    return False
+
+
+def _client_extension_exempt(
+    box: object,
+    *,
+    mode: object,
+    run_id: object,
+    project: object,
+    caller_session: str | None,
+) -> bool:
+    row = _explicit_client_extension_row(
+        box,
+        mode=mode,
+        run_id=run_id,
+        project=project,
+        caller_session=caller_session,
+    )
+    if row is None:
+        return False
+    return not _client_extension_blocked(box, row)
+
+
 def _failed_active_run_result(
     *,
     project: str,
@@ -4452,7 +4533,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "session did not launch is run_protected until use_state is "
             "abandoned; takeover=true does not evict it. Abandoned, or the "
             "session that launched it, stays takeover_required unless "
-            "takeover=true. "
+            "takeover=true, except an explicit mode=client with that run_id, "
+            "a matching project and RUNNING_IDLE: that call replaces only the "
+            "client and does not stop the server. A public session prefix "
+            "may select this path; the daemon authorises the process change "
+            "with the full session id. A client that is still polling is "
+            "client_already_polling. "
             "port_scan_unknown means the daemon could not read the socket "
             "table: fix the host, waiting does not help. "
             f"0 is the immediate reject. wait_for_box_s must be <= "
@@ -4663,12 +4749,28 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             # A box that was already busy keeps the answer it always had.
             return refused
 
+        def extension_exempt(box: object) -> bool:
+            return _client_extension_exempt(
+                box,
+                mode=mode,
+                run_id=run_id,
+                project=project,
+                caller_session=caller_session,
+            )
+
         try:
             if on_busy == "queue":
                 peeked = await peek_box()
                 cannot = _box_wait_cannot_help(
                     peeked, caller_session=caller_session, port=port
                 )
+                if (
+                    cannot in {"own_run", "adopt"}
+                    and extension_exempt(peeked)
+                ):
+                    # This call extends the caller's own run. The FIFO is for
+                    # a fresh launch, and adopt is the lease, not a refusal.
+                    cannot = None
                 if cannot is not None:
                     failed = _failed_active_run_result(
                         project=project,
@@ -4683,7 +4785,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     if cannot in {"own_run", "adopt"}:
                         failed["reason"] = cannot
                     return annotated(failed)
-            if on_busy == "queue" or wait_s > 0.0:
+            elif wait_s > 0.0:
+                # Same admission as queue, before the box is asked to go free.
+                # session_box_status is the wait's own read, without joining.
+                async with client.tool_lock:
+                    peeked_status = await client.session_box_status()
+                peeked = _box_from_status(
+                    peeked_status if isinstance(peeked_status, dict) else {}
+                )
+            # An eligible client extension does not wait out the server it keeps.
+            skip_box_wait = extension_exempt(peeked) if wait_s > 0.0 or on_busy == "queue" else False
+            if not skip_box_wait and (on_busy == "queue" or wait_s > 0.0):
                 await report("queued", "waiting for box")
                 wait_budget = wait_s
                 abort = None
@@ -4692,9 +4804,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     session_for_wait = caller_session
 
                     def abort(box: dict[str, Any]) -> object:
-                        return _box_wait_cannot_help(
+                        reason = _box_wait_cannot_help(
                             box, caller_session=session_for_wait, port=port
                         )
+                        if (
+                            reason in {"own_run", "adopt"}
+                            and extension_exempt(box)
+                        ):
+                            return None
+                        return reason
 
                 box_wait_deadline = clock() + wait_budget
                 waited = await execute_wait_for_box(
@@ -4738,6 +4856,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 target = takeover_target_run_id(
                     box, caller_session=caller_session
                 )
+                # Fresh launches keep takeover_target_run_id. An explicit
+                # client extension exempts only the requested row, and only
+                # after the same blockers the queue checked.
+                if target is not None and extension_exempt(box) and target == run_id:
+                    target = None
                 if target is not None and _row_is_protected(
                     _box_run(box, target), caller_session
                 ):
@@ -6652,7 +6775,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "guarantee resetting to that measured default, the singleton free "
         "camera included. "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
-        "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV). "
+        "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV): "
+        "settle_ticks * 0.05 seconds, and 0 keeps the default of three ticks (0.15 s). "
+        "settle_ticks must be an integer from 0 to 600. timeout_s has to cover that "
+        "settle plus bridge processing and transport. A timeout does not prove the "
+        "camera was not applied; the job may already have moved it. "
         "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
     ))
     async def camera_set(
@@ -6700,7 +6827,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if fov_value < 0.0:
             raise ToolError(fov_error)
         args["fov"] = fov_value
-        args["settle_ticks"] = int(settle_ticks)
+        # 0 is the wire's absent integer and means the bridge default of three
+        # ticks. Above 600 the job would outlive every bound this call publishes.
+        if (
+            isinstance(settle_ticks, bool)
+            or not isinstance(settle_ticks, int)
+            or not 0 <= settle_ticks <= 600
+        ):
+            raise ToolError(
+                "bad_args: settle_ticks must be an integer from 0 to 600 "
+                "(0 keeps the default of three ticks; each tick is 0.05 s)"
+            )
+        args["settle_ticks"] = settle_ticks
         async with runtime.tool_lock:
             result = await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
         # 983a: the wire has no FOV getter (Camera.GetCurrentFOV froze the
