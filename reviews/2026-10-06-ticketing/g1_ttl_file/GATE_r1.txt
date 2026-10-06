@@ -1,0 +1,8 @@
+--- tests.test_lease_ttl_and_file_wait: rc=0
+Ran 14 tests in 10.445s
+
+OK
+--- fast tier: ran=5655 baseline_ran=5587 failures=3 new=1
+--- FLAKY (failed in the full run, passed alone and with its module; not blocking):
+    FAIL: test_584e_all_tool_results_carry_owned_ttl (tests.test_lease_ttl_and_file_wait.ProtocolTtlTest.test_584e_all_tool_results_carry_owned_ttl)
+GAUNTLET_GATE: PASS

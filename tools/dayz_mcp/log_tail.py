@@ -11,6 +11,7 @@ a stale offset would skip lines with no signal that anything was lost.
 from __future__ import annotations
 
 import json
+import os
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,35 @@ LOG_SUFFIXES = (".rpt", ".log")
 # Bytes hashed to identify the file. A rewrite in place keeps the path and can
 # keep or exceed the old size, so size alone cannot detect it.
 IDENTITY_PREFIX_BYTES = 512
+# Cooperative readers take a tail window in chunks of this size and check the
+# stop signal between chunks; one blocking read() cannot be interrupted.
+READ_CHUNK_BYTES = 65536
+
+
+def read_window(handle, max_bytes: int, stop: object = None) -> bytes:
+    """Read up to ``max_bytes`` from ``handle`` in bounded chunks.
+
+    ``stop`` is a cooperative signal with ``stopped`` and ``wait(timeout)``.
+    It is checked between chunk reads, and its own deadline turns ``stopped``
+    true, so a stalled read ends instead of blocking its thread forever. With
+    no signal this is one plain ``handle.read(max_bytes)``. An aborted read
+    raises ``TimeoutError``: the window did not finish inside its budget and
+    a partial window must not look like file content.
+    """
+
+    if stop is None:
+        return handle.read(max_bytes)
+    chunks: list[bytes] = []
+    remaining = max_bytes
+    while remaining > 0:
+        if stop.stopped:
+            raise TimeoutError("tail window did not finish inside its deadline")
+        chunk = handle.read(min(READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 class LogTailError(ValueError):
@@ -93,6 +123,64 @@ def _file_identity(handle, length: int) -> int:
     if len(prefix) < length:
         return 0  # shorter than expected: the size checks own that case
     return zlib.crc32(prefix) or 1  # never 0: 0 is reserved for "unknown"
+
+
+def read_open_handle(
+    handle,
+    path: str,
+    marker: TailMarker | None,
+    *,
+    max_bytes: int = MAX_TAIL_BYTES,
+    max_lines: int | None = None,
+    stop: object = None,
+) -> dict[str, object]:
+    """Same contract as ``read_since`` for a handle the caller already opened.
+
+    The caller closes the handle. Reading it here, instead of reopening the
+    path, keeps a directory swap from pointing the second open somewhere else.
+    ``stop`` makes the window read cooperative: see ``read_window``.
+    """
+
+    size = os.fstat(handle.fileno()).st_size
+    previous = 0
+    if marker is not None:
+        previous = _file_identity(handle, min(IDENTITY_PREFIX_BYTES, marker.size))
+    rotated = marker is not None and (
+        size < marker.size
+        or size < marker.offset
+        or (marker.identity != 0 and previous != marker.identity)
+    )
+    start = 0 if (marker is None or rotated) else marker.offset
+    truncated = False
+    if size - start > max_bytes:
+        start = size - max_bytes
+        truncated = True
+    handle.seek(start)
+    payload = read_window(handle, max_bytes, stop)
+    new_identity = _file_identity(handle, min(IDENTITY_PREFIX_BYTES, size))
+    last_newline = payload.rfind(b"\n")
+    complete = b"" if last_newline == -1 else payload[: last_newline + 1]
+    if max_lines is not None:
+        cut = 0
+        for _ in range(max_lines):
+            nxt = complete.find(b"\n", cut)
+            if nxt == -1:
+                break
+            cut = nxt + 1
+        if cut < len(complete):
+            truncated = True
+        complete = complete[:cut]
+    consumed = start + len(complete)
+    lines = complete.decode("utf-8", errors="replace").splitlines()
+    return {
+        "path": path,
+        "lines": lines,
+        "rotated": rotated,
+        "truncated": truncated,
+        "marker": TailMarker(
+            path=path, offset=consumed, size=size, identity=new_identity
+        ),
+    }
 
 
 def is_allowed_profiles_dir(value: object) -> bool:

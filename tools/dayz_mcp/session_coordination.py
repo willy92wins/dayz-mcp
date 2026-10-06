@@ -1342,11 +1342,9 @@ class SessionCoordinator:
                         decision="owner_read",
                     )
                     if self._active is lease and audit_ok:
-                        expires_at = self._time_fn() + SESSION_TTL_S
-                        if lease.expires_at != expires_at:
-                            lease.expires_at = expires_at
-                            self._bump_revision_locked()
-                        self._note_renewed_lease(lease.lease_id)
+                        # Owner reads stay authorized and audited. They do not
+                        # extend expires_at and are not a renewal stamp.
+                        # file_matches renews through session_heartbeat instead.
                         return AuthorizationDecision(
                             True,
                             200,

@@ -1,0 +1,11 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=1
+    (same offenders as the base tree; not blocking)
+--- tests.test_lease_ttl_and_file_wait: rc=0
+Ran 28 tests in 12.727s
+
+OK
+--- tests.test_lease_ttl_and_file_wait on Python 3.11: rc=0 OK
+--- fast tier: ran=5669 baseline_ran=5587 failures=3 new=1
+--- FLAKY (failed in the full run, passed alone and with its module; not blocking):
+    FAIL: test_584e_all_tool_results_carry_owned_ttl (tests.test_lease_ttl_and_file_wait.ProtocolTtlTest.test_584e_all_tool_results_carry_owned_ttl)
+GAUNTLET_GATE: PASS

@@ -200,6 +200,28 @@ def _offset_before_last_lines_in_window(
     return min(offset, window_start + len(window))
 
 
+def _marker_rewound_handle(
+    handle, path: str, lookback_lines: int, *, stop: object = None
+) -> log_tail.TailMarker:
+    """``_marker_rewound`` on a handle the caller already holds open.
+
+    ``stop`` makes the window read cooperative; see ``log_tail.read_window``.
+    """
+
+    size = os.fstat(handle.fileno()).st_size
+    identity = log_tail._file_identity(
+        handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
+    )
+    read_size = min(size, log_tail.MAX_TAIL_BYTES)
+    window_start = size - read_size
+    handle.seek(window_start)
+    window = log_tail.read_window(handle, read_size, stop)
+    offset = _offset_before_last_lines_in_window(window, window_start, lookback_lines)
+    return log_tail.TailMarker(
+        path=path, offset=offset, size=size, identity=identity
+    )
+
+
 def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:
     """Marker rewound by ``lookback_lines``, reading only the file's tail.
 

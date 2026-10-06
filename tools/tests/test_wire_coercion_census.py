@@ -361,6 +361,10 @@ COERCIBLE_ALLOWLIST.update(
             "keeps this key coercible so a numeric branch cannot hide"
         ),
         ("wait_for", "pattern"): "free text substring",
+        ("wait_for", "profile_file"): (
+            "relative path under the role $profile; str | None stays coercible "
+            "because the bare-str arm accepts a numeric JSON branch"
+        ),
         ("weapon_state", "uid"): "free text player id, empty means first human",
         ("world_spawn", "type"): "free text classname",
     }

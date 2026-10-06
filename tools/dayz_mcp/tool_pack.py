@@ -49,6 +49,9 @@ def apply_tool_pack(tool_manager: Any, pack: str) -> frozenset[str] | None:
     if allowed is None:
         return None
     for tool in tuple(tool_manager.list_tools()):
+        # Internal supervisor transport tools are not part of a public pack.
+        if str(tool.name).startswith("__dayz_mcp_"):
+            continue
         if tool.name not in allowed:
             tool_manager.remove_tool(tool.name)
     return allowed

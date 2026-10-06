@@ -16,7 +16,7 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
@@ -76,6 +76,12 @@ from dayz_mcp.peer_liveness import (
     client_peer_probeable as _client_peer_probeable,
     peer_is_live as _peer_is_live,
 )
+from dayz_mcp.lease_result_ttl import (
+    LEASE_TTL_OBSERVE_S,
+    LEASE_LOCAL_TOOL,
+    LEASE_TTL_OBSERVE_TOOL,
+    install_lease_ttl_annotation,
+)
 from dayz_mcp.server_freshness import (
     REMEDIATION as _TOOL_REGISTRY_REMEDIATION,
     ServerSourceWatch,
@@ -98,6 +104,7 @@ from dayz_mcp.loopback import (
 from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
 from dayz_mcp.process_lifecycle import (
     ADOPTION_REVERT_PENDING,
+    _caller_owns_run,
     caller_launched_row,
     caller_may_adopt_ownerless,
     empty_box,
@@ -109,6 +116,7 @@ from dayz_mcp import session_handoff
 from dayz_mcp.mcp_supervisor import Supervisor
 from dayz_mcp.session_coordination import (
     READ_ONLY_COMMANDS,
+    SESSION_TTL_S,
     ClientIdentity,
     command_requires_lease,
     public_audit_stage,
@@ -245,6 +253,7 @@ from dayz_mcp.launch_logs import (
     _log_markers_at_end,
     _log_markers_with_lookback,
     _marker_rewound,
+    _marker_rewound_handle,
     _new_log_lines,
     _newest_rpt_and_script,
     _offset_before_last_lines,
@@ -356,6 +365,7 @@ WAIT_FOR_CONDITIONS = frozenset({
     "players_at_most",
     "log_matches",
     "entity_state",
+    "file_matches",
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
@@ -2444,6 +2454,724 @@ async def _tool_lock_until(runtime: Any, deadline: float) -> AsyncIterator[bool]
             runtime.tool_lock.release()
 
 
+_PROFILE_ROLE_PARENT = {"server": "_server", "client": "_client", "offline": "_client"}
+_PROFILE_DEVICES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def _profile_file_parts(profile_file: str) -> tuple[str, ...]:
+    """Reject paths that are not a bounded relative profile file. No IO."""
+
+    if not isinstance(profile_file, str) or profile_file == "":
+        raise ToolError("bad_args: profile_file must be a relative path")
+    if profile_file != profile_file.strip() or any(ord(char) < 32 for char in profile_file):
+        raise ToolError("bad_args: profile_file escapes the profile")
+    if (
+        ":" in profile_file
+        or profile_file.startswith("\\")
+        or profile_file.startswith("/")
+        or profile_file.startswith("//")
+    ):
+        raise ToolError("bad_args: profile_file escapes the profile")
+    parts = PureWindowsPath(profile_file).parts
+    if not parts or len(profile_file) > 240:
+        raise ToolError("bad_args: profile_file escapes the profile")
+    for part in parts:
+        if part in {".", ".."} or part.endswith(" ") or part.endswith("."):
+            raise ToolError("bad_args: profile_file escapes the profile")
+        base = part.split(".", 1)[0].casefold()
+        if base in _PROFILE_DEVICES:
+            raise ToolError("bad_args: profile_file escapes the profile")
+    return parts
+
+
+def _held_lease(runtime: Any) -> tuple[str, str]:
+    control = getattr(runtime, "_control", None)
+    token = getattr(control, "active_lease_token", None)
+    lease_id = getattr(control, "active_lease_id", None)
+    if not isinstance(token, str) or not token or not isinstance(lease_id, str) or not lease_id:
+        raise ToolError("lease_required")
+    return token, lease_id
+
+
+def _caller_session_id(runtime: Any) -> str:
+    identity = getattr(runtime, "identity", None)
+    session = getattr(identity, "session_id", None)
+    if not isinstance(session, str) or not session:
+        session = getattr(runtime, "caller_session", None)
+    if not isinstance(session, str) or not session:
+        raise ToolError("lease_required")
+    return session
+
+
+async def _lifecycle_runs(runtime: Any) -> list[dict[str, Any]]:
+    status_fn = getattr(runtime, "lifecycle_status", None)
+    if status_fn is None:
+        raise ToolError("no_active_run")
+    status = status_fn()
+    if inspect.isawaitable(status):
+        status = await status
+    if not isinstance(status, dict):
+        raise ToolError("no_active_run")
+    runs = status.get("runs") or []
+    return [item for item in runs if isinstance(item, dict)]
+
+
+def _run_owner_session(item: dict[str, Any]) -> str | None:
+    """Production rows publish ``owner_session_id``. Older fixtures used ``owner_session``."""
+
+    owner = item.get("owner_session_id")
+    if not isinstance(owner, str) or not owner:
+        owner = item.get("owner_session")
+    if not isinstance(owner, str) or not owner:
+        return None
+    return owner
+
+
+def _one_owned_run(
+    runs: list[dict[str, Any]], session: str, lease_id: str
+) -> dict[str, Any]:
+    owned: list[dict[str, Any]] = []
+    for item in runs:
+        if item.get("state") not in {"STARTING", "RUNNING", "RUNNING_IDLE"}:
+            continue
+        owner = _run_owner_session(item)
+        if owner is None or not isinstance(session, str) or not session:
+            continue
+        if owner not in {session, session[:12]}:
+            continue
+        owner_lease = item.get("owner_lease_id")
+        if isinstance(owner_lease, str) and owner_lease and owner_lease != lease_id:
+            continue
+        owned.append(item)
+    if len(owned) != 1:
+        raise ToolError("no_active_run" if len(owned) == 0 else "multiple_active_runs")
+    return owned[0]
+
+
+def _profiles_dir_for_role(run: dict[str, Any], role: str) -> str:
+    """Role profile from sealed project/mode policy. The run path is not a root.
+
+    ``RunRecord.profiles`` is one folder. A client wait on a server-recorded
+    run still resolves ``_client/profiles`` from the mode start root. A path
+    that policy did not approve is not readable, even when its parent is
+    named ``_server``.
+    """
+
+    from dayz_mcp.dayz_test_tool import (
+        _close_project_policy,
+        _close_role_folder,
+        _start_role_roots,
+    )
+
+    processes = run.get("processes")
+    launched: set[str] = set()
+    if isinstance(processes, list):
+        for proc in processes:
+            role_name = proc.get("role") if isinstance(proc, dict) else getattr(proc, "role", None)
+            if isinstance(role_name, str) and role_name:
+                launched.add(role_name)
+    if role == "offline":
+        if "offline" not in launched and "client" not in launched:
+            raise ToolError("profile_unresolved")
+    elif role not in launched:
+        raise ToolError("profile_unresolved")
+    policy = _close_project_policy(run)
+    roots = _start_role_roots()
+    if policy is None or not roots:
+        raise ToolError("profile_unresolved")
+    asked = "client" if role == "offline" else role
+    folder = _close_role_folder(policy, asked, roots)
+    if folder is None and role == "offline":
+        folder = _close_role_folder(policy, "offline", roots)
+    if not isinstance(folder, str) or not log_tail.is_allowed_profiles_dir(folder):
+        raise ToolError("profile_unresolved")
+    recorded = run.get("profiles")
+    if isinstance(recorded, str) and recorded and role in {"server", "client", "offline"}:
+        recorded_parent = Path(recorded).parent.name.casefold()
+        folder_parent = Path(folder).parent.name.casefold()
+        if recorded_parent == folder_parent and os.path.normcase(os.path.normpath(recorded)) != os.path.normcase(os.path.normpath(folder)):
+            raise ToolError("profile_unresolved")
+    return folder
+
+
+def _under_root(root: Path, candidate: Path) -> bool:
+    try:
+        Path(os.path.normcase(str(candidate))).resolve().relative_to(
+            Path(os.path.normcase(str(root))).resolve()
+        )
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _final_handle_path(handle) -> Path:
+    """Path this open handle names, after reparse points. Does not close it."""
+
+    if sys.platform == "win32":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        get_final = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+        get_final.argtypes = [
+            wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ]
+        get_final.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        os_handle = msvcrt.get_osfhandle(handle.fileno())
+        written = get_final(wintypes.HANDLE(os_handle), buffer, 32768, 0)
+        if written == 0 or written >= 32768:
+            raise log_tail.LogTailError("log_unavailable")
+        text = buffer.value
+        if text.startswith("\\\\?\\UNC\\"):
+            text = "\\\\" + text[8:]
+        elif text.startswith("\\\\?\\"):
+            text = text[4:]
+        return Path(text)
+    return Path(os.path.realpath(handle.fileno()))
+
+
+def _profile_root(root: Path) -> Path:
+    try:
+        root_final = root.resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise ToolError("bad_profiles") from error
+    if not root_final.is_dir():
+        raise ToolError("bad_profiles")
+    return root_final
+
+
+def _walk_profile_parent(root_final: Path, parts: tuple[str, ...]) -> Path | None:
+    """Existing ancestors of the relative file. None when the file is not there yet.
+
+    A parent that leaves the profile is ``bad_args``. The file itself is not
+    opened here: the poll opens that handle and reads it.
+    """
+
+    current = root_final
+    for index, part in enumerate(parts):
+        current = current / part
+        last = index == len(parts) - 1
+        try:
+            exists = current.exists()
+        except OSError as error:
+            raise ToolError("bad_args: profile_file escapes the profile") from error
+        if not exists:
+            return None
+        try:
+            resolved = current.resolve(strict=True)
+        except (OSError, ValueError) as error:
+            raise ToolError("bad_args: profile_file escapes the profile") from error
+        if not _under_root(root_final, resolved):
+            raise ToolError("bad_args: profile_file escapes the profile")
+        if last:
+            if not resolved.is_file():
+                raise ToolError("bad_args: profile_file escapes the profile")
+            return resolved
+        if not resolved.is_dir():
+            raise ToolError("bad_args: profile_file escapes the profile")
+        current = resolved
+    return None
+
+
+def _read_contained_handle(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    lookback_lines: int,
+    primed: bool,
+    file_marker: log_tail.TailMarker | None,
+    caller_marker: log_tail.TailMarker | None,
+    stop: Any = None,
+) -> dict[str, Any]:
+    """Open the profile file once, check that handle, and read it.
+
+    ``state`` is ``missing``, ``unreadable``, or ``ok``. A reparse point that
+    leaves the profile raises ``ToolError`` and is not a scan diagnostic.
+    ``stop`` is the cooperative signal of the bounded reader thread: it is
+    checked between phases and the window reads abort between chunks when it
+    fires or the read deadline passes.
+    """
+
+    if stop is not None and stop.stopped:
+        raise TimeoutError
+    root_final = _profile_root(root)
+    lexical = _walk_profile_parent(root_final, parts)
+    if lexical is None:
+        return {"state": "missing"}
+    if stop is not None and stop.stopped:
+        raise TimeoutError
+    try:
+        handle = lexical.open("rb")
+    except OSError:
+        return {"state": "unreadable", "path": str(lexical)}
+    try:
+        if stop is not None and stop.stopped:
+            raise TimeoutError
+        try:
+            final = _final_handle_path(handle)
+            if not _under_root(root_final, final):
+                raise ToolError("bad_args: profile_file escapes the profile")
+            path = str(final)
+            if not primed:
+                if caller_marker is not None:
+                    if os.path.normcase(os.path.normpath(caller_marker.path)) != os.path.normcase(path):
+                        raise ToolError("bad_marker")
+                    file_marker = log_tail.TailMarker(
+                        path=path,
+                        offset=caller_marker.offset,
+                        size=caller_marker.size,
+                        identity=caller_marker.identity,
+                    )
+                elif lookback_lines > 0:
+                    file_marker = _marker_rewound_handle(
+                        handle, path, lookback_lines, stop=stop
+                    )
+                else:
+                    parked = log_tail.read_open_handle(handle, path, None, stop=stop)
+                    file_marker = parked["marker"]
+                    return {
+                        "state": "ok",
+                        "path": path,
+                        "lines": [],
+                        "marker": file_marker,
+                        "count": 0,
+                    }
+            if file_marker is None:
+                return {"state": "ok", "path": path, "lines": [], "marker": None, "count": None}
+            read = log_tail.read_open_handle(
+                handle, path, log_tail.TailMarker(
+                    path=path,
+                    offset=file_marker.offset,
+                    size=file_marker.size,
+                    identity=file_marker.identity,
+                ),
+                stop=stop,
+            )
+            lines = list(read["lines"])
+            return {
+                "state": "ok",
+                "path": path,
+                "lines": lines,
+                "marker": read["marker"],
+                "count": len(lines),
+            }
+        except TimeoutError:
+            raise
+        except ToolError:
+            raise
+        except (OSError, log_tail.LogTailError):
+            return {"state": "unreadable", "path": str(lexical)}
+    finally:
+        handle.close()
+
+
+async def _bound(awaitable: Any, deadline: float) -> Any:
+    """Await ``awaitable`` only for the time still left before ``deadline``."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        raise TimeoutError
+    return await asyncio.wait_for(awaitable, timeout=remaining)
+
+
+def _stop_thread(thread: threading.Thread) -> None:
+    """Nudge a worker thread that is executing Python bytecodes.
+
+    This injects SystemExit into that thread. It cannot run inside a blocked
+    wait, so it is only the fallback beside the cooperative ``_ReadStop``
+    signal; the bounded join after it decides what the caller may claim.
+    """
+
+    if not thread.is_alive() or thread.ident is None:
+        return
+    import ctypes
+
+    ident = ctypes.c_ulong(thread.ident)
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(ident, ctypes.py_object(SystemExit))
+
+
+class _ReadStop:
+    """Cooperative stop signal for a bounded worker thread.
+
+    An injected exception does not run inside ``Event.wait``, so cleanup that
+    only injects cannot stop a blocked thread. The worker therefore checks
+    this signal between chunks, and both ``stopped`` and ``wait`` turn true at
+    the worker's own deadline: the work ends even if the caller never stops it.
+    """
+
+    def __init__(self, deadline: float) -> None:
+        self._event = threading.Event()
+        self._deadline = deadline
+
+    def stop(self) -> None:
+        self._event.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._event.is_set() or time.monotonic() >= self._deadline
+
+    def wait(self, timeout: float) -> bool:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0.0:
+            return True
+        return self._event.wait(min(max(timeout, 0.0), remaining))
+
+
+# How long cleanup waits for a worker that was told to stop before the caller
+# reports (or assumes) the outcome. A cooperative worker leaves well inside it.
+_THREAD_STOP_GRACE_S = 0.05
+
+
+async def _thread_bounded(
+    fn: Any, deadline: float, alive_flag: set[str] | None = None
+) -> Any:
+    """Run ``fn(stop)`` off the event loop, bounded by ``deadline``.
+
+    ``fn`` receives a cooperative stop signal and must check it between
+    chunks. When the budget ends or the await is cancelled, the thread is
+    stopped, joined with a bound, and a thread that is still alive is marked
+    in ``alive_flag`` instead of being claimed terminated. A result or error
+    that lands outside the budget is never delivered.
+    """
+
+    stop = _ReadStop(deadline)
+    slot: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            slot["value"] = fn(stop)
+            slot["done_at"] = time.monotonic()
+        except BaseException as exc:
+            slot["error"] = exc
+            slot["done_at"] = time.monotonic()
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    remaining = deadline - time.monotonic()
+    if remaining > 0.0:
+        try:
+            await asyncio.to_thread(thread.join, remaining)
+        except asyncio.CancelledError:
+            stop.stop()
+            _stop_thread(thread)
+            await asyncio.to_thread(thread.join, _THREAD_STOP_GRACE_S)
+            if thread.is_alive() and alive_flag is not None:
+                alive_flag.add("reader")
+            raise
+    if "done_at" not in slot or slot["done_at"] > deadline:
+        # The work did not finish inside its budget. Ask it to leave, wait a
+        # bound, and never deliver its result or its error.
+        stop.stop()
+        _stop_thread(thread)
+        await asyncio.to_thread(thread.join, _THREAD_STOP_GRACE_S)
+        if thread.is_alive() and alive_flag is not None:
+            alive_flag.add("reader")
+        raise TimeoutError
+    if "error" in slot:
+        raise slot["error"]
+    return slot.get("value")
+
+
+async def _heartbeat_exact_lease(
+    runtime: Any, token: str, lease_id: str, deadline: float
+) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError
+    control = getattr(runtime, "_control", None)
+    if getattr(control, "active_lease_id", None) != lease_id:
+        raise ToolError("lease_expired")
+    beat = getattr(runtime, "session_heartbeat", None)
+    if not callable(beat):
+        raise ToolError("lease_required")
+    try:
+        result = beat(token)
+        if inspect.isawaitable(result):
+            result = await result
+    except ToolError:
+        raise
+    except Exception as error:
+        raise ToolError("lease_expired") from error
+    if isinstance(result, dict) and result.get("error"):
+        raise ToolError(str(result["error"]))
+    if not isinstance(result, dict):
+        raise ToolError("lease_invalid")
+    if getattr(control, "active_lease_id", None) != lease_id:
+        raise ToolError("lease_invalid")
+
+
+def _file_matches_timeout(
+    role: str,
+    profile_file: str,
+    started: float,
+    probes: int,
+    observed: Any,
+    file_marker: log_tail.TailMarker | None,
+    seen_paths: list[str],
+    scanned_lines: dict[str, int],
+    unreadable: set[str],
+    last_error: str | None,
+    reader_alive: set[str] | None = None,
+) -> dict[str, Any]:
+    report = _scanned_report(seen_paths, scanned_lines, unreadable, "lines", False)
+    report["role"] = role
+    report["profile_file"] = profile_file
+    if reader_alive:
+        # The read thread outlived its budget: say so instead of claiming it
+        # was terminated.
+        report["reader_alive_at_return"] = True
+    cursor = (
+        log_tail.encode_marker({file_marker.path: file_marker})
+        if file_marker is not None
+        else None
+    )
+    response = _wait_for_response(
+        condition="file_matches",
+        started=started,
+        probes=probes,
+        observed=observed,
+        satisfied=False,
+        scanned=report,
+        last_error=last_error,
+    )
+    response["role"] = role
+    response["profile_file"] = profile_file
+    response["cursor"] = cursor
+    return response
+
+
+async def _execute_file_matches(
+    runtime: Any,
+    *,
+    pattern: str,
+    timeout_s: float,
+    poll_interval_s: float,
+    lookback_lines: int,
+    lookback_from: str,
+    marker: str | dict[str, Any] | None,
+    profile_file: str | None,
+    role: str,
+    started: float,
+    deadline: float,
+) -> dict[str, Any]:
+    if pattern == "":
+        raise ToolError("bad_args: pattern must be non-empty when condition is file_matches")
+    if role not in _PROFILE_ROLE_PARENT:
+        raise ToolError('bad_args: role must be "server", "client" or "offline"')
+    if not isinstance(profile_file, str):
+        raise ToolError("bad_args: profile_file must be a relative path")
+    parts = _profile_file_parts(profile_file)
+    if lookback_from == "launch":
+        raise ToolError("bad_args: lookback_from=launch is not valid for file_matches")
+    if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
+        raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
+    if (
+        not isinstance(lookback_lines, int)
+        or isinstance(lookback_lines, bool)
+        or lookback_lines < 0
+        or lookback_lines > WAIT_FOR_LOOKBACK_MAX
+    ):
+        raise ToolError(
+            f"bad_args: lookback_lines must be in 0..{WAIT_FOR_LOOKBACK_MAX}"
+        )
+    # A poll longer than the lease window cannot promise the lease stays held.
+    if poll_interval_s > SESSION_TTL_S:
+        raise ToolError(
+            f"bad_args: poll_interval_s must be <= {SESSION_TTL_S:g} so each poll can renew"
+        )
+    token, lease_id = _held_lease(runtime)
+    session = _caller_session_id(runtime)
+    try:
+        runs = await _bound(_lifecycle_runs(runtime), deadline)
+    except (TimeoutError, asyncio.TimeoutError):
+        runs = None
+    if runs is None:
+        return _file_matches_timeout(
+            role, profile_file, started, 0, "", None, [], {}, set(), None
+        )
+    run = _one_owned_run(runs, session, lease_id)
+    run_id = run.get("run_id")
+    try:
+        profiles = await _thread_bounded(
+            lambda stop: _profiles_dir_for_role(run, role), deadline
+        )
+        root = Path(profiles)
+
+        def _check_parents(_stop: Any) -> None:
+            resolved = _profile_root(root)
+            _walk_profile_parent(resolved, parts)
+
+        await _thread_bounded(_check_parents, deadline)
+    except ToolError:
+        raise
+    except (TimeoutError, asyncio.TimeoutError):
+        return _file_matches_timeout(
+            role, profile_file, started, 0, "", None, [], {}, set(), None
+        )
+    caller_marker: log_tail.TailMarker | None = None
+    if marker is not None:
+        try:
+            decoded = log_tail.decode_marker(_coerce_logs_since_marker(marker))
+        except log_tail.LogTailError:
+            raise ToolError("bad_marker") from None
+        if len(decoded) != 1:
+            raise ToolError("bad_marker")
+        caller_marker = next(iter(decoded.values()))
+
+    probes = 0
+    observed: Any = ""
+    satisfied = False
+    file_marker: log_tail.TailMarker | None = None
+    seen_paths: list[str] = []
+    scanned_lines: dict[str, int] = {}
+    unreadable: set[str] = set()
+    primed = False
+    last_error: str | None = None
+    reader_alive: set[str] = set()
+
+    def _summary(path: str | None) -> dict[str, Any]:
+        report = _scanned_report(
+            seen_paths, scanned_lines, unreadable, "lines", False
+        )
+        report["role"] = role
+        report["profile_file"] = profile_file
+        if path is not None and path in unreadable:
+            report["unreadable"] = True
+        if reader_alive:
+            report["reader_alive_at_return"] = True
+        return report
+
+    while time.monotonic() < deadline:
+        async with _tool_lock_until(runtime, deadline) as held:
+            if not held:
+                last_error = _TOOL_LOCK_BUSY
+                break
+            if deadline - time.monotonic() <= 0.0:
+                break
+            probes += 1
+            try:
+                await _bound(
+                    _heartbeat_exact_lease(runtime, token, lease_id, deadline),
+                    deadline,
+                )
+                fresh_runs = await _bound(_lifecycle_runs(runtime), deadline)
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            fresh = _one_owned_run(fresh_runs, session, lease_id)
+            if fresh.get("run_id") != run_id:
+                raise ToolError("no_active_run")
+            # Every policy recheck shares the original deadline.
+            if deadline - time.monotonic() <= 0.0:
+                break
+            try:
+                unchanged = await _thread_bounded(
+                    lambda stop: _profiles_dir_for_role(fresh, role), deadline
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            if unchanged != profiles:
+                raise ToolError("profile_unresolved")
+        if time.monotonic() >= deadline:
+            break
+        try:
+            read = await _thread_bounded(
+                lambda stop: _read_contained_handle(
+                    root,
+                    parts,
+                    lookback_lines=lookback_lines,
+                    primed=primed,
+                    file_marker=file_marker,
+                    caller_marker=caller_marker,
+                    stop=stop,
+                ),
+                deadline,
+                reader_alive,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            break
+        if time.monotonic() >= deadline:
+            # The read finished late. Its match is not a success.
+            break
+        state = read.get("state")
+        if state == "missing":
+            primed = False
+            file_marker = None
+            observed = ""
+            satisfied = False
+        elif state == "unreadable":
+            path = str(read.get("path") or profile_file)
+            _record_scan([path], {}, seen_paths, scanned_lines, unreadable)
+            satisfied = False
+        else:
+            path = str(read["path"])
+            file_marker = read.get("marker")
+            primed = True
+            count = read.get("count")
+            counts = {path: count} if isinstance(count, int) else {}
+            _record_scan([path], counts, seen_paths, scanned_lines, unreadable)
+            lines = list(read.get("lines") or [])
+            matched = next((line for line in lines if pattern in line), None)
+            satisfied = matched is not None
+            observed = matched if matched is not None else (lines[-1] if lines else "")
+        if satisfied and time.monotonic() < deadline:
+            control = getattr(runtime, "_control", None)
+            if getattr(control, "active_lease_id", None) != lease_id:
+                raise ToolError("lease_expired")
+            try:
+                owned_runs = await _bound(_lifecycle_runs(runtime), deadline)
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            owned = _one_owned_run(owned_runs, session, lease_id)
+            if owned.get("run_id") != run_id:
+                raise ToolError("no_active_run")
+            try:
+                unchanged = await _thread_bounded(
+                    lambda stop: _profiles_dir_for_role(owned, role), deadline
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            if time.monotonic() >= deadline:
+                # Validation finished after the deadline: never a success.
+                break
+            if unchanged != profiles:
+                raise ToolError("profile_unresolved")
+            if getattr(control, "active_lease_id", None) != lease_id:
+                # The exact held lease is rechecked after the last await and
+                # immediately before success is accepted.
+                raise ToolError("lease_expired")
+            cursor = (
+                log_tail.encode_marker({file_marker.path: file_marker})
+                if file_marker is not None
+                else None
+            )
+            response = _wait_for_response(
+                condition="file_matches",
+                started=started,
+                probes=probes,
+                observed=observed,
+                satisfied=True,
+                scanned=_summary(file_marker.path if file_marker else None),
+            )
+            response["role"] = role
+            response["profile_file"] = profile_file
+            response["cursor"] = cursor
+            return response
+        satisfied = False
+        remaining_sleep = deadline - time.monotonic()
+        if remaining_sleep <= 0.0:
+            break
+        await asyncio.sleep(min(poll_interval_s, remaining_sleep))
+
+    return _file_matches_timeout(
+        role, profile_file, started, probes, observed, file_marker,
+        seen_paths, scanned_lines, unreadable, last_error, reader_alive,
+    )
+
+
 async def execute_wait_for(
     runtime: Any,
     condition: str,
@@ -2455,6 +3183,8 @@ async def execute_wait_for(
     lookback_from: str = "lines",
     marker: str | dict[str, Any] | None = None,
     entity: dict[str, Any] | None = None,
+    profile_file: str | None = None,
+    role: str = "server",
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
@@ -2475,7 +3205,7 @@ async def execute_wait_for(
     if condition not in WAIT_FOR_CONDITIONS:
         raise ToolError(
             "bad_args: condition must be one of "
-            "players_at_least, players_at_most, log_matches, entity_state"
+            "players_at_least, players_at_most, log_matches, entity_state, file_matches"
         )
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ToolError("bad_args: value must be a non-negative int")
@@ -2495,6 +3225,21 @@ async def execute_wait_for(
     if poll_value <= 0.0:
         raise ToolError("bad_args: poll_interval_s must be > 0")
     poll_interval_s = max(poll_value, WAIT_FOR_MIN_POLL_INTERVAL_S)
+    if condition == "file_matches":
+        started_file = time.monotonic()
+        return await _execute_file_matches(
+            runtime,
+            pattern=pattern,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            lookback_lines=lookback_lines,
+            lookback_from=lookback_from,
+            marker=marker,
+            profile_file=profile_file,
+            role=role,
+            started=started_file,
+            deadline=started_file + timeout_s,
+        )
     marker_state: dict[str, log_tail.TailMarker] | None = None
     if condition == "log_matches" and marker is not None:
         try:
@@ -3186,14 +3931,17 @@ def _annotate_mcp_fence(overlay: dict[str, Any]) -> None:
 def _lease_renewal_contract(ttl_s: float) -> str:
     """Lease TTL and how an interactive session keeps or loses it."""
     return (
-        "Calls that reach the box with this session's lease (bridge verbs "
-        "and probes such as players_* and entity_state, dayz_test_run, "
-        "dayz_test_stop) and session_heartbeat renew the lease; "
-        "session_status does not renew the lease. With no renewing call "
-        f"for longer than {ttl_s:g} s the lease expires; an adopted run "
-        "then becomes ownerless RUNNING_IDLE and the next client verb on "
-        "that run returns run_not_owned. session_heartbeat keeps the lease "
-        "across a longer pause."
+        "Bridge mutations that reach the box with this session's lease, "
+        "dayz_test_run, dayz_test_stop, and session_heartbeat renew the "
+        "lease. Pure reads do not, including players_* and entity_state "
+        "probes, camera and log reads. session_status does not renew. "
+        "wait_for(file_matches) is the exception: each poll renews by "
+        "session_heartbeat. With no renewing call for longer than "
+        f"{ttl_s:g} s the lease expires; an adopted run then becomes "
+        "ownerless RUNNING_IDLE and the next client verb on that run "
+        "returns run_not_owned. session_heartbeat keeps the lease across "
+        "a longer pause. An owner read renews only on a daemon that still "
+        "has the previous behaviour; this process does not."
     )
 
 
@@ -3578,6 +4326,43 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
             await _attach_revalidated_runs_retired_recently(client, status)
             return _with_ok_next_step(status, "session_status")
+
+    @app.tool(
+        name=LEASE_TTL_OBSERVE_TOOL,
+        description=(
+            "Internal. Reads the caller's lease TTL through ControlClient.session_status "
+            "and does not start a daemon. Not part of the public catalog."
+        ),
+    )
+    async def lease_ttl_observe() -> dict[str, Any]:
+        client = _client_runtime()
+        control = getattr(client, "_control", None)
+        status_fn = getattr(control, "session_status", None)
+        if not callable(status_fn):
+            raise ToolError("daemon_unavailable")
+        try:
+            status = status_fn(timeout_s=LEASE_TTL_OBSERVE_S)
+        except TypeError:
+            status = status_fn()
+        if inspect.isawaitable(status):
+            status = await status
+        if not isinstance(status, dict):
+            raise ToolError("daemon_unavailable")
+        return status
+
+    @app.tool(
+        name=LEASE_LOCAL_TOOL,
+        description=(
+            "Internal. Reports this process's local lease id without calling the daemon."
+        ),
+    )
+    async def lease_local_observe() -> dict[str, Any]:
+        client = _client_runtime()
+        control = getattr(client, "_control", None)
+        lease_id = getattr(control, "active_lease_id", None)
+        if not isinstance(lease_id, str) or not lease_id:
+            lease_id = None
+        return {"local_lease_id": lease_id}
 
     async def report_dayz_progress(
         ctx: Context | None, stage: str, message: str | None
@@ -6906,7 +7691,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Block until a condition holds. condition ENUM: players_at_least, "
-            "players_at_most, log_matches, entity_state. entity_state requires "
+            "players_at_most, log_matches, entity_state, file_matches. "
+            "file_matches reads one relative file under the selected role's "
+            "profile of the single run this lease owns or adopted "
+            "(role=server|client|offline, profile_file relative, no regex). "
+            "It heartbeats that lease on every poll, including while the file "
+            "is missing. lookback_from=launch is rejected. Default "
+            "lookback_lines can match text already in the file; a boundary "
+            "marker (or lookback_lines=0, then the returned cursor) does not. "
+            "entity_state requires "
             "entity={type,pos,radius,field,equals}; it polls server telemetry_read "
             "object_at with an exact type and radius in (0,50]. field is found "
             "(bool), health01 (0..1), attachment_count, cargo_count or items_total "
@@ -6941,14 +7734,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "runs it reports multiple_idle_runs and adopts none). "
             "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match. "
-            "players_* and entity_state probes reach the box with this "
-            "session's lease and renew it while this wait stays open; "
-            "log_matches does not. "
+            "players_* and entity_state probes are reads and do not renew "
+            "the lease. log_matches does not renew. file_matches renews on "
+            "each poll through session_heartbeat. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )
     async def wait_for(
-        condition: Literal["players_at_least", "players_at_most", "log_matches", "entity_state"],
+        condition: Literal[
+            "players_at_least", "players_at_most", "log_matches", "entity_state",
+            "file_matches",
+        ],
         value: StrictInt = 0,
         pattern: str = "",
         timeout_s: StrictFloat = 180.0,
@@ -6957,6 +7753,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         lookback_from: Literal["lines", "launch"] = "lines",
         marker: str | dict[str, Any] | None = None,
         entity: dict[str, Any] | None = None,
+        profile_file: str | None = None,
+        role: Literal["server", "client", "offline"] = "server",
     ) -> dict[str, Any]:
         # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
         # in tool_lock. Any tool that waits on a human or a slow condition
@@ -6974,6 +7772,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             lookback_from=lookback_from,
             marker=marker,
             entity=entity,
+            profile_file=profile_file,
+            role=role,
         )
 
     def _pipeline_platform() -> str:
@@ -7165,6 +7965,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
+    _all_tools = app._tool_manager.list_tools
+
+    def _public_tools():
+        hidden = {LEASE_TTL_OBSERVE_TOOL, LEASE_LOCAL_TOOL}
+        return [tool for tool in _all_tools() if tool.name not in hidden]
+
+    app._tool_manager.list_tools = _public_tools  # type: ignore[method-assign]
     registered_tool_names = frozenset(
         tool.name for tool in app._tool_manager.list_tools()
     )
@@ -7172,8 +7979,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     runtime._registered_tool_names = registered_tool_names
     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
     if _progressive_disclosure_enabled(config):
-        # Before install_result_freshness: its wrapper has to stay outermost.
+        # Before the result decorators: the freshness wrapper has to stay outermost.
         _install_catalog_change_notice(app, runtime)
+    # After catalog registration, before freshness, so every CallToolResult
+    # (including errors, images, and lists) can carry lease_ttl_s and freshness
+    # still sees the decorated result.
+    install_lease_ttl_annotation(app, runtime)
     observe_server_sources = install_result_freshness(app, server_sources)
     _original_list_tools = app.list_tools
 
