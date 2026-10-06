@@ -168,14 +168,22 @@ class RunlossWaitBudgetTest(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(path)
         runtime._call = transport
         with patch.object(server, "time", SimpleNamespace(monotonic=monotonic)):
-            with self.assertRaises(server.ToolError) as caught:
-                await server.execute_wait_for(runtime, "players_at_least", value=1,
-                                              timeout_s=timeout_s, poll_interval_s=6)
+            try:
+                result = await server.execute_wait_for(
+                    runtime, "players_at_least", value=1,
+                    timeout_s=timeout_s, poll_interval_s=6,
+                )
+            except server.ToolError as exc:
+                outcome: object = exc
+            else:
+                outcome = result
         self.assertEqual(paths.count("/enqueue"), 1)
-        return str(caught.exception), clock.now - 1000.0
+        return outcome, clock.now - 1000.0
 
     async def test_fifteen_second_probe_does_not_claim_420_second_deadline(self):
-        message, elapsed = await self.probe_timeout(420)
+        outcome, elapsed = await self.probe_timeout(420)
+        self.assertIsInstance(outcome, server.ToolError)
+        message = str(outcome)
         self.assertEqual(elapsed, 15.0)
         self.assertIn("wait_for aborted", message)
         self.assertNotIn("wait_for timed out", message)
@@ -185,14 +193,19 @@ class RunlossWaitBudgetTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("probe_timeout_s=15", message)
 
     async def test_probe_that_exhausts_global_budget_still_reports_timeout(self):
-        message, elapsed = await self.probe_timeout(10)
+        outcome, elapsed = await self.probe_timeout(10)
+        self.assertIsInstance(outcome, dict)
         self.assertEqual(elapsed, 10.0)
-        self.assertIn("wait_for timed out", message)
-        self.assertIn("elapsed_s=10.000", message)
-        self.assertIn("timeout_s=10", message)
+        self.assertTrue(outcome["ok"])
+        self.assertFalse(outcome["satisfied"])
+        self.assertTrue(outcome["timed_out"])
+        self.assertEqual(outcome["last_error"], "probe_timeout")
+        self.assertEqual(outcome["tool"], "wait_for")
 
     async def test_global_poll_age_is_labelled_as_station_snapshot(self):
-        message, _elapsed = await self.probe_timeout(420)
+        outcome, _elapsed = await self.probe_timeout(420)
+        self.assertIsInstance(outcome, server.ToolError)
+        message = str(outcome)
         self.assertIn("station snapshot:", message)
         self.assertIn("last poll 140.4s ago", message)
 
