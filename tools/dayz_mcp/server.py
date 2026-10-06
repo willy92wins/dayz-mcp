@@ -5666,6 +5666,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation). "
         "cam_orientation is [yaw, pitch, roll] in degrees. fov is the FOV angle "
         "in radians; 0 leaves the current/default FOV unchanged. "
+        "A successful apply echoes the value the setter path received as "
+        "top-level fov_applied in radians (fov=0 reports null): that echo is "
+        "not a native readback and does not guarantee the observed optical "
+        "projection. The engine default the owner measured is approximately "
+        "68.5 degrees vertical at 1920×1080 (owner-provided measurement, "
+        "run 8834df0e, 2026-10-04); fov=0 keeps the current FOV and does not "
+        "guarantee resetting to that measured default, the singleton free "
+        "camera included. "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
         "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV). "
         "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
@@ -5717,7 +5725,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args["fov"] = fov_value
         args["settle_ticks"] = int(settle_ticks)
         async with runtime.tool_lock:
-            return await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
+            result = await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
+        # 983a: the wire has no FOV getter (Camera.GetCurrentFOV froze the
+        # render, MCPClientBridge.c:4773-4776), so fov_applied echoes the
+        # validated value this call submitted, never a native readback. The
+        # bridge reaches SetFOV only on a successful apply
+        # (MCPClientBridge.c:5417/:5461) and its report still snapshots the
+        # camera, so an apply that failed, timed out, or left an illegible
+        # camera observation claims nothing. fov=0 sent no SetFOV at all: an
+        # explicit null, not the owner-measured engine default (the ~68.5
+        # degree vertical value documented above, never read back here).
+        camera_observation = result.get("camera")
+        if result.get("ok") and isinstance(camera_observation, dict) and camera_observation.get("ok"):
+            result["fov_applied"] = fov_value if fov_value > 0.0 else None
+        return result
 
     @app.tool(description=(
         "Read the client camera through camera_get. Observable trichotomy "
