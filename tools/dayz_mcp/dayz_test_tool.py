@@ -1542,9 +1542,10 @@ def _compact_result(
             dump_baseline=client_dump_baseline,
         ),
         # null: this call did not observe a rotation (no status, another run,
-        # a launch that does not create storage, a legacy row). false: the
-        # run measured that it did not rotate. true is only that measurement.
-        # It is not evidence the economy restored the world.
+        # a launch that does not create storage, a call on an existing run,
+        # a legacy row). false: the run measured that it did not rotate. true
+        # is only that measurement. It is not evidence the economy restored
+        # the world.
         "storage_rotated": storage_rotated if type(storage_rotated) is bool else None,
         "storage_backup": storage_backup if storage_rotated is True else None,
         "storage_reset_notice": (
@@ -1801,9 +1802,14 @@ async def _execute_request(
     # the run it names). attempt_run_id is the worker's own id for the run it
     # created or targeted; a failure terminal without it (an older worker, or a
     # failure before any run) is unknown, not a license to use whatever run_id
-    # cleanup left behind.
-    if terminal.attempt_run_id is not None:
-        storage_run_id: str | None = terminal.attempt_run_id
+    # cleanup left behind. A call that names an existing run (reattach, stop)
+    # never rotates: the rotation that run recorded at its creation is not this
+    # call's observation, so the fields stay null on every terminal.
+    if expected_run_id is not None:
+        storage_run_id: str | None = None
+        storage_operation = None
+    elif terminal.attempt_run_id is not None:
+        storage_run_id = terminal.attempt_run_id
         storage_operation = terminal.launch_operation_id
     elif terminal.ok:
         storage_run_id = terminal.run_id

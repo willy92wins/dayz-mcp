@@ -44,6 +44,15 @@ SEAL_A = "a" * 64
 SEAL_B = "b" * 64
 
 
+def _observation(run_id: str) -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "storage_rotated": True,
+        "storage_backup": "storage_1.modset-" + run_id[:8],
+        "storage_reset_notice": dayz_test_storage.RESET_NOTICE,
+    }
+
+
 def _terminal_bytes(
     *,
     ok: bool,
@@ -209,6 +218,7 @@ class StorageResetVisibilityTest(unittest.IsolatedAsyncioTestCase):
         launch_operation_id: str | None = None,
         error_code: str | None = None,
         public_mode: str = "server",
+        expected_run_id: str | None = None,
     ) -> dict[str, object]:
         runtime = _StatusRuntime(status)
         if cleanup_degraded is None:
@@ -246,7 +256,7 @@ class StorageResetVisibilityTest(unittest.IsolatedAsyncioTestCase):
                 artifacts_paths=[],
                 started_at=0.0,
                 preflight=False,
-                expected_run_id=None,
+                expected_run_id=expected_run_id,
                 progress_cb=None,
             )
         # A failure that never names a run does not read status. Reading it
@@ -691,6 +701,267 @@ class StorageResetVisibilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(digest_rotated, digest_before)
         RunManifestStore(self.paths)
         self.assertEqual(self._journal_digest_or_empty(), digest_rotated)
+
+    def _plant_impossible_rotation_state(self) -> None:
+        """A journal in a physical state no rotation sequence produces.
+
+        The journal is valid, its phase says the tree was already moved, and
+        both `storage_1` and the backup are present: prepare_storage refuses
+        the launch with journal_state_impossible instead of classifying.
+        """
+        mission = self._plant_storage(marker_seal=None)
+        backup = "storage_1.modset-impossible"
+        (mission / ("storage_1.modset.rotation." + "c" * 32 + ".json")).write_text(
+            json.dumps(
+                {
+                    "schema_version": dayz_test_storage.MARKER_SCHEMA_VERSION,
+                    "txid": "c" * 32,
+                    "phase": dayz_test_storage.PHASE_STORAGE_MOVED,
+                    "new_seal": SEAL_A,
+                    "old_seal": None,
+                    "project": "SameMod",
+                    "storage_backup": backup,
+                    "marker_backup": backup + ".marker.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+        tree = mission / backup
+        (tree / "players").mkdir(parents=True)
+        (tree / "data.bin").write_bytes(b"old-world")
+
+    def _refused_launch(self) -> str:
+        failed = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self._request(SEAL_A)
+        )
+        self.assertEqual(failed.get("error"), "storage_recovery_required", failed)
+        return str(failed["run_id"])
+
+    def test_refused_classification_settles_null_not_a_measured_false(self) -> None:
+        self._plant_impossible_rotation_state()
+        run_id = self._refused_launch()
+        row = self._row(run_id)
+        self.assertEqual(row["state"], "EXITED")
+        self.assertIsNone(row["storage_rotated"])
+        self.assertIsNone(row["storage_backup"])
+        self.assertIsNone(row["storage_reset_notice"])
+        # The durable list keeps unknown off it, on load as anywhere else.
+        reloaded = RunManifestStore(self.paths)
+        self.assertFalse(
+            [
+                item
+                for item in reloaded.storage_observations()
+                if item.get("run_id") == run_id
+            ]
+        )
+
+    async def test_refused_classification_public_result_stays_null(self) -> None:
+        self._plant_impossible_rotation_state()
+        run_id = self._refused_launch()
+        result = await self._public(
+            lambda: self.lifecycle.status(IDENTITY_A),
+            ok=False,
+            run_id=None,
+            cleanup_degraded=False,
+            error_code="storage_recovery_required",
+            attempt_run_id=run_id,
+        )
+        self.assertEqual(result["error_code"], "storage_recovery_required")
+        self.assertIsNone(result["storage_rotated"])
+        self.assertIsNone(result["storage_backup"])
+        self.assertIsNone(result["storage_reset_notice"])
+
+    def _visible_run_payload(self) -> dict[str, object]:
+        record = RunRecord(
+            RUN_OTHER,
+            "A",
+            "lease-A",
+            "RUNNING",
+            "other",
+            "@SameMod",
+            "profiles",
+            "mission",
+            [process(9100, "server")],
+        )
+        return dataclasses.asdict(record)
+
+    def _write_manifest(
+        self, runs: list[dict[str, object]], observations: object
+    ) -> None:
+        self.paths.runs_path.write_text(
+            json.dumps({"version": 1, "runs": runs, "storage_observations": observations}),
+            encoding="utf-8",
+        )
+
+    def test_more_than_the_bound_keeps_the_newest_entries(self) -> None:
+        entries = [
+            _observation("11111111-1111-4111-8111-" + f"{index:012d}")
+            for index in range(33)
+        ]
+        self._write_manifest([self._visible_run_payload()], entries)
+        store = RunManifestStore(self.paths)
+        self.assertIsNotNone(store.get(RUN_OTHER))
+        loaded = store.storage_observations()
+        self.assertEqual(len(loaded), 32)
+        self.assertEqual(loaded[0]["run_id"], entries[1]["run_id"])
+        self.assertEqual(loaded[-1]["run_id"], entries[-1]["run_id"])
+
+    def test_a_malformed_entry_drops_only_itself(self) -> None:
+        good = _observation(RUN_ROTATED)
+        malformed = {
+            "run_id": RUN_RETRY,
+            "storage_rotated": "yes",
+            "storage_backup": None,
+            "storage_reset_notice": None,
+        }
+        self._write_manifest(
+            [self._visible_run_payload()], [good, malformed, _observation(RUN_REUSE)]
+        )
+        store = RunManifestStore(self.paths)
+        self.assertIsNotNone(store.get(RUN_OTHER))
+        loaded = store.storage_observations()
+        self.assertEqual([item["run_id"] for item in loaded], [RUN_ROTATED, RUN_REUSE])
+
+    def test_broken_entries_are_dropped_one_by_one(self) -> None:
+        good = _observation(RUN_ROTATED)
+        not_a_dict = ["nope"]
+        missing_key = {
+            "run_id": RUN_RETRY,
+            "storage_rotated": False,
+            "storage_backup": None,
+        }
+        bad_backup = {
+            "run_id": RUN_OTHER,
+            "storage_rotated": True,
+            "storage_backup": "with/slash",
+            "storage_reset_notice": dayz_test_storage.RESET_NOTICE,
+        }
+        self._write_manifest(
+            [self._visible_run_payload()],
+            [not_a_dict, good, missing_key, bad_backup],
+        )
+        store = RunManifestStore(self.paths)
+        self.assertIsNotNone(store.get(RUN_OTHER))
+        loaded = store.storage_observations()
+        self.assertEqual([item["run_id"] for item in loaded], [RUN_ROTATED])
+
+    def test_a_malformed_twin_drops_the_run_id_before_validation(self) -> None:
+        """Repeated ids are counted on the original list, before validation.
+
+        A valid observation plus a malformed twin of the same run id loads as
+        no entry for that id, in either order, and a twin that is only
+        {"run_id": <same>} does the same. The runs of that runs.json stay
+        visible through RunManifestStore._load.
+        """
+        good = _observation(RUN_ROTATED)
+        malformed = dict(good, storage_rotated="broken")
+        id_only = {"run_id": RUN_ROTATED}
+        cases = (
+            [good, malformed],
+            [malformed, good],
+            [good, id_only],
+            [id_only, good],
+        )
+        for observations in cases:
+            self._write_manifest(
+                [self._visible_run_payload()],
+                [*observations, _observation(RUN_REUSE)],
+            )
+            # Construction is the _load path the daemon uses for runs.json.
+            store = RunManifestStore(self.paths)
+            self.assertIsNotNone(store.get(RUN_OTHER))
+            loaded = store.storage_observations()
+            self.assertEqual(
+                [item["run_id"] for item in loaded],
+                [RUN_REUSE],
+                observations,
+            )
+
+    def test_a_duplicated_run_id_is_dropped_entirely(self) -> None:
+        self._write_manifest(
+            [self._visible_run_payload()],
+            [
+                _observation(RUN_ROTATED),
+                _observation(RUN_REUSE),
+                _observation(RUN_ROTATED),
+            ],
+        )
+        store = RunManifestStore(self.paths)
+        self.assertIsNotNone(store.get(RUN_OTHER))
+        loaded = store.storage_observations()
+        self.assertEqual([item["run_id"] for item in loaded], [RUN_REUSE])
+
+    def test_an_extra_key_is_ignored_and_not_copied(self) -> None:
+        entry = dict(_observation(RUN_ROTATED), future_field=42)
+        self._write_manifest([self._visible_run_payload()], [entry])
+        store = RunManifestStore(self.paths)
+        self.assertIsNotNone(store.get(RUN_OTHER))
+        loaded = store.storage_observations()
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(
+            set(loaded[0]),
+            {"run_id", "storage_rotated", "storage_backup", "storage_reset_notice"},
+        )
+
+    def test_a_non_list_value_loads_as_empty(self) -> None:
+        for value in ("nope", None, {"run_id": RUN_ROTATED}):
+            self._write_manifest([self._visible_run_payload()], value)
+            store = RunManifestStore(self.paths)
+            self.assertIsNotNone(store.get(RUN_OTHER))
+            self.assertEqual(store.storage_observations(), [])
+
+    async def test_creating_launch_still_reports_its_rotation_and_backup(self) -> None:
+        self._arm()
+        self._plant_storage(marker_seal=SEAL_B)
+        started = self.lifecycle.start_run(IDENTITY_A, self.token_a, self._request(SEAL_A))
+        self.assertIs(started.get("ok"), True, started)
+        run_id = str(started["run_id"])
+        backup = str(self._row(run_id)["storage_backup"])
+        result = await self._public(
+            lambda: self.lifecycle.status(IDENTITY_A),
+            ok=True,
+            run_id=run_id,
+            expected_run_id=None,
+        )
+        self.assertIs(result["storage_rotated"], True)
+        self.assertEqual(result["storage_backup"], backup)
+        self.assertEqual(
+            result["storage_reset_notice"], dayz_test_storage.RESET_NOTICE
+        )
+
+    async def test_a_reattach_of_an_existing_run_reports_null(self) -> None:
+        self._arm()
+        self._plant_storage(marker_seal=SEAL_B)
+        started = self.lifecycle.start_run(IDENTITY_A, self.token_a, self._request(SEAL_A))
+        self.assertIs(started.get("ok"), True, started)
+        run_id = str(started["run_id"])
+        result = await self._public(
+            lambda: self.lifecycle.status(IDENTITY_A),
+            ok=True,
+            run_id=run_id,
+            expected_run_id=run_id,
+            public_mode="client",
+        )
+        self.assertIsNone(result["storage_rotated"])
+        self.assertIsNone(result["storage_backup"])
+        self.assertIsNone(result["storage_reset_notice"])
+
+    async def test_a_stop_of_an_existing_run_reports_null(self) -> None:
+        self._arm()
+        self._plant_storage(marker_seal=SEAL_B)
+        started = self.lifecycle.start_run(IDENTITY_A, self.token_a, self._request(SEAL_A))
+        self.assertIs(started.get("ok"), True, started)
+        run_id = str(started["run_id"])
+        result = await self._public(
+            lambda: self.lifecycle.status(IDENTITY_A),
+            ok=True,
+            run_id=run_id,
+            expected_run_id=run_id,
+            public_mode="stop",
+        )
+        self.assertIsNone(result["storage_rotated"])
+        self.assertIsNone(result["storage_backup"])
+        self.assertIsNone(result["storage_reset_notice"])
 
     def _journal_digest_or_empty(self) -> str:
         mission = self.root / "mpmissions" / "dayzOffline"

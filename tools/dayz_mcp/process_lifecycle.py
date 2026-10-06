@@ -226,33 +226,51 @@ def _storage_rotation_from_payload(
 
 
 def _storage_observations_from_payload(value: object) -> list[dict[str, object]]:
-    if value is None:
+    """Advisory diagnostic list: never refuses the manifest, degrades per entry.
+
+    An entry that cannot be validated is dropped, and a later version may add
+    keys per entry: extra keys are ignored, never copied. A run id named twice
+    anywhere in the original list -- even by an entry whose other fields do not
+    validate -- is ambiguous, so every copy is dropped before the rest is
+    validated. Unknown, never a guess.
+    """
+    if not isinstance(value, list):
         return []
-    if not isinstance(value, list) or len(value) > _STORAGE_OBSERVATION_BOUND:
-        raise ValueError("invalid_run_manifest")
-    observations: list[dict[str, object]] = []
+    # Count before per-entry validation: a malformed twin still makes the id
+    # ambiguous, and a measured value must not survive that ambiguity.
     seen: set[str] = set()
+    repeated: set[str] = set()
     for item in value:
-        if not isinstance(item, dict) or set(item) != {
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        if run_id in seen:
+            repeated.add(run_id)
+        else:
+            seen.add(run_id)
+    observations: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict) or not {
             "run_id",
             "storage_rotated",
             "storage_backup",
             "storage_reset_notice",
-        }:
-            raise ValueError("invalid_run_manifest")
+        }.issubset(item):
+            continue
         run_id = item.get("run_id")
-        if not isinstance(run_id, str) or not run_id or run_id in seen:
-            raise ValueError("invalid_run_manifest")
         rotated = item.get("storage_rotated")
         backup = item.get("storage_backup")
         notice = item.get("storage_reset_notice")
+        if not isinstance(run_id, str) or not run_id or run_id in repeated:
+            continue
         try:
             _validate_storage_rotation(rotated, backup, notice)
-        except ValueError as exc:
-            raise ValueError("invalid_run_manifest") from exc
+        except ValueError:
+            continue
         if type(rotated) is not bool:
-            raise ValueError("invalid_run_manifest")
-        seen.add(run_id)
+            continue
         observations.append(
             {
                 "run_id": run_id,
@@ -261,6 +279,8 @@ def _storage_observations_from_payload(value: object) -> list[dict[str, object]]
                 "storage_reset_notice": notice,
             }
         )
+    if len(observations) > _STORAGE_OBSERVATION_BOUND:
+        del observations[: len(observations) - _STORAGE_OBSERVATION_BOUND]
     return observations
 
 
@@ -3021,9 +3041,13 @@ class ProcessLifecycle:
                 return None
             if pending is not None:
                 result = pending
-        self._record_storage_rotation(provisional, result)
         if not result.launch_allowed:
+            # A refused classification measured nothing: the provisional keeps
+            # null storage fields, exactly like a launch that raised before
+            # prepare_storage returned. Writing false here would report a
+            # measured reuse for a state the subsystem could not classify.
             return "storage_recovery_required"
+        self._record_storage_rotation(provisional, result)
         # A replay of a completed journal is the same reset, not a second one.
         # The run record carries it; another audit row would claim a new move.
         if result.storage_rotated and result.reason != "pending_completed_rotation":
