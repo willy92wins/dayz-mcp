@@ -14,8 +14,11 @@ status, public tool result) and the rotation journals/backups it reads.
    fix specification (self-sample > 20%).
 4. Implementer-grade cross-actor pass (GLM, fresh context): `C/AUDIT.md`.
 5. Fixes: batch r9fix_c8c7 (spec `R9_C8C7.md`; GLM round 1, Grok consolidation round 2; gpt-6.1-sol review).
-6. Re-audit subset: pending (after the storage-recovery batch).
-7. In-game: pending (in-game cycle of 2026-10-06).
+6. Re-audit subset: mechanical writer/reader census re-run on the final tree (no new writer), and a
+   gpt-6.1-sol re-audit of the two changed angles (`STEP6-REAUDIT.md`): one regression, R9-REG-01, fixed
+   in the single allowed loop back to step 5 (Grok, `SOL-r9fix-r3.md` APPROVED).
+7. In-game: pending. The in-game cycle waits for g5: the 1.30 instance loads the same @DayZ_MCP PBO, so
+   both instances are promoted together. Release-safe only after it.
 
 ## Deduped table
 | ID | Sev | Title | File:Lines | Found by | Verified by | Kind | Status |
