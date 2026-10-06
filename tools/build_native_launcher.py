@@ -67,6 +67,7 @@ PACKAGED_MODULES = (
     "native_process_guard.py",
     "native_process_snapshot.py",
     "normal_daemon_policy.py",
+    "pack_only.py",
     "pinned_keyfile.py",
     "server_cli.py",
     # Pulled in on 2026-08-21 by pinned_keyfile: the duplicated FILE_STANDARD_INFO
