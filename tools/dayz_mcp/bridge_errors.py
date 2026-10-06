@@ -66,6 +66,9 @@ _REMOTE_ERROR_CODES = frozenset({
     "bad_peer",
     "bad_purpose",
     "bad_wait_timeout",
+    # d17c-a: client-peer admission refused because the exact destination's
+    # registered client process is known dead. Process absence, not a crash.
+    "client_process_gone",
     "exec_not_allowed",
     "identity_mismatch",
     "invalid_identity",
