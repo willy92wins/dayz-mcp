@@ -4274,6 +4274,62 @@ class ProcessLifecycle:
                 unknown_reason = reason
         return buckets, unknown_reason
 
+    def classify_registered_client_liveness(
+        self, run_id: object, destination: tuple[int, str] | None = None
+    ) -> str:
+        """alive, dead, unknown or none for one exact run's player records.
+
+        d17c-a: identity-sensitive admission classifies the registered
+        client/offline records through _classify_registered_process, the full
+        native identity snapshot, and never through the PID census
+        _client_liveness uses for use_state. Read-only: it takes no
+        _operation_lock and terminates, reaps and relaunches nothing. Doubt is
+        never a death: an unreadable run, a missing run or a guard that cannot
+        answer reads unknown, and a run without client/offline records has no
+        client process (none) instead of a guessed one.
+
+        destination, when given, is the (pid, creation_time_utc) identity the
+        caller is about to publish to. A death is only evidence when the
+        snapshot this verdict was computed from actually observed that
+        identity: reattach confirms the station binding before its manifest
+        record is published, so a clone taken inside that window still lists
+        only the superseded client. A pinned destination absent from the
+        snapshot reads unknown instead of inheriting the replaced client's
+        death.
+        """
+        if not isinstance(run_id, str) or not run_id:
+            return "unknown"
+        try:
+            run = self.manifest.get(run_id)
+        except Exception:
+            return "unknown"
+        if run is None:
+            return "unknown"
+        processes = getattr(run, "processes", None)
+        if not isinstance(processes, list):
+            return "unknown"
+        records: list[ProcessRecord] = []
+        observed: list[tuple[int, str]] = []
+        for item in processes:
+            if getattr(item, "role", None) not in _PLAYER_ROLES:
+                continue
+            if not isinstance(item, ProcessRecord):
+                return "unknown"
+            records.append(item)
+            observed.append((item.pid, item.creation_time_utc))
+        if not records:
+            return "none"
+        verdicts = [
+            self._classify_registered_process(record)[0] for record in records
+        ]
+        if "owned" in verdicts:
+            return "alive"
+        if "unknown" in verdicts:
+            return "unknown"
+        if destination is not None and destination not in observed:
+            return "unknown"
+        return "dead"
+
     def _ports_released(self, pids: set[int]) -> str | None:
         """None when no UDP holder carries one of these pids (P-L2.c).
 

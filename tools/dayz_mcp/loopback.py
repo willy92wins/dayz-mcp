@@ -130,6 +130,15 @@ _RUN_NOT_OWNED_HINT = (
     "This run has no owner (RUNNING_IDLE). Adopt it with session_acquire_wait: "
     "its grant adopts the single ownerless run"
 )
+# d17c-a: the one refusal every client-peer enqueue shares when the exact
+# destination's registered client is known dead. Bounded like every enqueue hint.
+_CLIENT_PROCESS_GONE_HINT = (
+    "The registered client process of this run is gone. Inspect session_status, "
+    "then reattach the client with dayz_test_run mode=client and run_id"
+)
+# Verdicts classify_registered_client_liveness may answer; anything else is
+# treated as unknown so a foreign shape can never read as a death.
+_CLIENT_GATE_VERDICTS = frozenset({"alive", "dead", "unknown", "none"})
 _DURABLE_UNREADABLE = "run_state_unavailable"
 VALID_PEERS = {"server", "client"}
 SESSION_ROUTES = {
@@ -2630,48 +2639,72 @@ class ServerState:
         commanded_run_id: str | None = None
         activity_epoch: float | None = None
         owner_session = owner_client.session_id if owner_client is not None else None
+        # d17c-a: a client-peer command whose exact destination's registered
+        # client is known dead is refused at once. The native identity probe
+        # runs with the loopback lock released, so admission resolves the
+        # fence twice and the publication pass revalidates the destination
+        # pin: a destination that changed while the probe ran never inherits
+        # the death verdict. The verdict is also tied to the pinned process
+        # identity: a snapshot that never observed the pinned client (a
+        # reattach confirmed against the station before its record is
+        # published) reads unknown instead of inheriting the superseded
+        # client's death.
+        gate_pin: tuple[str, str, int, int | None, str | None] | None = None
         with self._lock:
-            if self._stopping:
-                return 409, {"error": "enqueue_cancelled"}
-            fence_error_code, queue, fence_instance = self._enqueue_fence_target(
+            error, queue, fence_instance, gate_pin = self._admit_enqueue_locked(
                 peer, cmd, internal=internal, owner_session=owner_session
             )
-            if fence_error_code is not None or queue is None:
-                code = fence_error_code or "legacy_unbound"
-                self._fence_reject_counts[code] = (
-                    self._fence_reject_counts.get(code, 0) + 1
+            if error is not None:
+                return error
+            if gate_pin is None:
+                status, payload, commanded_run_id, activity_epoch = (
+                    self._publish_enqueue_locked(
+                        cmd,
+                        args,
+                        peer,
+                        queue,
+                        fence_instance,
+                        owner_client=owner_client,
+                        owner_lease_id=owner_lease_id,
+                        operation_timeout_s=operation_timeout_s,
+                        commit=commit,
+                        internal=internal,
+                    )
                 )
-                return self._fence_reject_response(code, peer=peer)
-            if self._peer_queue_len(peer) >= MAX_QUEUE:
-                return 429, {"error": "queue_full"}
-
-            command_id = self._next_id
-            self._next_id += 1
-            command = {"id": command_id, "cmd": cmd, "args": args}
-            if commit is not None and not commit(command_id):
-                return 409, {"error": "lease_invalid"}
-            if owner_client is not None and owner_lease_id is not None:
-                self._command_owner[command_id] = (owner_client, owner_lease_id)
-            queue.append(command)
-            enqueued_at = self._now()
-            self._enqueued_at[command_id] = enqueued_at
-            if operation_timeout_s > 0.0:
-                self._operation_deadlines[command_id] = (
-                    enqueued_at + operation_timeout_s
-                )
-            binding = (
-                self._bindings.get(fence_instance) if fence_instance else None
+                if status != 200:
+                    return status, payload
+        if gate_pin is not None:
+            gate_verdict = self._registered_client_verdict(
+                gate_pin[1], (gate_pin[3], gate_pin[4])
             )
-            self._seal_command(command_id, fence_instance, binding)
-            commanded_run_id = _binding_run_id(binding)
-            if command_requires_lease(cmd) and (
-                fence_instance is None
-                or binding is None
-                or binding.state != BINDING_BOUND
-            ):
-                self._unaccredited_mutation_enqueues += 1
-            if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
-                activity_epoch = time.time()
+            with self._lock:
+                error, queue, fence_instance, repin = self._admit_enqueue_locked(
+                    peer, cmd, internal=internal, owner_session=owner_session
+                )
+                if error is not None:
+                    return error
+                if repin == gate_pin and gate_verdict == "dead":
+                    return 409, {
+                        "error": "client_process_gone",
+                        "run_id": gate_pin[1],
+                        "hint": _CLIENT_PROCESS_GONE_HINT,
+                    }
+                status, payload, commanded_run_id, activity_epoch = (
+                    self._publish_enqueue_locked(
+                        cmd,
+                        args,
+                        peer,
+                        queue,
+                        fence_instance,
+                        owner_client=owner_client,
+                        owner_lease_id=owner_lease_id,
+                        operation_timeout_s=operation_timeout_s,
+                        commit=commit,
+                        internal=internal,
+                    )
+                )
+                if status != 200:
+                    return status, payload
 
         try:
             if not internal:
@@ -2680,7 +2713,164 @@ class ServerState:
                 )
         except Exception:
             pass
-        return 200, {"id": command_id, "peer": peer, "cmd": cmd}
+        return 200, payload
+
+    def _admit_enqueue_locked(
+        self,
+        peer: str,
+        cmd: str,
+        *,
+        internal: bool,
+        owner_session: str | None,
+    ) -> tuple[
+        tuple[int, dict] | None,
+        list[dict] | None,
+        str | None,
+        tuple[str, str, int, int | None, str | None] | None,
+    ]:
+        """Fence, capacity and gate-destination resolution under the lock.
+
+        Returns (error, queue, instance, client_gate_pin): error is the refusal
+        to answer with, and the pin is the exact bound client destination a
+        client-peer command would publish to, or None when there is none to
+        gate on. Caller holds self._lock; the probe that may follow must not.
+        """
+        if self._stopping:
+            return (409, {"error": "enqueue_cancelled"}), None, None, None
+        fence_error_code, queue, fence_instance = self._enqueue_fence_target(
+            peer, cmd, internal=internal, owner_session=owner_session
+        )
+        if fence_error_code is not None or queue is None:
+            code = fence_error_code or "legacy_unbound"
+            self._fence_reject_counts[code] = (
+                self._fence_reject_counts.get(code, 0) + 1
+            )
+            return self._fence_reject_response(code, peer=peer), None, None, None
+        if self._peer_queue_len(peer) >= MAX_QUEUE:
+            return (429, {"error": "queue_full"}), None, None, None
+        pin = None
+        if peer == "client" and not internal:
+            pin = self._client_gate_pin_locked(fence_instance)
+        return None, queue, fence_instance, pin
+
+    def _client_gate_pin_locked(
+        self, instance: str | None
+    ) -> tuple[str, str, int, int | None, str | None] | None:
+        """Identity pin of the exact bound client destination, or None.
+
+        Caller holds self._lock. The pin carries the instance, the run it
+        serves, the station epoch and the announced process identity: any
+        rebind, replace or confirm produces a different pin, so a death
+        verdict captured for one destination is never inherited by another.
+        """
+        if not instance:
+            return None
+        binding = self._bindings.get(instance)
+        if binding is None or binding.state != BINDING_BOUND:
+            return None
+        run_id = _binding_run_id(binding)
+        if not run_id:
+            return None
+        return (
+            instance,
+            run_id,
+            binding.epoch,
+            binding.pid if isinstance(binding.pid, int) else None,
+            binding.creation_time_utc,
+        )
+
+    def _registered_client_verdict(
+        self, run_id: str, destination: tuple[int | None, str | None]
+    ) -> str:
+        """alive, dead, unknown or none for the run's registered client.
+
+        d17c-a: identity-sensitive admission classifies the registered client
+        and offline records through the lifecycle's full native identity
+        check, never through a PID census. destination is the pinned (pid,
+        creation_time) of the exact bound destination, and the helper reads a
+        death only when its snapshot observed that identity, so a client
+        confirmed against the station before its record is published keeps
+        today's admission instead of inheriting the superseded client's
+        death. Called with the loopback lock released. An unavailable or
+        older lifecycle without the helper, a failed probe, a destination
+        whose identity cannot be tied to the probe, or a foreign shape is
+        unknown, which keeps today's admission path instead of guessing a
+        death.
+        """
+        classify = getattr(
+            self.lifecycle, "classify_registered_client_liveness", None
+        )
+        if not callable(classify):
+            return "unknown"
+        pinned_pid, pinned_creation_time = destination
+        if (
+            not isinstance(pinned_pid, int)
+            or isinstance(pinned_pid, bool)
+            or not isinstance(pinned_creation_time, str)
+            or not pinned_creation_time
+        ):
+            return "unknown"
+        try:
+            verdict = classify(
+                run_id, destination=(pinned_pid, pinned_creation_time)
+            )
+        except Exception:
+            return "unknown"
+        return verdict if verdict in _CLIENT_GATE_VERDICTS else "unknown"
+
+    def _publish_enqueue_locked(
+        self,
+        cmd: str,
+        args: dict,
+        peer: str,
+        queue: list[dict],
+        fence_instance: str | None,
+        *,
+        owner_client: ClientIdentity | None,
+        owner_lease_id: str | None,
+        operation_timeout_s: float,
+        commit: Callable[[int], bool] | None,
+        internal: bool,
+    ) -> tuple[int, dict, str | None, float | None]:
+        """Assign the id, seal and append one admitted command.
+
+        Caller holds self._lock and admission passed immediately before, so
+        the exact commit below stays the authority linearization point.
+        """
+        command_id = self._next_id
+        self._next_id += 1
+        command = {"id": command_id, "cmd": cmd, "args": args}
+        if commit is not None and not commit(command_id):
+            return 409, {"error": "lease_invalid"}, None, None
+        if owner_client is not None and owner_lease_id is not None:
+            self._command_owner[command_id] = (owner_client, owner_lease_id)
+        queue.append(command)
+        enqueued_at = self._now()
+        self._enqueued_at[command_id] = enqueued_at
+        if operation_timeout_s > 0.0:
+            self._operation_deadlines[command_id] = (
+                enqueued_at + operation_timeout_s
+            )
+        binding = (
+            self._bindings.get(fence_instance) if fence_instance else None
+        )
+        self._seal_command(command_id, fence_instance, binding)
+        commanded_run_id = _binding_run_id(binding)
+        if command_requires_lease(cmd) and (
+            fence_instance is None
+            or binding is None
+            or binding.state != BINDING_BOUND
+        ):
+            self._unaccredited_mutation_enqueues += 1
+        activity_epoch: float | None = None
+        if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
+            activity_epoch = time.time()
+        return (
+            200,
+            {"id": command_id, "peer": peer, "cmd": cmd},
+            commanded_run_id,
+            activity_epoch,
+        )
 
     def _enqueue_exec_enforce(
         self,
