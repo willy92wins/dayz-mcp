@@ -1954,10 +1954,13 @@ def _storage_observation_from_status(
 ) -> tuple[bool | None, str | None, str | None]:
     """The rotation stored for this attempt's run id, or unknown.
 
-    One live row wins when it carries a measurement and, when it names a
-    launch operation, that operation is this attempt's. Otherwise the durable
-    observation log, which outlives EXITED-row pruning. No run id is unknown,
-    not a guess about whichever run happens to be in status.
+    Exactly one live row naming the run id is the only authority, including
+    when its measurement is null or the keys are absent: a log entry must not
+    fill in a row that measured nothing. A row that names a different launch
+    operation is unknown for this attempt. The durable observation log is
+    consulted only when no live row names the run (an EXITED row already
+    pruned). No run id is unknown, not a guess about whichever run happens
+    to be in status.
     """
     if not isinstance(status, dict) or not isinstance(run_id, str) or not run_id:
         return None, None, None
@@ -1973,10 +1976,7 @@ def _storage_observation_from_status(
         if len(matches) == 1:
             if not _operation_matches(matches[0], operation_id):
                 return None, None, None
-            if "storage_rotated" in matches[0]:
-                measured = _decode_storage_observation(matches[0])
-                if measured[0] is not None:
-                    return measured
+            return _decode_storage_observation(matches[0])
     observations = status.get("storage_observations")
     if not isinstance(observations, list):
         return None, None, None

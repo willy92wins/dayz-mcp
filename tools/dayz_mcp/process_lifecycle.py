@@ -1839,9 +1839,17 @@ class RunManifestStore:
     def _note_storage_observation_locked(self, run: RunRecord) -> None:
         """Keep a measured rotation after the EXITED row is pruned.
 
-        Unknown stays off this list. The list is bounded and keyed by run id.
+        Unknown stays off this list, and noting a run without a measurement
+        removes any earlier entry for that run id. A stale or planted log
+        must not survive the pruning of a row that measured nothing. The
+        list is bounded and keyed by run id.
         """
         if type(run.storage_rotated) is not bool:
+            self._storage_observations = [
+                item
+                for item in self._storage_observations
+                if item.get("run_id") != run.run_id
+            ]
             return
         entry = {
             "run_id": run.run_id,

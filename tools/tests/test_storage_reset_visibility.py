@@ -771,6 +771,97 @@ class StorageResetVisibilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["storage_backup"])
         self.assertIsNone(result["storage_reset_notice"])
 
+    def _planted_observation_store(self) -> RunManifestStore:
+        """A durable log entry for RUN_ROTATED, with no live row yet."""
+        self._write_manifest([], [_observation(RUN_ROTATED)])
+        store = RunManifestStore(self.paths)
+        self.lifecycle = self._lifecycle(store)
+        return store
+
+    def _refuse_planted_run(self, store: RunManifestStore) -> RunRecord:
+        """Add RUN_ROTATED, refuse its classification, and replace the row.
+
+        The same sequence the storage refusal takes: the provisional is
+        registered, prepare_storage declines the launch, and the settled
+        EXITED row is written back with no measurement.
+        """
+        record = RunRecord(
+            RUN_ROTATED, None, None, "EXITED", "", "@SameMod", "profiles", "mission", []
+        )
+        refusal = dayz_test_storage.RotationResult(
+            False, False, None, None, "a" * 64, True, None, "refuse", "bad"
+        )
+        with patch.object(
+            dayz_test_storage, "prepare_storage", return_value=refusal
+        ):
+            store.add(record)
+            code = self.lifecycle._rotate_storage_for_launch(
+                {
+                    "storage_seal": "a" * 64,
+                    "mission": "mission",
+                    "mod": "@SameMod",
+                },
+                RUN_ROTATED,
+                record,
+            )
+            self.assertEqual(code, "storage_recovery_required")
+            store.replace(record)
+        self.assertIsNone(store.get(RUN_ROTATED).storage_rotated)
+        return record
+
+    async def test_refused_launch_does_not_republish_a_planted_observation(self) -> None:
+        store = self._planted_observation_store()
+        planted = _observation(RUN_ROTATED)
+        self._refuse_planted_run(store)
+        # Noting the unmeasured row drops the planted entry.
+        self.assertEqual(store.storage_observations(), [])
+        # A live null row stays authoritative even when the status still
+        # carries the planted log entry (the reader must not fall through).
+        status = {
+            "runs": [dataclasses.asdict(store.get(RUN_ROTATED))],
+            "storage_observations": [planted],
+        }
+        self.assertEqual(
+            dayz_test_tool._storage_observation_from_status(status, RUN_ROTATED),
+            (None, None, None),
+        )
+        result = await self._public(
+            lambda: status,
+            ok=False,
+            run_id=None,
+            cleanup_degraded=False,
+            error_code="storage_recovery_required",
+            attempt_run_id=RUN_ROTATED,
+        )
+        self.assertEqual(result["error_code"], "storage_recovery_required")
+        self.assertIsNone(result["storage_rotated"])
+        self.assertIsNone(result["storage_backup"])
+        self.assertIsNone(result["storage_reset_notice"])
+
+    def test_pruning_an_unmeasured_row_drops_the_planted_observation(self) -> None:
+        record = RunRecord(
+            RUN_ROTATED, None, None, "EXITED", "", "@SameMod", "profiles", "mission", []
+        )
+        self._write_manifest(
+            [dataclasses.asdict(record)], [_observation(RUN_ROTATED)]
+        )
+        pruned = RunManifestStore(self.paths)
+        self.assertIsNone(pruned.get(RUN_ROTATED))
+        self.assertEqual(pruned.storage_observations(), [])
+        # The removal is what the file keeps, not only the in-memory prune.
+        reloaded = RunManifestStore(self.paths)
+        self.assertEqual(reloaded.storage_observations(), [])
+        self.assertEqual(
+            dayz_test_tool._storage_observation_from_status(
+                {
+                    "runs": [],
+                    "storage_observations": reloaded.storage_observations(),
+                },
+                RUN_ROTATED,
+            ),
+            (None, None, None),
+        )
+
     def _visible_run_payload(self) -> dict[str, object]:
         record = RunRecord(
             RUN_OTHER,
