@@ -1208,6 +1208,9 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_pid_repair",
                 "steam_restarted",
                 "client_death_diagnosis",
+                "storage_rotated",
+                "storage_backup",
+                "storage_reset_notice",
             },
         )
         self.assertEqual(result["status"], "succeeded")
@@ -1358,6 +1361,9 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_pid_repair",
                 "steam_restarted",
                 "client_death_diagnosis",
+                "storage_rotated",
+                "storage_backup",
+                "storage_reset_notice",
             },
         )
         self.assertEqual(result["status"], "failed")
@@ -1438,6 +1444,9 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_pid_repair",
                 "steam_restarted",
                 "client_death_diagnosis",
+                "storage_rotated",
+                "storage_backup",
+                "storage_reset_notice",
             },
         )
 
@@ -1512,6 +1521,9 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "steam_pid_repair",
                 "steam_restarted",
                 "client_death_diagnosis",
+                "storage_rotated",
+                "storage_backup",
+                "storage_reset_notice",
             },
         )
 

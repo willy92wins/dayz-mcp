@@ -16,6 +16,7 @@ from typing import Awaitable, Callable, Iterator, Protocol
 from dayz_mcp import (
     dayz_test_modes,
     dayz_test_request,
+    dayz_test_storage,
     dayz_test_worker,
     process_lifecycle,
     secure_launcher,
@@ -106,6 +107,7 @@ _TRANSITION_IN_FLIGHT = (
 _TERMINAL_KEYS = frozenset(
     {"cleanup_degraded", "error_code", "exit_code", "ok", "run_id"}
 )
+_OPTIONAL_TERMINAL_KEYS = frozenset({"attempt_run_id", "launch_operation_id"})
 
 
 class DayzTestToolError(RuntimeError):
@@ -122,6 +124,8 @@ class WorkerTerminal:
     exit_code: int
     ok: bool
     run_id: str | None
+    attempt_run_id: str | None = None
+    launch_operation_id: str | None = None
 
 
 class _Runtime(Protocol):
@@ -637,10 +641,13 @@ def parse_worker_terminal(
         ).encode("utf-8")
     except (UnicodeError, ValueError, TypeError):
         _fail("terminal_invalid")
+    if not isinstance(value, dict) or canonical != stdout:
+        _fail("terminal_invalid")
+    keys = set(value)
+    optional = keys - _TERMINAL_KEYS
     if (
-        not isinstance(value, dict)
-        or set(value) != _TERMINAL_KEYS
-        or canonical != stdout
+        not _TERMINAL_KEYS <= keys
+        or optional - _OPTIONAL_TERMINAL_KEYS
         or type(value.get("cleanup_degraded")) is not bool
         or type(value.get("ok")) is not bool
         or type(value.get("exit_code")) is not int
@@ -656,23 +663,47 @@ def parse_worker_terminal(
     if not valid_run:
         _fail("terminal_invalid")
     if ok:
-        if exit_code != 0 or error_code is not None or cleanup_degraded:
+        if (
+            exit_code != 0
+            or error_code is not None
+            or cleanup_degraded
+            or optional
+        ):
             _fail("terminal_invalid")
-    elif (
-        not 1 <= exit_code <= 255
-        or error_code not in dayz_test_worker.WORKER_ERROR_CODES
-        or cleanup_degraded
-        and run_id is None
-        or not cleanup_degraded
-        and run_id is not None
-    ):
-        _fail("terminal_invalid")
+        attempt_run_id = None
+        launch_operation_id = None
+    else:
+        if (
+            not 1 <= exit_code <= 255
+            or error_code not in dayz_test_worker.WORKER_ERROR_CODES
+            or cleanup_degraded
+            and run_id is None
+            or not cleanup_degraded
+            and run_id is not None
+        ):
+            _fail("terminal_invalid")
+        attempt_run_id = value.get("attempt_run_id")
+        launch_operation_id = value.get("launch_operation_id")
+        if "attempt_run_id" in value and not _valid_uuid4(attempt_run_id):
+            _fail("terminal_invalid")
+        if "launch_operation_id" in value and (
+            not _valid_uuid4(launch_operation_id) or "attempt_run_id" not in value
+        ):
+            _fail("terminal_invalid")
+        if "attempt_run_id" not in value:
+            attempt_run_id = None
+        if "launch_operation_id" not in value:
+            launch_operation_id = None
     return WorkerTerminal(
         cleanup_degraded=cleanup_degraded,
         error_code=error_code,
         exit_code=exit_code,
         ok=ok,
         run_id=run_id,
+        attempt_run_id=attempt_run_id if isinstance(attempt_run_id, str) else None,
+        launch_operation_id=(
+            launch_operation_id if isinstance(launch_operation_id, str) else None
+        ),
     )
 
 
@@ -1452,6 +1483,9 @@ def _compact_result(
     steam_pid_repair: object = None,
     steam_restarted: object = None,
     client_dump_baseline: ClientDumpBaseline | None = None,
+    storage_rotated: bool | None = None,
+    storage_backup: str | None = None,
+    storage_reset_notice: str | None = None,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     startup = _steam_prep_token(steam_startup)
@@ -1506,6 +1540,15 @@ def _compact_result(
             client_alive=client_alive,
             steam_startup=startup,
             dump_baseline=client_dump_baseline,
+        ),
+        # null: this call did not observe a rotation (no status, another run,
+        # a launch that does not create storage, a legacy row). false: the
+        # run measured that it did not rotate. true is only that measurement.
+        # It is not evidence the economy restored the world.
+        "storage_rotated": storage_rotated if type(storage_rotated) is bool else None,
+        "storage_backup": storage_backup if storage_rotated is True else None,
+        "storage_reset_notice": (
+            storage_reset_notice if storage_rotated is True else None
         ),
     }
 
@@ -1740,6 +1783,7 @@ async def _execute_request(
     # writes its row before it spawns, and the transaction released and
     # verified its lease before this terminal was read, so no start of that id
     # can still be admitted. The error code is kept.
+    registered: object = None
     if (
         not terminal.ok
         and terminal.run_id is not None
@@ -1752,6 +1796,21 @@ async def _execute_request(
             registered = None
         if _run_unknown_to_store(registered, terminal.run_id):
             terminal = replace(terminal, run_id=None, cleanup_degraded=False)
+    # Storage is this attempt only, decided on the worker's terminal before any
+    # projection below turns a launch into a failure (client_dead_after_ack keeps
+    # the run it names). attempt_run_id is the worker's own id for the run it
+    # created or targeted; a failure terminal without it (an older worker, or a
+    # failure before any run) is unknown, not a license to use whatever run_id
+    # cleanup left behind.
+    if terminal.attempt_run_id is not None:
+        storage_run_id: str | None = terminal.attempt_run_id
+        storage_operation = terminal.launch_operation_id
+    elif terminal.ok:
+        storage_run_id = terminal.run_id
+        storage_operation = None
+    else:
+        storage_run_id = None
+        storage_operation = None
     server_alive: bool | None = None
     client_alive: bool | None = None
     readiness: LaunchReadinessProjection | None = None
@@ -1797,6 +1856,17 @@ async def _execute_request(
     steam_startup, steam_pid_repair, steam_restarted = _steam_fields_from_status(
         status, terminal.run_id
     )
+    observed_status = status if isinstance(status, dict) else registered
+    if not preflight and storage_run_id is not None and not isinstance(observed_status, dict):
+        try:
+            observed_status = await runtime.lifecycle_status()
+        except Exception:
+            observed_status = None
+    storage_rotated, storage_backup, storage_reset_notice = (
+        _storage_observation_from_status(
+            observed_status, storage_run_id, storage_operation
+        )
+    )
     result = _compact_result(
         terminal=terminal,
         project=policy.mod,
@@ -1826,6 +1896,9 @@ async def _execute_request(
         steam_pid_repair=steam_pid_repair,
         steam_restarted=steam_restarted,
         client_dump_baseline=client_dump_baseline,
+        storage_rotated=storage_rotated,
+        storage_backup=storage_backup,
+        storage_reset_notice=storage_reset_notice,
     )
     if not terminal.ok and terminal.error_code == WORKER_INTERNAL_FAILURE:
         # 4fdf: the stage is known here, the exception class is not (see above).
@@ -1833,6 +1906,82 @@ async def _execute_request(
         result["exception_class"] = None
         result["remediation"] = _WORKER_INTERNAL_FAILURE_REMEDIATION
     return result
+
+
+def _operation_matches(row: dict[str, object], operation_id: str | None) -> bool:
+    """When both sides name an operation, they must be the same attempt."""
+    if operation_id is None:
+        return True
+    if "launch_operation_id" not in row or row.get("launch_operation_id") is None:
+        return True
+    return row.get("launch_operation_id") == operation_id
+
+
+def _decode_storage_observation(
+    row: dict[str, object],
+) -> tuple[bool | None, str | None, str | None]:
+    if "storage_rotated" not in row:
+        return None, None, None
+    rotated = row.get("storage_rotated")
+    if rotated is None:
+        return None, None, None
+    if rotated is False:
+        return False, None, None
+    if rotated is not True:
+        return None, None, None
+    backup = row.get("storage_backup")
+    notice = row.get("storage_reset_notice")
+    if (
+        not isinstance(backup, str)
+        or not backup
+        or any(separator in backup for separator in ("/", "\\", ":"))
+        or notice != dayz_test_storage.RESET_NOTICE
+    ):
+        return None, None, None
+    return True, backup, notice
+
+
+def _storage_observation_from_status(
+    status: object,
+    run_id: object,
+    operation_id: str | None = None,
+) -> tuple[bool | None, str | None, str | None]:
+    """The rotation stored for this attempt's run id, or unknown.
+
+    One live row wins when it carries a measurement and, when it names a
+    launch operation, that operation is this attempt's. Otherwise the durable
+    observation log, which outlives EXITED-row pruning. No run id is unknown,
+    not a guess about whichever run happens to be in status.
+    """
+    if not isinstance(status, dict) or not isinstance(run_id, str) or not run_id:
+        return None, None, None
+    runs = status.get("runs")
+    if isinstance(runs, list):
+        matches = [
+            item
+            for item in runs
+            if isinstance(item, dict) and item.get("run_id") == run_id
+        ]
+        if len(matches) > 1:
+            return None, None, None
+        if len(matches) == 1:
+            if not _operation_matches(matches[0], operation_id):
+                return None, None, None
+            if "storage_rotated" in matches[0]:
+                measured = _decode_storage_observation(matches[0])
+                if measured[0] is not None:
+                    return measured
+    observations = status.get("storage_observations")
+    if not isinstance(observations, list):
+        return None, None, None
+    found = [
+        item
+        for item in observations
+        if isinstance(item, dict) and item.get("run_id") == run_id
+    ]
+    if len(found) != 1 or not _operation_matches(found[0], operation_id):
+        return None, None, None
+    return _decode_storage_observation(found[0])
 
 
 def _steam_fields_from_status(

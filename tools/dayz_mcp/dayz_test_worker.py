@@ -79,15 +79,26 @@ class DayzTestWorkerError(RuntimeError):
         *,
         run_id: str | None = None,
         cleanup_degraded: bool = False,
+        attempt_run_id: str | None = None,
+        launch_operation_id: str | None = None,
     ) -> None:
         if code not in WORKER_ERROR_CODES or type(cleanup_degraded) is not bool:
             raise ValueError("invalid_worker_error")
         if cleanup_degraded and not isinstance(run_id, str):
             raise ValueError("invalid_worker_error")
+        if attempt_run_id is not None and _UUID4.fullmatch(attempt_run_id) is None:
+            raise ValueError("invalid_worker_error")
+        if launch_operation_id is not None and (
+            attempt_run_id is None or _UUID4.fullmatch(launch_operation_id) is None
+        ):
+            raise ValueError("invalid_worker_error")
         super().__init__(code)
         self.code = code
         self.run_id = run_id
         self.cleanup_degraded = cleanup_degraded
+        # Independent of run_id. run_id stays null when cleanup succeeded.
+        self.attempt_run_id = attempt_run_id
+        self.launch_operation_id = launch_operation_id
 
 
 class Broker(Protocol):
@@ -119,9 +130,15 @@ def _failed(
     *,
     run_id: str | None = None,
     cleanup_degraded: bool = False,
+    attempt_run_id: str | None = None,
+    launch_operation_id: str | None = None,
 ) -> DayzTestWorkerError:
     return DayzTestWorkerError(
-        code, run_id=run_id, cleanup_degraded=cleanup_degraded
+        code,
+        run_id=run_id,
+        cleanup_degraded=cleanup_degraded,
+        attempt_run_id=attempt_run_id,
+        launch_operation_id=launch_operation_id,
     )
 
 
@@ -130,10 +147,26 @@ def _failure_after_cleanup(
     *,
     run_id: str | None,
     cleanup_degraded: bool,
+    attempt_run_id: str | None = None,
+    launch_operation_id: str | None = None,
 ) -> DayzTestWorkerError:
     if isinstance(error, DayzTestWorkerError):
+        if error.attempt_run_id is not None:
+            attempt_run_id = error.attempt_run_id
+        if error.launch_operation_id is not None:
+            launch_operation_id = error.launch_operation_id
         if error.cleanup_degraded:
-            return error
+            # A degraded cleanup keeps its own code and run id, and still carries
+            # the attempt context so the caller correlates exactly (c8c7).
+            return _failed(
+                error.code,
+                run_id=error.run_id,
+                cleanup_degraded=True,
+                attempt_run_id=attempt_run_id,
+                launch_operation_id=(
+                    launch_operation_id if attempt_run_id is not None else None
+                ),
+            )
         code = error.code
     elif isinstance(error, asyncio.CancelledError):
         code = "operation_cancelled"
@@ -143,6 +176,8 @@ def _failure_after_cleanup(
         code,
         run_id=run_id if cleanup_degraded else None,
         cleanup_degraded=cleanup_degraded,
+        attempt_run_id=attempt_run_id,
+        launch_operation_id=launch_operation_id,
     )
 
 
@@ -540,7 +575,7 @@ async def _start(
     role: str,
     existing_run_id: str | None,
     id_fn: Callable[[], str],
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str | None]:
     core = _start_core(payload, runtime, role=role, run_id=existing_run_id)
     operation_id: str | None = None
     new_run_id: str | None = None
@@ -578,9 +613,13 @@ async def _start(
         pre_admission_rejection = _pre_admission_rejection(result)
         if pre_admission_rejection is not None:
             degraded = bool(result.get("cleanup_degraded")) or pre_admission_rejection == "steam_cleanup_degraded"
-            raise _failed(pre_admission_rejection,
-                          run_id=target_run_id if degraded else None,
-                          cleanup_degraded=degraded)
+            raise _failed(
+                pre_admission_rejection,
+                run_id=target_run_id if degraded else None,
+                cleanup_degraded=degraded,
+                attempt_run_id=target_run_id,
+                launch_operation_id=operation_id,
+            )
         if operation_id is not None and role == "server" and not _successful_run(
             result, target_run_id, "RUNNING"
         ) and _lifecycle_rejection(result) not in STEAM_PREPARATION_REJECTION_CODES:
@@ -604,7 +643,7 @@ async def _start(
         if not _successful_run(result, target_run_id, "RUNNING"):
             raise _failed(_lifecycle_rejection(result) or "worker_failed")
         if operation_id is None:
-            return target_run_id, True
+            return target_run_id, True, None
         ack = await _lifecycle(
             broker,
             "ack",
@@ -623,8 +662,10 @@ async def _start(
             error,
             run_id=target_run_id,
             cleanup_degraded=cleanup_degraded,
+            attempt_run_id=target_run_id,
+            launch_operation_id=operation_id,
         ) from None
-    return target_run_id, True
+    return target_run_id, True, operation_id
 
 
 def _default_has_assets(source: str) -> bool:
@@ -755,24 +796,29 @@ async def execute_dayz_test_worker(
 
     mode = str(payload["mode"])
     created_run_id: str | None = None
+    # The run this attempt created or targeted, and the launch operation it
+    # allocated: a failure terminal carries both whatever cleanup did, so the
+    # caller correlates exactly (c8c7). created_run_id stays the run to stop.
+    attempt_run_id: str | None = run_id if mode in {"client", "offline"} else None
+    attempt_operation_id: str | None = None
     try:
         if mode in {"client", "offline"} and run_id is not None:
             adopted = await _lifecycle(broker, "adopt", run_id=run_id)
             if not _successful_run(adopted, run_id, "RUNNING"):
                 raise _failed()
         if mode == "server":
-            run_id, _acknowledged = await _start(
+            run_id, _acknowledged, attempt_operation_id = await _start(
                 broker, payload, runtime, role="server", existing_run_id=None, id_fn=id_fn
             )
-            created_run_id = run_id
+            created_run_id = attempt_run_id = run_id
         elif mode == "client":
             if run_id is None:
                 raise _failed()
-            run_id, _acknowledged = await _start(
+            run_id, _acknowledged, _operation = await _start(
                 broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
             )
         elif mode == "offline":
-            run_id, _acknowledged = await _start(
+            run_id, _acknowledged, operation = await _start(
                 broker,
                 payload,
                 runtime,
@@ -780,13 +826,15 @@ async def execute_dayz_test_worker(
                 existing_run_id=run_id,
                 id_fn=id_fn,
             )
+            attempt_run_id = run_id
             if supplied_run_id is None:
                 created_run_id = run_id
+                attempt_operation_id = operation
         elif mode == "all":
-            run_id, _acknowledged = await _start(
+            run_id, _acknowledged, attempt_operation_id = await _start(
                 broker, payload, runtime, role="server", existing_run_id=None, id_fn=id_fn
             )
-            created_run_id = run_id
+            created_run_id = attempt_run_id = run_id
             if readiness_probe is None:
                 raise _failed("readiness_failed")
             readiness = await readiness_probe(
@@ -802,7 +850,7 @@ async def execute_dayz_test_worker(
                 raise _failed(readiness.error_code)
             if cancelled():
                 raise asyncio.CancelledError
-            run_id, _acknowledged = await _start(
+            run_id, _acknowledged, _operation = await _start(
                 broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
             )
         else:
@@ -815,5 +863,7 @@ async def execute_dayz_test_worker(
             error,
             run_id=created_run_id,
             cleanup_degraded=cleanup_degraded,
+            attempt_run_id=attempt_run_id,
+            launch_operation_id=attempt_operation_id if attempt_run_id is not None else None,
         ) from None
     return WorkerResult(0, run_id)

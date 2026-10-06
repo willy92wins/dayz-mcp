@@ -1,0 +1,6 @@
+--- tests.test_storage_reset_visibility: rc=0
+Ran 15 tests in 0.778s
+
+OK
+--- fast tier: ran=5602 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

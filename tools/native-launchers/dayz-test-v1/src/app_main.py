@@ -57,16 +57,23 @@ def _write_worker_terminal(
     run_id: str | None,
     error_code: str | None,
     cleanup_degraded: bool,
+    attempt_run_id: str | None = None,
+    launch_operation_id: str | None = None,
 ) -> None:
-    terminal = b"DZW1" + _canonical(
-        {
-            "cleanup_degraded": cleanup_degraded,
-            "error_code": error_code,
-            "exit_code": exit_code,
-            "ok": exit_code == 0,
-            "run_id": run_id,
-        }
-    )
+    body: dict[str, object] = {
+        "cleanup_degraded": cleanup_degraded,
+        "error_code": error_code,
+        "exit_code": exit_code,
+        "ok": exit_code == 0,
+        "run_id": run_id,
+    }
+    # Optional. Absent on success and on an older worker. run_id is unchanged:
+    # it is still null when cleanup of a failed launch succeeded.
+    if attempt_run_id is not None:
+        body["attempt_run_id"] = attempt_run_id
+    if launch_operation_id is not None:
+        body["launch_operation_id"] = launch_operation_id
+    terminal = b"DZW1" + _canonical(body)
     sys.stdout.buffer.write(struct.pack("<I", len(terminal)))
     sys.stdout.buffer.write(terminal)
     sys.stdout.buffer.flush()
@@ -336,10 +343,14 @@ def main() -> int:
             return 130
         if not arguments:
             try:
+                attempt_run_id = None
+                launch_operation_id = None
                 if isinstance(error, dayz_test_worker.DayzTestWorkerError):
                     error_code = error.code
                     run_id = error.run_id
                     cleanup_degraded = error.cleanup_degraded
+                    attempt_run_id = error.attempt_run_id
+                    launch_operation_id = error.launch_operation_id
                 elif isinstance(error, asyncio.CancelledError):
                     error_code = "operation_cancelled"
                     run_id = None
@@ -349,7 +360,12 @@ def main() -> int:
                     run_id = None
                     cleanup_degraded = False
                 _write_worker_terminal(
-                    2, run_id, error_code, cleanup_degraded
+                    2,
+                    run_id,
+                    error_code,
+                    cleanup_degraded,
+                    attempt_run_id,
+                    launch_operation_id,
                 )
             except BaseException:
                 pass
