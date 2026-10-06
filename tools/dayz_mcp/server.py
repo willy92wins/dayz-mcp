@@ -5210,9 +5210,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Delete an object "
-            "previously returned by world_spawn.object_id. object_id is "
-            "session-scoped and does not survive the run — keep the spawn id "
-            "in this session; there is no pos+type delete. Spawn with "
+            "previously returned by world_spawn.object_id or by "
+            "inventory_attach.item_object_id. object_id is "
+            "session-scoped and does not survive the run — keep that id "
+            "in this session; there is no pos+type delete. "
+            "inventory_attach's top-level object_id is the destination owner; "
+            "deleting it deletes that owner. The worn or cargo item is "
+            "inventory_attach.item_object_id, and only that id removes the item. "
+            "Spawn with "
             "ECE_NOPERSISTENCY_WORLD so the object is not saved into a later "
             "run. Deleting a seated "
             "transport after vehicle_get_in_client needs care (sanctioned "
@@ -5736,7 +5741,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} "
             "Read or set an entity animation phase. Target by object_id (as "
-            "returned by world_spawn; position-independent, reaches a "
+            "returned by world_spawn or by inventory_attach.item_object_id; "
+            "position-independent, reaches a "
             "client-authoritative fixture whose server replica sits at spawn) "
             "or by classname near pos. phase is a unitless value; the write "
             "uses SetAnimationPhaseNow. The returned phase is the same-tick "
@@ -5788,7 +5794,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "object_anim uses. mode=read changes nothing. source is the car's "
             "door animation source, the name object_anim takes (CivilianSedan: "
             "DoorsDriver, DoorsCoDriver, DoorsCargo1, DoorsCargo2, DoorsHood, "
-            "DoorsTrunk). Target by object_id (world_spawn) or by classname "
+            "DoorsTrunk). Target by object_id (world_spawn or "
+            "inventory_attach.item_object_id) or by classname "
             "near pos. The door part must be attached: door_missing names the "
             "empty slot of a crew door (vehicle_prepare_fixture or "
             "inventory_attach fills it), and door_not_found means no attached "
@@ -5914,7 +5921,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} "
             "Put a reachable item into a player's hands via "
-            "PredictiveTakeEntityToHands. object_id is the world_spawn id "
+            "PredictiveTakeEntityToHands. object_id is a same-run registry id "
+            "from world_spawn.object_id or inventory_attach.item_object_id "
             "(inventory_give does not return one). The take is predictive and "
             "asynchronous: accepted=true with confirmed=false means the server "
             "accepted the request, not that the item is in hands yet. Confirm "
@@ -5949,9 +5957,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Weapon_Base.EEFired on the server only, after super, and is not "
             "a replicated variable. Empty hands or a non-weapon is a completed "
             "read: ok=true, found=false, error=no_weapon_in_hands, and type "
-            "is set when a non-weapon is held. object_id is the world_spawn "
-            "id of the object actually held, or 0 when that object was not "
-            "spawned by world_spawn. uid empty (default) targets the first "
+            "is set when a non-weapon is held. object_id is the same-run registry "
+            "id of the object actually held (world_spawn or inventory_attach), "
+            "or 0 when that object was not registered. uid empty (default) targets the first "
             "human. Confirm a hands_take by comparing object_id with the "
             "requested id."
         )
@@ -6093,6 +6101,38 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "weapon_sights", {"mode": mode}, "client", _timeout(timeout_s)
             )
 
+    def _require_inventory_attach_child(result: dict[str, Any]) -> dict[str, Any]:
+        # The bridge has already created the item by the time this runs.
+        # Raising would hide that mutation and make a retry create a second
+        # item (cargo) or hit slot_occupied (attachment). Version, command
+        # census and the arg-contract hash do not change with this reply
+        # field, so an older PBO cannot be refused before enqueue.
+        # Keep the receipt. Say the item exists and has no removable child id.
+        receipt = result.get("inventory_attach") if isinstance(result, dict) else None
+        item_id = receipt.get("item_object_id") if isinstance(receipt, dict) else None
+        owner_id = result.get("object_id") if isinstance(result, dict) else None
+        owner_set = (
+            isinstance(owner_id, int) and not isinstance(owner_id, bool) and owner_id > 0
+        )
+        child_ok = (
+            isinstance(item_id, int)
+            and not isinstance(item_id, bool)
+            and item_id > 0
+            and not (owner_set and item_id == owner_id)
+        )
+        if child_ok:
+            return result
+        reported = dict(result)
+        reported["item_object_id_unavailable"] = True
+        reported["detail"] = (
+            "item_object_id_unavailable: the item was created and this receipt "
+            "is that creation. No removable child id was returned, so "
+            "object_delete of object_id would delete the destination owner. "
+            "Do not retry this call: a second cargo create adds another item "
+            "and a second attachment hits slot_occupied."
+        )
+        return reported
+
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
@@ -6100,7 +6140,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "unique type+pos. dest='attachment' requires a non-empty slot and "
             "uses CreateAttachmentEx; dest='cargo' requires slot to be omitted. "
             "Success returns the destination receipt plus an immediate inventory "
-            "snapshot; object_inspect(want=['inventory']) can re-read it."
+            "snapshot; object_inspect(want=['inventory']) can re-read it. "
+            "The top-level object_id stays the destination owner. "
+            "inventory_attach.item_object_id is the created item's same-run "
+            "registry id (this command's id). object_delete of that child id "
+            "removes the worn or cargo item and leaves the owner. Both ids "
+            "die with the run. A PBO that omits item_object_id still created "
+            "the item: the receipt is returned with "
+            "item_object_id_unavailable true. object_id is the owner and "
+            "must not be deleted to remove the item, and the call must not "
+            "be retried."
         )
     )
     async def inventory_attach(
@@ -6135,15 +6184,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["slot"] = slot
         args.update(_object_target_args(type, pos, object_id))
         async with runtime.tool_lock:
-            return await runtime.call_bridge(
+            result = await runtime.call_bridge(
                 "inventory_attach", args, "server", _timeout(timeout_s)
             )
+        return _require_inventory_attach_child(result)
 
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
         description=(
             "Inspect an object: memory points (exists+pos) and optional "
-            "bounding_center. Target by object_id (from world_spawn) or by "
+            "bounding_center. Target by object_id (from world_spawn or from "
+            "inventory_attach.item_object_id; that id is the created item, "
+            "not the destination owner, and lasts this run only) or by "
             "classname near pos. Absent memory points return exists:false "
             "with ok:true."
         )
@@ -6184,7 +6236,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # the door was closed; the lateral ray hit component 2 only while it was open.
     @app.tool(
         description=(
-            "Read Building door state. Target by object_id (from world_spawn) "
+            "Read Building door state. Target by object_id (from world_spawn or "
+            "inventory_attach.item_object_id) "
             "or by classname near pos, the same lookup object_inspect uses. "
             "Returns door_count and, per door index, open, opening, "
             "opening_ajar, opened, ajar, closing, closed and locked. These are "

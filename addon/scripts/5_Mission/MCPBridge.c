@@ -685,8 +685,9 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// hands_take validates on the server (object_id lives in m_RuntimeObjects)
-	// and asks the owning client to call PredictiveTakeEntityToHands. That call
+	// hands_take validates on the server (object_id lives in m_RuntimeObjects:
+	// world_spawn and inventory_attach register there) and asks the owning
+	// client to call PredictiveTakeEntityToHands. That call
 	// no-ops on a dedicated server (actiontakeitemtohands.c OnExecute returns
 	// before it). accepted is the synchronous verdict; confirmed stays false.
 	protected bool DispatchHandsTake(MCPCommand command, MCPResult result)
@@ -796,7 +797,8 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// world_spawn id of this object, or 0 when it is not in m_RuntimeObjects.
+	// Registry id of this object (world_spawn or inventory_attach), or 0 when it
+	// is not in m_RuntimeObjects. The id is this run only.
 	// map.GetElement / GetKey are O(n) (enscript.c:868, :878); foreach is the
 	// linear walk vanilla uses (effectmanager.c:547).
 	protected int RuntimeObjectId(Object subject)
@@ -1998,6 +2000,12 @@ class MCPBridge : Managed
 			}
 		}
 
+		// Same map and key as world_spawn (command id). This id is the created
+		// item for this run only; a later daemon restarts ids at 1. result.object_id
+		// below stays the destination owner. object_delete of item_object_id
+		// removes the worn or cargo item and leaves the owner registered.
+		m_RuntimeObjects.Insert(command.id, attachedItem);
+
 		result.classname = command.args.classname;
 		result.type = attachedItem.GetType();
 		result.found = true;
@@ -2009,6 +2017,7 @@ class MCPBridge : Managed
 		MCPInventoryAttachReceipt attachReceipt = new MCPInventoryAttachReceipt();
 		attachReceipt.dest = command.args.dest;
 		attachReceipt.slot = command.args.slot;
+		attachReceipt.item_object_id = command.id;
 		result.inventory_attach = attachReceipt;
 
 		MCPTelemetry attachTelemetry = new MCPTelemetry();
@@ -2261,9 +2270,10 @@ class MCPBridge : Managed
 	}
 
 	// Shared resolution for anim/inspect verbs. object_id > 0 selects from the runtime
-	// registry (objects created through world_spawn, fixture cars included) and needs no
-	// position; otherwise classname near pos. object_id_unknown covers never-registered
-	// and already-deleted ids alike (delete removes the registry entry).
+	// registry (world_spawn, inventory_attach's created item, fixture cars included)
+	// and needs no position; otherwise classname near pos. object_id_unknown covers
+	// never-registered and already-deleted ids alike (delete removes the registry entry).
+	// An inventory_attach id is the child, not the destination owner, and lasts this run.
 	protected Object ResolveCommandObject(MCPArgs args, out string error)
 	{
 		if (args.object_id > 0)

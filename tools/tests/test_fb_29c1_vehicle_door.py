@@ -655,7 +655,7 @@ class VehicleDoorToolTest(unittest.IsolatedAsyncioTestCase):
             "it does not use SetAnimationPhaseNow, which object_anim uses",
             "mode=read changes nothing",
             "DoorsDriver, DoorsCoDriver, DoorsCargo1, DoorsCargo2, DoorsHood, DoorsTrunk",
-            "Target by object_id (world_spawn) or by classname near pos",
+            "Target by object_id (world_spawn or inventory_attach.item_object_id) or by classname near pos",
             "door_missing names the empty slot of a crew door",
             "(vehicle_prepare_fixture or inventory_attach fills it)",
             "door_not_found means no attached door part maps to source",
