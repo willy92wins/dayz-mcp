@@ -127,6 +127,179 @@ def _valid_uuid4(value: object) -> bool:
     return parsed.version == 4 and str(parsed) == value
 
 
+_COMPLETED_ROTATION_JOURNAL = re.compile(
+    r"^storage_1\.modset\.rotation\.([0-9a-f]{32})\.completed\.json$"
+)
+
+
+_AMBIGUOUS_PENDING_ROTATION = object()
+
+
+def _pending_completed_rotation(
+    mission: str, seal: str
+) -> dayz_test_storage.RotationResult | None | object:
+    """Reset already committed for this seal, while replacement storage is absent.
+
+    Reads a validated completed journal. Does not move or delete anything.
+    An unreadable completed file is skipped, not a refusal. Several completed
+    journals for the same seal (B->A, A->B, B->A) cannot be told apart, since
+    transaction ids are not chronological: that is _AMBIGUOUS_PENDING_ROTATION,
+    and the caller records the observation as unknown instead of guessing.
+    """
+    try:
+        entries = os.listdir(mission)
+    except OSError:
+        return None
+    matches: list[tuple[str, dict[str, object]]] = []
+    for name in entries:
+        matched = _COMPLETED_ROTATION_JOURNAL.fullmatch(name)
+        if matched is None:
+            continue
+        document = dayz_test_storage._valid_journal(
+            dayz_test_storage._read_json(os.path.join(mission, name)),
+            matched.group(1),
+        )
+        if (
+            document is None
+            or document.get("phase") != dayz_test_storage.PHASE_MARKER_PUBLISHED
+            or document.get("new_seal") != seal
+        ):
+            continue
+        backup = document.get("storage_backup")
+        if not _plain_storage_backup_name(backup) or not os.path.isdir(
+            os.path.join(mission, str(backup))
+        ):
+            continue
+        matches.append((name, document))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return _AMBIGUOUS_PENDING_ROTATION
+    document = matches[0][1]
+    marker_backup = document.get("marker_backup")
+    return dayz_test_storage.RotationResult(
+        launch_allowed=True,
+        storage_rotated=True,
+        storage_backup=str(document["storage_backup"]),
+        storage_marker_backup=(
+            str(marker_backup)
+            if _plain_storage_backup_name(marker_backup)
+            else None
+        ),
+        storage_seal=seal[:8],
+        storage_recovery_required=False,
+        storage_reset_notice=dayz_test_storage.RESET_NOTICE,
+        decision=dayz_test_storage.DECISION_ROTATE,
+        reason="pending_completed_rotation",
+    )
+
+
+def _plain_storage_backup_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value not in {".", ".."}
+        and not any(separator in value for separator in ("/", "\\", ":"))
+    )
+
+
+def _storage_rotation_from_payload(
+    value: dict[str, object],
+) -> tuple[bool | None, str | None, str | None]:
+    """Legacy rows omit the keys and stay unknown. A present key is validated."""
+    if not any(
+        key in value
+        for key in ("storage_rotated", "storage_backup", "storage_reset_notice")
+    ):
+        return None, None, None
+    rotated = value.get("storage_rotated")
+    backup = value.get("storage_backup")
+    notice = value.get("storage_reset_notice")
+    _validate_storage_rotation(rotated, backup, notice)
+    if rotated is True:
+        return True, backup if isinstance(backup, str) else None, (
+            notice if isinstance(notice, str) else None
+        )
+    if rotated is False:
+        return False, None, None
+    return None, None, None
+
+
+def _storage_observations_from_payload(value: object) -> list[dict[str, object]]:
+    """Advisory diagnostic list: never refuses the manifest, degrades per entry.
+
+    An entry that cannot be validated is dropped, and a later version may add
+    keys per entry: extra keys are ignored, never copied. A run id named twice
+    anywhere in the original list -- even by an entry whose other fields do not
+    validate -- is ambiguous, so every copy is dropped before the rest is
+    validated. Unknown, never a guess.
+    """
+    if not isinstance(value, list):
+        return []
+    # Count before per-entry validation: a malformed twin still makes the id
+    # ambiguous, and a measured value must not survive that ambiguity.
+    seen: set[str] = set()
+    repeated: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        if run_id in seen:
+            repeated.add(run_id)
+        else:
+            seen.add(run_id)
+    observations: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict) or not {
+            "run_id",
+            "storage_rotated",
+            "storage_backup",
+            "storage_reset_notice",
+        }.issubset(item):
+            continue
+        run_id = item.get("run_id")
+        rotated = item.get("storage_rotated")
+        backup = item.get("storage_backup")
+        notice = item.get("storage_reset_notice")
+        if not isinstance(run_id, str) or not run_id or run_id in repeated:
+            continue
+        try:
+            _validate_storage_rotation(rotated, backup, notice)
+        except ValueError:
+            continue
+        if type(rotated) is not bool:
+            continue
+        observations.append(
+            {
+                "run_id": run_id,
+                "storage_rotated": rotated,
+                "storage_backup": backup,
+                "storage_reset_notice": notice,
+            }
+        )
+    if len(observations) > _STORAGE_OBSERVATION_BOUND:
+        del observations[: len(observations) - _STORAGE_OBSERVATION_BOUND]
+    return observations
+
+
+def _validate_storage_rotation(
+    rotated: object, backup: object, notice: object
+) -> None:
+    if rotated is None or rotated is False:
+        if backup is not None or notice is not None:
+            raise ValueError("invalid_run_record")
+        return
+    if rotated is not True:
+        raise ValueError("invalid_run_record")
+    if (
+        not _plain_storage_backup_name(backup)
+        or notice != dayz_test_storage.RESET_NOTICE
+    ):
+        raise ValueError("invalid_run_record")
+
+
 def _valid_sha256(value: object) -> bool:
     return bool(
         isinstance(value, str)
@@ -1002,6 +1175,7 @@ _REPLACE_WITNESS_HINTS = {
         "process. Nothing was terminated and nothing was launched."
     ),
 }
+_STORAGE_OBSERVATION_BOUND = 32
 _STORAGE_ROTATE_HINTS = {
     "storage_rotate_failed": (
         "storage_rotate_failed: the mission storage could not be sealed or set "
@@ -1386,6 +1560,12 @@ class RunRecord:
     launch_request_sha256: str | None = None
     launch_acknowledged: bool = True
     daemon_generation_at_launch: str | None = None
+    # None: this record never observed a rotation (legacy row, or a launch
+    # that does not create storage). False: this launch measured no rotation.
+    # True: storage_1 was set aside. Not a claim that the economy rebuilt it.
+    storage_rotated: bool | None = None
+    storage_backup: str | None = None
+    storage_reset_notice: str | None = None
 
     @classmethod
     def from_payload(cls, value: object) -> "RunRecord":
@@ -1394,6 +1574,7 @@ class RunRecord:
         raw_processes = value.get("processes")
         if not isinstance(raw_processes, list):
             raise ValueError("invalid_run_record")
+        rotated, backup, notice = _storage_rotation_from_payload(value)
         run = cls(
             value.get("run_id"),
             value.get("owner_session_id"),
@@ -1408,6 +1589,9 @@ class RunRecord:
             value.get("launch_request_sha256"),
             value.get("launch_acknowledged", True),
             value.get("daemon_generation_at_launch"),
+            rotated,
+            backup,
+            notice,
         )
         run.validate()
         return run
@@ -1460,6 +1644,9 @@ class RunRecord:
             self.daemon_generation_at_launch, str
         ):
             raise ValueError("invalid_run_record")
+        _validate_storage_rotation(
+            self.storage_rotated, self.storage_backup, self.storage_reset_notice
+        )
 
 
 @dataclass(frozen=True)
@@ -1486,6 +1673,7 @@ class RunManifestStore:
         self.paths = paths
         self._lock = threading.RLock()
         self._runs: dict[str, RunRecord] = {}
+        self._storage_observations: list[dict[str, object]] = []
         self._legacy_gate_complete = False
         self._checkpoint = checkpoint
         self._read_only = bool(read_only)
@@ -1512,6 +1700,7 @@ class RunManifestStore:
         store.paths = paths
         store._lock = threading.RLock()
         store._runs = {}
+        store._storage_observations = []
         store._legacy_gate_complete = True
         store._checkpoint = checkpoint
         store._read_only = False
@@ -1572,6 +1761,9 @@ class RunManifestStore:
         if not self._create_preprune_backup(original_raw):
             return False
         previous = self._runs
+        previous_observations = list(self._storage_observations)
+        for run in retired.values():
+            self._note_storage_observation_locked(run)
         self._runs = {
             run_id: run
             for run_id, run in self._runs.items()
@@ -1581,6 +1773,7 @@ class RunManifestStore:
             self._persist_locked()
         except Exception:
             self._runs = previous
+            self._storage_observations = previous_observations
             raise
         return True
 
@@ -1593,6 +1786,9 @@ class RunManifestStore:
             raise ValueError("invalid_run_manifest") from exc
         if not isinstance(payload, dict) or payload.get("version") != 1:
             raise ValueError("invalid_run_manifest")
+        self._storage_observations = _storage_observations_from_payload(
+            payload.get("storage_observations", [])
+        )
         runs = payload.get("runs")
         if not isinstance(runs, list):
             raise ValueError("invalid_run_manifest")
@@ -1614,6 +1810,8 @@ class RunManifestStore:
             "version": 1,
             "runs": [dataclasses.asdict(self._runs[key]) for key in sorted(self._runs)],
         }
+        if self._storage_observations:
+            payload["storage_observations"] = list(self._storage_observations)
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         ) + b"\n"
@@ -1638,6 +1836,41 @@ class RunManifestStore:
         with self._lock:
             return [self._clone(self._runs[key]) for key in sorted(self._runs)]
 
+    def _note_storage_observation_locked(self, run: RunRecord) -> None:
+        """Keep a measured rotation after the EXITED row is pruned.
+
+        Unknown stays off this list, and noting a run without a measurement
+        removes any earlier entry for that run id. A stale or planted log
+        must not survive the pruning of a row that measured nothing. The
+        list is bounded and keyed by run id.
+        """
+        if type(run.storage_rotated) is not bool:
+            self._storage_observations = [
+                item
+                for item in self._storage_observations
+                if item.get("run_id") != run.run_id
+            ]
+            return
+        entry = {
+            "run_id": run.run_id,
+            "storage_rotated": run.storage_rotated,
+            "storage_backup": run.storage_backup,
+            "storage_reset_notice": run.storage_reset_notice,
+        }
+        self._storage_observations = [
+            item
+            for item in self._storage_observations
+            if item.get("run_id") != run.run_id
+        ]
+        self._storage_observations.append(entry)
+        overflow = len(self._storage_observations) - _STORAGE_OBSERVATION_BOUND
+        if overflow > 0:
+            del self._storage_observations[:overflow]
+
+    def storage_observations(self) -> list[dict[str, object]]:
+        with self._lock:
+            return [dict(item) for item in self._storage_observations]
+
     def get(self, run_id: str) -> RunRecord | None:
         with self._lock:
             run = self._runs.get(run_id)
@@ -1650,10 +1883,13 @@ class RunManifestStore:
             if run.run_id in self._runs:
                 raise ValueError("run_exists")
             self._runs[run.run_id] = self._clone(run)
+            previous_observations = list(self._storage_observations)
+            self._note_storage_observation_locked(run)
             try:
                 self._persist_locked()
             except Exception:
                 self._runs.pop(run.run_id, None)
+                self._storage_observations = previous_observations
                 raise
             if self._active_legacy(run):
                 self._legacy_gate_complete = False
@@ -1666,10 +1902,13 @@ class RunManifestStore:
                 raise ValueError("run_not_found")
             previous = self._runs[run.run_id]
             self._runs[run.run_id] = self._clone(run)
+            previous_observations = list(self._storage_observations)
+            self._note_storage_observation_locked(run)
             try:
                 self._persist_locked()
             except Exception:
                 self._runs[run.run_id] = previous
+                self._storage_observations = previous_observations
                 raise
             if self._active_legacy(run):
                 self._legacy_gate_complete = False
@@ -2746,7 +2985,10 @@ class ProcessLifecycle:
         return existing is None and launch_role in {"server", "offline"}
 
     def _rotate_storage_for_launch(
-        self, parsed: dict[str, object], run_id: str
+        self,
+        parsed: dict[str, object],
+        run_id: str,
+        provisional: RunRecord | None = None,
     ) -> str | None:
         """Seal the mod set and set aside an incompatible storage. Pre-spawn.
 
@@ -2788,11 +3030,64 @@ class ProcessLifecycle:
             )
         except (dayz_test_storage.StorageError, OSError):
             return "storage_rotate_failed"
+        # prepare_storage skips completed journals. A retry before the engine
+        # has created storage_1 would otherwise look like a launch that never
+        # reset the mission. The marker match is not evidence the world was
+        # rebuilt, and this does not define that accreditation.
+        if (
+            result.launch_allowed
+            and not result.storage_rotated
+            and isinstance(mission, str)
+            and not os.path.isdir(
+                os.path.join(mission, dayz_test_storage.STORAGE_NAME)
+            )
+        ):
+            pending = _pending_completed_rotation(mission, seal)
+            if pending is _AMBIGUOUS_PENDING_ROTATION:
+                # A reset is pending but its saved world is ambiguous: leave the
+                # run's storage observation unknown, never a measured false.
+                return None
+            if pending is not None:
+                result = pending
         if not result.launch_allowed:
+            # A refused classification measured nothing: the provisional keeps
+            # null storage fields, exactly like a launch that raised before
+            # prepare_storage returned. Writing false here would report a
+            # measured reuse for a state the subsystem could not classify.
             return "storage_recovery_required"
-        if result.storage_rotated:
+        self._record_storage_rotation(provisional, result)
+        # A replay of a completed journal is the same reset, not a second one.
+        # The run record carries it; another audit row would claim a new move.
+        if result.storage_rotated and result.reason != "pending_completed_rotation":
             self._audit_storage_rotation(run_id, result)
         return None
+
+    @staticmethod
+    def _record_storage_rotation(
+        provisional: RunRecord | None, result: dayz_test_storage.RotationResult
+    ) -> None:
+        """Copy a measured rotation onto the run that is about to spawn.
+
+        Unknown stays unknown: a launch that raised before prepare_storage
+        returned has no measurement. False is only the measured non-rotation.
+        """
+        if provisional is None:
+            return
+        if result.storage_rotated:
+            backup = result.storage_backup
+            notice = result.storage_reset_notice
+            if (
+                not _plain_storage_backup_name(backup)
+                or notice != dayz_test_storage.RESET_NOTICE
+            ):
+                return
+            provisional.storage_rotated = True
+            provisional.storage_backup = backup
+            provisional.storage_reset_notice = notice
+            return
+        provisional.storage_rotated = False
+        provisional.storage_backup = None
+        provisional.storage_reset_notice = None
 
     def _audit_storage_rotation(self, run_id: str, result: object) -> None:
         """A rotation resets the world and the characters: it leaves a row.
@@ -3643,7 +3938,16 @@ class ProcessLifecycle:
                 # rotated nothing, and this is the only point at which the run
                 # is certain to be created.
                 if self._rotation_applies(existing, launch_role):
-                    storage_error = self._rotate_storage_for_launch(parsed, run_id)
+                    storage_error = self._rotate_storage_for_launch(
+                        parsed, run_id, provisional
+                    )
+                    if storage_error is None:
+                        # Durable before the spawn, so a crash or a later
+                        # failed settlement still has the reset on this run.
+                        try:
+                            self.manifest.replace(provisional)
+                        except Exception:
+                            storage_error = "manifest_failed"
                     if storage_error is not None:
                         self._retire_minted(
                             run_id, launch_role, minted, "launch_failed"
@@ -3657,7 +3961,9 @@ class ProcessLifecycle:
                             confirmed_error=storage_error,
                             attempt_started_at=attempt_started_at,
                         )
-                        settled["hint"] = _STORAGE_ROTATE_HINTS[storage_error]
+                        hint = _STORAGE_ROTATE_HINTS.get(storage_error)
+                        if hint is not None:
+                            settled["hint"] = hint
                         return settled
                 if steam is not None and not self.steam_gate.final_check(steam):
                     self._retire_minted(run_id, launch_role, minted, "launch_failed")
@@ -7057,6 +7363,9 @@ class ProcessLifecycle:
         }
         if self._last_start_error is not None:
             payload["last_start_error"] = self._last_start_error
+        observations = self.manifest.storage_observations()
+        if observations:
+            payload["storage_observations"] = observations
         if preparation is not None:
             payload["steam_preparation"] = preparation
         verdict = self._server_start_verdict_payload()
@@ -7072,13 +7381,17 @@ class ProcessLifecycle:
         runs, diagnostics = self._status_snapshot()
         # Keep every non-terminal state: admin recovery needs STARTING and STOPPING.
         active_runs = [run for run in runs if run.state in _ACTIVE_STATES]
-        return {
+        payload: dict[str, object] = {
             "runs": [self._projected_run(run) for run in active_runs],
             "runs_retired": len(runs) - len(active_runs),
             "retail_quarantine": self._quarantined(),
             "retired_run_diagnostics": diagnostics,
             "audit_rows_dropped": self._audit_rows_dropped,
         }
+        observations = self.manifest.storage_observations()
+        if observations:
+            payload["storage_observations"] = observations
+        return payload
 
     def _diag_snapshot(
         self,
