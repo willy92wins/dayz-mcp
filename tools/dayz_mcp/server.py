@@ -3286,6 +3286,30 @@ async def execute_wait_for(
             seen_paths, scanned_lines, unreadable, scan_mode, scan_truncated
         )
 
+    def _probe_timeout_at_deadline(message: str) -> dict[str, Any] | None:
+        """Structured timeout only for a recognised probe timeout past the deadline.
+
+        ``timeout waiting for`` is the probe budget from ``_await_result``.
+        Before the global deadline that message stays a tool error. Ownership,
+        version, authentication and ambiguous-response errors do not match
+        this prefix, so a late clock never rewrites them.
+        """
+        if not message.startswith("timeout waiting for"):
+            return None
+        now = time.monotonic()
+        if now < deadline:
+            return None
+        return _wait_for_response(
+            condition=condition,
+            started=started,
+            probes=probes,
+            observed=observed,
+            satisfied=False,
+            scanned=scan_summary(),
+            not_ready_probes=not_ready_probes,
+            last_error="probe_timeout",
+        )
+
     if condition == "log_matches":
         async with _tool_lock_until(runtime, deadline) as held:
             if not held:
@@ -3362,7 +3386,15 @@ async def execute_wait_for(
             probes += 1
             if condition == "entity_state":
                 probe_timeout = min(DEFAULT_TOOL_TIMEOUT_S, remaining)
-                result = await runtime.call_bridge("telemetry_read", entity_args, "server", probe_timeout)
+                try:
+                    result = await runtime.call_bridge(
+                        "telemetry_read", entity_args, "server", probe_timeout
+                    )
+                except ToolError as exc:
+                    structured = _probe_timeout_at_deadline(str(exc))
+                    if structured is not None:
+                        return structured
+                    raise
                 not_ready = _structured_not_ready_message(result)
                 if not_ready is not None:
                     if not_ready not in _WAIT_FOR_RETRYABLE_NOT_READY:
@@ -3393,17 +3425,20 @@ async def execute_wait_for(
                         satisfied = False
                     elif message.startswith("timeout waiting for"):
                         # An accepted probe has its own (normally 15s) budget.
-                        # Keep its abort semantics, but do not claim the whole
-                        # wait expired when the caller still had time left.
+                        # Once the global deadline has passed, that recognised
+                        # timeout is a normal unsatisfied result. Earlier, keep
+                        # the abort: the caller still had time left.
+                        structured = _probe_timeout_at_deadline(message)
+                        if structured is not None:
+                            return structured
                         now = time.monotonic()
-                        outcome = "timed out" if now >= deadline else "aborted"
                         suffix = ""
                         if "; " in message:
                             # /status is peer-wide, not tied to this command or
                             # the caller's adopted run; old polls may survive.
                             suffix = "; station snapshot: " + message.split("; ", 1)[1]
                         raise ToolError(
-                            f"wait_for {outcome} waiting for {condition}; "
+                            f"wait_for aborted waiting for {condition}; "
                             f"reason=probe_timeout; elapsed_s={now - started:.3f}; "
                             f"timeout_s={timeout_s:g}; probe_timeout_s={probe_timeout:g}{suffix}"
                         ) from None
