@@ -1,0 +1,6 @@
+--- tests.test_mcp_supervisor: rc=0
+Ran 27 tests in 0.081s
+
+OK (skipped=3)
+--- fast tier: ran=5597 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
