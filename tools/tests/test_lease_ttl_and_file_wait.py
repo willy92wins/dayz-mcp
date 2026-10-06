@@ -228,7 +228,15 @@ class ProtocolTtlTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.session_heartbeat.await_count, 0)
 
     async def test_584e_local_reads_show_declining_ttl(self) -> None:
-        self.runtime._control.session_status = AsyncMock(side_effect=[_status(LEASE, 40.0), _status(LEASE, 25.0), _status(LEASE, 10.0)])
+        # capture_screenshot also reads session_status once for camera_unverified
+        # (06a6) before the result decorator reads it again. The published TTL
+        # is still the decorator's sample, and it still declines.
+        self.runtime._control.session_status = AsyncMock(side_effect=[
+            _status(LEASE, 40.0),
+            _status(LEASE, 25.0),
+            _status(LEASE, 10.0),
+            _status(LEASE, 5.0),
+        ])
         self.runtime.lifecycle_status = AsyncMock(return_value={"runs": []})
         first = await _protocol(self.app, "logs_since", {})
         with patch.object(

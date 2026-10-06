@@ -72,6 +72,56 @@ def _unknown() -> dict[str, Any]:
     return {"lease_ttl_s": None, "lease_ttl_status": "unknown"}
 
 
+# self.state values session_coordination.status actually writes.
+# "none" and "queued" are the caller without a held lease. "releasing" is
+# still that caller, so it is not confirmed absence. Anything else, including
+# a self row with no state, is unreadable.
+_CALLER_ABSENT_STATES = frozenset({"none", "queued"})
+
+
+def caller_presence(status: object) -> str:
+    """Whether this caller holds a lease, from one session_status body.
+
+    ``classify_status`` returns None both when the caller is confirmed idle
+    and when there is nothing to say. Those are not the same fact. A missing
+    or unreadable body is ``unknown`` and must not be reported as expired.
+    ``held`` does not certify a camera pose.
+    """
+
+    if not isinstance(status, dict) or "self" not in status:
+        return "unknown"
+    self_row = status.get("self")
+    if not isinstance(self_row, dict):
+        return "unknown"
+    state = self_row.get("state")
+    # Membership on a non-string (a list, a dict) raises. That observation
+    # must stay unknown; it must not escape and discard the capture.
+    if not isinstance(state, str):
+        return "unknown"
+    if state == "active":
+        return "held"
+    if state in _CALLER_ABSENT_STATES:
+        return "absent"
+    return "unknown"
+
+
+async def observe_caller_presence(runtime: object) -> str:
+    """Bounded session_status read. Does not spawn a daemon or renew a lease."""
+
+    control = getattr(runtime, "_control", None)
+    if control is None or not callable(getattr(control, "session_status", None)):
+        return "unknown"
+    try:
+        status = await asyncio.wait_for(
+            _read_session_status(runtime), timeout=LEASE_TTL_OBSERVE_S + 0.25
+        )
+        # Classification stays inside this boundary. A bad shape must not
+        # become an error on the capture that asked for the observation.
+        return caller_presence(status)
+    except Exception:
+        return "unknown"
+
+
 def visible_text(annotation: dict[str, Any]) -> str:
     if annotation.get("lease_ttl_status") == "unknown" or annotation.get("lease_ttl_s") is None:
         return f"{_VISIBLE}=unknown"

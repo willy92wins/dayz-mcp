@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
@@ -62,21 +62,27 @@ class CaptureTargetsRunClientTest(unittest.IsolatedAsyncioTestCase):
 
     def _with_run(self, state: str) -> None:
         # The run records the SERVER dir only; the client sibling is derived.
-        self.runtime.lifecycle_status = AsyncMock(
-            return_value={
-                "runs": [
-                    {
-                        "run_id": "run-a",
-                        "state": state,
-                        "profiles": str(self.server_profiles),
-                        "processes": [
-                            {"role": "server", "pid": 111},
-                            {"role": "client", "pid": 222},
-                        ],
-                    }
-                ]
-            }
-        )
+        # Capture reads lifecycle through the bounded control call, not
+        # runtime.lifecycle_status (that path lazy-spawns).
+        payload = {
+            "runs": [
+                {
+                    "run_id": "run-a",
+                    "state": state,
+                    "profiles": str(self.server_profiles),
+                    "processes": [
+                        {"role": "server", "pid": 111},
+                        {"role": "client", "pid": 222},
+                    ],
+                }
+            ]
+        }
+
+        async def session_call(path: str, body: object = None, timeout_s: float | None = None):
+            self.assertEqual(path, "/lifecycle/status")
+            return payload
+
+        self.runtime._control._session_call = session_call
 
     async def _call(self) -> None:
         with self.assertRaises(Exception):
