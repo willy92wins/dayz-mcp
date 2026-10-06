@@ -1,0 +1,9 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_capture_frame_limit: rc=0
+Ran 5 tests in 2.235s
+
+OK
+--- tests.test_capture_frame_limit on Python 3.11: rc=0 OK
+--- waiting for a free fast-tier slot (other batches are gating)
+--- fast tier: ran=5828 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

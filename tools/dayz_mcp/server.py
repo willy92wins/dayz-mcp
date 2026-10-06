@@ -7221,6 +7221,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "
         "stored state and are therefore there on the very first capture. A repeated frame is a fact about pixels, not an error: a paused sim, an open menu "
         "and a still scene all produce it legitimately. "
+        "A request above 5 frames is captured as 5. The frame evidence then records requested_frames, effective_frames, frame_limit (5) and limit_reason frame_limit, and the published metadata warns frames_capped. A request of 1 to 5 frames keeps that count and carries no frames_capped warning; a request below 1 is captured as 1 frame. "
         "With a live simulation and a position that advances, frames>=2 (default frames=4) "
         f"with max_adjacent_delta below {mcp_capture.RENDER_FROZEN_DELTA_EPS:g} is a frozen-render signal, not a "
         "process hang, even when distinct_frames is above 1 (a render frozen on its last frame measured "
