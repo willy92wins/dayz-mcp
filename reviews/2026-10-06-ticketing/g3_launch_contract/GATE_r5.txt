@@ -1,0 +1,9 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=1
+    (same offenders as the base tree; not blocking)
+--- tests.test_launch_contract_c561_31d2_2837: rc=0
+Ran 33 tests in 6.746s
+
+OK
+--- tests.test_launch_contract_c561_31d2_2837 on Python 3.11: rc=0 OK
+--- fast tier: ran=5694 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

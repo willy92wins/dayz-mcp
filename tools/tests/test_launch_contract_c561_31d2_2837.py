@@ -26,6 +26,7 @@ from dayz_mcp import (
     server as server_module,
 )
 from dayz_mcp.server import ServerConfig
+from dayz_mcp import steam_preflight
 from dayz_mcp.steam_preflight import SteamSessionResult
 from tests.dayz_test_tool_helpers import (
     RUN_ID,
@@ -1312,6 +1313,53 @@ class Round4Tests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], "invalid_dayz_test_path_authority")
+
+
+class Round5RegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_r5_client_reattach_preflight_survives_stopped_steam(self) -> None:
+        """Previous tree: client reattach preflight returns status failed on steam_not_running."""
+        runtime = _Runtime()
+        with patch.object(dayz_test_tool, "open_approved_launcher", return_value=_Opened()), patch.object(
+            dayz_test_tool.secure_launcher, "load_verified_bundle", return_value=_Bundle(_sealed(_policy()))
+        ), patch.object(
+            dayz_test_tool, "preflight_vpp_request",
+            return_value=type("V", (), {"error_code": None, "missing": (), "warnings": (), "hint": ""})(),
+        ), patch.object(
+            dayz_test_tool, "evaluate_prerun_desktop",
+            return_value=type("D", (), {"error_code": None, "remediation": ""})(),
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session",
+            return_value=SteamSessionResult("steam_not_running", None, (), "start steam"),
+        ), patch.object(
+            steam_preflight,
+            "remediate_stale_steam_session",
+            side_effect=AssertionError("repair"),
+        ):
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                preflight=True,
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+                auto_remediate_steam=True,
+            )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["run_id"], RUN_ID)
+        self.assertTrue(result["preflight"])
+        self.assertIsNone(result["error_code"])
+
+    def test_r5_preflight_loader_is_not_dynamic_http(self) -> None:
+        """Previous tree: getattr loader in _execute_preflight is a dynamic_http finding."""
+        from dayz_mcp.security_runtime_audit import audit_runtime_http
+
+        tools_dir = Path(__file__).resolve().parents[1]
+        findings = [
+            item
+            for item in audit_runtime_http(tools_dir)
+            if item.function == "_execute_preflight"
+        ]
+        self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":

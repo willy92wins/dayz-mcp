@@ -114,8 +114,37 @@ Round 2: `gauntlet_gate.py` was started with `-u`. It printed the required modul
 - F4: `dayz_test_worker.worker_runtime_from_document` is the one closed parser (required keys including `build_source_basename`, unknown keys, semantic rules). `VerifiedNativeBundle.validated_worker_runtime` and `app_main._validated_worker_runtime` both call it. Public preflight still reports `runtime_policy_invalid`. Regression: `test_f4_missing_build_source_basename_is_refused_by_preflight` and `test_f4_runtime_document_decisions_agree`.
 - `tools/packaged-modules.lock.json` regenerated. The installed launcher binary was not resealed.
 
+## ROUND 5 FIXES
+- Client reattach preflight (`mode="client"` with `run_id`) no longer fails when Steam is stopped or stale. `_execute_preflight` still calls `evaluate_steam_session` and still does not repair. A Steam error fails preflight only when `run_id` is absent, so `all` and `offline` keep the 31d2 refusal. The slow test `test_dayz_test_run_preflight_client_reattach_keeps_run_id` has no Steam double; on a machine whose Steam session is not the registered one the new gate returned `status=failed` (`steam_not_running` / `steam_session_stale`) and dropped the supplied run id. Reproduced by forcing `steam_not_running`: `AssertionError: 'failed' != 'succeeded'`. With a healthy local Steam session the same test already returned succeeded, which is why an isolated run on this machine did not show the CI failure until Steam was forced. Regression: `test_r5_client_reattach_preflight_survives_stopped_steam` (previous tree returns failed).
+- `_execute_preflight` no longer does `loader = getattr(bundle, "validated_worker_runtime", None)` and then `loader(mod, dev_root)`. The runtime HTTP audit classifies that assignment-plus-two-argument call as `dynamic_http` (`dayz_mcp/dayz_test_tool.py`, function `_execute_preflight`). The accessor is now a direct attribute call; `AttributeError` and validation errors still become `runtime_policy_invalid`. No audit allow-list entry was added. Regression: `test_r5_preflight_loader_is_not_dynamic_http` (previous tree reports that finding).
+
+Slow modules, `DAYZ_MCP_FAST_TESTS` unset, `DAYZ_MCP_FOREIGN_TOOLCHAIN=1`:
+
+```
+----------------------------------------------------------------------
+Ran 113 tests in 25.660s
+
+OK
+```
+
+`tests.test_mcp_tools` and `tests.test_security_runtime_audit` together. The reattach test and `test_productive_runtime_closure_has_no_unaccredited_http_path` both passed.
+
+Round 5 gate, last lines:
+
+```
+--- tests.test_suite_structure (whole-suite ratchets): rc=1
+    (same offenders as the base tree; not blocking)
+--- tests.test_launch_contract_c561_31d2_2837: rc=0
+Ran 33 tests in 5.042s
+
+OK
+--- tests.test_launch_contract_c561_31d2_2837 on Python 3.11: rc=0 OK
+--- fast tier: ran=5694 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
+```
+
 ## DEVIATIONS
-H11 and H13 were updated in round 3, as that round required. The round-2 note that left them unchanged is historical. `tools/build_native_launcher.py`, `tools/native-launchers/dayz-test-v1/src/app_main.py` and `tools/packaged-modules.lock.json` were updated because packaging and the worker terminal have to carry attestation; the brief allows those sealed sources and the lock. The installed launcher binary was not resealed. A v2 document with `project_mod_override: false` is accepted and canonicalized as version 1. Cancellation of initialization is the existing `operation_cancelled` path inside the launch `try`; there is no separate cancellation test beyond the worker's existing cancel event. Host preflight does not accredit mod directories through `request_path_authority` when the bundle object is the test double; the worker validator checks the effective directories on the runtime policy.
+H11 and H13 were updated in round 3, as that round required. The round-2 note that left them unchanged is historical. `tools/build_native_launcher.py`, `tools/native-launchers/dayz-test-v1/src/app_main.py` and `tools/packaged-modules.lock.json` were updated because packaging and the worker terminal have to carry attestation; the brief allows those sealed sources and the lock. The installed launcher binary was not resealed. A v2 document with `project_mod_override: false` is accepted and canonicalized as version 1. Cancellation of initialization is the existing `operation_cancelled` path inside the launch `try`; there is no separate cancellation test beyond the worker's existing cancel event. Host preflight does not accredit mod directories through `request_path_authority` when the bundle object is the test double; the worker validator checks the effective directories on the runtime policy. Round 5: a client-reattach preflight still observes Steam but does not fail the preflight on that observation. Modes that start a client without a run id still fail. The installed launcher was not resealed; this round did not change sealed worker sources.
 
 ## NOT VERIFIED
 No DayZ, DayZDiag, DayZServer, daemon or `127.0.0.1:8765` call. No live reseal, no deployed-PBO hash on a real profile, no foreign-box occupancy on the shared machine, no in-game `-mod=` or storage-rotation check. Fast-tier baseline failures that the gate left as `new=0` were not re-diagnosed.

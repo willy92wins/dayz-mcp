@@ -2261,7 +2261,13 @@ async def _execute_preflight(
                         steam_live_pids=(),
                         remediation=REMEDIATION,
                     )
-                if steam.error_code is not None:
+                # Client reattach does not start a new client during preflight.
+                # A stopped or stale Steam session must not turn that preflight
+                # into a failure: the supplied run id is the result, and a
+                # later real launch still hits this same gate. Modes that
+                # start a client without a run id (all, offline) keep the
+                # refusal. No repair runs on either path.
+                if steam.error_code is not None and run_id is None:
                     failed = _compact_result(
                         terminal=WorkerTerminal(
                             cleanup_degraded=False,
@@ -2285,27 +2291,13 @@ async def _execute_preflight(
             parsed = dayz_test_request.parse_dayz_test_request(
                 raw_request, policies=_semantic_policies(bundle.sealed_policies)
             )
-            loader = getattr(bundle, "validated_worker_runtime", None)
-            if not callable(loader):
-                failed = _compact_result(
-                    terminal=WorkerTerminal(
-                        cleanup_degraded=False,
-                        error_code="runtime_policy_invalid",
-                        exit_code=1,
-                        ok=False,
-                        run_id=None,
-                    ),
-                    project=policy.mod,
-                    mode=mode,
-                    started_at=started_at,
-                    artifacts_paths=[],
-                    phase="validating",
-                    vpp_missing=list(vpp.missing),
-                    vpp_warnings=list(vpp.warnings),
-                )
-                return finish(failed, bridge_default)
             try:
-                runtime_policy = loader(policy.mod, policy.dev_root)
+                # Direct attribute, not getattr: assigning getattr's result
+                # and calling it with two arguments is the shape the runtime
+                # HTTP audit classifies as a dynamic HTTP callable.
+                runtime_policy = bundle.validated_worker_runtime(
+                    policy.mod, policy.dev_root
+                )
             except Exception:
                 failed = _compact_result(
                     terminal=WorkerTerminal(
