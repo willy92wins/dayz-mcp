@@ -79,6 +79,7 @@ _APP_PACKAGED_MODULES = frozenset(
         "native_process_guard.py",
         "native_process_snapshot.py",
         "normal_daemon_policy.py",
+        "pack_only.py",
         "pinned_keyfile.py",
         "server_cli.py",
         "win32_fileinfo.py",

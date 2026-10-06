@@ -10,7 +10,6 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 from dayz_mcp import (
@@ -18,6 +17,7 @@ from dayz_mcp import (
     dayz_test_request,
     dayz_test_storage,
     native_broker_protocol,
+    pack_only,
 )
 
 
@@ -629,12 +629,9 @@ async def _start(
 
 def _default_has_assets(source: str) -> bool:
     # Same suffix set as dayz_mcp.pack_only.BINARIZABLE_SUFFIXES / pack-addon.ps1.
+    # The shared walk does not follow junctions or symbolic links (dbe0).
     try:
-        return any(
-            path.suffix.casefold() in {".p3d", ".paa", ".rvmat"}
-            for path in Path(source).rglob("*")
-            if path.is_file()
-        )
+        return pack_only.has_binarizable_assets(source)
     except OSError:
         raise _failed("build_source_unavailable") from None
 
