@@ -23,6 +23,7 @@ from PIL import Image
 
 import mcp_capture
 from dayz_mcp.effective_schema import resolve_effective_schemas
+from tests._frame_state_isolation import isolate_capture_frame_state
 
 
 @functools.lru_cache(maxsize=1)
@@ -185,6 +186,9 @@ class CaptureFullresCropBehaviorTest(unittest.TestCase):
     whole-window coordinates to the file selects the wrong region. Kept in a
     separate class from the wording checks above.
     """
+
+    def setUp(self) -> None:
+        isolate_capture_frame_state(self)
 
     WINDOW_W, WINDOW_H = 100, 80
     CLIENT_RECT = (10, 10, 60, 60)  # left, top, width, height, window space
