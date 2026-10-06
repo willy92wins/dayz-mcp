@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Published-description clarifications only (no parameter, result or error-code change): `capture_screenshot` names `fullres_path` as the native-resolution effective_surface (post-crop, pre-downscale), `player_teleport` separates the position assignment from client physics settlement and documents the `player_move` walk workaround, `key_press` points game-level keys to `input_trigger(kind="key", dik=1, entry="game", phase="click")` and defers UI-effect claims to `ui_tree`, and `world_spawn` flags prose qualifies an infected spawned without `ECE_INITAI` as not a durable living fixture (reported health-zero, cause unverified; check `health01`) (inbox 4d7e, c879, 769c, 1d31, 0eb8).
 - **Godmode is now on by default for every player of a test run.** In every run that loads DayZ_MCP, the server makes each player immune to damage when it connects or respawns: falls, hits, hunger and thirst no longer hurt or kill it, which changes how damage behaves in the game under test. `player_godmode(on=false)` gives a player vanilla damage back, and it stays off for that player identity across respawns until the mission ends. A body that respawns or logs out loses its godmode first, so vanilla can still kill it. `query_player_state` and `query_all_players` report `godmode` for each player, after their existing fields (inbox 3136).
 
 ### Fixed

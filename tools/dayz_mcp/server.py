@@ -384,7 +384,14 @@ WORLD_SPAWN_FLAGS_LINE = (
     "return it in a later run, where its object_id is no longer valid. "
     f"Add that flag to keep it out of the world save, for example "
     f"flags={_WORLD_SPAWN_NOPERSIST_FLAGS} "
-    "(ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD)."
+    "(ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD). "
+    "Spawning an infected without ECE_INITAI does not establish a durable "
+    "living visual fixture: a spawned infected found at health 0 minutes "
+    "later was reported (the cause is unverified). Check the entity's "
+    "health with telemetry_read object_at (field health01) immediately "
+    "before judging it visually; the living-infected recipe is flags=3108 "
+    "(ECE_PLACE_ON_SURFACE|ECE_INITAI), which initializes the AI and does "
+    "not guarantee survival."
 )
 # world_spawn lifetime_s upper bound, in seconds. Mirrors SPAWN_LIFETIME_MAX_S in
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
@@ -4762,7 +4769,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "occupant_client_seated precheck calls client vehicle_telemetry "
             "only when that peer is probing; without a client peer it is "
             "skipped (fail open to on-foot teleport) and Enforce still refuses "
-            "a seated occupant."
+            "a seated occupant. The reply's pos_real is the server-side "
+            "position assignment (SetPosition); the assignment does not attest "
+            "that the client's physics have settled at that position or that a "
+            "moving floor keeps carrying the player — a teleport onto a moving "
+            "platform was reported to leave the player at constant height, "
+            "unattached to the floor (reported, not reproduced). There is no "
+            "settle operation: to provoke settlement, walk with player_move, "
+            "which drives the local on-foot player only (a uid target is out "
+            'of its reach): player_move(speed="walk", phase="hold", hold_s=1) '
+            "requests real movement for about a second and can change the "
+            "position; it does not guarantee displacement or settlement, and "
+            "no zero-speed hold exists."
         )
     )
     async def player_teleport(
@@ -5815,7 +5833,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Deliver one non-negative DIK code to "
         "Mission.OnKeyPress on the client (ESC is dik=1). This is a mission "
-        "callback, not OS input, key-up, hold, or respawn."
+        "callback, not OS input, key-up, hold, or respawn. key_press reaches "
+        "the mission handler only; for game-level key handlers "
+        "(DayZGame.OnKeyPress/OnKeyRelease) use "
+        'input_trigger(kind="key", dik=1, entry="game", phase="click") '
+        "instead. A delivered callback is not confirmation that the intended "
+        "UI effect happened (an open menu, for example); verify the result "
+        "with ui_tree."
     ))
     async def key_press(
         dik: StrictInt,
@@ -6047,8 +6071,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). "
         "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, frame_stale, frame_stale_detail, fullres_path). "
         "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
-        "native-resolution frame to disk and reports its path as fullres_path — read that file for "
-        "fine detail, bypassing the inline token budget. Capture never steals OS focus "
+        "native-resolution effective_surface to disk and reports its path as fullres_path: the file is the frame after client-area selection and cropping, before inline downscaling, so the effective_surface dimensions — not the whole window's — apply to the file; read that file for "
+        "fine detail in effective_surface coordinates, bypassing the inline token budget. Capture never steals OS focus "
         "(PrintWindow, then CopyFromScreen; no SetForegroundWindow) because focus theft "
         "has killed the live client (ficha 8f76). "
         "session_locked means the Windows session is locked: both window-grab backends need the interactive desktop, retrying does not help until the session is unlocked, so unattended runs must keep it unlocked. "
