@@ -431,12 +431,12 @@ class SteamBranchEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         self.launch.assert_not_awaited()
         self.remediation.assert_not_called()
 
-    async def test_preflight_never_reads_or_repairs_steam(self):
-        with patch.object(self.tool, "evaluate_steam_session") as evaluate:
-            result = await self.run_tool(preflight=True)
-        evaluate.assert_not_called()
+    async def test_preflight_reads_steam_and_does_not_repair_it(self):
+        result = await self.run_tool(preflight=True)
         self.remediation.assert_not_called()
-        self.assertIn("steam_session", result["preflight_skipped_checks"])
+        self.assertEqual(result["error_code"], "steam_session_stale")
+        self.assertNotIn("steam_session", result["preflight_skipped_checks"])
+        self.launch.assert_not_awaited()
 
 
 if __name__ == "__main__":

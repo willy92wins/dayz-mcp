@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from dayz_mcp import dayz_test_readiness, dayz_test_request, dayz_test_worker
+from dayz_mcp import dayz_test_attestation, dayz_test_readiness, dayz_test_request, dayz_test_worker
 from dayz_mcp import native_broker_protocol
 
 
@@ -59,6 +59,7 @@ def _write_worker_terminal(
     cleanup_degraded: bool,
     attempt_run_id: str | None = None,
     launch_operation_id: str | None = None,
+    attestation: dict[str, object] | None = None,
 ) -> None:
     body: dict[str, object] = {
         "cleanup_degraded": cleanup_degraded,
@@ -67,6 +68,8 @@ def _write_worker_terminal(
         "ok": exit_code == 0,
         "run_id": run_id,
     }
+    if attestation is not None:
+        body["attestation"] = attestation
     # Optional. Absent on success and on an older worker. run_id is unchanged:
     # it is still null when cleanup of a failed launch succeeded.
     if attempt_run_id is not None:
@@ -164,10 +167,17 @@ def _semantic_policies() -> tuple[dayz_test_request.RequestProjectPolicy, ...]:
         raise RuntimeError("request_policy_invalid")
     policies: list[dayz_test_request.RequestProjectPolicy] = []
     for project in projects:
-        if not isinstance(project, dict) or set(project) != {
+        allowed = {
             "default_base_mods", "default_source", "dev_root", "mission_roots", "mod", "mod_roots"
-        }:
+        }
+        if not isinstance(project, dict) or not allowed <= set(project) <= allowed | {"attestation"}:
             raise RuntimeError("request_policy_invalid")
+        attestation = None
+        if "attestation" in project:
+            try:
+                attestation = dayz_test_attestation.parse_attestation(project["attestation"])
+            except ValueError:
+                raise RuntimeError("request_policy_invalid") from None
         policies.append(
             dayz_test_request.RequestProjectPolicy(
                 mod=project["mod"],
@@ -176,37 +186,27 @@ def _semantic_policies() -> tuple[dayz_test_request.RequestProjectPolicy, ...]:
                 default_base_mods=tuple(project["default_base_mods"]),
                 mission_roots=tuple(item["path"] for item in project["mission_roots"]),
                 mod_roots=tuple(item["path"] for item in project["mod_roots"]),
+                attestation=attestation,
             )
         )
     return tuple(policies)
 
 
+def _validated_worker_runtime(
+    document: object, mod: str, dev_root: str
+) -> dayz_test_worker.WorkerRuntimePolicy:
+    """Same closed document the host bundle accessor accepts or refuses."""
+    try:
+        return dayz_test_worker.worker_runtime_from_document(document, mod, dev_root)
+    except ValueError as error:
+        if str(error) != "worker_runtime_invalid":
+            raise
+        raise RuntimeError("worker_runtime_invalid") from None
+
+
 def _worker_runtime(mod: str, dev_root: str) -> dayz_test_worker.WorkerRuntimePolicy:
     value = json.loads((_bundle_root() / "worker-runtime.json").read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or set(value) != {"format_version", "projects"} or value["format_version"] != 1:
-        raise RuntimeError("worker_runtime_invalid")
-    matches = [
-        item for item in value["projects"]
-        if isinstance(item, dict) and item.get("mod") == mod and item.get("dev_root") == dev_root
-    ]
-    if len(matches) != 1:
-        raise RuntimeError("worker_runtime_invalid")
-    item = matches[0]
-    if set(item) != {
-        "build_source_basename", "build_temp_root", "dev_root", "diag_executable",
-        "game_directory", "mission_aliases", "mod", "mods_root"
-    } or not isinstance(item["mission_aliases"], dict) or not {"chernarus", "livonia", "sakhal"}.issubset(item["mission_aliases"]) or not all(type(key) is str and key for key in item["mission_aliases"]):
-        raise RuntimeError("worker_runtime_invalid")
-    return dayz_test_worker.WorkerRuntimePolicy(
-        dev_root=item["dev_root"],
-        mod=item["mod"],
-        diag_executable=item["diag_executable"],
-        game_directory=item["game_directory"],
-        mission_aliases=tuple(sorted(item["mission_aliases"].items())),
-        mods_root=item["mods_root"],
-        build_temp_root=item["build_temp_root"],
-        build_source_basename=item["build_source_basename"],
-    )
+    return _validated_worker_runtime(value, mod, dev_root)
 
 
 async def _worker_main() -> int:
@@ -269,7 +269,9 @@ async def _worker_main() -> int:
             await cancel_task
         except asyncio.CancelledError:
             pass
-    _write_worker_terminal(result.exit_code, result.run_id, None, False)
+    _write_worker_terminal(
+        result.exit_code, result.run_id, None, False, attestation=result.attestation
+    )
     return result.exit_code
 
 
@@ -345,12 +347,14 @@ def main() -> int:
             try:
                 attempt_run_id = None
                 launch_operation_id = None
+                attestation = None
                 if isinstance(error, dayz_test_worker.DayzTestWorkerError):
                     error_code = error.code
                     run_id = error.run_id
                     cleanup_degraded = error.cleanup_degraded
                     attempt_run_id = error.attempt_run_id
                     launch_operation_id = error.launch_operation_id
+                    attestation = error.attestation
                 elif isinstance(error, asyncio.CancelledError):
                     error_code = "operation_cancelled"
                     run_id = None
@@ -366,6 +370,7 @@ def main() -> int:
                     cleanup_degraded,
                     attempt_run_id,
                     launch_operation_id,
+                    attestation,
                 )
             except BaseException:
                 pass

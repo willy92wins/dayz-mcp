@@ -258,9 +258,10 @@ def effective_mod_entries(payload: dict[str, object]) -> tuple[str, ...]:
     """
     base = payload.get("base_mods") or []
     extra = payload.get("extra_mods") or []
+    project = () if payload.get("project_mod_override") is True else ("@" + str(payload["mod"]),)
     return (
         *(str(item) for item in base),
-        "@" + str(payload["mod"]),
+        *project,
         *(str(item) for item in extra),
     )
 

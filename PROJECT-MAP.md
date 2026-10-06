@@ -87,7 +87,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-30 (UTC)
 - `GATES.md` - 4 KB, touched 2026-09-30 (UTC)
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-09-30 (UTC)
-- `product-spec.md` - 70 KB, touched 2026-10-06 (UTC)
+- `product-spec.md` - 71 KB, touched 2026-10-06 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-09-30 (UTC)
 - `README.md` - 23 KB, touched 2026-10-01 (UTC)
 

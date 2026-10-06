@@ -72,6 +72,7 @@ class RequestPathAuthorityTests(unittest.TestCase):
             mods / "@CF",
             mods / "@Extra",
             mods / "@Server",
+            mods / "@ExampleMod",
         ):
             path.mkdir(parents=True, exist_ok=True)
         mod_roots = [str(mods)]

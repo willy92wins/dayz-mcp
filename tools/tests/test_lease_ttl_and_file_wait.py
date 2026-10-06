@@ -269,7 +269,14 @@ class ProtocolTtlTest(unittest.IsolatedAsyncioTestCase):
         foreign = await _protocol(self.app, "bridge_status")
         self.assertIsNone(_ttl_of(foreign))
         self.assertEqual((foreign.meta or {}).get("lease_ttl_status"), "unknown")
-        self.assertNotIn("77", json.dumps(foreign.meta))
+        # The freshness notice carries host paths and numbers of its own; the
+        # foreign lease's 77 must not appear in anything else.
+        lease_meta = {
+            key: value
+            for key, value in (foreign.meta or {}).items()
+            if key != "server_code_freshness"
+        }
+        self.assertNotIn("77", json.dumps(lease_meta))
 
     async def test_584e_unknown_expired_pin_release_and_freshness(self) -> None:
         self.runtime._control.session_status = AsyncMock(side_effect=OSError("down"))

@@ -8,10 +8,10 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 
-from . import dayz_test_modes
+from . import dayz_test_attestation, dayz_test_modes
 
 
-_REQUEST_KEYS = frozenset(
+_REQUEST_KEYS_V1 = frozenset(
     {
         "version",
         "dev_root",
@@ -40,6 +40,10 @@ _REQUEST_KEYS = frozenset(
         "navmesh_data_server",
     }
 )
+# Version 1 stays this set. Version 2 adds exactly one closed field.
+_REQUEST_KEYS = _REQUEST_KEYS_V1
+_REQUEST_KEYS_V2 = _REQUEST_KEYS_V1 | {"project_mod_override"}
+_BRIDGE_BASENAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 _INVALID_RUN_ID = "invalid_run_id"
 _CLIENT_REQUIRES_RUN_ID = "client_requires_run_id"
@@ -60,7 +64,7 @@ _SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"
 # exact failure a rollback of this window would hit. Keep the pre-navmesh
 # canonical forms too; omitted optional fields retain their false defaults.
 _CANONICAL_KEYSETS = frozenset(
-    keys - omitted
+    variant
     for keys in (
         _REQUEST_KEYS,
         _REQUEST_KEYS - {"replace_if_not_polling_since"},
@@ -68,6 +72,10 @@ _CANONICAL_KEYSETS = frozenset(
         _REQUEST_KEYS - {"replace_if_not_polling_since", "auto_remediate_steam"},
     )
     for omitted in (frozenset(), frozenset({"navmesh_data_server"}))
+    for variant in (
+        keys - omitted,
+        (keys - omitted) | {"project_mod_override"},
+    )
 )
 
 
@@ -90,6 +98,9 @@ REQUEST_REJECTION_REASONS = frozenset(
         "payload_too_large",
         "player_name_invalid",
         "port_out_of_range",
+        "project_mod_override_conflicts_with_build",
+        "project_mod_override_includes_original",
+        "project_mod_override_requires_candidate",
         "project_policy_not_found",
         "raw_envelope_invalid",
         "replace_witness_invalid",
@@ -116,6 +127,39 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
 
 def _reject_json_constant(_value: str) -> object:
     _invalid("json_constant_rejected")
+
+
+def reject_original_project_directory(
+    payload: dict[str, object], mods_root: str
+) -> None:
+    """Refuse an override that puts the live project folder back on `-mod`.
+
+    Comparison is the normalized runtime path, not the leaf name. The public
+    token stays the closed request reason.
+    """
+    if payload.get("project_mod_override") is not True:
+        return
+    from dayz_mcp.dayz_test_storage import StorageError, normalize_mod_path
+
+    mod = payload.get("mod")
+    if type(mod) is not str:
+        return
+    try:
+        original = ntpath.normcase(normalize_mod_path("@" + mod, mods_root))
+    except StorageError:
+        return
+    listed: list[object] = []
+    for field in ("base_mods", "extra_mods", "server_mods"):
+        values = payload.get(field)
+        if isinstance(values, list):
+            listed.extend(values)
+    for value in listed:
+        try:
+            resolved = ntpath.normcase(normalize_mod_path(value, mods_root))
+        except StorageError:
+            continue
+        if resolved == original:
+            _invalid("project_mod_override_includes_original")
 
 
 def _invalid(reason: str) -> None:
@@ -247,6 +291,7 @@ class RequestProjectPolicy:
     default_base_mods: tuple[str, ...]
     mission_roots: tuple[str, ...]
     mod_roots: tuple[str, ...]
+    attestation: dayz_test_attestation.ProjectAttestation | None = None
 
 
 @dataclass(frozen=True)
@@ -296,6 +341,10 @@ def _validate_policies(policies: object) -> tuple[RequestProjectPolicy, ...]:
             for item in policy.default_base_mods
         ):
             _invalid_policy()
+        if policy.attestation is not None and (
+            type(policy.attestation) is not dayz_test_attestation.ProjectAttestation
+        ):
+            _invalid_policy()
 
         identity = (policy.mod.casefold(), ntpath.normcase(policy.dev_root))
         if identity in identities:
@@ -325,7 +374,18 @@ def parse_dayz_test_request(
         # RecursionError: on Python 3.11 and 3.12 the decoder itself gives up on
         # deep nesting that 3.14 parses and _valid_unicode_tree then refuses.
         _invalid("json_undecodable")
-    if not isinstance(value, dict) or not set(value).issubset(_REQUEST_KEYS):
+    if not isinstance(value, dict):
+        _invalid("unknown_key")
+    version = value.get("version")
+    if type(version) is int and version == 1:
+        allowed_keys = _REQUEST_KEYS_V1
+    elif type(version) is int and version == 2:
+        allowed_keys = _REQUEST_KEYS_V2
+    else:
+        if not set(value).issubset(_REQUEST_KEYS_V2):
+            _invalid("unknown_key")
+        _invalid("version_unsupported")
+    if not set(value).issubset(allowed_keys):
         _invalid("unknown_key")
     if not _valid_unicode_tree(value):
         _invalid("unicode_not_normalized")
@@ -339,8 +399,6 @@ def parse_dayz_test_request(
         ),
         None,
     )
-    if type(value.get("version")) is not int or value.get("version") != 1:
-        _invalid("version_unsupported")
     if policy is None:
         _invalid("project_policy_not_found")
 
@@ -365,6 +423,12 @@ def parse_dayz_test_request(
     kill = value.get("kill", False)
     auto_remediate_steam = value.get("auto_remediate_steam", False)
     navmesh_data_server = value.get("navmesh_data_server", False)
+    if version == 2:
+        project_mod_override = value.get("project_mod_override")
+        if type(project_mod_override) is not bool:
+            _invalid("flag_not_boolean")
+    else:
+        project_mod_override = False
     run_id = value.get("run_id")
     replace_witness = value.get("replace_if_not_polling_since")
 
@@ -438,6 +502,25 @@ def parse_dayz_test_request(
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
     if not kill and mode == "client" and run_id is None:
         raise ValueError(_CLIENT_REQUIRES_RUN_ID)
+    if project_mod_override:
+        if effective_build:
+            _invalid("project_mod_override_conflicts_with_build")
+        declared: list[object] = []
+        if "base_mods" in value:
+            declared.extend(base_mods if isinstance(base_mods, list) else [])
+        if "extra_mods" in value:
+            declared.extend(extra_mods if isinstance(extra_mods, list) else [])
+        candidates = [
+            item
+            for item in declared
+            if isinstance(item, str)
+            and ntpath.basename(item).casefold() not in _BRIDGE_BASENAMES
+        ]
+        if not candidates:
+            _invalid("project_mod_override_requires_candidate")
+    # Path identity of the original project folder is checked once the
+    # selected runtime mods root is known (reject_original_project_directory).
+    # A shared basename under another root is a different directory.
     # fb-20260904-200816-79e2. The witness of the client-replacement gate: the
     # instant, in epoch milliseconds, at which the gate READ the bridge and
     # concluded that the client had stopped polling. It only makes sense on the
@@ -468,14 +551,17 @@ def parse_dayz_test_request(
         "player_name": player_name,
         "port": port,
         "preflight": preflight,
+        "project_mod_override": project_mod_override,
         "replace_if_not_polling_since": replace_witness,
         "run_id": run_id,
         "server_mods": list(server_mods),
         "server_wait_s": server_wait_s,
         "source": policy.default_source if source is None else source,
-        "version": 1,
+        "version": 2 if project_mod_override else 1,
         "width": width,
     }
+    if not project_mod_override:
+        payload.pop("project_mod_override")
     try:
         canonical_bytes = json.dumps(
             payload,

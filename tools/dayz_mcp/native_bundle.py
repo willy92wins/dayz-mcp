@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 
 from dayz_mcp.authenticode import is_valve_signed, is_valve_signed_handle
+from dayz_mcp.dayz_test_attestation import parse_attestation
 from dayz_mcp.dayz_test_request import RequestProjectPolicy
 from dayz_mcp.native_broker_protocol import BrokerKind
 from dayz_mcp.dayz_tools_paths import (
@@ -83,6 +84,7 @@ _APP_PACKAGED_MODULES = frozenset(
         "pinned_keyfile.py",
         "server_cli.py",
         "win32_fileinfo.py",
+        "dayz_test_attestation.py",
     }
 )
 _APP_MEMBERS = frozenset(
@@ -1076,6 +1078,18 @@ class VerifiedNativeBundle:
     manifest_sha256: str
     debug_image_authority: DebugImageAuthority
     _streams: list[BinaryIO]
+    worker_runtime_document: object = None
+
+    def validated_worker_runtime(self, mod: str, dev_root: str):
+        """The runtime already verified with the bundle. Does not reopen a file."""
+        from dayz_mcp.dayz_test_worker import worker_runtime_from_document
+
+        try:
+            return worker_runtime_from_document(
+                self.worker_runtime_document, mod, dev_root
+            )
+        except ValueError:
+            _invalid()
 
     def close(self) -> None:
         while self._streams:
@@ -1392,15 +1406,24 @@ def _parse_policy(value: object) -> tuple[SealedRequestProjectPolicy, ...]:
     policies: list[SealedRequestProjectPolicy] = []
     identities: set[tuple[str, str]] = set()
     for project in value["projects"]:
-        if type(project) is not dict or set(project) != {
+        _policy_keys = {
             "default_base_mods",
             "default_source",
             "dev_root",
             "mission_roots",
             "mod",
             "mod_roots",
+        }
+        if type(project) is not dict or not _policy_keys <= set(project) <= _policy_keys | {
+            "attestation"
         }:
             _invalid()
+        attestation = None
+        if "attestation" in project:
+            try:
+                attestation = parse_attestation(project["attestation"])
+            except ValueError:
+                _invalid()
         if (
             type(project["mod"]) is not str
             or type(project["default_base_mods"]) is not list
@@ -1422,6 +1445,7 @@ def _parse_policy(value: object) -> tuple[SealedRequestProjectPolicy, ...]:
             default_base_mods=tuple(project["default_base_mods"]),
             mission_roots=tuple(item.path for item in mission_roots),
             mod_roots=tuple(item.path for item in mod_roots),
+            attestation=attestation,
         )
         sealed = SealedRequestProjectPolicy(
             policy=public,
@@ -1598,7 +1622,9 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
             != declared_hashes["worker_runtime_sha256"]
         ):
             _invalid()
-        _canonical_json(worker_runtime_raw, maximum=_MAX_POLICY_BYTES)
+        worker_runtime_document = _canonical_json(
+            worker_runtime_raw, maximum=_MAX_POLICY_BYTES
+        )
 
         build_contract_raw = _read_bounded(
             build_contract_stream,
@@ -1701,6 +1727,7 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
             manifest_sha256,
             authority,
             streams,
+            worker_runtime_document,
         )
     except BaseException:
         while streams:
