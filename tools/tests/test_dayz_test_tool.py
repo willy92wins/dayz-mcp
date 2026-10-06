@@ -1590,11 +1590,10 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         # (client_requires_run_id) but then expected_run_id is set and the
         # terminal of a preflight run has run_id=None, which
         # _validate_terminal_context rejects (dayz_test_tool.py:527-530).
-        # mode="all" is in {client, all}, so it is still the case that WOULD
-        # consult Steam; preflight is what has to suppress it.
-        for label, arguments in (
-            ("preflight", {"mode": "all", "preflight": True}),
-            ("server", {"mode": "server", "preflight": False}),
+        # mode="all" consults Steam even for preflight. mode="server" does not.
+        for label, arguments, expect_call in (
+            ("preflight", {"mode": "all", "preflight": True}, True),
+            ("server", {"mode": "server", "preflight": False}, False),
         ):
             calls.clear()
             runtime = _Runtime()
@@ -1617,8 +1616,12 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                     extra_mods=["@DayZ_MCP"],
                     **arguments,
                 )
-                self.assertEqual(calls, [])
-                self.assertEqual(result["status"], "succeeded")
+                self.assertEqual(calls, [1] if expect_call else [])
+                if expect_call:
+                    self.assertEqual(result["error_code"], "steam_session_stale")
+                    self.assertNotIn("steam_session", result["preflight_skipped_checks"])
+                else:
+                    self.assertEqual(result["status"], "succeeded")
 
     async def test_preflight_client_reattach_preserves_requested_run_id(self) -> None:
         policy = _policy()
@@ -1655,7 +1658,14 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
             "execute_secure_launcher_request",
             side_effect=launch,
         ), patch.object(
-            dayz_test_tool, "evaluate_steam_session"
+            dayz_test_tool,
+            "evaluate_steam_session",
+            return_value=steam_preflight.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=41,
+                steam_live_pids=(41,),
+                remediation="",
+            ),
         ) as steam:
             result = await dayz_test_tool.execute_dayz_test_run(
                 runtime,
@@ -1666,9 +1676,10 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 extra_mods=["@DayZ_MCP"],
             )
 
-        steam.assert_not_called()
+        steam.assert_called()
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["run_id"], RUN_ID)
+        self.assertTrue(result["preflight"])
         self.assertIsNone(result["error_code"])
 
     async def test_run_fails_when_client_pid_is_already_dead(self) -> None:

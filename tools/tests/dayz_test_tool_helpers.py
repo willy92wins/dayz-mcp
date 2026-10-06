@@ -69,6 +69,31 @@ class _Bundle:
     def __exit__(self, *_args: object) -> None:
         return None
 
+    def validated_worker_runtime(self, mod: str, dev_root: str):
+        policy = self.sealed_policies[0].policy
+        if policy.mod != mod or policy.dev_root != dev_root:
+            raise ValueError("runtime_policy_invalid")
+        from dayz_mcp.dayz_test_worker import WorkerRuntimePolicy, runtime_policy_acceptable
+
+        built = WorkerRuntimePolicy(
+            dev_root=dev_root,
+            mod=mod,
+            diag_executable=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe",
+            game_directory=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
+            mission_aliases=(
+                ("chernarus", dev_root + r"\_server\mpmissions\dayzOffline.chernarusplus"),
+                ("livonia", dev_root + r"\_server\mpmissions\dayzOffline.enoch"),
+                ("sakhal", dev_root + r"\_server\mpmissions\dayzOffline.sakhal"),
+                ("lfheli", dev_root + r"\_server\mpmissions\lfheli"),
+            ),
+            mods_root=policy.mod_roots[0],
+            build_temp_root=dev_root + r"\_build",
+            build_source_basename=None,
+        )
+        if not runtime_policy_acceptable(built):
+            raise ValueError("runtime_policy_invalid")
+        return built
+
 
 class _Runtime:
     def __init__(self, lifecycle: dict[str, object] | None = None) -> None:
@@ -94,6 +119,25 @@ class _Runtime:
     async def lifecycle_status(self) -> dict[str, object]:
         self.lifecycle_calls += 1
         return self.lifecycle
+
+    async def session_status(self) -> dict[str, object]:
+        """Box observer the preflight samples. Tests may replace the payload."""
+        self.session_calls = getattr(self, "session_calls", 0) + 1
+        replacement = getattr(self, "session_payload", None)
+        if isinstance(replacement, dict):
+            return replacement
+        runs = self.lifecycle.get("runs", []) if isinstance(self.lifecycle, dict) else []
+        if not isinstance(runs, list):
+            runs = []
+        return {
+            "box": {
+                "occupied": bool(runs),
+                "runs": list(runs),
+                "foreign": [],
+                "scan_known": True,
+                "port_scan_known": True,
+            }
+        }
 
     async def reconcile_idle_session(self) -> dict[str, object]:
         self.reconcile_calls += 1

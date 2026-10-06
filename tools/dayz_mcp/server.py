@@ -4459,6 +4459,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the launch, so a client whose own tool-call timeout is shorter "
             "(Antigravity CLI cuts MCP calls at 180 s) must pass a smaller "
             "wait_for_box_s and repeat the call. "
+            "preflight=true checks the request, the sealed launcher, mods, the "
+            "mission and VPP, and the Steam session when the mode starts a "
+            "client, without taking the box or repairing Steam. box_busy and "
+            "occupied_by_run_id are advisory: a busy box does not pass a bad "
+            "request, and preflight success is not a free box or a future "
+            "launch. project_mod_override=true drops the implicit project "
+            "folder from -mod= in favour of a caller candidate and reports "
+            "project_mod_replaced; that flag does not prove the candidate "
+            "initialized. Launch success has no project-attestation meaning "
+            "unless the project policy enables attestation, and attestation "
+            "success does not prove feature acceptance. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
@@ -4485,6 +4496,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         auto_remediate_steam: StrictBool = False,
         navmesh_data_server: StrictBool = False,
         takeover: StrictBool = False,
+        project_mod_override: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
         ctx: Context | None = None,
@@ -4582,6 +4594,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         progress_cb=report,
                         auto_remediate_steam=auto_remediate_steam,
                         client_start_budget_s=budget_s,
+                        project_mod_override=project_mod_override,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
@@ -4595,6 +4608,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_run", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+
+        if preflight:
+            # After argument checks, before the box FIFO, takeover or any
+            # lease release. execute_dayz_test_run(preflight=True) does not
+            # acquire a lease. Occupancy is advisory.
+            preflight_error, preflight_result = await execute(
+                {"build": build, "clean": clean, "pack_only": pack_only}
+            )
+            if preflight_error is not None:
+                raise ToolError(preflight_error.code) from None
+            if not isinstance(preflight_result, dict):
+                raise ToolError("dayz_test_failed:RuntimeError")
+            return annotated(preflight_result)
 
         # inbox 3997: the sealed request builds when build or clean is set.
         built = bool(build or clean)

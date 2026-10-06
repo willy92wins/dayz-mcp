@@ -42,7 +42,8 @@ def make_fixture_source(root: Path, *, mods: tuple[str, ...] = ("ExampleMod",)) 
         missions / "dayzOffline.chernarusplus",
         missions / "dayzOffline.enoch",
         missions / "dayzOffline.sakhal",
-        mods_dir,
+        mods_dir / "@ExampleMod",
+        mods_dir / "@ExampleCore",
         temp_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)

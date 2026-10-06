@@ -520,6 +520,113 @@ def _accredit_mod_list(
         raise
 
 
+def _pin_sealed_roots(
+    roots: tuple[SealedPathRoot, ...],
+    handles: list[_PinnedDirectory],
+) -> None:
+    """Open each sealed root and keep the handles in ``handles``.
+
+    ``_open_descendant`` checks a child against a root that this call has
+    already matched to its sealed volume and file identity. The handles stay
+    open until the caller finishes the descendant checks.
+    """
+    seen: set[int] = set()
+    for root in roots:
+        if id(root) in seen:
+            continue
+        seen.add(id(root))
+        handles.extend(_open_sealed_root(root))
+
+
+def _single_sealed_root(
+    path: str, roots: tuple[SealedPathRoot, ...]
+) -> SealedPathRoot:
+    if type(path) is not str or not ntpath.isabs(path):
+        _invalid()
+    candidates = _root_candidates(path, roots)
+    if len(candidates) != 1:
+        _invalid()
+    return candidates[0]
+
+
+def accredit_exact_paths(
+    paths: tuple[str, ...],
+    roots: tuple[SealedPathRoot, ...],
+) -> AccreditedRequestPaths:
+    """Accredit these absolute paths and no other directory under the roots.
+
+    The caller has already resolved each entry with the selected runtime.
+    A relative name is not searched across roots: a hit under a different
+    allowed root is a different directory. Each ancestor root is pinned to
+    its sealed identity before any descendant is opened.
+    """
+    handles: list[_PinnedDirectory] = []
+    identities: list[PathIdentity] = []
+    try:
+        if type(paths) is not tuple or type(roots) is not tuple or not roots:
+            _invalid()
+        ancestors = tuple(_single_sealed_root(path, roots) for path in paths)
+        _pin_sealed_roots(ancestors, handles)
+        for path, root in zip(paths, ancestors):
+            identity, opened = _open_descendant(path, root)
+            identities.append(identity)
+            handles.extend(opened)
+        return AccreditedRequestPaths({"exact": tuple(identities)}, handles)
+    except (OSError, TypeError, ValueError):
+        for item in reversed(handles):
+            item.close()
+        raise ValueError("invalid_dayz_test_path_authority") from None
+
+
+def accredit_runtime_resolved_paths(
+    policy: SealedRequestProjectPolicy,
+    *,
+    directories: tuple[str, ...],
+    mission: str,
+) -> AccreditedRequestPaths:
+    """Pin sealed roots, then accredit runtime-resolved absolute paths.
+
+    ``dev_root`` and ``default_source`` are validated even when no requested
+    path descends from them. A mod or mission path is accredited only through
+    the one sealed root that contains it, and only after that root's volume
+    and file identity have been checked. The root handles stay open for the
+    whole check.
+    """
+    handles: list[_PinnedDirectory] = []
+    try:
+        policy = _validate_sealed_policy(policy)
+        if type(directories) is not tuple:
+            _invalid()
+        mod_roots = tuple(
+            _single_sealed_root(path, policy.mod_roots) for path in directories
+        )
+        mission_root = _single_sealed_root(mission, policy.mission_roots)
+        _pin_sealed_roots(
+            (policy.dev_root, policy.default_source, *mod_roots, mission_root),
+            handles,
+        )
+        identities: list[PathIdentity] = []
+        for path, root in zip(directories, mod_roots):
+            identity, opened = _open_descendant(path, root)
+            identities.append(identity)
+            handles.extend(opened)
+        mission_identity, opened = _open_descendant(mission, mission_root)
+        handles.extend(opened)
+        return AccreditedRequestPaths(
+            {
+                "dev_root": (policy.dev_root.resolved_identity,),
+                "default_source": (policy.default_source.resolved_identity,),
+                "mods": tuple(identities),
+                "mission": (mission_identity,),
+            },
+            handles,
+        )
+    except (OSError, TypeError, ValueError):
+        for item in reversed(handles):
+            item.close()
+        raise ValueError("invalid_dayz_test_path_authority") from None
+
+
 def accredit_request_paths(
     parsed: ParsedDayzTestRequest,
     *,

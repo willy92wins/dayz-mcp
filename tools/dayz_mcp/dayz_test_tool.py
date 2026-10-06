@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Protocol
 
 from dayz_mcp import (
+    dayz_test_attestation,
     dayz_test_modes,
     dayz_test_request,
     dayz_test_storage,
     dayz_test_worker,
     process_lifecycle,
+    request_path_authority,
     secure_launcher,
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
@@ -126,6 +128,7 @@ class WorkerTerminal:
     run_id: str | None
     attempt_run_id: str | None = None
     launch_operation_id: str | None = None
+    attestation: dict[str, object] | None = None
 
 
 class _Runtime(Protocol):
@@ -320,6 +323,7 @@ def _extra_mods_with_bridge_default(
     project_mod: str,
     kill: bool,
     base_mods: list[str],
+    project_counts_as_bridge: bool = True,
 ) -> tuple[list[str] | None, tuple[str, ...]]:
     """Append @DayZ_MCP on extra_mods when this launch would miss the bridge.
 
@@ -334,6 +338,10 @@ def _extra_mods_with_bridge_default(
     casefold duplicate) is left unchanged.
     """
     if kill or _names_bridge(project_mod):
+        # The project folder is the bridge. A normal launch already counts it.
+        # An override excludes that folder and must not copy it back into
+        # extra_mods; presence is then decided on the effective list.
+        del project_counts_as_bridge
         return extra_mods, ()
     if extra_mods is not None and any(_names_bridge(item) for item in extra_mods):
         return extra_mods, ()
@@ -363,10 +371,15 @@ def _bridge_default_report(
 
 
 def _annotate_bridge_default(
-    result: dict[str, object], defaulted: list[str]
+    result: dict[str, object],
+    defaulted: list[str],
+    *,
+    project_mod_replaced: bool = False,
 ) -> dict[str, object]:
     if defaulted:
         result["extra_mods_defaulted"] = list(defaulted)
+    if project_mod_replaced:
+        result["project_mod_replaced"] = True
     return result
 
 
@@ -395,6 +408,7 @@ def build_run_request(
     server_wait_s: int = 60,
     kill: bool = False,
     replace_if_not_polling_since: int | None = None,
+    project_mod_override: bool = False,
 ) -> tuple[bytes, dayz_test_request.RequestProjectPolicy]:
     selected = _selected_policy(sealed_policies, project)
     if mode not in _accepted_modes():
@@ -417,6 +431,7 @@ def build_run_request(
         project_mod=selected.mod,
         kill=kill,
         base_mods=effective_base,
+        project_counts_as_bridge=not project_mod_override,
     )
 
     def _compose(
@@ -441,9 +456,11 @@ def build_run_request(
             "preflight": preflight,
             "run_id": run_id,
             "server_wait_s": server_wait_s,
-            "version": 1,
+            "version": 2 if project_mod_override else 1,
             "width": width,
         }
+        if project_mod_override:
+            document["project_mod_override"] = True
         if mods is not None:
             document["extra_mods"] = mods
         if public_base is not None:
@@ -502,7 +519,10 @@ def build_run_request(
             public_extra = requested_extra
         else:
             raise
-    effective_mods = [selected.mod, *(public_extra or [])]
+    effective_mods = [
+        *( [] if project_mod_override else [selected.mod] ),
+        *(public_extra or []),
+    ]
     if not kill and not any(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
         for mod in effective_mods
@@ -645,9 +665,20 @@ def parse_worker_terminal(
         _fail("terminal_invalid")
     keys = set(value)
     optional = keys - _TERMINAL_KEYS
+    attestation_report = None
+    if "attestation" in keys:
+        try:
+            attestation_report = dayz_test_attestation.validate_report(
+                value.get("attestation")
+            )
+        except (TypeError, ValueError):
+            _fail("terminal_invalid")
+    allowed_optional = set(_OPTIONAL_TERMINAL_KEYS)
+    if attestation_report is not None:
+        allowed_optional.add("attestation")
     if (
         not _TERMINAL_KEYS <= keys
-        or optional - _OPTIONAL_TERMINAL_KEYS
+        or optional - allowed_optional
         or type(value.get("cleanup_degraded")) is not bool
         or type(value.get("ok")) is not bool
         or type(value.get("exit_code")) is not int
@@ -667,7 +698,7 @@ def parse_worker_terminal(
             exit_code != 0
             or error_code is not None
             or cleanup_degraded
-            or optional
+            or optional - {"attestation"}
         ):
             _fail("terminal_invalid")
         attempt_run_id = None
@@ -704,6 +735,7 @@ def parse_worker_terminal(
         launch_operation_id=(
             launch_operation_id if isinstance(launch_operation_id, str) else None
         ),
+        attestation=attestation_report,
     )
 
 
@@ -1486,12 +1518,13 @@ def _compact_result(
     storage_rotated: bool | None = None,
     storage_backup: str | None = None,
     storage_reset_notice: str | None = None,
+    project_mod_replaced: bool = False,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     startup = _steam_prep_token(steam_startup)
     repair = _steam_prep_token(steam_pid_repair)
     restarted = steam_restarted if type(steam_restarted) is bool else None
-    return {
+    result: dict[str, object] = {
         "status": "succeeded" if terminal.ok else "failed",
         "project": project,
         "mode": mode,
@@ -1552,6 +1585,11 @@ def _compact_result(
             storage_reset_notice if storage_rotated is True else None
         ),
     }
+    if terminal.attestation is not None:
+        result["attestation"] = terminal.attestation
+    if project_mod_replaced:
+        result["project_mod_replaced"] = True
+    return result
 
 
 def _validate_terminal_context(
@@ -2006,6 +2044,419 @@ def _steam_fields_from_status(
     )
 
 
+_MANAGED_BOX_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
+)
+
+
+_PREFLIGHT_LIVE_OMISSIONS = (
+    "process_launch",
+    "readiness",
+    "initialization_evidence",
+)
+
+
+def _preflight_skipped_checks(mode: str, run_id: str | None) -> list[str]:
+    skipped: list[str] = []
+    if run_id is not None:
+        skipped.append("extension_run")
+        if _mode_starts_client(mode):
+            skipped.append("client_replacement")
+    skipped.extend(_PREFLIGHT_LIVE_OMISSIONS)
+    return skipped
+
+
+def _occupancy_from_box(box: object) -> tuple[bool | None, str | None]:
+    """Known occupancy from the read-only box snapshot.
+
+    ``scan_known`` / ``port_scan_known`` must both be true. Anything else,
+    including a snapshot that sets ``occupied`` because the scan did not run,
+    stays unknown (``null``), never a free or busy guess.
+    """
+    if not isinstance(box, dict):
+        return None, None
+    if box.get("scan_known") is not True or box.get("port_scan_known") is not True:
+        return None, None
+    runs = box.get("runs")
+    foreign = box.get("foreign")
+    occupied = box.get("occupied")
+    if type(occupied) is not bool or not isinstance(runs, list) or not isinstance(foreign, list):
+        return None, None
+    occupants = [
+        str(item.get("run_id"))
+        for item in runs
+        if isinstance(item, dict)
+        and item.get("state") in _MANAGED_BOX_STATES
+        and isinstance(item.get("run_id"), str)
+    ]
+    foreign_busy = any(isinstance(item, dict) for item in foreign)
+    occupant = occupants[0] if len(occupants) == 1 else None
+    if occupants or foreign_busy or occupied:
+        return True, occupant
+    return False, None
+
+
+async def _sample_box_occupancy(
+    runtime: _Runtime,
+) -> tuple[bool | None, str | None]:
+    """Advisory read of the box observer, not ``/lifecycle/status``.
+
+    Lifecycle status lists managed runs only. Foreign DayZ processes and the
+    scan flags live on the session box. A missing or failed observation is
+    null, not a guess that the box is free.
+    """
+    observe = getattr(runtime, "session_status", None)
+    if not callable(observe):
+        return None, None
+    try:
+        status = await observe()
+    except Exception:
+        return None, None
+    if not isinstance(status, dict) or "box" not in status:
+        return None, None
+    return _occupancy_from_box(status.get("box"))
+
+
+def _stamp_preflight(
+    result: dict[str, object],
+    *,
+    run_id: str | None,
+    box_busy: bool | None,
+    occupied_by_run_id: str | None,
+    skipped: list[str],
+    project_mod_replaced: bool,
+) -> dict[str, object]:
+    result["preflight"] = True
+    result["box_busy"] = box_busy
+    result["occupied_by_run_id"] = occupied_by_run_id
+    result["preflight_skipped_checks"] = list(skipped)
+    if run_id is not None:
+        result["run_id"] = run_id
+    if project_mod_replaced:
+        result["project_mod_replaced"] = True
+    return result
+
+
+async def _execute_preflight(
+    runtime: _Runtime,
+    *,
+    project: str,
+    mode: str,
+    mission: str,
+    build: bool,
+    clean: bool,
+    pack_only: bool,
+    run_id: str | None,
+    extra_mods: list[str] | None,
+    base_mods: list[str] | None,
+    server_mods: list[str] | None,
+    no_base_mods: bool,
+    no_file_patching: bool,
+    port: int,
+    width: int,
+    height: int,
+    player_name: str,
+    server_wait_s: int,
+    auto_remediate_steam: bool,
+    navmesh_data_server: bool,
+    project_mod_override: bool,
+    started_at: float,
+) -> dict[str, object]:
+    """Validate without a lease, a queue slot, a repair, or a process start."""
+    skipped = _preflight_skipped_checks(mode, run_id)
+    box_busy, occupied = await _sample_box_occupancy(runtime)
+
+    def finish(
+        result: dict[str, object], defaulted: list[str]
+    ) -> dict[str, object]:
+        stamped = _stamp_preflight(
+            result,
+            run_id=run_id,
+            box_busy=box_busy,
+            occupied_by_run_id=occupied,
+            skipped=skipped,
+            project_mod_replaced=project_mod_override,
+        )
+        return _annotate_bridge_default(
+            stamped, defaulted, project_mod_replaced=project_mod_override
+        )
+
+    with open_approved_launcher("dayz-test-v1") as opened:
+        opened.validate_native_pe()
+        with secure_launcher.load_verified_bundle(opened) as bundle:
+            raw_request, policy = build_run_request(
+                bundle.sealed_policies,
+                project=project,
+                mode=mode,
+                mission=mission,
+                build=build,
+                clean=clean,
+                pack_only=pack_only,
+                preflight=True,
+                run_id=run_id,
+                extra_mods=extra_mods,
+                base_mods=base_mods,
+                server_mods=server_mods,
+                no_base_mods=no_base_mods,
+                no_file_patching=no_file_patching,
+                navmesh_data_server=navmesh_data_server,
+                auto_remediate_steam=auto_remediate_steam,
+                port=port,
+                width=width,
+                height=height,
+                player_name=player_name,
+                server_wait_s=server_wait_s,
+                project_mod_override=project_mod_override,
+            )
+            bridge_default = _bridge_default_report(extra_mods, raw_request)
+            vpp = preflight_vpp_request(
+                raw_request, sealed_policies=bundle.sealed_policies
+            )
+            if vpp.error_code is not None:
+                refused = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=vpp.error_code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    remediation=vpp.hint,
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(refused, bridge_default)
+            if _mode_starts_client(mode):
+                desktop = await asyncio.to_thread(evaluate_prerun_desktop)
+                if desktop.error_code is not None:
+                    refused = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=desktop.error_code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        remediation=desktop.remediation,
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    return finish(refused, bridge_default)
+                try:
+                    steam = evaluate_steam_session()
+                except Exception:
+                    steam = SteamSessionResult(
+                        error_code=STEAM_SESSION_STALE,
+                        steam_registered_pid=None,
+                        steam_live_pids=(),
+                        remediation=REMEDIATION,
+                    )
+                if steam.error_code is not None:
+                    failed = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=steam.error_code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        steam_registered_pid=steam.steam_registered_pid,
+                        steam_live_pids=list(steam.steam_live_pids[:8]),
+                        remediation=steam.remediation,
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    return finish(failed, bridge_default)
+            parsed = dayz_test_request.parse_dayz_test_request(
+                raw_request, policies=_semantic_policies(bundle.sealed_policies)
+            )
+            loader = getattr(bundle, "validated_worker_runtime", None)
+            if not callable(loader):
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code="runtime_policy_invalid",
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            try:
+                runtime_policy = loader(policy.mod, policy.dev_root)
+            except Exception:
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code="runtime_policy_invalid",
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            try:
+                mission_path = dayz_test_worker._mission(parsed.payload, runtime_policy)
+                effective_directories = dayz_test_worker._effective_directories(
+                    parsed.payload, runtime_policy
+                )
+            except dayz_test_worker.DayzTestWorkerError as error:
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=error.code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            sealed = bundle.sealed_policies
+            if (
+                type(sealed) is tuple
+                and sealed
+                and all(
+                    type(item) is request_path_authority.SealedRequestProjectPolicy
+                    for item in sealed
+                )
+            ):
+                selected = next(
+                    (
+                        item
+                        for item in sealed
+                        if item.policy.mod == policy.mod
+                        and item.policy.dev_root == policy.dev_root
+                    ),
+                    None,
+                )
+                try:
+                    if selected is None:
+                        raise ValueError("invalid_dayz_test_path_authority")
+                    with request_path_authority.accredit_runtime_resolved_paths(
+                        selected,
+                        directories=effective_directories,
+                        mission=mission_path,
+                    ):
+                        pass
+                except ValueError:
+                    failed = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code="invalid_dayz_test_path_authority",
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    return finish(failed, bridge_default)
+            attestation_document = None
+            try:
+                attestation_document = dayz_test_worker.assess_preflight(
+                    parsed.payload, runtime_policy, policy.attestation
+                )
+            except dayz_test_worker.DayzTestWorkerError as error:
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=error.code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                        attestation=error.attestation,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            except ValueError as error:
+                token = str(error)
+                if not token.startswith("invalid_dayz_test_request:"):
+                    raise
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code="bad_" + token[len("invalid_") :],
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            succeeded = _compact_result(
+                terminal=WorkerTerminal(
+                    cleanup_degraded=False,
+                    error_code=None,
+                    exit_code=0,
+                    ok=True,
+                    run_id=run_id,
+                    attestation=attestation_document,
+                ),
+                project=policy.mod,
+                mode=mode,
+                started_at=started_at,
+                artifacts_paths=[],
+                phase="validating",
+                vpp_missing=list(vpp.missing),
+                vpp_warnings=list(vpp.warnings),
+            )
+            return finish(succeeded, bridge_default)
+
+
 async def execute_dayz_test_run(
     runtime: _Runtime,
     *,
@@ -2031,14 +2482,14 @@ async def execute_dayz_test_run(
     auto_remediate_steam: bool = False,
     navmesh_data_server: bool = False,
     client_start_budget_s: float | None = None,
+    project_mod_override: bool = False,
 ) -> dict[str, object]:
     """Run or preflight a request, with explicit omissions in this adapter.
 
     Every preflight envelope includes preflight_skipped_checks, even when empty.
-    It lists checks disabled specifically by preflight: steam_session,
-    extension_run (run state/project), and client_replacement (live client/bridge).
-    It is not a list of later checks unreached after an earlier refusal, nor a
-    guarantee that build, process launch or readiness will succeed.
+    It lists checks that need a live run: extension_run, client_replacement,
+    process_launch, readiness, and initialization_evidence. Steam is checked.
+    Preflight success is not a free box and not a future launch.
     """
     started_at = time.monotonic()
     if progress_cb is not None:
@@ -2049,14 +2500,32 @@ async def execute_dayz_test_run(
     # touched: a budget the caller got wrong must cost them an error message,
     # not a launched client that then gets refused.
     budget_s = _client_start_budget_s(client_start_budget_s)
-    preflight_skipped_checks: list[str] = []
     if preflight:
-        if _mode_starts_client(mode):
-            preflight_skipped_checks.append("steam_session")
-        if run_id is not None:
-            preflight_skipped_checks.append("extension_run")
-            if _mode_starts_client(mode):
-                preflight_skipped_checks.append("client_replacement")
+        return await _execute_preflight(
+            runtime,
+            project=project,
+            mode=mode,
+            mission=mission,
+            build=build,
+            clean=clean,
+            pack_only=pack_only,
+            run_id=run_id,
+            extra_mods=extra_mods,
+            base_mods=base_mods,
+            server_mods=server_mods,
+            no_base_mods=no_base_mods,
+            no_file_patching=no_file_patching,
+            port=port,
+            width=width,
+            height=height,
+            player_name=player_name,
+            server_wait_s=server_wait_s,
+            auto_remediate_steam=auto_remediate_steam,
+            navmesh_data_server=navmesh_data_server,
+            project_mod_override=project_mod_override,
+            started_at=started_at,
+        )
+    preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
@@ -2082,6 +2551,7 @@ async def execute_dayz_test_run(
                 "height": height,
                 "player_name": player_name,
                 "server_wait_s": server_wait_s,
+                "project_mod_override": project_mod_override,
             }
             raw_request, policy = build_run_request(
                 bundle.sealed_policies, **request_arguments
@@ -2118,7 +2588,7 @@ async def execute_dayz_test_run(
                 )
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
-                return _annotate_bridge_default(refused, bridge_default)
+                return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             if _mode_starts_client(mode):
                 # Gate body uses time.sleep / ImageGrab join. Run it off the
                 # broker event loop so other MCP sessions keep heartbeating.
@@ -2143,7 +2613,7 @@ async def execute_dayz_test_run(
                     )
                     if preflight:
                         refused["preflight_skipped_checks"] = preflight_skipped_checks
-                    return _annotate_bridge_default(refused, bridge_default)
+                    return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -2175,7 +2645,7 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
-                    return _annotate_bridge_default(failed, bridge_default)
+                    return _annotate_bridge_default(failed, bridge_default, project_mod_replaced=project_mod_override)
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
             bridge_cause: str | None = None
@@ -2205,7 +2675,7 @@ async def execute_dayz_test_run(
                         vpp_warnings=list(vpp.warnings),
                     )
                     refused["run_not_extensible_cause"] = exc.cause
-                    return _annotate_bridge_default(refused, bridge_default)
+                    return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
                     # run (the role replacement inside start_run). The caller
@@ -2289,7 +2759,7 @@ async def execute_dayz_test_run(
                             and replacement.reason == _BRIDGE_STATUS_UNKNOWN
                         ):
                             refused["bridge_status_cause"] = bridge_cause
-                        return _annotate_bridge_default(refused, bridge_default)
+                        return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
                 # one process start away from the kill, so it does not travel as
@@ -2328,7 +2798,7 @@ async def execute_dayz_test_run(
             )
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
-            return _annotate_bridge_default(result, bridge_default)
+            return _annotate_bridge_default(result, bridge_default, project_mod_replaced=project_mod_override)
 
 
 def _run_row(status: object, run_id: str) -> dict[str, object] | None:

@@ -403,7 +403,10 @@ class PrerunDesktopDayzTestRunTest(unittest.IsolatedAsyncioTestCase):
 
         launch.assert_not_awaited()
         self.assertEqual(result["error_code"], "session_locked")
-        self.assertEqual(result.get("preflight_skipped_checks"), ["steam_session"])
+        self.assertEqual(
+            result.get("preflight_skipped_checks"),
+            ["process_launch", "readiness", "initialization_evidence"],
+        )
 
     async def test_server_mode_does_not_consult_desktop_gate(self) -> None:
         policy = _policy()

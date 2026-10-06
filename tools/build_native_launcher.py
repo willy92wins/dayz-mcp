@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
+from dayz_mcp.dayz_test_attestation import parse_attestation
 from dayz_mcp.dayz_test_request import (
     _path_is_within,
     _valid_local_absolute_path,
@@ -74,6 +75,7 @@ PACKAGED_MODULES = (
     # moved here, and a packaged module importing an unpackaged one is a
     # ModuleNotFoundError inside app.pyz, not a build error.
     "win32_fileinfo.py",
+    "dayz_test_attestation.py",
 )
 def external_files() -> tuple[Path, ...]:
     return external_file_paths(require_dayz_layout())
@@ -510,8 +512,15 @@ def validate_launcher_policy_source(value: object) -> None:
         raise ValueError("policy_source_schema")
     seen: set[tuple[str, str]] = set()
     for project in projects:
-        if type(project) is not dict or set(project) != _PROJECT_INTENT_KEYS:
+        if type(project) is not dict or not _PROJECT_INTENT_KEYS <= set(project) <= (
+            _PROJECT_INTENT_KEYS | {"attestation"}
+        ):
             raise ValueError("policy_source_schema")
+        if "attestation" in project:
+            try:
+                parse_attestation(project["attestation"])
+            except ValueError:
+                raise ValueError("policy_source_schema") from None
         if type(project["mod"]) is not str or _MOD_NAME.fullmatch(project["mod"]) is None:
             raise ValueError("policy_source_schema")
         _validate_root_intent(project["default_source"])
@@ -586,6 +595,11 @@ def seal_request_policy(source: dict[str, object]) -> dict[str, object]:
                     for item in project["mission_roots"]
                 ],
                 "mod": project["mod"],
+                **(
+                    {"attestation": project["attestation"]}
+                    if "attestation" in project
+                    else {}
+                ),
                 "mod_roots": [
                     _sealed_root(item["path"], allow_root_junction=item["allow_root_junction"])
                     for item in project["mod_roots"]

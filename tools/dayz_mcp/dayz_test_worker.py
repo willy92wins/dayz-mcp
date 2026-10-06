@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from dayz_mcp import (
+    dayz_test_attestation,
     dayz_test_readiness,
     dayz_test_request,
     dayz_test_storage,
@@ -66,6 +67,9 @@ WORKER_ERROR_CODES = frozenset(
         "run_not_adoptable",
         "run_stop_failed",
         "runtime_policy_invalid",
+        "project_attestation_artifact_missing",
+        "project_attestation_initialization_missing",
+        "project_attestation_unverifiable",
         "worker_failed",
         "worker_identity_failed",
     }
@@ -81,6 +85,7 @@ class DayzTestWorkerError(RuntimeError):
         cleanup_degraded: bool = False,
         attempt_run_id: str | None = None,
         launch_operation_id: str | None = None,
+        attestation: dict[str, object] | None = None,
     ) -> None:
         if code not in WORKER_ERROR_CODES or type(cleanup_degraded) is not bool:
             raise ValueError("invalid_worker_error")
@@ -99,6 +104,7 @@ class DayzTestWorkerError(RuntimeError):
         # Independent of run_id. run_id stays null when cleanup succeeded.
         self.attempt_run_id = attempt_run_id
         self.launch_operation_id = launch_operation_id
+        self.attestation = attestation
 
 
 class Broker(Protocol):
@@ -123,6 +129,7 @@ class WorkerRuntimePolicy:
 class WorkerResult:
     exit_code: int
     run_id: str | None
+    attestation: dict[str, object] | None = None
 
 
 def _failed(
@@ -132,6 +139,7 @@ def _failed(
     cleanup_degraded: bool = False,
     attempt_run_id: str | None = None,
     launch_operation_id: str | None = None,
+    attestation: dict[str, object] | None = None,
 ) -> DayzTestWorkerError:
     return DayzTestWorkerError(
         code,
@@ -139,6 +147,7 @@ def _failed(
         cleanup_degraded=cleanup_degraded,
         attempt_run_id=attempt_run_id,
         launch_operation_id=launch_operation_id,
+        attestation=attestation,
     )
 
 
@@ -150,6 +159,9 @@ def _failure_after_cleanup(
     attempt_run_id: str | None = None,
     launch_operation_id: str | None = None,
 ) -> DayzTestWorkerError:
+    attestation = (
+        error.attestation if isinstance(error, DayzTestWorkerError) else None
+    )
     if isinstance(error, DayzTestWorkerError):
         if error.attempt_run_id is not None:
             attempt_run_id = error.attempt_run_id
@@ -166,6 +178,7 @@ def _failure_after_cleanup(
                 launch_operation_id=(
                     launch_operation_id if attempt_run_id is not None else None
                 ),
+                attestation=attestation,
             )
         code = error.code
     elif isinstance(error, asyncio.CancelledError):
@@ -178,6 +191,7 @@ def _failure_after_cleanup(
         cleanup_degraded=cleanup_degraded,
         attempt_run_id=attempt_run_id,
         launch_operation_id=launch_operation_id,
+        attestation=attestation,
     )
 
 
@@ -205,19 +219,23 @@ def _valid_build_source_basename(value: object) -> bool:
     return type(value) is str and _BUILD_SOURCE_BASENAME.fullmatch(value) is not None
 
 
-def _validate_runtime(
-    runtime: WorkerRuntimePolicy,
-    parsed: dayz_test_request.ParsedDayzTestRequest,
-) -> WorkerRuntimePolicy:
+_REQUIRED_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal"})
+
+
+def runtime_policy_acceptable(runtime: WorkerRuntimePolicy) -> bool:
+    """Semantic runtime rules shared with the sealed bundle accessor.
+
+    Required mission aliases, absolute local paths, and the build-source
+    basename. A dictionary of aliases is not enough: the worker refuses the
+    same document the accessor must refuse.
+    """
     aliases = dict(runtime.mission_aliases)
-    if (
-        type(runtime) is not WorkerRuntimePolicy
-        or runtime.dev_root != parsed.payload.get("dev_root")
-        or runtime.mod != parsed.payload.get("mod")
-        or not {"chernarus", "livonia", "sakhal"}.issubset(aliases)
-        or not all(type(key) is str and key for key in aliases)
-        or len(aliases) != len(runtime.mission_aliases)
-        or not all(
+    return (
+        type(runtime) is WorkerRuntimePolicy
+        and _REQUIRED_MISSION_ALIASES.issubset(aliases)
+        and all(type(key) is str and key for key in aliases)
+        and len(aliases) == len(runtime.mission_aliases)
+        and all(
             _local_path(path)
             for path in (
                 runtime.dev_root,
@@ -228,7 +246,93 @@ def _validate_runtime(
                 *aliases.values(),
             )
         )
-        or not _valid_build_source_basename(runtime.build_source_basename)
+        and _valid_build_source_basename(runtime.build_source_basename)
+    )
+
+
+_WORKER_RUNTIME_PROJECT_KEYS = frozenset(
+    {
+        "build_source_basename",
+        "build_temp_root",
+        "dev_root",
+        "diag_executable",
+        "game_directory",
+        "mission_aliases",
+        "mod",
+        "mods_root",
+    }
+)
+
+
+def worker_runtime_from_document(
+    document: object, mod: str, dev_root: str
+) -> WorkerRuntimePolicy:
+    """Closed worker-runtime document shared by the bundle and the bootstrap.
+
+    Required keys, unknown keys, and the semantic rules in
+    ``runtime_policy_acceptable`` are one decision. A missing
+    ``build_source_basename`` is a refusal, not an implicit null. The public
+    preflight maps this error to ``runtime_policy_invalid``.
+    """
+    if (
+        type(document) is not dict
+        or set(document) != {"format_version", "projects"}
+        or type(document.get("format_version")) is not int
+        or document["format_version"] != 1
+        or type(document.get("projects")) is not list
+        or not 1 <= len(document["projects"]) <= 128
+    ):
+        raise ValueError("worker_runtime_invalid")
+    seen: set[tuple[str, str]] = set()
+    selected: WorkerRuntimePolicy | None = None
+    for item in document["projects"]:
+        if type(item) is not dict or set(item) != _WORKER_RUNTIME_PROJECT_KEYS:
+            raise ValueError("worker_runtime_invalid")
+        if type(item["mod"]) is not str or not item["mod"]:
+            raise ValueError("worker_runtime_invalid")
+        if type(item["dev_root"]) is not str:
+            raise ValueError("worker_runtime_invalid")
+        identity = (item["mod"].casefold(), item["dev_root"].casefold())
+        if identity in seen:
+            raise ValueError("worker_runtime_invalid")
+        seen.add(identity)
+        aliases = item["mission_aliases"]
+        if type(aliases) is not dict or any(
+            type(key) is not str or not key or type(path) is not str
+            for key, path in aliases.items()
+        ):
+            raise ValueError("worker_runtime_invalid")
+        if not _REQUIRED_MISSION_ALIASES.issubset(aliases):
+            raise ValueError("worker_runtime_invalid")
+        if not _valid_build_source_basename(item["build_source_basename"]):
+            raise ValueError("worker_runtime_invalid")
+        policy = WorkerRuntimePolicy(
+            dev_root=item["dev_root"],
+            mod=item["mod"],
+            diag_executable=item["diag_executable"],
+            game_directory=item["game_directory"],
+            mission_aliases=tuple(sorted(aliases.items())),
+            mods_root=item["mods_root"],
+            build_temp_root=item["build_temp_root"],
+            build_source_basename=item["build_source_basename"],
+        )
+        if not runtime_policy_acceptable(policy):
+            raise ValueError("worker_runtime_invalid")
+        if item["mod"] == mod and item["dev_root"] == dev_root:
+            selected = policy
+    if selected is None:
+        raise ValueError("worker_runtime_invalid")
+    return selected
+
+
+def _validate_runtime(
+    runtime: WorkerRuntimePolicy,
+    parsed: dayz_test_request.ParsedDayzTestRequest,
+) -> WorkerRuntimePolicy:
+    if (
+        not runtime_policy_acceptable(runtime)
+        or runtime.dev_root != parsed.payload.get("dev_root")
+        or runtime.mod != parsed.payload.get("mod")
     ):
         raise _failed("runtime_policy_invalid")
     return runtime
@@ -271,13 +375,24 @@ def _mod_path(value: object, runtime: WorkerRuntimePolicy) -> str:
         raise _failed("runtime_policy_invalid") from None
 
 
+def _override(payload: dict[str, object]) -> bool:
+    return payload.get("project_mod_override") is True
+
+
+def _mod_entries(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> list[str]:
+    values = [*list(payload.get("base_mods", []))]
+    if not _override(payload):
+        values.append("@" + runtime.mod)
+    values.extend(list(payload.get("extra_mods", [])))
+    return [_mod_path(value, runtime) for value in values]
+
+
+def _reject_override_alias(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> None:
+    dayz_test_request.reject_original_project_directory(payload, runtime.mods_root)
+
+
 def _mods(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> str:
-    values = [
-        *list(payload.get("base_mods", [])),
-        "@" + runtime.mod,
-        *list(payload.get("extra_mods", [])),
-    ]
-    return ";".join(_mod_path(value, runtime) for value in values)
+    return ";".join(_mod_entries(payload, runtime))
 
 
 def _start_core(
@@ -287,6 +402,7 @@ def _start_core(
     role: str,
     run_id: str | None,
 ) -> dict[str, object]:
+    _reject_override_alias(payload, runtime)
     mission = _mission(payload, runtime)
     server_root = ntpath.join(runtime.dev_root, "_server")
     client_root = ntpath.join(runtime.dev_root, "_client")
@@ -391,7 +507,7 @@ def _modset_seal(
         return dayz_test_storage.modset_seal(
             dayz_test_storage.modset_roles(
                 base_mods=list(payload.get("base_mods", [])),
-                project_mod="@" + runtime.mod,
+                project_mod=None if _override(payload) else "@" + runtime.mod,
                 extra_mods=list(payload.get("extra_mods", [])),
                 server_mods=list(payload.get("server_mods", [])),
                 mods_root=runtime.mods_root,
@@ -399,6 +515,165 @@ def _modset_seal(
         )
     except dayz_test_storage.StorageError:
         raise _failed("runtime_policy_invalid") from None
+
+
+def _selected_attestation(
+    policies: tuple[dayz_test_request.RequestProjectPolicy, ...],
+    payload: dict[str, object],
+) -> dayz_test_attestation.ProjectAttestation | None:
+    for policy in policies:
+        if policy.mod == payload.get("mod") and policy.dev_root == payload.get("dev_root"):
+            return policy.attestation
+    return None
+
+
+def _effective_directories(
+    payload: dict[str, object], runtime: WorkerRuntimePolicy
+) -> tuple[str, ...]:
+    """Directories the requested roles actually load, including -serverMod."""
+    directories = list(_mod_entries(payload, runtime))
+    if payload.get("mode") in {"server", "all"}:
+        directories.extend(
+            _mod_path(value, runtime) for value in list(payload.get("server_mods", []))
+        )
+    return tuple(directories)
+
+
+def _capture_role_boundary(
+    attestation: dayz_test_attestation.ProjectAttestation,
+    payload: dict[str, object],
+    runtime: WorkerRuntimePolicy,
+    role: str,
+) -> dict[str, tuple[int, bool]]:
+    filenames = tuple(
+        requirement.filename
+        for requirement in attestation.initialization
+        if requirement.role == role and requirement.filename is not None
+    )
+    return dayz_test_attestation.capture_log_boundaries(
+        dayz_test_attestation.profile_directory(runtime.dev_root, role),
+        filenames,
+    )
+
+
+def assess_preflight(
+    payload: dict[str, object],
+    runtime: WorkerRuntimePolicy,
+    attestation: dayz_test_attestation.ProjectAttestation | None,
+) -> dict[str, object] | None:
+    """Checks shared with the host that do not need the box or a child process.
+
+    Mission resolution and the build-source basename gate run here. Asset
+    traversal does not. Attestation artifacts are read only when no build was
+    requested; a future build stays pending, and initialization is always
+    pending because preflight does not start the role.
+    """
+    _mission(payload, runtime)
+    _reject_override_alias(payload, runtime)
+    required = runtime.build_source_basename
+    if payload.get("build") and required is not None:
+        source = str(payload.get("source"))
+        if ntpath.basename(ntpath.normpath(source)).casefold() != required.casefold():
+            raise _failed("build_source_unavailable")
+    if attestation is None:
+        return None
+    pending_artifacts = bool(payload.get("build"))
+    artifact_status, artifacts = dayz_test_attestation.verify_artifacts(
+        attestation,
+        _effective_directories(payload, runtime),
+        pending=pending_artifacts,
+    )
+    init_status, initialization = dayz_test_attestation.initialization_rows(
+        attestation,
+        mode=str(payload.get("mode")),
+        dev_root=runtime.dev_root,
+        boundaries_by_role={},
+        pending=True,
+    )
+    document = dayz_test_attestation.report(
+        attestation,
+        artifact_status=artifact_status,
+        artifacts=artifacts,
+        initialization_status=init_status,
+        initialization=initialization,
+    )
+    code = dayz_test_attestation.failure_code(
+        document["status"] if isinstance(document.get("status"), str) else "unverifiable",
+        initialization_failed=False,
+    )
+    if code is not None:
+        raise _failed(code, attestation=document)
+    return document
+
+
+def _attest_artifacts_or_raise(
+    attestation: dayz_test_attestation.ProjectAttestation,
+    payload: dict[str, object],
+    runtime: WorkerRuntimePolicy,
+) -> tuple[str, list[dict[str, object]]]:
+    status, rows = dayz_test_attestation.verify_artifacts(
+        attestation, _effective_directories(payload, runtime), pending=False
+    )
+    if status != "passed":
+        init_status, initialization = dayz_test_attestation.initialization_rows(
+            attestation,
+            mode=str(payload.get("mode")),
+            dev_root=runtime.dev_root,
+            boundaries_by_role={},
+            pending=True,
+        )
+        document = dayz_test_attestation.report(
+            attestation,
+            artifact_status=status,
+            artifacts=rows,
+            initialization_status=init_status,
+            initialization=initialization,
+        )
+        raise _failed(
+            dayz_test_attestation.failure_code(status, initialization_failed=False)
+            or "project_attestation_unverifiable",
+            attestation=document,
+        )
+    return status, rows
+
+
+async def _attest_initialization(
+    attestation: dayz_test_attestation.ProjectAttestation,
+    *,
+    payload: dict[str, object],
+    runtime: WorkerRuntimePolicy,
+    artifact_status: str,
+    artifacts: list[dict[str, object]],
+    boundaries: dict[str, dict[str, int]],
+    cancel_event: asyncio.Event | None,
+) -> dict[str, object]:
+    deadline = asyncio.get_running_loop().time() + attestation.timeout_s
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+        init_status, initialization = dayz_test_attestation.initialization_rows(
+            attestation,
+            mode=str(payload.get("mode")),
+            dev_root=runtime.dev_root,
+            boundaries_by_role=boundaries,
+            pending=False,
+        )
+        document = dayz_test_attestation.report(
+            attestation,
+            artifact_status=artifact_status,
+            artifacts=artifacts,
+            initialization_status=init_status,
+            initialization=initialization,
+        )
+        if document["status"] == "passed":
+            return document
+        if document["status"] == "unverifiable" or asyncio.get_running_loop().time() >= deadline:
+            code = dayz_test_attestation.failure_code(
+                str(document["status"]) if document["status"] != "pending" else "failed",
+                initialization_failed=init_status == "failed" or document["status"] != "unverifiable",
+            )
+            raise _failed(code or "project_attestation_initialization_missing", attestation=document)
+        await asyncio.sleep(0.05)
 
 
 async def _invoke(
@@ -752,12 +1027,11 @@ async def execute_dayz_test_worker(
         raise _failed(
             "run_stop_failed", run_id=run_id, cleanup_degraded=True
         )
+    attestation = _selected_attestation(request_policies, payload)
     if payload["preflight"]:
-        # Preflight must fail exactly where a real launch would: resolve the
-        # mission now so an alias missing from this project's runtime is not
-        # reported as success.
-        _mission(payload, runtime)
-        return WorkerResult(0, run_id)
+        # No child, no storage write. The same assess_preflight the host uses.
+        document = assess_preflight(payload, runtime, attestation)
+        return WorkerResult(0, run_id, document)
 
     if payload["build"]:
         source = str(payload["source"])
@@ -794,6 +1068,40 @@ async def execute_dayz_test_worker(
     if cancelled():
         raise _failed("operation_cancelled")
 
+    artifact_status = "passed"
+    artifact_rows: list[dict[str, object]] = []
+    boundaries: dict[str, dict[str, tuple[int, bool]]] = {}
+    if attestation is not None:
+        artifact_status, artifact_rows = _attest_artifacts_or_raise(
+            attestation, payload, runtime
+        )
+
+    def capture(role: str) -> None:
+        if attestation is None:
+            return
+        try:
+            boundaries[role] = _capture_role_boundary(
+                attestation, payload, runtime, role
+            )
+        except ValueError:
+            init_status, initialization = dayz_test_attestation.initialization_rows(
+                attestation,
+                mode=str(payload.get("mode")),
+                dev_root=runtime.dev_root,
+                boundaries_by_role=boundaries,
+                pending=True,
+            )
+            document = dayz_test_attestation.report(
+                attestation,
+                artifact_status=artifact_status,
+                artifacts=artifact_rows,
+                initialization_status="unverifiable",
+                initialization=initialization,
+            )
+            raise _failed(
+                "project_attestation_unverifiable", attestation=document
+            ) from None
+
     mode = str(payload["mode"])
     created_run_id: str | None = None
     # The run this attempt created or targeted, and the launch operation it
@@ -807,6 +1115,7 @@ async def execute_dayz_test_worker(
             if not _successful_run(adopted, run_id, "RUNNING"):
                 raise _failed()
         if mode == "server":
+            capture("server")
             run_id, _acknowledged, attempt_operation_id = await _start(
                 broker, payload, runtime, role="server", existing_run_id=None, id_fn=id_fn
             )
@@ -814,10 +1123,12 @@ async def execute_dayz_test_worker(
         elif mode == "client":
             if run_id is None:
                 raise _failed()
+            capture("client")
             run_id, _acknowledged, _operation = await _start(
                 broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
             )
         elif mode == "offline":
+            capture("offline")
             run_id, _acknowledged, operation = await _start(
                 broker,
                 payload,
@@ -831,6 +1142,7 @@ async def execute_dayz_test_worker(
                 created_run_id = run_id
                 attempt_operation_id = operation
         elif mode == "all":
+            capture("server")
             run_id, _acknowledged, attempt_operation_id = await _start(
                 broker, payload, runtime, role="server", existing_run_id=None, id_fn=id_fn
             )
@@ -850,11 +1162,24 @@ async def execute_dayz_test_worker(
                 raise _failed(readiness.error_code)
             if cancelled():
                 raise asyncio.CancelledError
+            capture("client")
             run_id, _acknowledged, _operation = await _start(
                 broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
             )
         else:
             raise _failed("runtime_policy_invalid")
+        if attestation is not None:
+            attested = await _attest_initialization(
+                attestation,
+                payload=payload,
+                runtime=runtime,
+                artifact_status=artifact_status,
+                artifacts=artifact_rows,
+                boundaries=boundaries,
+                cancel_event=cancel_event,
+            )
+        else:
+            attested = None
     except BaseException as error:
         cleanup_degraded = False
         if created_run_id is not None:
@@ -866,4 +1191,4 @@ async def execute_dayz_test_worker(
             attempt_run_id=attempt_run_id,
             launch_operation_id=attempt_operation_id if attempt_run_id is not None else None,
         ) from None
-    return WorkerResult(0, run_id)
+    return WorkerResult(0, run_id, attested if attestation is not None else None)

@@ -163,9 +163,13 @@ def modset_roles(
     separate roles: merging them would let a change confined to `server_mods`
     leave the seal unmoved.
     """
+    if project_mod is None:
+        sealed_project: str | None = None
+    else:
+        sealed_project = normalize_mod_path(project_mod, mods_root).casefold()
     return {
         "base_mods": list(normalize_modset(base_mods, mods_root=mods_root)),
-        "project_mod": normalize_mod_path(project_mod, mods_root).casefold(),
+        "project_mod": sealed_project,
         "extra_mods": list(normalize_modset(extra_mods, mods_root=mods_root)),
         "server_mods": list(normalize_modset(server_mods, mods_root=mods_root)),
     }
@@ -180,7 +184,11 @@ def modset_seal(roles: Mapping[str, object]) -> str:
     if not isinstance(roles, Mapping) or set(roles) != set(MODSET_ROLES):
         raise StorageError("invalid_modset_roles")
     project_mod = roles["project_mod"]
-    if not isinstance(project_mod, str) or not project_mod:
+    # null is the absent implicit project role (project_mod_override). A string
+    # role keeps the historical hash input.
+    if project_mod is not None and (
+        not isinstance(project_mod, str) or not project_mod
+    ):
         raise StorageError("invalid_modset_roles")
     sealed_roles: dict[str, object] = {"project_mod": project_mod}
     for name in ("base_mods", "extra_mods", "server_mods"):
