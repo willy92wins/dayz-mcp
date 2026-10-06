@@ -245,8 +245,10 @@ def _is_trusted_gac_resource_satellite(path: str, windows_directory: str) -> boo
     # ".resources" directories qualify (code assemblies like
     # System.Resources.Reader stay out). Evil sibling roots, foreign
     # basenames, deeper nesting and malformed fields stay rejected.
-    # The whole path must be ASCII, as every legitimate satellite path is:
-    # casefold() and lower() equate some non-ASCII letters with ASCII ones
+    # The whole path must be ASCII, as the 230 satellite paths measured on the
+    # host on 2026-10-06 are; a satellite under a non-ASCII name or a non-ASCII
+    # Windows directory is rejected (fail closed). casefold() and lower()
+    # equate some non-ASCII letters with ASCII ones
     # (U+017F LONG S casefolds to "s", U+212A KELVIN SIGN lowers to "k"),
     # while Windows compares names with its own uppercase table and does not,
     # so "C:\Window<U+017F>\..." is a separate tree any authenticated user
