@@ -245,6 +245,14 @@ def _is_trusted_gac_resource_satellite(path: str, windows_directory: str) -> boo
     # ".resources" directories qualify (code assemblies like
     # System.Resources.Reader stay out). Evil sibling roots, foreign
     # basenames, deeper nesting and malformed fields stay rejected.
+    # The whole path must be ASCII, as every legitimate satellite path is:
+    # casefold() and lower() equate some non-ASCII letters with ASCII ones
+    # (U+017F LONG S casefolds to "s", U+212A KELVIN SIGN lowers to "k"),
+    # while Windows compares names with its own uppercase table and does not,
+    # so "C:\Window<U+017F>\..." is a separate tree any authenticated user
+    # can create.
+    if not path.isascii():
+        return False
     expected = ntpath.normpath(
         ntpath.join(
             windows_directory, "Microsoft.NET", "assembly", "GAC_MSIL"
@@ -257,7 +265,7 @@ def _is_trusted_gac_resource_satellite(path: str, windows_directory: str) -> boo
     # parent = <GAC_MSIL>\<assembly>\<version dir>; one more dirname gets the
     # assembly directory, one more the pinned GAC_MSIL root.
     gac_directory = ntpath.dirname(ntpath.dirname(parent))
-    if gac_directory.casefold() != expected.casefold():
+    if ntpath.normcase(gac_directory) != ntpath.normcase(expected):
         return False
     if not assembly_directory.casefold().endswith(".resources"):
         return False

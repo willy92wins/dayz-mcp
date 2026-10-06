@@ -155,6 +155,8 @@ class NativeBundleTest(unittest.TestCase):
             40: unknown,
             41: unknown,
             42: unknown,
+            45: unknown,
+            46: unknown,
             43: unknown,
             44: unknown,
         }
@@ -274,6 +276,17 @@ class NativeBundleTest(unittest.TestCase):
                 r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
                 r"\v4.0_4.0.0.0_es_zzzz5c561934e089\mscorlib.resources.dll"
             ),
+            # Lookalike root: U+017F LONG S casefolds to "s" but names a
+            # separate, user-creatable directory under C:\.
+            45: (
+                "C:\\Window\u017f\\Microsoft.NET\\assembly\\GAC_MSIL\\Evil.resources"
+                "\\v4.0_1.2.3.4_es_0000000000000000\\Evil.resources.dll"
+            ),
+            # Lookalike ".resources" suffix inside the genuine root.
+            46: (
+                "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\Evil.re\u017fources"
+                "\\v4.0_1.2.3.4_es_0000000000000000\\Evil.re\u017fources.dll"
+            ),
         }
         with patch.object(
             native_bundle, "_file_identity", side_effect=lambda handle: identities[handle]
@@ -317,6 +330,9 @@ class NativeBundleTest(unittest.TestCase):
             # tokens, evil roots, foreign basenames, nesting, bad cultures.
             self.assertFalse(authority.approve_debug_image(43, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(44, event_kind="LOAD_DLL"))
+            # Non-ASCII lookalikes of the root or of the suffix (U+017F).
+            self.assertFalse(authority.approve_debug_image(45, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(46, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(12, event_kind="CREATE_PROCESS"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="UNKNOWN"))
