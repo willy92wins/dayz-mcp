@@ -1,0 +1,6 @@
+--- tests.test_tool_description_caveats_2: rc=0
+Ran 10 tests in 0.296s
+
+OK
+--- fast tier: ran=5597 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
