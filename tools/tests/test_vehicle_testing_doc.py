@@ -180,14 +180,14 @@ class VehicleReleaseNotGetOutDocsTest(unittest.TestCase):
         doc = _doc()
         m = re.search(
             r"only (?:aborts the\s+trace and\s+clears|clears)\s+"
-            r"(?:the )?trace/control[^.]*`MCPClientBridge\.c:2598-2603`|"
-            r"`MCPClientBridge\.c:2598-2603`[^.]*not a get-out",
+            r"(?:the )?trace/control[^.]*`MCPClientBridge\.c:\d+-\d+`|"
+            r"`MCPClientBridge\.c:\d+-\d+`[^.]*not a get-out",
             doc, re.S)
         self.assertIsNotNone(
             m,
             "the release clause lost its scope or its cite: the doc must "
             "say vehicle_release only clears trace/control "
-            "(MCPClientBridge.c:2598-2603) and is not a get-out")
+            "(an MCPClientBridge.c line range) and is not a get-out")
         self.assertIn(
             "not a get-out", doc,
             "the doc must state outright that vehicle_release is not a "
@@ -196,20 +196,26 @@ class VehicleReleaseNotGetOutDocsTest(unittest.TestCase):
     def test_cited_release_lines_match_the_bridge(self) -> None:
         if not CLIENT_BRIDGE.is_file():
             self.skipTest("addon/ absent (sparse public clone)")
+        # The range comes from the doc's own cite, so a bridge edit that
+        # moves the release body fails here until the cite is re-anchored.
+        cites = sorted({(int(a), int(b)) for a, b in re.findall(
+            r"`MCPClientBridge\.c:(\d+)-(\d+)`", _doc())})
+        self.assertTrue(cites, "the doc lost its MCPClientBridge.c release cite")
         lines = CLIENT_BRIDGE.read_text(encoding="utf-8").splitlines()
-        body = "\n".join(lines[2597:2603])
-        self.assertIn(
-            "DispatchVehicleRelease", body,
-            "the cited MCPClientBridge.c:2598-2603 no longer holds "
-            "DispatchVehicleRelease; re-anchor the doc's release cite")
-        self.assertIn(
-            "MCPVehicleTrace.Abort", body,
-            "DispatchVehicleRelease no longer aborts the trace at the "
-            "cited lines")
-        self.assertIn(
-            "MCPCarDrive.Clear", body,
-            "DispatchVehicleRelease no longer clears the drive control "
-            "state at the cited lines")
+        for start, end in cites:
+            body = "\n".join(lines[start - 1:end])
+            self.assertIn(
+                "DispatchVehicleRelease", body,
+                f"the cited MCPClientBridge.c:{start}-{end} no longer holds "
+                "DispatchVehicleRelease; re-anchor the doc's release cite")
+            self.assertIn(
+                "MCPVehicleTrace.Abort", body,
+                "DispatchVehicleRelease no longer aborts the trace at the "
+                f"cited lines {start}-{end}")
+            self.assertIn(
+                "MCPCarDrive.Clear", body,
+                "DispatchVehicleRelease no longer clears the drive control "
+                f"state at the cited lines {start}-{end}")
 
     def test_teardown_stays_the_registered_id_delete(self) -> None:
         section = _section(_doc(), _LADDER_HEADER)

@@ -25,7 +25,7 @@ no `vehicle_enter`, the bridge build of 2026-08-24 — the server's replica of
 the client-owned car was still at the spawn point while the client drove it.
 That observation is bound to its run and configuration; it is not a law.
 `vehicle_enter` seats the player in the server crew (`StartCommand_Vehicle`,
-`MCPBridge.c:995-1005`; in-game 2026-06-08, product-spec B2), and every
+`MCPBridge.c:1001-1011`; in-game 2026-06-08, product-spec B2), and every
 no-replica-motion sample this file carries was taken on a client-get-in-only
 ladder like the client one below. Whether the server side follows the
 client-owned car is read per run, with the server/client position comparison
@@ -36,11 +36,11 @@ sessions), which `finish_site` reports as `OK_FORCED_DELETE`.
 
 Surface limits that shape site choice:
 
-- `vehicle_control` has **no reverse** — throttle is clamped to `0..1`
-  ([`tools/dayz_mcp/server.py:3695`](../tools/dayz_mcp/server.py)); a car
+- `vehicle_control` has **no reverse** — throttle is limited to `0..1` and refused as `bad_throttle`
+  outside it ([`tools/dayz_mcp/server.py:7733-7734`](../tools/dayz_mcp/server.py)); a car
   stopped against an obstacle cannot be recovered by driving.
 - `world_spawn`'s `rotation` argument is **`RF_*` flags, not a heading**
-  (`MCPBridge.c:553`); spawn heading is inherited from the terrain and there
+  (`MCPBridge.c:651`); spawn heading is inherited from the terrain and there
   is no orientation setter in the tool surface.
 - `scene_raycast` with `intersect="view"` does **not** detect the statics
   that stop a car (measured 8/8 false CLEAR over a line with a proven
@@ -143,7 +143,7 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    on this stand (see "The exit reality"). Tear down with `vehicle_release`
    and `object_delete` of the fixture (`vehicle_release` only aborts the
    trace and clears the drive-control state,
-   `MCPClientBridge.c:2598-2603` — it is not a get-out); verify the ejection
+   `MCPClientBridge.c:2601-2606` — it is not a get-out); verify the ejection
    via telemetry (`not_seated`), then `restore_gameplay`.
 10. Release the session lease.
 
@@ -188,7 +188,7 @@ server replica is.
 2. `player_teleport` the driver to the surface y behind the canopy gate, as
    in the client ladder.
 3. `vehicle_enter` near the fixture pos: the server half of the seat. It
-   runs `StartCommand_Vehicle` (`MCPBridge.c:995-1005`) and puts the player
+   runs `StartCommand_Vehicle` (`MCPBridge.c:1001-1011`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
    (product-spec B2). `seated=1` says the command was accepted, not that
    the state settled: assert `seated` and `seat == "driver"`, and treat the
@@ -203,12 +203,12 @@ server replica is.
    replica moved. Server side: `entities_query` around the last
    server-known position, or `object_inspect(object_id=<fixture id>,
    want=["inventory"])` and its `telemetry.pos`, the world position
-   (`GetPosition`, `MCPBridge.c:3394`). `bounding_center` is model-local
+   (`GetPosition`, `MCPBridge.c:3471`). `bounding_center` is model-local
    (`MCPMessages.c:476`) and is not a position to compare. Client
    side: `vehicle_telemetry` `pos_real` and the `vehicle_trace` samples.
    This step checks position agreement only, not the server crew:
    `query_all_players` reports the server `in_vehicle` (`IsInTransport`,
-   `MCPBridge.c:4258`), which shows a player in a transport but neither the
+   `MCPBridge.c:4335`), which shows a player in a transport but neither the
    driver seat nor a settled seat.
    Record both tracks with the run id and the bridge/game version, the way
    every measurement in this file is labeled. A divergence is a result about
@@ -217,7 +217,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: `vehicle_release`, then
    `object_delete` of the registered fixture id — the release only clears
-   trace/control (`MCPClientBridge.c:2598-2603`), the delete performs the
+   trace/control (`MCPClientBridge.c:2601-2606`), the delete performs the
    ejection, verified via telemetry (`not_seated`) — then
    `restore_gameplay` and the session release.
 
