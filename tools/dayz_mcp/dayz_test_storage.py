@@ -36,12 +36,15 @@ import json
 import ntpath
 import os
 import re
+import stat
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
 MARKER_SCHEMA_VERSION = 1
+JOURNAL_SCHEMA_LEGACY = 1
+JOURNAL_SCHEMA_VERSION = 2
 MARKER_ALGORITHM = "sha256"
 STORAGE_NAME = "storage_1"
 MARKER_NAME = "storage_1.modset.json"
@@ -253,12 +256,33 @@ def _mission_dir(mission: object) -> str:
     return mission
 
 
-def _read_json(path: str) -> object | None:
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
-    except OSError:
-        return None
+def _win32_file_identity(name: str) -> str:
+    """Path-segment identity used by Win32: case, trailing dots, trailing spaces."""
+    return name.rstrip(" .").casefold()
+
+
+def _plain_artifact_name(value: object) -> bool:
+    """D5, the same predicate process_lifecycle uses for a backup name.
+
+    Applied before any join. A name that is not a single path segment can alias
+    an authoritative artifact or escape the mission directory.
+    """
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value not in {".", ".."}
+        and "/" not in value
+        and "\\" not in value
+        and ":" not in value
+    )
+
+
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def _parse_json(raw: bytes) -> object | None:
     if not raw or len(raw) > 65_536:
         return None
     try:
@@ -267,37 +291,63 @@ def _read_json(path: str) -> object | None:
         return None
 
 
+def _read_json(path: str) -> object | None:
+    try:
+        raw = _read_bytes(path)
+    except OSError:
+        return None
+    return _parse_json(raw)
+
+
+def _write_all(handle: object, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = handle.write(view)  # type: ignore[attr-defined]
+        if not isinstance(written, int) or written <= 0:
+            raise StorageError("short_write")
+        view = view[written:]
+
+
+def _exclusive_temporary(directory: str) -> str:
+    """Create an empty sibling temporary. Never truncate a name that exists."""
+    while True:
+        temporary = ntpath.join(
+            directory,
+            f"{STORAGE_NAME}.modset.tmp-{os.getpid()}-{next(_TEMPORARY_SEQUENCE)}",
+        )
+        try:
+            handle = open(temporary, "xb")
+        except FileExistsError:
+            continue
+        handle.close()
+        return temporary
+
+
 def _write_json_atomic(path: str, document: object, *, replace: bool) -> None:
-    """Temporary sibling, fsync, rename. Read back before returning.
+    """Temporary sibling, fsync, publish, read back.
 
     `replace=False` refuses an existing destination: a journal is created once
-    and never overwritten. `replace=True` is only used for the marker, which is
-    derived data and never the source of truth of anything a player owns.
+    and never overwritten. `replace=True` publishes the marker or a later phase.
+    The temporary is not named after its destination, so a leftover cannot match
+    the journal grammar. A publish that fails unlinks that temporary only.
     """
     payload = _canonical(document)
-    # The temporary is NOT named after its destination. A hard kill between the
-    # write and the rename leaves it on disk forever (v1 deletes nothing), and a
-    # leftover called `storage_1.modset.rotation.<txid>.json.tmp-...` matches the
-    # journal prefix without matching the journal grammar, which would block
-    # every future launch of the mission. Its own prefix keeps it out of the scan.
-    temporary = ntpath.join(
-        ntpath.dirname(path),
-        f"{STORAGE_NAME}.modset.tmp-{os.getpid()}-{next(_TEMPORARY_SEQUENCE)}",
-    )
-    with open(temporary, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
+    temporary = _exclusive_temporary(ntpath.dirname(path))
     try:
+        with open(temporary, "wb") as handle:
+            _write_all(handle, payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         if replace:
             os.replace(temporary, path)
         else:
-            if os.path.exists(path):
+            if _entry_kind(path) != "absent":
                 raise StorageError("destination_exists")
             os.rename(temporary, path)
-    except BaseException:
+    except Exception:
         try:
-            os.unlink(temporary)
+            if _entry_kind(temporary) != "absent":
+                os.unlink(temporary)
         except OSError:
             pass
         raise
@@ -308,7 +358,7 @@ def _write_json_atomic(path: str, document: object, *, replace: bool) -> None:
 
 def _rename_strict(source: str, destination: str) -> None:
     """Rename to a destination that does not exist. Never overwrite, never delete."""
-    if os.path.exists(destination):
+    if _entry_kind(destination) != "absent":
         raise StorageError("destination_exists")
     os.rename(source, destination)
 
@@ -316,9 +366,9 @@ def _rename_strict(source: str, destination: str) -> None:
 def read_marker(mission: str) -> MarkerRead:
     """Classify the sibling seal. Never repairs, never trusts a path it carries."""
     path = ntpath.join(_mission_dir(mission), MARKER_NAME)
-    if not os.path.isfile(path):
+    if _entry_kind(path) != "file":
         return MarkerRead(MARKER_ABSENT, None, None, False)
-    document = _read_json(path)
+    document = _parse_json(_read_bytes(path))
     if (
         not isinstance(document, dict)
         or set(document) != {"schema_version", "algorithm", "seal", "project"}
@@ -342,12 +392,6 @@ def _marker_document(seal: str, project: str) -> dict[str, object]:
         "seal": seal,
         "project": project,
     }
-
-
-def _publish_marker(mission: str, seal: str, project: str) -> None:
-    _write_json_atomic(
-        ntpath.join(mission, MARKER_NAME), _marker_document(seal, project), replace=True
-    )
 
 
 def _backup_stamp(now: float) -> str:
@@ -377,9 +421,11 @@ def _journal_document(
     project: str,
     storage_backup: str,
     marker_backup: str,
+    old_marker_state: str,
+    old_marker_sha256: str | None,
 ) -> dict[str, object]:
     return {
-        "schema_version": MARKER_SCHEMA_VERSION,
+        "schema_version": JOURNAL_SCHEMA_VERSION,
         "txid": txid,
         "phase": phase,
         "new_seal": new_seal,
@@ -387,40 +433,88 @@ def _journal_document(
         "project": project,
         "storage_backup": storage_backup,
         "marker_backup": marker_backup,
+        "old_marker_state": old_marker_state,
+        "old_marker_sha256": old_marker_sha256,
     }
 
 
 def _valid_journal(document: object, txid: str) -> dict[str, object] | None:
+    if not isinstance(document, dict):
+        return None
+    version = document.get("schema_version")
+    legacy = version == JOURNAL_SCHEMA_LEGACY
+    current = version == JOURNAL_SCHEMA_VERSION
+    if legacy == current:
+        return None
+    expected = {
+        "schema_version",
+        "txid",
+        "phase",
+        "new_seal",
+        "old_seal",
+        "project",
+        "storage_backup",
+        "marker_backup",
+    }
+    if current:
+        expected |= {"old_marker_state", "old_marker_sha256"}
+    if set(document) != expected:
+        return None
+    phase = document.get("phase")
+    new_seal = document.get("new_seal")
+    project = document.get("project")
     if (
-        not isinstance(document, dict)
-        or set(document)
-        != {
-            "schema_version",
-            "txid",
-            "phase",
-            "new_seal",
-            "old_seal",
-            "project",
-            "storage_backup",
-            "marker_backup",
-        }
-        or document.get("schema_version") != MARKER_SCHEMA_VERSION
-        or document.get("txid") != txid
-        or document.get("phase") not in _PHASES
-        or not isinstance(document.get("new_seal"), str)
-        or _SEAL.fullmatch(str(document["new_seal"])) is None
-        or not isinstance(document.get("project"), str)
-        or not document["project"]
-        or not isinstance(document.get("storage_backup"), str)
-        or not document["storage_backup"]
-        or not isinstance(document.get("marker_backup"), str)
-        or not document["marker_backup"]
+        document.get("txid") != txid
+        or not isinstance(phase, str)
+        or phase not in _PHASES
+        or not isinstance(new_seal, str)
+        or _SEAL.fullmatch(new_seal) is None
+        or not isinstance(project, str)
+        or not 1 <= len(project) <= 64
+        or not _plain_artifact_name(document.get("storage_backup"))
+        or not _plain_artifact_name(document.get("marker_backup"))
     ):
         return None
     old_seal = document.get("old_seal")
     if old_seal is not None and (
         not isinstance(old_seal, str) or _SEAL.fullmatch(old_seal) is None
     ):
+        return None
+    backup = str(document["storage_backup"])
+    marker_backup = str(document["marker_backup"])
+    journal_name = JOURNAL_PREFIX + txid + JOURNAL_SUFFIX
+    completed_name = JOURNAL_PREFIX + txid + JOURNAL_COMPLETED_SUFFIX
+    reserved = (
+        STORAGE_NAME,
+        MARKER_NAME,
+        backup,
+        marker_backup,
+        journal_name,
+        completed_name,
+    )
+    # Windows names one file when segments differ only by case or by trailing
+    # spaces and periods (`storage_1.` is `storage_1`). Refuse before any join
+    # that would rename a marker onto the world.
+    if len({_win32_file_identity(name) for name in reserved}) != len(reserved):
+        return None
+    if not current:
+        return document
+    state = document.get("old_marker_state")
+    digest = document.get("old_marker_sha256")
+    if state == MARKER_ABSENT:
+        if digest is not None or old_seal is not None:
+            return None
+    elif isinstance(state, str) and state in {MARKER_PRESENT_VALID, MARKER_PRESENT_INVALID}:
+        if (
+            not isinstance(digest, str)
+            or _SEAL.fullmatch(digest) is None
+        ):
+            return None
+        if state == MARKER_PRESENT_VALID and old_seal is None:
+            return None
+        if state == MARKER_PRESENT_INVALID and old_seal is not None:
+            return None
+    else:
         return None
     return document
 
@@ -439,37 +533,448 @@ def _complete_journal(mission: str, txid: str) -> None:
     )
 
 
-def _finish_rotation(
+def _entry_kind(path: str) -> str:
+    """`absent`, `dir`, `file`, `link` or `other`. An OSError is not absence."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return "absent"
+    if stat.S_ISLNK(mode):
+        return "link"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "other"
+
+
+def _sha256(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _classify_marker_bytes(raw: bytes) -> tuple[str, str | None]:
+    document = _parse_json(raw)
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "algorithm", "seal", "project"}
+        or document.get("schema_version") != MARKER_SCHEMA_VERSION
+        or document.get("algorithm") != MARKER_ALGORITHM
+        or not isinstance(document.get("seal"), str)
+        or _SEAL.fullmatch(document["seal"]) is None
+        or not isinstance(document.get("project"), str)
+        or not document["project"]
+    ):
+        return MARKER_PRESENT_INVALID, None
+    return MARKER_PRESENT_VALID, str(document["seal"])
+
+
+def _canonical_marker(seal: str, project: str) -> bytes:
+    return _canonical(_marker_document(seal, project))
+
+
+def _publish_payload(path: str, payload: bytes, *, replace: bool) -> None:
+    temporary = _exclusive_temporary(ntpath.dirname(path))
+    try:
+        with open(temporary, "wb") as handle:
+            _write_all(handle, payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if replace:
+            os.replace(temporary, path)
+        else:
+            if _entry_kind(path) != "absent":
+                raise StorageError("destination_exists")
+            os.rename(temporary, path)
+    except Exception:
+        try:
+            if _entry_kind(temporary) != "absent":
+                os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    if _read_bytes(path) != payload:
+        raise StorageError("write_not_durable")
+
+
+def _publish_marker(mission: str, seal: str, project: str) -> None:
+    path = ntpath.join(mission, MARKER_NAME)
+    payload = _canonical_marker(seal, project)
+    if _entry_kind(path) == "file" and _read_bytes(path) == payload:
+        return
+    _publish_payload(path, payload, replace=True)
+
+
+def _marker_is_n(raw: bytes | None, document: dict[str, object]) -> bool:
+    if raw is None:
+        return False
+    return raw == _canonical_marker(str(document["new_seal"]), str(document["project"]))
+
+
+def _legacy_is_n(raw: bytes | None, document: dict[str, object]) -> bool:
+    """Schema 1 published the seal, not a byte-identical canonical document.
+
+    Main treated a valid marker carrying ``new_seal`` as the publication.
+    Schema 2 keeps the exact canonical bytes in ``_marker_is_n``.
+    """
+    if raw is None:
+        return False
+    state, seal = _classify_marker_bytes(raw)
+    if state != MARKER_PRESENT_VALID or seal != document.get("new_seal"):
+        return False
+    parsed = _parse_json(raw)
+    return isinstance(parsed, dict) and parsed.get("project") == document.get("project")
+
+
+def _legacy_seal_bytes(raw: bytes | None, old_seal: str) -> bool:
+    if raw is None:
+        return False
+    state, seal = _classify_marker_bytes(raw)
+    return state == MARKER_PRESENT_VALID and seal == old_seal
+
+
+def _select_action(
+    document: dict[str, object],
+    *,
+    w: str,
+    d: str,
+    m_kind: str,
+    m_bytes: bytes | None,
+    k_kind: str,
+    k_bytes: bytes | None,
+    completed: bool,
+) -> str:
+    """One admitted continuation, or `refuse`. No mutation."""
+    if completed:
+        return "refuse"
+    if w not in {"absent", "dir"} or d not in {"absent", "dir"}:
+        return "refuse"
+    if w == "dir" and d == "dir":
+        return "refuse"
+    if w == "absent" and d == "absent":
+        return "refuse"
+    phase = str(document["phase"])
+    if phase in {PHASE_STORAGE_MOVED, PHASE_MARKER_PUBLISHED} and d != "dir":
+        return "refuse"
+    schema2 = document.get("schema_version") == JOURNAL_SCHEMA_VERSION
+    if schema2:
+        return _select_schema2(
+            document, w=w, d=d, m_kind=m_kind, m_bytes=m_bytes,
+            k_kind=k_kind, k_bytes=k_bytes,
+        )
+    return _select_legacy(
+        document, w=w, d=d, m_kind=m_kind, m_bytes=m_bytes,
+        k_kind=k_kind, k_bytes=k_bytes,
+    )
+
+
+def _original_matches(
+    document: dict[str, object], kind: str, raw: bytes | None
+) -> bool:
+    state = document.get("old_marker_state")
+    if state == MARKER_ABSENT:
+        return kind == "absent"
+    if kind != "file" or raw is None:
+        return False
+    return _sha256(raw) == document.get("old_marker_sha256")
+
+
+def _preservation_held(
+    document: dict[str, object], k_kind: str, k_bytes: bytes | None
+) -> bool:
+    state = document.get("old_marker_state")
+    if state == MARKER_ABSENT:
+        return k_kind == "absent"
+    return _original_matches(document, k_kind, k_bytes)
+
+
+def _select_schema2(
+    document: dict[str, object],
+    *,
+    w: str,
+    d: str,
+    m_kind: str,
+    m_bytes: bytes | None,
+    k_kind: str,
+    k_bytes: bytes | None,
+) -> str:
+    phase = str(document["phase"])
+    is_n = _marker_is_n(m_bytes, document)
+    if phase == PHASE_PREPARED:
+        if k_kind != "absent" or not _original_matches(document, m_kind, m_bytes):
+            return "refuse"
+        if w == "dir" and d == "absent":
+            return "abort"
+        if w == "absent" and d == "dir":
+            return "advance_s"
+        return "refuse"
+    if phase == PHASE_STORAGE_MOVED:
+        if document.get("old_marker_state") == MARKER_ABSENT:
+            if k_kind != "absent":
+                return "refuse"
+            if m_kind == "absent":
+                return "publish_n"
+            if is_n:
+                return "advance_q"
+            return "refuse"
+        if k_kind == "absent":
+            if _original_matches(document, m_kind, m_bytes):
+                return "preserve"
+            return "refuse"
+        if not _preservation_held(document, k_kind, k_bytes):
+            return "refuse"
+        if m_kind == "absent":
+            return "publish_n"
+        if is_n:
+            return "advance_q"
+        return "refuse"
+    if phase == PHASE_MARKER_PUBLISHED:
+        if not is_n or not _preservation_held(document, k_kind, k_bytes):
+            return "refuse"
+        return "complete"
+    return "refuse"
+
+
+def _legacy_opaque(kind: str) -> bool:
+    return kind in {"file", "dir", "link", "other"}
+
+
+def _select_legacy(
+    document: dict[str, object],
+    *,
+    w: str,
+    d: str,
+    m_kind: str,
+    m_bytes: bytes | None,
+    k_kind: str,
+    k_bytes: bytes | None,
+) -> str:
+    phase = str(document["phase"])
+    old = document.get("old_seal")
+    known = isinstance(old, str)
+    is_n = _legacy_is_n(m_bytes, document)
+    if phase == PHASE_PREPARED and w == "dir" and d == "absent":
+        # An intact world is only the abort of a prepared journal. K authenticates
+        # an old marker after the world has moved; it does not make a new canonical
+        # marker compatible with the tree that is still in place. Preserved-K
+        # exceptions stay in the moved-world branches below.
+        if k_kind != "absent":
+            return "refuse"
+        if known and not _legacy_seal_bytes(m_bytes, old):
+            return "refuse"
+        return "abort"
+    if d != "dir" or w != "absent":
+        return "refuse"
+    if known:
+        return _select_legacy_known(
+            document, old=old, phase=phase, m_kind=m_kind, m_bytes=m_bytes,
+            k_kind=k_kind, k_bytes=k_bytes, is_n=is_n,
+        )
+    return _select_legacy_unknown(
+        phase=phase, m_kind=m_kind, k_kind=k_kind, is_n=is_n,
+    )
+
+
+def _select_legacy_unknown(
+    *,
+    phase: str,
+    m_kind: str,
+    k_kind: str,
+    is_n: bool,
+) -> str:
+    if phase == PHASE_MARKER_PUBLISHED:
+        if not is_n:
+            return "refuse"
+        return "complete"
+    if phase not in {PHASE_PREPARED, PHASE_STORAGE_MOVED}:
+        return "refuse"
+    if phase == PHASE_PREPARED:
+        if k_kind != "absent" and not (m_kind == "absent" or is_n):
+            return "refuse"
+        return "advance_s"
+    if k_kind == "absent" and _legacy_opaque(m_kind):
+        return "preserve"
+    if k_kind != "absent" and not (m_kind == "absent" or is_n):
+        return "refuse"
+    if not is_n:
+        return "publish_n"
+    return "advance_q"
+
+
+def _select_legacy_known(
+    document: dict[str, object],
+    *,
+    old: str,
+    phase: str,
+    m_kind: str,
+    m_bytes: bytes | None,
+    k_kind: str,
+    k_bytes: bytes | None,
+    is_n: bool,
+) -> str:
+    del document
+    pending = _legacy_seal_bytes(m_bytes, old)
+    k_ok = k_kind == "file" and _legacy_seal_bytes(k_bytes, old)
+    if phase == PHASE_MARKER_PUBLISHED:
+        if not k_ok or not is_n:
+            return "refuse"
+        return "complete"
+    if phase not in {PHASE_PREPARED, PHASE_STORAGE_MOVED}:
+        return "refuse"
+    if phase == PHASE_PREPARED:
+        if k_kind == "absent" and pending and not is_n:
+            return "advance_s"
+        if k_kind == "absent" and pending and is_n:
+            return "advance_s"
+        if k_ok and (m_kind == "absent" or is_n):
+            return "advance_s"
+        return "refuse"
+    if k_kind == "absent" and pending:
+        return "preserve"
+    if k_ok and m_kind == "absent":
+        return "publish_n"
+    if k_ok and is_n:
+        return "advance_q"
+    return "refuse"
+
+
+def _observe_pair(
+    mission: str, document: dict[str, object]
+) -> tuple[str, str, str, bytes | None, str, bytes | None, bool]:
+    storage = ntpath.join(mission, STORAGE_NAME)
+    backup = ntpath.join(mission, str(document["storage_backup"]))
+    marker = ntpath.join(mission, MARKER_NAME)
+    preserved = ntpath.join(mission, str(document["marker_backup"]))
+    completed = ntpath.join(
+        mission,
+        JOURNAL_PREFIX + str(document["txid"]) + JOURNAL_COMPLETED_SUFFIX,
+    )
+    w = _entry_kind(storage)
+    d = _entry_kind(backup)
+    m_kind = _entry_kind(marker)
+    k_kind = _entry_kind(preserved)
+    c_kind = _entry_kind(completed)
+    if c_kind not in {"absent", "file"}:
+        raise StorageError("completed_journal_type")
+    m_bytes = _read_bytes(marker) if m_kind == "file" else None
+    k_bytes = _read_bytes(preserved) if k_kind == "file" else None
+    return w, d, m_kind, m_bytes, k_kind, k_bytes, c_kind == "file"
+
+
+def _apply_action(
     mission: str,
     journal_path: str,
     document: dict[str, object],
-) -> tuple[str, str | None]:
-    """Move the old marker aside if it is still there, then publish the new one.
+    action: str,
+) -> dict[str, object]:
+    if action == "abort":
+        _complete_journal(mission, str(document["txid"]))
+        return document
+    if action == "advance_s":
+        return _advance_phase(journal_path, document, PHASE_STORAGE_MOVED)
+    if action == "preserve":
+        _rename_strict(
+            ntpath.join(mission, MARKER_NAME),
+            ntpath.join(mission, str(document["marker_backup"])),
+        )
+        return document
+    if action == "publish_n":
+        _publish_marker(
+            mission, str(document["new_seal"]), str(document["project"])
+        )
+        return document
+    if action == "advance_q":
+        return _advance_phase(journal_path, document, PHASE_MARKER_PUBLISHED)
+    if action == "complete":
+        _complete_journal(mission, str(document["txid"]))
+        return document
+    raise StorageError("unknown_recovery_action")
 
-    Idempotent on purpose: recovery re-enters here without knowing how far the
-    crashed attempt got, and re-publishing an identical marker is a no-op.
+
+def _finish_recorded(
+    mission: str,
+    journal_path: str,
+    document: dict[str, object],
+    call_seal: str,
+    project: str,
+) -> RotationResult | None:
+    """Walk the admitted continuation until the journal is complete, then reseal.
+
+    An OSError keeps whatever the walk already published and returns a blocked
+    result. It does not roll the transaction back.
     """
-    marker_path = ntpath.join(mission, MARKER_NAME)
-    marker_backup = str(document["marker_backup"])
-    marker_backup_path = ntpath.join(mission, marker_backup)
-    published_marker_backup: str | None = None
-    # The backup is checked FIRST on purpose. Once it exists the old marker has
-    # already been set aside, so whatever sits at marker_path is the new one --
-    # published by an attempt that died before advancing the phase. Asking about
-    # marker_path first would try to move the new marker onto the old backup and
-    # abort the recovery of a tree that was already moved (crash at boundary 6).
-    if os.path.exists(marker_backup_path):
-        published_marker_backup = marker_backup
-    elif os.path.exists(marker_path):
-        _rename_strict(marker_path, marker_backup_path)
-        published_marker_backup = marker_backup
-    _publish_marker(mission, str(document["new_seal"]), str(document["project"]))
-    _advance_phase(journal_path, document, PHASE_MARKER_PUBLISHED)
-    _complete_journal(mission, str(document["txid"]))
-    return str(document["storage_backup"]), published_marker_backup
+    try:
+        current = document
+        for _step in range(8):
+            observed = _observe_pair(mission, current)
+            action = _select_action(
+                current,
+                w=observed[0],
+                d=observed[1],
+                m_kind=observed[2],
+                m_bytes=observed[3],
+                k_kind=observed[4],
+                k_bytes=observed[5],
+                completed=observed[6],
+            )
+            if action == "refuse":
+                return _blocked("journal_state_impossible", call_seal)
+            if action == "abort":
+                _apply_action(mission, journal_path, current, action)
+                return None
+            if action == "complete":
+                _apply_action(mission, journal_path, current, action)
+                break
+            current = _apply_action(mission, journal_path, current, action)
+        else:
+            return _blocked("recovery_finish_failed", call_seal)
+        if _entry_kind(ntpath.join(mission, STORAGE_NAME)) != "absent":
+            return _blocked("recovery_marker_mismatch", call_seal)
+        marker_path = ntpath.join(mission, MARKER_NAME)
+        published = _read_bytes(marker_path) if _entry_kind(marker_path) == "file" else None
+        legacy = document.get("schema_version") == JOURNAL_SCHEMA_LEGACY
+        if legacy:
+            published_ok = _legacy_is_n(published, document)
+        else:
+            published_ok = published == _canonical_marker(
+                str(document["new_seal"]), str(document["project"])
+            )
+        if not published_ok:
+            return _blocked("recovery_marker_mismatch", call_seal)
+        if call_seal != str(document["new_seal"]):
+            try:
+                _publish_marker(mission, call_seal, project)
+            except OSError:
+                return _blocked("recovery_seal_publish_failed", call_seal)
+            except StorageError:
+                return _blocked("recovery_seal_publish_failed", call_seal)
+            expected_x = _canonical_marker(call_seal, project)
+            if _entry_kind(marker_path) != "file" or _read_bytes(marker_path) != expected_x:
+                return _blocked("recovery_marker_mismatch", call_seal)
+        # Same seal: N stays the journal's project. A different caller project
+        # is not a reseal and is not a mismatch. The rotation result stands.
+        preserved = document["marker_backup"]
+        preserved_path = ntpath.join(mission, str(preserved))
+        preserved_kind = _entry_kind(preserved_path)
+        return RotationResult(
+            launch_allowed=True,
+            storage_rotated=True,
+            storage_backup=str(document["storage_backup"]),
+            storage_marker_backup=(
+                str(preserved) if preserved_kind != "absent" else None
+            ),
+            storage_seal=call_seal[:8],
+            storage_recovery_required=False,
+            storage_reset_notice=RESET_NOTICE,
+            decision=DECISION_ROTATE,
+            reason="recovered_storage_moved",
+        )
+    except (OSError, StorageError):
+        return _blocked("recovery_finish_failed", call_seal)
 
 
-def _reconcile_journal(mission: str, txid: str, seal: str) -> RotationResult | None:
+def _reconcile_journal(
+    mission: str, txid: str, seal: str, project: str
+) -> RotationResult | None:
     """Pre-pass. Returns a terminal result, or None when it is safe to classify.
 
     Driven by the physical state, not by the declared phase: a crash between the
@@ -477,44 +982,14 @@ def _reconcile_journal(mission: str, txid: str, seal: str) -> RotationResult | N
     moved, so believing the phase alone would rotate twice.
     """
     journal_path = ntpath.join(mission, JOURNAL_PREFIX + txid + JOURNAL_SUFFIX)
-    document = _valid_journal(_read_json(journal_path), txid)
+    try:
+        raw = _read_bytes(journal_path)
+    except OSError:
+        return _blocked("recovery_observation_failed", seal)
+    document = _valid_journal(_parse_json(raw), txid)
     if document is None:
         return _blocked("journal_unreadable", seal)
-    storage_present = os.path.isdir(ntpath.join(mission, STORAGE_NAME))
-    backup_path = ntpath.join(mission, str(document["storage_backup"]))
-    backup_present = os.path.exists(backup_path)
-    if document["phase"] == PHASE_MARKER_PUBLISHED:
-        # Codex F-03. The phase is a CLAIM, not evidence. A journal that says
-        # marker_published over a mission whose backup does not exist, or whose
-        # marker is not the one this transaction published, describes a rotation
-        # that did not happen -- and completing it would hand the engine the old
-        # world under the new seal. The backup is the tell: this phase is only
-        # reachable after the tree was renamed.
-        if not backup_present or read_marker(mission).seal != str(document["new_seal"]):
-            return _blocked("journal_state_impossible", seal)
-        _complete_journal(mission, txid)
-        return None
-    if storage_present and not backup_present:
-        # Nothing was moved. Abort the transaction and classify from scratch.
-        _complete_journal(mission, txid)
-        return None
-    if not storage_present and backup_present:
-        # The case the design names: killed between the rename and the seal.
-        # The journal's new_seal is the authority; the old marker is not.
-        # The engine will create the new tree on the next start.
-        backup, marker_backup = _finish_rotation(mission, journal_path, document)
-        return RotationResult(
-            launch_allowed=True,
-            storage_rotated=True,
-            storage_backup=backup,
-            storage_marker_backup=marker_backup,
-            storage_seal=str(document["new_seal"])[:8],
-            storage_recovery_required=False,
-            storage_reset_notice=RESET_NOTICE,
-            decision=DECISION_ROTATE,
-            reason="recovered_storage_moved",
-        )
-    return _blocked("journal_state_impossible", seal)
+    return _finish_recorded(mission, journal_path, document, seal, project)
 
 
 def _active_journals(mission: str) -> tuple[list[str], bool] | None:
@@ -553,13 +1028,27 @@ def rotate_storage(
     marker: MarkerRead,
 ) -> RotationResult:
     """The only function with effects. Reserves every name before moving anything."""
+    del marker
     mission = _mission_dir(mission)
     _validate_transaction(seal, project, now, txid)
-    old_seal8 = (
-        marker.seal[:8]
-        if marker.state == MARKER_PRESENT_VALID and isinstance(marker.seal, str)
-        else LEGACY_SEAL8
-    )
+    storage_path = ntpath.join(mission, STORAGE_NAME)
+    marker_path = ntpath.join(mission, MARKER_NAME)
+    try:
+        if _entry_kind(storage_path) != "dir":
+            return _blocked("storage_not_a_directory", seal)
+        marker_kind = _entry_kind(marker_path)
+        if marker_kind not in {"absent", "file"}:
+            return _blocked("marker_type_unsupported", seal)
+        old_state = MARKER_ABSENT
+        old_seal: str | None = None
+        old_hash: str | None = None
+        if marker_kind == "file":
+            captured = _read_bytes(marker_path)
+            old_state, old_seal = _classify_marker_bytes(captured)
+            old_hash = _sha256(captured)
+    except OSError:
+        return _blocked("recovery_observation_failed", seal)
+    old_seal8 = old_seal[:8] if isinstance(old_seal, str) else LEGACY_SEAL8
     backup = f"{STORAGE_NAME}.modset-{_backup_stamp(now)}-{old_seal8}"
     marker_backup = f"{backup}.marker.json"
     journal_path = ntpath.join(mission, JOURNAL_PREFIX + txid + JOURNAL_SUFFIX)
@@ -569,29 +1058,32 @@ def rotate_storage(
         journal_path,
         ntpath.join(mission, JOURNAL_PREFIX + txid + JOURNAL_COMPLETED_SUFFIX),
     )
-    if any(os.path.exists(path) for path in reserved):
-        # Nothing has been touched yet, and nothing will be.
+    if any(_entry_kind(path) != "absent" for path in reserved):
         return _blocked("backup_name_collision", seal)
     document = _journal_document(
         txid=txid,
         phase=PHASE_PREPARED,
         new_seal=seal,
-        old_seal=marker.seal if marker.state == MARKER_PRESENT_VALID else None,
+        old_seal=old_seal,
         project=project,
         storage_backup=backup,
         marker_backup=marker_backup,
+        old_marker_state=old_state,
+        old_marker_sha256=old_hash,
     )
     _write_json_atomic(journal_path, document, replace=False)
-    _rename_strict(ntpath.join(mission, STORAGE_NAME), ntpath.join(mission, backup))
+    _rename_strict(storage_path, ntpath.join(mission, backup))
     document = _advance_phase(journal_path, document, PHASE_STORAGE_MOVED)
-    stored_backup, published_marker_backup = _finish_rotation(
-        mission, journal_path, document
-    )
+    finished = _finish_recorded(mission, journal_path, document, seal, project)
+    if finished is None or not finished.launch_allowed:
+        return finished if finished is not None else _blocked(
+            "journal_state_impossible", seal
+        )
     return RotationResult(
         launch_allowed=True,
         storage_rotated=True,
-        storage_backup=stored_backup,
-        storage_marker_backup=published_marker_backup,
+        storage_backup=finished.storage_backup,
+        storage_marker_backup=finished.storage_marker_backup,
         storage_seal=seal[:8],
         storage_recovery_required=False,
         storage_reset_notice=RESET_NOTICE,
@@ -633,7 +1125,7 @@ def prepare_storage(
     """
     mission = _mission_dir(mission)
     _validate_transaction(seal, project, now, txid)
-    if not os.path.isdir(mission):
+    if _entry_kind(mission) != "dir":
         return _blocked("mission_not_a_directory", seal)
     scan = _active_journals(mission)
     if scan is None:
@@ -646,7 +1138,10 @@ def prepare_storage(
     rotation_txid = txid
     if active:
         recovered = _reconcile_journal(
-            mission, active[0][len(JOURNAL_PREFIX) : -len(JOURNAL_SUFFIX)], seal
+            mission,
+            active[0][len(JOURNAL_PREFIX) : -len(JOURNAL_SUFFIX)],
+            seal,
+            project,
         )
         if recovered is not None:
             return recovered
@@ -654,8 +1149,11 @@ def prepare_storage(
         # `txid`, so a rotation decided after it gets its own derived id. Same
         # call, same input, deterministic: no clock and no randomness here.
         rotation_txid = derived_txid(txid)
-    marker = read_marker(mission)
-    storage_present = os.path.isdir(ntpath.join(mission, STORAGE_NAME))
+    try:
+        marker = read_marker(mission)
+        storage_present = _entry_kind(ntpath.join(mission, STORAGE_NAME)) == "dir"
+    except OSError:
+        return _blocked("recovery_observation_failed", seal)
     decision = should_rotate(
         seal=seal, marker=marker, storage_present=storage_present
     )

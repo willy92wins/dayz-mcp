@@ -1,0 +1,18 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_storage_rotation_model: rc=0
+Ran 5 tests in 31.392s
+
+OK
+--- tests.test_storage_rotation_model on Python 3.11: rc=0 OK
+--- tests.test_dayz_test_storage: rc=0
+Ran 32 tests in 0.545s
+
+OK
+--- tests.test_dayz_test_storage on Python 3.11: rc=0 OK
+--- tests.test_storage_reset_visibility: rc=0
+Ran 31 tests in 1.295s
+
+OK
+--- tests.test_storage_reset_visibility on Python 3.11: rc=0 OK
+--- fast tier: ran=5854 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
