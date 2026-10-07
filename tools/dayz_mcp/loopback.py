@@ -1802,6 +1802,65 @@ class ServerState:
             return False
         return config_path.is_file()
 
+    def _provision_named_profile_leaf(
+        self, profiles_dir: Path, role: str, expected_dir: str
+    ) -> None:
+        """Create only the named leaf under an existing role root.
+
+        Ancestors are not created. A file, a path that resolves outside the
+        role root, or a leaf that is not that directory after a concurrent
+        create fails closed. Credentials are checked before the create.
+        """
+        if role == "server":
+            role_root_name = "_server"
+        elif role in {"client", "offline"}:
+            role_root_name = "_client"
+        else:
+            raise BindingPrepareError("instance_config_missing")
+        role_root = profiles_dir.parent
+        project_root = role_root.parent
+        if role_root.name.casefold() != role_root_name.casefold():
+            raise BindingPrepareError("instance_config_missing")
+        if not project_root.is_dir() or not role_root.is_dir():
+            raise BindingPrepareError("instance_config_missing")
+        try:
+            resolved_project = project_root.resolve()
+            resolved_role = role_root.resolve()
+        except OSError as exc:
+            raise BindingPrepareError("instance_config_missing") from exc
+        if os.path.normcase(str(resolved_role.parent)) != os.path.normcase(str(resolved_project)):
+            raise BindingPrepareError("instance_config_missing")
+        if resolved_role.name.casefold() != role_root_name.casefold():
+            raise BindingPrepareError("instance_config_missing")
+        expected_leaf = resolved_role / expected_dir
+        try:
+            present = profiles_dir.exists() or profiles_dir.is_symlink()
+        except OSError as exc:
+            raise BindingPrepareError("instance_config_missing") from exc
+        if not present:
+            if (
+                not self.key
+                or isinstance(self.config_port, bool)
+                or not isinstance(self.config_port, int)
+            ):
+                raise BindingPrepareError("instance_config_missing")
+            try:
+                profiles_dir.mkdir(parents=False)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise BindingPrepareError("instance_config_missing") from exc
+        try:
+            if not profiles_dir.is_dir():
+                raise BindingPrepareError("instance_config_missing")
+            resolved_leaf = profiles_dir.resolve()
+        except BindingPrepareError:
+            raise
+        except OSError as exc:
+            raise BindingPrepareError("instance_config_missing") from exc
+        if os.path.normcase(str(resolved_leaf)) != os.path.normcase(str(expected_leaf)):
+            raise BindingPrepareError("instance_config_missing")
+
     def prepare(self, run_id: str, role: str, profiles_dir: str) -> str:
         from dayz_mcp.process_lifecycle import _valid_uuid4
         from dayz_mcp.runtime_state import atomic_write_json
@@ -1814,10 +1873,16 @@ class ServerState:
             raise BindingPrepareError("instance_config_missing")
         config_path = Path(profiles_dir) / "dayz_mcp.json"
         token = getattr(self, "instance_token", None)
-        if isinstance(token, str) and token:
-            expected_dir = "profiles-" + token
+        if token is not None:
+            from dayz_mcp.server_cli import InstanceSelectionError, profile_leaf_name
+
+            try:
+                expected_dir = profile_leaf_name(token)
+            except InstanceSelectionError as exc:
+                raise BindingPrepareError("instance_config_missing") from exc
             if Path(profiles_dir).name.casefold() != expected_dir.casefold():
                 raise BindingPrepareError("instance_profile_owner_mismatch")
+            self._provision_named_profile_leaf(Path(profiles_dir), role, expected_dir)
             if config_path.is_file():
                 try:
                     existing = json.loads(config_path.read_text(encoding="utf-8"))

@@ -43,6 +43,32 @@ def validate_instance_token(value: object) -> str | None:
     return value
 
 
+def profile_leaf_name(token: str | None) -> str:
+    """Directory leaf for an explicit instance token.
+
+    Omission is exactly ``profiles``. A token the instance validator accepts
+    is exactly ``profiles-<token>``. The argument is the token; this function
+    does not read the environment or the bound context.
+    """
+    validated = validate_instance_token(token)
+    if validated is None:
+        return "profiles"
+    return "profiles-" + validated
+
+
+def bound_instance_token() -> str | None:
+    """The selector already published for this process, or None if none is.
+
+    Does not bind from argv. Callers that need the daemon's selection read it
+    here; a missing bind is the default instance, not a guess from the
+    environment.
+    """
+    with _instance_bound_lock:
+        if _instance_bound is None:
+            return None
+        return _instance_bound[0]
+
+
 def validate_game_path(value: object) -> str | None:
     if value is None:
         return None

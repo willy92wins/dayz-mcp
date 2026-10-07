@@ -19,7 +19,11 @@ class Db05DiagnosticsTest(unittest.IsolatedAsyncioTestCase):
         self.provider = _MutableSteamProvider()
         self.runtime = fixtures._Runtime({"runs": [{
             "run_id": fixtures.RUN_ID, "state": "RUNNING_IDLE",
-            "mod": "@ExampleMod", "processes": [],
+            "mod": "@ExampleMod",
+            # The extension admission validates this recorded anchor against
+            # the approved dev_root and the bound (default) leaf.
+            "profiles": r"P:\ExampleMod_Suite\_server\profiles",
+            "processes": [],
         }]})
         self.launch_error = None
         self.vpp = SimpleNamespace(error_code=None, missing=(), warnings=(), hint="")

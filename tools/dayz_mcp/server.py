@@ -2738,17 +2738,11 @@ def _profiles_dir_for_role(run: dict[str, Any], role: str) -> str:
     if policy is None or not roots:
         raise ToolError("profile_unresolved")
     asked = "client" if role == "offline" else role
-    folder = _close_role_folder(policy, asked, roots)
+    folder = _close_role_folder(policy, asked, roots, run)
     if folder is None and role == "offline":
-        folder = _close_role_folder(policy, "offline", roots)
+        folder = _close_role_folder(policy, "offline", roots, run)
     if not isinstance(folder, str) or not log_tail.is_allowed_profiles_dir(folder):
         raise ToolError("profile_unresolved")
-    recorded = run.get("profiles")
-    if isinstance(recorded, str) and recorded and role in {"server", "client", "offline"}:
-        recorded_parent = Path(recorded).parent.name.casefold()
-        folder_parent = Path(folder).parent.name.casefold()
-        if recorded_parent == folder_parent and os.path.normcase(os.path.normpath(recorded)) != os.path.normcase(os.path.normpath(folder)):
-            raise ToolError("profile_unresolved")
     return folder
 
 
@@ -5400,17 +5394,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         runs = [item for item in (status.get("runs") or []) if isinstance(item, dict)]
         if run_id is not None:
             runs = [item for item in runs if item.get("run_id") == run_id]
-        candidates = sorted(
-            {str(item.get("profiles")) for item in runs if item.get("profiles")}
-        )
+        candidates = [
+            item.get("profiles") for item in runs if item.get("profiles")
+        ]
         if not candidates:
             raise ToolError("no_active_run")
-        allowed = [
-            item for item in candidates if log_tail.is_allowed_profiles_dir(item)
-        ]
-        if not allowed:
+        profiles = _profile_dirs_from_runs(runs)
+        if not profiles:
             raise ToolError("bad_profiles")
-        profiles = _sibling_profile_dirs(allowed)
         start_epoch = _run_start_epoch(runs)
 
         files: list[dict[str, Any]] = []

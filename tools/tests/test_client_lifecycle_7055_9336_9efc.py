@@ -50,7 +50,7 @@ _RUN = "11111111-1111-4111-8111-111111111111"
 _OTHER = "22222222-2222-4222-8222-222222222222"
 _PROJECT = "ExampleMod"
 _MOD = "@ExampleMod"
-_POLICY = SimpleNamespace(mod=_PROJECT)
+_POLICY = SimpleNamespace(mod=_PROJECT, dev_root=r"P:\ExampleMod_Suite")
 _BRIDGE = (
     Path(__file__).resolve().parents[2]
     / "addon"
@@ -194,6 +194,9 @@ class _Harness:
             "run_id": _RUN,
             "state": "RUNNING_IDLE",
             "mod": _MOD,
+            # require_extension_run validates this recorded anchor against the
+            # policy dev_root above and the bound (default) leaf.
+            "profiles": r"P:\ExampleMod_Suite\_server\profiles",
             "processes": [
                 {
                     "pid": _SERVER_PID,

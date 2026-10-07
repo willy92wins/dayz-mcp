@@ -43,7 +43,7 @@ from tests.test_wait_for import (
     _http_always_client_not_polling,
     _real_client_runtime_http_only,
 )
-from tests.wait_for_helpers import _ExactWaitClock
+from tests.wait_for_helpers import PinnedClosePolicy, _ExactWaitClock
 from tests._tiers import slow_test
 
 
@@ -69,6 +69,7 @@ class _FakeRuntime:
             else [
                 {
                     "run_id": "run-a",
+                    "mod": "@ExampleMod",
                     "profiles": str(profiles),
                     "processes": [_live_process()],
                 }
@@ -90,7 +91,7 @@ def _profiles(directory: str) -> Path:
     return profiles
 
 
-class PatternIsASubstringTest(unittest.IsolatedAsyncioTestCase):
+class PatternIsASubstringTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     """The contract is substring matching, and it has to be stated somewhere."""
 
     @slow_test
@@ -143,7 +144,7 @@ class PatternIsASubstringTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ok is true only if satisfied", description)
 
 
-class LaunchScanReachesTheStartOfTheLaunchTest(unittest.IsolatedAsyncioTestCase):
+class LaunchScanReachesTheStartOfTheLaunchTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     """The pairing that matters: unreachable by lines, reachable from the launch."""
 
     NEEDLE = "MCP-BOOT-NEEDLE"
@@ -224,7 +225,7 @@ class LaunchScanReachesTheStartOfTheLaunchTest(unittest.IsolatedAsyncioTestCase)
         self.assertIn(self.NEEDLE, str(result["observed"]))
 
 
-class LaunchScanIsBoundedTest(unittest.IsolatedAsyncioTestCase):
+class LaunchScanIsBoundedTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     """The scan runs under tool_lock, so it is capped -- and says when it capped."""
 
     @slow_test
@@ -273,7 +274,7 @@ class LaunchScanIsBoundedTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["scanned"]["scan_truncated"])
 
 
-class ScannedReportTest(unittest.IsolatedAsyncioTestCase):
+class ScannedReportTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     """A no-match has to be visible as a no-match, per file."""
 
     @slow_test
@@ -458,7 +459,7 @@ class ScanHelperTest(unittest.TestCase):
         self.assertFalse(truncated)
 
 
-class LookbackFromArgumentTest(unittest.IsolatedAsyncioTestCase):
+class LookbackFromArgumentTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     async def test_an_unknown_lookback_from_is_bad_args_naming_the_field(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profiles = _profiles(directory)

@@ -601,6 +601,8 @@ def require_extension_run(
         )
     if run.get("mod") != "@" + selected_policy.mod:
         _fail("run_project_mismatch")
+    if _validated_recorded_leaf(selected_policy, run) is None:
+        _fail("lifecycle_status_invalid")
     return run
 
 
@@ -783,6 +785,65 @@ async def _require_idle_session(runtime: _Runtime, *, tool: str) -> None:
         _fail("session_busy")
 
 
+def _planned_profile_leaf() -> str:
+    """Leaf of the bound instance. Unbound is the default ``profiles`` leaf."""
+    from dayz_mcp.server_cli import (
+        InstanceSelectionError,
+        bound_instance_token,
+        profile_leaf_name,
+    )
+
+    try:
+        return profile_leaf_name(bound_instance_token())
+    except InstanceSelectionError:
+        _fail("invalid_instance_token")
+
+
+def _paths_for_leaf(
+    policy: dayz_test_request.RequestProjectPolicy, mode: str, leaf: str
+) -> list[str]:
+    record = _mode_record(mode)
+    if record is None:
+        _fail(_mode_expected_error())
+    return [ntpath.join(policy.dev_root, root, leaf) for root in record.artifact_roots]
+
+
+def _validated_recorded_leaf(
+    policy: dayz_test_request.RequestProjectPolicy, run: dict[str, object]
+) -> str | None:
+    """The recorded profile leaf, after the anchor matches this instance.
+
+    The check runs before any requested role is chosen. A relative path, a
+    traversal, another project, another token, or a legacy leaf under a named
+    instance is rejected.
+    """
+    profiles = run.get("profiles")
+    if not isinstance(profiles, str) or not profiles or not ntpath.isabs(profiles):
+        return None
+    # Reject traversal in the recorded text. normpath would erase `..` and
+    # turn a different role's anchor into the approved leaf.
+    raw_parts = profiles.replace("/", "\\").split("\\")
+    if any(part == ".." for part in raw_parts):
+        return None
+    normalized = ntpath.normpath(profiles)
+    try:
+        leaf = _planned_profile_leaf()
+    except DayzTestToolError:
+        return None
+    if ntpath.basename(normalized).casefold() != leaf.casefold():
+        return None
+    parent = ntpath.basename(ntpath.dirname(normalized))
+    if parent.casefold() not in {"_server", "_client"}:
+        return None
+    dev_root = policy.dev_root
+    if not isinstance(dev_root, str) or not ntpath.isabs(dev_root):
+        return None
+    expected = ntpath.normcase(ntpath.normpath(ntpath.join(dev_root, parent, leaf)))
+    if ntpath.normcase(normalized) != expected:
+        return None
+    return leaf
+
+
 def _artifact_paths(
     policy: dayz_test_request.RequestProjectPolicy, mode: str
 ) -> list[str]:
@@ -792,28 +853,35 @@ def _artifact_paths(
     name it did not know: a mode whose roots the authority moved kept
     reporting the old ones, and an unknown mode reported a root it never
     wrote. An exact lookup that fails closed says so instead.
+
+    Before a run exists the leaf is the bound instance. The default instance
+    stays ``profiles``.
     """
-    record = _mode_record(mode)
-    if record is None:
-        _fail(_mode_expected_error())
-    return [
-        ntpath.join(policy.dev_root, root, "profiles")
-        for root in record.artifact_roots
-    ]
+    return _paths_for_leaf(policy, mode, _planned_profile_leaf())
 
 
 def _client_profile_roots(
-    policy: dayz_test_request.RequestProjectPolicy, mode: str
+    policy: dayz_test_request.RequestProjectPolicy,
+    mode: str,
+    run: dict[str, object] | None = None,
 ) -> list[str]:
     """The profile roots this mode starts a client in; never a server root.
 
-    offline is the client-side process that also hosts the mission.
+    offline is the client-side process that also hosts the mission. An
+    existing run keeps the leaf of its validated recorded anchor. An anchor
+    that does not belong to this instance yields no root.
     """
     record = _mode_record(mode)
     if record is None:
         return []
+    if run is not None:
+        leaf = _validated_recorded_leaf(policy, run)
+        if leaf is None:
+            return []
+    else:
+        leaf = _planned_profile_leaf()
     return [
-        ntpath.join(policy.dev_root, step.root, "profiles")
+        ntpath.join(policy.dev_root, step.root, leaf)
         for step in record.steps
         if step.kind == "start" and step.role in {"client", "offline"} and step.root
     ]
@@ -1628,7 +1696,10 @@ def _stop_artifacts(
         return []
     if not isinstance(profiles, str) or not profiles:
         _fail("lifecycle_status_invalid")
-    candidates = _artifact_paths(policy, "all")
+    leaf = _validated_recorded_leaf(policy, run)
+    if leaf is None:
+        _fail("lifecycle_status_invalid")
+    candidates = _paths_for_leaf(policy, "all", leaf)
     normalized = ntpath.normcase(ntpath.normpath(profiles))
     matches = [
         candidate
@@ -1652,7 +1723,7 @@ def _stop_artifacts(
     # already left the row (hung client, 8f76). Hung-client RPTs under
     # _client\profiles were then never collected on stop. Keep client-only
     # anchors as a single root; expand server anchors to the full "all" set.
-    server_roots = _artifact_paths(policy, "server")
+    server_roots = _paths_for_leaf(policy, "server", leaf)
     if matches == server_roots:
         return list(candidates)
     return matches
@@ -2713,7 +2784,12 @@ async def execute_dayz_test_run(
                         bridge,
                         budget_s=budget_s,
                         start_stalled=_client_start_stall_evidence(
-                            record, _client_profile_roots(policy, mode)
+                            record,
+                            _client_profile_roots(
+                                policy,
+                                mode,
+                                _run_row(extension_status, run_id),
+                            ),
                         ),
                     )
                     if not replacement.replace:
@@ -2777,8 +2853,17 @@ async def execute_dayz_test_run(
                 bridge_default = _bridge_default_report(extra_mods, raw_request)
             # 296b: the CLIENT profile roots whose dumps can name this
             # launch's death; the snapshot is taken when the launch executes.
+            recorded_run = (
+                _run_row(extension_status, run_id)
+                if run_id is not None and not preflight
+                else None
+            )
+            if recorded_run is not None and _validated_recorded_leaf(
+                policy, recorded_run
+            ) is None:
+                _fail("lifecycle_status_invalid")
             client_dump_roots = (
-                _client_profile_roots(policy, mode)
+                _client_profile_roots(policy, mode, recorded_run)
                 if not preflight and _mode_starts_client(mode)
                 else None
             )
@@ -3268,9 +3353,11 @@ def _close_project_policy(
 
 def _artifact_candidates(
     policy: dayz_test_request.RequestProjectPolicy,
+    leaf: str | None = None,
 ) -> list[str] | None:
     try:
-        return _artifact_paths(policy, "all")
+        chosen = _planned_profile_leaf() if leaf is None else leaf
+        return _paths_for_leaf(policy, "all", chosen)
     except DayzTestToolError:
         return None
 
@@ -3281,7 +3368,10 @@ def _profiles_match_policy(
     profiles = run.get("profiles")
     if not isinstance(profiles, str) or not profiles:
         return False
-    candidates = _artifact_candidates(policy)
+    leaf = _validated_recorded_leaf(policy, run)
+    if leaf is None:
+        return False
+    candidates = _artifact_candidates(policy, leaf)
     if candidates is None:
         return False
     normalized = ntpath.normcase(ntpath.normpath(profiles))
@@ -3297,14 +3387,26 @@ def _close_role_folder(
     policy: dayz_test_request.RequestProjectPolicy,
     role: str,
     start_roots: dict[str, str],
+    run: dict[str, object] | None = None,
 ) -> str | None:
+    """One role folder. The recorded anchor is validated before this role.
+
+    ``run`` is optional so a caller that already proved the anchor can pass
+    it. Without a run there is no recorded leaf to keep, and the folder is
+    not invented from the legacy name.
+    """
+    if run is None:
+        return None
+    leaf = _validated_recorded_leaf(policy, run)
+    if leaf is None:
+        return None
     root = start_roots.get(role)
     if not isinstance(root, str) or not root:
         return None
-    candidates = _artifact_candidates(policy)
+    candidates = _artifact_candidates(policy, leaf)
     if candidates is None:
         return None
-    folder = ntpath.join(policy.dev_root, root, "profiles")
+    folder = ntpath.join(policy.dev_root, root, leaf)
     folder_norm = ntpath.normcase(ntpath.normpath(folder))
     if not any(
         ntpath.normcase(ntpath.normpath(candidate)) == folder_norm
@@ -4134,7 +4236,7 @@ async def execute_dayz_test_close(
             if role not in start_roots:
                 missing_rpt.append(role)
                 continue
-            folder = _close_role_folder(policy, role, start_roots)
+            folder = _close_role_folder(policy, role, start_roots, run)
             if folder is None:
                 missing_rpt.append(role)
                 continue
