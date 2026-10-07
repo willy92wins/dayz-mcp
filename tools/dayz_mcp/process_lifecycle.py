@@ -272,14 +272,18 @@ def _storage_observations_from_payload(value: object) -> list[dict[str, object]]
             continue
         if type(rotated) is not bool:
             continue
-        observations.append(
-            {
-                "run_id": run_id,
-                "storage_rotated": rotated,
-                "storage_backup": backup,
-                "storage_reset_notice": notice,
-            }
-        )
+        entry = {
+            "run_id": run_id,
+            "storage_rotated": rotated,
+            "storage_backup": backup,
+            "storage_reset_notice": notice,
+        }
+        if "launch_operation_id" in item:
+            operation_id = item.get("launch_operation_id")
+            if not _valid_uuid4(operation_id):
+                continue
+            entry["launch_operation_id"] = operation_id
+        observations.append(entry)
     if len(observations) > _STORAGE_OBSERVATION_BOUND:
         del observations[: len(observations) - _STORAGE_OBSERVATION_BOUND]
     return observations
@@ -1906,6 +1910,8 @@ class RunManifestStore:
             "storage_backup": run.storage_backup,
             "storage_reset_notice": run.storage_reset_notice,
         }
+        if run.launch_operation_id is not None:
+            entry["launch_operation_id"] = run.launch_operation_id
         self._storage_observations = [
             item
             for item in self._storage_observations
@@ -3318,6 +3324,20 @@ class ProcessLifecycle:
             # null storage fields, exactly like a launch that raised before
             # prepare_storage returned. Writing false here would report a
             # measured reuse for a state the subsystem could not classify.
+            # The public code stays storage_recovery_required; the audit keeps
+            # the exact reason prepare_storage already decided.
+            reason = result.reason if isinstance(result.reason, str) else ""
+            if not reason.strip():
+                reason = "storage_recovery_required"
+            written = self._audit(
+                "lifecycle_storage_recovery_required",
+                None,
+                reason,
+                "rejected",
+                run_id=run_id,
+            )
+            if not written:
+                self._note_audit_row_dropped()
             return "storage_recovery_required"
         self._record_storage_rotation(provisional, result)
         # A replay of a completed journal is the same reset, not a second one.
