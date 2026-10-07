@@ -244,12 +244,20 @@ Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 
 Each of these fails closed with a named error instead of guessing (#93):
 
-- **Server config and profiles.** Each project's `dev_root\_server\serverDZ.cfg`
-  must exist, and so must the profile folders where `dayz_mcp.json` is seeded:
-  `dev_root\_server\profiles` for the server and `dev_root\_client\profiles` for
-  the client (offline mode uses the client's). Without them the server exits with
-  "Could not find server config", or the launch is refused with
-  `instance_config_missing`.
+- **Server config and profiles.** Each project's `dev_root\_server` and
+  `dev_root\_client` roots must already exist, and so must
+  `dev_root\_server\serverDZ.cfg`. The default instance also requires the
+  legacy leaves `dev_root\_server\profiles` and `dev_root\_client\profiles`
+  (offline uses the client leaf); this batch does not create those. A named
+  instance (`--instance <token>`) creates only the missing leaf
+  `profiles-<token>` under the existing role root during launch preparation,
+  and seeds `dayz_mcp.json` there. An existing file at that leaf, a missing
+  role root, or a `dayz_mcp.json` whose endpoint or key belongs to another
+  daemon is rejected and nothing above the leaf is created. Named VPP
+  SuperAdmins and credentials are not copied; put them in the named server
+  leaf when that instance should have them. Without the server config the
+  server exits with "Could not find server config". A profile the launcher
+  cannot seed is `instance_config_missing`.
 - **One `mod` name per project.** Two projects that share a `mod` name are
   refused with `bad_project`. The name is also the PBO prefix.
 - **No retail client.** A running `DayZ_x64.exe` or `DayZ_BE.exe` blocks every

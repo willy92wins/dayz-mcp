@@ -188,9 +188,9 @@ def is_allowed_profiles_dir(value: object) -> bool:
 
     `profiles` reaches this tool from the run manifest, i.e. it is data, not a
     caller argument -- but it still decides which host directory gets read, so it
-    is validated rather than trusted. The worker always builds it as
-    `<dev_root>\\_server|_client\\profiles` (`dayz_test_worker.py:208-211`), so
-    anything else is not a run profile and is refused.
+    is validated rather than trusted. The admitted leaf is the bound instance's
+    leaf (`profiles`, or `profiles-<token>`). Another token and the legacy leaf
+    of a named instance are refused. The parent is still `_server` or `_client`.
     """
     if not isinstance(value, str) or not value:
         return False
@@ -200,8 +200,14 @@ def is_allowed_profiles_dir(value: object) -> bool:
         return False
     if not path.is_absolute() or ".." in path.parts:
         return False
+    from dayz_mcp.server_cli import InstanceSelectionError, bound_instance_token, profile_leaf_name
+
+    try:
+        leaf = profile_leaf_name(bound_instance_token())
+    except InstanceSelectionError:
+        return False
     return (
-        path.name.casefold() == "profiles"
+        path.name.casefold() == leaf.casefold()
         and path.parent.name.casefold() in {"_server", "_client"}
     )
 

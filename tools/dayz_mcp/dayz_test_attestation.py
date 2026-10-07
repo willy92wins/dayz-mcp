@@ -308,9 +308,11 @@ def verify_artifacts(
     return status, rows
 
 
-def profile_directory(dev_root: str, role: str) -> str:
+def profile_directory(dev_root: str, role: str, token: str | None = None) -> str:
+    from dayz_mcp.server_cli import profile_leaf_name
+
     root = "_server" if role == "server" else "_client"
-    return ntpath.join(dev_root, root, "profiles")
+    return ntpath.join(dev_root, root, profile_leaf_name(token))
 
 
 def _boundary_mark(path: str) -> tuple[int, bool]:
@@ -463,6 +465,7 @@ def initialization_rows(
     dev_root: str,
     boundaries_by_role: dict[str, dict[str, tuple[int, bool] | int]],
     pending: bool,
+    token: str | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     applicable = roles_for_mode(mode)
     rows: list[dict[str, str]] = []
@@ -474,7 +477,7 @@ def initialization_rows(
         if pending:
             rows.append({"id": requirement.id, "status": "pending"})
             continue
-        profiles = profile_directory(dev_root, requirement.role)
+        profiles = profile_directory(dev_root, requirement.role, token)
         try:
             outcome = new_matching_line(
                 pattern=requirement.pattern,

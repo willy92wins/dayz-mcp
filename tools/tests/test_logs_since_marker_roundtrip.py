@@ -5,13 +5,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import server
+from dayz_mcp import dayz_test_tool, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
@@ -45,15 +46,30 @@ class LogsSinceMarkerRoundtripTest(unittest.IsolatedAsyncioTestCase):
         self.log.write_text("boot line\n", encoding="utf-8")
         lifecycle = AsyncMock(
             return_value={
-                "runs": [{"run_id": "run-a", "profiles": str(self.profiles)}]
+                "runs": [{
+                    "run_id": "run-a",
+                    "mod": "@ExampleMod",
+                    "profiles": str(self.profiles),
+                }]
             }
         )
         self._lifecycle_patch = patch.object(
             self.runtime, "lifecycle_status", new=lifecycle
         )
         self._lifecycle_patch.start()
+        # The sealed-project admission reads the approved-launcher registry,
+        # which these tests do not build; the row carries its project identity
+        # and the recorded anchor is validated against this dev_root.
+        self._policy_patch = patch.object(
+            dayz_test_tool, "_close_project_policy",
+            return_value=SimpleNamespace(
+                mod="ExampleMod", dev_root=str(self._temp.name)
+            ),
+        )
+        self._policy_patch.start()
 
     async def asyncTearDown(self) -> None:
+        self._policy_patch.stop()
         self._lifecycle_patch.stop()
         self._temp.cleanup()
 
@@ -115,8 +131,16 @@ class LogsSinceMarkerRoundtripTest(unittest.IsolatedAsyncioTestCase):
         # case for a per-run cursor, since only the key can keep them apart.
         self.runtime.lifecycle_status.return_value = {
             "runs": [
-                {"run_id": "run-a", "profiles": str(self.profiles)},
-                {"run_id": "run-b", "profiles": str(self.profiles)},
+                {
+                    "run_id": "run-a",
+                    "mod": "@ExampleMod",
+                    "profiles": str(self.profiles),
+                },
+                {
+                    "run_id": "run-b",
+                    "mod": "@ExampleMod",
+                    "profiles": str(self.profiles),
+                },
             ]
         }
         first_a = _content_json(

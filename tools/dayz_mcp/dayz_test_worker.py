@@ -440,6 +440,25 @@ def _accredited_build_lock_wait_s(payload: dict[str, object]) -> float:
     return float(value)
 
 
+def _request_instance_token(payload: dict[str, object]) -> str | None:
+    """The accredited request's token, or None when the request omits it.
+
+    A present malformed token fails. The worker environment is not consulted.
+    """
+    from dayz_mcp.server_cli import InstanceSelectionError, profile_leaf_name
+
+    if "instance_token" not in payload or payload.get("instance_token") is None:
+        return None
+    try:
+        profile_leaf_name(payload.get("instance_token"))
+    except InstanceSelectionError:
+        raise _failed("request_integrity_failed") from None
+    token = payload.get("instance_token")
+    if not isinstance(token, str):
+        raise _failed("request_integrity_failed")
+    return token
+
+
 def _start_core(
     payload: dict[str, object],
     runtime: WorkerRuntimePolicy,
@@ -451,11 +470,10 @@ def _start_core(
     mission = _mission(payload, runtime)
     server_root = ntpath.join(runtime.dev_root, "_server")
     client_root = ntpath.join(runtime.dev_root, "_client")
-    profile_name = "profiles"
+    from dayz_mcp.server_cli import profile_leaf_name
+
     # The sealed request carries the selector. The worker environment does not.
-    bound_token = payload.get("instance_token")
-    if isinstance(bound_token, str) and bound_token:
-        profile_name = "profiles-" + bound_token
+    profile_name = profile_leaf_name(_request_instance_token(payload))
     server_profiles = ntpath.join(server_root, profile_name)
     client_profiles = ntpath.join(client_root, profile_name)
     mod_string = _mods(payload, runtime)
@@ -601,7 +619,9 @@ def _capture_role_boundary(
         if requirement.role == role and requirement.filename is not None
     )
     return dayz_test_attestation.capture_log_boundaries(
-        dayz_test_attestation.profile_directory(runtime.dev_root, role),
+        dayz_test_attestation.profile_directory(
+            runtime.dev_root, role, _request_instance_token(payload)
+        ),
         filenames,
     )
 
@@ -639,6 +659,7 @@ def assess_preflight(
         dev_root=runtime.dev_root,
         boundaries_by_role={},
         pending=True,
+        token=_request_instance_token(payload),
     )
     document = dayz_test_attestation.report(
         attestation,
@@ -671,6 +692,7 @@ def _attest_artifacts_or_raise(
             dev_root=runtime.dev_root,
             boundaries_by_role={},
             pending=True,
+            token=_request_instance_token(payload),
         )
         document = dayz_test_attestation.report(
             attestation,
@@ -707,6 +729,7 @@ async def _attest_initialization(
             dev_root=runtime.dev_root,
             boundaries_by_role=boundaries,
             pending=False,
+            token=_request_instance_token(payload),
         )
         document = dayz_test_attestation.report(
             attestation,
@@ -1163,6 +1186,7 @@ async def execute_dayz_test_worker(
                 dev_root=runtime.dev_root,
                 boundaries_by_role=boundaries,
                 pending=True,
+                token=_request_instance_token(payload),
             )
             document = dayz_test_attestation.report(
                 attestation,

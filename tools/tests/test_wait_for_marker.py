@@ -8,13 +8,14 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import server
+from dayz_mcp import dayz_test_tool, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.catalog_helpers import list_tools_after_lease
 from tests.client_helpers import _fixture_client_runtime
@@ -53,6 +54,7 @@ class WaitForMarkerTest(unittest.IsolatedAsyncioTestCase):
                 "runs": [
                     {
                         "run_id": "run-a",
+                        "mod": "@ExampleMod",
                         "profiles": str(self.profiles),
                         "processes": [_live_process()],
                     }
@@ -63,8 +65,19 @@ class WaitForMarkerTest(unittest.IsolatedAsyncioTestCase):
             self.runtime, "lifecycle_status", new=lifecycle
         )
         self._lifecycle_patch.start()
+        # The sealed-project admission reads the approved-launcher registry,
+        # which these tests do not build; the row carries its project identity
+        # and the recorded anchor is validated against this dev_root.
+        self._policy_patch = patch.object(
+            dayz_test_tool, "_close_project_policy",
+            return_value=SimpleNamespace(
+                mod="ExampleMod", dev_root=str(self._temp.name)
+            ),
+        )
+        self._policy_patch.start()
 
     async def asyncTearDown(self) -> None:
+        self._policy_patch.stop()
         self._lifecycle_patch.stop()
         self._temp.cleanup()
 

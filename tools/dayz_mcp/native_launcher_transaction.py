@@ -155,7 +155,6 @@ VPP_ABSENT_HINT = (
     "requires a particular admin tool"
 )
 SERVER_CONFIG_NAME = "serverDZ.cfg"
-_PROFILES_DIR = "profiles"
 _VPP_PROFILE_DIR = "VPPAdminTools"
 _VPP_PERMISSIONS_DIR = "Permissions"
 _SUPERADMINS_DIR = "SuperAdmins"
@@ -288,7 +287,10 @@ def vpp_preflight_paths(
     if len(roots) != 1:
         raise ValueError(VPP_PREFLIGHT_FAILED)
     server_root = ntpath.join(policy.dev_root, str(roots[0]))
-    profiles = ntpath.join(server_root, _PROFILES_DIR)
+    from dayz_mcp.server_cli import profile_leaf_name
+
+    raw_token = payload.get("instance_token")
+    profiles = ntpath.join(server_root, profile_leaf_name(None if raw_token is None else raw_token))
     permissions = ntpath.join(profiles, _VPP_PROFILE_DIR, _VPP_PERMISSIONS_DIR)
     return VppPreflightPaths(
         server_root=server_root,

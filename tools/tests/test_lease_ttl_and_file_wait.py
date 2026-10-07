@@ -505,7 +505,7 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         self.server_file = Path(self.run["profiles_by_role"]["server"]) / "mission.log"
         self.client_file = Path(self.run["profiles_by_role"]["client"]) / "mission.log"
 
-        def _folder(policy, role, _roots):
+        def _folder(policy, role, _roots, run=None):
             side = "_client" if role in {"client", "offline"} else "_server"
             return str(Path(policy.dev_root) / side / "profiles")
 

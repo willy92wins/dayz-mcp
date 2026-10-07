@@ -4,6 +4,9 @@ Lives here so a test module can use it without importing another test module.
 """
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 
 class _ExactWaitClock:
     """time.monotonic that moves only by the delay wait_for sleeps.
@@ -24,3 +27,44 @@ class _ExactWaitClock:
     async def sleep(self, delay: float) -> None:
         self.sleeps.append(delay)
         self.now += delay
+
+
+def fixture_close_policy(run: dict) -> "SimpleNamespace":
+    """The sealed-project authority for a fixture run: the root it names.
+
+    The production admission (`launch_logs._recorded_anchor_in_sealed_project`
+    via `dayz_test_tool._close_project_policy`) reads the approved-launcher
+    registry, which the fast tier does not build. A test pins that loader to
+    this stand-in with `patch.object`; the run row still carries its project
+    identity, and the recorded anchor is validated against this policy's
+    dev_root exactly as in production.
+    """
+
+    return SimpleNamespace(
+        mod="ExampleMod",
+        dev_root=str(Path(str(run.get("profiles"))).parent.parent),
+    )
+
+
+class PinnedClosePolicy:
+    """Test mixin: pin the sealed-project admission for the test's runtime.
+
+    ``_recorded_anchor_in_sealed_project`` resolves the loader through
+    ``dayz_test_tool`` at call time, so one attribute patch covers every
+    reader that consumes run rows.
+    """
+
+    def setUp(self) -> None:
+        from unittest.mock import patch
+
+        from dayz_mcp import dayz_test_tool
+
+        pinned = patch.object(
+            dayz_test_tool,
+            "_close_project_policy",
+            side_effect=fixture_close_policy,
+        )
+        pinned.start()
+        self.addCleanup(pinned.stop)
+        super().setUp()
+

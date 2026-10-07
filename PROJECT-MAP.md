@@ -89,7 +89,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-09-30 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-10-06 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-09-30 (UTC)
-- `README.md` - 23 KB, touched 2026-10-01 (UTC)
+- `README.md` - 24 KB, touched 2026-10-07 (UTC)
 
 ## Reparse points omitidos
 

@@ -21,7 +21,7 @@ from dayz_mcp import loopback, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests.client_helpers import _fixture_client_runtime
 from tests.mcp_helpers import _content_json
-from tests.wait_for_helpers import _ExactWaitClock
+from tests.wait_for_helpers import PinnedClosePolicy, _ExactWaitClock
 from tests._tiers import slow_test
 
 def _live_run(profiles: Path) -> dict:
@@ -37,6 +37,7 @@ def _live_run(profiles: Path) -> dict:
     )
     return {
         "run_id": "run-a",
+        "mod": "@ExampleMod",
         "profiles": str(profiles),
         "processes": [{"pid": 4242, "creation_time_utc": stamp}],
     }
@@ -112,7 +113,7 @@ class _HttpClientNotPollingThenPlayers:
         raise AssertionError(f"unexpected transport path {path!r}")
 
 
-class WaitForTest(unittest.IsolatedAsyncioTestCase):
+class WaitForTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     async def test_satisfied_on_first_probe(self) -> None:
         runtime = _FakeRuntime(player_counts=[2])
         result = await server.execute_wait_for(
@@ -816,7 +817,7 @@ _WINDOW_CASES = (
 )
 
 
-class WaitForBug086EvidenceTest(unittest.IsolatedAsyncioTestCase):
+class WaitForBug086EvidenceTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _profiles(directory: str) -> Path:
         profiles = Path(directory) / "_server" / "profiles"
