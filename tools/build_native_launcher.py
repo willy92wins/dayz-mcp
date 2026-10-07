@@ -257,25 +257,50 @@ def _acquire_cpython(lock: dict[str, object], *, offline: bool) -> Path:
     if offline:
         raise ValueError("cpython_cache_missing_or_drifted")
     cache.parent.mkdir(parents=True, exist_ok=True)
-    temporary = cache.with_name(cache.name + ".partial")
-    if temporary.exists():
-        temporary.unlink()
-    request = urllib.request.Request(str(expected["url"]), headers={"User-Agent": "DayZ-MCP-reproducible-builder/1"})
-    with urllib.request.urlopen(request, timeout=60) as response, temporary.open("xb") as output:
-        while True:
-            block = response.read(1024 * 1024)
-            if not block:
-                break
-            output.write(block)
-            if output.tell() > int(expected["size"]):
-                raise ValueError("cpython_download_size_drift")
-        output.flush()
-        os.fsync(output.fileno())
-    if temporary.stat().st_size != expected["size"] or _sha256(temporary) != expected["sha256"]:
-        temporary.unlink(missing_ok=True)
-        raise ValueError("cpython_download_integrity_failed")
-    os.replace(temporary, cache)
-    return cache
+    # One download lock and a per-process partial. Two builders must not share
+    # the same `.partial` file.
+    download_lock = cache.with_name(cache.name + ".download.lock")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(download_lock, flags, 0o600)
+    try:
+        import msvcrt
+
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        if cache.is_file() and cache.stat().st_size == expected["size"] and _sha256(cache) == expected["sha256"]:
+            return cache
+        temporary = cache.with_name(cache.name + f".partial.{os.getpid()}")
+        if temporary.exists():
+            temporary.unlink()
+        request = urllib.request.Request(str(expected["url"]), headers={"User-Agent": "DayZ-MCP-reproducible-builder/1"})
+        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("xb") as output:
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                output.write(block)
+                if output.tell() > int(expected["size"]):
+                    raise ValueError("cpython_download_size_drift")
+            output.flush()
+            os.fsync(output.fileno())
+        if temporary.stat().st_size != expected["size"] or _sha256(temporary) != expected["sha256"]:
+            temporary.unlink(missing_ok=True)
+            raise ValueError("cpython_download_integrity_failed")
+        os.replace(temporary, cache)
+        return cache
+    finally:
+        try:
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        os.close(descriptor)
 
 
 def _safe_archive_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:

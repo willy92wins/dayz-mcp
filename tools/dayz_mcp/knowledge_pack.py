@@ -52,7 +52,11 @@ def resolve_pack_dir() -> Path:
     local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
     if not local_appdata:
         raise KnowledgePackError("localappdata_missing")
-    return (Path(local_appdata) / "DayZ_MCP" / "knowledge-pack").resolve()
+    from dayz_mcp.instance_context import current_instance_token, state_root_name
+
+    token = current_instance_token()
+    folder = "DayZ_MCP" if token is None else state_root_name(token)
+    return (Path(local_appdata) / folder / "knowledge-pack").resolve()
 
 
 def default_skills_dir() -> Path:
@@ -178,7 +182,29 @@ def _remove_owned_entry(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def sync_skills(pack_dir: Path, skills_dir: Path, manifest_path: Path) -> list[str]:
+def _skills_owner(owner: str | None) -> str:
+    if owner is not None:
+        return owner
+    from dayz_mcp.server_cli import current_instance_token
+
+    token = current_instance_token()
+    return token if token else "default"
+
+
+def sync_skills(
+    pack_dir: Path,
+    skills_dir: Path,
+    manifest_path: Path,
+    *,
+    owner: str | None = None,
+) -> list[str]:
+    from dayz_mcp.instance_context import GLOBAL_SKILLS_OWNER
+
+    owner = _skills_owner(owner)
+    if owner != GLOBAL_SKILLS_OWNER:
+        raise KnowledgePackError("global_skills_not_owned")
+    if Path(skills_dir).resolve() == default_skills_dir() and owner != GLOBAL_SKILLS_OWNER:
+        raise KnowledgePackError("global_skills_not_owned")
     pack = Path(pack_dir).resolve()
     destination_root = Path(skills_dir).resolve()
     manifest = Path(manifest_path).resolve()
@@ -243,6 +269,7 @@ def install_knowledge_pack(
     skills_dir: Path | None = None,
     manifest_path: Path | None = None,
     python_executable: Path | None = None,
+    owner: str | None = None,
 ) -> dict[str, object]:
     pack = resolve_pack_dir() if pack_dir is None else Path(pack_dir).resolve()
     skills = default_skills_dir() if skills_dir is None else Path(skills_dir).resolve()
@@ -254,7 +281,12 @@ def install_knowledge_pack(
     python = Path(sys.executable) if python_executable is None else Path(python_executable)
     ready_pack = ensure_pack(pack, runner)
     available = _pack_skill_names(ready_pack)
-    registered = sync_skills(ready_pack, skills, manifest) if sync else []
+    owner = _skills_owner(owner)
+    if sync and owner != "default":
+        raise KnowledgePackError("global_skills_not_owned")
+    registered = (
+        sync_skills(ready_pack, skills, manifest, owner=owner) if sync else []
+    )
     return {
         "status": "ready",
         "pack_dir": str(ready_pack),
@@ -274,11 +306,15 @@ def install_knowledge_pack(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install the DayZ Knowledge Pack")
+    parser = argparse.ArgumentParser(
+        description="Install the DayZ Knowledge Pack",
+        allow_abbrev=False,
+    )
     commands = parser.add_subparsers(dest="operation", required=True)
-    install = commands.add_parser("install")
+    install = commands.add_parser("install", allow_abbrev=False)
     install.add_argument("--sync", action="store_true")
-    remove = commands.add_parser("unsync")
+    install.add_argument("--instance", default="")
+    remove = commands.add_parser("unsync", allow_abbrev=False)
     remove.add_argument("--manifest-path", default="")
     return parser
 
@@ -288,10 +324,33 @@ def main(
     *,
     runner: CommandRunner = subprocess.run,
 ) -> int:
-    args = _build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    from dayz_mcp.server_cli import (
+        bind_instance_context,
+        selector_from_parsed,
+        validate_entry_selector,
+    )
+
     try:
+        token, _game_path = validate_entry_selector(raw)
+        try:
+            args = _build_parser().parse_args(raw)
+        except SystemExit as exited:
+            if exited.code in (0, None):
+                raise
+            raise KnowledgePackError("invalid_instance_token") from exited
         if args.operation == "install":
-            payload = install_knowledge_pack(sync=args.sync, runner=runner)
+            consumed, _consumed_game = selector_from_parsed(
+                getattr(args, "instance", ""), None
+            )
+            if consumed != token:
+                raise KnowledgePackError("duplicate_instance_flag")
+            owner = token
+            if owner is not None:
+                bind_instance_context(owner, replace=True)
+            payload = install_knowledge_pack(
+                sync=args.sync, runner=runner, owner=owner
+            )
         else:
             manifest = (
                 Path(args.manifest_path).resolve()

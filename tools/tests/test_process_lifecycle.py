@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.steam_helpers import FakeSteamGate
 
 import json
+import os
 import hashlib
 import dataclasses
 import sys
@@ -414,6 +415,8 @@ class ProcessLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self._saved_shared_root = os.environ.get("DAYZ_MCP_SHARED_ROOT")
+        os.environ["DAYZ_MCP_SHARED_ROOT"] = str(self.root / "shared-root")
         self.game = self.root / "DayZ"
         self.game.mkdir()
         for name in ("DayZDiag_x64.exe", "DayZ_BE.exe", "DayZ_x64.exe", "DayZServer_x64.exe"):
@@ -453,6 +456,10 @@ class ProcessLifecycleTest(unittest.TestCase):
         self.lifecycle.bridge_probe = self.bridge.status_snapshot
 
     def tearDown(self) -> None:
+        if self._saved_shared_root is None:
+            os.environ.pop("DAYZ_MCP_SHARED_ROOT", None)
+        else:
+            os.environ["DAYZ_MCP_SHARED_ROOT"] = self._saved_shared_root
         self.temporary.cleanup()
 
     def request(self, executable: Path | None = None) -> dict[str, object]:
@@ -946,6 +953,29 @@ class ProcessLifecycleTest(unittest.TestCase):
             rejected[-1]["reason"],
             "retail_manual_lifecycle_required",
         )
+
+    def test_normal_tier_start_stays_inside_the_fixture(self) -> None:
+        """F10: a lifecycle start with the fast tier unset does not touch the profile."""
+        os.environ.pop("DAYZ_MCP_FAST_TESTS", None)
+        os.environ["DAYZ_MCP_SHARED_ROOT"] = str(self.root / "shared-root")
+        local = os.environ.get("LOCALAPPDATA", "")
+        home = os.environ.get("USERPROFILE", "")
+        watched = [
+            Path(local) / "DayZ_MCP_shared" if local else None,
+            Path(local) / "DayZ_MCP" if local else None,
+            Path(home) / "DayZ_MCP" if home else None,
+            Path(home) / "DayZ_MCP_shared" if home else None,
+        ]
+        before = {path: path.exists() for path in watched if path is not None}
+        expected = process(self.launcher.pid)
+        self.guard.snapshots[self.launcher.pid] = snapshot(expected)
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, self.request())
+        self.assertEqual(result["ok"], True)
+        lock = self.root / "shared-root" / "box-admission.lock"
+        self.assertTrue(lock.is_file())
+        self.assertEqual(before, {path: path.exists() for path in before})
+        for path in before:
+            self.assertFalse(str(lock).casefold().startswith(str(path).casefold()))
 
     def test_diag_start_records_only_complete_strong_identity(self) -> None:
         expected = process(self.launcher.pid)

@@ -137,6 +137,7 @@ class Fb7ef2LifecycleTests(unittest.TestCase):
             self.assertIsNotNone(state.lifecycle)
             self.assertEqual(state.lifecycle.daemon_generation, _LAUNCH_GENERATION)
             self.assertEqual(forwarded, [_LAUNCH_GENERATION])
+            state.root_writer_lease.release()
         run_id = self._start()
         stored = self.lifecycle.manifest.get(run_id)
         self.assertIsNotNone(stored)

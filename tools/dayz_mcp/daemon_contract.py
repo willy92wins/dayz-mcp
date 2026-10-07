@@ -42,6 +42,14 @@ def build_daemon_argv(config: Any, *, python: str | None = None) -> list[str]:
     audit_path = getattr(config, "exec_audit_path", None)
     if audit_path:
         argv += ["--exec-audit-path", audit_path]
+    # Named selectors come after the whole existing argv, including optional
+    # exec flags. Omission appends nothing, so the default argv stays put.
+    instance_token = getattr(config, "instance_token", None)
+    if instance_token:
+        argv += ["--instance", str(instance_token)]
+    game_path = getattr(config, "game_path", None)
+    if game_path:
+        argv += ["--game-path", str(game_path)]
     return argv
 
 

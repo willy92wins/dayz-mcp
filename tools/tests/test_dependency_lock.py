@@ -36,8 +36,8 @@ EXPECTED_LOCK = {
             "location": "project_relative",
             "path": "tools/dayz_mcp/secure_launcher.py",
             "role": "productive_launcher_source",
-            "sha256": "D4139911A21E28499E96B4FE7FA9C1CFF5B26C7683D5B3A98FF2B07283CD3705",
-            "size": 9594,
+            "sha256": "3BDF14502F02C5F8FBCDF5DD0EE8F6F1E4193E86CC6C7FF0A29DF0F2D516E492",
+            "size": 11581,
         },
         "psutil_license": {
             "location": "project_relative",

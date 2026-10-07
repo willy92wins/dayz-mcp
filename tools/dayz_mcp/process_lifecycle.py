@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import dayz_test_storage, window_close
+from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.instance_fence import BindingPrepareError, format_creation_time_utc
@@ -2260,6 +2261,22 @@ class ProcessLifecycle:
             return None, exc.code
         except Exception:
             return None, "instance_config_missing"
+        port = getattr(bindings, "config_port", None)
+        key = getattr(bindings, "key", None)
+        if isinstance(port, int) and not isinstance(port, bool) and isinstance(key, str) and key:
+            try:
+                written = json.loads(
+                    (Path(profiles_dir) / "dayz_mcp.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                return None, "instance_endpoint_mismatch"
+            expected_url = "http://127.0.0.1:" + str(port) + "/"
+            if (
+                not isinstance(written, dict)
+                or written.get("url") != expected_url
+                or written.get("key") != key
+            ):
+                return None, "instance_endpoint_mismatch"
         if not isinstance(minted, str) or not minted:
             return None, "instance_config_missing"
         return minted, None
@@ -3813,6 +3830,21 @@ class ProcessLifecycle:
             self._operation_lock.release()
 
     def _start_run_reserved(
+        self, client: ClientIdentity, authority: tuple[str, str, str], request: object,
+        steam: Preparation | None = None,
+    ) -> dict[str, object]:
+        with box_admission() as admitted:
+            if not admitted:
+                return {
+                    "ok": False,
+                    "error": "box_admission_busy",
+                    "status": 409,
+                }
+            return self._start_run_reserved_holding(
+                client, authority, request, steam
+            )
+
+    def _start_run_reserved_holding(
         self, client: ClientIdentity, authority: tuple[str, str, str], request: object,
         steam: Preparation | None = None,
     ) -> dict[str, object]:

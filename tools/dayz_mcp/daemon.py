@@ -255,10 +255,11 @@ def _ensure_identity_migration(config: Any) -> None:
             raise RuntimeError("invalid_identity_migration_fault_injector")
         migration_kwargs["fault_injector"] = test_fault_injector
     ensure_runs_v1_backup(
-        RuntimePaths.from_env(),
+        RuntimePaths.for_token(getattr(config, "instance_token", None)),
         int(getattr(config, "port", 8765)),
         allowed_current_identity=identity,
         allowed_launch_ancestor_identity=launch_ancestor_identity,
+        state_token=getattr(config, "instance_token", None),
         **migration_kwargs,
     )
 
@@ -339,11 +340,20 @@ def _status_accredits_generation(
     return False
 
 
-def _audit_path(config: Any) -> Path:
+def exec_enforce_audit_path(config: Any) -> Path:
+    """One exec-enforce audit file name per instance, shared by both writers."""
     configured = getattr(config, "exec_audit_path", None)
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[1] / "_audit" / "exec_enforce.jsonl"
+    token = getattr(config, "instance_token", None)
+    audit_dir = Path(__file__).resolve().parents[1] / "_audit"
+    if not token:
+        return audit_dir / "exec_enforce.jsonl"
+    return audit_dir / f"exec_enforce-{token}.jsonl"
+
+
+def _audit_path(config: Any) -> Path:
+    return exec_enforce_audit_path(config)
 
 
 def build_server_state(
@@ -384,13 +394,44 @@ def build_server_state(
         config_port=config_port,
     )
     state.daemon_generation = generation
+    state.instance_token = getattr(config, "instance_token", None)
     if activate_coordination:
+        from dayz_mcp.instance_context import RootWriterLease
+
+        token = getattr(config, "instance_token", None)
+        paths = RuntimePaths.for_token(token)
+        lease = RootWriterLease(paths.root, owner=state)
+        if not lease.try_acquire():
+            raise RuntimeError("state_root_writer_busy")
+        state.root_writer_lease = lease
         activation_deadline = time.monotonic() + validated_startup_budget_s()
-        _ensure_identity_migration(config)
-        _activate_server_coordination(
-            state, generation, deadline=activation_deadline
-        )
+        try:
+            _ensure_identity_migration(config)
+            _activate_server_coordination(
+                state,
+                generation,
+                deadline=activation_deadline,
+                instance_token=token,
+                game_path=_lifecycle_game_path(config),
+            )
+        except BaseException:
+            lease.release()
+            state.root_writer_lease = None
+            raise
     return state
+
+
+def _lifecycle_game_path(config: Any) -> Path:
+    """Bound `--game-path` wins. Otherwise the historical env or retail default."""
+    configured = getattr(config, "game_path", None)
+    if isinstance(configured, str) and configured:
+        return Path(configured)
+    return Path(
+        os.environ.get(
+            "DAYZ_GAME_PATH",
+            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
+        )
+    )
 
 
 def _activate_server_coordination(
@@ -399,6 +440,8 @@ def _activate_server_coordination(
     *,
     deadline: float | None = None,
     time_fn: Callable[[], float] | None = None,
+    instance_token: str | None = None,
+    game_path: Path | None = None,
 ) -> None:
     now = time_fn or time.monotonic
     if deadline is None:
@@ -420,7 +463,7 @@ def _activate_server_coordination(
         require_remaining()
         return result
 
-    paths = bounded_io(RuntimePaths.from_env)
+    paths = bounded_io(RuntimePaths.for_token, instance_token)
     audit_writer = bounded_io(JsonlAuditWriter, paths, daemon_generation)
     coordination_store = bounded_io(
         CoordinationSnapshotStore, paths, daemon_generation
@@ -583,12 +626,7 @@ def _activate_server_coordination(
         # fb-20260904-114520-6927: the socket table is the second witness of
         # the box; a DayZ image holding a UDP port occupies it without a run.
         port_probe=orphan_guard.snapshot_udp_port_holders,
-        game_path=Path(
-            os.environ.get(
-                "DAYZ_GAME_PATH",
-                r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
-            )
-        ),
+        game_path=game_path if game_path is not None else _lifecycle_game_path(None),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,
         # 79e2: the same ServerState, read-only, so start_run can revalidate a
@@ -1394,7 +1432,12 @@ def record_daemon_event(
             if sink is None:
                 if not daemon_generation:
                     return False
-                sink = JsonlAuditWriter(RuntimePaths.from_env(), daemon_generation)
+                from dayz_mcp.server_cli import current_instance_token
+
+                sink = JsonlAuditWriter(
+                    RuntimePaths.for_token(current_instance_token()),
+                    daemon_generation,
+                )
             return sink.write(event) is True
         except Exception as error:
             log(f"DAEMON: audit event {name!r} not recorded: {type(error).__name__}")
@@ -1494,6 +1537,43 @@ def _record_daemon_stopping(
 
 
 def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
+    from dayz_mcp.instance_context import (
+        InstanceSelectionError,
+        RootWriterLease,
+        reject_conflicting_environment,
+    )
+
+    token = getattr(config, "instance_token", None)
+    port = int(getattr(config, "port", 8765))
+    game_path = getattr(config, "game_path", None)
+    if getattr(config, "key", None) is None:
+        read_key(_required_keyfile(config))
+    log = _log_sink(config)
+    try:
+        from dayz_mcp.server_cli import bind_instance_context
+
+        bind_instance_context(token, game_path, replace=True)
+        reject_conflicting_environment(token, port, game_path)
+    except InstanceSelectionError:
+        log("DAEMON: instance environment conflicts with the selector")
+        return DAEMON_STARTUP_CONTENDED
+    paths = RuntimePaths.for_token(token)
+    lease = RootWriterLease(paths.root)
+    if not lease.try_acquire():
+        log("DAEMON: state root already has a writer")
+        return DAEMON_STARTUP_CONTENDED
+    try:
+        return _run_daemon_body(config, stop=stop, runtime_paths=paths)
+    finally:
+        lease.release()
+
+
+def _run_daemon_body(
+    config: Any,
+    *,
+    stop: threading.Event | None = None,
+    runtime_paths: RuntimePaths | None = None,
+) -> int:
     daemon_started_at = time.monotonic()
     startup_deadline = daemon_started_at + validated_startup_budget_s()
     log = _log_sink(config)
@@ -1525,7 +1605,9 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
         log("DAEMON: startup deadline expired during discovery")
         return DAEMON_STARTUP_CONTENDED
 
-    paths = RuntimePaths.from_env()
+    paths = runtime_paths or RuntimePaths.for_token(
+        getattr(config, "instance_token", None)
+    )
     with daemon_startup_election(paths) as elected:
         if not elected:
             if healthy():
@@ -1591,7 +1673,11 @@ def run_daemon(config: Any, *, stop: threading.Event | None = None) -> int:
 
         try:
             _activate_server_coordination(
-                state, daemon_generation, deadline=startup_deadline
+                state,
+                daemon_generation,
+                deadline=startup_deadline,
+                instance_token=getattr(config, "instance_token", None),
+                game_path=_lifecycle_game_path(config),
             )
         except TimeoutError:
             httpd.server_close()
