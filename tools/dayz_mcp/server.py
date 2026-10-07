@@ -81,6 +81,7 @@ from dayz_mcp.lease_result_ttl import (
     LEASE_LOCAL_TOOL,
     LEASE_TTL_OBSERVE_TOOL,
     install_lease_ttl_annotation,
+    observe_caller_presence,
 )
 from dayz_mcp.server_freshness import (
     REMEDIATION as _TOOL_REGISTRY_REMEDIATION,
@@ -585,6 +586,133 @@ def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[st
         "tool_registry_fingerprint": snapshot.fingerprint,
         "tool_registry_captured_at": snapshot.captured_at_utc,
     }
+
+
+_CAMERA_UNVERIFIED = "camera_unverified"
+_CAMERA_UNVERIFIED_NO_LEASE = "no_lease"
+_CAMERA_UNVERIFIED_UNKNOWN = "unknown"
+
+
+def _camera_run_context(status: object) -> tuple | None:
+    """Fingerprint of the runs a lifecycle read actually returned.
+
+    None means the read was missing or unreadable. An empty tuple is a real
+    observation of no runs, and a later different tuple is a context change.
+    """
+
+    if not isinstance(status, dict):
+        return None
+    runs = status.get("runs")
+    if not isinstance(runs, list):
+        return None
+    rows: list[tuple[str, str, str, str]] = []
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        # Lifecycle state (STARTING, RUNNING, ...) is not identity. A run
+        # that merely advances must keep the camera attempt.
+        rows.append((
+            str(item.get("run_id") or ""),
+            str(item.get("daemon_generation_current") or ""),
+            str(item.get("daemon_generation_at_launch") or ""),
+        ))
+    return tuple(sorted(rows))
+
+
+def _camera_failure_reason(value: object) -> str:
+    """Stable token for a failed camera_set. Never a path and never 'expired' by inference."""
+
+    if isinstance(value, BaseException):
+        text = str(value)
+    elif isinstance(value, dict):
+        error = value.get("error")
+        text = error if isinstance(error, str) else ""
+    else:
+        text = value if isinstance(value, str) else ""
+    token = text.strip().split()[0] if text.strip() else ""
+    if token.endswith(":"):
+        token = token[:-1]
+    if (
+        not token
+        or len(token) > 64
+        or not token.isascii()
+        or any(ch in token for ch in "\\/:")
+    ):
+        return "camera_set_failed"
+    return token
+
+
+def _camera_result_failed(result: object) -> bool:
+    if not isinstance(result, dict):
+        return True
+    ok = result.get("ok")
+    return ok not in (True, 1)
+
+
+async def _read_run_status_no_spawn(runtime: object) -> object:
+    """One lifecycle read that does not lazy-spawn. Unreadable comes back as None."""
+
+    control = getattr(runtime, "_control", None)
+    if control is None:
+        return None
+    session_call = getattr(control, "_session_call", None)
+    if callable(session_call):
+        try:
+            status = session_call("/lifecycle/status", timeout_s=LEASE_TTL_OBSERVE_S)
+            if inspect.isawaitable(status):
+                status = await asyncio.wait_for(status, LEASE_TTL_OBSERVE_S + 0.25)
+            return status
+        except Exception:
+            return None
+    status_fn = getattr(control, "lifecycle_status", None)
+    if not callable(status_fn):
+        return None
+    try:
+        status = status_fn()
+        if inspect.isawaitable(status):
+            status = await asyncio.wait_for(status, LEASE_TTL_OBSERVE_S + 0.25)
+        return status
+    except Exception:
+        return None
+
+
+def _camera_note_for_capture(
+    slot: dict[str, Any], observed_status: object, presence: str
+) -> dict[str, Any] | None:
+    """One warning decision for this capture. A held lease certifies nothing."""
+
+    attempt = slot.get("attempt")
+    current = _camera_run_context(observed_status)
+    if isinstance(attempt, dict):
+        stored = attempt.get("context")
+        if current is not None and stored is not None and current != stored:
+            slot["attempt"] = None
+            attempt = None
+    if isinstance(attempt, dict) and attempt.get("failed"):
+        reason = attempt.get("reason")
+        if not isinstance(reason, str) or not reason:
+            reason = "camera_set_failed"
+        return {"warn": True, "reason": reason}
+    if presence == "absent":
+        return {"warn": True, "reason": _CAMERA_UNVERIFIED_NO_LEASE}
+    if presence == _CAMERA_UNVERIFIED_UNKNOWN:
+        return {"warn": False, "reason": _CAMERA_UNVERIFIED_UNKNOWN}
+    return None
+
+
+def _attach_camera_unverified(meta: dict[str, Any], note: dict[str, Any] | None) -> None:
+    if not note:
+        return
+    reason = note.get("reason")
+    if isinstance(reason, str):
+        meta["camera_unverified_reason"] = reason
+    if not note.get("warn"):
+        return
+    warnings = meta.get("warnings")
+    warnings = list(warnings) if isinstance(warnings, list) else []
+    if _CAMERA_UNVERIFIED not in warnings:
+        warnings.append(_CAMERA_UNVERIFIED)
+    meta["warnings"] = warnings
 
 
 def _image_format_from_mime(mime: object) -> str:
@@ -4192,6 +4320,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # StrictFloat still accepts JSON integers; optional None stays read/omit.
     intended_tool_names = tool_pack_mod.tool_names(config.tool_pack)
     runtime: Any = ClientRuntime(config) if config.mode == "client" else Runtime(config)
+    # Last camera_set of this process only: outcome plus the run/generation
+    # context observed with it. camera_set, restore_gameplay and capture all
+    # mutate it under runtime.tool_lock. A held lease is not a pose.
+    _camera_attempt: dict[str, Any] = {"attempt": None}
 
     @asynccontextmanager
     async def lifespan(_app: FastMCP):
@@ -6875,7 +7007,43 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         args["settle_ticks"] = settle_ticks
         async with runtime.tool_lock:
-            result = await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
+            result: dict[str, Any] | None = None
+            failed = False
+            reason: str | None = None
+            try:
+                result = await runtime.call_bridge(
+                    "camera_set", args, "client", _timeout(timeout_s)
+                )
+            except Exception as exc:
+                failed = True
+                reason = _camera_failure_reason(exc)
+                raise
+            except BaseException:
+                # CancelledError is not an Exception. Only a returned success
+                # marks the attempt successful; cancellation still propagates.
+                failed = True
+                reason = "cancelled"
+                raise
+            else:
+                if _camera_result_failed(result):
+                    failed = True
+                    reason = _camera_failure_reason(result)
+            finally:
+                # Same lock as capture. Record the outcome before the lifecycle
+                # await: a cancellation at that await must not skip the slot
+                # or leave the previous attempt looking successful.
+                # An unreadable lifecycle read is a missing context, not a
+                # run change and not an expiry.
+                _camera_attempt["attempt"] = {
+                    "failed": failed,
+                    "reason": reason,
+                    "context": None,
+                }
+                try:
+                    status = await _read_run_status_no_spawn(runtime)
+                except Exception:
+                    status = None
+                _camera_attempt["attempt"]["context"] = _camera_run_context(status)
         # 983a: the wire has no FOV getter (Camera.GetCurrentFOV froze the
         # render, MCPClientBridge.c:4773-4776), so fov_applied echoes the
         # validated value this call submitted, never a native readback. The
@@ -6936,6 +7104,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             timeout = _timeout(timeout_s)
             result = await runtime.call_bridge("restore_gameplay", {}, "client", timeout)
+            # The bridge accepted the restore, so the last camera_set no longer
+            # describes the view. A rejection before that call keeps the attempt.
+            _camera_attempt["attempt"] = None
             try:
                 probe = await runtime.call_bridge(
                     RESTORE_CAMERA_PROBE_CMD, {"cam_mode": "get"}, "client", timeout
@@ -7295,16 +7466,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # (process_lifecycle.py:1365-1372) and a DayZDiag window can be owned by
         # a different process (mcp_capture.py:330, mcp-grab.ps1:28-30). With no
         # live run both stay empty and capture behaves exactly as before.
-        cmdline_match = ""
-        client_pid = 0
-        status_fn = getattr(runtime, "lifecycle_status", None)
-        if status_fn is not None:
-            try:
-                status = status_fn()
-                if asyncio.iscoroutine(status):
-                    status = await status
-            except Exception:
-                status = None      # fail-open: a capture beats no capture
+        # Lifecycle, the grab, and the camera-attempt note share tool_lock with
+        # camera_set so a rejected set cannot land between the picture and the warning.
+        async with runtime.tool_lock:
+            cmdline_match = ""
+            client_pid = 0
+            # Bounded control read. runtime.lifecycle_status lazy-spawns in
+            # client mode; capture must not recover a daemon.
+            status = await _read_run_status_no_spawn(runtime)
             if isinstance(status, dict):
                 runs = [
                     item
@@ -7328,7 +7497,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             break
                     if client_pid:
                         break
-        async with runtime.tool_lock:
             result = await asyncio.to_thread(
                 mcp_capture.capture_dual,
                 scale=scale,
@@ -7344,6 +7512,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 save_fullres=save_fullres,
                 save_dir=save_dir,
             )
+            camera_note = None
+            if not result.get("isError"):
+                # Existing bounded session_status read. It does not renew, and
+                # an unreadable body stays unknown rather than expired.
+                presence = await observe_caller_presence(runtime)
+                camera_note = _camera_note_for_capture(
+                    _camera_attempt, status, presence
+                )
         if result.get("isError"):
             raise ToolError(
                 _wire_safe_error(
@@ -7361,6 +7537,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         image_format = _image_format_from_mime(inline.get("mimeType"))
         image = Image(data=raw, format=image_format)
         meta = {"fullres_path": result.get("fullres_path"), **result.get("meta", {})}
+        _attach_camera_unverified(meta, camera_note)
         return [image, json.dumps(meta)]
 
     if config.enable_exec_enforce:

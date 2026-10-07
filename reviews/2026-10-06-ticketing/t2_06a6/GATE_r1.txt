@@ -1,0 +1,8 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_capture_camera_unverified: rc=0
+Ran 7 tests in 0.821s
+
+OK
+--- tests.test_capture_camera_unverified on Python 3.11: rc=0 OK
+--- fast tier: ran=5830 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
