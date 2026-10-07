@@ -483,14 +483,16 @@ class DaemonIdentityMigrationGateTest(unittest.TestCase):
                 side_effect=lambda _state, _generation, **_kwargs: order.append("activate"),
             ),
         ):
-            daemon.build_server_state(
+            state = daemon.build_server_state(
                 config(),
                 "fixture-key",
                 daemon_generation="fixture-generation",
                 activate_coordination=True,
             )
-
-        self.assertEqual(order, ["gate", "activate"])
+        try:
+            self.assertEqual(order, ["gate", "activate"])
+        finally:
+            state.root_writer_lease.release()
 
 
 if __name__ == "__main__":

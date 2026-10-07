@@ -285,19 +285,32 @@ def capture_installer_not_found_fixtures(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DayZ MCP P0.S security gates")
+    parser = argparse.ArgumentParser(
+        description="DayZ MCP P0.S security gates",
+        allow_abbrev=False,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    freeze = subparsers.add_parser("freeze-installer-clis")
+    freeze = subparsers.add_parser("freeze-installer-clis", allow_abbrev=False)
     freeze.add_argument("--claude-exe", type=Path, required=True)
     freeze.add_argument("--codex-exe", type=Path, required=True)
-    subparsers.add_parser("probe-installer-not-found")
-    backup = subparsers.add_parser("backup-runs-v1")
+    subparsers.add_parser("probe-installer-not-found", allow_abbrev=False)
+    backup = subparsers.add_parser("backup-runs-v1", allow_abbrev=False)
     backup.add_argument("--port", type=int, required=True)
+    backup.add_argument("--instance", default="")
+    backup.add_argument("--game-path", default="")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    from dayz_mcp.server_cli import InstanceSelectionError, validate_entry_selector
+
+    try:
+        validate_entry_selector(raw)
+    except InstanceSelectionError as error:
+        print(json.dumps({"status": "rejected", "error": error.code}))
+        return 2
+    args = _build_parser().parse_args(raw)
     if args.command == "freeze-installer-clis":
         created = create_installer_cli_manifest(
             installer_cli_manifest_path(),
@@ -314,8 +327,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "backup-runs-v1":
         from dayz_mcp.identity_migration import ensure_runs_v1_backup
         from dayz_mcp.runtime_state import RuntimePaths
+        from dayz_mcp.server_cli import (
+            InstanceSelectionError,
+            bind_instance_context,
+            reject_conflicting_environment,
+            selector_from_parsed,
+            validate_entry_selector,
+        )
 
-        receipt = ensure_runs_v1_backup(RuntimePaths.from_env(), args.port)
+        try:
+            token, game_path = validate_entry_selector(raw)
+            consumed_token, consumed_game = selector_from_parsed(
+                args.instance, args.game_path
+            )
+            if (consumed_token, consumed_game) != (token, game_path):
+                raise InstanceSelectionError("duplicate_instance_flag")
+            token, game_path = consumed_token, consumed_game
+            bind_instance_context(token, game_path, replace=True)
+            reject_conflicting_environment(token, args.port, game_path)
+        except InstanceSelectionError as error:
+            print(json.dumps({"status": "rejected", "error": error.code}))
+            return 2
+        if token is None:
+            receipt = ensure_runs_v1_backup(RuntimePaths.from_env(), args.port)
+        else:
+            receipt = ensure_runs_v1_backup(
+                RuntimePaths.for_token(token),
+                args.port,
+                state_token=token,
+            )
         print(
             json.dumps(
                 {

@@ -38,6 +38,9 @@ _REQUEST_KEYS_V1 = frozenset(
         "replace_if_not_polling_since",
         "auto_remediate_steam",
         "navmesh_data_server",
+        "shared_lock_root",
+        "instance_token",
+        "build_lock_wait_s",
     }
 )
 # Version 1 stays this set. Version 2 adds exactly one closed field.
@@ -71,10 +74,23 @@ _CANONICAL_KEYSETS = frozenset(
         _REQUEST_KEYS - {"auto_remediate_steam"},
         _REQUEST_KEYS - {"replace_if_not_polling_since", "auto_remediate_steam"},
     )
-    for omitted in (frozenset(), frozenset({"navmesh_data_server"}))
+    for omitted in (
+        frozenset(),
+        frozenset({"navmesh_data_server"}),
+        frozenset({"shared_lock_root"}),
+        frozenset({"instance_token"}),
+        frozenset({"shared_lock_root", "instance_token"}),
+        frozenset({"navmesh_data_server", "shared_lock_root"}),
+        frozenset({"navmesh_data_server", "instance_token"}),
+        frozenset({"navmesh_data_server", "shared_lock_root", "instance_token"}),
+    )
+    for extra in (
+        frozenset(),
+        frozenset({"build_lock_wait_s"}),
+    )
     for variant in (
-        keys - omitted,
-        (keys - omitted) | {"project_mod_override"},
+        keys - omitted - extra,
+        (keys - omitted - extra) | {"project_mod_override"},
     )
 )
 
@@ -109,6 +125,9 @@ REQUEST_REJECTION_REASONS = frozenset(
         "source_outside_default",
         "source_requires_build",
         "unicode_not_normalized",
+        "shared_lock_root_invalid",
+        "build_lock_wait_invalid",
+        "instance_token_invalid",
         "unknown_key",
         "version_unsupported",
         "window_size_out_of_range",
@@ -431,6 +450,34 @@ def parse_dayz_test_request(
         project_mod_override = False
     run_id = value.get("run_id")
     replace_witness = value.get("replace_if_not_polling_since")
+    shared_lock_root = value.get("shared_lock_root") if "shared_lock_root" in value else None
+    instance_token = value.get("instance_token") if "instance_token" in value else None
+    build_lock_wait_s = value.get("build_lock_wait_s") if "build_lock_wait_s" in value else None
+    if "build_lock_wait_s" in value and (
+        isinstance(build_lock_wait_s, bool)
+        or not isinstance(build_lock_wait_s, (int, float))
+        or build_lock_wait_s < 0
+        or build_lock_wait_s != build_lock_wait_s
+        or build_lock_wait_s == float("inf")
+        or build_lock_wait_s > 24 * 60 * 60
+    ):
+        _invalid("build_lock_wait_invalid")
+    if "shared_lock_root" in value and (
+        not isinstance(shared_lock_root, str)
+        or not shared_lock_root
+        or "\x00" in shared_lock_root
+        or not ntpath.isabs(shared_lock_root)
+        or ntpath.normpath(shared_lock_root) != shared_lock_root
+    ):
+        _invalid("shared_lock_root_invalid")
+    if "instance_token" in value:
+        from dayz_mcp.server_cli import InstanceSelectionError, validate_instance_token
+
+        try:
+            if validate_instance_token(instance_token) != instance_token:
+                _invalid("instance_token_invalid")
+        except InstanceSelectionError:
+            _invalid("instance_token_invalid")
 
     if mode not in request_mode_names:
         _invalid("mode_unknown")
@@ -562,6 +609,17 @@ def parse_dayz_test_request(
     }
     if not project_mod_override:
         payload.pop("project_mod_override")
+    if "shared_lock_root" in value:
+        payload["shared_lock_root"] = shared_lock_root
+    if "instance_token" in value:
+        payload["instance_token"] = instance_token
+    if "build_lock_wait_s" in value:
+        assert isinstance(build_lock_wait_s, (int, float))
+        payload["build_lock_wait_s"] = (
+            int(build_lock_wait_s)
+            if float(build_lock_wait_s) == int(build_lock_wait_s)
+            else float(build_lock_wait_s)
+        )
     try:
         canonical_bytes = json.dumps(
             payload,

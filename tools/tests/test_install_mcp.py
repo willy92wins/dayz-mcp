@@ -663,6 +663,13 @@ class FakeRegistrationProvider:
 
 class InstallerRegistrationTransactionTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.journal_dir = TemporaryDirectory()
+        self.journal_patch = patch.object(
+            installer,
+            "_default_registration_journal_root",
+            return_value=Path(self.journal_dir.name) / "registration-transaction",
+        )
+        self.journal_patch.start()
         self.old = {
             "CLAUDE": RegistrationSpec(
                 command=Path(r"C:\old\python.exe"),
@@ -683,6 +690,10 @@ class InstallerRegistrationTransactionTest(unittest.TestCase):
                 arguments=("-m", "dayz_mcp", "--client-platform", "codex"),
             ),
         }
+
+    def tearDown(self) -> None:
+        self.journal_patch.stop()
+        self.journal_dir.cleanup()
 
     def test_fresh_absent_install_adds_and_verifies_without_remove(self) -> None:
         provider = FakeRegistrationProvider({"CLAUDE": None, "CODEX": None})
@@ -1975,6 +1986,7 @@ class RegistryFlagGrammarTest(unittest.TestCase):
         # option. Registration copies and the daemon argv include it. host_config
         # checks args[:2] itself (host_config.py:254) and does not list it.
         module_switch = frozenset({"-m"})
+        installer_selector_omission = frozenset()
         # doctor._DAEMON_* parses the listener argv (doctor.py:893-897).
         # daemon_contract.build_daemon_argv (daemon_contract.py:15-45) forwards
         # bridge policy and `--daemon` only, so client-only parser options are
@@ -2015,14 +2027,14 @@ class RegistryFlagGrammarTest(unittest.TestCase):
         text_body = _ps_function_body(script, "Test-CanonicalTextArguments")
         array_body = _ps_function_body(script, "Test-CanonicalArrayArguments")
         copies = (
-            ("install_mcp._VALUE_FLAGS", set(installer._VALUE_FLAGS), value, module_switch, frozenset()),
+            ("install_mcp._VALUE_FLAGS", set(installer._VALUE_FLAGS), value, module_switch, installer_selector_omission),
             ("install_mcp._BOOLEAN_FLAGS", set(installer._BOOLEAN_FLAGS), boolean, frozenset(), frozenset()),
             (
                 "install-mcp.ps1 Test-CanonicalTextArguments $valueFlags",
                 _ps_flag_array(text_body, "valueFlags"),
                 value,
                 module_switch,
-                frozenset(),
+                installer_selector_omission,
             ),
             (
                 "install-mcp.ps1 Test-CanonicalTextArguments $booleanFlags",
@@ -2036,7 +2048,7 @@ class RegistryFlagGrammarTest(unittest.TestCase):
                 _ps_flag_array(array_body, "valueFlags"),
                 value,
                 module_switch,
-                frozenset(),
+                installer_selector_omission,
             ),
             (
                 "install-mcp.ps1 Test-CanonicalArrayArguments $booleanFlags",
@@ -2101,8 +2113,13 @@ class RegistryFlagGrammarTest(unittest.TestCase):
         for group in (registration_value, registration_boolean):
             baseline_name, baseline = group[0]
             for copy_name, copy_flags in group[1:]:
+                allowed_extra = (
+                    installer_selector_omission
+                    if copy_name.startswith("doctor.")
+                    else frozenset()
+                )
                 missing = sorted(baseline - copy_flags)
-                extra = sorted(copy_flags - baseline)
+                extra = sorted(copy_flags - baseline - allowed_extra)
                 if missing or extra:
                     self.fail(
                         f"{copy_name} drifted from {baseline_name}: "
@@ -2228,7 +2245,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ('PowerShell source did not parse: ' + $parseErrors[0].ToString()) }
-foreach ($name in @('Invoke-NativeRegistrationCommand', 'Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision')) {
+foreach ($name in @('Invoke-NativeRegistrationCommand', 'Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision', 'Get-DayZMcpInstallerErrorToken', 'Get-DayZMcpInstallerRegisterArguments', 'Invoke-DayZMcpInstallerRegister', 'Submit-DayZMcpRegistration', 'Test-DayZMcpNativePe', 'Resolve-DayZMcpNativeClientExecutable', 'Format-DayZMcpNativeCommandLine')) {
   $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
   if ($null -eq $functionAst) { throw "Missing function $name" }
   . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -2238,8 +2255,8 @@ $start = $source.IndexOf('$registrationDecision = Get-RegistrationReplaceDecisio
 $throwAt = $source.IndexOf('throw $registrationDecision.Reason', $start)
 $end = $source.IndexOf("`n  }", $throwAt)
 if ($start -lt 0 -or $throwAt -lt 0 -or $end -lt 0) { throw 'decision block missing' }
-$removeAt = $source.IndexOf('& claude mcp remove dayz-mcp')
-if ($removeAt -lt $end) { throw 'decision block is not before mcp remove' }
+$delegateAt = $source.IndexOf('# DAYZ_MCP_REGISTER_DELEGATE')
+if ($delegateAt -lt $end) { throw 'decision block is not before installer register' }
 $blockText = $source.Substring($start, ($end + 4) - $start)
 if ($blockText -match 'mcp remove') { throw 'decision block contains mcp remove' }
 $decisionBlock = [scriptblock]::Create($blockText)
@@ -2338,22 +2355,16 @@ class PowerShellRegisterGuardTest(unittest.TestCase):
         source = (TOOLS_DIR / "install-mcp.ps1").read_text(encoding="utf-8")
         register_at = source.rindex("if ($Register)")
         decision_at = source.index("$registrationDecision = Get-RegistrationReplaceDecision")
-        remove_at = source.index("& claude mcp remove dayz-mcp")
-        codex_remove_at = source.index("& $CodexCmd mcp remove dayz-mcp")
+        delegate_at = source.index("# DAYZ_MCP_REGISTER_DELEGATE")
         self.assertLess(register_at, decision_at)
-        self.assertLess(decision_at, remove_at)
-        self.assertLess(decision_at, codex_remove_at)
-        window = source[register_at:remove_at]
+        self.assertLess(decision_at, delegate_at)
+        window = source[register_at:delegate_at]
         self.assertIn("throw $registrationDecision.Reason", window)
         self.assertNotIn("mcp remove", window)
-        self.assertIn(
-            "if ($ReplaceExistingRegistration) {\n    & claude mcp remove dayz-mcp -s user\n  }",
-            source,
-        )
-        self.assertIn(
-            "if ($ReplaceExistingRegistration) {\n    & $CodexCmd mcp remove dayz-mcp\n  }",
-            source,
-        )
+        self.assertNotIn("& claude mcp add", source)
+        self.assertNotIn("& claude mcp remove", source)
+        self.assertIn("Submit-DayZMcpRegistration -Python $VenvPython", source)
+        self.assertIn("--allow-option-removal", source)
         probe_body = _ps_function_body(source, "Get-ClientRegistrationProbe")
         self.assertNotIn("mcp remove", probe_body)
         self.assertNotIn("mcp add", probe_body)
@@ -2484,6 +2495,8 @@ exit /b 0
             bindir = root / "bin"
             bindir.mkdir()
             self._write_channel_fakes(bindir)
+            write_fake_x64_pe(bindir / "claude.exe")
+            write_fake_x64_pe(bindir / "codex.exe")
             probe = root / "register_mutation.ps1"
             probe.write_text(_PS_REGISTER_MUTATION_PROBE, encoding="utf-8")
             return _run_powershell(
@@ -2547,16 +2560,36 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($SourcePath, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ('PowerShell source did not parse: ' + $parseErrors[0].ToString()) }
-foreach ($name in @('Invoke-NativeRegistrationCommand', 'Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision')) {
+foreach ($name in @('Invoke-NativeRegistrationCommand', 'Get-ClientRegistrationProbe', 'Get-RegistrationReplaceDecision', 'Get-DayZMcpInstallerErrorToken', 'Get-DayZMcpInstallerRegisterArguments', 'Invoke-DayZMcpInstallerRegister', 'Submit-DayZMcpRegistration', 'Test-DayZMcpNativePe', 'Resolve-DayZMcpNativeClientExecutable', 'Format-DayZMcpNativeCommandLine')) {
   $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
   if ($null -eq $functionAst) { throw "Missing function $name" }
   . ([scriptblock]::Create($functionAst.Extent.Text))
 }
 $source = [IO.File]::ReadAllText($SourcePath)
 $start = $source.IndexOf('$registrationDecision = Get-RegistrationReplaceDecision')
-$end = $source.IndexOf("  # Self-verify", $start)
+$end = $source.IndexOf("# DAYZ_MCP_REGISTER_DELEGATE_END", $start)
 if ($start -lt 0 -or $end -lt 0) { throw 'register block missing' }
 $blockText = $source.Substring($start, $end - $start)
+$ToolsRoot = Split-Path $BinDir
+$KeyFile = Join-Path $ToolsRoot '.dayz_mcp.key'
+$Port = 8765
+$IdleTimeoutSeconds = 1800
+$ServerProfiles = ''
+$ClientProfiles = ''
+$MissionPath = ''
+$ExpectedGameVersion = ''
+$AllowLegacy = $false
+$SkipKnowledgePack = $false
+$ClaudeNoProgressiveDisclosure = $false
+$NoSupervised = $false
+$Instance = ''
+$GamePath = ''
+$seam = Join-Path $ToolsRoot 'seam.cmd'
+$seamLog = Join-Path $ToolsRoot 'seam.log'
+$env:DAYZ_MCP_REGISTER_SEAM = $seam
+$env:DAYZ_MCP_SEAM_LOG = $seamLog
+$env:DAYZ_MCP_SEAM_FAIL = '0'
+Set-Content -LiteralPath $seam -Encoding Ascii -Value "@echo off`r`n>>`"%DAYZ_MCP_SEAM_LOG%`" echo %*`r`nif not `"%DAYZ_MCP_SEAM_FAIL%`"==`"1`" goto :ok`r`necho {`"status`":`"error`",`"error`":`"registration_busy`"} 1>&2`r`nexit /b 2`r`n:ok`r`nexit /b 0`r`n"
 $env:PATH = $BinDir
 $env:PATHEXT = '.CMD;.EXE;.BAT'
 $env:FAKE_STATE = $StatePath
@@ -2571,7 +2604,7 @@ if ($Mode -eq 'replace') {
 } elseif (Test-Path -LiteralPath $StatePath) {
   Remove-Item -LiteralPath $StatePath -Force
 }
-if ($Mode -eq 'addfail') { $env:FAKE_ADD_FAIL = '1' }
+if ($Mode -eq 'addfail') { $env:DAYZ_MCP_SEAM_FAIL = '1' }
 Set-Content -LiteralPath $LogPath -Encoding Ascii -Value ''
 $resolved = Get-Command claude -ErrorAction SilentlyContinue
 if ($null -eq $resolved -or -not $resolved.Source.StartsWith($BinDir)) {
@@ -2596,25 +2629,27 @@ try {
 }
 $logged = [IO.File]::ReadAllText($LogPath)
 $state = Test-Path -LiteralPath $StatePath
+$seamText = if (Test-Path -LiteralPath $seamLog) { [IO.File]::ReadAllText($seamLog) } else { '' }
+if ($logged -match 'REMOVE' -or $logged -match 'ADD' -or $logged -match 'NOT-GET') {
+  throw "$Mode invoked mcp add or remove: $logged"
+}
 if ($Mode -eq 'race') {
   if ($threw) { throw "race refused: $message" }
-  if ($logged -match 'REMOVE') { throw "race removed: $logged" }
-  if ($logged -notmatch 'CLAUDE_ADD' -or $logged -notmatch 'CODEX_ADD') { throw "race did not add: $logged" }
+  if ($registerResult.ExitCode -ne 0) { throw "race register exit $($registerResult.ExitCode)" }
+  if ($seamText -notmatch '--register') { throw "race did not delegate: $seamText" }
+  if ($seamText -match 'allow-option-removal') { throw "race dropped options: $seamText" }
   if (-not $state) { throw 'race deleted the registration that appeared after the first get' }
 }
 if ($Mode -eq 'addfail') {
-  if (-not $threw) { throw "add failure proceeded: $logged" }
-  if ($message -notlike '*claude mcp add*') { throw "add failure reason: $message" }
-  if ($logged -match 'REMOVE') { throw "add failure removed: $logged" }
-  if ($logged -match 'CODEX_ADD') { throw "add failure continued to codex: $logged" }
-  if ($logged -notmatch 'CLAUDE_ADD') { throw "add was not attempted: $logged" }
+  if ($threw) { throw "add failure threw: $message" }
+  if ($registerResult.ExitCode -eq 0) { throw "add failure proceeded: $seamText" }
+  if ($registerResult.Token -ne 'registration_busy') { throw "add failure token: $($registerResult.Token)" }
+  if ($seamText -match 'allow-option-removal') { throw "add failure dropped options: $seamText" }
 }
 if ($Mode -eq 'replace') {
   if ($threw) { throw "replace refused: $message" }
-  if ($logged -notmatch 'CLAUDE_REMOVE_DELETED') { throw "replace did not remove: $logged" }
-  if ($logged -notmatch 'CODEX_REMOVE' -or $logged -notmatch 'CLAUDE_ADD' -or $logged -notmatch 'CODEX_ADD') {
-    throw "replace log: $logged"
-  }
+  if ($registerResult.ExitCode -ne 0) { throw "replace exit $($registerResult.ExitCode) $seamText" }
+  if ($seamText -notmatch '--allow-option-removal') { throw "replace omitted option removal: $seamText" }
 }
 'PASS'
 '''

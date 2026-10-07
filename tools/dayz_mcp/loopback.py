@@ -1695,6 +1695,7 @@ class ServerState:
         self.client_dumps = ClientDumpRegistry()
         self.retail_probe: Callable[[], dict[str, object]] | None = None
         self.daemon_generation: str | None = None
+        self.instance_token: str | None = None
         self._lock = threading.RLock()
         self._fenced_runs: set[str] = set()
         self._next_id = 1
@@ -1793,6 +1794,25 @@ class ServerState:
         ):
             raise BindingPrepareError("instance_config_missing")
         config_path = Path(profiles_dir) / "dayz_mcp.json"
+        token = getattr(self, "instance_token", None)
+        if isinstance(token, str) and token:
+            expected_dir = "profiles-" + token
+            if Path(profiles_dir).name.casefold() != expected_dir.casefold():
+                raise BindingPrepareError("instance_profile_owner_mismatch")
+            if config_path.is_file():
+                try:
+                    existing = json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise BindingPrepareError("instance_config_missing") from exc
+                expected_url = "http://127.0.0.1:" + str(self.config_port) + "/"
+                if (
+                    not isinstance(existing, dict)
+                    or not isinstance(self.config_port, int)
+                    or isinstance(self.config_port, bool)
+                    or existing.get("url") != expected_url
+                    or existing.get("key") != self.key
+                ):
+                    raise BindingPrepareError("instance_endpoint_mismatch")
         if not config_path.is_file() and not self._seed_bridge_config(config_path):
             raise BindingPrepareError("instance_config_missing")
         try:

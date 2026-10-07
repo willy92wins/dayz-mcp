@@ -208,6 +208,24 @@ class RuntimePaths:
         root = Path(base) / "DayZ_MCP"
         return cls(root, root / "audit", root / "coordination.json", root / "runs.json")
 
+    @classmethod
+    def for_token(
+        cls,
+        token: str | None,
+        env: Mapping[str, str] | None = None,
+    ) -> "RuntimePaths":
+        if token is None:
+            return cls.from_env(env)
+        from dayz_mcp.instance_context import state_root_name, validate_instance_token
+
+        validate_instance_token(token)
+        values = os.environ if env is None else env
+        base = values.get("LOCALAPPDATA", "")
+        if not base:
+            raise RuntimeError("localappdata_unavailable")
+        root = Path(base) / state_root_name(token)
+        return cls(root, root / "audit", root / "coordination.json", root / "runs.json")
+
     @property
     def coordination_fault_path(self) -> Path:
         return self.root / "coordination-fault.json"

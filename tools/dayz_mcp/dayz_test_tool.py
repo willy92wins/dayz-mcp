@@ -472,6 +472,17 @@ def build_run_request(
             # once the gate has actually read the bridge: the value is the instant
             # of that reading, which start_run revalidates before killing anything.
             document["replace_if_not_polling_since"] = replace_if_not_polling_since
+        from dayz_mcp import server_cli
+
+        document["shared_lock_root"] = os.path.normpath(str(server_cli.shared_root()))
+        # The private worker environment is built from a fixed list and does
+        # not inherit DAYZ_MCP_BUILD_LOCK_WAIT_S. The sealed request is the
+        # accredited copy of the daemon's validated limit.
+        document["build_lock_wait_s"] = server_cli.build_lock_wait_s()
+        with server_cli._instance_bound_lock:
+            bound = server_cli._instance_bound
+        if bound is not None and bound[0]:
+            document["instance_token"] = bound[0]
         raw = json.dumps(
             document,
             ensure_ascii=False,

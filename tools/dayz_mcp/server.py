@@ -104,7 +104,16 @@ from dayz_mcp.loopback import (
     is_printable_input_name,
     read_key,
 )
-from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
+from dayz_mcp.instance_context import (
+    InstanceSelectionError,
+    bind_instance_context,
+    registration_name,
+)
+from dayz_mcp.server_cli import (
+    CLIENT_PLATFORM_ALIASES,
+    build_server_parser,
+    reject_glued_selector_flags,
+)
 from dayz_mcp.process_lifecycle import (
     ADOPTION_REVERT_PENDING,
     _caller_owns_run,
@@ -758,6 +767,9 @@ class ServerConfig:
     # says (_progressive_disclosure_enabled); --no-progressive-disclosure does
     # the same for any other platform.
     progressive_disclosure: bool = True
+    # None is the default instance. Named tokens never change that omission.
+    instance_token: str | None = None
+    game_path: str | None = None
 
 
 class Runtime:
@@ -986,9 +998,9 @@ class Runtime:
             handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     def exec_audit_path(self) -> Path:
-        if self.config.exec_audit_path is not None:
-            return Path(self.config.exec_audit_path)
-        return Path(__file__).resolve().parents[1] / "_audit" / "exec_enforce.jsonl"
+        from dayz_mcp.daemon import exec_enforce_audit_path
+
+        return exec_enforce_audit_path(self.config)
 
     def _load_exec_allowlist(self, path: str | None) -> set[str]:
         return core.load_exec_allowlist(path)
@@ -1054,13 +1066,21 @@ class ClientRuntime:
         self.config = config
         self.tool_lock = asyncio.Lock()
         self._allow_stale_policy = False
-        daemon_policy = load_normal_daemon_policy()
-        provenance = host_config.resolve_daemon_provenance()
+        selected_registration = registration_name(config.instance_token)
+        daemon_policy = load_normal_daemon_policy(selected_registration)
+        if selected_registration == "dayz-mcp":
+            provenance = host_config.resolve_daemon_provenance()
+        else:
+            provenance = host_config.resolve_daemon_provenance(
+                server_name=selected_registration
+            )
         if (
             type(provenance.port) is not int
             or type(config.port) is not int
             or not 1 <= provenance.port <= 65535
             or config.port != provenance.port
+            or getattr(provenance, "instance_token", None) != config.instance_token
+            or getattr(provenance, "game_path", None) != config.game_path
         ):
             raise host_config.HostConfigError("daemon_provenance_conflict")
         if (
@@ -8617,7 +8637,24 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
     parser = build_server_parser()
     parser.allow_abbrev = False
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        reject_glued_selector_flags(raw_argv)
+    except InstanceSelectionError as exc:
+        parser.error(exc.code)
     args = parser.parse_args(raw_argv)
+    from dayz_mcp.instance_context import (
+        reject_conflicting_environment,
+        validate_game_path,
+        validate_instance_token,
+    )
+
+    try:
+        instance_token = validate_instance_token(args.instance)
+        game_path = validate_game_path(args.game_path)
+        bind_instance_context(instance_token, game_path, replace=True)
+        reject_conflicting_environment(instance_token, int(args.port), game_path)
+    except InstanceSelectionError as exc:
+        parser.error(exc.code)
     tool_pack = args.tool_pack
     tool_pack_was_explicit = "--tool-pack" in raw_argv or any(
         token.startswith("--tool-pack=") for token in raw_argv
@@ -8652,6 +8689,8 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
         auto_spawn_daemon=bool(args.auto_spawn_daemon),
         tool_pack=tool_pack,
         progressive_disclosure=bool(args.progressive_disclosure),
+        instance_token=instance_token,
+        game_path=game_path,
     )
 
 

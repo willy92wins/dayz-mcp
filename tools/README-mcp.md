@@ -15,7 +15,7 @@ python install_mcp.py --pin-clis
 python install_mcp.py
 ```
 
-`--pin-clis` records native x64 `claude.exe` / `codex.exe` under `%LOCALAPPDATA%\DayZ_MCP\security\` (override with `DAYZ_MCP_SECURITY_DIR`). It is required before `python install_mcp.py --register`. The non-Python installer registration path does not need that pin.
+`--pin-clis` records native x64 `claude.exe` / `codex.exe` under `%LOCALAPPDATA%\DayZ_MCP\security\` (override with `DAYZ_MCP_SECURITY_DIR`). It is required before `python install_mcp.py --register` when that command does not itself receive `--claude-exe` and `--codex-exe`. `install-mcp.ps1 -Register` does not call `claude mcp` or `codex mcp` itself: after its own checks it runs the venv Python with `install_mcp.py --register` and those two executables, and `--allow-option-removal` only when an existing registration is being replaced. That invocation pins the executables and then registers under the installer lock and journal. A `.cmd` shim is not a pin target.
 
 The installer creates `.venv-mcp`, installs `mcp==1.27.2`, generates `.dayz_mcp.key` if missing, writes sample `dayz_mcp.json` files under `_mcp_config`, and prints both registration commands:
 
@@ -23,13 +23,57 @@ The installer creates `.venv-mcp`, installs `mcp==1.27.2`, generates `.dayz_mcp.
 - Codex: `--client --client-platform codex`
 - Claude lists every tool before the lease, because Claude Code does not re-list after `tools/list_changed`: `--client-platform claude` is enough. `-ClaudeNoProgressiveDisclosure` (PowerShell) and `--claude-no-progressive-disclosure` (Python) are still accepted and add `--no-progressive-disclosure`, whose full list is now the default for Claude. Codex keeps the compact pre-lease list (the session and lifecycle tools plus the reads that need no lease) and is sent `tools/list_changed` when a lease is granted, released, or found expired or lost. The list does not gate calls: a tool it leaves out still runs when called by name, and lease-gated tools still refuse to run without a lease.
 
-It mutates the Claude and Codex MCP registrations only when run with `--register`. Registration is remove-then-add and verifies both effective configurations use client mode, the expected platform, the same port/keyfile, and no `--embedded` flag.
+It mutates the Claude and Codex MCP registrations only when run with `--register` (including when `install-mcp.ps1 -Register` delegates to that command). Registration is one transaction: remove-then-add under the installer lock and journal, and it verifies both effective configurations use client mode, the expected platform, the same port/keyfile, and no `--embedded` flag. A failure prints a named token such as `registration_busy`, `registration_journal_invalid` or `registration_would_drop_options`.
 
 To seed real DayZ profile/mission config, pass the directories explicitly:
 
 ```text
 python install_mcp.py --server-profiles "C:\path\server_profiles" --client-profiles "C:\path\client_profiles" --mission-path "C:\path\mpmissions\dayzOffline.chernarusplus"
 ```
+
+## Independent instances
+
+A named instance is one tools tree bound to one token. The token is one to 32 characters, lowercase letters, digits and single hyphens, matching `^[a-z0-9](?:[a-z0-9-]{0,31})?$`. It must not start or end with `-` and must not contain `--`. The token `default` is reserved at any case and is rejected as `invalid_instance_token`. Omitting the selector keeps the historical store: state root `%LOCALAPPDATA%\DayZ_MCP`, registration name `dayz-mcp`, and the argv the installer already wrote.
+
+What changes with the token:
+
+- State root `%LOCALAPPDATA%\DayZ_MCP_<token>` (`runs.json`, coordination, audit).
+- Loopback port, chosen with `--port` / `-Port` (the default remains `8765`, so a second instance needs its own port).
+- Keyfile, the tools tree's `.dayz_mcp.key` unless `--keyfile` / `-KeyFile` names another absolute file.
+- MCP registration name `dayz-mcp-<token>`.
+- Game folder, an absolute `--game-path` / `-GamePath`.
+
+What stays one per host:
+
+- The physical DayZ box. Process and game-port admission is the machine's, so two instances do not get two boxes.
+- Build locks, under the shared root's `build-locks` directory.
+- The host-config journal, `%LOCALAPPDATA%\DayZ_MCP\host-config-transaction`. Registration journals for each server name are separate directories under `%LOCALAPPDATA%\DayZ_MCP\registration-transaction`, and one registration lock covers that root.
+- The shared root: `DAYZ_MCP_SHARED_ROOT` when set, otherwise `%LOCALAPPDATA%\DayZ_MCP_shared`. The override must be absolute. A relative value is refused as `relative_shared_root` when code calls `shared_root()`, and is not resolved against the process cwd. The installer does not make that check, and can create the venv before anything consults the shared root.
+
+Create one by copying or checking out a separate tools tree (that split is the operator's; the selector does not clone a tree), then install and register it:
+
+```text
+python install_mcp.py --register --instance <token> --game-path <absolute DayZ folder> --port <port>
+powershell -File install-mcp.ps1 -Register -Instance <token> -GamePath <absolute DayZ folder> -Port <port>
+```
+
+The flags select the instance. `DAYZ_MCP_INSTANCE`, `DAYZ_MCP_PORT` and `DAYZ_MCP_GAME_PATH`, when present, must equal those flags as the installer parses them (the game path compared in its normalized absolute form, with backslashes) (`DAYZ_MCP_INSTANCE` empty when `--instance` is omitted). They cannot replace the flags: `DAYZ_MCP_INSTANCE=alpha` with no `--instance` is `instance_environment_conflict` (the Python installer exits 2) and does not select `alpha`. That mismatch stops the entry point before it writes a capture sidecar, creates a venv or changes a registration. `install-mcp.ps1 -ValidateOnly` checks the selector and exits before those effects. `--instance=<token>`, `--game-path=<path>` and a repeated flag are invalid; the token is a separate argv element.
+
+Adopting a legacy store means a tools tree that was hardcoded to this same state root. Before the daemon copies `runs.json`, it requires quiescence. These block an unsettled migration: a listener on this instance's port (`listener_present`); a same-root writer; a writer whose package does not carry the root-selection contract; `p0s_daemon_bootstrap.py`; and a process whose interpreter flags are unrecognized while its argv still shows daemon evidence (`dayz_mcp_process_present`). A `--client` process and a writer positively accredited to a different state root do not block. The published receipt is `runs-backup-receipt.json` under `<state root>\migration\P0S-IDENTITY-V2`, kind `dayz-mcp-runs-backup-receipt-v1`, next to the backup `runs.pre-v2.json`. When the start is blocked, stop the named listener or writer and start again. Leave the migration directory in place while a transaction file is present. After a settled receipt, a listener and a non-writer no longer block, and a live same-root writer still blocks every start with `dayz_mcp_process_present`.
+
+One writer holds each state root for the life of the process, on byte 1 of `<state root>\.daemon-startup.lock`. Process death releases it. A second daemon for that root, whatever its port or keyfile, logs `DAEMON: state root already has a writer` and exits `75` (`DAEMON_STARTUP_CONTENDED`). That line is not the code `state_root_writer_busy`. Coordinated state activation raises `state_root_writer_busy` before it activates stores. The migration scan reports the same live writer as `dayz_mcp_process_present`. A second lease in the same process is admitted only for the same owner object. In each of these cases, stop the live writer and start again.
+
+Operator error codes:
+
+- `registration_busy` — another registration holds the lock. Wait until it finishes and retry. Do not force the host configs.
+- `build_busy` — the shared build lock was still held when the wait elapsed. Retry after the other build releases it.
+- `relative_shared_root` — `DAYZ_MCP_SHARED_ROOT` is relative. Raised when code calls `shared_root()`, not by the installer before it creates the venv. Set the variable to an absolute directory, or unset it to use `%LOCALAPPDATA%\DayZ_MCP_shared`.
+- `instance_environment_conflict` — `DAYZ_MCP_INSTANCE`, `DAYZ_MCP_PORT` or `DAYZ_MCP_GAME_PATH` is set and is not exactly the flag. Make them match, or unset the variable.
+- `duplicate_instance_flag` — `--instance` or `--game-path` appears twice, or the parsed selector disagrees with the argv scan. Pass each flag once, as its own argv element.
+- `glued_instance_flag` — the token or game path was glued to the flag (`--instance=<token>`, `--game-path=<path>`, or a longer flag that only starts with that name). Pass the value as the next argument.
+- `state_root_writer_busy` — coordinated activation found the root lease already held. Stop that writer and start again. A second daemon does not print this code: it logs `DAEMON: state root already has a writer` and exits 75. The migration scan names the same writer `dayz_mcp_process_present`.
+- `listener_present` — an unsettled migration sees a listener on this instance's port. Close that listener and start again.
+- `dayz_mcp_process_present` — an unsettled migration, or a start after a settled receipt, sees a same-root writer (or, before the receipt, a writer that does not prove its root). Stop that writer and start again.
 
 ## Startup and health
 

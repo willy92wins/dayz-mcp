@@ -64,6 +64,8 @@ def official_client_argv(
     expected_game_version: str = "",
     allow_legacy: bool = False,
     tools_root: str | Path | None = None,
+    instance_token: str | None = None,
+    game_path: str | None = None,
 ) -> list[str]:
     from install_mcp import InstallerOptions, build_client_args
 
@@ -82,7 +84,12 @@ def official_client_argv(
         codex_exe=None,
         tools_root=Path(tools_root or TOOLS_DIR),
     )
-    return [python, *build_client_args(options, platform)]
+    argv = [python, *build_client_args(options, platform)]
+    if instance_token:
+        argv += ["--instance", instance_token]
+    if game_path:
+        argv += ["--game-path", game_path]
+    return argv
 
 
 def _unwrap_error(error: BaseException) -> BaseException:
@@ -370,7 +377,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Print the installer-registered DayZ-MCP stdio --client argv, "
             "or probe tools/list on a short-lived spawn of that process."
-        )
+        ),
+        allow_abbrev=False,
     )
     parser.add_argument("--python", help="Python used to spawn -m dayz_mcp")
     parser.add_argument("--keyfile", help="Installer keyfile path, not the key")
@@ -408,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Retry tools/list on a short-lived --client spawn",
     )
+    parser.add_argument("--instance", default="")
+    parser.add_argument("--game-path", default="")
     parser.add_argument("--attempts", type=_positive_int, default=PLAN_B_ATTEMPTS)
     parser.add_argument(
         "--backoff-s",
@@ -420,7 +430,40 @@ def main(argv: list[str] | None = None) -> int:
         default=PLAN_B_READ_TIMEOUT_S,
         help="Per-attempt ClientSession read timeout (default 15)",
     )
-    args = parser.parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    from dayz_mcp.server_cli import (
+        InstanceSelectionError,
+        selector_from_parsed,
+        validate_entry_selector,
+    )
+
+    try:
+        token, game_path = validate_entry_selector(raw)
+    except InstanceSelectionError as error:
+        _dump(
+            {
+                "ok": False,
+                "error": error.code,
+                "code": error.code,
+                "cwd": str(TOOLS_DIR),
+            }
+        )
+        return 2
+    args = parser.parse_args(raw)
+    try:
+        consumed_token, consumed_game = selector_from_parsed(args.instance, args.game_path)
+        if (consumed_token, consumed_game) != (token, game_path):
+            raise InstanceSelectionError("duplicate_instance_flag")
+    except InstanceSelectionError as error:
+        _dump(
+            {
+                "ok": False,
+                "error": error.code,
+                "code": error.code,
+                "cwd": str(TOOLS_DIR),
+            }
+        )
+        return 2
     try:
         command = official_client_argv(
             python=_resolve_python(args.python),
@@ -430,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
             idle_timeout_s=args.idle_timeout,
             expected_game_version=args.expected_game_version,
             allow_legacy=args.allow_legacy,
+            instance_token=token,
+            game_path=game_path,
         )
     except Exception as error:
         code, _retryable, message = classify_probe_error(error)

@@ -21,7 +21,29 @@ else:
 
 
 INBOX_DIR = Path(os.environ["LOCALAPPDATA"]) / "DayZ_MCP" / "inbox"
+
+
+def inbox_directory() -> Path:
+    """Default inbox stays ``INBOX_DIR``. Named instances use their own root."""
+    from dayz_mcp.instance_context import current_instance_token, state_root_name
+
+    token = current_instance_token()
+    if token is None:
+        return INBOX_DIR
+    return Path(os.environ["LOCALAPPDATA"]) / state_root_name(token) / "inbox"
+
+
 FEEDBACK_PATH = INBOX_DIR / "feedback.jsonl"
+
+
+def feedback_path() -> Path:
+    from dayz_mcp.instance_context import current_instance_token
+
+    if current_instance_token() is None:
+        return FEEDBACK_PATH
+    return inbox_directory() / "feedback.jsonl"
+
+
 KINDS = frozenset({"bug", "request", "tool_contribution", "finding"})
 # Published on pipeline_feedback.inputSchema (fb-20260910-032514-2c43) and
 # enforced again in append_feedback. Keep the two in lockstep via these names.
@@ -113,9 +135,9 @@ def _age_fields(ts: object, now: datetime) -> dict[str, object]:
 
 
 def _lock_path() -> Path:
-    # Derived at call time, like every use of FEEDBACK_PATH: a test that
+    # Derived at call time, like every use of feedback_path(): a test that
     # points the store at a temporary directory moves the lock with it.
-    return FEEDBACK_PATH.with_name(FEEDBACK_PATH.name + ".lock")
+    return feedback_path().with_name(feedback_path().name + ".lock")
 
 
 def _try_lock(fd: int) -> bool:
@@ -148,7 +170,7 @@ def _append_lock() -> Iterator[None]:
     """Hold the store's exclusive cross-process append lock.
 
     An OS byte-range lock (msvcrt.locking on Windows, flock elsewhere) on
-    byte 0 of feedback.jsonl.lock, beside FEEDBACK_PATH. It belongs to the
+    byte 0 of feedback.jsonl.lock, beside feedback_path(). It belongs to the
     open handle: closing the handle, or the death of the process, drops it,
     so a writer that crashed leaves nothing stale and whether the lock file
     exists means nothing. The file stays empty and is never removed. A lock
@@ -189,7 +211,7 @@ def _filed_ids() -> set[str]:
     """
     filed: set[str] = set()
     try:
-        handle = FEEDBACK_PATH.open("rb")
+        handle = feedback_path().open("rb")
     except FileNotFoundError:
         return filed
     with handle:
@@ -226,7 +248,7 @@ def _unused_id(stamp: str) -> str:
 def _ends_mid_line() -> bool:
     """True when the store's last byte is not the b"\\n" that ends a record."""
     try:
-        handle = FEEDBACK_PATH.open("rb")
+        handle = feedback_path().open("rb")
     except FileNotFoundError:
         return False
     with handle:
@@ -250,7 +272,7 @@ def _append_jsonl(record: dict, id_stamp: str | None = None) -> None:
     #
     # With id_stamp, record["id"] is chosen here, under the lock (_unused_id),
     # so the uniqueness check and the write are one step to every other writer.
-    os.makedirs(INBOX_DIR, exist_ok=True)
+    os.makedirs(inbox_directory(), exist_ok=True)
     with _append_lock():
         if id_stamp is not None:
             record["id"] = _unused_id(id_stamp)
@@ -262,7 +284,7 @@ def _append_jsonl(record: dict, id_stamp: str | None = None) -> None:
             # without the lock. End its torn line first, so it costs one
             # malformed line and does not swallow this record as well.
             payload = b"\n" + payload
-        fd = os.open(FEEDBACK_PATH, os.O_APPEND | os.O_CREAT | os.O_WRONLY)
+        fd = os.open(feedback_path(), os.O_APPEND | os.O_CREAT | os.O_WRONLY)
         try:
             os.write(fd, payload)
         finally:
@@ -302,7 +324,7 @@ def append_feedback(
     }
     _append_jsonl(entry, id_stamp=stamp)
     result = dict(entry)
-    result["path"] = str(FEEDBACK_PATH)
+    result["path"] = str(feedback_path())
     return result
 
 
@@ -323,7 +345,7 @@ def _feedback_state(feedback_id: str) -> tuple[bool, bool]:
     exists = False
     already_resolved = False
     try:
-        handle = FEEDBACK_PATH.open("rb")
+        handle = feedback_path().open("rb")
     except FileNotFoundError:
         return exists, already_resolved
     with handle:
@@ -399,14 +421,14 @@ def _read_inbox(
     entries: list[dict] = []
     by_id: dict[str, dict] = {}
     malformed = 0
-    if FEEDBACK_PATH.is_file():
+    if feedback_path().is_file():
         # Read as _feedback_state reads, without the append lock, and split
         # the same way: on the b"\n" ending each record
         # (a CRLF's \r is JSON whitespace), each line decoded on its own.
         # str.splitlines() also broke at U+0085, U+2028 and U+2029, which
         # ensure_ascii=False writes raw, and one undecodable byte failed the
         # whole read (fb-20260930-172226-89c9); now either costs one line.
-        with FEEDBACK_PATH.open("rb") as handle:
+        with feedback_path().open("rb") as handle:
             lines = handle.readlines()
         for raw in lines:
             try:

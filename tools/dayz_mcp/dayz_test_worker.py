@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import ntpath
+import os
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -58,6 +59,7 @@ LIFECYCLE_REJECTION_CODES = frozenset(
 
 WORKER_ERROR_CODES = frozenset(
     {
+        "build_busy",
         "build_failed",
         "build_source_unavailable",
         "internal_failure",
@@ -395,6 +397,49 @@ def _mods(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> str:
     return ";".join(_mod_entries(payload, runtime))
 
 
+def _accredited_shared_root(payload: dict[str, object]) -> Path | None:
+    """The lock directory the daemon hashed into the sealed request.
+
+    Omission keeps the historical lookup. A present value that is not an
+    absolute normalized path is rejected before any build lock is taken.
+    """
+    if "shared_lock_root" not in payload:
+        return None
+    value = payload.get("shared_lock_root")
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or not ntpath.isabs(value)
+        or ntpath.normpath(value) != value
+    ):
+        raise _failed("request_integrity_failed")
+    from pathlib import Path
+
+    return Path(value)
+
+
+def _accredited_build_lock_wait_s(payload: dict[str, object]) -> float:
+    """The wait the daemon hashed into the sealed request.
+
+    Omission keeps the historical 15 minutes. The worker does not read
+    ``DAYZ_MCP_BUILD_LOCK_WAIT_S``: that variable never reaches the private
+    worker environment.
+    """
+    if "build_lock_wait_s" not in payload:
+        return 15 * 60
+    value = payload.get("build_lock_wait_s")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or value < 0
+        or value != value
+        or value == float("inf")
+    ):
+        raise _failed("request_integrity_failed")
+    return float(value)
+
+
 def _start_core(
     payload: dict[str, object],
     runtime: WorkerRuntimePolicy,
@@ -406,8 +451,13 @@ def _start_core(
     mission = _mission(payload, runtime)
     server_root = ntpath.join(runtime.dev_root, "_server")
     client_root = ntpath.join(runtime.dev_root, "_client")
-    server_profiles = ntpath.join(server_root, "profiles")
-    client_profiles = ntpath.join(client_root, "profiles")
+    profile_name = "profiles"
+    # The sealed request carries the selector. The worker environment does not.
+    bound_token = payload.get("instance_token")
+    if isinstance(bound_token, str) and bound_token:
+        profile_name = "profiles-" + bound_token
+    server_profiles = ntpath.join(server_root, profile_name)
+    client_profiles = ntpath.join(client_root, profile_name)
     mod_string = _mods(payload, runtime)
     port = int(payload["port"])
     if role == "server":
@@ -1045,18 +1095,41 @@ async def execute_dayz_test_worker(
         ):
             raise _failed("build_source_unavailable")
         pack_only = bool(payload["pack_only"]) or not has_binarizable_assets(source)
-        result = await _invoke(
-            broker,
-            native_broker_protocol.BrokerKind.ADDON_BUILDER,
-            {
-                "clear": bool(payload["clean"]),
-                "pack_only": pack_only,
-                "prefix": runtime.mod,
-                "source": source,
-                "target": ntpath.join(runtime.mods_root, "@" + runtime.mod, "Addons"),
-                "temp": ntpath.join(runtime.build_temp_root, runtime.mod),
-            },
+        target = ntpath.join(runtime.mods_root, "@" + runtime.mod, "Addons")
+        temp = ntpath.join(runtime.build_temp_root, runtime.mod)
+        from dayz_mcp.server_cli import (
+            BuildLockBusy,
+            BuildLockCancelled,
+            async_shared_build_lock,
         )
+
+        lock_root = _accredited_shared_root(payload)
+        try:
+            async with async_shared_build_lock(
+                target,
+                temp,
+                root=lock_root,
+                wait_s=_accredited_build_lock_wait_s(payload),
+                cancel=cancelled,
+            ):
+                if cancelled():
+                    raise _failed("operation_cancelled")
+                result = await _invoke(
+                    broker,
+                    native_broker_protocol.BrokerKind.ADDON_BUILDER,
+                    {
+                        "clear": bool(payload["clean"]),
+                        "pack_only": pack_only,
+                        "prefix": runtime.mod,
+                        "source": source,
+                        "target": target,
+                        "temp": temp,
+                    },
+                )
+        except BuildLockBusy:
+            raise _failed("build_busy") from None
+        except BuildLockCancelled:
+            raise _failed("operation_cancelled") from None
         if (
             result.get("ok") is not True
             or type(result.get("exit_code")) is not int

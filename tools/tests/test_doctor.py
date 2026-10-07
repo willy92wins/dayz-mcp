@@ -1741,25 +1741,15 @@ class DoctorTest(unittest.TestCase):
         self.assertIn(
             "$codexArgs  = $serverArgs + @('--client-platform','codex')", script
         )
-        self.assertIn("$CodexCmd=(Get-Command codex.cmd).Source", script)
-        self.assertIn("& claude mcp add dayz-mcp -s user -- $VenvPython @claudeArgs", script)
-        self.assertIn("& $CodexCmd mcp add dayz-mcp -- $VenvPython @codexArgs", script)
-        self.assertIn("& $CodexCmd mcp get dayz-mcp --json", script)
-        self.assertIn("Test-ClaudeRegistration", script)
-        self.assertIn("Test-CodexRegistration", script)
-        self.assertIn(
-            "Test-ClaudeRegistration $effectiveClaude $VenvPython $KeyFile \"$Port\" $claudeArgs", script
-        )
-        self.assertIn(
-            "Test-CodexJsonShape $effectiveCodex", script
-        )
-        self.assertIn(
-            "Test-CodexRegistration $codexConfig $VenvPython $KeyFile \"$Port\" $codexArgs", script
-        )
-        self.assertLess(
-            script.index("Test-CodexJsonShape $effectiveCodex"),
-            script.index("$effectiveCodex | ConvertFrom-Json"),
-        )
+        self.assertIn("install_mcp.py", script)
+        self.assertIn("'--register'", script)
+        self.assertIn("Submit-DayZMcpRegistration -Python $VenvPython", script)
+        self.assertNotIn("& claude mcp add", script)
+        self.assertNotIn("& claude mcp remove", script)
+        self.assertNotIn("mcp remove", script)
+        self.assertIn("function Test-ClaudeRegistration", script)
+        self.assertIn("function Test-CodexRegistration", script)
+        self.assertIn("function Test-CodexJsonShape", script)
         self.assertNotIn("$effectiveClaude.Contains($KeyFile)", script)
         self.assertNotIn("[Array]::IndexOf", script)
 
