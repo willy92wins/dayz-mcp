@@ -736,6 +736,39 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
     ),
+    "object_resolve": (
+        (
+            "valid",
+            {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 2.0},
+            (True, None),
+        ),
+        (
+            "radius_at_cap",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "radius": 50.0},
+            (True, None),
+        ),
+        ("missing_radius", {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0]}, (False, "bad_args")),
+        (
+            "radius_zero",
+            {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "radius_over_cap",
+            {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 50.1},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "type": "CivilianSedan",
+                "pos": [0.0, 0.0, 0.0],
+                "radius": 2.0,
+                "nearest": True,
+            },
+            (False, "bad_args"),
+        ),
+    ),
     "object_doors": (
         (
             "valid_type_pos",

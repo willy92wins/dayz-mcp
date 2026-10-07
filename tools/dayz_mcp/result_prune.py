@@ -103,6 +103,9 @@ PRUNABLE_FIELDS = (
     "player_move",
     # player_trace fills it with the trace header and its paged samples (4ae5).
     "player_trace",
+    # vehicle_telemetry fills it with the seated transport's GetDirection.
+    # Omitted when the player is not in a transport (c32c).
+    "direction",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

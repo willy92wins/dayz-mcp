@@ -21,6 +21,8 @@ class MCPBridge : Managed
 	protected const float TELEMETRY_OBJECT_AT_MAX_RADIUS = 50.0;
 	// F3.4 / F3.6: fixed lookup radius when type+pos resolve an in-world object.
 	protected const float OBJECT_LOOKUP_RADIUS = 25.0;
+	// object_resolve only. Callers pass this radius; it is not the 25 m lookup.
+	protected const float OBJECT_RESOLVE_RADIUS_MAX = 50.0;
 	// object_doors refuses a larger GetDoorCount instead of emitting an unbounded list.
 	protected const int DOOR_READ_MAX = 64;
 	// vehicle_door calls ForceUpdateLightsEnd this long after its write. Vanilla
@@ -33,12 +35,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "e5a0ed288dbae72f";
+	protected const string SERVER_ARG_CONTRACT_HASH = "421895632da1ef7e";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -580,6 +582,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "object_inspect")
 		{
 			postNow = DispatchObjectInspect(command, result);
+		}
+		else if (command.cmd == "object_resolve")
+		{
+			postNow = DispatchObjectResolve(command, result);
 		}
 		else if (command.cmd == "world_time_set")
 		{
@@ -2108,6 +2114,11 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		// Same map and key as world_spawn (command id). This id is the created
+		// item for this run only, for both dests. object_delete of it removes
+		// the item. A retry is a second create.
+		m_RuntimeObjects.Insert(command.id, spawned);
+		result.object_id = command.id;
 		result.classname = command.args.classname;
 		result.type = spawned.GetType();
 		result.found = true;
@@ -2558,6 +2569,63 @@ class MCPBridge : Managed
 		}
 
 		return FindUniqueObjectNearType(args.type, Vector(px, py, pz), OBJECT_LOOKUP_RADIUS, error);
+	}
+
+	// Register one existing object of args.type inside the caller's radius.
+	// Radius is finite and in (0, OBJECT_RESOLVE_RADIUS_MAX]. Exact type, one
+	// match. An object already in m_RuntimeObjects keeps that id; otherwise
+	// the id is command.id. FindUniqueObjectNearType is unchanged.
+	protected bool DispatchObjectResolve(MCPCommand command, MCPResult result)
+	{
+		string resolveError = "";
+		float px;
+		float py;
+		float pz;
+		float radius;
+		Object match;
+		int existingId;
+		int objectId;
+
+		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		px = command.args.pos.Get(0);
+		py = command.args.pos.Get(1);
+		pz = command.args.pos.Get(2);
+		radius = command.args.radius;
+		if (!IsFiniteFloat(px) || !IsFiniteFloat(py) || !IsFiniteFloat(pz) || !IsFiniteFloat(radius) || radius <= 0.0 || radius > OBJECT_RESOLVE_RADIUS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		match = FindUniqueObjectNearType(command.args.type, Vector(px, py, pz), radius, resolveError);
+		if (!match)
+		{
+			result.ok = false;
+			result.error = resolveError;
+			return true;
+		}
+
+		existingId = RuntimeObjectId(match);
+		objectId = existingId;
+		if (existingId <= 0)
+		{
+			m_RuntimeObjects.Insert(command.id, match);
+			objectId = command.id;
+		}
+
+		result.object_id = objectId;
+		result.type = match.GetType();
+		result.pos_real = new array<float>();
+		VectorToArray(match.GetPosition(), result.pos_real);
+		result.ok = true;
+		return true;
 	}
 
 	// Resolve a single world object by classname near pos. Zero matches -> object_not_found;
@@ -3303,6 +3371,15 @@ class MCPBridge : Managed
 		}
 
 		PopulateTelemetryObject(match, telemetry);
+		// Top-level lifetime for this EntityAI. A non-EntityAI omits it.
+		// Zero remaining_s or max_s is a real reading (entityai.c:3380, :3387).
+		EntityAI lifetimeEntity = EntityAI.Cast(match);
+		if (lifetimeEntity)
+		{
+			result.lifetime = new MCPSpawnLifetime();
+			result.lifetime.remaining_s = lifetimeEntity.GetLifetime();
+			result.lifetime.max_s = lifetimeEntity.GetLifetimeMax();
+		}
 		result.ok = true;
 		result.telemetry = telemetry;
 		return true;

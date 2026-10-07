@@ -5526,8 +5526,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Delete an object "
-            "previously returned by world_spawn.object_id or by "
-            "inventory_attach.item_object_id. object_id is "
+            "previously returned by world_spawn.object_id, "
+            "inventory_attach.item_object_id, inventory_give.object_id or "
+            "object_resolve.object_id. object_id is "
             "session-scoped and does not survive the run — keep that id "
             "in this session; there is no pos+type delete. "
             "inventory_attach's top-level object_id is the destination owner; "
@@ -5556,6 +5557,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Register one existing world object of exact "
+            "type within radius metres of pos. radius is finite and in "
+            "(0, 50]. Zero matches is object_not_found; two or more is "
+            "ambiguous_object. An object already registered keeps that "
+            "same-run id; otherwise the id is this command's id. The reply "
+            "is object_id, type and pos_real. object_delete of that id "
+            "deletes the object. This does not pick a nearest neighbour."
+        )
+    )
+    async def object_resolve(
+        type: StrictStr,
+        pos: list[StrictFloat],
+        radius: StrictFloat,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(type, str) or type == "":
+            raise ToolError(_bad_args("type", type, "be a non-empty string"))
+        radius_error = _bad_args("radius", radius, "be a finite number in (0, 50]")
+        radius_value = _finite_float(radius, radius_error)
+        if radius_value <= 0.0 or radius_value > 50.0:
+            raise ToolError(radius_error)
+        args = {"type": type, "pos": _require_vec3(pos, "pos"), "radius": radius_value}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "object_resolve", args, "server", _timeout(timeout_s)
+            )
 
     @app.tool(
         description=(
@@ -6299,9 +6329,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Spawn classname "
-            "into a player's inventory via CreateInInventory. dest is 'hands' "
-            "or 'inventory'. uid empty (default) targets the first human; a "
-            "non-empty uid selects by PlayerIdentity.GetPlainId()."
+            "into a player's inventory via CreateInInventory, or into the "
+            "hands via CreateInHands. dest is 'hands' or 'inventory'. "
+            "Success returns object_id, the created item's same-run registry "
+            "id, for both dests. hands_take and object_delete take that id. "
+            "uid empty (default) targets the first human; a non-empty uid "
+            "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
+            "success without a positive object_id still created the item: "
+            "the receipt is returned with object_id_unavailable true. Do not "
+            "retry that call; a second give creates another item."
         )
     )
     async def inventory_give(
@@ -6324,15 +6360,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if uid != "":
             args["uid"] = uid
         async with runtime.tool_lock:
-            return await runtime.call_bridge("inventory_give", args, "server", _timeout(timeout_s))
+            result = await runtime.call_bridge(
+                "inventory_give", args, "server", _timeout(timeout_s)
+            )
+        return _require_inventory_give_id(result)
 
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
             "Put a reachable item into a player's hands via "
             "PredictiveTakeEntityToHands. object_id is a same-run registry id "
-            "from world_spawn.object_id or inventory_attach.item_object_id "
-            "(inventory_give does not return one). The take is predictive and "
+            "from world_spawn.object_id, inventory_attach.item_object_id or "
+            "inventory_give.object_id. The take is predictive and "
             "asynchronous: accepted=true with confirmed=false means the server "
             "accepted the request, not that the item is in hands yet. Confirm "
             "with weapon_state. uid empty (default) targets the first human. "
@@ -6509,6 +6548,31 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return await runtime.call_bridge(
                 "weapon_sights", {"mode": mode}, "client", _timeout(timeout_s)
             )
+
+    def _require_inventory_give_id(result: dict[str, Any]) -> dict[str, Any]:
+        # The bridge has already created the item when ok is true. Raising
+        # would hide that and a retry would create a second item. An older
+        # PBO answers success with no positive object_id. Keep the receipt.
+        if not isinstance(result, dict):
+            return result
+        ok = result.get("ok")
+        if ok is not True and ok != 1:
+            return result
+        object_id = result.get("object_id")
+        if (
+            isinstance(object_id, int)
+            and not isinstance(object_id, bool)
+            and object_id > 0
+        ):
+            return result
+        reported = dict(result)
+        reported["object_id_unavailable"] = True
+        reported["detail"] = (
+            "object_id_unavailable: the item was created and this receipt "
+            "is that creation. No positive object_id was returned. Do not "
+            "retry this call: a second give creates another item."
+        )
+        return reported
 
     def _require_inventory_attach_child(result: dict[str, Any]) -> dict[str, Any]:
         # The bridge has already created the item by the time this runs.
@@ -7683,7 +7747,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_control", args, "client", _timeout(timeout_s))
 
-    @app.tool(description="Read owner-side vehicle telemetry (speed, gear, engine, pos, ownership).")
+    @app.tool(
+        description=(
+            "Read owner-side vehicle telemetry (speed, gear, engine, pos, "
+            "ownership). direction is the seated transport's GetDirection as "
+            "[x, y, z], the same vector vehicle_trace stores. It is omitted "
+            "when the player is not in a transport."
+        )
+    )
     async def vehicle_telemetry(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))

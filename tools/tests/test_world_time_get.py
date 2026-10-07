@@ -259,8 +259,8 @@ class WorldTimeGetCensusTest(unittest.TestCase):
         # A no-argument verb adds nothing to the arg contract, and a new verb
         # does not bump the bridge version.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "e5a0ed288dbae72f")
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "e5a0ed288dbae72f"', self.source)
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "421895632da1ef7e"', self.source)
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "11";', messages)
 

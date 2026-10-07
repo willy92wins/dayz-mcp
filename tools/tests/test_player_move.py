@@ -647,7 +647,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only, and a
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "e5a0ed288dbae72f")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
         self.assertIn('const string MCP_BRIDGE_VERSION = "11";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1705,18 +1705,22 @@ class PlayerMovePayloadTest(unittest.TestCase):
         for owner in ("MCPResult", "MCPJob"):
             with self.subTest(owner=owner):
                 self.assertEqual(_class_members(self.messages, owner).count(("ref MCPPlayerMove", FIELD)), 1)
-        # player_trace stays the last MCPResult member; this one sits just before it.
+        # player_move sits just before player_trace. direction (c32c) is last.
         result_members = _class_members(self.messages, "MCPResult")
         self.assertEqual(
-            result_members[-2:],
-            [("ref MCPPlayerMove", FIELD), ("ref MCPPlayerTraceRead", "player_trace")],
+            result_members[-3:],
+            [
+                ("ref MCPPlayerMove", FIELD),
+                ("ref MCPPlayerTraceRead", "player_trace"),
+                ("ref array<float>", "direction"),
+            ],
         )
         self.assertLess(self.messages.index("class MCPPlayerMove"), self.messages.index("class MCPResult"))
 
     def test_the_reply_is_prunable_and_a_refusal_keeps_its_zero_facts(self) -> None:
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-2:], (FIELD, "player_trace")
+            result_prune.PRUNABLE_FIELDS[-3:], (FIELD, "player_trace", "direction")
         )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("world_spawn", {"ok": 1, FIELD: {}})
