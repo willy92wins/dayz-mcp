@@ -1,0 +1,63 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_g5fix_named_profiles: rc=0
+Ran 16 tests in 1.174s
+
+OK
+--- tests.test_g5fix_named_profiles on Python 3.11: rc=0 OK
+--- tests.test_dayz_test_worker: rc=0
+Ran 41 tests in 0.111s
+
+OK
+--- tests.test_dayz_test_worker on Python 3.11: rc=0 OK
+--- tests.test_instance_identity_97de: rc=0
+Ran 53 tests in 2.705s
+
+OK
+--- tests.test_instance_identity_97de on Python 3.11: rc=0 OK
+--- tests.test_log_tail: rc=0
+Ran 15 tests in 0.077s
+
+OK
+--- tests.test_log_tail on Python 3.11: rc=0 OK
+--- tests.test_wait_for: rc=0
+Ran 36 tests in 13.384s
+
+OK
+--- tests.test_wait_for on Python 3.11: rc=0 OK
+--- tests.test_lease_ttl_and_file_wait: rc=0
+Ran 29 tests in 12.080s
+
+OK
+--- tests.test_lease_ttl_and_file_wait on Python 3.11: rc=0 OK
+--- tests.test_logs_since_marker_roundtrip: rc=0
+Ran 5 tests in 0.707s
+
+OK
+--- tests.test_logs_since_marker_roundtrip on Python 3.11: rc=0 OK
+--- tests.test_fb_8604_orderly_close: rc=0
+Ran 57 tests in 13.698s
+
+OK
+--- tests.test_fb_8604_orderly_close on Python 3.11: rc=0 OK
+--- tests.test_vpp_preflight: rc=0
+Ran 73 tests in 3.229s
+
+OK (skipped=1)
+--- tests.test_vpp_preflight on Python 3.11: rc=0 OK (skipped=1)
+--- tests.test_client_death_dump_binding: rc=0
+Ran 31 tests in 0.198s
+
+OK
+--- tests.test_client_death_dump_binding on Python 3.11: rc=0 OK
+--- tests.test_launch_contract_c561_31d2_2837: rc=0
+Ran 33 tests in 4.087s
+
+OK
+--- tests.test_launch_contract_c561_31d2_2837 on Python 3.11: rc=0 OK
+--- tests.test_fb_1025_packaged_modules_lock: rc=0
+Ran 8 tests in 1.180s
+
+OK
+--- tests.test_fb_1025_packaged_modules_lock on Python 3.11: rc=0 OK
+--- fast tier: ran=5994 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS
