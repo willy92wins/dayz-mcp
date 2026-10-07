@@ -179,13 +179,14 @@ class Fb1004TeardownCopyTest(unittest.TestCase):
     def test_1004_object_delete_does_not_invent_pos_type_api_or_refuse_seat(self) -> None:
         source = SERVER_PY.read_text(encoding="utf-8")
         body = _python_def(
-            source, "async def object_delete(", "async def notify_players("
+            source, "async def object_delete(", "async def object_resolve("
         )
         self.assertIn("object_id", body)
         self.assertNotIn("expected_type", body)
         self.assertNotIn("pos:", body)
         self.assertNotIn("vehicle_telemetry", body)
         self.assertNotIn("occupant_client_seated", body)
+        self.assertNotIn("async def object_resolve(", body)
 
 
 if __name__ == "__main__":

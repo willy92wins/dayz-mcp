@@ -2386,6 +2386,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.seat = "unknown";
 		result.type = transport.GetType();
 		result.classname = transport.ClassName();
+		// Same vector as vehicle_trace direction_x/y/z (Object.GetDirection, object.c:320).
+		result.direction = new array<float>();
+		VectorToArray(transport.GetDirection(), result.direction);
 
 		vehicleCommand = player.GetCommand_Vehicle();
 		if (vehicleCommand && vehicleCommand.GetTransport() == transport)

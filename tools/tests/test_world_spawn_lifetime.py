@@ -203,7 +203,9 @@ class SpawnLifetimeEnforceContractTest(unittest.TestCase):
         self.assertIn("result.lifetime.remaining_s = lifetimeEntity.GetLifetime();", filled)
         self.assertIn("result.lifetime.max_s = lifetimeEntity.GetLifetimeMax();", filled)
         self.assertLess(post.index("if (job.args.lifetime_s_set)"), post.index("PostResult(result);"))
-        self.assertEqual(self.bridge.count("result.lifetime"), filled.count("result.lifetime"))
+        # Spawn still writes lifetime only inside this flag. telemetry_read
+        # object_at writes the same field on its own handler (19c3).
+        self.assertEqual(post.count("result.lifetime"), filled.count("result.lifetime"))
 
     def test_the_read_back_payload_is_primitives_and_prunable(self) -> None:
         self.assertEqual(

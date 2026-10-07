@@ -233,6 +233,7 @@ def _has_ready_snapshot_shape(status: object) -> bool:
 SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
+    "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
 }
@@ -284,6 +285,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "object_delete": "object_delete",
         "object_doors": "object_doors",
         "object_inspect": "object_inspect",
+        "object_resolve": "object_resolve",
         "player_godmode": "player_godmode",
         "player_heal": "player_heal",
         "player_kill": "player_kill",

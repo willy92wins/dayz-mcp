@@ -73,6 +73,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "object_delete",
     "object_doors",
     "object_inspect",
+    "object_resolve",
     "player_godmode",
     "player_heal",
     "player_kill",

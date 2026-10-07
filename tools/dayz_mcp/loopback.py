@@ -87,6 +87,7 @@ SERVER_COMMANDS = {
     "inventory_attach",
     "inventory_give",
     "object_inspect",
+    "object_resolve",
     "object_doors",
     "infected_drive",
     "entities_query",
@@ -800,7 +801,12 @@ BOT_START_ACTIONS = (
 # Verbs an older PBO must never be handed. Admission and delivery both require
 # a fresh accredited server census that names the command and the current
 # arg-contract hash.
-_CAPABILITY_ADMISSION_COMMANDS = frozenset({"player_kill", "bot_start", "bot_stop"})
+_CAPABILITY_ADMISSION_COMMANDS = frozenset({
+    "player_kill",
+    "bot_start",
+    "bot_stop",
+    "object_resolve",
+})
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset({"vehicle_release", "bot_stop"})
@@ -1116,6 +1122,19 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "dest": _equal_to("cargo"),
             },
         ),
+    ),
+    # object_resolve registers one existing object. Radius is finite, in (0, 50].
+    "object_resolve": _command_schema(
+        _schema_variant(
+            required=("type", "pos", "radius"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
+                ),
+            },
+        )
     ),
     "object_inspect": _command_schema(
         _schema_variant(
