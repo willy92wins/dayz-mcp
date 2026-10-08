@@ -1027,7 +1027,9 @@ async def _start(
             )
         if operation_id is not None and role == "server" and not _successful_run(
             result, target_run_id, "RUNNING"
-        ) and _lifecycle_rejection(result) not in STEAM_PREPARATION_REJECTION_CODES:
+        ) and _lifecycle_rejection(result) not in (
+            STEAM_PREPARATION_REJECTION_CODES | {"storage_recovery_required"}
+        ):
             result = await invoke_start()
         elif (
             operation_id is None
