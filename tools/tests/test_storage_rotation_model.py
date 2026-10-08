@@ -2289,8 +2289,9 @@ class RotationModelTest(unittest.TestCase):
                     sys.stdout = previous_out
                 self.assertEqual(code, 2)
                 self.assertEqual(broker.spawns, 0)
-                # Server creation replays one failed start before it settles the refusal.
-                self.assertEqual(broker.commands, ["start", "start", "stop"])
+                # storage_recovery_required is consumed on the first start (855c).
+                # A lost response still replays; this refusal must not.
+                self.assertEqual(broker.commands, ["start", "stop"])
                 framed = holder.buffer.getvalue()
                 size = int.from_bytes(framed[:4], "little")
                 body = framed[4 : 4 + size]
