@@ -14,8 +14,7 @@
   - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v11b-20261008\` (`steps.log`).
 - **PBO vivo:** `CC616EC7…` (puente "11").
 - **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
-  - A las 22:02 no había daemons ni DayZ vivos; los daemons arrancan con la primera llamada de un cliente.
-  - Las otras sesiones ya reconectaron sus clientes.
+  - Al cierre, el orquestador registró sus harnesses cerrados y ningún proceso propio pendiente. El censo global de las 22:02 y la reconexión de otras sesiones no están acreditados en esta evidencia.
 - **Verificado en juego el 2026-10-08:** `reviews/2026-10-06-ticketing/ingame-v11b/RESULTS.md`.
 - **Riesgos abiertos:**
   - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`). El arreglo quedó aparcado: `reviews/2026-10-06-ticketing/round2/2986_PARKED.md`.

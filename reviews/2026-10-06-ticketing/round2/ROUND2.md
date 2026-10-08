@@ -14,7 +14,7 @@ orchestrator-granted consolidation round.
 | C 86a3 `action_cursor` / `player_look_at` | **Stopped** after 3 rounds plus a consolidation round (r4: gate green, two P2). |
 | Infra (owner: "infra first") | **Stopped** after 3 rounds (`SPEC_R2I.md`; r3: gate green, four P2; F4, F7 and F11 reappeared in every round). |
 
-## Why B and C stopped: one missing piece of infrastructure
+## Shared broker blockers in B and C
 Both verbs must stop the in-game work when the caller cancels, and must fence their result to the exact client
 incarnation that executed it. In broker mode (`python -m dayz_mcp --client`, the production mode) neither is
 possible today:
@@ -22,10 +22,12 @@ possible today:
   release.
 - `/status` exposes only an 8-character `instance_prefix`, so a same-run client replacement passes a fence.
 
+B additionally retains F3/F15 reconciliation defects, F6 drain-state defects, F5 shutdown callback retention, and the F12 regression failure.
+
 The owner chose to build that infrastructure first (`SPEC_R2I.md`: complete binding tokens for broker clients, an
 abandon-by-id operation with a release each command type registers, `ClientRuntime` cancellation using it). Its
-loop converged (13 -> 7 -> 4 findings, no P1 left, gate green), but the retention, release-catalog and
-receipt-attribution findings kept coming back. The owner decided to stop for the day and start the next session
+Findings decreased from 13 to 7 to 4; r3 had no P1 and the offline delta gate passed, but the review remained
+CHANGES_REQUIRED, and the retention, release-catalog and receipt-attribution findings kept coming back. The owner decided to stop for the day and start the next session
 by narrowing the infrastructure to its minimum (abandon by id and the complete token, without the retention and
 receipt-attribution machinery), then give B and C a final round on top.
 

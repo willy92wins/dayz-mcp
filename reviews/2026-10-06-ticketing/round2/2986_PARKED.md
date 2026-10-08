@@ -15,8 +15,7 @@ the same family of findings reappeared in every round, in the single-role warnin
 
 What worked and stays as evidence in the batch workspace (`C:\Users\guill\dzmcp_gauntlet\r2a_855c_2986\ws`, not merged):
 the neutral cursor ([Login]/[StateMachine] + `<CREATE NEW CHAR>`/`<LOAD EXISTING CHAR>` + correlated
-`[Disconnect]: Finish`), the 1.29 and 1.30 fixtures, and the close's logout watcher, which the reviewer found to treat
-the unresolved cases conservatively.
+`[Disconnect]: Finish`), the 1.29 and 1.30 fixtures, and the close's logout watcher. The logout watcher behaved conservatively in the specific trailing-block reproduction checked in r3 and the reconnect reproduction rechecked in r4; live acceptance remains unverified.
 
 Design notes for the next attempt (to be decided, not started):
 - One state machine for both formats. Feed the legacy `[Logout]: Player <id> finished` line into the neutral cursor as
