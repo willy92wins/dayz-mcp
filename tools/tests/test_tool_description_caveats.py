@@ -126,6 +126,29 @@ class WorldSpawnInfectedWordingTest(unittest.TestCase):
         self.assertIn("does not guarantee survival", text)
 
 
+class TextureStreamingCaveatWordingTest(unittest.TestCase):
+    """c440: frame_stale=false is not a loaded scene; a long teleport streams."""
+
+    def test_frame_stale_false_is_not_a_finished_load(self) -> None:
+        text = _description("capture_screenshot")
+        self.assertIn("frame_stale=false", text)
+        self.assertIn("means the render advanced, not that the scene finished loading", text)
+        self.assertIn("textures and terrain can still be streaming", text)
+        self.assertIn("vanilla Chernarus and a custom map", text)
+        self.assertIn("the cause, focus or distance, is not established", text)
+        self.assertIn("No capture field certifies that streaming finished", text)
+        self.assertIn("the caller looks at the image", text)
+
+    def test_long_teleport_capture_can_be_untextured(self) -> None:
+        text = _description("player_teleport")
+        self.assertIn("After a long teleport the client streams the new area", text)
+        self.assertIn("a capture taken right after it can show an untextured scene", text)
+        self.assertIn("for minutes on an unfocused client", text)
+        self.assertIn("reported; not a measured duration", text)
+        # A duration must not be promised as a rule.
+        self.assertNotIn("always untextured for", text)
+
+
 class PublishedContractPreservedTest(unittest.TestCase):
     """The clarifications touch wording only: parameters and masks stay put."""
 

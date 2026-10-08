@@ -5947,7 +5947,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             'of its reach): player_move(speed="walk", phase="hold", hold_s=1) '
             "requests real movement for about a second and can change the "
             "position; it does not guarantee displacement or settlement, and "
-            "no zero-speed hold exists."
+            "no zero-speed hold exists. After a long teleport the client "
+            "streams the new area; a capture taken right after it can show "
+            "an untextured scene, for minutes on an unfocused client "
+            "(reported; not a measured duration)."
         )
     )
     async def player_teleport(
@@ -7498,7 +7501,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "An unfocused DayZDiag client renders at about 20 fps, so client-side timing depends on which window owns the foreground. "
         "Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
         "pixels repeat the previous capture of the same window, false that the render advanced, and null that no comparison was possible (first capture, an "
-        "unidentifiable window, a record over a different surface or geometry, or an unusable state store). frame_stale_detail carries the evidence: "
+        "unidentifiable window, a record over a different surface or geometry, or an unusable state store). frame_stale=false means the render advanced, not that the scene finished loading: textures and terrain can still be streaming "
+        "(an unfocused client after a teleport was reported to stay untextured for minutes on vanilla Chernarus and a custom map; the cause, focus or distance, is not established). No capture field certifies that streaming finished: the caller looks at the image. frame_stale_detail carries the evidence: "
         "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "
         "stored state and are therefore there on the very first capture. A repeated frame is a fact about pixels, not an error: a paused sim, an open menu "
         "and a still scene all produce it legitimately. "

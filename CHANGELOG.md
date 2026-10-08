@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Published-description clarifications only (no parameter, result or error-code change): `capture_screenshot` states that `frame_stale=false` means the render advanced, not that texture streaming finished, and `player_teleport` notes that a capture right after a long teleport can show an untextured scene (reported, not a measured duration) (inbox c440).
 - `capture_screenshot` still grabs at most 5 frames. The frame evidence records `requested_frames`, `effective_frames` and `frame_limit`, and `limit_reason=frame_limit` when the request was cut. Published metadata on both capture entry points warns `frames_capped`. The tool description states the cap (inbox 5aa8).
 - `scene_raycast` description documents the rvproxy radius-zero substitution (requested `radius=0` currently runs with an effective radius of 0.05 m), the engine-returned `pos` without contact-point reconstruction, that `method='bullet'` does not use radius, and that the reported floor sweep-centre offset is not promised for all surfaces (inbox 449e).
 - `capture_screenshot` description clarifies that the dayz_test_run desktop preflight is a point-in-time check of accessibility/brightness: it neither keeps the display awake nor guarantees later client captures (inbox d490).
