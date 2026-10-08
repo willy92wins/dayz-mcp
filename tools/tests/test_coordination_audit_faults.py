@@ -59,6 +59,38 @@ def _paths(root: Path) -> RuntimePaths:
     )
 
 
+# The release worker clears _handoff_pending and only then calls
+# _persist_snapshot_locked, which drops the condition for the duration of the
+# write. A wait on the flag alone can return while that write is in flight
+# and the file still holds the previous snapshot.
+_TERMINAL_RELEASE_SNAPSHOT_TIMEOUT_S = 1.0
+
+
+def _persisted_terminal_release(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("handoff_pending") is False
+        and payload.get("active") is None
+    )
+
+
+def _wait_for_persisted_terminal_release(
+    path: Path, timeout: float = _TERMINAL_RELEASE_SNAPSHOT_TIMEOUT_S
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if _persisted_terminal_release(path):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
 def _marker(**changes: object) -> dict[str, object]:
     marker: dict[str, object] = {
         "format_version": 1,
@@ -1556,11 +1588,15 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
                 with coordinator._condition:
                     self.assertTrue(
                         coordinator._condition.wait_for(
-                            lambda: not coordinator._handoff_pending
-                            and coordinator._wal_marker is None,
+                            lambda: coordinator._wal_marker is None,
                             timeout=1.0,
                         )
                     )
+                # The file read below follows this release. The flag and the
+                # WAL marker both clear before the terminal snapshot write.
+                self.assertTrue(
+                    _wait_for_persisted_terminal_release(paths.coordination_path)
+                )
                 armed_cutpoint = True
 
                 with self.assertRaises(CrashBeforeClear):
@@ -1679,12 +1715,9 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
 
         self.assertEqual((released[0], released[1]["released"]), (200, True))
         self.assertNotIn("audit_failed", released[1].get("cleanup_degraded") or [])
-        with coordinator._condition:
-            self.assertTrue(
-                coordinator._condition.wait_for(
-                    lambda: not coordinator._handoff_pending, timeout=1.0
-                )
-            )
+        self.assertTrue(
+            _wait_for_persisted_terminal_release(self.paths.coordination_path)
+        )
         self.assertEqual(self.fault_store.load_with_sha(), (None, None))
         persisted = json.loads(self.paths.coordination_path.read_text(encoding="utf-8"))
         self.assertIsNone(persisted["active"])
@@ -1692,6 +1725,63 @@ class CoordinatorWalIntegrationTests(unittest.TestCase):
         self.assertFalse(persisted["handoff_pending"])
         names = [event["event"] for event in self.events]
         self.assertLess(names.index("session_release_started"), names.index("session_release_finished"))
+
+    def test_terminal_snapshot_wait_stays_blocked_until_the_write_lands(self) -> None:
+        """The memory flag clears before the terminal snapshot write.
+
+        Holding that write open must show a cleared flag against the previous
+        file, and the file wait must not return until the write is released.
+        Replacing the wait with the old memory-only wait, or dropping the
+        terminal persist after the flag clear, fails this test.
+        """
+        write_released = threading.Event()
+        terminal_entered = threading.Event()
+        real_persist = self.snapshot_store.write_coordination
+
+        def persist(payload: dict[str, object]) -> bool:
+            if (
+                payload.get("handoff_pending") is False
+                and payload.get("active") is None
+            ):
+                terminal_entered.set()
+                if not write_released.wait(2.0):
+                    return False
+            return real_persist(payload) is not False
+
+        coordinator = self._coordinator(persist=persist)
+        active = coordinator.acquire(_identity("a"), "drive")[1]
+        released = coordinator.release(_identity("a"), active["lease_token"])
+
+        self.assertEqual((released[0], released[1]["released"]), (200, True))
+        self.assertTrue(terminal_entered.wait(1.0))
+        with coordinator._condition:
+            self.assertFalse(coordinator._handoff_pending)
+        stale = json.loads(self.paths.coordination_path.read_text(encoding="utf-8"))
+        self.assertTrue(stale["handoff_pending"])
+        self.assertIsNone(stale["active"])
+
+        # The write is still held. This call runs on the main thread, so a
+        # memory-only wait cannot pass by starting after the write lands.
+        self.addCleanup(write_released.set)
+        self.assertFalse(
+            _wait_for_persisted_terminal_release(
+                self.paths.coordination_path, timeout=0.2
+            )
+        )
+        write_released.set()
+        self.assertTrue(
+            _wait_for_persisted_terminal_release(self.paths.coordination_path)
+        )
+        self.assertEqual(self.fault_store.load_with_sha(), (None, None))
+        persisted = json.loads(self.paths.coordination_path.read_text(encoding="utf-8"))
+        self.assertIsNone(persisted["active"])
+        self.assertIsNone(persisted["releasing"])
+        self.assertFalse(persisted["handoff_pending"])
+        names = [event["event"] for event in self.events]
+        self.assertLess(
+            names.index("session_release_started"),
+            names.index("session_release_finished"),
+        )
 
     @slow_test
     def test_slow_successful_release_audit_is_not_reported_failed(self) -> None:
