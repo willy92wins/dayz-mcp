@@ -26,7 +26,7 @@ import sys
 import time
 import types
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -280,6 +280,10 @@ class DaemonStartRefusalTest(unittest.TestCase):
                     id_fn=lambda: next(ids),
                     readiness_probe=_ready,
                     has_binarizable_assets=lambda _source: True,
+                    # bf5c / 8cf9: a binarizing build is staged from the real
+                    # source, and P:\ExampleMod is not one. The stage is not
+                    # what this incident is about.
+                    stage_build_source=nullcontext,
                 )
             )
 
