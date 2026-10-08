@@ -109,7 +109,14 @@ _TRANSITION_IN_FLIGHT = (
 _TERMINAL_KEYS = frozenset(
     {"cleanup_degraded", "error_code", "exit_code", "ok", "run_id"}
 )
-_OPTIONAL_TERMINAL_KEYS = frozenset({"attempt_run_id", "launch_operation_id"})
+_OPTIONAL_TERMINAL_KEYS = frozenset(
+    {
+        "attempt_run_id",
+        "launch_operation_id",
+        "storage_recovery_reason",
+        "storage_recovery_hint",
+    }
+)
 
 
 class DayzTestToolError(RuntimeError):
@@ -129,6 +136,8 @@ class WorkerTerminal:
     attempt_run_id: str | None = None
     launch_operation_id: str | None = None
     attestation: dict[str, object] | None = None
+    storage_recovery_reason: str | None = None
+    storage_recovery_hint: str | None = None
 
 
 class _Runtime(Protocol):
@@ -647,6 +656,33 @@ def _valid_uuid4(value: object) -> bool:
     return parsed.version == 4 and str(parsed) == value
 
 
+def _terminal_storage_pair(
+    value: dict[str, object], ok: bool, error_code: object
+) -> tuple[str, str] | None:
+    """The declared storage refusal, when the terminal carries a whole pair.
+
+    Both keys or neither, only on a failed storage-rejection terminal, the
+    token from the closed vocabulary and its canonical guidance. Anything
+    else is a malformed diagnostic, not a half truth to publish.
+    """
+    present_reason = "storage_recovery_reason" in value
+    present_hint = "storage_recovery_hint" in value
+    if not present_reason and not present_hint:
+        return None
+    if not present_hint or ok or error_code != "storage_recovery_required":
+        _fail("terminal_invalid")
+    reason = value.get("storage_recovery_reason")
+    hint = value.get("storage_recovery_hint")
+    if (
+        not isinstance(reason, str)
+        or not isinstance(hint, str)
+        or reason not in dayz_test_storage.STORAGE_RECOVERY_REASONS
+        or hint != dayz_test_storage.storage_recovery_hint(reason)
+    ):
+        _fail("terminal_invalid")
+    return reason, hint
+
+
 def parse_worker_terminal(
     stdout: bytes, stderr: bytes, process_exit_code: int
 ) -> WorkerTerminal:
@@ -716,6 +752,9 @@ def parse_worker_terminal(
             _fail("terminal_invalid")
         attempt_run_id = None
         launch_operation_id = None
+        # A success carries no storage diagnostic pair. The ok branch above
+        # already refused any optional key beyond the attestation.
+        storage_recovery = None
     else:
         if (
             not 1 <= exit_code <= 255
@@ -738,6 +777,7 @@ def parse_worker_terminal(
             attempt_run_id = None
         if "launch_operation_id" not in value:
             launch_operation_id = None
+        storage_recovery = _terminal_storage_pair(value, ok, error_code)
     return WorkerTerminal(
         cleanup_degraded=cleanup_degraded,
         error_code=error_code,
@@ -749,6 +789,12 @@ def parse_worker_terminal(
             launch_operation_id if isinstance(launch_operation_id, str) else None
         ),
         attestation=attestation_report,
+        storage_recovery_reason=(
+            None if storage_recovery is None else storage_recovery[0]
+        ),
+        storage_recovery_hint=(
+            None if storage_recovery is None else storage_recovery[1]
+        ),
     )
 
 
@@ -1603,6 +1649,19 @@ def _compact_result(
     startup = _steam_prep_token(steam_startup)
     repair = _steam_prep_token(steam_pid_repair)
     restarted = steam_restarted if type(steam_restarted) is bool else None
+    recovery_reason = terminal.storage_recovery_reason
+    recovery_hint = terminal.storage_recovery_hint
+    if (
+        terminal.ok
+        or terminal.error_code != "storage_recovery_required"
+        or not isinstance(recovery_reason, str)
+        or recovery_reason not in dayz_test_storage.STORAGE_RECOVERY_REASONS
+        or recovery_hint != dayz_test_storage.storage_recovery_hint(recovery_reason)
+    ):
+        recovery_reason = None
+        recovery_hint = None
+    if remediation is None and recovery_hint is not None:
+        remediation = recovery_hint
     result: dict[str, object] = {
         "status": "succeeded" if terminal.ok else "failed",
         "project": project,
@@ -1663,6 +1722,9 @@ def _compact_result(
         "storage_reset_notice": (
             storage_reset_notice if storage_rotated is True else None
         ),
+        # null when this failure is not a declared storage refusal. The hint
+        # is the remediation above; the token is the decision, not daemon text.
+        "storage_recovery_reason": recovery_reason,
     }
     if terminal.attestation is not None:
         result["attestation"] = terminal.attestation

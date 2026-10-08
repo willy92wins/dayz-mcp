@@ -1,0 +1,33 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_storage_rotation_model: rc=0
+Ran 23 tests in 49.863s
+
+OK
+--- tests.test_storage_rotation_model on Python 3.11: rc=0 OK
+--- tests.test_dayz_test_storage: rc=0
+Ran 32 tests in 0.507s
+
+OK
+--- tests.test_dayz_test_storage on Python 3.11: rc=0 OK
+--- tests.test_storage_reset_visibility: rc=0
+Ran 31 tests in 1.275s
+
+OK
+--- tests.test_storage_reset_visibility on Python 3.11: rc=0 OK
+--- tests.test_dayz_test_tool: rc=0
+Ran 77 tests in 0.407s
+
+OK
+--- tests.test_dayz_test_tool on Python 3.11: rc=0 OK
+--- tests.test_docs_truth: rc=0
+Ran 22 tests in 2.257s
+
+OK (skipped=2)
+--- tests.test_docs_truth on Python 3.11: rc=0 OK (skipped=2)
+--- tests.test_fb_1025_packaged_modules_lock: rc=0
+Ran 8 tests in 1.043s
+
+OK
+--- tests.test_fb_1025_packaged_modules_lock on Python 3.11: rc=0 OK
+--- fast tier: ran=6032 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

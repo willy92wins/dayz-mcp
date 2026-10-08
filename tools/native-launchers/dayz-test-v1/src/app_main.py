@@ -60,6 +60,8 @@ def _write_worker_terminal(
     attempt_run_id: str | None = None,
     launch_operation_id: str | None = None,
     attestation: dict[str, object] | None = None,
+    storage_recovery_reason: str | None = None,
+    storage_recovery_hint: str | None = None,
 ) -> None:
     body: dict[str, object] = {
         "cleanup_degraded": cleanup_degraded,
@@ -76,6 +78,11 @@ def _write_worker_terminal(
         body["attempt_run_id"] = attempt_run_id
     if launch_operation_id is not None:
         body["launch_operation_id"] = launch_operation_id
+    # Optional pair, both or neither, validated by the reader against the
+    # storage module's closed refusal vocabulary.
+    if storage_recovery_reason is not None and storage_recovery_hint is not None:
+        body["storage_recovery_reason"] = storage_recovery_reason
+        body["storage_recovery_hint"] = storage_recovery_hint
     terminal = b"DZW1" + _canonical(body)
     sys.stdout.buffer.write(struct.pack("<I", len(terminal)))
     sys.stdout.buffer.write(terminal)
@@ -348,6 +355,8 @@ def main() -> int:
                 attempt_run_id = None
                 launch_operation_id = None
                 attestation = None
+                storage_recovery_reason = None
+                storage_recovery_hint = None
                 if isinstance(error, dayz_test_worker.DayzTestWorkerError):
                     error_code = error.code
                     run_id = error.run_id
@@ -355,6 +364,8 @@ def main() -> int:
                     attempt_run_id = error.attempt_run_id
                     launch_operation_id = error.launch_operation_id
                     attestation = error.attestation
+                    storage_recovery_reason = error.storage_recovery_reason
+                    storage_recovery_hint = error.storage_recovery_hint
                 elif isinstance(error, asyncio.CancelledError):
                     error_code = "operation_cancelled"
                     run_id = None
@@ -371,6 +382,8 @@ def main() -> int:
                     attempt_run_id,
                     launch_operation_id,
                     attestation,
+                    storage_recovery_reason,
+                    storage_recovery_hint,
                 )
             except BaseException:
                 pass

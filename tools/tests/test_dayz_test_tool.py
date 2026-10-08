@@ -1211,8 +1211,12 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_rotated",
                 "storage_backup",
                 "storage_reset_notice",
+                # E2: present on every envelope. null when this call is not a
+                # declared storage refusal (success, and every other failure).
+                "storage_recovery_reason",
             },
         )
+        self.assertIsNone(result["storage_recovery_reason"])
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["phase"], "completed")
         self.assertEqual(result["run_id"], RUN_ID)
@@ -1364,8 +1368,10 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_rotated",
                 "storage_backup",
                 "storage_reset_notice",
+                "storage_recovery_reason",
             },
         )
+        self.assertIsNone(result["storage_recovery_reason"])
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], readiness_code)
 
@@ -1411,6 +1417,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["steam_registered_pid"], 4321)
         self.assertEqual(result["steam_live_pids"], [1, 2, 3, 4, 5, 6, 7, 8])
         self.assertEqual(result["remediation"], "restart Steam")
+        self.assertIsNone(result["storage_recovery_reason"])
         self.assertEqual(
             set(result),
             {
@@ -1447,6 +1454,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_rotated",
                 "storage_backup",
                 "storage_reset_notice",
+                "storage_recovery_reason",
             },
         )
 
@@ -1488,6 +1496,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["steam_registered_pid"])
         self.assertEqual(result["steam_live_pids"], [])
         self.assertEqual(result["remediation"], steam_preflight.REMEDIATION)
+        self.assertIsNone(result["storage_recovery_reason"])
         self.assertEqual(
             set(result),
             {
@@ -1524,6 +1533,7 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_rotated",
                 "storage_backup",
                 "storage_reset_notice",
+                "storage_recovery_reason",
             },
         )
 

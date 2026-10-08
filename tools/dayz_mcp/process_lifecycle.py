@@ -141,15 +141,32 @@ def _pending_completed_rotation(
 ) -> dayz_test_storage.RotationResult | None | object:
     """Reset already committed for this seal, while replacement storage is absent.
 
-    Reads a validated completed journal. Does not move or delete anything.
-    An unreadable completed file is skipped, not a refusal. Several completed
-    journals for the same seal (B->A, A->B, B->A) cannot be told apart, since
-    transaction ids are not chronological: that is _AMBIGUOUS_PENDING_ROTATION,
-    and the caller records the observation as unknown instead of guessing.
+    Reads validated completed journals. Does not move or delete anything.
+    An unreadable completed file is skipped, not a refusal. The completed
+    rotation may seal its own A: the recovery that finished the transaction
+    resealed the marker to the caller's seal, and the record still names the
+    reset, so the recorded seal never decides alone. A published record whose
+    reserved world backup is a directory is a candidate; several candidates
+    (B->A, A->B, B->A) cannot be told apart, since transaction ids are not
+    chronological: that is _AMBIGUOUS_PENDING_ROTATION, and the caller records
+    the observation as unknown instead of guessing. A completed `prepared`
+    journal is a recorded abort and never counts as a reset.
     """
     try:
         entries = os.listdir(mission)
     except OSError:
+        return None
+    try:
+        marker = dayz_test_storage.read_marker(mission)
+    except OSError:
+        return None
+    if (
+        marker.state != dayz_test_storage.MARKER_PRESENT_VALID
+        or marker.seal != seal
+    ):
+        # The replay retells a reset whose marker now carries this seal. A
+        # marker that says anything else is this call's classification, not
+        # evidence about the completed rotation.
         return None
     matches: list[tuple[str, dict[str, object]]] = []
     for name in entries:
@@ -163,7 +180,6 @@ def _pending_completed_rotation(
         if (
             document is None
             or document.get("phase") != dayz_test_storage.PHASE_MARKER_PUBLISHED
-            or document.get("new_seal") != seal
         ):
             continue
         backup = document.get("storage_backup")
@@ -2151,6 +2167,8 @@ class ProcessLifecycle:
         self._operation_lock = threading.RLock()
         self._command_id = -1
         self._last_start_error: str | None = None
+        # The storage refusal behind the public code, when one was decided.
+        self._last_storage_recovery_reason: str | None = None
         # Wire-safe Steam preparation of the last successful client launch.
         # One row per session; never persisted and never includes identity or PIDs.
         self._steam_preparation_by_session: dict[str, dict[str, object]] = {}
@@ -3329,6 +3347,11 @@ class ProcessLifecycle:
             reason = result.reason if isinstance(result.reason, str) else ""
             if not reason.strip():
                 reason = "storage_recovery_required"
+            self._last_storage_recovery_reason = (
+                reason
+                if reason in dayz_test_storage.STORAGE_RECOVERY_REASONS
+                else None
+            )
             written = self._audit(
                 "lifecycle_storage_recovery_required",
                 None,
@@ -4263,6 +4286,15 @@ class ProcessLifecycle:
                         hint = _STORAGE_ROTATE_HINTS.get(storage_error)
                         if hint is not None:
                             settled["hint"] = hint
+                        if storage_error == "storage_recovery_required":
+                            recovery_reason = self._last_storage_recovery_reason
+                            if recovery_reason is not None:
+                                settled["storage_recovery_reason"] = recovery_reason
+                                settled["storage_recovery_hint"] = (
+                                    dayz_test_storage.storage_recovery_hint(
+                                        recovery_reason
+                                    )
+                                )
                         return settled
                 if steam is not None and not self.steam_gate.final_check(steam):
                     self._retire_minted(run_id, launch_role, minted, "launch_failed")
