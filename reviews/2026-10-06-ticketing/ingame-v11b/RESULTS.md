@@ -48,7 +48,7 @@ waited 17.1 s and reported `logout_players=[Dev, logout_finished=true]`.
 - Pre-existing, not from #195: a `dayz_test_run(build=true)` PBO packs only config, models, textures and rvmats.
   - SimpleGroup: 22 entries against 67 in the project's own build. No `scripts\`, `gui\layouts`, `inputs.xml` or `stringtable.csv`, so such a run tests the mod without its scripts (c561 family).
   - LFHeli_OH1: prefix `LFHeli_OH1` against `LFHeli` in the deployed PBO.
-- Observations: 16 + 2 `Error: 1816 Cannot run binMake.exe` lines in the staged builds; empty `dayz-mcp-native-*` folders from earlier days left in `%TEMP%` (listed 2026-10-08 ~16:03 with their mtimes: `djz62e4_` 2026-09-30 02:40, `1kac5jtf` 2026-10-06 03:59, `8bv30qzg` 2026-10-06 23:27, `i9n_jkih` 2026-10-07 16:27, `au6x20l5` 2026-10-08 01:05); the folders of today's two staged builds were gone.
+- Observations: 16 + 2 `Error: 1816 Cannot run binMake.exe` lines in the staged builds; empty `dayz-mcp-native-*` folders from earlier runs left in `%TEMP%` (listed 2026-10-08 ~16:03 with their mtimes: `djz62e4_` 2026-09-30 02:40, `1kac5jtf` 2026-10-06 03:59, `8bv30qzg` 2026-10-06 23:27, `i9n_jkih` 2026-10-07 16:27, `au6x20l5` 2026-10-08 01:05); the folders of today's two staged builds were gone.
 
 ## 9941 hold probe (corrected procedure, gpt-6.1-sol READY)
 FenceKit + `ActionDeployObject` (5 s deploy), multiplayer, one fresh kit per trial, hologram confirmed by capture.
