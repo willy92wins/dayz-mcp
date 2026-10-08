@@ -25,7 +25,7 @@ possible today:
 B additionally retains F3/F15 reconciliation defects, F6 drain-state defects, F5 shutdown callback retention, and the F12 regression failure.
 
 The owner chose to build that infrastructure first (`SPEC_R2I.md`: complete binding tokens for broker clients, an
-abandon-by-id operation with a release each command type registers, `ClientRuntime` cancellation using it). Its
+abandon-by-id operation with a release each command type registers, `ClientRuntime` cancellation using it).
 Findings decreased from 13 to 7 to 4; r3 had no P1 and the offline delta gate passed, but the review remained
 CHANGES_REQUIRED, and the retention, release-catalog and receipt-attribution findings kept coming back. The owner decided to stop for the day and start the next session
 by narrowing the infrastructure to its minimum (abandon by id and the complete token, without the retention and
