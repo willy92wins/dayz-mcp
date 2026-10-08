@@ -88,6 +88,8 @@ class DayzTestWorkerError(RuntimeError):
         attempt_run_id: str | None = None,
         launch_operation_id: str | None = None,
         attestation: dict[str, object] | None = None,
+        storage_recovery_reason: str | None = None,
+        storage_recovery_hint: str | None = None,
     ) -> None:
         if code not in WORKER_ERROR_CODES or type(cleanup_degraded) is not bool:
             raise ValueError("invalid_worker_error")
@@ -99,6 +101,15 @@ class DayzTestWorkerError(RuntimeError):
             attempt_run_id is None or _UUID4.fullmatch(launch_operation_id) is None
         ):
             raise ValueError("invalid_worker_error")
+        if (storage_recovery_reason is None) != (storage_recovery_hint is None):
+            raise ValueError("invalid_worker_error")
+        if storage_recovery_reason is not None and (
+            storage_recovery_reason
+            not in dayz_test_storage.STORAGE_RECOVERY_REASONS
+            or storage_recovery_hint
+            != dayz_test_storage.storage_recovery_hint(storage_recovery_reason)
+        ):
+            raise ValueError("invalid_worker_error")
         super().__init__(code)
         self.code = code
         self.run_id = run_id
@@ -107,6 +118,10 @@ class DayzTestWorkerError(RuntimeError):
         self.attempt_run_id = attempt_run_id
         self.launch_operation_id = launch_operation_id
         self.attestation = attestation
+        # The declared storage refusal behind code, when the daemon named one.
+        # Both or neither: a half pair is a malformed diagnostic.
+        self.storage_recovery_reason = storage_recovery_reason
+        self.storage_recovery_hint = storage_recovery_hint
 
 
 class Broker(Protocol):
@@ -142,6 +157,8 @@ def _failed(
     attempt_run_id: str | None = None,
     launch_operation_id: str | None = None,
     attestation: dict[str, object] | None = None,
+    storage_recovery_reason: str | None = None,
+    storage_recovery_hint: str | None = None,
 ) -> DayzTestWorkerError:
     return DayzTestWorkerError(
         code,
@@ -150,7 +167,27 @@ def _failed(
         attempt_run_id=attempt_run_id,
         launch_operation_id=launch_operation_id,
         attestation=attestation,
+        storage_recovery_reason=storage_recovery_reason,
+        storage_recovery_hint=storage_recovery_hint,
     )
+
+
+def _storage_recovery_pair(result: object) -> tuple[str, str] | None:
+    """The daemon's storage refusal diagnostics, when they are consistent.
+
+    A pair that names no declared refusal, or whose guidance is not the
+    canonical text for its token, is malformed: the legacy collapse without
+    diagnostics is the answer then, never a half-validated pair.
+    """
+    if not isinstance(result, dict):
+        return None
+    reason = result.get("storage_recovery_reason")
+    hint = result.get("storage_recovery_hint")
+    if not isinstance(reason, str) or not isinstance(hint, str):
+        return None
+    if hint != dayz_test_storage.storage_recovery_hint(reason):
+        return None
+    return reason, hint
 
 
 def _failure_after_cleanup(
@@ -163,6 +200,12 @@ def _failure_after_cleanup(
 ) -> DayzTestWorkerError:
     attestation = (
         error.attestation if isinstance(error, DayzTestWorkerError) else None
+    )
+    recovery = (
+        (error.storage_recovery_reason, error.storage_recovery_hint)
+        if isinstance(error, DayzTestWorkerError)
+        and error.storage_recovery_reason is not None
+        else None
     )
     if isinstance(error, DayzTestWorkerError):
         if error.attempt_run_id is not None:
@@ -181,6 +224,8 @@ def _failure_after_cleanup(
                     launch_operation_id if attempt_run_id is not None else None
                 ),
                 attestation=attestation,
+                storage_recovery_reason=None if recovery is None else recovery[0],
+                storage_recovery_hint=None if recovery is None else recovery[1],
             )
         code = error.code
     elif isinstance(error, asyncio.CancelledError):
@@ -194,6 +239,8 @@ def _failure_after_cleanup(
         attempt_run_id=attempt_run_id,
         launch_operation_id=launch_operation_id,
         attestation=attestation,
+        storage_recovery_reason=None if recovery is None else recovery[0],
+        storage_recovery_hint=None if recovery is None else recovery[1],
     )
 
 
@@ -989,7 +1036,17 @@ async def _start(
                     "state": "RUNNING",
                 }
         if not _successful_run(result, target_run_id, "RUNNING"):
-            raise _failed(_lifecycle_rejection(result) or "worker_failed")
+            rejection = _lifecycle_rejection(result)
+            recovery = (
+                _storage_recovery_pair(result)
+                if rejection == "storage_recovery_required"
+                else None
+            )
+            raise _failed(
+                rejection or "worker_failed",
+                storage_recovery_reason=None if recovery is None else recovery[0],
+                storage_recovery_hint=None if recovery is None else recovery[1],
+            )
         if operation_id is None:
             return target_run_id, True, None
         ack = await _lifecycle(

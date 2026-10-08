@@ -258,6 +258,11 @@ Each of these fails closed with a named error instead of guessing (#93):
   leaf when that instance should have them. Without the server config the
   server exits with "Could not find server config". A profile the launcher
   cannot seed is `instance_config_missing`.
+- **Mission storage that does not classify.** A launch refuses with
+  `storage_recovery_required` and does not delete world bytes. The precise
+  reason and the repair steps are in
+  [docs/STORAGE_RECOVERY.md](docs/STORAGE_RECOVERY.md). Stop retries, inventory
+  the mission, and restore only artifacts you can authenticate.
 - **One `mod` name per project.** Two projects that share a `mod` name are
   refused with `bad_project`. The name is also the PBO prefix.
 - **No retail client.** A running `DayZ_x64.exe` or `DayZ_BE.exe` blocks every

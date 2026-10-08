@@ -72,6 +72,82 @@ DECISION_ROTATE = "rotate"
 RESET_NOTICE = "mission_world_and_character_reset"
 LEGACY_SEAL8 = "legacy"
 
+# Every refusal this module can return in `RotationResult.reason`. The worker,
+# the launcher terminal and the tool carry a refusal to the operator only as a
+# pair from this closed set with its canonical guidance, so a daemon cannot
+# widen the vocabulary and the token names the decision the module made.
+STORAGE_RECOVERY_REASONS = frozenset(
+    {
+        "backup_name_collision",
+        "journal_ambiguous",
+        "journal_name_invalid",
+        "journal_state_impossible",
+        "journal_unreadable",
+        "marker_type_unsupported",
+        "mission_not_a_directory",
+        "mission_not_enumerable",
+        "recovery_finish_failed",
+        "recovery_marker_mismatch",
+        "recovery_observation_failed",
+        "recovery_seal_publish_failed",
+        "storage_not_a_directory",
+    }
+)
+
+_RECOVERY_GUIDANCE = {
+    "backup_name_collision": (
+        "a reserved rotation name is already taken by another artifact"
+    ),
+    "journal_ambiguous": (
+        "more than one active rotation journal is in the mission directory"
+    ),
+    "journal_name_invalid": (
+        "a rotation journal entry is not spelled as the canonical single name"
+    ),
+    "journal_state_impossible": (
+        "the journal and the artifacts beside it describe a state no cut produces"
+    ),
+    "journal_unreadable": (
+        "a rotation journal exists but its bytes are not a readable document"
+    ),
+    "marker_type_unsupported": (
+        "the seal marker is a directory, link or other non-file node"
+    ),
+    "mission_not_a_directory": (
+        "the configured mission directory itself is missing or not a directory"
+    ),
+    "mission_not_enumerable": (
+        "the mission directory could not be listed, so its state is unknown"
+    ),
+    "recovery_finish_failed": (
+        "an error stopped the recovery walk after it had already mutated disk"
+    ),
+    "recovery_marker_mismatch": (
+        "the published marker does not carry the seal the journal recorded"
+    ),
+    "recovery_observation_failed": (
+        "a rotation artifact could not be inspected, so its state is unknown"
+    ),
+    "recovery_seal_publish_failed": (
+        "the finished rotation could not be resealed with the requested seal"
+    ),
+    "storage_not_a_directory": (
+        "a non-directory node occupies the storage_1 name"
+    ),
+}
+
+
+def storage_recovery_hint(reason: object) -> str | None:
+    """Canonical operator guidance for a refusal, or None outside the set."""
+    if isinstance(reason, str) and reason in _RECOVERY_GUIDANCE:
+        return (
+            "storage recovery: "
+            + _RECOVERY_GUIDANCE[reason]
+            + "; stop retrying and follow docs/STORAGE_RECOVERY.md. "
+              "Nothing was deleted: v1 renames only."
+        )
+    return None
+
 # Annex 01ae: BOTH literals, not one. See the module docstring.
 STORAGE_POISON_RPT_SIGNATURES = (
     "Failed to read modstorage",
@@ -79,6 +155,11 @@ STORAGE_POISON_RPT_SIGNATURES = (
 )
 
 MODSET_ROLES = ("base_mods", "project_mod", "extra_mods", "server_mods")
+
+# JSON documents (marker, journal) larger than this are unreadable by design;
+# the +1 read tells an oversized file from a full one without reading it all.
+_MAX_JSON_BYTES = 65_536
+_DIGEST_CHUNK = 8_192
 
 
 _TEMPORARY_SEQUENCE = itertools.count()
@@ -277,23 +358,45 @@ def _plain_artifact_name(value: object) -> bool:
     )
 
 
-def _read_bytes(path: str) -> bytes:
+def _read_handle_capped(handle: object) -> bytes:
+    """Positive reads only, stopping at EOF or one byte past the JSON cap."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= _MAX_JSON_BYTES:
+        chunk = handle.read(_MAX_JSON_BYTES + 1 - total)  # type: ignore[attr-defined]
+        if not isinstance(chunk, (bytes, bytearray)) or not chunk:
+            break
+        chunks.append(bytes(chunk))
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _read_capped(path: str) -> bytes:
+    """At most `_MAX_JSON_BYTES` + 1 bytes, in positive bounded reads.
+
+    Every read names a size, and a short read only ends the accumulation when
+    the file ended: a spy that returns fewer bytes than asked must see the
+    same decision as a whole-file read. OSError propagates; the cap check
+    itself stays in `_parse_json`.
+    """
     with open(path, "rb") as handle:
-        return handle.read()
+        return _read_handle_capped(handle)
 
 
 def _parse_json(raw: bytes) -> object | None:
-    if not raw or len(raw) > 65_536:
+    if not raw or len(raw) > _MAX_JSON_BYTES:
         return None
     try:
         return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        # A deeply nested document exhausts the parser stack on the main
+        # thread too; an unreadable journal is a refusal, never a crash.
         return None
 
 
 def _read_json(path: str) -> object | None:
     try:
-        raw = _read_bytes(path)
+        raw = _read_capped(path)
     except OSError:
         return None
     return _parse_json(raw)
@@ -352,7 +455,9 @@ def _write_json_atomic(path: str, document: object, *, replace: bool) -> None:
             pass
         raise
     with open(path, "rb") as handle:
-        if handle.read() != payload:
+        # A positive short read is not corruption. The same bound as every
+        # other JSON read: ask for what is still missing and stop at EOF.
+        if _read_handle_capped(handle) != payload:
             raise StorageError("write_not_durable")
 
 
@@ -368,7 +473,7 @@ def read_marker(mission: str) -> MarkerRead:
     path = ntpath.join(_mission_dir(mission), MARKER_NAME)
     if _entry_kind(path) != "file":
         return MarkerRead(MARKER_ABSENT, None, None, False)
-    document = _parse_json(_read_bytes(path))
+    document = _parse_json(_read_capped(path))
     if (
         not isinstance(document, dict)
         or set(document) != {"schema_version", "algorithm", "seal", "project"}
@@ -548,8 +653,38 @@ def _entry_kind(path: str) -> str:
     return "other"
 
 
-def _sha256(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()
+def _read_artifact(path: str) -> tuple[bytes, str]:
+    """Head for the document parse, digest for every byte of the file.
+
+    The digest never sees a truncation: the original marker is authenticated
+    by its whole self, and an oversized original stays an original. The head
+    is what `_parse_json` is allowed to classify.
+    """
+    digest = hashlib.sha256()
+    head = bytearray()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_DIGEST_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+            # One byte past the cap keeps an oversized file out of `_parse_json`
+            # (which rejects len > cap) while the digest still covers the tail.
+            room = _MAX_JSON_BYTES + 1 - len(head)
+            if room > 0:
+                head.extend(chunk[:room])
+    return bytes(head), digest.hexdigest()
+
+
+def _capture_original_marker(path: str) -> tuple[str, str | None, str]:
+    """One capture of the original: class from the head, hash of every byte.
+
+    An OSError here blocks the rotation before the journal exists; it is never
+    a `present_invalid` original, and the hash is never taken from a prefix.
+    """
+    head, digest = _read_artifact(path)
+    state, seal = _classify_marker_bytes(head)
+    return state, seal, digest
 
 
 def _classify_marker_bytes(raw: bytes) -> tuple[str, str | None]:
@@ -592,22 +727,27 @@ def _publish_payload(path: str, payload: bytes, *, replace: bool) -> None:
         except OSError:
             pass
         raise
-    if _read_bytes(path) != payload:
+    if _read_capped(path) != payload:
         raise StorageError("write_not_durable")
 
 
 def _publish_marker(mission: str, seal: str, project: str) -> None:
     path = ntpath.join(mission, MARKER_NAME)
     payload = _canonical_marker(seal, project)
-    if _entry_kind(path) == "file" and _read_bytes(path) == payload:
+    if _entry_kind(path) == "file" and _read_capped(path) == payload:
         return
     _publish_payload(path, payload, replace=True)
 
 
-def _marker_is_n(raw: bytes | None, document: dict[str, object]) -> bool:
-    if raw is None:
+def _marker_is_n(head: bytes | None, document: dict[str, object]) -> bool:
+    """The published document, judged on the capped head.
+
+    N is smaller than the cap, so a head that equals N is the whole file and
+    a longer head is a different file.
+    """
+    if head is None:
         return False
-    return raw == _canonical_marker(str(document["new_seal"]), str(document["project"]))
+    return head == _canonical_marker(str(document["new_seal"]), str(document["project"]))
 
 
 def _legacy_is_n(raw: bytes | None, document: dict[str, object]) -> bool:
@@ -638,9 +778,11 @@ def _select_action(
     w: str,
     d: str,
     m_kind: str,
-    m_bytes: bytes | None,
+    m_head: bytes | None,
+    m_sha: str | None,
     k_kind: str,
-    k_bytes: bytes | None,
+    k_head: bytes | None,
+    k_sha: str | None,
     completed: bool,
 ) -> str:
     """One admitted continuation, or `refuse`. No mutation."""
@@ -658,33 +800,33 @@ def _select_action(
     schema2 = document.get("schema_version") == JOURNAL_SCHEMA_VERSION
     if schema2:
         return _select_schema2(
-            document, w=w, d=d, m_kind=m_kind, m_bytes=m_bytes,
-            k_kind=k_kind, k_bytes=k_bytes,
+            document, w=w, d=d, m_kind=m_kind, m_head=m_head, m_sha=m_sha,
+            k_kind=k_kind, k_head=k_head, k_sha=k_sha,
         )
     return _select_legacy(
-        document, w=w, d=d, m_kind=m_kind, m_bytes=m_bytes,
-        k_kind=k_kind, k_bytes=k_bytes,
+        document, w=w, d=d, m_kind=m_kind, m_head=m_head,
+        k_kind=k_kind, k_head=k_head,
     )
 
 
 def _original_matches(
-    document: dict[str, object], kind: str, raw: bytes | None
+    document: dict[str, object], kind: str, sha: str | None
 ) -> bool:
     state = document.get("old_marker_state")
     if state == MARKER_ABSENT:
         return kind == "absent"
-    if kind != "file" or raw is None:
+    if kind != "file" or sha is None:
         return False
-    return _sha256(raw) == document.get("old_marker_sha256")
+    return sha == document.get("old_marker_sha256")
 
 
 def _preservation_held(
-    document: dict[str, object], k_kind: str, k_bytes: bytes | None
+    document: dict[str, object], k_kind: str, k_sha: str | None
 ) -> bool:
     state = document.get("old_marker_state")
     if state == MARKER_ABSENT:
         return k_kind == "absent"
-    return _original_matches(document, k_kind, k_bytes)
+    return _original_matches(document, k_kind, k_sha)
 
 
 def _select_schema2(
@@ -693,14 +835,16 @@ def _select_schema2(
     w: str,
     d: str,
     m_kind: str,
-    m_bytes: bytes | None,
+    m_head: bytes | None,
+    m_sha: str | None,
     k_kind: str,
-    k_bytes: bytes | None,
+    k_head: bytes | None,
+    k_sha: str | None,
 ) -> str:
     phase = str(document["phase"])
-    is_n = _marker_is_n(m_bytes, document)
+    is_n = _marker_is_n(m_head, document)
     if phase == PHASE_PREPARED:
-        if k_kind != "absent" or not _original_matches(document, m_kind, m_bytes):
+        if k_kind != "absent" or not _original_matches(document, m_kind, m_sha):
             return "refuse"
         if w == "dir" and d == "absent":
             return "abort"
@@ -717,10 +861,10 @@ def _select_schema2(
                 return "advance_q"
             return "refuse"
         if k_kind == "absent":
-            if _original_matches(document, m_kind, m_bytes):
+            if _original_matches(document, m_kind, m_sha):
                 return "preserve"
             return "refuse"
-        if not _preservation_held(document, k_kind, k_bytes):
+        if not _preservation_held(document, k_kind, k_sha):
             return "refuse"
         if m_kind == "absent":
             return "publish_n"
@@ -728,7 +872,7 @@ def _select_schema2(
             return "advance_q"
         return "refuse"
     if phase == PHASE_MARKER_PUBLISHED:
-        if not is_n or not _preservation_held(document, k_kind, k_bytes):
+        if not is_n or not _preservation_held(document, k_kind, k_sha):
             return "refuse"
         return "complete"
     return "refuse"
@@ -744,14 +888,14 @@ def _select_legacy(
     w: str,
     d: str,
     m_kind: str,
-    m_bytes: bytes | None,
+    m_head: bytes | None,
     k_kind: str,
-    k_bytes: bytes | None,
+    k_head: bytes | None,
 ) -> str:
     phase = str(document["phase"])
     old = document.get("old_seal")
     known = isinstance(old, str)
-    is_n = _legacy_is_n(m_bytes, document)
+    is_n = _legacy_is_n(m_head, document)
     if phase == PHASE_PREPARED and w == "dir" and d == "absent":
         # An intact world is only the abort of a prepared journal. K authenticates
         # an old marker after the world has moved; it does not make a new canonical
@@ -759,15 +903,15 @@ def _select_legacy(
         # exceptions stay in the moved-world branches below.
         if k_kind != "absent":
             return "refuse"
-        if known and not _legacy_seal_bytes(m_bytes, old):
+        if known and not _legacy_seal_bytes(m_head, old):
             return "refuse"
         return "abort"
     if d != "dir" or w != "absent":
         return "refuse"
     if known:
         return _select_legacy_known(
-            document, old=old, phase=phase, m_kind=m_kind, m_bytes=m_bytes,
-            k_kind=k_kind, k_bytes=k_bytes, is_n=is_n,
+            document, old=old, phase=phase, m_kind=m_kind, m_head=m_head,
+            k_kind=k_kind, k_head=k_head, is_n=is_n,
         )
     return _select_legacy_unknown(
         phase=phase, m_kind=m_kind, k_kind=k_kind, is_n=is_n,
@@ -806,14 +950,14 @@ def _select_legacy_known(
     old: str,
     phase: str,
     m_kind: str,
-    m_bytes: bytes | None,
+    m_head: bytes | None,
     k_kind: str,
-    k_bytes: bytes | None,
+    k_head: bytes | None,
     is_n: bool,
 ) -> str:
     del document
-    pending = _legacy_seal_bytes(m_bytes, old)
-    k_ok = k_kind == "file" and _legacy_seal_bytes(k_bytes, old)
+    pending = _legacy_seal_bytes(m_head, old)
+    k_ok = k_kind == "file" and _legacy_seal_bytes(k_head, old)
     if phase == PHASE_MARKER_PUBLISHED:
         if not k_ok or not is_n:
             return "refuse"
@@ -839,7 +983,12 @@ def _select_legacy_known(
 
 def _observe_pair(
     mission: str, document: dict[str, object]
-) -> tuple[str, str, str, bytes | None, str, bytes | None, bool]:
+) -> tuple[str, str, str, bytes | None, str | None, str, bytes | None, str | None, bool]:
+    """Kinds, capped heads and whole-file digests of the four artifacts.
+
+    The digest authenticates the original marker for schema 2; the head is
+    all a document parse may consume.
+    """
     storage = ntpath.join(mission, STORAGE_NAME)
     backup = ntpath.join(mission, str(document["storage_backup"]))
     marker = ntpath.join(mission, MARKER_NAME)
@@ -855,9 +1004,11 @@ def _observe_pair(
     c_kind = _entry_kind(completed)
     if c_kind not in {"absent", "file"}:
         raise StorageError("completed_journal_type")
-    m_bytes = _read_bytes(marker) if m_kind == "file" else None
-    k_bytes = _read_bytes(preserved) if k_kind == "file" else None
-    return w, d, m_kind, m_bytes, k_kind, k_bytes, c_kind == "file"
+    m_head, m_sha = _read_artifact(marker) if m_kind == "file" else (None, None)
+    k_head, k_sha = _read_artifact(preserved) if k_kind == "file" else (None, None)
+    return (
+        w, d, m_kind, m_head, m_sha, k_kind, k_head, k_sha, c_kind == "file"
+    )
 
 
 def _apply_action(
@@ -905,16 +1056,20 @@ def _finish_recorded(
     try:
         current = document
         for _step in range(8):
-            observed = _observe_pair(mission, current)
+            w, d, m_kind, m_head, m_sha, k_kind, k_head, k_sha, completed = _observe_pair(
+                mission, current
+            )
             action = _select_action(
                 current,
-                w=observed[0],
-                d=observed[1],
-                m_kind=observed[2],
-                m_bytes=observed[3],
-                k_kind=observed[4],
-                k_bytes=observed[5],
-                completed=observed[6],
+                w=w,
+                d=d,
+                m_kind=m_kind,
+                m_head=m_head,
+                m_sha=m_sha,
+                k_kind=k_kind,
+                k_head=k_head,
+                k_sha=k_sha,
+                completed=completed,
             )
             if action == "refuse":
                 return _blocked("journal_state_impossible", call_seal)
@@ -930,7 +1085,7 @@ def _finish_recorded(
         if _entry_kind(ntpath.join(mission, STORAGE_NAME)) != "absent":
             return _blocked("recovery_marker_mismatch", call_seal)
         marker_path = ntpath.join(mission, MARKER_NAME)
-        published = _read_bytes(marker_path) if _entry_kind(marker_path) == "file" else None
+        published = _read_capped(marker_path) if _entry_kind(marker_path) == "file" else None
         legacy = document.get("schema_version") == JOURNAL_SCHEMA_LEGACY
         if legacy:
             published_ok = _legacy_is_n(published, document)
@@ -948,7 +1103,10 @@ def _finish_recorded(
             except StorageError:
                 return _blocked("recovery_seal_publish_failed", call_seal)
             expected_x = _canonical_marker(call_seal, project)
-            if _entry_kind(marker_path) != "file" or _read_bytes(marker_path) != expected_x:
+            if (
+                _entry_kind(marker_path) != "file"
+                or _read_capped(marker_path) != expected_x
+            ):
                 return _blocked("recovery_marker_mismatch", call_seal)
         # Same seal: N stays the journal's project. A different caller project
         # is not a reseal and is not a mismatch. The rotation result stands.
@@ -983,7 +1141,7 @@ def _reconcile_journal(
     """
     journal_path = ntpath.join(mission, JOURNAL_PREFIX + txid + JOURNAL_SUFFIX)
     try:
-        raw = _read_bytes(journal_path)
+        raw = _read_capped(journal_path)
     except OSError:
         return _blocked("recovery_observation_failed", seal)
     document = _valid_journal(_parse_json(raw), txid)
@@ -1007,9 +1165,25 @@ def _active_journals(mission: str) -> tuple[list[str], bool] | None:
     active: list[str] = []
     malformed = False
     for name in entries:
-        if not name.startswith(JOURNAL_PREFIX):
+        # Family membership follows the Win32 segment identity, not the
+        # literal bytes: `STORAGE_1...JSON` and a trailing space alias name
+        # the same directory entry on NTFS, so an alias must be seen here
+        # even though no canonical join would list it. Only a canonically
+        # spelled name is ever recovered; an alias is a malformed family
+        # entry, never a normalized pathname to recover through.
+        identity = _win32_file_identity(name)
+        if not identity.startswith(JOURNAL_PREFIX):
+            continue
+        # An entry whose spelling is not its Win32 identity is an alias.
+        # This runs before the completed-name exemption: folding
+        # `Garbage.completed.json` and then treating it as history would
+        # hide a family alias and publish a marker beside it.
+        if name != identity:
+            malformed = True
             continue
         if name.endswith(JOURNAL_COMPLETED_SUFFIX):
+            # Canonically spelled completed journals stay history, including
+            # the `...garbage.completed.json` form. The exemption is exact.
             continue
         if _JOURNAL_ACTIVE.fullmatch(name) is None:
             malformed = True
@@ -1043,9 +1217,7 @@ def rotate_storage(
         old_seal: str | None = None
         old_hash: str | None = None
         if marker_kind == "file":
-            captured = _read_bytes(marker_path)
-            old_state, old_seal = _classify_marker_bytes(captured)
-            old_hash = _sha256(captured)
+            old_state, old_seal, old_hash = _capture_original_marker(marker_path)
     except OSError:
         return _blocked("recovery_observation_failed", seal)
     old_seal8 = old_seal[:8] if isinstance(old_seal, str) else LEGACY_SEAL8
@@ -1099,6 +1271,55 @@ def derived_txid(txid: str) -> str:
     return hashlib.sha256(f"{txid}:retry".encode("ascii")).hexdigest()[:32]
 
 
+def _allocate_rotation_txid(mission: str, txid: str) -> str | None:
+    """The first free identity of this call's chain: t0, t1 = derived(t0), ...
+
+    A retained completed `prepared` journal whose recorded backups are gone
+    is a dead attempt of this same call: its id is spent and the walk advances
+    past it, leaving the record untouched. Every other completed journal,
+    active journal name or occupied reservation stops the walk and lets the
+    rotation collide on it, as before. A repeated candidate terminates the
+    walk instead of looping. None means an observation failed.
+    """
+    seen: set[str] = set()
+    candidate = txid
+    while True:
+        if candidate in seen:
+            return candidate
+        seen.add(candidate)
+        try:
+            journal_kind = _entry_kind(
+                ntpath.join(mission, JOURNAL_PREFIX + candidate + JOURNAL_SUFFIX)
+            )
+            completed_path = ntpath.join(
+                mission, JOURNAL_PREFIX + candidate + JOURNAL_COMPLETED_SUFFIX
+            )
+            completed_kind = _entry_kind(completed_path)
+            if journal_kind == "absent" and completed_kind == "absent":
+                return candidate
+            if completed_kind != "file":
+                return candidate
+            raw = _read_capped(completed_path)
+            document = (
+                _valid_journal(_parse_json(raw), candidate)
+                if raw is not None
+                else None
+            )
+            if document is None or document.get("phase") != PHASE_PREPARED:
+                return candidate
+            backup_kind = _entry_kind(
+                ntpath.join(mission, str(document["storage_backup"]))
+            )
+            marker_kind = _entry_kind(
+                ntpath.join(mission, str(document["marker_backup"]))
+            )
+        except OSError:
+            return None
+        if backup_kind != "absent" or marker_kind != "absent":
+            return candidate
+        candidate = derived_txid(candidate)
+
+
 def _validate_transaction(seal: object, project: object, now: object, txid: object) -> None:
     if not isinstance(seal, str) or _SEAL.fullmatch(seal) is None:
         raise StorageError("invalid_seal")
@@ -1135,7 +1356,6 @@ def prepare_storage(
         return _blocked("journal_name_invalid", seal)
     if len(active) > 1:
         return _blocked("journal_ambiguous", seal)
-    rotation_txid = txid
     if active:
         recovered = _reconcile_journal(
             mission,
@@ -1145,19 +1365,30 @@ def prepare_storage(
         )
         if recovered is not None:
             return recovered
-        # The reconciled transaction already owns the journal names built from
-        # `txid`, so a rotation decided after it gets its own derived id. Same
-        # call, same input, deterministic: no clock and no randomness here.
-        rotation_txid = derived_txid(txid)
     try:
         marker = read_marker(mission)
-        storage_present = _entry_kind(ntpath.join(mission, STORAGE_NAME)) == "dir"
+        storage_kind = _entry_kind(ntpath.join(mission, STORAGE_NAME))
+        marker_kind = _entry_kind(ntpath.join(mission, MARKER_NAME))
     except OSError:
         return _blocked("recovery_observation_failed", seal)
+    # A file, link or other node on the world name is not an absent world:
+    # classifying it so would publish a seal beside bytes none of the rows
+    # inspected. The same two gates exist in rotate_storage; they run here so
+    # the refusal precedes every classification and publication.
+    if storage_kind not in {"absent", "dir"}:
+        return _blocked("storage_not_a_directory", seal)
+    if marker_kind not in {"absent", "file"}:
+        return _blocked("marker_type_unsupported", seal)
     decision = should_rotate(
-        seal=seal, marker=marker, storage_present=storage_present
+        seal=seal, marker=marker, storage_present=storage_kind == "dir"
     )
     if decision.action == DECISION_ROTATE:
+        # The identity is allocated now, from the caller's id, past the
+        # retained aborts of this same call chain. Same call, same input,
+        # deterministic: no clock and no randomness here.
+        rotation_txid = _allocate_rotation_txid(mission, txid)
+        if rotation_txid is None:
+            return _blocked("recovery_observation_failed", seal)
         return rotate_storage(
             mission,
             seal=seal,
