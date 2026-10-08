@@ -1,0 +1,358 @@
+modded class ActionManagerClient
+{
+	protected bool m_McpHoldActive;
+	protected bool m_McpHoldAccepted;
+	protected bool m_McpHoldRestored;
+	protected bool m_McpHoldPrevIgnore;
+	protected bool m_McpHoldStartLogged;
+	protected bool m_McpHoldEndedInCallback;
+	protected bool m_McpHoldEndStateKnown;
+	protected bool m_McpHoldEndPlacedKnown;
+	protected bool m_McpHoldEndPlaced;
+	protected int m_McpHoldEndState;
+	protected int m_McpHoldStartMs;
+	protected int m_McpHoldTick;
+	protected string m_McpHoldMode;
+	protected ActionBase m_McpHoldAction;
+	protected ref ActionData m_McpHoldData;
+
+	override void PerformActionStart(ActionBase action, ActionTarget target, ItemBase item, Param extra_data = NULL)
+	{
+		if (m_McpHoldActive)
+		{
+			super.PerformActionStart(action, target, item, extra_data);
+			return;
+		}
+
+		string mode = "";
+		string marker = "";
+		if (FileExist("$profile:mcp_hold_probe_control"))
+		{
+			mode = "control";
+			marker = "$profile:mcp_hold_probe_control";
+		}
+		else if (FileExist("$profile:mcp_hold_probe_suppress"))
+		{
+			mode = "suppress";
+			marker = "$profile:mcp_hold_probe_suppress";
+		}
+		else if (FileExist("$profile:mcp_hold_probe_cancel"))
+		{
+			mode = "cancel";
+			marker = "$profile:mcp_hold_probe_cancel";
+		}
+
+		if (mode == "")
+		{
+			super.PerformActionStart(action, target, item, extra_data);
+			return;
+		}
+
+		bool removed = DeleteFile(marker);
+		if (!removed)
+		{
+			super.PerformActionStart(action, target, item, extra_data);
+			return;
+		}
+
+		m_McpHoldPrevIgnore = m_IgnoreAutoInputEnd;
+		m_McpHoldMode = mode;
+		m_McpHoldAction = action;
+		m_McpHoldData = null;
+		m_McpHoldActive = true;
+		m_McpHoldAccepted = false;
+		m_McpHoldRestored = false;
+		m_McpHoldStartLogged = false;
+		m_McpHoldEndedInCallback = false;
+		m_McpHoldEndStateKnown = false;
+		m_McpHoldEndPlacedKnown = false;
+		m_McpHoldEndPlaced = false;
+		m_McpHoldEndState = 0;
+		m_McpHoldTick = 0;
+		m_McpHoldStartMs = 0;
+		if (GetGame())
+			m_McpHoldStartMs = GetGame().GetTime();
+
+		if (mode == "suppress")
+			SetIgnoreAutomaticInputEnd(true);
+		if (mode == "cancel")
+			SetIgnoreAutomaticInputEnd(true);
+
+		ActionData prevPending = m_PendingActionData;
+		ActionData prevCurrent = m_CurrentActionData;
+
+		super.PerformActionStart(action, target, item, extra_data);
+
+		m_McpHoldData = null;
+		m_McpHoldAccepted = false;
+		if (m_PendingActionData)
+		{
+			if (m_PendingActionData != prevPending)
+			{
+				if (m_PendingActionData != prevCurrent)
+				{
+					if (m_PendingActionData.m_Action == action)
+					{
+						m_McpHoldData = m_PendingActionData;
+						m_McpHoldAccepted = true;
+					}
+				}
+			}
+		}
+		if (!m_McpHoldAccepted)
+		{
+			if (m_CurrentActionData)
+			{
+				if (m_CurrentActionData != prevPending)
+				{
+					if (m_CurrentActionData != prevCurrent)
+					{
+						if (m_CurrentActionData.m_Action == action)
+						{
+							m_McpHoldData = m_CurrentActionData;
+							m_McpHoldAccepted = true;
+						}
+					}
+				}
+			}
+		}
+		if (!m_McpHoldAccepted)
+			m_McpHoldData = null;
+
+		if (mode == "cancel")
+		{
+			if (m_McpHoldAccepted)
+			{
+				if (m_McpHoldData)
+				{
+					if (!m_McpHoldEndedInCallback)
+						EndActionInput();
+				}
+			}
+		}
+
+		m_McpHoldStartLogged = true;
+		McpHoldWrite("start");
+
+		if (!m_McpHoldData || m_McpHoldEndedInCallback)
+		{
+			if (!m_McpHoldRestored)
+			{
+				McpHoldWrite("ended");
+				McpHoldRestore();
+			}
+		}
+	}
+
+	override void Update(int pCurrentCommandID)
+	{
+		if (m_McpHoldActive)
+		{
+			if (!m_McpHoldRestored)
+			{
+				if (m_McpHoldData)
+				{
+					bool pendingIsOurs = false;
+					bool currentIsOurs = false;
+					if (m_PendingActionData == m_McpHoldData)
+						pendingIsOurs = true;
+					if (m_CurrentActionData == m_McpHoldData)
+						currentIsOurs = true;
+					if (!pendingIsOurs)
+					{
+						if (!currentIsOurs)
+						{
+							McpHoldWrite("ended");
+							McpHoldRestore();
+						}
+					}
+				}
+			}
+		}
+
+		super.Update(pCurrentCommandID);
+
+		if (!m_McpHoldActive)
+			return;
+
+		if (m_McpHoldTick < 2000)
+		{
+			McpHoldWrite("tick");
+			m_McpHoldTick = m_McpHoldTick + 1;
+		}
+
+		bool timedOut = false;
+		if (GetGame())
+		{
+			int nowMs = GetGame().GetTime();
+			if ((nowMs - m_McpHoldStartMs) >= 30000)
+				timedOut = true;
+		}
+
+		if (timedOut)
+		{
+			McpHoldWrite("timeout");
+			McpHoldRestore();
+			return;
+		}
+
+		bool dataStill = false;
+		if (m_McpHoldData)
+		{
+			if (m_PendingActionData == m_McpHoldData)
+				dataStill = true;
+			if (m_CurrentActionData == m_McpHoldData)
+				dataStill = true;
+		}
+
+		if (!dataStill)
+		{
+			if (!m_McpHoldRestored)
+			{
+				McpHoldWrite("ended");
+				McpHoldRestore();
+			}
+		}
+	}
+
+	override void OnActionEnd()
+	{
+		bool ours = false;
+		if (m_McpHoldActive)
+		{
+			if (!m_McpHoldRestored)
+			{
+				if (m_McpHoldData)
+				{
+					if (m_CurrentActionData == m_McpHoldData)
+						ours = true;
+				}
+			}
+		}
+
+		if (ours)
+		{
+			m_McpHoldEndedInCallback = true;
+			m_McpHoldEndStateKnown = true;
+			m_McpHoldEndState = m_CurrentActionData.m_State;
+			PlaceObjectActionData placeData = PlaceObjectActionData.Cast(m_CurrentActionData);
+			if (placeData)
+			{
+				m_McpHoldEndPlacedKnown = true;
+				m_McpHoldEndPlaced = placeData.m_AlreadyPlaced;
+			}
+			if (m_McpHoldStartLogged)
+				McpHoldWrite("ended");
+		}
+
+		super.OnActionEnd();
+
+		if (ours)
+		{
+			if (m_McpHoldStartLogged)
+			{
+				if (!m_McpHoldRestored)
+					McpHoldRestore();
+			}
+		}
+	}
+
+	void ~ActionManagerClient()
+	{
+		if (m_McpHoldActive)
+		{
+			if (!m_McpHoldRestored)
+				McpHoldRestore();
+		}
+	}
+
+	protected void McpHoldRestore()
+	{
+		if (m_McpHoldRestored)
+			return;
+
+		m_McpHoldRestored = true;
+		SetIgnoreAutomaticInputEnd(m_McpHoldPrevIgnore);
+		McpHoldWrite("restored");
+		m_McpHoldActive = false;
+	}
+
+	protected void McpHoldWrite(string eventName)
+	{
+		string timeJson = "null";
+		if (GetGame())
+		{
+			int nowMs = GetGame().GetTime();
+			timeJson = "" + nowMs;
+		}
+
+		string actionJson = "null";
+		string isTrialJson = "false";
+		ActionBase running = GetRunningAction();
+		if (running)
+		{
+			actionJson = "\"" + running.ClassName() + "\"";
+			if (running == m_McpHoldAction)
+				isTrialJson = "true";
+		}
+
+		string stateJson = "null";
+		string placedJson = "null";
+		bool useSnapshot = false;
+		if (eventName == "ended")
+		{
+			if (!m_CurrentActionData)
+			{
+				if (m_McpHoldEndStateKnown)
+					useSnapshot = true;
+			}
+		}
+
+		if (useSnapshot)
+		{
+			stateJson = "" + m_McpHoldEndState;
+			if (m_McpHoldEndPlacedKnown)
+				placedJson = McpHoldBool(m_McpHoldEndPlaced);
+		}
+		else if (m_CurrentActionData)
+		{
+			stateJson = "" + m_CurrentActionData.m_State;
+			PlaceObjectActionData placeData = PlaceObjectActionData.Cast(m_CurrentActionData);
+			if (placeData)
+				placedJson = McpHoldBool(placeData.m_AlreadyPlaced);
+		}
+
+		string tickJson = "null";
+		if (eventName == "tick")
+			tickJson = "" + m_McpHoldTick;
+
+		string line = "{";
+		line = line + "\"event\":\"" + eventName + "\"";
+		line = line + ",\"mode\":\"" + m_McpHoldMode + "\"";
+		line = line + ",\"accepted\":" + McpHoldBool(m_McpHoldAccepted);
+		line = line + ",\"tick\":" + tickJson;
+		line = line + ",\"time_ms\":" + timeJson;
+		line = line + ",\"running_action\":" + actionJson;
+		line = line + ",\"is_trial_action\":" + isTrialJson;
+		line = line + ",\"state\":" + stateJson;
+		line = line + ",\"ignore_auto_input_end\":" + McpHoldBool(m_IgnoreAutoInputEnd);
+		line = line + ",\"already_placed\":" + placedJson;
+		line = line + "}";
+
+		FileHandle handle = OpenFile("$profile:mcp_hold_probe.jsonl", FileMode.APPEND);
+		if (handle == 0)
+			handle = OpenFile("$profile:mcp_hold_probe.jsonl", FileMode.WRITE);
+		if (handle != 0)
+		{
+			FPrintln(handle, line);
+			CloseFile(handle);
+		}
+	}
+
+	protected string McpHoldBool(bool value)
+	{
+		if (value)
+			return "true";
+		return "false";
+	}
+}
