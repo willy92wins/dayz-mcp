@@ -1,31 +1,42 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-01 02:40 (Madrid; medido: main, PBO, daemon y caja)
+# DayZ-MCP - Estado vivo - 2026-10-08 16:50 (Madrid; medido: main, árboles vivos, launcher, PBO, daemons y caja)
 
-- **main** = `68e4c94` (#187), más el PR de release de la v1.3 (CHANGELOG, versión `1.3`, spec y este HANDOFF). El árbol vivo está limpio en `68e4c94`. Se hace fast-forward de `origin/main` solo dentro de una promoción. Nunca `reset --hard`.
-- **PBO vivo:** `4F3DD79D2B2CAF2AD6A82269F3F3ECD0DCAC9AE6FCED33C86CAEF470401972DD` (377 176 B), construido desde `68e4c94`. Procedencia: 17 entradas exactas más el marcador `mcp_build.json` de ese commit.
-  - Evidencia: `C:\Users\guill\DayZ_MCP_backups\v13-20260930\p18c\`.
-  - Vuelta atrás: el PBO anterior queda al lado como `DayZ_MCP.pbo.swapped_out_20261001T001139Z_1882389D8372B948`, y está también en `v13-20260930\p18\pbo-3b31cbe`.
-- **Daemon:** generación `1cc37140`, arrancado a las 02:12 sobre `68e4c94`. Doctor ok. Caja libre a las 02:30.
-- **Superficie:** 75 herramientas (+ `exec_enforce` opt-in). Tier rápido: `Ran 5313 tests / OK (skipped=504)`; la suite completa pasa en la CI (Python 3.11 y 3.14).
-- **v1.3 (2026-09-30/10-01, sesión autónoma):** fusionados #166-#187, todos con el APROBADO de un revisor de otra familia y la CI 4/4 sobre la cabeza revisada. El detalle está en `CHANGELOG.md`.
-- **Verificado en juego**, con un cliente stdio propio (P17, P18a y P18a'):
-  - f47b, e1ae (`input_trigger`), 3cc4/48bc, 4ed0, 6211, 89c9, bad7;
-  - `world_time_get`, el prune de #183, lcrecover;
-  - G1-G4, H11 (`mission_roots` y la rotación de `storage_1`), 7163, 9486, c673;
-  - 20be (`ui_click mode="complete"`).
-  - H9 pasa con 2 sesiones Claude y 2 Codex reales.
-  - Evidencia en el vault: `research/2026-09-30-v13/` (`p17/`, `p18/`, `h9/`).
-- **Pendiente de la release:**
-  - la ventana del dueño (P18b): resellar el launcher (6ed1, más la decisión sobre el foco al arrancar, fade/75e7), rescatar el pase B con el vigilante permanente (250f) y c261;
-  - después, con el sí del dueño: la etiqueta `v1.3`, los assets de `docs/RELEASE.md`, y comentar y cerrar #93.
-- **Hallazgos abiertos:**
-  - c8c7 (el aviso de reset de la rotación no llega a quien llama) y 7f27 (escalares genéricos en todos los verbos), para la v1.4;
-  - bf5c, 8cf9, a97e y 7672 (alcance de AddonBuilder y publicación del bundle con handles vivos): decide el dueño.
-- **Puertas de modelos:** implementa Opus (subagente) y revisan Codex gpt-6-sol (`dzn-night/run_review.sh`) o Gemini 3.8 Flash por `agy` (`dzn-night/run_agy_review.sh`).
-- **Arnés:** el Bash tool de Claude Code falla en su envoltorio en esta sesión (fd52/5363). Se usa PowerShell con Git Bash y scripts `.sh` en fichero.
-- **Handoff completo:** `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-01-HANDOFF-dayz-mcp-v13.md`. Decisiones: D-94 a D-96 en el decision-log del vault.
+- **main** = `685a6ad` (#224).
+  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main`, y T130 `C:\temp\DayZ_MCP_130` detached) están en `46833d7`: es el despliegue v11b del 2026-10-08.
+  - #223 (test de coordinación) y #224 (descripciones de captura y teleport) no tocan nada sellado y entran con la próxima promoción. Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
+- **Launcher `dayz-test-v1` resellado el 2026-10-08:**
+  - PE de LIVE `E1788375…` y de T130 `44372199…` (política POL130); mismo `app.pyz` `8B932082…`, ya con las copias en LF (6ed1).
+  - Pasos, backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v11b-20261008\` (`steps.log`, rama `backup/live-main-20261008` = `f8aad74`).
+- **PBO vivo:** `CC616EC7…` (puente "11", desde `686b15f`); sin cambios Enforce desde entonces.
+- **Instancias y daemons (16:47):**
+  - default: DayZ 1.29, `:8765`, `dayz-mcp`, gen `8dd1787c`;
+  - `130`: DayZ 1.30 Exp, `:8775`, `dayz-mcp-130`, gen `755bb6e0`.
+  - Los dos en reposo, sin lease, con la caja libre y sin faults.
+  - Doctors limpios, salvo `RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED` en la default (preexistente).
+- **Verificado en juego el 2026-10-08** (`reviews/2026-10-06-ticketing/ingame-v11b/RESULTS.md`):
+  - g5fix en la 130: carpetas `profiles-130` recreadas, y lecturas y cierre sobre la carpeta con nombre.
+  - Rotación de `storage_1` por cambio de modset.
+  - Rechazo de un journal con mayúsculas.
+  - Stage de AddonBuilder (#195): en SimpleGroup, G1-G5 del gate ODOL de 713a en verde (G6/G7 fallan igual que en el PBO desplegado); LFHeli_OH1 compila.
+  - 9941: el mecanismo de hold está medido (`SetIgnoreAutomaticInputEnd`).
+  - Overrides de aim: radianes por pulso.
+- **Riesgos abiertos:**
+  - 130: `dayz_test_close` no espera el logout, porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; ahí la desconexión va con `logoutTime 0`).
+  - Un rechazo de storage no publica `storage_recovery_reason`/`remediation` en el camino del lifecycle (`fb-20261008-141211-855c`).
+  - `dayz_test_run(build=true)` con binarize no empaqueta scripts, layouts ni stringtable (`fb-20261008-141215-222d`).
+  - Instaladores, doctors y tests lanzados desde la app de Claude escriben ficheros nuevos en la virtualización MSIX de `%LOCALAPPDATA%` (`fb-20261008-141157-e92d`).
+- **Ronda 2** (el dueño eligió A, B y C en la sesión del 2026-10-08; queda registrada en `reviews/2026-10-06-ticketing/triage3/TRIAGE3.md`):
+  - A: 855c + 2986 (Python). La spec de gpt-6.1-sol estaba en curso a las 16:50; la implementación aún no había empezado.
+  - B: el verbo `action_hold` (9941, Enforce). Spec de gpt-6.1-sol hecha; Grok 4.7 implementaba desde las 16:54.
+  - C: `action_cursor` + `player_look_at` (86a3, Enforce). Grok 4.7 implementaba desde las 16:45, con la spec de Sol y un anexo de medidas.
+  - Revisa gpt-6.1-sol; implementa Grok porque el GX10 estaba lleno.
+  - Los lotes Enforce (B y C) se mergean después de su ciclo in-game, con el PBO "12".
+- **Buzón abierto relevante:** 9941 y 9ab8 (hold), 86a3, 75e7/fade (foco al arrancar), 1d31, d490, a97e, 7695, y los cuatro riesgos de arriba.
+- **Detalle:**
+  - Triaje: `reviews/2026-10-06-ticketing/triage3/`.
+  - Handoff de la sesión: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-08-HANDOFF-dayz-mcp-ticketing.md`.
 <!-- LIVE-STATE:END -->
 
 ---
