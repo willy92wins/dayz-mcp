@@ -328,6 +328,14 @@ class _StageTestCase(unittest.TestCase):
         patcher = mock.patch.object(tempfile, "tempdir", str(self.fixture.decoy_temp))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # A test process keeps the shared build lock under tempfile's folder,
+        # here the decoy; the lock gets its own folder so the decoy shows only
+        # a misplaced stage.
+        shared_lock_root = self.fixture.root / "shared-lock"
+        shared_lock_root.mkdir()
+        self.enterContext(
+            mock.patch.dict(os.environ, {"DAYZ_MCP_SHARED_ROOT": str(shared_lock_root)})
+        )
         # The worker runs in the launcher's private folder, with TEMP set to it.
         private_temp = str(self.fixture.private_temp)
         self.enterContext(_worker_folders(private_temp, private_temp))
