@@ -45,3 +45,6 @@ owners. Verification against the tree: gpt-6.1-sol, read-only, with the verbatim
 - Filed: 2986 (1.30 close skips the logout wait: localized join line), 855c (r9c E2 not end to end on the
   lifecycle path), 222d (binarize builds pack no scripts), e92d (MSIX virtualization of %LOCALAPPDATA% for
   processes started from the Claude app), b58f (hold mechanism and aim units measured).
+- Round 2, chosen by the owner in the session on 2026-10-08 after the deploy: A (855c + 2986, Python), B (hold
+  mode for continuous actions, 9941, Enforce) and C (86a3 action cursor + look-at, Enforce); D (222d builds with
+  scripts) left for a later reseal window.

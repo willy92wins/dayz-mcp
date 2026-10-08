@@ -36,28 +36,28 @@ waited 17.1 s and reported `logout_players=[Dev, logout_finished=true]`.
 |---|---|
 | Modset change rotates `storage_1` | PASS: `storage_rotated=true`, backup `storage_1.modset-20261008-154124-795a0433` (old seal `795a0433…`) and again after the refusal check (`…-160010-fab720e2`) |
 | A planted case-variant journal refuses before any mutation | PASS for the refusal (`error_code=storage_recovery_required`, no run, no process; daemon audit `lifecycle_storage_recovery_required` reason `journal_name_invalid`) |
-| The caller gets `storage_recovery_reason` and `remediation` (r9c E2) | **FAIL**: both null on this path. The refusal happens in the daemon lifecycle (`process_lifecycle.py`), which sets the pair on its settled result (`:4289-4297`), but it does not reach the tool result. |
+| The caller gets `storage_recovery_reason` and `remediation` (r9c E2) | **FAIL**: both null on this path. The refusal happens in the daemon lifecycle (`process_lifecycle.py`), which sets `storage_recovery_reason` and `storage_recovery_hint` on its settled result (`:4289-4297`), but it does not reach the tool result. |
 | After removing the plant, the next launch | PASS (run `82cb609d`, rotated) |
 
 ## AddonBuilder stage (#195, bf5c / 8cf9)
 - SimpleGroup, `dayz_test_run(build=true)`: built from `…\Temp\dayz-mcp-native-29paid5w\dayz-mcp-build-kkver6gp\SimpleGroup` (AddonBuilder log), 20 s with the launch.
-  - The ODOL gate of inbox 713a passes. G2: tangent space n_st == vertices in all 5 LOD0. G3: every `dz\` material complete (VS=102, 13 stages).
-  - `T1_FlagKit.p3d` is byte-identical to the deployed PBO. G6/G7 fail identically on the deployed PBO (control): those gates predate the current T3 model.
+  - ODOL gate of inbox 713a (`gates_rc2.py`): G1-G5 PASS, G6/G7 FAIL with the same failures on the deployed PBO (reference). G2: tangent space n_st == vertices in all 5 LOD0. G3: every `dz\` material complete (VS=102, 13 stages).
+  - `T1_FlagKit.p3d` is byte-identical to the deployed PBO. G6 (T3 cloth sections) and G7 (T3 LOD0 proxies) fail identically on the deployed PBO; why they fail on both is not established here.
   - The private folder was gone after the run. The deployed PBO was restored, sha256 `2C3EAC14…` = original.
 - LFHeli_OH1: built through the stage (ResultCode 0, 80 s). The closure (`\LFHeli\` references) is not semantically verified. The deployed PBO was restored, sha256 `194FD1A5…` = original.
 - Pre-existing, not from #195: a `dayz_test_run(build=true)` PBO packs only config, models, textures and rvmats.
   - SimpleGroup: 22 entries against 67 in the project's own build. No `scripts\`, `gui\layouts`, `inputs.xml` or `stringtable.csv`, so such a run tests the mod without its scripts (c561 family).
   - LFHeli_OH1: prefix `LFHeli_OH1` against `LFHeli` in the deployed PBO.
-- Observations: 16 + 2 `Error: 1816 Cannot run binMake.exe` lines in the staged builds; 5 empty `dayz-mcp-native-*` folders from earlier days left in TEMP.
+- Observations: 16 + 2 `Error: 1816 Cannot run binMake.exe` lines in the staged builds; empty `dayz-mcp-native-*` folders from earlier days left in `%TEMP%` (listed 2026-10-08 ~16:03 with their mtimes: `djz62e4_` 2026-09-30 02:40, `1kac5jtf` 2026-10-06 03:59, `8bv30qzg` 2026-10-06 23:27, `i9n_jkih` 2026-10-07 16:27, `au6x20l5` 2026-10-08 01:05); the folders of today's two staged builds were gone.
 
 ## 9941 hold probe (corrected procedure, gpt-6.1-sol READY)
 FenceKit + `ActionDeployObject` (5 s deploy), multiplayer, one fresh kit per trial, hologram confirmed by capture.
 
 | Arm | Start | Lifecycle | `already_placed` | New Fence |
 |---|---|---|---|---|
-| control (vanilla) | accepted, ignore flag false | cancel (state 5) after ~1.9 s | false | none |
-| suppress (`SetIgnoreAutomaticInputEnd(true)` before the start) | accepted, ignore flag true | processing ~6.7 s, then finished (state 4) | true (21 ticks) | yes, 2.5 m away (resolved and deleted) |
-| cancel (suppress + `EndActionInput`) | accepted, ignore flag true | cancel after ~1.7 s | false | none |
+| control (vanilla) | accepted, ignore flag false | cancel (state 5) from 70 ms; start to `ended` 1.903 s | false | none |
+| suppress (`SetIgnoreAutomaticInputEnd(true)` before the start) | accepted, ignore flag true | processing (state 2) from 1.142 s, finished (state 4) at 6.190 s (about 5.0 s of progress); start to `ended` 6.863 s | true (21 ticks) | yes, 2.5 m away (resolved and deleted) |
+| cancel (suppress + `EndActionInput`) | accepted, ignore flag true | cancel (state 5) from 111 ms; start to `ended` 1.965 s | false | none |
 
 All three restored the flag to false. **H1 supported**: setting `SetIgnoreAutomaticInputEnd(true)` right before one `PerformActionStart` lets a continuous action complete with no input held, which is the mechanism inbox 9941 / d1a8 / 9ab8 need.
 
@@ -75,5 +75,6 @@ All three restored the flag to false. **H1 supported**: setting `SetIgnoreAutoma
 ## Other
 - 1d31: inconclusive. No pause menu after this launch (`ui_tree` no_menu); ESC by `key_press` or `input_trigger` opened none either.
 - f298 / 75e7 passive focus probe (250 ms sampling, 15:36-15:56):
-  - DayZDiag took the foreground at each launch: server about 5 s, client 1-4 s.
-  - `WindowsTerminal.exe` held it for one sample at 15:39:01 and at 15:54:01, not attributed.
+  - Instance 130 launch: the server window held the foreground 5.305 s (15:36:52); the client 1.753 s, 1.002 s and 4.258 s (15:37:31-15:37:59).
+  - Default launch: the server window 2.004 s (15:41:25); the client 2.504 s, then continuously from 15:41:41 to 15:48:54 (about 432.6 s, while this session drove the game). Who gave focus back each time is not observable here.
+  - `WindowsTerminal.exe` held it 0.254 s at 15:39:01 and 0.256 s at 15:54:01, not attributed.

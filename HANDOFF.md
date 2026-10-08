@@ -19,7 +19,7 @@
   - g5fix en la 130: carpetas `profiles-130` recreadas, y lecturas y cierre sobre la carpeta con nombre.
   - Rotación de `storage_1` por cambio de modset.
   - Rechazo de un journal con mayúsculas.
-  - Stage de AddonBuilder (#195): gate ODOL de 713a verde en SimpleGroup y LFHeli_OH1 compila.
+  - Stage de AddonBuilder (#195): en SimpleGroup, G1-G5 del gate ODOL de 713a en verde (G6/G7 fallan igual que en el PBO desplegado); LFHeli_OH1 compila.
   - 9941: el mecanismo de hold está medido (`SetIgnoreAutomaticInputEnd`).
   - Overrides de aim: radianes por pulso.
 - **Riesgos abiertos:**
@@ -27,11 +27,11 @@
   - Un rechazo de storage no publica `storage_recovery_reason`/`remediation` en el camino del lifecycle (`fb-20261008-141211-855c`).
   - `dayz_test_run(build=true)` con binarize no empaqueta scripts, layouts ni stringtable (`fb-20261008-141215-222d`).
   - Instaladores, doctors y tests lanzados desde la app de Claude escriben ficheros nuevos en la virtualización MSIX de `%LOCALAPPDATA%` (`fb-20261008-141157-e92d`).
-- **Ronda 2 en marcha (decisión del dueño, 2026-10-08):**
-  - A: 855c + 2986 (Python).
-  - B: un modo hold para acciones continuas (9941, Enforce).
-  - C: `action_cursor` + `player_look_at` (86a3, Enforce).
-  - Specs de gpt-6.1-sol; implementa Grok 4.7 porque el GX10 estaba lleno; revisa gpt-6.1-sol.
+- **Ronda 2** (el dueño eligió A, B y C en la sesión del 2026-10-08; queda registrada en `reviews/2026-10-06-ticketing/triage3/TRIAGE3.md`):
+  - A: 855c + 2986 (Python). La spec de gpt-6.1-sol estaba en curso a las 16:50; la implementación aún no había empezado.
+  - B: el verbo `action_hold` (9941, Enforce). Spec de gpt-6.1-sol hecha; Grok 4.7 implementaba desde las 16:54.
+  - C: `action_cursor` + `player_look_at` (86a3, Enforce). Grok 4.7 implementaba desde las 16:45, con la spec de Sol y un anexo de medidas.
+  - Revisa gpt-6.1-sol; implementa Grok porque el GX10 estaba lleno.
   - Los lotes Enforce (B y C) se mergean después de su ciclo in-game, con el PBO "12".
 - **Buzón abierto relevante:** 9941 y 9ab8 (hold), 86a3, 75e7/fade (foco al arrancar), 1d31, d490, a97e, 7695, y los cuatro riesgos de arriba.
 - **Detalle:**
