@@ -662,6 +662,7 @@ class DaemonReleaseWiringTest(unittest.TestCase):
                     # If workers outlive the deadline, fail explicitly — never let
                     # tempfile.WinError 145 be the first signal.
                     _wait_for_dayz_mcp_background_workers(timeout_s=2.0)
+                    state.root_writer_lease.release()
 
 
 # --- from test_task7_rereview_regressions.py ---

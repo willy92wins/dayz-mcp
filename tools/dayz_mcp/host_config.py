@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Iterator
 
-from dayz_mcp.server_cli import parse_server_tail_silent
+from dayz_mcp.server_cli import parse_server_tail_silent, registration_name
 
 
 CLAUDE_TIMEOUT_MS = 604_800_000
@@ -48,6 +48,8 @@ class DaemonProvenance:
     port: int
     keyfile: str
     auto_spawn_daemon: bool
+    instance_token: str | None = None
+    game_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,8 @@ class _ClientRegistration:
     exec_allowlist: str | None
     exec_audit_path: str | None
     auto_spawn_daemon: bool
+    instance_token: str | None = None
+    game_path: str | None = None
 
 
 _ENTRY_KEYS = {
@@ -79,6 +83,8 @@ _VALUE_OPTIONS = frozenset(
         "--client-platform",
         "--task-label",
         "--tool-pack",
+        "--instance",
+        "--game-path",
     }
 )
 _BOOLEAN_OPTIONS = frozenset(
@@ -234,6 +240,7 @@ def _registration_from_entry(
     entry: object,
     *,
     platform: str,
+    server_name: str = "dayz-mcp",
 ) -> _ClientRegistration:
     if not isinstance(entry, dict):
         raise HostConfigError("daemon_provenance_conflict")
@@ -305,6 +312,10 @@ def _registration_from_entry(
     exec_allowlist = namespace.exec_allowlist
     if exec_allowlist is not None:
         exec_allowlist = _canonical_existing_file(exec_allowlist)
+    if registration_name(namespace.instance) != server_name:
+        raise HostConfigError("daemon_provenance_conflict")
+    if namespace.game_path is not None and not os.path.isabs(namespace.game_path):
+        raise HostConfigError("daemon_provenance_conflict")
     return _ClientRegistration(
         launch_executable=command,
         port=namespace.port,
@@ -316,6 +327,8 @@ def _registration_from_entry(
         exec_allowlist=exec_allowlist,
         exec_audit_path=namespace.exec_audit_path,
         auto_spawn_daemon=bool(namespace.auto_spawn_daemon),
+        instance_token=namespace.instance,
+        game_path=namespace.game_path,
     )
 
 
@@ -323,7 +336,23 @@ def _reject_json_constant(_value: str) -> object:
     raise HostConfigError("daemon_provenance_conflict")
 
 
-def _registration_from_raw(raw: bytes, *, platform: str) -> _ClientRegistration | None:
+def _selector_call_kwargs(server_name: str) -> dict[str, str]:
+    """Pass the registration name only when it is not the historical default.
+
+    Default-path tests replace these parsers with callables that predate the
+    selector argument. A named registration still threads the name through.
+    """
+    if server_name == "dayz-mcp":
+        return {}
+    return {"server_name": server_name}
+
+
+def _registration_from_raw(
+    raw: bytes,
+    *,
+    platform: str,
+    server_name: str = "dayz-mcp",
+) -> _ClientRegistration | None:
     try:
         if platform == "claude":
             parsed = json.loads(
@@ -345,16 +374,19 @@ def _registration_from_raw(raw: bytes, *, platform: str) -> _ClientRegistration 
         return None
     if not isinstance(servers, dict):
         raise HostConfigError("daemon_provenance_conflict")
-    if "dayz-mcp" not in servers:
+    if server_name not in servers:
         return None
-    entry = servers["dayz-mcp"]
-    return _registration_from_entry(entry, platform=platform)
+    entry = servers[server_name]
+    return _registration_from_entry(
+        entry, platform=platform, **_selector_call_kwargs(server_name)
+    )
 
 
 def resolve_daemon_provenance(
     *,
     claude_path: Path | None = None,
     codex_path: Path | None = None,
+    server_name: str = "dayz-mcp",
 ) -> DaemonProvenance:
     """Resolve the daemon policy only from both canonical local registrations."""
     paths = {
@@ -371,7 +403,9 @@ def resolve_daemon_provenance(
                 continue
             raw = handle.read()
             identities[platform] = handle.identity()
-            registrations[platform] = _registration_from_raw(raw, platform=platform)
+            registrations[platform] = _registration_from_raw(
+                raw, platform=platform, **_selector_call_kwargs(server_name)
+            )
 
         present = sum(registration is not None for registration in registrations.values())
         if present == 0:
@@ -396,6 +430,8 @@ def resolve_daemon_provenance(
             enable_exec_enforce=claude.enable_exec_enforce,
             exec_allowlist=claude.exec_allowlist,
             exec_audit_path=claude.exec_audit_path,
+            instance_token=claude.instance_token,
+            game_path=claude.game_path,
         )
         argv = daemon_contract.build_daemon_argv(
             config, python=claude.launch_executable
@@ -408,6 +444,8 @@ def resolve_daemon_provenance(
             port=claude.port,
             keyfile=claude.keyfile,
             auto_spawn_daemon=claude.auto_spawn_daemon,
+            instance_token=claude.instance_token,
+            game_path=claude.game_path,
         )
         for platform in ("claude", "codex"):
             handle = handles[platform]
@@ -421,7 +459,9 @@ def resolve_daemon_provenance(
             identity = identities[platform]
             if (
                 handle.identity() != identity
-                or _registration_from_raw(handle.read(), platform=platform)
+                or _registration_from_raw(
+                    handle.read(), platform=platform, **_selector_call_kwargs(server_name)
+                )
                 != registrations[platform]
             ):
                 raise HostConfigError("daemon_provenance_conflict")
@@ -432,7 +472,11 @@ def resolve_daemon_provenance(
             try:
                 if (
                     reopened.identity() != identity
-                    or _registration_from_raw(reopened.read(), platform=platform)
+                    or _registration_from_raw(
+                    reopened.read(),
+                    platform=platform,
+                    **_selector_call_kwargs(server_name),
+                )
                     != registrations[platform]
                 ):
                     raise HostConfigError("daemon_provenance_conflict")
@@ -441,7 +485,7 @@ def resolve_daemon_provenance(
         return provenance
 
 
-def build_claude_target(raw: bytes) -> bytes:
+def build_claude_target(raw: bytes, server_name: str = "dayz-mcp") -> bytes:
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, HostConfigError):
@@ -449,7 +493,7 @@ def build_claude_target(raw: bytes) -> bytes:
     if not isinstance(value, dict):
         raise HostConfigError("invalid_claude_config")
     servers = value.get("mcpServers")
-    entry = servers.get("dayz-mcp") if isinstance(servers, dict) else None
+    entry = servers.get(server_name) if isinstance(servers, dict) else None
     if not isinstance(entry, dict):
         raise HostConfigError("missing_claude_dayz_mcp")
     entry["timeout"] = CLAUDE_TIMEOUT_MS
@@ -458,22 +502,28 @@ def build_claude_target(raw: bytes) -> bytes:
         verified = json.loads(target)
     except json.JSONDecodeError:
         raise HostConfigError("invalid_claude_target") from None
-    timeout = verified.get("mcpServers", {}).get("dayz-mcp", {}).get("timeout")
+    timeout = verified.get("mcpServers", {}).get(server_name, {}).get("timeout")
     if isinstance(timeout, bool) or timeout != CLAUDE_TIMEOUT_MS:
         raise HostConfigError("invalid_claude_target")
     return target
 
 
-def build_codex_target(raw: bytes) -> bytes:
+def _codex_header_re(server_name: str) -> re.Pattern[str]:
+    return re.compile(
+        r"(?m)^\s*\[mcp_servers\." + re.escape(server_name) + r"\]\s*(?:#.*)?$"
+    )
+
+
+def build_codex_target(raw: bytes, server_name: str = "dayz-mcp") -> bytes:
     try:
         text = raw.decode("utf-8")
         parsed = tomllib.loads(text)
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         raise HostConfigError("invalid_codex_config") from None
-    entry = parsed.get("mcp_servers", {}).get("dayz-mcp")
+    entry = parsed.get("mcp_servers", {}).get(server_name)
     if not isinstance(entry, dict):
         raise HostConfigError("missing_codex_dayz_mcp")
-    matches = list(_HEADER_RE.finditer(text))
+    matches = list(_codex_header_re(server_name).finditer(text))
     if len(matches) != 1:
         raise HostConfigError("ambiguous_codex_dayz_mcp")
     start = matches[0].end()
@@ -497,7 +547,7 @@ def build_codex_target(raw: bytes) -> bytes:
         verified = tomllib.loads(target_text)
     except tomllib.TOMLDecodeError:
         raise HostConfigError("invalid_codex_target") from None
-    timeout = verified.get("mcp_servers", {}).get("dayz-mcp", {}).get("tool_timeout_sec")
+    timeout = verified.get("mcp_servers", {}).get(server_name, {}).get("tool_timeout_sec")
     if isinstance(timeout, bool) or timeout != CODEX_TIMEOUT_SECONDS:
         raise HostConfigError("invalid_codex_target")
     return target_text.encode("utf-8")
@@ -911,10 +961,15 @@ def _manifest_path(journal: Path) -> Path:
 
 
 def _persist_manifest(journal: Path, manifest: dict[str, object]) -> None:
+    # Bytes land under a staging name first. A kill during that write leaves
+    # manifest.staging, which is not a manifest and is discarded next time.
     payload = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    temporary = journal / "manifest.next"
-    _write_private(temporary, payload)
-    os.replace(temporary, _manifest_path(journal))
+    published = _manifest_path(journal)
+    pending = journal / "manifest.next"
+    staging = journal / "manifest.staging"
+    _write_private(staging, payload)
+    os.replace(staging, pending)
+    os.replace(pending, published)
 
 
 def _journal_payload(
@@ -941,8 +996,72 @@ def _journal_payload(
 
 
 def _load_manifest(journal: Path) -> dict[str, object]:
+    manifest, _only_next = _load_manifest_publication(journal)
+    return manifest
+
+
+def _is_torn_manifest_fragment(path: Path) -> bool:
+    """True when the file is not a finished JSON document."""
     try:
-        raw = _manifest_path(journal).read_bytes()
+        json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return True
+    return False
+
+
+def _release_unrecorded_journal(journal: Path) -> bool:
+    """Drop a journal that never recorded a manifest and report that it is gone.
+
+    A staging file, or a 0-byte or partial manifest.next with no manifest.json,
+    is a first-publication fragment: nothing was written to a host file. An
+    empty directory is the same (killed after mkdir, or during cleanup after
+    the manifest was unlinked). Any other unexpected entry still refuses.
+    A complete manifest.next is left for the caller.
+    """
+    if not journal.exists():
+        return False
+    if journal.is_symlink() or not journal.is_dir():
+        raise HostConfigError("registration_journal_invalid")
+    staging = journal / "manifest.staging"
+    if staging.is_file() and not staging.is_symlink():
+        staging.unlink()
+    published = journal / "manifest.json"
+    pending = journal / "manifest.next"
+    if (
+        not published.exists()
+        and pending.is_file()
+        and not pending.is_symlink()
+        and _is_torn_manifest_fragment(pending)
+    ):
+        pending.unlink()
+    entries = list(journal.iterdir())
+    allowed = {"manifest.json", "manifest.next"}
+    if any(entry.name not in allowed or entry.is_symlink() for entry in entries):
+        raise HostConfigError("registration_journal_invalid")
+    if not any(entry.name in allowed for entry in entries):
+        shutil.rmtree(journal)
+        return True
+    return False
+
+
+def _load_manifest_publication(journal: Path) -> tuple[dict[str, object], bool]:
+    """Return the manifest and whether only manifest.next was published.
+
+    Publication writes manifest.staging, replaces it onto manifest.next, then
+    replaces that onto manifest.json. A crash in the last replace leaves a
+    prepared manifest and no host-file writes.
+    """
+    published = _manifest_path(journal)
+    pending = journal / "manifest.next"
+    only_next = False
+    try:
+        if published.exists():
+            raw = published.read_bytes()
+        elif pending.is_file():
+            raw = pending.read_bytes()
+            only_next = True
+        else:
+            raise OSError
         value = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         raise HostConfigError("registration_journal_invalid") from None
@@ -961,7 +1080,9 @@ def _load_manifest(journal: Path) -> dict[str, object]:
         _decode_recovery_sources(value.get("recovery_source"))
     if set(value) != expected_keys:
         raise HostConfigError("registration_journal_invalid")
-    return value
+    if only_next and value["status"] != "prepared":
+        raise HostConfigError("registration_journal_invalid")
+    return value, only_next
 
 
 def _decode_manifest_file(value: object) -> tuple[Path, dict[str, object], bytes, bytes]:
@@ -1075,6 +1196,11 @@ def _is_own_write(current: bytes, original: bytes, target: bytes) -> bool:
 
 
 def _is_restore_progress(current: bytes, original: bytes, source: bytes) -> bool:
+    # write() copies the original and only then truncates. A finished restore
+    # whose original is shorter than the torn source is not an in-place overlay
+    # of that longer file, but recovery did write those exact bytes.
+    if current == original:
+        return True
     return _matches_in_place_overwrite(current, original, source)
 
 
@@ -1095,9 +1221,11 @@ def _recover_if_needed(
     *,
     fault_injector: _FaultInjector | None = None,
 ) -> None:
+    if _release_unrecorded_journal(journal):
+        return
     if not journal.exists():
         return
-    manifest = _load_manifest(journal)
+    manifest, only_next = _load_manifest_publication(journal)
     files = manifest["files"]
     decoded = {
         role: _decode_manifest_file(files[role]) for role in ("claude", "codex")
@@ -1113,6 +1241,13 @@ def _recover_if_needed(
         if any(handles[role].identity() != decoded[role][1] for role in decoded):
             raise HostConfigError("registration_recovery_conflict")
         currents = {role: handles[role].read() for role in decoded}
+        if only_next:
+            # First publication never reaches a host write. Discard only when
+            # both files are still the recorded originals; anything else is replayed.
+            if all(currents[role] == decoded[role][2] for role in decoded):
+                _cleanup_journal(journal)
+                return
+            _persist_manifest(journal, manifest)
         status = manifest["status"]
         if status == "committed":
             if any(currents[role] != decoded[role][3] for role in decoded):
@@ -1167,6 +1302,7 @@ def apply_host_timeouts(
     *,
     journal_root: Path | None = None,
     fault_injector: _FaultInjector | None = None,
+    server_name: str = "dayz-mcp",
 ) -> dict[str, str]:
     claude_path = Path(claude_path).resolve(strict=True)
     codex_path = Path(codex_path).resolve(strict=True)
@@ -1189,8 +1325,8 @@ def apply_host_timeouts(
         raise HostConfigError("registration_config_busy") from None
     try:
         targets = {
-            "claude": build_claude_target(originals["claude"]),
-            "codex": build_codex_target(originals["codex"]),
+            "claude": build_claude_target(originals["claude"], server_name),
+            "codex": build_codex_target(originals["codex"], server_name),
         }
     except HostConfigError:
         raise
@@ -1220,8 +1356,8 @@ def apply_host_timeouts(
                 fault_injector(f"after_write_{role}")
         if any(handles[role].read() != targets[role] for role in paths):
             raise HostConfigError("registration_config_verify_failed")
-        build_claude_target(handles["claude"].read())
-        build_codex_target(handles["codex"].read())
+        build_claude_target(handles["claude"].read(), server_name)
+        build_codex_target(handles["codex"].read(), server_name)
         manifest["status"] = "committed"
         _persist_manifest(journal, manifest)
         if fault_injector is not None:

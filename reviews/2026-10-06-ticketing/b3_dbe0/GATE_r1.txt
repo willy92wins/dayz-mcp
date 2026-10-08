@@ -1,0 +1,7 @@
+--- tests.test_pack_only_junctions: rc=0
+Ran 4 tests in 0.093s
+
+OK
+--- waiting for a free fast-tier slot (other batches are gating)
+--- fast tier: ran=5591 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

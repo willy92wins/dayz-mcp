@@ -363,9 +363,9 @@ class VehicleDoorCensusTest(unittest.TestCase):
     def test_the_arg_contract_hash_does_not_cover_the_command(self) -> None:
         # The hash covers vehicle_prepare_fixture only; a new command leaves it as is.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3c77a99c95fd05a4")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
         self.assertIn(
-            'SERVER_ARG_CONTRACT_HASH = "3c77a99c95fd05a4"',
+            'SERVER_ARG_CONTRACT_HASH = "421895632da1ef7e"',
             BRIDGE_PATH.read_text(encoding="utf-8"),
         )
 
@@ -655,7 +655,7 @@ class VehicleDoorToolTest(unittest.IsolatedAsyncioTestCase):
             "it does not use SetAnimationPhaseNow, which object_anim uses",
             "mode=read changes nothing",
             "DoorsDriver, DoorsCoDriver, DoorsCargo1, DoorsCargo2, DoorsHood, DoorsTrunk",
-            "Target by object_id (world_spawn) or by classname near pos",
+            "Target by object_id (world_spawn or inventory_attach.item_object_id) or by classname near pos",
             "door_missing names the empty slot of a crew door",
             "(vehicle_prepare_fixture or inventory_attach fills it)",
             "door_not_found means no attached door part maps to source",

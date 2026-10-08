@@ -316,14 +316,21 @@ def _normal_policy_from_provenance(provenance: object) -> AccreditedDaemonPolicy
     )
 
 
-def load_normal_daemon_policy() -> AccreditedDaemonPolicy:
-    provenance = host_config.resolve_daemon_provenance()
+def load_normal_daemon_policy(server_name: str | None = None) -> AccreditedDaemonPolicy:
+    from dayz_mcp.instance_context import current_instance_token, registration_name
+
+    selected = server_name or registration_name(current_instance_token())
+
+    def _resolve() -> object:
+        if selected == "dayz-mcp":
+            return host_config.resolve_daemon_provenance()
+        return host_config.resolve_daemon_provenance(server_name=selected)
+
+    provenance = _resolve()
     policy = _normal_policy_from_provenance(provenance)
 
     def revalidate_normal() -> None:
-        current = _normal_policy_from_provenance(
-            host_config.resolve_daemon_provenance()
-        )
+        current = _normal_policy_from_provenance(_resolve())
         if current != policy:
             raise ValueError("daemon_policy_drift")
 

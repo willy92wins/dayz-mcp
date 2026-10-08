@@ -1,0 +1,8 @@
+--- enforce linter: errors=2 baseline=2 new=0
+--- tests.test_inventory_attach_item_id: rc=0
+Ran 8 tests in 1.575s
+
+OK
+--- waiting for a free fast-tier slot (other batches are gating)
+--- fast tier: ran=5595 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

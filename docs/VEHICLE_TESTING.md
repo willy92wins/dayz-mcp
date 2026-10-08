@@ -20,27 +20,37 @@ about the site, not about the tools.
 two historical ones, fb-20260824-133301-ecf5): the fixture spawns with the
 door closed, and the injected `action_use ActionOpenCarDoors` starts on the
 client but its server half (`OnStartServer` → `SetAnimationPhase`,
-`actioncardoors.c:92`) never lands — the server's replica of the
-client-authoritative car never even moves from the spawn point. The sanctioned
-scenario teardown is therefore `object_delete` of the fixture with the
+`actioncardoors.c:92`) never lands. On that run — client-side get-in only,
+no `vehicle_enter`, the bridge build of 2026-08-24 — the server's replica of
+the client-owned car was still at the spawn point while the client drove it.
+That observation is bound to its run and configuration; it is not a law.
+`vehicle_enter` seats the player in the server crew (`StartCommand_Vehicle`,
+`MCPBridge.c:1001-1011`; in-game 2026-06-08, product-spec B2), and every
+no-replica-motion sample this file carries was taken on a client-get-in-only
+ladder like the client one below. Whether the server side follows the
+client-owned car is read per run, with the server/client position comparison
+of the server-side ladder; an accepted enter is not replication evidence.
+The sanctioned scenario teardown is therefore `object_delete` of the fixture with the
 ejection verified via telemetry (`not_seated`; 13/13 clean across two
 sessions), which `finish_site` reports as `OK_FORCED_DELETE`.
 
 Surface limits that shape site choice:
 
-- `vehicle_control` has **no reverse** — throttle is clamped to `0..1`
-  ([`tools/dayz_mcp/server.py:3695`](../tools/dayz_mcp/server.py)); a car
+- `vehicle_control` has **no reverse** — throttle is limited to `0..1` and refused as `bad_throttle`
+  outside it ([`tools/dayz_mcp/server.py:7733-7734`](../tools/dayz_mcp/server.py)); a car
   stopped against an obstacle cannot be recovered by driving.
 - `world_spawn`'s `rotation` argument is **`RF_*` flags, not a heading**
-  (`MCPBridge.c:553`); spawn heading is inherited from the terrain and there
+  (`MCPBridge.c:651`); spawn heading is inherited from the terrain and there
   is no orientation setter in the tool surface.
 - `scene_raycast` with `intersect="view"` does **not** detect the statics
   that stop a car (measured 8/8 false CLEAR over a line with a proven
   obstacle cluster). Corridor checks must use `entities_query` **with the
   player teleported into the area first** (fb-20260824-123204-638e).
-- `object_anim` / `object_inspect` resolve by position on the **server**,
-  which still has a driven fixture at its spawn point — target them there,
-  or not at all (fb-20260824-133301-ecf5).
+- `object_anim` / `object_inspect` resolve by position on the **server**.
+  Where the server-side replica of a client-driven car sits is a per-run
+  read (`entities_query`), not the spawn point by construction: spawn-point
+  targeting was measured on the client-get-in-only runs
+  (fb-20260824-133301-ecf5, no `vehicle_enter`).
 - A `world_spawn` fixture lives only as long as its **economy lifetime** once
   no player is within the mission's `CleanupAvoidance` (100 m in
   `dayzOffline.chernarusplus` `db/globals.xml`), and `CivilianSedan`'s
@@ -131,8 +141,10 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
 8. Brake to a stop (`brake 1.0`, `handbrake 1.0`), `engine_set stop`.
 9. Attempt `action_use ActionGetOutTransport`; expect `condition_failed`
    on this stand (see "The exit reality"). Tear down with `vehicle_release`
-   and `object_delete` of the fixture; verify the ejection via telemetry
-   (`not_seated`), then `restore_gameplay`.
+   and `object_delete` of the fixture (`vehicle_release` only aborts the
+   trace and clears the drive-control state,
+   `MCPClientBridge.c:2601-2606` — it is not a get-out); verify the ejection
+   via telemetry (`not_seated`), then `restore_gameplay`.
 10. Release the session lease.
 
 A vehicle field arrives only from a verb that fills it. `seated`, `seat`,
@@ -147,16 +159,67 @@ carries all of them but `vehicle_fixture_ready`; `vehicle_get_in_client` all but
 reached the car and are not telemetry, so read gear, speed, position and
 ownership with `vehicle_telemetry`. No result carries `pos_delta`: no verb fills
 it (fb-20260823-141958-dde3), so displacement is the difference of two
-`vehicle_telemetry` `pos_real` reads or comes from `vehicle_trace` samples.
-`query_player_state` and `query_all_players` do not follow a client-owned car:
-the server-side body stays where the server last put it, and
-`query_all_players` reports `in_vehicle` 0 (fb-20260823-130833-95d8).
+`vehicle_telemetry` `pos_real` reads or comes from `vehicle_trace` samples. On a client-get-in-only run `query_player_state` and `query_all_players` do
+not follow a client-owned car: the server-side body stays where the server
+last put it, and `query_all_players` reports `in_vehicle` 0
+(fb-20260823-130833-95d8, no `vehicle_enter`). After a `vehicle_enter` the
+player is in the server crew; re-read the server side instead of carrying
+these no-crew numbers across configurations — the server-side ladder below
+ends in exactly that comparison.
 
 Steps 2-9 are exactly `prepare_site` / `run_cell` / `finish_site` in
 [`tools/g0_abba_gate.py`](../tools/g0_abba_gate.py); drive new tests through
 that library instead of re-implementing the ladder. The threshold judgement
 of step 7 (`delta_2s_xz` / `delta_5s_xz` against the contract) lives in the
 site gate's `drive_metrics`, not in the library.
+
+## Server-side ladder (server crew, and where the replica is)
+
+The client ladder above seats the client and never tells the server that a
+crew exists. When the test target is server-side state — zones, AI, loot
+writes, the `query_*` reads — run this variant instead: the client ladder
+plus the server enter, ending in the comparison that answers where the
+server replica is.
+
+1. `world_spawn` the vehicle fixture at the certified site (`flags: 0`;
+   y=0 grounds it), then `vehicle_prepare_fixture` (`mode: object_at`) at
+   the real spawn position. Keep the registered in-session `object_id`: the
+   teardown below deletes that id, and no fixture id survives the run.
+2. `player_teleport` the driver to the surface y behind the canopy gate, as
+   in the client ladder.
+3. `vehicle_enter` near the fixture pos: the server half of the seat. It
+   runs `StartCommand_Vehicle` (`MCPBridge.c:1001-1011`) and puts the player
+   in the server crew — measured in-game 2026-06-08, driver seat
+   (product-spec B2). `seated=1` says the command was accepted, not that
+   the state settled: assert `seated` and `seat == "driver"`, and treat the
+   settle as unproven until step 6 reads it back.
+4. `vehicle_get_in_client`: the client-ownership half, which `engine_set`,
+   `vehicle_control` and `vehicle_trace` require and which does not place
+   the player in the server crew (its description in
+   `tools/dayz_mcp/server.py`). Assert the client ladder's step-4 contract.
+5. `engine_set start`, then the traced `vehicle_control` run of client
+   ladder steps 5-6.
+6. Compare positions; never accept the two enters as proof that the server
+   replica moved. Server side: `entities_query` around the last
+   server-known position, or `object_inspect(object_id=<fixture id>,
+   want=["inventory"])` and its `telemetry.pos`, the world position
+   (`GetPosition`, `MCPBridge.c:3471`). `bounding_center` is model-local
+   (`MCPMessages.c:476`) and is not a position to compare. Client
+   side: `vehicle_telemetry` `pos_real` and the `vehicle_trace` samples.
+   This step checks position agreement only, not the server crew:
+   `query_all_players` reports the server `in_vehicle` (`IsInTransport`,
+   `MCPBridge.c:4335`), which shows a player in a transport but neither the
+   driver seat nor a settled seat.
+   Record both tracks with the run id and the bridge/game version, the way
+   every measurement in this file is labeled. A divergence is a result about
+   that run's configuration, not noise: the frozen-replica run above
+   (fb-20260824-133301-ecf5) is the standing counter-example to assuming
+   the server side follows the client-owned car.
+7. Tear down as the client ladder does: `vehicle_release`, then
+   `object_delete` of the registered fixture id — the release only clears
+   trace/control (`MCPClientBridge.c:2601-2606`), the delete performs the
+   ejection, verified via telemetry (`not_seated`) — then
+   `restore_gameplay` and the session release.
 
 ## Session shape
 

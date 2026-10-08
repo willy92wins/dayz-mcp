@@ -20,6 +20,17 @@ Two measured facts shape what is here and what is deliberately absent:
     a handle to the serving process: it is reported as launcher_pid, and termination
     goes through the process TREE.
 
+A generation whose transport dies is not left to swallow requests. EOF on its
+stdout outside a planned retirement, or a failed write into its stdin, marks the
+generation failed under the state lock: its pending requests are detached and
+answered exactly once -- a tools/call with an isError result whose payload says
+the completion is unknown, anything else with a JSON-RPC -32603 error -- and
+further admission into that generation is refused. The supervisor's own reserved
+requests fail internally and are never answered to the host. server_reload is the way out:
+it retires the failed generation and replays the handshake into a replacement.
+Interrupted calls are never retried on the caller's behalf; their effects may
+already have reached the daemon.
+
 The lease is carried by dayz_mcp.session_handoff, whose contract the rehearsal of
 2026-09-10 fixed (REHEARSAL-LEASE.md, 34/34). This module never reads the token: it
 hands the carrier PATH to each worker generation and lets the worker write and consume
@@ -43,7 +54,13 @@ from typing import Callable, Protocol
 # has no pending request for logs it as a protocol fault, which the spike hit.
 REPLAY_ID = "__dayz_mcp_supervisor_replay__"
 HEARTBEAT_ID = "__dayz_mcp_supervisor_heartbeat__"
-_RESERVED_IDS = frozenset({REPLAY_ID, HEARTBEAT_ID})
+STATUS_ID = "__dayz_mcp_supervisor_status__"
+_RESERVED_IDS = frozenset({REPLAY_ID, HEARTBEAT_ID, STATUS_ID})
+_OBSERVE_PREFIX = "__dayz_mcp_supervisor_obs_"
+
+
+def _is_observe_id(ident: object) -> bool:
+    return isinstance(ident, str) and ident.startswith(_OBSERVE_PREFIX)
 
 RELOAD_TOOL_NAME = "server_reload"
 RELOAD_TOOL = {
@@ -63,6 +80,9 @@ DRAIN_TIMEOUT_S = 30.0
 STDIN_CLOSE_GRACE_S = 5.0
 REPLAY_TIMEOUT_S = 15.0
 HEARTBEAT_TIMEOUT_S = 5.0
+# Bound for the session_status the supervisor reads before it annotates a
+# result it synthesized. A heartbeat receipt is not a TTL.
+LEASE_STATUS_TIMEOUT_S = 1.0
 
 
 class WorkerProcess(Protocol):
@@ -92,6 +112,23 @@ class _Generation:
     number: int
     pump: threading.Thread | None = None
     inflight: dict[object, str] = field(default_factory=dict)
+    # Terminal transport failure, decided under the supervisor's _state lock: no
+    # further admission, no further forwarding for this generation.
+    failed: bool = False
+    failure_reason: str | None = None
+    # Ids the failure path detached and answered; the pump swallows a late response
+    # for one of these so the host never sees a second terminal answer.
+    detached: set[object] = field(default_factory=set)
+    # Bodies of reserved supervisor requests. The pump does not forward them.
+    reserved_bodies: dict[object, dict] = field(default_factory=dict)
+    # Lease id the worker process currently holds, from the freshest local
+    # probe. It is never ownership proof on its own: a TTL requires the
+    # status's own lease id to match the local id read around the status.
+    local_lease_id: str | None = None
+    expired_observe_ids: set[object] = field(default_factory=set)
+    # Set before a planned retirement closes stdin, so the pump reads the EOF that
+    # follows as the expected end and not as a transport failure.
+    retired: bool = False
 
 
 def terminate_tree(process: WorkerProcess, *, log: Callable[[str], None]) -> None:
@@ -133,6 +170,7 @@ class Supervisor:
         stdin_close_grace_s: float = STDIN_CLOSE_GRACE_S,
         replay_timeout_s: float = REPLAY_TIMEOUT_S,
         heartbeat_timeout_s: float = HEARTBEAT_TIMEOUT_S,
+        lease_status_timeout_s: float = LEASE_STATUS_TIMEOUT_S,
     ) -> None:
         self._spawn = spawn
         self._out = out_stream
@@ -142,6 +180,7 @@ class Supervisor:
         self._stdin_close_grace_s = stdin_close_grace_s
         self._replay_timeout_s = replay_timeout_s
         self._heartbeat_timeout_s = heartbeat_timeout_s
+        self._lease_status_timeout_s = lease_status_timeout_s
 
         self._out_lock = threading.Lock()
         self._state = threading.Condition()
@@ -164,13 +203,81 @@ class Supervisor:
         self._write_host((json.dumps(message) + "\n").encode("utf-8"))
 
     def _send_worker(self, generation: _Generation, raw: bytes) -> bool:
+        with self._state:
+            if generation.failed:
+                # The transport is known dead. Refuse rather than lose bytes into a
+                # pipe that can no longer produce a response.
+                return False
         try:
             generation.process.stdin.write(raw if raw.endswith(b"\n") else raw + b"\n")
             generation.process.stdin.flush()
         except (OSError, ValueError) as exc:
             self._log(f"worker generation={generation.number} write failed: {exc}")
+            self._fail_generation(generation, "write_failed")
             return False
         return True
+
+    def _fail_generation(self, generation: _Generation, reason: str) -> None:
+        """Mark the transport dead, detach its pending requests, answer them once.
+
+        Idempotent: whichever racer gets here first (EOF in the pump, a failed write)
+        does the work, and later callers observe the flag and return. Detaching happens
+        under the same lock hold that sets the flag, so a response that lost the race
+        cannot be forwarded after the failure answer.
+        """
+        with self._state:
+            if generation.failed:
+                return
+            generation.failed = True
+            generation.failure_reason = reason
+            pending = list(generation.inflight.items())
+            generation.inflight.clear()
+            generation.detached.update(ident for ident, _ in pending)
+            self._state.notify_all()
+        host_pending = [
+            (ident, method) for ident, method in pending if ident not in _RESERVED_IDS
+        ]
+        self._log(
+            f"worker generation={generation.number} transport failed ({reason}); "
+            f"detached {len(pending)} pending request(s), answered {len(host_pending)}"
+        )
+        for ident, method in host_pending:
+            self._answer_worker_died(ident, method, generation.number, reason)
+
+    def _worker_died_payload(self, generation_number: int, reason: str) -> dict:
+        # completion is deliberately unknown: the call may or may not have reached the
+        # daemon, so nothing here may invite an automatic retry.
+        return {
+            "error": "worker_died",
+            "generation": generation_number,
+            "reason": reason,
+            "completion": "unknown",
+        }
+
+    def _answer_worker_died(
+        self, ident: object, method: str | None, generation_number: int, reason: str
+    ) -> None:
+        """Give one host request the terminal answer its dead transport owes it.
+
+        A tools/call gets the tool-shaped isError result the host expects from a call;
+        any other request method gets a JSON-RPC error, because a tools/call result
+        would not be a valid answer to an initialize or a tools/list.
+        """
+        payload = self._worker_died_payload(generation_number, reason)
+        if method == "tools/call":
+            self._reply(ident, payload, is_error=True)
+            return
+        self._send_host(
+            {
+                "jsonrpc": "2.0",
+                "id": ident,
+                "error": {
+                    "code": -32603,  # JSON-RPC internal error
+                    "message": "worker transport failed; request completion is unknown",
+                    "data": payload,
+                },
+            }
+        )
 
     # -- worker lifecycle ------------------------------------------------------
 
@@ -218,8 +325,18 @@ class Supervisor:
             if is_response:
                 with self._state:
                     generation.inflight.pop(ident, None)
+                    superseded = ident in generation.detached
+                    observe = _is_observe_id(ident)
+                    if observe and ident in generation.expired_observe_ids:
+                        generation.reserved_bodies.pop(ident, None)
+                    elif (ident in _RESERVED_IDS or observe) and isinstance(message, dict):
+                        generation.reserved_bodies[ident] = message
                     self._state.notify_all()
-                if ident in _RESERVED_IDS:
+                if superseded:
+                    # A terminal failure already answered this request; relaying this
+                    # late response would give the host a second terminal answer.
+                    continue
+                if ident in _RESERVED_IDS or _is_observe_id(ident):
                     # The supervisor asked for this, not the host. Forwarding it makes
                     # the client log a response with no pending request.
                     continue
@@ -228,6 +345,12 @@ class Supervisor:
                     self._send_host(amended)
                     continue
             self._write_host(raw)
+        with self._state:
+            retired = generation.retired
+        if not retired:
+            # EOF without a planned retirement: nothing else will ever come out of
+            # this transport, so whatever is still pending is answered from here.
+            self._fail_generation(generation, "stdout_eof")
         self._log(f"worker generation={generation.number} stdout closed")
 
     def _amend_tools_list(self, message: dict) -> dict | None:
@@ -328,14 +451,20 @@ class Supervisor:
             "params": {"name": "session_heartbeat", "arguments": {}},
         }
         with self._state:
+            if generation.failed:
+                return "worker_died"
             generation.inflight[HEARTBEAT_ID] = "tools/call"
         if not self._send_worker(generation, (json.dumps(request) + "\n").encode("utf-8")):
-            with self._state:
-                generation.inflight.pop(HEARTBEAT_ID, None)
-            return "send_failed"
+            # The failed write marked the generation dead, which detached the heartbeat.
+            return "worker_died"
         deadline = self._monotonic() + self._heartbeat_timeout_s
         with self._state:
-            while HEARTBEAT_ID in generation.inflight:
+            while True:
+                if HEARTBEAT_ID in generation.detached:
+                    # The transport died while waiting. EOF is not an answer.
+                    return "worker_died"
+                if HEARTBEAT_ID not in generation.inflight:
+                    break
                 remaining = deadline - self._monotonic()
                 if remaining <= 0:
                     generation.inflight.pop(HEARTBEAT_ID, None)
@@ -345,6 +474,8 @@ class Supervisor:
 
     def _retire(self, generation: _Generation) -> None:
         """Close stdin first: the stdio contract says a worker exits when its peer goes."""
+        with self._state:
+            generation.retired = True
         try:
             generation.process.stdin.close()
         except (OSError, ValueError):
@@ -372,14 +503,21 @@ class Supervisor:
             return False
         replay["id"] = REPLAY_ID
         with self._state:
+            if generation.failed:
+                return False
             generation.inflight[REPLAY_ID] = "initialize"
         if not self._send_worker(generation, (json.dumps(replay) + "\n").encode("utf-8")):
-            with self._state:
-                generation.inflight.pop(REPLAY_ID, None)
             return False
         deadline = self._monotonic() + self._replay_timeout_s
         with self._state:
-            while REPLAY_ID in generation.inflight:
+            while True:
+                if REPLAY_ID in generation.detached:
+                    # The replacement's transport died mid-replay: a failure to report,
+                    # never a success to build on.
+                    self._log("initialize replay lost to a dead worker transport")
+                    return False
+                if REPLAY_ID not in generation.inflight:
+                    break
                 remaining = deadline - self._monotonic()
                 if remaining <= 0:
                     generation.inflight.pop(REPLAY_ID, None)
@@ -387,20 +525,142 @@ class Supervisor:
                     return False
                 self._state.wait(timeout=min(remaining, 0.5))
         if self._initialized_line is not None:
-            self._send_worker(generation, self._initialized_line)
+            if not self._send_worker(generation, self._initialized_line):
+                return False
+        # The send can report success while a death is being marked on another
+        # thread: the bytes were accepted, the reader is gone. Resolving the
+        # outcome under the state lock keeps a failed replacement from being
+        # announced as a success the very next call would contradict.
+        with self._state:
+            if generation.failed:
+                self._log("initialize replay lost to a dead worker transport")
+                return False
         return True
 
+    def _observe_seq(self) -> str:
+        self._observe_n = getattr(self, "_observe_n", 0) + 1
+        return f"{_OBSERVE_PREFIX}{self._observe_n}"
+
+    def _unknown_if_held(self, generation: _Generation) -> dict | None:
+        with self._state:
+            held = generation.local_lease_id
+        if not isinstance(held, str) or not held:
+            return None
+        return {"lease_ttl_s": None, "lease_ttl_status": "unknown"}
+
+    def _ask_worker(self, generation: _Generation, tool_name: str, deadline: float) -> dict | None:
+        """One correlated tools/call. A late body for an expired id is ignored."""
+
+        ident = self._observe_seq()
+        request = {
+            "jsonrpc": "2.0",
+            "id": ident,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": {}},
+        }
+        with self._state:
+            if generation.failed or generation.retired:
+                return None
+            generation.inflight[ident] = "tools/call"
+        if not self._send_worker(generation, (json.dumps(request) + "\n").encode("utf-8")):
+            with self._state:
+                generation.inflight.pop(ident, None)
+                generation.expired_observe_ids.add(ident)
+            return None
+        with self._state:
+            while ident in generation.inflight and ident not in generation.detached:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    generation.inflight.pop(ident, None)
+                    generation.expired_observe_ids.add(ident)
+                    generation.reserved_bodies.pop(ident, None)
+                    return None
+                self._state.wait(timeout=min(remaining, 0.05))
+            if ident in generation.detached:
+                generation.expired_observe_ids.add(ident)
+                return None
+            return generation.reserved_bodies.pop(ident, None)
+
+    def _observe_lease_ttl(self, generation: _Generation) -> dict | None:
+        """Local lease id, authoritative status, local lease id again.
+
+        A TTL is published only when the status's own active lease id equals
+        the worker's current generation-local lease id, read right before the
+        status and re-read right after it. A mismatch, an ownership change, or
+        missing evidence is the unknown annotation -- never another lease's
+        TTL, and never a stale cache as ownership proof. A heartbeat is not a
+        TTL. Never called on the generation's pump thread: that thread is the
+        one that would have to deliver the answer. Each call uses its own id
+        so a late body cannot satisfy the next observation.
+        """
+
+        from dayz_mcp.lease_result_ttl import (
+            LEASE_LOCAL_TOOL,
+            LEASE_TTL_OBSERVE_TOOL,
+            classify_status,
+            parse_tool_status,
+        )
+
+        if generation.pump is threading.current_thread():
+            return self._unknown_if_held(generation)
+        deadline = self._monotonic() + self._lease_status_timeout_s
+
+        def _local_lease() -> tuple[str | None, bool]:
+            message = self._ask_worker(generation, LEASE_LOCAL_TOOL, deadline)
+            body = parse_tool_status(message) if message is not None else None
+            if not isinstance(body, dict):
+                return None, False
+            found = body.get("local_lease_id")
+            if isinstance(found, str) and found:
+                return found, True
+            return None, True
+
+        local_before, seen_before = _local_lease()
+        with self._state:
+            if seen_before:
+                generation.local_lease_id = local_before
+        if not seen_before:
+            return self._unknown_if_held(generation)
+        status_message = self._ask_worker(generation, LEASE_TTL_OBSERVE_TOOL, deadline)
+        status = parse_tool_status(status_message) if status_message is not None else None
+        if status is None:
+            return self._unknown_if_held(generation)
+        local_after, seen_after = _local_lease()
+        with self._state:
+            if seen_after:
+                generation.local_lease_id = local_after
+        if not seen_after or local_after != local_before:
+            # Ownership changed or its evidence went missing while the status
+            # was in flight: the observed TTL may belong to a lease this
+            # result never held.
+            return {"lease_ttl_s": None, "lease_ttl_status": "unknown"}
+        if local_before is None:
+            # The worker holds no lease: the field stays absent, and another
+            # owner's status is not a TTL.
+            return None
+        return classify_status(status, local_before)
+
     def _reply(self, request_id: object, payload: dict, *, is_error: bool) -> None:
+        from dayz_mcp.lease_result_ttl import render_supervisor_result
+
         if is_error:
             self._log(f"server_reload: {payload}")
+        with self._state:
+            generation = self._current
+        annotation = None
+        if (
+            generation is not None
+            and not generation.failed
+            and not generation.retired
+        ):
+            annotation = self._observe_lease_ttl(generation)
         self._send_host(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(payload)}],
-                    "isError": is_error,
-                },
+                "result": render_supervisor_result(
+                    payload, annotation, is_error=is_error
+                ),
             }
         )
 
@@ -452,6 +712,14 @@ class Supervisor:
                     # Admitting it now would put a call in flight against a worker that
                     # is being replaced, which is what the drain just finished ruling out.
                     self._reply(ident, {"error": "server_recycling"}, is_error=True)
+                    return
+                if generation.failed:
+                    # The transport is dead: admitting would swallow the request. The
+                    # refusal is answered from here, never forwarded.
+                    self._answer_worker_died(
+                        ident, method, generation.number,
+                        generation.failure_reason or "worker_died",
+                    )
                     return
                 generation.inflight[ident] = method
         self._send_worker(generation, raw)

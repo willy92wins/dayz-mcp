@@ -77,6 +77,9 @@ class IntegrationDaemon:
     def stop(self) -> None:
         self.httpd.shutdown()
         self.httpd.server_close()
+        lease = getattr(self.state, "root_writer_lease", None)
+        if lease is not None:
+            lease.release()
         self.thread.join(timeout=2.0)
 
 

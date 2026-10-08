@@ -101,7 +101,12 @@ from dayz_mcp.accredited_daemon_transport import argv_matches_redirected
 from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
 from dayz_mcp.orphan_guard import image_name_of
 from dayz_mcp.runtime_state import RuntimePaths
-from dayz_mcp.server_cli import parse_server_tail_silent
+from dayz_mcp.instance_context import (
+    accredited_package_dir,
+    state_root_name,
+    validate_instance_token,
+)
+from dayz_mcp.server_cli import open_lock_file, parse_server_tail_silent
 
 
 _MIGRATION_SUBDIR = ("migration", "P0S-IDENTITY-V2")
@@ -359,13 +364,10 @@ def daemon_startup_election(paths: RuntimePaths) -> Iterator[bool]:
     lock_path = root / _STARTUP_LOCK_NAME
     if os.path.lexists(lock_path):
         _assert_regular_path(lock_path, "daemon_startup_lock_unavailable")
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY
     descriptor: int | None = None
     acquired = False
     try:
-        descriptor = os.open(lock_path, flags, 0o600)
+        descriptor = open_lock_file(lock_path)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _is_reparse_stat(opened):
             raise RunsBackupGateError("daemon_startup_lock_unavailable")
@@ -412,13 +414,10 @@ def _exclusive_gate_lock(lock_path: Path) -> Iterator[None]:
     _assert_no_name_surrogates(lock_path.parent, "runs_backup_lock_unavailable")
     if os.path.lexists(lock_path):
         _assert_regular_path(lock_path, "runs_backup_lock_unavailable")
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY
     descriptor: int | None = None
     acquired = False
     try:
-        descriptor = os.open(lock_path, flags, 0o600)
+        descriptor = open_lock_file(lock_path)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _is_reparse_stat(opened):
             raise RunsBackupGateError("runs_backup_lock_unavailable")
@@ -475,7 +474,7 @@ def _dayz_mcp_tail_is_writer(tail: list[str]) -> bool:
     return result.namespace.mode != "client"
 
 
-def _argv_targets_dayz_mcp(argv: list[str]) -> bool:
+def _argv_targets_dayz_mcp(argv: list[str], *, writers_only: bool = True) -> bool:
     if len(argv) < 2:
         return False
     no_value_options = frozenset("bBdEiIOPqRsSuvx")
@@ -558,6 +557,8 @@ def _argv_targets_dayz_mcp(argv: list[str]) -> bool:
         break
 
     if target_kind == "module" and target_value == "dayz_mcp":
+        if not writers_only:
+            return parse_server_tail_silent(argv[index:]).status != "terminal"
         return _dayz_mcp_tail_is_writer(argv[index:])
     if target_kind == "module" and target_value == "dayz_mcp.__main__":
         return True
@@ -696,6 +697,211 @@ def capture_launch_ancestor_identity(
     }
 
 
+def _stopped_on_unrecognized_short_option(argv: list[str]) -> bool:
+    """True when a short interpreter flag this parser does not know stops the scan.
+
+    Long options, including ``--help``, ``--version`` and an unknown
+    ``--unknown``, stay on the existing non-target path. ``-z`` does not.
+    """
+    no_value_options = frozenset("bBdEiIOPqRsSuvx")
+    index = 1
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--" or argument == "--check-hash-based-pycs":
+            return False
+        if argument.startswith("--"):
+            return False
+        if argument.startswith("-") and argument != "-":
+            compact = argument[1:]
+            position = 0
+            while position < len(compact):
+                option = compact[position]
+                if option in no_value_options:
+                    position += 1
+                    continue
+                if option == "c":
+                    return False
+                if option == "m":
+                    return False
+                if option in {"W", "X"}:
+                    return False
+                return True
+            index += 1
+            continue
+        return False
+    return False
+
+
+def _unestablished_daemon_evidence(argv: list[str]) -> bool:
+    """Writer evidence that remains when the interpreter flag scan stops.
+
+    An unrecognized flag makes ``-m`` resolution unestablished. The tail can
+    still name ``-m dayz_mcp``, ``--daemon``, or a ``dayz_mcp`` package path.
+    That process stays a possible writer.
+    """
+    for index, argument in enumerate(argv[1:], start=1):
+        if argument == "--daemon":
+            return True
+        if argument == "-m" and index + 1 < len(argv):
+            module = argv[index + 1]
+            if module == "dayz_mcp" or module.startswith("dayz_mcp."):
+                return True
+        if argument.startswith("-m") and len(argument) > 2:
+            module = argument[2:]
+            if module == "dayz_mcp" or module.startswith("dayz_mcp."):
+                return True
+        parts = [part.casefold() for part in argument.replace("/", "\\").split("\\")]
+        if "dayz_mcp" in parts:
+            return True
+    return False
+
+
+def _migration_disposition(
+    argv: list[str],
+    executable: str,
+    *,
+    cwd: str | None,
+    state_token: str | None,
+) -> str:
+    """Role first, then root. Clients are not writers.
+
+    ``blocker`` is a same-root writer or any writer whose tree does not prove
+    the root-selection contract. ``not_writer`` is a supported client or a
+    positively accredited writer of a different root. An unrecognized
+    interpreter flag is not evidence of absence when the argv still carries
+    daemon evidence.
+    """
+    if _stopped_on_unrecognized_short_option(argv) and _unestablished_daemon_evidence(argv):
+        return "blocker"
+    if not _argv_targets_dayz_mcp(argv, writers_only=False):
+        return "absent"
+    if not _argv_targets_dayz_mcp(argv, writers_only=True):
+        return "not_writer"
+    script = _script_target(argv)
+    if script is not None and ntpath.basename(script).casefold() == "p0s_daemon_bootstrap.py":
+        return "blocker"
+    _kind, _value, module_established = _interpreter_target(argv)
+    package = accredited_package_dir(
+        executable,
+        script,
+        cwd,
+        module_import_established=module_established,
+    )
+    if package is None:
+        return "blocker"
+    tail = _server_tail(argv)
+    parsed = parse_server_tail_silent(tail)
+    if parsed.status != "parsed" or parsed.namespace is None:
+        return "blocker"
+    if parsed.namespace.mode == "client":
+        return "not_writer"
+    try:
+        token = validate_instance_token(getattr(parsed.namespace, "instance", None))
+    except Exception:
+        return "blocker"
+    if state_root_name(token) == state_root_name(state_token):
+        return "blocker"
+    return "not_writer"
+
+
+def _interpreter_target(argv: list[str]) -> tuple[str | None, str | None, bool]:
+    """The script or ``-m`` module the interpreter actually executes.
+
+    A script is the first non-option argument. ``-m`` consumes the next
+    argument as the module. Values of server options, including ``--keyfile``
+    and ``--game-path``, are never the target.
+
+    The third value is whether ``-m`` import resolution is established.
+    ``-I`` and ``-P`` keep the current directory off ``sys.path`` (``-I``
+    implies ``-P``), so the cwd package is not the executed target. Any
+    interpreter flag this parser does not recognize means the same: lookup
+    is not established and the caller must keep the migration blocker.
+    ``PYTHONSAFEPATH`` in the other process is not visible here. A writer
+    that sets it without ``-P`` can still look like a cwd import.
+    """
+    no_value_options = frozenset("bBdEiIOPqRsSuvx")
+    isolating = False
+    index = 1
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--":
+            if index + 1 < len(argv) and not str(argv[index + 1]).startswith("-"):
+                return "script", argv[index + 1], not isolating
+            return None, None, False
+        if argument == "--check-hash-based-pycs":
+            index += 2
+            continue
+        if argument.startswith("--"):
+            return None, None, False
+        if argument.startswith("-") and argument != "-":
+            compact = argument[1:]
+            position = 0
+            while position < len(compact):
+                option = compact[position]
+                if option in no_value_options:
+                    if option in {"I", "P"}:
+                        isolating = True
+                    position += 1
+                    continue
+                if option == "c":
+                    return None, None, False
+                if option == "m":
+                    established = not isolating
+                    if position + 1 < len(compact):
+                        return "module", compact[position + 1 :], established
+                    if index + 1 >= len(argv):
+                        return None, None, False
+                    return "module", argv[index + 1], established
+                if option in {"W", "X"}:
+                    if position + 1 == len(compact):
+                        index += 2
+                    else:
+                        index += 1
+                    break
+                return None, None, False
+            else:
+                index += 1
+            continue
+        return "script", argument, True
+    return None, None, False
+
+
+def _script_target(argv: list[str]) -> str | None:
+    kind, value, _established = _interpreter_target(argv)
+    if kind == "script" and isinstance(value, str) and ntpath.isabs(value):
+        return value
+    return None
+
+
+def _server_tail(argv: list[str]) -> list[str]:
+    for index, argument in enumerate(argv):
+        if argument == "-m" and index + 1 < len(argv) and argv[index + 1] in {
+            "dayz_mcp",
+            "dayz_mcp.__main__",
+        }:
+            return argv[index + 2 :]
+    script = _script_target(argv)
+    if script is None:
+        return []
+    try:
+        return argv[argv.index(script) + 1 :]
+    except ValueError:
+        return []
+
+
+def _process_cwd(process: object) -> str | None:
+    cwd_fn = getattr(process, "cwd", None)
+    if not callable(cwd_fn):
+        return None
+    try:
+        value = cwd_fn()
+    except Exception:
+        return None
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def _launch_ancestor_consistent(
     ancestor: Mapping[str, object], current: Mapping[str, object]
 ) -> bool:
@@ -716,6 +922,7 @@ def scan_dayz_mcp_processes(
     psutil_module: object | None = None,
     guard: object | None = None,
     image_name_fn: Callable[[int], str | None] = image_name_of,
+    state_token: str | None = None,
 ) -> tuple[int, ...]:
     module = psutil if psutil_module is None else psutil_module
     if module is None:
@@ -778,9 +985,25 @@ def scan_dayz_mcp_processes(
                 or any(not isinstance(argument, str) or not argument for argument in argv)
             ):
                 raise RunsBackupGateError("process_scan_incomplete")
-            if not _argv_targets_dayz_mcp(argv):
+            disposition = _migration_disposition(
+                argv,
+                executable,
+                cwd=_process_cwd(process),
+                state_token=state_token,
+            )
+            if disposition == "absent":
                 continue
             expected_identity = allowed_identities.get(pid)
+            if disposition == "not_writer":
+                if expected_identity is None:
+                    continue
+                actual = native_guard.snapshot(pid)
+                if not isinstance(actual, Mapping) or not _identity_matches(
+                    expected_identity, actual
+                ):
+                    raise RunsBackupGateError("allowed_process_identity_drift")
+                allowed_seen.add(pid)
+                continue
             if expected_identity is None:
                 blockers.append(pid)
                 continue
@@ -869,12 +1092,44 @@ def _validate_receipt(
     return payload
 
 
+def _blocking_pids(
+    allowed_current_identity: Mapping[str, object] | None,
+    allowed_launch_ancestor_identity: Mapping[str, object] | None,
+    scan_fn: Callable[..., tuple[int, ...]],
+    state_token: str | None,
+) -> tuple[int, ...]:
+    """Pids the current classifier still treats as writers that block startup."""
+    scan_kwargs = {"state_token": state_token}
+    try:
+        blockers = (
+            scan_fn(
+                allowed_current_identity,
+                allowed_launch_ancestor_identity,
+                **scan_kwargs,
+            )
+            if allowed_launch_ancestor_identity is not None
+            else scan_fn(allowed_current_identity, **scan_kwargs)
+        )
+    except TypeError:
+        blockers = (
+            scan_fn(allowed_current_identity, allowed_launch_ancestor_identity)
+            if allowed_launch_ancestor_identity is not None
+            else scan_fn(allowed_current_identity)
+        )
+    if not isinstance(blockers, tuple) or any(
+        not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 for pid in blockers
+    ):
+        raise RunsBackupGateError("invalid_process_scan_result")
+    return blockers
+
+
 def _assert_quiescent(
     port: int,
     allowed_current_identity: Mapping[str, object] | None,
     allowed_launch_ancestor_identity: Mapping[str, object] | None,
     scan_fn: Callable[..., tuple[int, ...]],
     listener_fn: Callable[[int], bool],
+    state_token: str | None = None,
 ) -> None:
     try:
         has_listener = listener_fn(port)
@@ -884,16 +1139,12 @@ def _assert_quiescent(
         raise RunsBackupGateError("listener_probe_failed") from error
     if has_listener is not False:
         raise RunsBackupGateError("listener_present")
-    blockers = (
-        scan_fn(allowed_current_identity, allowed_launch_ancestor_identity)
-        if allowed_launch_ancestor_identity is not None
-        else scan_fn(allowed_current_identity)
-    )
-    if not isinstance(blockers, tuple) or any(
-        not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 for pid in blockers
+    if _blocking_pids(
+        allowed_current_identity,
+        allowed_launch_ancestor_identity,
+        scan_fn,
+        state_token,
     ):
-        raise RunsBackupGateError("invalid_process_scan_result")
-    if blockers:
         raise RunsBackupGateError("dayz_mcp_process_present")
 
 
@@ -1295,6 +1546,7 @@ def ensure_runs_v1_backup(
     scan_fn: Callable[..., tuple[int, ...]] = scan_dayz_mcp_processes,
     listener_fn: Callable[[int], bool] = listener_present,
     fault_injector: Callable[[str], None] | None = None,
+    state_token: str | None = None,
 ) -> dict[str, object]:
     if not isinstance(paths, RuntimePaths):
         raise RunsBackupGateError("invalid_runtime_paths")
@@ -1330,14 +1582,11 @@ def ensure_runs_v1_backup(
     )
 
     with _exclusive_gate_lock(destination_dir / _LOCK_NAME):
-        # Quiescence is a precondition for WRITING -- it exists so that
-        # nothing mutates runs while it is copied. Once the receipt is published
-        # and no transaction artifact remains there is nothing left to write, and
-        # demanding an empty machine buys no safety while making the daemon
-        # unbootable: the scan counts every `-m dayz_mcp` process of every open
-        # session as a blocker (:739-743), so the drain never converges and
-        # startup dies at its deadline (daemon.py:246-261). Deliberately narrow --
-        # anything that could still write falls through to the gate below.
+        # Quiescence for WRITING still requires an empty listener. A settled
+        # receipt has nothing left to copy, so a listener and a non-writer do
+        # not block. A live same-root writer, classified the same way as the
+        # write gate, still refuses the start: the receipt does not make a
+        # second writer of this root safe.
         settled = _settled_receipt(
             source_path,
             backup_path,
@@ -1347,6 +1596,13 @@ def ensure_runs_v1_backup(
             next_path,
         )
         if settled is not None:
+            if _blocking_pids(
+                allowed_current_identity,
+                allowed_launch_ancestor_identity,
+                scan_fn,
+                state_token,
+            ):
+                raise RunsBackupGateError("dayz_mcp_process_present")
             return settled
         _assert_quiescent(
             port,
@@ -1354,6 +1610,7 @@ def ensure_runs_v1_backup(
             allowed_launch_ancestor_identity,
             scan_fn,
             listener_fn,
+            state_token,
         )
         recovered = _recover_backup_transaction(
             source_path,
@@ -1371,6 +1628,7 @@ def ensure_runs_v1_backup(
                 allowed_launch_ancestor_identity,
                 scan_fn,
                 listener_fn,
+                state_token,
             )
             return recovered
 
@@ -1416,6 +1674,7 @@ def ensure_runs_v1_backup(
             allowed_launch_ancestor_identity,
             scan_fn,
             listener_fn,
+            state_token,
         )
         if fault_injector is not None:
             fault_injector("after_second_quiescence")

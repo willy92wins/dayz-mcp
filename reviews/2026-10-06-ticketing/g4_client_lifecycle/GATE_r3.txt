@@ -1,0 +1,10 @@
+--- enforce linter: errors=2 baseline=2 new=0
+--- tests.test_suite_structure (whole-suite ratchets): rc=1
+    (same offenders as the base tree; not blocking)
+--- tests.test_client_lifecycle_7055_9336_9efc: rc=0
+Ran 20 tests in 3.380s
+
+OK
+--- tests.test_client_lifecycle_7055_9336_9efc on Python 3.11: rc=0 OK
+--- fast tier: ran=5681 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

@@ -142,6 +142,23 @@ class NativeBundleTest(unittest.TestCase):
             27: unknown,
             28: unknown,
             29: unknown,
+            30: unknown,
+            31: unknown,
+            32: unknown,
+            33: unknown,
+            34: unknown,
+            35: unknown,
+            36: unknown,
+            37: unknown,
+            38: unknown,
+            39: unknown,
+            40: unknown,
+            41: unknown,
+            42: unknown,
+            45: unknown,
+            46: unknown,
+            43: unknown,
+            44: unknown,
         }
         paths = {
             11: r"C:\bundle\python.exe",
@@ -196,6 +213,80 @@ class NativeBundleTest(unittest.TestCase):
                 r"C:\Windows\WinSxS\amd64_microsoft.windows.common-controls_"
                 r"6595b64144ccf1df_6.0.22621.6060_none_deadbeef\comctl32.dll"
             ),
+            30: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            31: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL-evil\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            32: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Other.Resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            33: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.1.0_es_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            34: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e08A\mscorlib.resources.dll"
+            ),
+            35: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\evil.dll"
+            ),
+            36: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\sub\mscorlib.resources.dll"
+            ),
+            37: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es..evil_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            38: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es-MX_b77a5c561934e089\mscorlib.resources.dll"
+            ),
+            39: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL"
+                r"\Microsoft.VisualBasic.resources"
+                r"\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\Microsoft.VisualBasic.resources.dll"
+            ),
+            40: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL"
+                r"\Microsoft.VisualBasic.resources"
+                r"\v4.0_10.0.0.0_es_b77a5c561934e089\Microsoft.VisualBasic.resources.dll"
+            ),
+            41: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL-evil"
+                r"\Microsoft.VisualBasic.resources"
+                r"\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\Microsoft.VisualBasic.resources.dll"
+            ),
+            42: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_10.0.0.0_es_b03f5f7f11d50a3a\mscorlib.resources.dll"
+            ),
+            43: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\System.Resources.Reader"
+                r"\v4.0_4.0.0.0_es_b77a5c561934e089\System.Resources.Reader.dll"
+            ),
+            44: (
+                r"C:\Windows\Microsoft.NET\assembly\GAC_MSIL\mscorlib.resources"
+                r"\v4.0_4.0.0.0_es_zzzz5c561934e089\mscorlib.resources.dll"
+            ),
+            # Lookalike root: U+017F LONG S casefolds to "s" but names a
+            # separate, user-creatable directory under C:\.
+            45: (
+                "C:\\Window\u017f\\Microsoft.NET\\assembly\\GAC_MSIL\\Evil.resources"
+                "\\v4.0_1.2.3.4_es_0000000000000000\\Evil.resources.dll"
+            ),
+            # Lookalike ".resources" suffix inside the genuine root.
+            46: (
+                "C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\Evil.re\u017fources"
+                "\\v4.0_1.2.3.4_es_0000000000000000\\Evil.re\u017fources.dll"
+            ),
         }
         with patch.object(
             native_bundle, "_file_identity", side_effect=lambda handle: identities[handle]
@@ -221,6 +312,27 @@ class NativeBundleTest(unittest.TestCase):
             self.assertFalse(authority.approve_debug_image(27, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(28, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(29, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(30, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(31, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(32, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(35, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(36, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(37, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(38, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(39, event_kind="LOAD_DLL"))
+            # Structural satellite rule: any version/token/culture that parses
+            # is approved inside the admin-protected subtree (33, 34, 40, 42).
+            self.assertTrue(authority.approve_debug_image(33, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(34, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(40, event_kind="LOAD_DLL"))
+            self.assertTrue(authority.approve_debug_image(42, event_kind="LOAD_DLL"))
+            # Still rejected: code assemblies without .resources, non-hex
+            # tokens, evil roots, foreign basenames, nesting, bad cultures.
+            self.assertFalse(authority.approve_debug_image(43, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(44, event_kind="LOAD_DLL"))
+            # Non-ASCII lookalikes of the root or of the suffix (U+017F).
+            self.assertFalse(authority.approve_debug_image(45, event_kind="LOAD_DLL"))
+            self.assertFalse(authority.approve_debug_image(46, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="LOAD_DLL"))
             self.assertFalse(authority.approve_debug_image(12, event_kind="CREATE_PROCESS"))
             self.assertFalse(authority.approve_debug_image(11, event_kind="UNKNOWN"))

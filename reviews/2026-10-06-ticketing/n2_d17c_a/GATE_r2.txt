@@ -1,0 +1,6 @@
+--- tests.test_client_process_gone: rc=0
+Ran 29 tests in 0.440s
+
+OK
+--- fast tier: ran=5616 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

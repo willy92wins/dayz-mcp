@@ -471,6 +471,9 @@ class ModeContractM19Test(unittest.IsolatedAsyncioTestCase):
         if extensible:
             run["state"] = "RUNNING_IDLE"
             run["mod"] = "@ExampleMod"
+            # require_extension_run validates this recorded anchor against the
+            # approved dev_root and the bound (default) leaf.
+            run["profiles"] = r"P:\ExampleMod_Suite\_server\profiles"
         return _Runtime(lifecycle={"runs": [run]})
 
     async def _run(

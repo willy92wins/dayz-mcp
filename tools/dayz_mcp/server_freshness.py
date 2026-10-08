@@ -20,6 +20,7 @@ from mcp import types
 from mcp.server.fastmcp import FastMCP
 
 from dayz_mcp import playbook_tool
+from dayz_mcp.lease_result_ttl import is_internal_probe
 
 REMEDIATION = "reopen_mcp_client"
 MARKER = "server_code_freshness"
@@ -247,6 +248,10 @@ def install_result_freshness(
         return snapshot
 
     async def handler(request: types.CallToolRequest) -> types.ServerResult:
+        # Ownership probes must not await this wrapper after they snapshot a
+        # lease id. The inner handler returns that snapshot as its last step.
+        if is_internal_probe(request):
+            return await original(request)
         before = await asyncio.to_thread(observe)
         response = await original(request)
         result = response.root

@@ -63,6 +63,10 @@ def resolve_request_budget(requested: object = None) -> int:
 DEFAULT_MAX_TOKENS = default_max_tokens()
 DEFAULT_FRAME_COUNT = 4
 DEFAULT_FRAME_INTERVAL_S = 0.12
+# Hard grab cap. A larger request is cut here; the evidence says so. Not a backend failure.
+FRAME_LIMIT = 5
+FRAME_LIMIT_REASON = "frame_limit"
+FRAMES_CAPPED = "frames_capped"
 # Cold powershell.exe plus Add-Type on a loaded runner can take longer than
 # the 8 s grab budget before the script has looked for a window. That wait is
 # a start, not a hung capture (fb-20260927-141044-76e2). After the script
@@ -547,18 +551,73 @@ STATE_BACKEND_SIDECAR = "sidecar"
 STATE_BACKEND_UNAVAILABLE = "unavailable"
 
 
+class _CaptureSelectionError(Exception):
+    """Selector rejected. Distinct from a missing dayz_mcp package."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _selection_failure(code: str) -> dict[str, Any]:
+    return {"isError": True, "error": code, "selection_error": code}
+
+
+def _selection_failure_if_any() -> dict[str, Any] | None:
+    """Reject a bad selector before a grab, an accreditation branch, or any other error.
+
+    A later failure such as an unaccredited window or frame_client_area_unverified
+    must not replace this payload, and must not be reached so nothing is written.
+    """
+    try:
+        _bound_capture_token()
+    except _CaptureSelectionError as exc:
+        return _selection_failure(exc.code)
+    return None
+
+
+def _bound_capture_token() -> str | None:
+    """Validated in-process selector. Omission keeps the historical paths.
+
+    A selection error is not omission: callers must report it and must not
+    write the default sidecar. This module is also published alone, so a
+    missing dayz_mcp package is omission, not a selection error.
+    """
+    try:
+        from dayz_mcp.server_cli import (
+            InstanceSelectionError,
+            current_instance_token,
+            validate_instance_token,
+        )
+    except ModuleNotFoundError:
+        return None
+
+    try:
+        return validate_instance_token(current_instance_token())
+    except InstanceSelectionError as error:
+        raise _CaptureSelectionError(error.code) from error
+    except Exception:
+        return None
+
+
 def frame_state_path() -> str:
     r"""Where the cross-call frame identity lives: $DAYZ_MCP_FRAME_STATE_PATH >
     %LOCALAPPDATA%\DayZ_MCP\capture-frame-state.json -- the same "env var wins" shape as
     resolve_capture_dir. The LOCALAPPDATA root is replicated here, not imported from
     dayz_mcp.runtime_state, because this module is published on its own (publish/boundary.py) and
     must not depend on the package. A host without LOCALAPPDATA falls back to the temp dir instead
-    of failing: the flag is never worth a lost capture."""
+    of failing: the flag is never worth a lost capture.
+
+    The selector is validated before an override is accepted. A selection error
+    does not fall through to the override path or the default sidecar.
+    """
+    token = _bound_capture_token()
     chosen = os.environ.get(FRAME_STATE_ENV, "").strip()
     if chosen:
         return os.path.abspath(chosen)
     base = os.environ.get("LOCALAPPDATA", "").strip() or tempfile.gettempdir()
-    return os.path.abspath(os.path.join(base, "DayZ_MCP", FRAME_STATE_FILENAME))
+    root_name = "DayZ_MCP" if token is None else "DayZ_MCP_" + token
+    return os.path.abspath(os.path.join(base, root_name, FRAME_STATE_FILENAME))
 
 
 class _FrameStateLock:
@@ -795,14 +854,41 @@ def _annotate_render_frozen_signal(payload: dict[str, Any]) -> dict[str, Any]:
     """Attach render_frozen_signal once when intra-call metrics say the render did not move."""
     if not _is_render_frozen_signal(payload.get("frame_stale_detail")):
         return payload
+    _append_warning(payload, RENDER_FROZEN_SIGNAL)
+    return payload
+
+
+def _append_warning(payload: dict[str, Any], warning: str) -> None:
     warnings = payload.get("warnings")
     if isinstance(warnings, list):
         warnings = list(warnings)
     else:
         warnings = []
-    if RENDER_FROZEN_SIGNAL not in warnings:
-        warnings.append(RENDER_FROZEN_SIGNAL)
+    if warning not in warnings:
+        warnings.append(warning)
     payload["warnings"] = warnings
+
+
+def _frame_cap_fields(requested_frames: int, effective_frames: int) -> dict[str, Any]:
+    """Cap bookkeeping for the frame evidence. limit_reason is present only when the request was cut."""
+    fields: dict[str, Any] = {
+        "requested_frames": requested_frames,
+        "effective_frames": effective_frames,
+        "frame_limit": FRAME_LIMIT,
+    }
+    if requested_frames > FRAME_LIMIT:
+        fields["limit_reason"] = FRAME_LIMIT_REASON
+    return fields
+
+
+def _annotate_frames_capped(payload: dict[str, Any]) -> dict[str, Any]:
+    """Warn frames_capped when this call's evidence says the grab was cut at FRAME_LIMIT.
+
+    A short request publishes the same counts with no warning. A failed grab is still an error
+    from grab_stable_frame; this warning is not one."""
+    detail = payload.get("frame_stale_detail")
+    if isinstance(detail, dict) and detail.get("limit_reason") == FRAME_LIMIT_REASON:
+        _append_warning(payload, FRAMES_CAPPED)
     return payload
 
 
@@ -905,6 +991,12 @@ def _frame_stale_report(
                 keep = set(newest) | {key}
                 state["windows"] = {name: record for name, record in windows.items() if name in keep}
             _write_frame_state(path, state)
+    except _CaptureSelectionError as exc:
+        stale = None
+        detail["state_backend"] = STATE_BACKEND_UNAVAILABLE
+        detail["state_error"] = exc.code
+        detail["selection_error"] = exc.code
+        return {"stale": stale, "detail": detail}
     except Exception as exc:
         stale = None
         detail["state_backend"] = STATE_BACKEND_UNAVAILABLE
@@ -1365,8 +1457,13 @@ def grab_stable_frame(
     client-area gates, so a rejected capture still counts: "black since T, N captures in a row" is
     only countable if the rejected frames are recorded too, and the error payload returned below
     carries no meta of its own. The report rides on the returned frame as
-    info["frame_stale_report"], which capture_dual publishes."""
-    frame_count = max(1, min(int(frames), 5))
+    info["frame_stale_report"], which capture_dual publishes.
+
+    frames above FRAME_LIMIT are grabbed as FRAME_LIMIT. The evidence records requested_frames,
+    effective_frames and frame_limit, plus limit_reason when the request was cut. The cut is not
+    an error."""
+    requested_frames = int(frames)
+    frame_count = max(1, min(requested_frames, FRAME_LIMIT))
     with tempfile.TemporaryDirectory(prefix="mcp_capture_") as tmp_dir:
         captured: list[Image.Image] = []
         capture_results: list[dict[str, Any]] = []
@@ -1391,11 +1488,13 @@ def grab_stable_frame(
         surface, surface_identity, surface_sha256 = _comparison_surface(
             chosen, chosen_result.get("client"), chosen_window
         )
+        evidence = _frame_evidence(captured, pair_deltas)
+        evidence.update(_frame_cap_fields(requested_frames, frame_count))
         frame_stale_report = _frame_stale_report(
             key=state_key,
             surface=surface,
             current_sha256=surface_sha256,
-            evidence=_frame_evidence(captured, pair_deltas),
+            evidence=evidence,
             key_kind=key_kind,
             identity=surface_identity,
         )
@@ -1445,19 +1544,47 @@ def capture_screenshot(
     quality: int = DEFAULT_QUALITY,
     crop: str = "",
 ) -> dict[str, Any]:
+    selection_failure = _selection_failure_if_any()
+    if selection_failure is not None:
+        return selection_failure
     chosen = grab_stable_frame(frames=frames, process_name=process_name, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
     if isinstance(chosen, dict):  # error payload from grab_stable_frame
         return chosen
-    return image_content_from_image(chosen, scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality, crop=crop)
+    selection = _selection_code(getattr(chosen, "info", None))
+    if selection is not None:
+        return _selection_failure(selection)
+    content = image_content_from_image(chosen, scale=scale, max_tokens=max_tokens, fmt=fmt, quality=quality, crop=crop)
+    report = chosen.info.get("frame_stale_report") or {}
+    detail = report.get("detail") if isinstance(report, dict) else None
+    meta: dict[str, Any] = {}
+    if isinstance(detail, dict):
+        meta["frame_stale_detail"] = detail
+    _annotate_frames_capped(meta)
+    if meta:
+        content["meta"] = meta
+    return content
+
+
+def _selection_code(info: object) -> str | None:
+    report = info.get("frame_stale_report") if isinstance(info, dict) else None
+    detail = report.get("detail") if isinstance(report, dict) else None
+    code = detail.get("selection_error") if isinstance(detail, dict) else None
+    return code if isinstance(code, str) and code else None
 
 
 def resolve_capture_dir(save_dir: str = "") -> str:
     """Where full-res frames land. Explicit arg > $DAYZ_MCP_CAPTURE_DIR > <temp>/dayz_mcp_captures.
     Returned path is absolute so the agent can Read it directly (the dual channel that sidesteps the
-    ~25k inline token budget — the full-res file is delivered through the normal image-read path)."""
+    ~25k inline token budget — the full-res file is delivered through the normal image-read path).
+
+    The selector is validated before an explicit directory is accepted, so a
+    selection error cannot persist a frame under a caller-supplied path.
+    """
+    token = _bound_capture_token()
     chosen = (save_dir or "").strip() or os.environ.get("DAYZ_MCP_CAPTURE_DIR", "").strip()
     if not chosen:
-        chosen = os.path.join(tempfile.gettempdir(), "dayz_mcp_captures")
+        directory = "dayz_mcp_captures" if token is None else "dayz_mcp_captures_" + token
+        chosen = os.path.join(tempfile.gettempdir(), directory)
     return os.path.abspath(chosen)
 
 
@@ -1522,7 +1649,13 @@ def capture_dual(
     the very first capture, and key_kind, which says how strong the window identity behind the
     comparison is.
 
+    A selection error is returned before crop_space checks, the grab, and window
+    accreditation, so a later error cannot replace it and nothing is written.
+
     Returns {inline, fullres_path, meta} on success or {isError, error} on failure."""
+    selection_failure = _selection_failure_if_any()
+    if selection_failure is not None:
+        return selection_failure
     if not isinstance(crop_space, str) or crop_space not in CROP_SPACES:
         return _error(ERROR_BAD_CROP_SPACE)
     chosen = grab_stable_frame(frames=frames, process_name=process_name, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
@@ -1535,6 +1668,9 @@ def capture_dual(
     # Written by grab_stable_frame on the frame it selected; an empty dict only if a caller hands in
     # a frame from somewhere else, in which case both keys publish as null rather than failing.
     frame_stale_report: dict[str, Any] = chosen.info.get("frame_stale_report") or {}
+    selection = _selection_code(chosen.info)
+    if selection is not None:
+        return _selection_failure(selection)
 
     client_rect = _verified_client_rect(chosen.info.get("client"), window_rgb.size)
     client_rgb: Image.Image | None = None
@@ -1598,8 +1734,12 @@ def capture_dual(
     }
     out: dict[str, Any] = {"inline": inline, "fullres_path": None, "meta": meta}
     if save_fullres:
-        path = write_fullres(effective_native, save_dir=save_dir, quality=fullres_quality)
+        try:
+            path = write_fullres(effective_native, save_dir=save_dir, quality=fullres_quality)
+        except _CaptureSelectionError as exc:
+            return _selection_failure(exc.code)
         out["fullres_path"] = path
         meta["fullres_file_sha256"] = _file_sha256(path)
     _annotate_render_frozen_signal(meta)
+    _annotate_frames_capped(meta)
     return out

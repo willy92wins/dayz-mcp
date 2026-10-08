@@ -1023,7 +1023,13 @@ class OwnedScalarCensusTest(unittest.TestCase):
                 self.assertNotIn(name, initialized)
 
     def test_every_owner_is_a_whitelisted_bridge_command(self) -> None:
-        commands = loopback.SERVER_COMMANDS | loopback.CLIENT_COMMANDS
+        # exec_enforce writes `sent` and lives in EXEC_COMMANDS, not the two
+        # peer sets. It is still a whitelisted bridge command.
+        commands = (
+            loopback.SERVER_COMMANDS
+            | loopback.CLIENT_COMMANDS
+            | loopback.EXEC_COMMANDS
+        )
         for name, owners in sorted(OWNED_SCALAR_FIELDS.items()):
             with self.subTest(field=name):
                 self.assertTrue(owners)
@@ -1117,7 +1123,7 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
         )
 
     def test_a_door_write_outside_its_command_gate_is_named(self) -> None:
-        # DispatchActionUse serves three commands; only its nested command.cmd
+        # DispatchActionUse serves four commands; only its nested command.cmd
         # gate keeps the door fields on action_use_door.
         mutated = _mutant(
             self.sources,
@@ -1127,7 +1133,12 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
         )
         self.assertEqual(
             census(mutated)["door_index"],
-            {"action_use", "action_use_door", "action_use_target"},
+            {
+                "action_use",
+                "action_use_component",
+                "action_use_door",
+                "action_use_target",
+            },
         )
 
     def test_a_seat_reply_outside_its_job_kind_gate_fails(self) -> None:

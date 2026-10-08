@@ -191,6 +191,9 @@ class DaemonHttpServer:
         # only safe to delete once no handler holds a file inside it.
         self.httpd.server_close()
         self._drain_coordination_workers()
+        lease = getattr(self.state, "root_writer_lease", None)
+        if lease is not None:
+            lease.release()
         self.runtime_dir.cleanup()
 
     @staticmethod

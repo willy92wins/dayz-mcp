@@ -1,0 +1,6 @@
+--- tests.test_camera_set_fov_applied: rc=0
+Ran 4 tests in 0.608s
+
+OK
+--- fast tier: ran=5591 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

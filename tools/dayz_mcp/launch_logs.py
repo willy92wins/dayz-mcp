@@ -25,10 +25,11 @@ def _sibling_profile_dirs(profiles: list[str]) -> list[str]:
     for item in profiles:
         path = Path(item)
         parent = path.parent.name.casefold()
+        leaf = path.name
         if parent == "_server":
-            sibling = str(path.parent.parent / "_client" / "profiles")
+            sibling = str(path.parent.parent / "_client" / leaf)
         elif parent == "_client":
-            sibling = str(path.parent.parent / "_server" / "profiles")
+            sibling = str(path.parent.parent / "_server" / leaf)
         else:
             continue
         if log_tail.is_allowed_profiles_dir(sibling) and Path(sibling).is_dir():
@@ -132,12 +133,36 @@ def _coerce_logs_since_marker(marker: object) -> str:
     raise ToolError("bad_marker")
 
 
-def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
-    candidates = sorted(
-        {str(item.get("profiles")) for item in runs if item.get("profiles")}
+def _recorded_anchor_in_sealed_project(run: dict[str, Any]) -> bool:
+    """The recorded profiles leaf belongs to this run's sealed project.
+
+    The run's ``mod`` must resolve to exactly one sealed project policy, and
+    that policy must accept the complete recorded anchor. A row whose project
+    cannot be resolved -- a missing, empty, or non-string ``mod``, or a mod no
+    sealed policy claims -- has no approved anchor and is rejected exactly
+    like a wrong project root.
+    """
+    from dayz_mcp.dayz_test_tool import (
+        _close_project_policy,
+        _validated_recorded_leaf,
     )
-    allowed = [item for item in candidates if log_tail.is_allowed_profiles_dir(item)]
-    return _sibling_profile_dirs(allowed)
+
+    policy = _close_project_policy(run)
+    if policy is None:
+        return False
+    return _validated_recorded_leaf(policy, run) is not None
+
+
+def _profile_dirs_from_runs(runs: list[dict[str, Any]]) -> list[str]:
+    allowed: list[str] = []
+    for item in runs:
+        profiles = item.get("profiles")
+        if not log_tail.is_allowed_profiles_dir(profiles):
+            continue
+        if not _recorded_anchor_in_sealed_project(item):
+            continue
+        allowed.append(str(profiles))
+    return _sibling_profile_dirs(sorted(set(allowed)))
 
 
 def _offset_before_last_lines(data: bytes, lookback_lines: int) -> int:
@@ -198,6 +223,28 @@ def _offset_before_last_lines_in_window(
     for part in parts[:skip]:
         offset += len(part) + 1
     return min(offset, window_start + len(window))
+
+
+def _marker_rewound_handle(
+    handle, path: str, lookback_lines: int, *, stop: object = None
+) -> log_tail.TailMarker:
+    """``_marker_rewound`` on a handle the caller already holds open.
+
+    ``stop`` makes the window read cooperative; see ``log_tail.read_window``.
+    """
+
+    size = os.fstat(handle.fileno()).st_size
+    identity = log_tail._file_identity(
+        handle, min(log_tail.IDENTITY_PREFIX_BYTES, size)
+    )
+    read_size = min(size, log_tail.MAX_TAIL_BYTES)
+    window_start = size - read_size
+    handle.seek(window_start)
+    window = log_tail.read_window(handle, read_size, stop)
+    offset = _offset_before_last_lines_in_window(window, window_start, lookback_lines)
+    return log_tail.TailMarker(
+        path=path, offset=offset, size=size, identity=identity
+    )
 
 
 def _marker_rewound(path: str, lookback_lines: int) -> log_tail.TailMarker:

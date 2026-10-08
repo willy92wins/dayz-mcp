@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
 from dayz_mcp import dayz_test_storage, window_close
+from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
 from dayz_mcp.instance_fence import BindingPrepareError, format_creation_time_utc
@@ -125,6 +126,199 @@ def _valid_uuid4(value: object) -> bool:
     except (ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+_COMPLETED_ROTATION_JOURNAL = re.compile(
+    r"^storage_1\.modset\.rotation\.([0-9a-f]{32})\.completed\.json$"
+)
+
+
+_AMBIGUOUS_PENDING_ROTATION = object()
+
+
+def _pending_completed_rotation(
+    mission: str, seal: str
+) -> dayz_test_storage.RotationResult | None | object:
+    """Reset already committed for this seal, while replacement storage is absent.
+
+    Reads validated completed journals. Does not move or delete anything.
+    An unreadable completed file is skipped, not a refusal. The completed
+    rotation may seal its own A: the recovery that finished the transaction
+    resealed the marker to the caller's seal, and the record still names the
+    reset, so the recorded seal never decides alone. A published record whose
+    reserved world backup is a directory is a candidate; several candidates
+    (B->A, A->B, B->A) cannot be told apart, since transaction ids are not
+    chronological: that is _AMBIGUOUS_PENDING_ROTATION, and the caller records
+    the observation as unknown instead of guessing. A completed `prepared`
+    journal is a recorded abort and never counts as a reset.
+    """
+    try:
+        entries = os.listdir(mission)
+    except OSError:
+        return None
+    try:
+        marker = dayz_test_storage.read_marker(mission)
+    except OSError:
+        return None
+    if (
+        marker.state != dayz_test_storage.MARKER_PRESENT_VALID
+        or marker.seal != seal
+    ):
+        # The replay retells a reset whose marker now carries this seal. A
+        # marker that says anything else is this call's classification, not
+        # evidence about the completed rotation.
+        return None
+    matches: list[tuple[str, dict[str, object]]] = []
+    for name in entries:
+        matched = _COMPLETED_ROTATION_JOURNAL.fullmatch(name)
+        if matched is None:
+            continue
+        document = dayz_test_storage._valid_journal(
+            dayz_test_storage._read_json(os.path.join(mission, name)),
+            matched.group(1),
+        )
+        if (
+            document is None
+            or document.get("phase") != dayz_test_storage.PHASE_MARKER_PUBLISHED
+        ):
+            continue
+        backup = document.get("storage_backup")
+        if not _plain_storage_backup_name(backup) or not os.path.isdir(
+            os.path.join(mission, str(backup))
+        ):
+            continue
+        matches.append((name, document))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return _AMBIGUOUS_PENDING_ROTATION
+    document = matches[0][1]
+    marker_backup = document.get("marker_backup")
+    return dayz_test_storage.RotationResult(
+        launch_allowed=True,
+        storage_rotated=True,
+        storage_backup=str(document["storage_backup"]),
+        storage_marker_backup=(
+            str(marker_backup)
+            if _plain_storage_backup_name(marker_backup)
+            else None
+        ),
+        storage_seal=seal[:8],
+        storage_recovery_required=False,
+        storage_reset_notice=dayz_test_storage.RESET_NOTICE,
+        decision=dayz_test_storage.DECISION_ROTATE,
+        reason="pending_completed_rotation",
+    )
+
+
+def _plain_storage_backup_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value not in {".", ".."}
+        and not any(separator in value for separator in ("/", "\\", ":"))
+    )
+
+
+def _storage_rotation_from_payload(
+    value: dict[str, object],
+) -> tuple[bool | None, str | None, str | None]:
+    """Legacy rows omit the keys and stay unknown. A present key is validated."""
+    if not any(
+        key in value
+        for key in ("storage_rotated", "storage_backup", "storage_reset_notice")
+    ):
+        return None, None, None
+    rotated = value.get("storage_rotated")
+    backup = value.get("storage_backup")
+    notice = value.get("storage_reset_notice")
+    _validate_storage_rotation(rotated, backup, notice)
+    if rotated is True:
+        return True, backup if isinstance(backup, str) else None, (
+            notice if isinstance(notice, str) else None
+        )
+    if rotated is False:
+        return False, None, None
+    return None, None, None
+
+
+def _storage_observations_from_payload(value: object) -> list[dict[str, object]]:
+    """Advisory diagnostic list: never refuses the manifest, degrades per entry.
+
+    An entry that cannot be validated is dropped, and a later version may add
+    keys per entry: extra keys are ignored, never copied. A run id named twice
+    anywhere in the original list -- even by an entry whose other fields do not
+    validate -- is ambiguous, so every copy is dropped before the rest is
+    validated. Unknown, never a guess.
+    """
+    if not isinstance(value, list):
+        return []
+    # Count before per-entry validation: a malformed twin still makes the id
+    # ambiguous, and a measured value must not survive that ambiguity.
+    seen: set[str] = set()
+    repeated: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        if run_id in seen:
+            repeated.add(run_id)
+        else:
+            seen.add(run_id)
+    observations: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict) or not {
+            "run_id",
+            "storage_rotated",
+            "storage_backup",
+            "storage_reset_notice",
+        }.issubset(item):
+            continue
+        run_id = item.get("run_id")
+        rotated = item.get("storage_rotated")
+        backup = item.get("storage_backup")
+        notice = item.get("storage_reset_notice")
+        if not isinstance(run_id, str) or not run_id or run_id in repeated:
+            continue
+        try:
+            _validate_storage_rotation(rotated, backup, notice)
+        except ValueError:
+            continue
+        if type(rotated) is not bool:
+            continue
+        entry = {
+            "run_id": run_id,
+            "storage_rotated": rotated,
+            "storage_backup": backup,
+            "storage_reset_notice": notice,
+        }
+        if "launch_operation_id" in item:
+            operation_id = item.get("launch_operation_id")
+            if not _valid_uuid4(operation_id):
+                continue
+            entry["launch_operation_id"] = operation_id
+        observations.append(entry)
+    if len(observations) > _STORAGE_OBSERVATION_BOUND:
+        del observations[: len(observations) - _STORAGE_OBSERVATION_BOUND]
+    return observations
+
+
+def _validate_storage_rotation(
+    rotated: object, backup: object, notice: object
+) -> None:
+    if rotated is None or rotated is False:
+        if backup is not None or notice is not None:
+            raise ValueError("invalid_run_record")
+        return
+    if rotated is not True:
+        raise ValueError("invalid_run_record")
+    if (
+        not _plain_storage_backup_name(backup)
+        or notice != dayz_test_storage.RESET_NOTICE
+    ):
+        raise ValueError("invalid_run_record")
 
 
 def _valid_sha256(value: object) -> bool:
@@ -621,6 +815,54 @@ _PLAYER_ROLES = frozenset({"client", "offline"})
 # 250f: past this many remembered exclusions, the ones no active run holds any
 # more are pruned. Live ones are never dropped (review #125 R3).
 _EXCLUSION_PRUNE_AT = 256
+# Active-run client observations. Daemon memory only. A restart starts empty.
+# Identities no active run still holds are the ones a full table drops.
+_CLIENT_ROLE_OBSERVATION_BOUND = 32
+# Observation strength for one client identity. A death is terminal and an
+# alive probe beats an unknown one, so a weaker observation never erases a
+# stronger stored one.
+_CLIENT_STATE_STRENGTH = {"dead": 2, "alive": 1}
+
+
+def _merge_client_observations(
+    previous: dict[str, object] | None,
+    observation: dict[str, object],
+) -> dict[str, object]:
+    """Fold one probe result into the latest stored observation.
+
+    The probe ran outside the table lock, so by the time it is stored another
+    reader may already have published a stronger row for the same identity.
+    The merged row never regresses: a weaker or older state does not replace
+    a stronger one. Recorded death evidence is write-once: an existing
+    first-death stamp, exit code or exit time is kept, and an incoming
+    observation only fills a field that is still missing. A conflicting
+    exact exit value is ignored.
+    """
+
+    merged = dict(observation)
+    if not isinstance(previous, dict):
+        return merged
+    new_state = merged.get("state")
+    old_state = previous.get("state")
+    if _CLIENT_STATE_STRENGTH.get(new_state, 0) < _CLIENT_STATE_STRENGTH.get(
+        old_state, 0
+    ):
+        merged["state"] = old_state
+    prev_dead = previous.get("first_observed_dead_at_utc")
+    if isinstance(prev_dead, str) and prev_dead:
+        merged["first_observed_dead_at_utc"] = prev_dead
+    for field in ("exit_code", "exit_time_utc"):
+        if previous.get(field) is not None:
+            merged[field] = previous.get(field)
+        elif merged.get(field) is None:
+            merged[field] = previous.get(field)
+    new_seen = merged.get("observed_at_utc")
+    old_seen = previous.get("observed_at_utc")
+    if isinstance(new_seen, str) and isinstance(old_seen, str) and new_seen < old_seen:
+        # A reader that probed before the stored row was published still
+        # observed: the stamp never moves backwards.
+        merged["observed_at_utc"] = old_seen
+    return merged
 
 
 def _client_liveness(run: RunRecord, probes: _BoxProbes) -> str:
@@ -1002,6 +1244,7 @@ _REPLACE_WITNESS_HINTS = {
         "process. Nothing was terminated and nothing was launched."
     ),
 }
+_STORAGE_OBSERVATION_BOUND = 32
 _STORAGE_ROTATE_HINTS = {
     "storage_rotate_failed": (
         "storage_rotate_failed: the mission storage could not be sealed or set "
@@ -1386,6 +1629,12 @@ class RunRecord:
     launch_request_sha256: str | None = None
     launch_acknowledged: bool = True
     daemon_generation_at_launch: str | None = None
+    # None: this record never observed a rotation (legacy row, or a launch
+    # that does not create storage). False: this launch measured no rotation.
+    # True: storage_1 was set aside. Not a claim that the economy rebuilt it.
+    storage_rotated: bool | None = None
+    storage_backup: str | None = None
+    storage_reset_notice: str | None = None
 
     @classmethod
     def from_payload(cls, value: object) -> "RunRecord":
@@ -1394,6 +1643,7 @@ class RunRecord:
         raw_processes = value.get("processes")
         if not isinstance(raw_processes, list):
             raise ValueError("invalid_run_record")
+        rotated, backup, notice = _storage_rotation_from_payload(value)
         run = cls(
             value.get("run_id"),
             value.get("owner_session_id"),
@@ -1408,6 +1658,9 @@ class RunRecord:
             value.get("launch_request_sha256"),
             value.get("launch_acknowledged", True),
             value.get("daemon_generation_at_launch"),
+            rotated,
+            backup,
+            notice,
         )
         run.validate()
         return run
@@ -1460,6 +1713,9 @@ class RunRecord:
             self.daemon_generation_at_launch, str
         ):
             raise ValueError("invalid_run_record")
+        _validate_storage_rotation(
+            self.storage_rotated, self.storage_backup, self.storage_reset_notice
+        )
 
 
 @dataclass(frozen=True)
@@ -1486,6 +1742,7 @@ class RunManifestStore:
         self.paths = paths
         self._lock = threading.RLock()
         self._runs: dict[str, RunRecord] = {}
+        self._storage_observations: list[dict[str, object]] = []
         self._legacy_gate_complete = False
         self._checkpoint = checkpoint
         self._read_only = bool(read_only)
@@ -1512,6 +1769,7 @@ class RunManifestStore:
         store.paths = paths
         store._lock = threading.RLock()
         store._runs = {}
+        store._storage_observations = []
         store._legacy_gate_complete = True
         store._checkpoint = checkpoint
         store._read_only = False
@@ -1572,6 +1830,9 @@ class RunManifestStore:
         if not self._create_preprune_backup(original_raw):
             return False
         previous = self._runs
+        previous_observations = list(self._storage_observations)
+        for run in retired.values():
+            self._note_storage_observation_locked(run)
         self._runs = {
             run_id: run
             for run_id, run in self._runs.items()
@@ -1581,6 +1842,7 @@ class RunManifestStore:
             self._persist_locked()
         except Exception:
             self._runs = previous
+            self._storage_observations = previous_observations
             raise
         return True
 
@@ -1593,6 +1855,9 @@ class RunManifestStore:
             raise ValueError("invalid_run_manifest") from exc
         if not isinstance(payload, dict) or payload.get("version") != 1:
             raise ValueError("invalid_run_manifest")
+        self._storage_observations = _storage_observations_from_payload(
+            payload.get("storage_observations", [])
+        )
         runs = payload.get("runs")
         if not isinstance(runs, list):
             raise ValueError("invalid_run_manifest")
@@ -1614,6 +1879,8 @@ class RunManifestStore:
             "version": 1,
             "runs": [dataclasses.asdict(self._runs[key]) for key in sorted(self._runs)],
         }
+        if self._storage_observations:
+            payload["storage_observations"] = list(self._storage_observations)
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         ) + b"\n"
@@ -1638,6 +1905,43 @@ class RunManifestStore:
         with self._lock:
             return [self._clone(self._runs[key]) for key in sorted(self._runs)]
 
+    def _note_storage_observation_locked(self, run: RunRecord) -> None:
+        """Keep a measured rotation after the EXITED row is pruned.
+
+        Unknown stays off this list, and noting a run without a measurement
+        removes any earlier entry for that run id. A stale or planted log
+        must not survive the pruning of a row that measured nothing. The
+        list is bounded and keyed by run id.
+        """
+        if type(run.storage_rotated) is not bool:
+            self._storage_observations = [
+                item
+                for item in self._storage_observations
+                if item.get("run_id") != run.run_id
+            ]
+            return
+        entry = {
+            "run_id": run.run_id,
+            "storage_rotated": run.storage_rotated,
+            "storage_backup": run.storage_backup,
+            "storage_reset_notice": run.storage_reset_notice,
+        }
+        if run.launch_operation_id is not None:
+            entry["launch_operation_id"] = run.launch_operation_id
+        self._storage_observations = [
+            item
+            for item in self._storage_observations
+            if item.get("run_id") != run.run_id
+        ]
+        self._storage_observations.append(entry)
+        overflow = len(self._storage_observations) - _STORAGE_OBSERVATION_BOUND
+        if overflow > 0:
+            del self._storage_observations[:overflow]
+
+    def storage_observations(self) -> list[dict[str, object]]:
+        with self._lock:
+            return [dict(item) for item in self._storage_observations]
+
     def get(self, run_id: str) -> RunRecord | None:
         with self._lock:
             run = self._runs.get(run_id)
@@ -1650,10 +1954,13 @@ class RunManifestStore:
             if run.run_id in self._runs:
                 raise ValueError("run_exists")
             self._runs[run.run_id] = self._clone(run)
+            previous_observations = list(self._storage_observations)
+            self._note_storage_observation_locked(run)
             try:
                 self._persist_locked()
             except Exception:
                 self._runs.pop(run.run_id, None)
+                self._storage_observations = previous_observations
                 raise
             if self._active_legacy(run):
                 self._legacy_gate_complete = False
@@ -1666,10 +1973,13 @@ class RunManifestStore:
                 raise ValueError("run_not_found")
             previous = self._runs[run.run_id]
             self._runs[run.run_id] = self._clone(run)
+            previous_observations = list(self._storage_observations)
+            self._note_storage_observation_locked(run)
             try:
                 self._persist_locked()
             except Exception:
                 self._runs[run.run_id] = previous
+                self._storage_observations = previous_observations
                 raise
             if self._active_legacy(run):
                 self._legacy_gate_complete = False
@@ -1857,6 +2167,8 @@ class ProcessLifecycle:
         self._operation_lock = threading.RLock()
         self._command_id = -1
         self._last_start_error: str | None = None
+        # The storage refusal behind the public code, when one was decided.
+        self._last_storage_recovery_reason: str | None = None
         # Wire-safe Steam preparation of the last successful client launch.
         # One row per session; never persisted and never includes identity or PIDs.
         self._steam_preparation_by_session: dict[str, dict[str, object]] = {}
@@ -1919,6 +2231,15 @@ class ProcessLifecycle:
         self._reaped_owners: dict[
             tuple[str, str], tuple[str, str, tuple[ProcessRecord, ...]]
         ] = {}
+        # Per client-process identity (generation, run, pid, creation time).
+        # A reused pid is a different key. Status reads this; it never
+        # terminates. Ordered so the bound drops the oldest identity.
+        self._client_role_observations: dict[
+            tuple[str, str, int, str], dict[str, object]
+        ] = {}
+        # Status readers merge, store and copy under this lock. Probes stay
+        # outside it.
+        self._client_observation_lock = threading.Lock()
         # fb-20260904-200821-dae1 part 2: the clock of not_before_utc in the
         # launch intent. Instance state so a test can drive it.
         self._launch_intent_clock: Callable[[], float] = time.time
@@ -1964,6 +2285,22 @@ class ProcessLifecycle:
             return None, exc.code
         except Exception:
             return None, "instance_config_missing"
+        port = getattr(bindings, "config_port", None)
+        key = getattr(bindings, "key", None)
+        if isinstance(port, int) and not isinstance(port, bool) and isinstance(key, str) and key:
+            try:
+                written = json.loads(
+                    (Path(profiles_dir) / "dayz_mcp.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                return None, "instance_endpoint_mismatch"
+            expected_url = "http://127.0.0.1:" + str(port) + "/"
+            if (
+                not isinstance(written, dict)
+                or written.get("url") != expected_url
+                or written.get("key") != key
+            ):
+                return None, "instance_endpoint_mismatch"
         if not isinstance(minted, str) or not minted:
             return None, "instance_config_missing"
         return minted, None
@@ -2082,7 +2419,197 @@ class ProcessLifecycle:
     def _projected_run(self, run: RunRecord) -> dict[str, object]:
         row = dataclasses.asdict(run)
         row.update(_generation_projection(run, self._current_generation()))
+        row["client_diagnostics"] = self._client_role_diagnostics(run)
         return row
+
+    @staticmethod
+    def _observation_now() -> str:
+        stamp = time.time()
+        whole = time.gmtime(stamp)
+        millis = int((stamp - math.floor(stamp)) * 1000)
+        return time.strftime("%Y-%m-%dT%H:%M:%S", whole) + f".{millis:03d}Z"
+
+    def _active_client_observation_keys(self) -> set[tuple[str, str, int, str]]:
+        active: set[tuple[str, str, int, str]] = set()
+        try:
+            runs = self.manifest.list_runs()
+        except Exception:
+            return active
+        generation = self._current_generation()
+        for run in runs:
+            if run.state not in _ACTIVE_STATES:
+                continue
+            for record in run.processes:
+                if record.role != "client":
+                    continue
+                active.add(
+                    (generation, run.run_id, record.pid, record.creation_time_utc)
+                )
+        return active
+
+    def _remember_client_observation(
+        self,
+        key: tuple[str, str, int, str],
+        observation: dict[str, object],
+    ) -> dict[str, object]:
+        """Merge one probe result into the table and return the merged row.
+
+        The probe ran outside this lock. The latest stored row is re-read
+        under it, so a reader that probed before a sibling published a
+        stronger observation cannot erase that evidence with a weaker one.
+        """
+
+        active = self._active_client_observation_keys()
+        with self._client_observation_lock:
+            stored = self._client_role_observations.get(key)
+            row = _merge_client_observations(
+                stored if isinstance(stored, dict) else None,
+                observation,
+            )
+            table = self._client_role_observations
+            table[key] = row
+            if len(table) <= _CLIENT_ROLE_OBSERVATION_BOUND:
+                return dict(row)
+            for old in list(table):
+                if len(table) <= _CLIENT_ROLE_OBSERVATION_BOUND:
+                    break
+                if old in active:
+                    continue
+                table.pop(old, None)
+            while len(table) > _CLIENT_ROLE_OBSERVATION_BOUND:
+                table.pop(next(iter(table)))
+            return dict(row)
+
+    def _retained_client_observations(
+        self,
+        generation: str,
+        run_id: str,
+        current_keys: set[tuple[str, str, int, str]],
+    ) -> list[dict[str, object]]:
+        with self._client_observation_lock:
+            stored = [
+                (key, dict(row))
+                for key, row in self._client_role_observations.items()
+                if isinstance(row, dict)
+            ]
+        retained: list[dict[str, object]] = []
+        for key, row in stored:
+            if key in current_keys:
+                continue
+            if key[0] != generation or key[1] != run_id:
+                continue
+            row["current"] = False
+            retained.append(row)
+        return retained
+
+    def _observe_client_record(self, run: RunRecord, record: ProcessRecord) -> dict[str, object]:
+        """Identity-aware liveness of one registered client. Never terminates."""
+
+        generation = self._current_generation()
+        key = (generation, run.run_id, record.pid, record.creation_time_utc)
+        state = "unknown"
+        exit_code: int | None = None
+        exit_time_utc: str | None = None
+        if self._quarantined():
+            # Quarantine blocks the guard. Status stays a read.
+            state = "unknown"
+            now = self._observation_now()
+        else:
+            try:
+                actual = self.guard.snapshot(record.pid)
+            except Exception:
+                actual = None
+            # After the probe returns, so a death stamp cannot precede the
+            # moment this probe saw the process gone.
+            now = self._observation_now()
+            if not isinstance(actual, dict):
+                state = "unknown"
+            elif (
+                actual.get("error") == "process_not_found"
+                and actual.get("exit_code") == 4
+            ):
+                state = "dead"
+            elif actual.get("exit_code") == 3 or actual.get("error"):
+                state = "unknown"
+            elif self._identity_matches(record, actual):
+                state = "alive"
+            elif actual.get("identity_complete") is True:
+                # The pid belongs to someone else. The old client is gone.
+                state = "dead"
+            else:
+                state = "unknown"
+            if (
+                state == "dead"
+                and isinstance(actual, dict)
+                and actual.get("error") != "process_identity_mismatch"
+                and not (
+                    actual.get("identity_complete") is True
+                    and not self._identity_matches(record, actual)
+                )
+            ):
+                # The guard's own exit_code (3 or 4) is not the process exit.
+                # A reused pid's snapshot is a different process: do not copy it.
+                observed = actual.get("process_exit_code")
+                observed_at = actual.get("exit_time_utc")
+                if (
+                    isinstance(observed, int)
+                    and not isinstance(observed, bool)
+                ):
+                    exit_code = observed
+                if isinstance(observed_at, str) and observed_at:
+                    exit_time_utc = observed_at
+        first_dead = now if state == "dead" else None
+        row: dict[str, object] = {
+            "role": "client",
+            "state": state,
+            "pid": record.pid,
+            "creation_time_utc": record.creation_time_utc,
+            "executable_sha256": record.executable_sha256,
+            "command_line_sha256": record.command_line_sha256,
+            "identity_scheme": record.identity_scheme,
+            "observed_at_utc": now,
+            "first_observed_dead_at_utc": first_dead,
+            "exit_code": exit_code,
+            "exit_time_utc": exit_time_utc,
+            "current": True,
+        }
+        # The probe ran unlocked. Merge, store and the returned copy share
+        # one critical section, so a late weak probe cannot erase a death
+        # another reader published while it was in flight.
+        return self._remember_client_observation(key, row)
+
+    def _client_role_diagnostics(self, run: RunRecord) -> list[dict[str, object]]:
+        generation = self._current_generation()
+        current: list[dict[str, object]] = []
+        current_keys: set[tuple[str, str, int, str]] = set()
+        for record in run.processes:
+            if record.role != "client":
+                continue
+            current_keys.add(
+                (generation, run.run_id, record.pid, record.creation_time_utc)
+            )
+            current.append(self._observe_client_record(run, record))
+        retained = self._retained_client_observations(
+            generation, run.run_id, current_keys
+        )
+        if not current and not retained:
+            return [
+                {
+                    "role": "client",
+                    "state": "not_started",
+                    "pid": None,
+                    "creation_time_utc": None,
+                    "executable_sha256": None,
+                    "command_line_sha256": None,
+                    "identity_scheme": None,
+                    "observed_at_utc": self._observation_now(),
+                    "first_observed_dead_at_utc": None,
+                    "exit_code": None,
+                    "exit_time_utc": None,
+                    "current": False,
+                }
+            ]
+        return retained + current
 
     def _publish_retired_diagnostics(self) -> list[dict[str, object]]:
         with self._activity_lock:
@@ -2746,7 +3273,10 @@ class ProcessLifecycle:
         return existing is None and launch_role in {"server", "offline"}
 
     def _rotate_storage_for_launch(
-        self, parsed: dict[str, object], run_id: str
+        self,
+        parsed: dict[str, object],
+        run_id: str,
+        provisional: RunRecord | None = None,
     ) -> str | None:
         """Seal the mod set and set aside an incompatible storage. Pre-spawn.
 
@@ -2788,11 +3318,83 @@ class ProcessLifecycle:
             )
         except (dayz_test_storage.StorageError, OSError):
             return "storage_rotate_failed"
+        # prepare_storage skips completed journals. A retry before the engine
+        # has created storage_1 would otherwise look like a launch that never
+        # reset the mission. The marker match is not evidence the world was
+        # rebuilt, and this does not define that accreditation.
+        if (
+            result.launch_allowed
+            and not result.storage_rotated
+            and isinstance(mission, str)
+            and not os.path.isdir(
+                os.path.join(mission, dayz_test_storage.STORAGE_NAME)
+            )
+        ):
+            pending = _pending_completed_rotation(mission, seal)
+            if pending is _AMBIGUOUS_PENDING_ROTATION:
+                # A reset is pending but its saved world is ambiguous: leave the
+                # run's storage observation unknown, never a measured false.
+                return None
+            if pending is not None:
+                result = pending
         if not result.launch_allowed:
+            # A refused classification measured nothing: the provisional keeps
+            # null storage fields, exactly like a launch that raised before
+            # prepare_storage returned. Writing false here would report a
+            # measured reuse for a state the subsystem could not classify.
+            # The public code stays storage_recovery_required; the audit keeps
+            # the exact reason prepare_storage already decided.
+            reason = result.reason if isinstance(result.reason, str) else ""
+            if not reason.strip():
+                reason = "storage_recovery_required"
+            self._last_storage_recovery_reason = (
+                reason
+                if reason in dayz_test_storage.STORAGE_RECOVERY_REASONS
+                else None
+            )
+            written = self._audit(
+                "lifecycle_storage_recovery_required",
+                None,
+                reason,
+                "rejected",
+                run_id=run_id,
+            )
+            if not written:
+                self._note_audit_row_dropped()
             return "storage_recovery_required"
-        if result.storage_rotated:
+        self._record_storage_rotation(provisional, result)
+        # A replay of a completed journal is the same reset, not a second one.
+        # The run record carries it; another audit row would claim a new move.
+        if result.storage_rotated and result.reason != "pending_completed_rotation":
             self._audit_storage_rotation(run_id, result)
         return None
+
+    @staticmethod
+    def _record_storage_rotation(
+        provisional: RunRecord | None, result: dayz_test_storage.RotationResult
+    ) -> None:
+        """Copy a measured rotation onto the run that is about to spawn.
+
+        Unknown stays unknown: a launch that raised before prepare_storage
+        returned has no measurement. False is only the measured non-rotation.
+        """
+        if provisional is None:
+            return
+        if result.storage_rotated:
+            backup = result.storage_backup
+            notice = result.storage_reset_notice
+            if (
+                not _plain_storage_backup_name(backup)
+                or notice != dayz_test_storage.RESET_NOTICE
+            ):
+                return
+            provisional.storage_rotated = True
+            provisional.storage_backup = backup
+            provisional.storage_reset_notice = notice
+            return
+        provisional.storage_rotated = False
+        provisional.storage_backup = None
+        provisional.storage_reset_notice = None
 
     def _audit_storage_rotation(self, run_id: str, result: object) -> None:
         """A rotation resets the world and the characters: it leaves a row.
@@ -3274,6 +3876,21 @@ class ProcessLifecycle:
         self, client: ClientIdentity, authority: tuple[str, str, str], request: object,
         steam: Preparation | None = None,
     ) -> dict[str, object]:
+        with box_admission() as admitted:
+            if not admitted:
+                return {
+                    "ok": False,
+                    "error": "box_admission_busy",
+                    "status": 409,
+                }
+            return self._start_run_reserved_holding(
+                client, authority, request, steam
+            )
+
+    def _start_run_reserved_holding(
+        self, client: ClientIdentity, authority: tuple[str, str, str], request: object,
+        steam: Preparation | None = None,
+    ) -> dict[str, object]:
         command = "lifecycle_start"
         with self._operation_lock:
             # Drop this session's Steam projection before any rejection or
@@ -3643,7 +4260,16 @@ class ProcessLifecycle:
                 # rotated nothing, and this is the only point at which the run
                 # is certain to be created.
                 if self._rotation_applies(existing, launch_role):
-                    storage_error = self._rotate_storage_for_launch(parsed, run_id)
+                    storage_error = self._rotate_storage_for_launch(
+                        parsed, run_id, provisional
+                    )
+                    if storage_error is None:
+                        # Durable before the spawn, so a crash or a later
+                        # failed settlement still has the reset on this run.
+                        try:
+                            self.manifest.replace(provisional)
+                        except Exception:
+                            storage_error = "manifest_failed"
                     if storage_error is not None:
                         self._retire_minted(
                             run_id, launch_role, minted, "launch_failed"
@@ -3657,7 +4283,18 @@ class ProcessLifecycle:
                             confirmed_error=storage_error,
                             attempt_started_at=attempt_started_at,
                         )
-                        settled["hint"] = _STORAGE_ROTATE_HINTS[storage_error]
+                        hint = _STORAGE_ROTATE_HINTS.get(storage_error)
+                        if hint is not None:
+                            settled["hint"] = hint
+                        if storage_error == "storage_recovery_required":
+                            recovery_reason = self._last_storage_recovery_reason
+                            if recovery_reason is not None:
+                                settled["storage_recovery_reason"] = recovery_reason
+                                settled["storage_recovery_hint"] = (
+                                    dayz_test_storage.storage_recovery_hint(
+                                        recovery_reason
+                                    )
+                                )
                         return settled
                 if steam is not None and not self.steam_gate.final_check(steam):
                     self._retire_minted(run_id, launch_role, minted, "launch_failed")
@@ -4273,6 +4910,62 @@ class ProcessLifecycle:
             if kind == "unknown" and unknown_reason is None:
                 unknown_reason = reason
         return buckets, unknown_reason
+
+    def classify_registered_client_liveness(
+        self, run_id: object, destination: tuple[int, str] | None = None
+    ) -> str:
+        """alive, dead, unknown or none for one exact run's player records.
+
+        d17c-a: identity-sensitive admission classifies the registered
+        client/offline records through _classify_registered_process, the full
+        native identity snapshot, and never through the PID census
+        _client_liveness uses for use_state. Read-only: it takes no
+        _operation_lock and terminates, reaps and relaunches nothing. Doubt is
+        never a death: an unreadable run, a missing run or a guard that cannot
+        answer reads unknown, and a run without client/offline records has no
+        client process (none) instead of a guessed one.
+
+        destination, when given, is the (pid, creation_time_utc) identity the
+        caller is about to publish to. A death is only evidence when the
+        snapshot this verdict was computed from actually observed that
+        identity: reattach confirms the station binding before its manifest
+        record is published, so a clone taken inside that window still lists
+        only the superseded client. A pinned destination absent from the
+        snapshot reads unknown instead of inheriting the replaced client's
+        death.
+        """
+        if not isinstance(run_id, str) or not run_id:
+            return "unknown"
+        try:
+            run = self.manifest.get(run_id)
+        except Exception:
+            return "unknown"
+        if run is None:
+            return "unknown"
+        processes = getattr(run, "processes", None)
+        if not isinstance(processes, list):
+            return "unknown"
+        records: list[ProcessRecord] = []
+        observed: list[tuple[int, str]] = []
+        for item in processes:
+            if getattr(item, "role", None) not in _PLAYER_ROLES:
+                continue
+            if not isinstance(item, ProcessRecord):
+                return "unknown"
+            records.append(item)
+            observed.append((item.pid, item.creation_time_utc))
+        if not records:
+            return "none"
+        verdicts = [
+            self._classify_registered_process(record)[0] for record in records
+        ]
+        if "owned" in verdicts:
+            return "alive"
+        if "unknown" in verdicts:
+            return "unknown"
+        if destination is not None and destination not in observed:
+            return "unknown"
+        return "dead"
 
     def _ports_released(self, pids: set[int]) -> str | None:
         """None when no UDP holder carries one of these pids (P-L2.c).
@@ -7001,6 +7694,9 @@ class ProcessLifecycle:
         }
         if self._last_start_error is not None:
             payload["last_start_error"] = self._last_start_error
+        observations = self.manifest.storage_observations()
+        if observations:
+            payload["storage_observations"] = observations
         if preparation is not None:
             payload["steam_preparation"] = preparation
         verdict = self._server_start_verdict_payload()
@@ -7016,13 +7712,17 @@ class ProcessLifecycle:
         runs, diagnostics = self._status_snapshot()
         # Keep every non-terminal state: admin recovery needs STARTING and STOPPING.
         active_runs = [run for run in runs if run.state in _ACTIVE_STATES]
-        return {
+        payload: dict[str, object] = {
             "runs": [self._projected_run(run) for run in active_runs],
             "runs_retired": len(runs) - len(active_runs),
             "retail_quarantine": self._quarantined(),
             "retired_run_diagnostics": diagnostics,
             "audit_rows_dropped": self._audit_rows_dropped,
         }
+        observations = self.manifest.storage_observations()
+        if observations:
+            payload["storage_observations"] = observations
+        return payload
 
     def _diag_snapshot(
         self,

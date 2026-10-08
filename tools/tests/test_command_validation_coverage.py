@@ -140,6 +140,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1, "classname": "Item", "dest": "cargo"}
     if cmd == "object_inspect":
         return {"type": "CarScript", "pos": [0.0, 0.0, 0.0], "want": ["health"]}
+    if cmd == "object_resolve":
+        return {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 1.0}
     if cmd == "object_doors":
         return {"type": "Land_Garage_Row_Small", "pos": [0.0, 0.0, 0.0]}
     if cmd == "object_delete":
@@ -179,6 +181,23 @@ def _minimal_args(cmd: str) -> dict:
         return {"action": "use", "target": "hands"}
     if cmd == "action_use_door":
         return {"action": "use", "classname": "Land_House_2W03", "door_index": 0}
+    if cmd == "action_use_component":
+        return {
+            "action": "use",
+            "classname": "Land_House_2W03",
+            "component_index": 0,
+            "cursor_pos": [0.0, 0.0, 0.0],
+        }
+    if cmd == "player_kill":
+        return {"uid": "player-1"}
+    if cmd == "bot_start":
+        return {
+            "object_id": 1,
+            "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT",
+            "bot_ttl_s": 5.0,
+        }
+    if cmd == "bot_stop":
+        return {"object_id": 1}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

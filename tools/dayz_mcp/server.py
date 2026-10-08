@@ -16,7 +16,7 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
@@ -76,6 +76,13 @@ from dayz_mcp.peer_liveness import (
     client_peer_probeable as _client_peer_probeable,
     peer_is_live as _peer_is_live,
 )
+from dayz_mcp.lease_result_ttl import (
+    LEASE_TTL_OBSERVE_S,
+    LEASE_LOCAL_TOOL,
+    LEASE_TTL_OBSERVE_TOOL,
+    install_lease_ttl_annotation,
+    observe_caller_presence,
+)
 from dayz_mcp.server_freshness import (
     REMEDIATION as _TOOL_REGISTRY_REMEDIATION,
     ServerSourceWatch,
@@ -86,6 +93,8 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    BOT_START_ACTIONS,
+    BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
@@ -95,9 +104,19 @@ from dayz_mcp.loopback import (
     is_printable_input_name,
     read_key,
 )
-from dayz_mcp.server_cli import CLIENT_PLATFORM_ALIASES, build_server_parser
+from dayz_mcp.instance_context import (
+    InstanceSelectionError,
+    bind_instance_context,
+    registration_name,
+)
+from dayz_mcp.server_cli import (
+    CLIENT_PLATFORM_ALIASES,
+    build_server_parser,
+    reject_glued_selector_flags,
+)
 from dayz_mcp.process_lifecycle import (
     ADOPTION_REVERT_PENDING,
+    _caller_owns_run,
     caller_launched_row,
     caller_may_adopt_ownerless,
     empty_box,
@@ -109,6 +128,7 @@ from dayz_mcp import session_handoff
 from dayz_mcp.mcp_supervisor import Supervisor
 from dayz_mcp.session_coordination import (
     READ_ONLY_COMMANDS,
+    SESSION_TTL_S,
     ClientIdentity,
     command_requires_lease,
     public_audit_stage,
@@ -245,6 +265,7 @@ from dayz_mcp.launch_logs import (
     _log_markers_at_end,
     _log_markers_with_lookback,
     _marker_rewound,
+    _marker_rewound_handle,
     _new_log_lines,
     _newest_rpt_and_script,
     _offset_before_last_lines,
@@ -332,6 +353,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # instead of the player named: an unknown key is refused, not dropped.
     "player_heal",
     "player_godmode",
+    # A mistyped uid key must not be dropped: kill has no first-player fallback.
+    "player_kill",
+    "bot_start",
+    "bot_stop",
 )
 
 
@@ -356,6 +381,7 @@ WAIT_FOR_CONDITIONS = frozenset({
     "players_at_most",
     "log_matches",
     "entity_state",
+    "file_matches",
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
@@ -384,7 +410,14 @@ WORLD_SPAWN_FLAGS_LINE = (
     "return it in a later run, where its object_id is no longer valid. "
     f"Add that flag to keep it out of the world save, for example "
     f"flags={_WORLD_SPAWN_NOPERSIST_FLAGS} "
-    "(ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD)."
+    "(ECE_PLACE_ON_SURFACE|ECE_NOPERSISTENCY_WORLD). "
+    "Spawning an infected without ECE_INITAI does not establish a durable "
+    "living visual fixture: a spawned infected found at health 0 minutes "
+    "later was reported (the cause is unverified). Check the entity's "
+    "health with telemetry_read object_at (field health01) immediately "
+    "before judging it visually; the living-infected recipe is flags=3108 "
+    "(ECE_PLACE_ON_SURFACE|ECE_INITAI), which initializes the AI and does "
+    "not guarantee survival."
 )
 # world_spawn lifetime_s upper bound, in seconds. Mirrors SPAWN_LIFETIME_MAX_S in
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
@@ -564,6 +597,133 @@ def _frozen_tool_registry_overlay(app: FastMCP, config: ServerConfig) -> dict[st
     }
 
 
+_CAMERA_UNVERIFIED = "camera_unverified"
+_CAMERA_UNVERIFIED_NO_LEASE = "no_lease"
+_CAMERA_UNVERIFIED_UNKNOWN = "unknown"
+
+
+def _camera_run_context(status: object) -> tuple | None:
+    """Fingerprint of the runs a lifecycle read actually returned.
+
+    None means the read was missing or unreadable. An empty tuple is a real
+    observation of no runs, and a later different tuple is a context change.
+    """
+
+    if not isinstance(status, dict):
+        return None
+    runs = status.get("runs")
+    if not isinstance(runs, list):
+        return None
+    rows: list[tuple[str, str, str, str]] = []
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        # Lifecycle state (STARTING, RUNNING, ...) is not identity. A run
+        # that merely advances must keep the camera attempt.
+        rows.append((
+            str(item.get("run_id") or ""),
+            str(item.get("daemon_generation_current") or ""),
+            str(item.get("daemon_generation_at_launch") or ""),
+        ))
+    return tuple(sorted(rows))
+
+
+def _camera_failure_reason(value: object) -> str:
+    """Stable token for a failed camera_set. Never a path and never 'expired' by inference."""
+
+    if isinstance(value, BaseException):
+        text = str(value)
+    elif isinstance(value, dict):
+        error = value.get("error")
+        text = error if isinstance(error, str) else ""
+    else:
+        text = value if isinstance(value, str) else ""
+    token = text.strip().split()[0] if text.strip() else ""
+    if token.endswith(":"):
+        token = token[:-1]
+    if (
+        not token
+        or len(token) > 64
+        or not token.isascii()
+        or any(ch in token for ch in "\\/:")
+    ):
+        return "camera_set_failed"
+    return token
+
+
+def _camera_result_failed(result: object) -> bool:
+    if not isinstance(result, dict):
+        return True
+    ok = result.get("ok")
+    return ok not in (True, 1)
+
+
+async def _read_run_status_no_spawn(runtime: object) -> object:
+    """One lifecycle read that does not lazy-spawn. Unreadable comes back as None."""
+
+    control = getattr(runtime, "_control", None)
+    if control is None:
+        return None
+    session_call = getattr(control, "_session_call", None)
+    if callable(session_call):
+        try:
+            status = session_call("/lifecycle/status", timeout_s=LEASE_TTL_OBSERVE_S)
+            if inspect.isawaitable(status):
+                status = await asyncio.wait_for(status, LEASE_TTL_OBSERVE_S + 0.25)
+            return status
+        except Exception:
+            return None
+    status_fn = getattr(control, "lifecycle_status", None)
+    if not callable(status_fn):
+        return None
+    try:
+        status = status_fn()
+        if inspect.isawaitable(status):
+            status = await asyncio.wait_for(status, LEASE_TTL_OBSERVE_S + 0.25)
+        return status
+    except Exception:
+        return None
+
+
+def _camera_note_for_capture(
+    slot: dict[str, Any], observed_status: object, presence: str
+) -> dict[str, Any] | None:
+    """One warning decision for this capture. A held lease certifies nothing."""
+
+    attempt = slot.get("attempt")
+    current = _camera_run_context(observed_status)
+    if isinstance(attempt, dict):
+        stored = attempt.get("context")
+        if current is not None and stored is not None and current != stored:
+            slot["attempt"] = None
+            attempt = None
+    if isinstance(attempt, dict) and attempt.get("failed"):
+        reason = attempt.get("reason")
+        if not isinstance(reason, str) or not reason:
+            reason = "camera_set_failed"
+        return {"warn": True, "reason": reason}
+    if presence == "absent":
+        return {"warn": True, "reason": _CAMERA_UNVERIFIED_NO_LEASE}
+    if presence == _CAMERA_UNVERIFIED_UNKNOWN:
+        return {"warn": False, "reason": _CAMERA_UNVERIFIED_UNKNOWN}
+    return None
+
+
+def _attach_camera_unverified(meta: dict[str, Any], note: dict[str, Any] | None) -> None:
+    if not note:
+        return
+    reason = note.get("reason")
+    if isinstance(reason, str):
+        meta["camera_unverified_reason"] = reason
+    if not note.get("warn"):
+        return
+    warnings = meta.get("warnings")
+    warnings = list(warnings) if isinstance(warnings, list) else []
+    if _CAMERA_UNVERIFIED not in warnings:
+        warnings.append(_CAMERA_UNVERIFIED)
+    meta["warnings"] = warnings
+
+
 def _image_format_from_mime(mime: object) -> str:
     if mime == "image/jpeg":
         return "jpeg"
@@ -607,6 +767,9 @@ class ServerConfig:
     # says (_progressive_disclosure_enabled); --no-progressive-disclosure does
     # the same for any other platform.
     progressive_disclosure: bool = True
+    # None is the default instance. Named tokens never change that omission.
+    instance_token: str | None = None
+    game_path: str | None = None
 
 
 class Runtime:
@@ -835,9 +998,9 @@ class Runtime:
             handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     def exec_audit_path(self) -> Path:
-        if self.config.exec_audit_path is not None:
-            return Path(self.config.exec_audit_path)
-        return Path(__file__).resolve().parents[1] / "_audit" / "exec_enforce.jsonl"
+        from dayz_mcp.daemon import exec_enforce_audit_path
+
+        return exec_enforce_audit_path(self.config)
 
     def _load_exec_allowlist(self, path: str | None) -> set[str]:
         return core.load_exec_allowlist(path)
@@ -903,13 +1066,21 @@ class ClientRuntime:
         self.config = config
         self.tool_lock = asyncio.Lock()
         self._allow_stale_policy = False
-        daemon_policy = load_normal_daemon_policy()
-        provenance = host_config.resolve_daemon_provenance()
+        selected_registration = registration_name(config.instance_token)
+        daemon_policy = load_normal_daemon_policy(selected_registration)
+        if selected_registration == "dayz-mcp":
+            provenance = host_config.resolve_daemon_provenance()
+        else:
+            provenance = host_config.resolve_daemon_provenance(
+                server_name=selected_registration
+            )
         if (
             type(provenance.port) is not int
             or type(config.port) is not int
             or not 1 <= provenance.port <= 65535
             or config.port != provenance.port
+            or getattr(provenance, "instance_token", None) != config.instance_token
+            or getattr(provenance, "game_path", None) != config.game_path
         ):
             raise host_config.HostConfigError("daemon_provenance_conflict")
         if (
@@ -2437,6 +2608,718 @@ async def _tool_lock_until(runtime: Any, deadline: float) -> AsyncIterator[bool]
             runtime.tool_lock.release()
 
 
+_PROFILE_ROLE_PARENT = {"server": "_server", "client": "_client", "offline": "_client"}
+_PROFILE_DEVICES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def _profile_file_parts(profile_file: str) -> tuple[str, ...]:
+    """Reject paths that are not a bounded relative profile file. No IO."""
+
+    if not isinstance(profile_file, str) or profile_file == "":
+        raise ToolError("bad_args: profile_file must be a relative path")
+    if profile_file != profile_file.strip() or any(ord(char) < 32 for char in profile_file):
+        raise ToolError("bad_args: profile_file escapes the profile")
+    if (
+        ":" in profile_file
+        or profile_file.startswith("\\")
+        or profile_file.startswith("/")
+        or profile_file.startswith("//")
+    ):
+        raise ToolError("bad_args: profile_file escapes the profile")
+    parts = PureWindowsPath(profile_file).parts
+    if not parts or len(profile_file) > 240:
+        raise ToolError("bad_args: profile_file escapes the profile")
+    for part in parts:
+        if part in {".", ".."} or part.endswith(" ") or part.endswith("."):
+            raise ToolError("bad_args: profile_file escapes the profile")
+        base = part.split(".", 1)[0].casefold()
+        if base in _PROFILE_DEVICES:
+            raise ToolError("bad_args: profile_file escapes the profile")
+    return parts
+
+
+def _held_lease(runtime: Any) -> tuple[str, str]:
+    control = getattr(runtime, "_control", None)
+    token = getattr(control, "active_lease_token", None)
+    lease_id = getattr(control, "active_lease_id", None)
+    if not isinstance(token, str) or not token or not isinstance(lease_id, str) or not lease_id:
+        raise ToolError("lease_required")
+    return token, lease_id
+
+
+def _caller_session_id(runtime: Any) -> str:
+    identity = getattr(runtime, "identity", None)
+    session = getattr(identity, "session_id", None)
+    if not isinstance(session, str) or not session:
+        session = getattr(runtime, "caller_session", None)
+    if not isinstance(session, str) or not session:
+        raise ToolError("lease_required")
+    return session
+
+
+async def _lifecycle_runs(runtime: Any) -> list[dict[str, Any]]:
+    status_fn = getattr(runtime, "lifecycle_status", None)
+    if status_fn is None:
+        raise ToolError("no_active_run")
+    status = status_fn()
+    if inspect.isawaitable(status):
+        status = await status
+    if not isinstance(status, dict):
+        raise ToolError("no_active_run")
+    runs = status.get("runs") or []
+    return [item for item in runs if isinstance(item, dict)]
+
+
+def _run_owner_session(item: dict[str, Any]) -> str | None:
+    """Production rows publish ``owner_session_id``. Older fixtures used ``owner_session``."""
+
+    owner = item.get("owner_session_id")
+    if not isinstance(owner, str) or not owner:
+        owner = item.get("owner_session")
+    if not isinstance(owner, str) or not owner:
+        return None
+    return owner
+
+
+def _one_owned_run(
+    runs: list[dict[str, Any]], session: str, lease_id: str
+) -> dict[str, Any]:
+    owned: list[dict[str, Any]] = []
+    for item in runs:
+        if item.get("state") not in {"STARTING", "RUNNING", "RUNNING_IDLE"}:
+            continue
+        owner = _run_owner_session(item)
+        if owner is None or not isinstance(session, str) or not session:
+            continue
+        if owner not in {session, session[:12]}:
+            continue
+        owner_lease = item.get("owner_lease_id")
+        if isinstance(owner_lease, str) and owner_lease and owner_lease != lease_id:
+            continue
+        owned.append(item)
+    if len(owned) != 1:
+        raise ToolError("no_active_run" if len(owned) == 0 else "multiple_active_runs")
+    return owned[0]
+
+
+def _profiles_dir_for_role(run: dict[str, Any], role: str) -> str:
+    """Role profile from sealed project/mode policy. The run path is not a root.
+
+    ``RunRecord.profiles`` is one folder. A client wait on a server-recorded
+    run still resolves ``_client/profiles`` from the mode start root. A path
+    that policy did not approve is not readable, even when its parent is
+    named ``_server``.
+    """
+
+    from dayz_mcp.dayz_test_tool import (
+        _close_project_policy,
+        _close_role_folder,
+        _start_role_roots,
+    )
+
+    processes = run.get("processes")
+    launched: set[str] = set()
+    if isinstance(processes, list):
+        for proc in processes:
+            role_name = proc.get("role") if isinstance(proc, dict) else getattr(proc, "role", None)
+            if isinstance(role_name, str) and role_name:
+                launched.add(role_name)
+    if role == "offline":
+        if "offline" not in launched and "client" not in launched:
+            raise ToolError("profile_unresolved")
+    elif role not in launched:
+        raise ToolError("profile_unresolved")
+    policy = _close_project_policy(run)
+    roots = _start_role_roots()
+    if policy is None or not roots:
+        raise ToolError("profile_unresolved")
+    asked = "client" if role == "offline" else role
+    folder = _close_role_folder(policy, asked, roots, run)
+    if folder is None and role == "offline":
+        folder = _close_role_folder(policy, "offline", roots, run)
+    if not isinstance(folder, str) or not log_tail.is_allowed_profiles_dir(folder):
+        raise ToolError("profile_unresolved")
+    return folder
+
+
+def _under_root(root: Path, candidate: Path) -> bool:
+    try:
+        Path(os.path.normcase(str(candidate))).resolve().relative_to(
+            Path(os.path.normcase(str(root))).resolve()
+        )
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _final_handle_path(handle) -> Path:
+    """Path this open handle names, after reparse points. Does not close it."""
+
+    if sys.platform == "win32":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        get_final = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+        get_final.argtypes = [
+            wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ]
+        get_final.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        os_handle = msvcrt.get_osfhandle(handle.fileno())
+        written = get_final(wintypes.HANDLE(os_handle), buffer, 32768, 0)
+        if written == 0 or written >= 32768:
+            raise log_tail.LogTailError("log_unavailable")
+        text = buffer.value
+        if text.startswith("\\\\?\\UNC\\"):
+            text = "\\\\" + text[8:]
+        elif text.startswith("\\\\?\\"):
+            text = text[4:]
+        return Path(text)
+    return Path(os.path.realpath(handle.fileno()))
+
+
+def _profile_root(root: Path) -> Path:
+    try:
+        root_final = root.resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise ToolError("bad_profiles") from error
+    if not root_final.is_dir():
+        raise ToolError("bad_profiles")
+    return root_final
+
+
+def _walk_profile_parent(root_final: Path, parts: tuple[str, ...]) -> Path | None:
+    """Existing ancestors of the relative file. None when the file is not there yet.
+
+    A parent that leaves the profile is ``bad_args``. The file itself is not
+    opened here: the poll opens that handle and reads it.
+    """
+
+    current = root_final
+    for index, part in enumerate(parts):
+        current = current / part
+        last = index == len(parts) - 1
+        try:
+            exists = current.exists()
+        except OSError as error:
+            raise ToolError("bad_args: profile_file escapes the profile") from error
+        if not exists:
+            return None
+        try:
+            resolved = current.resolve(strict=True)
+        except (OSError, ValueError) as error:
+            raise ToolError("bad_args: profile_file escapes the profile") from error
+        if not _under_root(root_final, resolved):
+            raise ToolError("bad_args: profile_file escapes the profile")
+        if last:
+            if not resolved.is_file():
+                raise ToolError("bad_args: profile_file escapes the profile")
+            return resolved
+        if not resolved.is_dir():
+            raise ToolError("bad_args: profile_file escapes the profile")
+        current = resolved
+    return None
+
+
+def _read_contained_handle(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    lookback_lines: int,
+    primed: bool,
+    file_marker: log_tail.TailMarker | None,
+    caller_marker: log_tail.TailMarker | None,
+    stop: Any = None,
+) -> dict[str, Any]:
+    """Open the profile file once, check that handle, and read it.
+
+    ``state`` is ``missing``, ``unreadable``, or ``ok``. A reparse point that
+    leaves the profile raises ``ToolError`` and is not a scan diagnostic.
+    ``stop`` is the cooperative signal of the bounded reader thread: it is
+    checked between phases and the window reads abort between chunks when it
+    fires or the read deadline passes.
+    """
+
+    if stop is not None and stop.stopped:
+        raise TimeoutError
+    root_final = _profile_root(root)
+    lexical = _walk_profile_parent(root_final, parts)
+    if lexical is None:
+        return {"state": "missing"}
+    if stop is not None and stop.stopped:
+        raise TimeoutError
+    try:
+        handle = lexical.open("rb")
+    except OSError:
+        return {"state": "unreadable", "path": str(lexical)}
+    try:
+        if stop is not None and stop.stopped:
+            raise TimeoutError
+        try:
+            final = _final_handle_path(handle)
+            if not _under_root(root_final, final):
+                raise ToolError("bad_args: profile_file escapes the profile")
+            path = str(final)
+            if not primed:
+                if caller_marker is not None:
+                    if os.path.normcase(os.path.normpath(caller_marker.path)) != os.path.normcase(path):
+                        raise ToolError("bad_marker")
+                    file_marker = log_tail.TailMarker(
+                        path=path,
+                        offset=caller_marker.offset,
+                        size=caller_marker.size,
+                        identity=caller_marker.identity,
+                    )
+                elif lookback_lines > 0:
+                    file_marker = _marker_rewound_handle(
+                        handle, path, lookback_lines, stop=stop
+                    )
+                else:
+                    parked = log_tail.read_open_handle(handle, path, None, stop=stop)
+                    file_marker = parked["marker"]
+                    return {
+                        "state": "ok",
+                        "path": path,
+                        "lines": [],
+                        "marker": file_marker,
+                        "count": 0,
+                    }
+            if file_marker is None:
+                return {"state": "ok", "path": path, "lines": [], "marker": None, "count": None}
+            read = log_tail.read_open_handle(
+                handle, path, log_tail.TailMarker(
+                    path=path,
+                    offset=file_marker.offset,
+                    size=file_marker.size,
+                    identity=file_marker.identity,
+                ),
+                stop=stop,
+            )
+            lines = list(read["lines"])
+            return {
+                "state": "ok",
+                "path": path,
+                "lines": lines,
+                "marker": read["marker"],
+                "count": len(lines),
+            }
+        except TimeoutError:
+            raise
+        except ToolError:
+            raise
+        except (OSError, log_tail.LogTailError):
+            return {"state": "unreadable", "path": str(lexical)}
+    finally:
+        handle.close()
+
+
+async def _bound(awaitable: Any, deadline: float) -> Any:
+    """Await ``awaitable`` only for the time still left before ``deadline``."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        raise TimeoutError
+    return await asyncio.wait_for(awaitable, timeout=remaining)
+
+
+def _stop_thread(thread: threading.Thread) -> None:
+    """Nudge a worker thread that is executing Python bytecodes.
+
+    This injects SystemExit into that thread. It cannot run inside a blocked
+    wait, so it is only the fallback beside the cooperative ``_ReadStop``
+    signal; the bounded join after it decides what the caller may claim.
+    """
+
+    if not thread.is_alive() or thread.ident is None:
+        return
+    import ctypes
+
+    ident = ctypes.c_ulong(thread.ident)
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(ident, ctypes.py_object(SystemExit))
+
+
+class _ReadStop:
+    """Cooperative stop signal for a bounded worker thread.
+
+    An injected exception does not run inside ``Event.wait``, so cleanup that
+    only injects cannot stop a blocked thread. The worker therefore checks
+    this signal between chunks, and both ``stopped`` and ``wait`` turn true at
+    the worker's own deadline: the work ends even if the caller never stops it.
+    """
+
+    def __init__(self, deadline: float) -> None:
+        self._event = threading.Event()
+        self._deadline = deadline
+
+    def stop(self) -> None:
+        self._event.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._event.is_set() or time.monotonic() >= self._deadline
+
+    def wait(self, timeout: float) -> bool:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0.0:
+            return True
+        return self._event.wait(min(max(timeout, 0.0), remaining))
+
+
+# How long cleanup waits for a worker that was told to stop before the caller
+# reports (or assumes) the outcome. A cooperative worker leaves well inside it.
+_THREAD_STOP_GRACE_S = 0.05
+
+
+async def _thread_bounded(
+    fn: Any, deadline: float, alive_flag: set[str] | None = None
+) -> Any:
+    """Run ``fn(stop)`` off the event loop, bounded by ``deadline``.
+
+    ``fn`` receives a cooperative stop signal and must check it between
+    chunks. When the budget ends or the await is cancelled, the thread is
+    stopped, joined with a bound, and a thread that is still alive is marked
+    in ``alive_flag`` instead of being claimed terminated. A result or error
+    that lands outside the budget is never delivered.
+    """
+
+    stop = _ReadStop(deadline)
+    slot: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            slot["value"] = fn(stop)
+            slot["done_at"] = time.monotonic()
+        except BaseException as exc:
+            slot["error"] = exc
+            slot["done_at"] = time.monotonic()
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    remaining = deadline - time.monotonic()
+    if remaining > 0.0:
+        try:
+            await asyncio.to_thread(thread.join, remaining)
+        except asyncio.CancelledError:
+            stop.stop()
+            _stop_thread(thread)
+            await asyncio.to_thread(thread.join, _THREAD_STOP_GRACE_S)
+            if thread.is_alive() and alive_flag is not None:
+                alive_flag.add("reader")
+            raise
+    if "done_at" not in slot or slot["done_at"] > deadline:
+        # The work did not finish inside its budget. Ask it to leave, wait a
+        # bound, and never deliver its result or its error.
+        stop.stop()
+        _stop_thread(thread)
+        await asyncio.to_thread(thread.join, _THREAD_STOP_GRACE_S)
+        if thread.is_alive() and alive_flag is not None:
+            alive_flag.add("reader")
+        raise TimeoutError
+    if "error" in slot:
+        raise slot["error"]
+    return slot.get("value")
+
+
+async def _heartbeat_exact_lease(
+    runtime: Any, token: str, lease_id: str, deadline: float
+) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError
+    control = getattr(runtime, "_control", None)
+    if getattr(control, "active_lease_id", None) != lease_id:
+        raise ToolError("lease_expired")
+    beat = getattr(runtime, "session_heartbeat", None)
+    if not callable(beat):
+        raise ToolError("lease_required")
+    try:
+        result = beat(token)
+        if inspect.isawaitable(result):
+            result = await result
+    except ToolError:
+        raise
+    except Exception as error:
+        raise ToolError("lease_expired") from error
+    if isinstance(result, dict) and result.get("error"):
+        raise ToolError(str(result["error"]))
+    if not isinstance(result, dict):
+        raise ToolError("lease_invalid")
+    if getattr(control, "active_lease_id", None) != lease_id:
+        raise ToolError("lease_invalid")
+
+
+def _file_matches_timeout(
+    role: str,
+    profile_file: str,
+    started: float,
+    probes: int,
+    observed: Any,
+    file_marker: log_tail.TailMarker | None,
+    seen_paths: list[str],
+    scanned_lines: dict[str, int],
+    unreadable: set[str],
+    last_error: str | None,
+    reader_alive: set[str] | None = None,
+) -> dict[str, Any]:
+    report = _scanned_report(seen_paths, scanned_lines, unreadable, "lines", False)
+    report["role"] = role
+    report["profile_file"] = profile_file
+    if reader_alive:
+        # The read thread outlived its budget: say so instead of claiming it
+        # was terminated.
+        report["reader_alive_at_return"] = True
+    cursor = (
+        log_tail.encode_marker({file_marker.path: file_marker})
+        if file_marker is not None
+        else None
+    )
+    response = _wait_for_response(
+        condition="file_matches",
+        started=started,
+        probes=probes,
+        observed=observed,
+        satisfied=False,
+        scanned=report,
+        last_error=last_error,
+    )
+    response["role"] = role
+    response["profile_file"] = profile_file
+    response["cursor"] = cursor
+    return response
+
+
+async def _execute_file_matches(
+    runtime: Any,
+    *,
+    pattern: str,
+    timeout_s: float,
+    poll_interval_s: float,
+    lookback_lines: int,
+    lookback_from: str,
+    marker: str | dict[str, Any] | None,
+    profile_file: str | None,
+    role: str,
+    started: float,
+    deadline: float,
+) -> dict[str, Any]:
+    if pattern == "":
+        raise ToolError("bad_args: pattern must be non-empty when condition is file_matches")
+    if role not in _PROFILE_ROLE_PARENT:
+        raise ToolError('bad_args: role must be "server", "client" or "offline"')
+    if not isinstance(profile_file, str):
+        raise ToolError("bad_args: profile_file must be a relative path")
+    parts = _profile_file_parts(profile_file)
+    if lookback_from == "launch":
+        raise ToolError("bad_args: lookback_from=launch is not valid for file_matches")
+    if lookback_from not in WAIT_FOR_LOOKBACK_FROM:
+        raise ToolError('bad_args: lookback_from must be "lines" or "launch"')
+    if (
+        not isinstance(lookback_lines, int)
+        or isinstance(lookback_lines, bool)
+        or lookback_lines < 0
+        or lookback_lines > WAIT_FOR_LOOKBACK_MAX
+    ):
+        raise ToolError(
+            f"bad_args: lookback_lines must be in 0..{WAIT_FOR_LOOKBACK_MAX}"
+        )
+    # A poll longer than the lease window cannot promise the lease stays held.
+    if poll_interval_s > SESSION_TTL_S:
+        raise ToolError(
+            f"bad_args: poll_interval_s must be <= {SESSION_TTL_S:g} so each poll can renew"
+        )
+    token, lease_id = _held_lease(runtime)
+    session = _caller_session_id(runtime)
+    try:
+        runs = await _bound(_lifecycle_runs(runtime), deadline)
+    except (TimeoutError, asyncio.TimeoutError):
+        runs = None
+    if runs is None:
+        return _file_matches_timeout(
+            role, profile_file, started, 0, "", None, [], {}, set(), None
+        )
+    run = _one_owned_run(runs, session, lease_id)
+    run_id = run.get("run_id")
+    try:
+        profiles = await _thread_bounded(
+            lambda stop: _profiles_dir_for_role(run, role), deadline
+        )
+        root = Path(profiles)
+
+        def _check_parents(_stop: Any) -> None:
+            resolved = _profile_root(root)
+            _walk_profile_parent(resolved, parts)
+
+        await _thread_bounded(_check_parents, deadline)
+    except ToolError:
+        raise
+    except (TimeoutError, asyncio.TimeoutError):
+        return _file_matches_timeout(
+            role, profile_file, started, 0, "", None, [], {}, set(), None
+        )
+    caller_marker: log_tail.TailMarker | None = None
+    if marker is not None:
+        try:
+            decoded = log_tail.decode_marker(_coerce_logs_since_marker(marker))
+        except log_tail.LogTailError:
+            raise ToolError("bad_marker") from None
+        if len(decoded) != 1:
+            raise ToolError("bad_marker")
+        caller_marker = next(iter(decoded.values()))
+
+    probes = 0
+    observed: Any = ""
+    satisfied = False
+    file_marker: log_tail.TailMarker | None = None
+    seen_paths: list[str] = []
+    scanned_lines: dict[str, int] = {}
+    unreadable: set[str] = set()
+    primed = False
+    last_error: str | None = None
+    reader_alive: set[str] = set()
+
+    def _summary(path: str | None) -> dict[str, Any]:
+        report = _scanned_report(
+            seen_paths, scanned_lines, unreadable, "lines", False
+        )
+        report["role"] = role
+        report["profile_file"] = profile_file
+        if path is not None and path in unreadable:
+            report["unreadable"] = True
+        if reader_alive:
+            report["reader_alive_at_return"] = True
+        return report
+
+    while time.monotonic() < deadline:
+        async with _tool_lock_until(runtime, deadline) as held:
+            if not held:
+                last_error = _TOOL_LOCK_BUSY
+                break
+            if deadline - time.monotonic() <= 0.0:
+                break
+            probes += 1
+            try:
+                await _bound(
+                    _heartbeat_exact_lease(runtime, token, lease_id, deadline),
+                    deadline,
+                )
+                fresh_runs = await _bound(_lifecycle_runs(runtime), deadline)
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            fresh = _one_owned_run(fresh_runs, session, lease_id)
+            if fresh.get("run_id") != run_id:
+                raise ToolError("no_active_run")
+            # Every policy recheck shares the original deadline.
+            if deadline - time.monotonic() <= 0.0:
+                break
+            try:
+                unchanged = await _thread_bounded(
+                    lambda stop: _profiles_dir_for_role(fresh, role), deadline
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            if unchanged != profiles:
+                raise ToolError("profile_unresolved")
+        if time.monotonic() >= deadline:
+            break
+        try:
+            read = await _thread_bounded(
+                lambda stop: _read_contained_handle(
+                    root,
+                    parts,
+                    lookback_lines=lookback_lines,
+                    primed=primed,
+                    file_marker=file_marker,
+                    caller_marker=caller_marker,
+                    stop=stop,
+                ),
+                deadline,
+                reader_alive,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            break
+        if time.monotonic() >= deadline:
+            # The read finished late. Its match is not a success.
+            break
+        state = read.get("state")
+        if state == "missing":
+            primed = False
+            file_marker = None
+            observed = ""
+            satisfied = False
+        elif state == "unreadable":
+            path = str(read.get("path") or profile_file)
+            _record_scan([path], {}, seen_paths, scanned_lines, unreadable)
+            satisfied = False
+        else:
+            path = str(read["path"])
+            file_marker = read.get("marker")
+            primed = True
+            count = read.get("count")
+            counts = {path: count} if isinstance(count, int) else {}
+            _record_scan([path], counts, seen_paths, scanned_lines, unreadable)
+            lines = list(read.get("lines") or [])
+            matched = next((line for line in lines if pattern in line), None)
+            satisfied = matched is not None
+            observed = matched if matched is not None else (lines[-1] if lines else "")
+        if satisfied and time.monotonic() < deadline:
+            control = getattr(runtime, "_control", None)
+            if getattr(control, "active_lease_id", None) != lease_id:
+                raise ToolError("lease_expired")
+            try:
+                owned_runs = await _bound(_lifecycle_runs(runtime), deadline)
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            owned = _one_owned_run(owned_runs, session, lease_id)
+            if owned.get("run_id") != run_id:
+                raise ToolError("no_active_run")
+            try:
+                unchanged = await _thread_bounded(
+                    lambda stop: _profiles_dir_for_role(owned, role), deadline
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            if time.monotonic() >= deadline:
+                # Validation finished after the deadline: never a success.
+                break
+            if unchanged != profiles:
+                raise ToolError("profile_unresolved")
+            if getattr(control, "active_lease_id", None) != lease_id:
+                # The exact held lease is rechecked after the last await and
+                # immediately before success is accepted.
+                raise ToolError("lease_expired")
+            cursor = (
+                log_tail.encode_marker({file_marker.path: file_marker})
+                if file_marker is not None
+                else None
+            )
+            response = _wait_for_response(
+                condition="file_matches",
+                started=started,
+                probes=probes,
+                observed=observed,
+                satisfied=True,
+                scanned=_summary(file_marker.path if file_marker else None),
+            )
+            response["role"] = role
+            response["profile_file"] = profile_file
+            response["cursor"] = cursor
+            return response
+        satisfied = False
+        remaining_sleep = deadline - time.monotonic()
+        if remaining_sleep <= 0.0:
+            break
+        await asyncio.sleep(min(poll_interval_s, remaining_sleep))
+
+    return _file_matches_timeout(
+        role, profile_file, started, probes, observed, file_marker,
+        seen_paths, scanned_lines, unreadable, last_error, reader_alive,
+    )
+
+
 async def execute_wait_for(
     runtime: Any,
     condition: str,
@@ -2448,6 +3331,8 @@ async def execute_wait_for(
     lookback_from: str = "lines",
     marker: str | dict[str, Any] | None = None,
     entity: dict[str, Any] | None = None,
+    profile_file: str | None = None,
+    role: str = "server",
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
@@ -2468,7 +3353,7 @@ async def execute_wait_for(
     if condition not in WAIT_FOR_CONDITIONS:
         raise ToolError(
             "bad_args: condition must be one of "
-            "players_at_least, players_at_most, log_matches, entity_state"
+            "players_at_least, players_at_most, log_matches, entity_state, file_matches"
         )
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ToolError("bad_args: value must be a non-negative int")
@@ -2488,6 +3373,21 @@ async def execute_wait_for(
     if poll_value <= 0.0:
         raise ToolError("bad_args: poll_interval_s must be > 0")
     poll_interval_s = max(poll_value, WAIT_FOR_MIN_POLL_INTERVAL_S)
+    if condition == "file_matches":
+        started_file = time.monotonic()
+        return await _execute_file_matches(
+            runtime,
+            pattern=pattern,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            lookback_lines=lookback_lines,
+            lookback_from=lookback_from,
+            marker=marker,
+            profile_file=profile_file,
+            role=role,
+            started=started_file,
+            deadline=started_file + timeout_s,
+        )
     marker_state: dict[str, log_tail.TailMarker] | None = None
     if condition == "log_matches" and marker is not None:
         try:
@@ -2526,6 +3426,30 @@ async def execute_wait_for(
             return None
         return _scanned_report(
             seen_paths, scanned_lines, unreadable, scan_mode, scan_truncated
+        )
+
+    def _probe_timeout_at_deadline(message: str) -> dict[str, Any] | None:
+        """Structured timeout only for a recognised probe timeout past the deadline.
+
+        ``timeout waiting for`` is the probe budget from ``_await_result``.
+        Before the global deadline that message stays a tool error. Ownership,
+        version, authentication and ambiguous-response errors do not match
+        this prefix, so a late clock never rewrites them.
+        """
+        if not message.startswith("timeout waiting for"):
+            return None
+        now = time.monotonic()
+        if now < deadline:
+            return None
+        return _wait_for_response(
+            condition=condition,
+            started=started,
+            probes=probes,
+            observed=observed,
+            satisfied=False,
+            scanned=scan_summary(),
+            not_ready_probes=not_ready_probes,
+            last_error="probe_timeout",
         )
 
     if condition == "log_matches":
@@ -2604,7 +3528,15 @@ async def execute_wait_for(
             probes += 1
             if condition == "entity_state":
                 probe_timeout = min(DEFAULT_TOOL_TIMEOUT_S, remaining)
-                result = await runtime.call_bridge("telemetry_read", entity_args, "server", probe_timeout)
+                try:
+                    result = await runtime.call_bridge(
+                        "telemetry_read", entity_args, "server", probe_timeout
+                    )
+                except ToolError as exc:
+                    structured = _probe_timeout_at_deadline(str(exc))
+                    if structured is not None:
+                        return structured
+                    raise
                 not_ready = _structured_not_ready_message(result)
                 if not_ready is not None:
                     if not_ready not in _WAIT_FOR_RETRYABLE_NOT_READY:
@@ -2635,17 +3567,20 @@ async def execute_wait_for(
                         satisfied = False
                     elif message.startswith("timeout waiting for"):
                         # An accepted probe has its own (normally 15s) budget.
-                        # Keep its abort semantics, but do not claim the whole
-                        # wait expired when the caller still had time left.
+                        # Once the global deadline has passed, that recognised
+                        # timeout is a normal unsatisfied result. Earlier, keep
+                        # the abort: the caller still had time left.
+                        structured = _probe_timeout_at_deadline(message)
+                        if structured is not None:
+                            return structured
                         now = time.monotonic()
-                        outcome = "timed out" if now >= deadline else "aborted"
                         suffix = ""
                         if "; " in message:
                             # /status is peer-wide, not tied to this command or
                             # the caller's adopted run; old polls may survive.
                             suffix = "; station snapshot: " + message.split("; ", 1)[1]
                         raise ToolError(
-                            f"wait_for {outcome} waiting for {condition}; "
+                            f"wait_for aborted waiting for {condition}; "
                             f"reason=probe_timeout; elapsed_s={now - started:.3f}; "
                             f"timeout_s={timeout_s:g}; probe_timeout_s={probe_timeout:g}{suffix}"
                         ) from None
@@ -2828,6 +3763,87 @@ def _parse_client_start_budget_s(value: object) -> float | None:
             f"[0, {CLIENT_START_BUDGET_MAX_S:g}]"
         )
     return converted
+
+
+_ACTIVE_BOX_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
+)
+
+
+def _explicit_client_extension_row(
+    box: object,
+    *,
+    mode: object,
+    run_id: object,
+    project: object,
+    caller_session: str | None,
+) -> dict[str, Any] | None:
+    """The caller's own released run, when this call only replaces its client.
+
+    Prefix match selects the row. It does not authorise a process change:
+    adopt and start still require the daemon's full session id.
+    """
+
+    if mode != "client" or not isinstance(run_id, str) or not run_id:
+        return None
+    if not isinstance(project, str) or not project:
+        return None
+    row = _box_run(box, run_id)
+    if row is None or row.get("state") != "RUNNING_IDLE":
+        return None
+    if row.get("mod") != "@" + project:
+        return None
+    if not caller_launched_row(row, caller_session):
+        return None
+    return row
+
+
+def _client_extension_blocked(box: object, row: dict[str, Any]) -> bool:
+    """Other managed runs, foreign DayZ, unknown scans, and transitions.
+
+    The requested row itself is RUNNING_IDLE here. A protected ownerless run
+    is not this function's job: the launcher is the only caller who reached it.
+    """
+
+    if not isinstance(box, dict):
+        return True
+    if box.get("scan_known") is False or box.get("port_scan_known") is False:
+        return True
+    foreign = box.get("foreign")
+    if not isinstance(foreign, list) or foreign:
+        return True
+    runs = box.get("runs")
+    if not isinstance(runs, list):
+        return True
+    requested = row.get("run_id")
+    for item in runs:
+        if not isinstance(item, dict):
+            return True
+        if item.get("run_id") == requested:
+            continue
+        if item.get("state") in _ACTIVE_BOX_STATES:
+            return True
+    return False
+
+
+def _client_extension_exempt(
+    box: object,
+    *,
+    mode: object,
+    run_id: object,
+    project: object,
+    caller_session: str | None,
+) -> bool:
+    row = _explicit_client_extension_row(
+        box,
+        mode=mode,
+        run_id=run_id,
+        project=project,
+        caller_session=caller_session,
+    )
+    if row is None:
+        return False
+    return not _client_extension_blocked(box, row)
 
 
 def _failed_active_run_result(
@@ -3179,14 +4195,17 @@ def _annotate_mcp_fence(overlay: dict[str, Any]) -> None:
 def _lease_renewal_contract(ttl_s: float) -> str:
     """Lease TTL and how an interactive session keeps or loses it."""
     return (
-        "Calls that reach the box with this session's lease (bridge verbs "
-        "and probes such as players_* and entity_state, dayz_test_run, "
-        "dayz_test_stop) and session_heartbeat renew the lease; "
-        "session_status does not renew the lease. With no renewing call "
-        f"for longer than {ttl_s:g} s the lease expires; an adopted run "
-        "then becomes ownerless RUNNING_IDLE and the next client verb on "
-        "that run returns run_not_owned. session_heartbeat keeps the lease "
-        "across a longer pause."
+        "Bridge mutations that reach the box with this session's lease, "
+        "dayz_test_run, dayz_test_stop, and session_heartbeat renew the "
+        "lease. Pure reads do not, including players_* and entity_state "
+        "probes, camera and log reads. session_status does not renew. "
+        "wait_for(file_matches) is the exception: each poll renews by "
+        "session_heartbeat. With no renewing call for longer than "
+        f"{ttl_s:g} s the lease expires; an adopted run then becomes "
+        "ownerless RUNNING_IDLE and the next client verb on that run "
+        "returns run_not_owned. session_heartbeat keeps the lease across "
+        "a longer pause. An owner read renews only on a daemon that still "
+        "has the previous behaviour; this process does not."
     )
 
 
@@ -3315,6 +4334,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # StrictFloat still accepts JSON integers; optional None stays read/omit.
     intended_tool_names = tool_pack_mod.tool_names(config.tool_pack)
     runtime: Any = ClientRuntime(config) if config.mode == "client" else Runtime(config)
+    # Last camera_set of this process only: outcome plus the run/generation
+    # context observed with it. camera_set, restore_gameplay and capture all
+    # mutate it under runtime.tool_lock. A held lease is not a pose.
+    _camera_attempt: dict[str, Any] = {"attempt": None}
 
     @asynccontextmanager
     async def lifespan(_app: FastMCP):
@@ -3354,8 +4377,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "does not miss a ~200ms response. action_use: held item is the "
             "ItemBase in the local player's hands (null if empty); world "
             "targets use componentIndex=-1 unless door_index targets one door "
-            "of a Building (then that door's view-geometry component); "
-            "classname is exact GetType()."
+            "of a Building (then that door's view-geometry component), or "
+            "component_index and cursor_pos select one world component through "
+            "action_use_component; classname is exact GetType()."
         ),
         lifespan=lifespan,
     )
@@ -3572,6 +4596,43 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             await _attach_revalidated_runs_retired_recently(client, status)
             return _with_ok_next_step(status, "session_status")
 
+    @app.tool(
+        name=LEASE_TTL_OBSERVE_TOOL,
+        description=(
+            "Internal. Reads the caller's lease TTL through ControlClient.session_status "
+            "and does not start a daemon. Not part of the public catalog."
+        ),
+    )
+    async def lease_ttl_observe() -> dict[str, Any]:
+        client = _client_runtime()
+        control = getattr(client, "_control", None)
+        status_fn = getattr(control, "session_status", None)
+        if not callable(status_fn):
+            raise ToolError("daemon_unavailable")
+        try:
+            status = status_fn(timeout_s=LEASE_TTL_OBSERVE_S)
+        except TypeError:
+            status = status_fn()
+        if inspect.isawaitable(status):
+            status = await status
+        if not isinstance(status, dict):
+            raise ToolError("daemon_unavailable")
+        return status
+
+    @app.tool(
+        name=LEASE_LOCAL_TOOL,
+        description=(
+            "Internal. Reports this process's local lease id without calling the daemon."
+        ),
+    )
+    async def lease_local_observe() -> dict[str, Any]:
+        client = _client_runtime()
+        control = getattr(client, "_control", None)
+        lease_id = getattr(control, "active_lease_id", None)
+        if not isinstance(lease_id, str) or not lease_id:
+            lease_id = None
+        return {"local_lease_id": lease_id}
+
     async def report_dayz_progress(
         ctx: Context | None, stage: str, message: str | None
     ) -> None:
@@ -3653,7 +4714,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "session did not launch is run_protected until use_state is "
             "abandoned; takeover=true does not evict it. Abandoned, or the "
             "session that launched it, stays takeover_required unless "
-            "takeover=true. "
+            "takeover=true, except an explicit mode=client with that run_id, "
+            "a matching project and RUNNING_IDLE: that call replaces only the "
+            "client and does not stop the server. A public session prefix "
+            "may select this path; the daemon authorises the process change "
+            "with the full session id. A client that is still polling is "
+            "client_already_polling. "
             "port_scan_unknown means the daemon could not read the socket "
             "table: fix the host, waiting does not help. "
             f"0 is the immediate reject. wait_for_box_s must be <= "
@@ -3667,6 +4733,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the launch, so a client whose own tool-call timeout is shorter "
             "(Antigravity CLI cuts MCP calls at 180 s) must pass a smaller "
             "wait_for_box_s and repeat the call. "
+            "preflight=true checks the request, the sealed launcher, mods, the "
+            "mission and VPP, and the Steam session when the mode starts a "
+            "client, without taking the box or repairing Steam. box_busy and "
+            "occupied_by_run_id are advisory: a busy box does not pass a bad "
+            "request, and preflight success is not a free box or a future "
+            "launch. project_mod_override=true drops the implicit project "
+            "folder from -mod= in favour of a caller candidate and reports "
+            "project_mod_replaced; that flag does not prove the candidate "
+            "initialized. Launch success has no project-attestation meaning "
+            "unless the project policy enables attestation, and attestation "
+            "success does not prove feature acceptance. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
@@ -3693,6 +4770,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         auto_remediate_steam: StrictBool = False,
         navmesh_data_server: StrictBool = False,
         takeover: StrictBool = False,
+        project_mod_override: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
         ctx: Context | None = None,
@@ -3790,6 +4868,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         progress_cb=report,
                         auto_remediate_steam=auto_remediate_steam,
                         client_start_budget_s=budget_s,
+                        project_mod_override=project_mod_override,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
@@ -3803,6 +4882,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_run", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+
+        if preflight:
+            # After argument checks, before the box FIFO, takeover or any
+            # lease release. execute_dayz_test_run(preflight=True) does not
+            # acquire a lease. Occupancy is advisory.
+            preflight_error, preflight_result = await execute(
+                {"build": build, "clean": clean, "pack_only": pack_only}
+            )
+            if preflight_error is not None:
+                raise ToolError(preflight_error.code) from None
+            if not isinstance(preflight_result, dict):
+                raise ToolError("dayz_test_failed:RuntimeError")
+            return annotated(preflight_result)
 
         # inbox 3997: the sealed request builds when build or clean is set.
         built = bool(build or clean)
@@ -3838,12 +4930,28 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             # A box that was already busy keeps the answer it always had.
             return refused
 
+        def extension_exempt(box: object) -> bool:
+            return _client_extension_exempt(
+                box,
+                mode=mode,
+                run_id=run_id,
+                project=project,
+                caller_session=caller_session,
+            )
+
         try:
             if on_busy == "queue":
                 peeked = await peek_box()
                 cannot = _box_wait_cannot_help(
                     peeked, caller_session=caller_session, port=port
                 )
+                if (
+                    cannot in {"own_run", "adopt"}
+                    and extension_exempt(peeked)
+                ):
+                    # This call extends the caller's own run. The FIFO is for
+                    # a fresh launch, and adopt is the lease, not a refusal.
+                    cannot = None
                 if cannot is not None:
                     failed = _failed_active_run_result(
                         project=project,
@@ -3858,7 +4966,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     if cannot in {"own_run", "adopt"}:
                         failed["reason"] = cannot
                     return annotated(failed)
-            if on_busy == "queue" or wait_s > 0.0:
+            elif wait_s > 0.0:
+                # Same admission as queue, before the box is asked to go free.
+                # session_box_status is the wait's own read, without joining.
+                async with client.tool_lock:
+                    peeked_status = await client.session_box_status()
+                peeked = _box_from_status(
+                    peeked_status if isinstance(peeked_status, dict) else {}
+                )
+            # An eligible client extension does not wait out the server it keeps.
+            skip_box_wait = extension_exempt(peeked) if wait_s > 0.0 or on_busy == "queue" else False
+            if not skip_box_wait and (on_busy == "queue" or wait_s > 0.0):
                 await report("queued", "waiting for box")
                 wait_budget = wait_s
                 abort = None
@@ -3867,9 +4985,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     session_for_wait = caller_session
 
                     def abort(box: dict[str, Any]) -> object:
-                        return _box_wait_cannot_help(
+                        reason = _box_wait_cannot_help(
                             box, caller_session=session_for_wait, port=port
                         )
+                        if (
+                            reason in {"own_run", "adopt"}
+                            and extension_exempt(box)
+                        ):
+                            return None
+                        return reason
 
                 box_wait_deadline = clock() + wait_budget
                 waited = await execute_wait_for_box(
@@ -3913,6 +5037,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 target = takeover_target_run_id(
                     box, caller_session=caller_session
                 )
+                # Fresh launches keep takeover_target_run_id. An explicit
+                # client extension exempts only the requested row, and only
+                # after the same blockers the queue checked.
+                if target is not None and extension_exempt(box) and target == run_id:
+                    target = None
                 if target is not None and _row_is_protected(
                     _box_run(box, target), caller_session
                 ):
@@ -4265,17 +5394,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         runs = [item for item in (status.get("runs") or []) if isinstance(item, dict)]
         if run_id is not None:
             runs = [item for item in runs if item.get("run_id") == run_id]
-        candidates = sorted(
-            {str(item.get("profiles")) for item in runs if item.get("profiles")}
-        )
+        candidates = [
+            item.get("profiles") for item in runs if item.get("profiles")
+        ]
         if not candidates:
             raise ToolError("no_active_run")
-        allowed = [
-            item for item in candidates if log_tail.is_allowed_profiles_dir(item)
-        ]
-        if not allowed:
+        profiles = _profile_dirs_from_runs(runs)
+        if not profiles:
             raise ToolError("bad_profiles")
-        profiles = _sibling_profile_dirs(allowed)
         start_epoch = _run_start_epoch(runs)
 
         files: list[dict[str, Any]] = []
@@ -4391,9 +5517,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Delete an object "
-            "previously returned by world_spawn.object_id. object_id is "
-            "session-scoped and does not survive the run — keep the spawn id "
-            "in this session; there is no pos+type delete. Spawn with "
+            "previously returned by world_spawn.object_id, "
+            "inventory_attach.item_object_id, inventory_give.object_id or "
+            "object_resolve.object_id. object_id is "
+            "session-scoped and does not survive the run — keep that id "
+            "in this session; there is no pos+type delete. "
+            "inventory_attach's top-level object_id is the destination owner; "
+            "deleting it deletes that owner. The worn or cargo item is "
+            "inventory_attach.item_object_id, and only that id removes the item. "
+            "Spawn with "
             "ECE_NOPERSISTENCY_WORLD so the object is not saved into a later "
             "run. Deleting a seated "
             "transport after vehicle_get_in_client needs care (sanctioned "
@@ -4416,6 +5548,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Register one existing world object of exact "
+            "type within radius metres of pos. radius is finite and in "
+            "(0, 50]. Zero matches is object_not_found; two or more is "
+            "ambiguous_object. An object already registered keeps that "
+            "same-run id; otherwise the id is this command's id. The reply "
+            "is object_id, type and pos_real. object_delete of that id "
+            "deletes the object. This does not pick a nearest neighbour."
+        )
+    )
+    async def object_resolve(
+        type: StrictStr,
+        pos: list[StrictFloat],
+        radius: StrictFloat,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(type, str) or type == "":
+            raise ToolError(_bad_args("type", type, "be a non-empty string"))
+        radius_error = _bad_args("radius", radius, "be a finite number in (0, 50]")
+        radius_value = _finite_float(radius, radius_error)
+        if radius_value <= 0.0 or radius_value > 50.0:
+            raise ToolError(radius_error)
+        args = {"type": type, "pos": _require_vec3(pos, "pos"), "radius": radius_value}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "object_resolve", args, "server", _timeout(timeout_s)
+            )
 
     @app.tool(
         description=(
@@ -4511,7 +5672,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Raycast through the server bridge using from/to world positions. "
-            "Public arg is from (alias of from_pos)."
+            "Public arg is from (alias of from_pos). "
+            "With method='rvproxy', a requested radius=0 currently runs with an "
+            "effective radius of 0.05 m (the bridge initializes the radius at "
+            "0.05 and replaces it only when the requested value is positive); "
+            "positive values pass through. "
+            "pos is the engine-returned position copied without contact-point "
+            "reconstruction: no universal sphere-centre or contact-point "
+            "semantics are established (vanilla names it a collision position). "
+            "With method='bullet', the implementation performs a raycast and "
+            "does not use radius. "
+            "A reported floor experiment suggested a sweep-centre offset for "
+            "that geometry; that interpretation is not promised for all "
+            "surfaces, and engine measurements are required before any "
+            "contact_pos addition."
         )
     )
     async def scene_raycast(
@@ -4762,7 +5936,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "occupant_client_seated precheck calls client vehicle_telemetry "
             "only when that peer is probing; without a client peer it is "
             "skipped (fail open to on-foot teleport) and Enforce still refuses "
-            "a seated occupant."
+            "a seated occupant. The reply's pos_real is the server-side "
+            "position assignment (SetPosition); the assignment does not attest "
+            "that the client's physics have settled at that position or that a "
+            "moving floor keeps carrying the player — a teleport onto a moving "
+            "platform was reported to leave the player at constant height, "
+            "unattached to the floor (reported, not reproduced). There is no "
+            "settle operation: to provoke settlement, walk with player_move, "
+            "which drives the local on-foot player only (a uid target is out "
+            'of its reach): player_move(speed="walk", phase="hold", hold_s=1) '
+            "requests real movement for about a second and can change the "
+            "position; it does not guarantee displacement or settlement, and "
+            "no zero-speed hold exists."
         )
     )
     async def player_teleport(
@@ -4888,12 +6073,106 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_godmode", args, "server", _timeout(timeout_s))
 
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Kill one connected player on the server by "
+            "PlayerIdentity.GetPlainId(). uid is required and never falls back "
+            "to the first human. The body is killed with SetHealth(0), the same "
+            "primitive the vanilla emote kill uses, so the normal death path "
+            "runs. A body in godmode is released for that hit; the identity's "
+            "remembered godmode choice is not changed and still applies on "
+            "player_respawn. This does not respawn. The answer is player_kill: "
+            "uid, health_before, health_after, alive_before, alive_after, "
+            "killed, godmode_policy_preserved. Success means that body is dead "
+            "with health at zero. The client death screen and the new character "
+            "are separate. Errors: bad_args, player_not_found, no_identity, "
+            "player_dead, kill_not_applied. A timeout means the outcome is "
+            "unknown; read the player before trying again."
+        )
+    )
+    async def player_kill(
+        uid: StrictStr,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(uid, str) or uid == "":
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        args = {"uid": uid}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("player_kill", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Start one debug-bot action on a survivor dummy "
+            "this bridge spawned with world_spawn. object_id is that registry "
+            "id. The dummy must be a living PlayerBase with no connected "
+            "identity. action is one of the 1.30 debug transitions "
+            "(PLAYER_BOT_RANDOMIZE_STANCE, PLAYER_BOT_RANDOMIZE_MOVEMENT, "
+            "PLAYER_BOT_SPAM_USER_ACTIONS, "
+            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
+            "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN, PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT, PLAYER_BOT_TEST_SWAP_G2H, "
+            "PLAYER_BOT_TEST_SWAP_INTERNAL). ttl_s is how long the server keeps "
+            "it running, from just above 0 to 30 seconds, default 5. A second "
+            "start while one is active is bot_busy. On 1.29, and on a 1.30 "
+            "build without the bot macros, the answer is bot_unavailable and "
+            "nothing is initialized. The answer is bot: object_id, action, "
+            "started, ttl_s. started means the bot FSM accepted the transition, "
+            "not that the action's effect happened. Errors: bad_args, "
+            "bot_unavailable, object_not_found, not_dummy_player, player_dead, "
+            "bot_busy, bot_action_rejected."
+        )
+    )
+    async def bot_start(
+        object_id: StrictInt,
+        action: str,
+        ttl_s: StrictFloat = 5.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        if not isinstance(action, str) or action not in BOT_START_ACTIONS:
+            raise ToolError(
+                _bad_args("action", action, "be one of the debug-bot action names")
+            )
+        if isinstance(ttl_s, bool) or not isinstance(ttl_s, (int, float)):
+            raise ToolError(_bad_args("ttl_s", ttl_s, "be a number of seconds"))
+        ttl_value = float(ttl_s)
+        if ttl_value != ttl_value or ttl_value <= 0.0 or ttl_value > BOT_TTL_MAX_S:
+            raise ToolError(
+                _bad_args("ttl_s", ttl_s, "be a finite number of seconds in (0, 30]")
+            )
+        args = {"object_id": object_id, "action": action, "bot_ttl_s": ttl_value}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("bot_start", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Stop the debug-bot action on a world_spawn "
+            "dummy, if one is running. An initialized idle dummy answers "
+            "success with stopped false. On 1.29 the answer is bot_unavailable "
+            "and nothing is initialized. The answer is bot: object_id, stopped, "
+            "released_by. Errors: bad_args, bot_unavailable, object_not_found, "
+            "not_dummy_player, player_dead."
+        )
+    )
+    async def bot_stop(
+        object_id: StrictInt,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        args = {"object_id": object_id}
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("bot_stop", args, "server", _timeout(timeout_s))
+
     # Read or write entity animation phase.
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
             "Read or set an entity animation phase. Target by object_id (as "
-            "returned by world_spawn; position-independent, reaches a "
+            "returned by world_spawn or by inventory_attach.item_object_id; "
+            "position-independent, reaches a "
             "client-authoritative fixture whose server replica sits at spawn) "
             "or by classname near pos. phase is a unitless value; the write "
             "uses SetAnimationPhaseNow. The returned phase is the same-tick "
@@ -4945,7 +6224,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "object_anim uses. mode=read changes nothing. source is the car's "
             "door animation source, the name object_anim takes (CivilianSedan: "
             "DoorsDriver, DoorsCoDriver, DoorsCargo1, DoorsCargo2, DoorsHood, "
-            "DoorsTrunk). Target by object_id (world_spawn) or by classname "
+            "DoorsTrunk). Target by object_id (world_spawn or "
+            "inventory_attach.item_object_id) or by classname "
             "near pos. The door part must be attached: door_missing names the "
             "empty slot of a crew door (vehicle_prepare_fixture or "
             "inventory_attach fills it), and door_not_found means no attached "
@@ -5040,9 +6320,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Requires a lease (session_acquire_wait). Spawn classname "
-            "into a player's inventory via CreateInInventory. dest is 'hands' "
-            "or 'inventory'. uid empty (default) targets the first human; a "
-            "non-empty uid selects by PlayerIdentity.GetPlainId()."
+            "into a player's inventory via CreateInInventory, or into the "
+            "hands via CreateInHands. dest is 'hands' or 'inventory'. "
+            "Success returns object_id, the created item's same-run registry "
+            "id, for both dests. hands_take and object_delete take that id. "
+            "uid empty (default) targets the first human; a non-empty uid "
+            "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
+            "success without a positive object_id still created the item: "
+            "the receipt is returned with object_id_unavailable true. Do not "
+            "retry that call; a second give creates another item."
         )
     )
     async def inventory_give(
@@ -5065,14 +6351,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if uid != "":
             args["uid"] = uid
         async with runtime.tool_lock:
-            return await runtime.call_bridge("inventory_give", args, "server", _timeout(timeout_s))
+            result = await runtime.call_bridge(
+                "inventory_give", args, "server", _timeout(timeout_s)
+            )
+        return _require_inventory_give_id(result)
 
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
             "Put a reachable item into a player's hands via "
-            "PredictiveTakeEntityToHands. object_id is the world_spawn id "
-            "(inventory_give does not return one). The take is predictive and "
+            "PredictiveTakeEntityToHands. object_id is a same-run registry id "
+            "from world_spawn.object_id, inventory_attach.item_object_id or "
+            "inventory_give.object_id. The take is predictive and "
             "asynchronous: accepted=true with confirmed=false means the server "
             "accepted the request, not that the item is in hands yet. Confirm "
             "with weapon_state. uid empty (default) targets the first human. "
@@ -5106,9 +6396,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Weapon_Base.EEFired on the server only, after super, and is not "
             "a replicated variable. Empty hands or a non-weapon is a completed "
             "read: ok=true, found=false, error=no_weapon_in_hands, and type "
-            "is set when a non-weapon is held. object_id is the world_spawn "
-            "id of the object actually held, or 0 when that object was not "
-            "spawned by world_spawn. uid empty (default) targets the first "
+            "is set when a non-weapon is held. object_id is the same-run registry "
+            "id of the object actually held (world_spawn or inventory_attach), "
+            "or 0 when that object was not registered. uid empty (default) targets the first "
             "human. Confirm a hands_take by comparing object_id with the "
             "requested id."
         )
@@ -5250,6 +6540,63 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "weapon_sights", {"mode": mode}, "client", _timeout(timeout_s)
             )
 
+    def _require_inventory_give_id(result: dict[str, Any]) -> dict[str, Any]:
+        # The bridge has already created the item when ok is true. Raising
+        # would hide that and a retry would create a second item. An older
+        # PBO answers success with no positive object_id. Keep the receipt.
+        if not isinstance(result, dict):
+            return result
+        ok = result.get("ok")
+        if ok is not True and ok != 1:
+            return result
+        object_id = result.get("object_id")
+        if (
+            isinstance(object_id, int)
+            and not isinstance(object_id, bool)
+            and object_id > 0
+        ):
+            return result
+        reported = dict(result)
+        reported["object_id_unavailable"] = True
+        reported["detail"] = (
+            "object_id_unavailable: the item was created and this receipt "
+            "is that creation. No positive object_id was returned. Do not "
+            "retry this call: a second give creates another item."
+        )
+        return reported
+
+    def _require_inventory_attach_child(result: dict[str, Any]) -> dict[str, Any]:
+        # The bridge has already created the item by the time this runs.
+        # Raising would hide that mutation and make a retry create a second
+        # item (cargo) or hit slot_occupied (attachment). Version, command
+        # census and the arg-contract hash do not change with this reply
+        # field, so an older PBO cannot be refused before enqueue.
+        # Keep the receipt. Say the item exists and has no removable child id.
+        receipt = result.get("inventory_attach") if isinstance(result, dict) else None
+        item_id = receipt.get("item_object_id") if isinstance(receipt, dict) else None
+        owner_id = result.get("object_id") if isinstance(result, dict) else None
+        owner_set = (
+            isinstance(owner_id, int) and not isinstance(owner_id, bool) and owner_id > 0
+        )
+        child_ok = (
+            isinstance(item_id, int)
+            and not isinstance(item_id, bool)
+            and item_id > 0
+            and not (owner_set and item_id == owner_id)
+        )
+        if child_ok:
+            return result
+        reported = dict(result)
+        reported["item_object_id_unavailable"] = True
+        reported["detail"] = (
+            "item_object_id_unavailable: the item was created and this receipt "
+            "is that creation. No removable child id was returned, so "
+            "object_delete of object_id would delete the destination owner. "
+            "Do not retry this call: a second cargo create adds another item "
+            "and a second attachment hits slot_occupied."
+        )
+        return reported
+
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} "
@@ -5257,7 +6604,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "unique type+pos. dest='attachment' requires a non-empty slot and "
             "uses CreateAttachmentEx; dest='cargo' requires slot to be omitted. "
             "Success returns the destination receipt plus an immediate inventory "
-            "snapshot; object_inspect(want=['inventory']) can re-read it."
+            "snapshot; object_inspect(want=['inventory']) can re-read it. "
+            "The top-level object_id stays the destination owner. "
+            "inventory_attach.item_object_id is the created item's same-run "
+            "registry id (this command's id). object_delete of that child id "
+            "removes the worn or cargo item and leaves the owner. Both ids "
+            "die with the run. A PBO that omits item_object_id still created "
+            "the item: the receipt is returned with "
+            "item_object_id_unavailable true. object_id is the owner and "
+            "must not be deleted to remove the item, and the call must not "
+            "be retried."
         )
     )
     async def inventory_attach(
@@ -5292,15 +6648,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["slot"] = slot
         args.update(_object_target_args(type, pos, object_id))
         async with runtime.tool_lock:
-            return await runtime.call_bridge(
+            result = await runtime.call_bridge(
                 "inventory_attach", args, "server", _timeout(timeout_s)
             )
+        return _require_inventory_attach_child(result)
 
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
         description=(
             "Inspect an object: memory points (exists+pos) and optional "
-            "bounding_center. Target by object_id (from world_spawn) or by "
+            "bounding_center. Target by object_id (from world_spawn or from "
+            "inventory_attach.item_object_id; that id is the created item, "
+            "not the destination owner, and lasts this run only) or by "
             "classname near pos. Absent memory points return exists:false "
             "with ok:true."
         )
@@ -5341,7 +6700,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # the door was closed; the lateral ray hit component 2 only while it was open.
     @app.tool(
         description=(
-            "Read Building door state. Target by object_id (from world_spawn) "
+            "Read Building door state. Target by object_id (from world_spawn or "
+            "inventory_attach.item_object_id) "
             "or by classname near pos, the same lookup object_inspect uses. "
             "Returns door_count and, per door index, open, opening, "
             "opening_ajar, opened, ajar, closing, closed and locked. These are "
@@ -5648,8 +7008,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "matrix (cam_matrix of 12), free (cam_pos, then look_at or cam_orientation). "
         "cam_orientation is [yaw, pitch, roll] in degrees. fov is the FOV angle "
         "in radians; 0 leaves the current/default FOV unchanged. "
+        "A successful apply echoes the value the setter path received as "
+        "top-level fov_applied in radians (fov=0 reports null): that echo is "
+        "not a native readback and does not guarantee the observed optical "
+        "projection. The engine default the owner measured is approximately "
+        "68.5 degrees vertical at 1920×1080 (owner-provided measurement, "
+        "run 8834df0e, 2026-10-04); fov=0 keeps the current FOV and does not "
+        "guarantee resetting to that measured default, the singleton free "
+        "camera included. "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
-        "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV). "
+        "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV): "
+        "settle_ticks * 0.05 seconds, and 0 keeps the default of three ticks (0.15 s). "
+        "settle_ticks must be an integer from 0 to 600. timeout_s has to cover that "
+        "settle plus bridge processing and transport. A timeout does not prove the "
+        "camera was not applied; the job may already have moved it. "
         "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
     ))
     async def camera_set(
@@ -5697,9 +7069,69 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if fov_value < 0.0:
             raise ToolError(fov_error)
         args["fov"] = fov_value
-        args["settle_ticks"] = int(settle_ticks)
+        # 0 is the wire's absent integer and means the bridge default of three
+        # ticks. Above 600 the job would outlive every bound this call publishes.
+        if (
+            isinstance(settle_ticks, bool)
+            or not isinstance(settle_ticks, int)
+            or not 0 <= settle_ticks <= 600
+        ):
+            raise ToolError(
+                "bad_args: settle_ticks must be an integer from 0 to 600 "
+                "(0 keeps the default of three ticks; each tick is 0.05 s)"
+            )
+        args["settle_ticks"] = settle_ticks
         async with runtime.tool_lock:
-            return await runtime.call_bridge("camera_set", args, "client", _timeout(timeout_s))
+            result: dict[str, Any] | None = None
+            failed = False
+            reason: str | None = None
+            try:
+                result = await runtime.call_bridge(
+                    "camera_set", args, "client", _timeout(timeout_s)
+                )
+            except Exception as exc:
+                failed = True
+                reason = _camera_failure_reason(exc)
+                raise
+            except BaseException:
+                # CancelledError is not an Exception. Only a returned success
+                # marks the attempt successful; cancellation still propagates.
+                failed = True
+                reason = "cancelled"
+                raise
+            else:
+                if _camera_result_failed(result):
+                    failed = True
+                    reason = _camera_failure_reason(result)
+            finally:
+                # Same lock as capture. Record the outcome before the lifecycle
+                # await: a cancellation at that await must not skip the slot
+                # or leave the previous attempt looking successful.
+                # An unreadable lifecycle read is a missing context, not a
+                # run change and not an expiry.
+                _camera_attempt["attempt"] = {
+                    "failed": failed,
+                    "reason": reason,
+                    "context": None,
+                }
+                try:
+                    status = await _read_run_status_no_spawn(runtime)
+                except Exception:
+                    status = None
+                _camera_attempt["attempt"]["context"] = _camera_run_context(status)
+        # 983a: the wire has no FOV getter (Camera.GetCurrentFOV froze the
+        # render, MCPClientBridge.c:4773-4776), so fov_applied echoes the
+        # validated value this call submitted, never a native readback. The
+        # bridge reaches SetFOV only on a successful apply
+        # (MCPClientBridge.c:5417/:5461) and its report still snapshots the
+        # camera, so an apply that failed, timed out, or left an illegible
+        # camera observation claims nothing. fov=0 sent no SetFOV at all: an
+        # explicit null, not the owner-measured engine default (the ~68.5
+        # degree vertical value documented above, never read back here).
+        camera_observation = result.get("camera")
+        if result.get("ok") and isinstance(camera_observation, dict) and camera_observation.get("ok"):
+            result["fov_applied"] = fov_value if fov_value > 0.0 else None
+        return result
 
     @app.tool(description=(
         "Read the client camera through camera_get. Observable trichotomy "
@@ -5747,6 +7179,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             timeout = _timeout(timeout_s)
             result = await runtime.call_bridge("restore_gameplay", {}, "client", timeout)
+            # The bridge accepted the restore, so the last camera_set no longer
+            # describes the view. A rejection before that call keeps the attempt.
+            _camera_attempt["attempt"] = None
             try:
                 probe = await runtime.call_bridge(
                     RESTORE_CAMERA_PROBE_CMD, {"cam_mode": "get"}, "client", timeout
@@ -5815,7 +7250,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Deliver one non-negative DIK code to "
         "Mission.OnKeyPress on the client (ESC is dik=1). This is a mission "
-        "callback, not OS input, key-up, hold, or respawn."
+        "callback, not OS input, key-up, hold, or respawn. key_press reaches "
+        "the mission handler only; for game-level key handlers "
+        "(DayZGame.OnKeyPress/OnKeyRelease) use "
+        'input_trigger(kind="key", dik=1, entry="game", phase="click") '
+        "instead. A delivered callback is not confirmation that the intended "
+        "UI effect happened (an open menu, for example); verify the result "
+        "with ui_tree."
     ))
     async def key_press(
         dik: StrictInt,
@@ -6047,12 +7488,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "for optical zoom set a narrow fov in radians via camera_set first. fmt='webp' is ~15% smaller (opt-in; Claude Code has known webp MIME bugs, JPEG stays default). "
         "The result is ALWAYS two blocks: the image, then a JSON text block with the surface map (crop_space, window_surface, client_surface, effective_surface, frame_sha256, frame_stale, frame_stale_detail, fullres_path). "
         "crop_space='client' (default) normalizes crop over the rendered viewport (the space ui_tree rects use) and fails closed with frame_client_rect_unverified; 'window' is the legacy whole-window bitmap. save_fullres=True also writes the "
-        "native-resolution frame to disk and reports its path as fullres_path — read that file for "
-        "fine detail, bypassing the inline token budget. Capture never steals OS focus "
+        "native-resolution effective_surface to disk and reports its path as fullres_path: the file is the frame after client-area selection and cropping, before inline downscaling, so the effective_surface dimensions — not the whole window's — apply to the file; read that file for "
+        "fine detail in effective_surface coordinates, bypassing the inline token budget. Capture never steals OS focus "
         "(PrintWindow, then CopyFromScreen; no SetForegroundWindow) because focus theft "
         "has killed the live client (ficha 8f76). "
         "session_locked means the Windows session is locked: both window-grab backends need the interactive desktop, retrying does not help until the session is unlocked, so unattended runs must keep it unlocked. "
         "dayz_test_run waits up to 30 s for an unlocked non-black host desktop before launching a client (session_locked / desktop_all_black / desktop_probe_timeout / desktop_probe_failed) so a capture tandem does not burn runs only to return frame_client_all_black. Non-Windows desktop_probe_unsupported does not block. "
+        "The preflight is a point-in-time check of current desktop accessibility and brightness: it neither keeps the display awake nor guarantees later client captures (a report links a display that entered power-save after the probe to frame_client_all_black; that cause is not reproduced). "
         "An unfocused DayZDiag client renders at about 20 fps, so client-side timing depends on which window owns the foreground. "
         "Without window focus, the frame can be frozen: frame_stale (bool | null) declares it. true means these "
         "pixels repeat the previous capture of the same window, false that the render advanced, and null that no comparison was possible (first capture, an "
@@ -6060,6 +7502,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "previous_sha256, age_s, repeat_count, key_kind and state_backend, plus the intra-call frames, distinct_frames and max_adjacent_delta, which need no "
         "stored state and are therefore there on the very first capture. A repeated frame is a fact about pixels, not an error: a paused sim, an open menu "
         "and a still scene all produce it legitimately. "
+        "A request above 5 frames is captured as 5. The frame evidence then records requested_frames, effective_frames, frame_limit (5) and limit_reason frame_limit, and the published metadata warns frames_capped. A request of 1 to 5 frames keeps that count and carries no frames_capped warning; a request below 1 is captured as 1 frame. "
         "With a live simulation and a position that advances, frames>=2 (default frames=4) "
         f"with max_adjacent_delta below {mcp_capture.RENDER_FROZEN_DELTA_EPS:g} is a frozen-render signal, not a "
         "process hang, even when distinct_frames is above 1 (a render frozen on its last frame measured "
@@ -6098,16 +7541,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # (process_lifecycle.py:1365-1372) and a DayZDiag window can be owned by
         # a different process (mcp_capture.py:330, mcp-grab.ps1:28-30). With no
         # live run both stay empty and capture behaves exactly as before.
-        cmdline_match = ""
-        client_pid = 0
-        status_fn = getattr(runtime, "lifecycle_status", None)
-        if status_fn is not None:
-            try:
-                status = status_fn()
-                if asyncio.iscoroutine(status):
-                    status = await status
-            except Exception:
-                status = None      # fail-open: a capture beats no capture
+        # Lifecycle, the grab, and the camera-attempt note share tool_lock with
+        # camera_set so a rejected set cannot land between the picture and the warning.
+        async with runtime.tool_lock:
+            cmdline_match = ""
+            client_pid = 0
+            # Bounded control read. runtime.lifecycle_status lazy-spawns in
+            # client mode; capture must not recover a daemon.
+            status = await _read_run_status_no_spawn(runtime)
             if isinstance(status, dict):
                 runs = [
                     item
@@ -6131,7 +7572,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             break
                     if client_pid:
                         break
-        async with runtime.tool_lock:
             result = await asyncio.to_thread(
                 mcp_capture.capture_dual,
                 scale=scale,
@@ -6147,6 +7587,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 save_fullres=save_fullres,
                 save_dir=save_dir,
             )
+            camera_note = None
+            if not result.get("isError"):
+                # Existing bounded session_status read. It does not renew, and
+                # an unreadable body stays unknown rather than expired.
+                presence = await observe_caller_presence(runtime)
+                camera_note = _camera_note_for_capture(
+                    _camera_attempt, status, presence
+                )
         if result.get("isError"):
             raise ToolError(
                 _wire_safe_error(
@@ -6164,6 +7612,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         image_format = _image_format_from_mime(inline.get("mimeType"))
         image = Image(data=raw, format=image_format)
         meta = {"fullres_path": result.get("fullres_path"), **result.get("meta", {})}
+        _attach_camera_unverified(meta, camera_note)
         return [image, json.dumps(meta)]
 
     if config.enable_exec_enforce:
@@ -6289,7 +7738,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_control", args, "client", _timeout(timeout_s))
 
-    @app.tool(description="Read owner-side vehicle telemetry (speed, gear, engine, pos, ownership).")
+    @app.tool(
+        description=(
+            "Read owner-side vehicle telemetry (speed, gear, engine, pos, "
+            "ownership). direction is the seated transport's GetDirection as "
+            "[x, y, z], the same vector vehicle_trace stores. It is omitted "
+            "when the player is not in a transport."
+        )
+    )
     async def vehicle_telemetry(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))
@@ -6721,7 +8177,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "Routes to MCPClientBridge on the CLIENT and calls "
         "ActionManagerClient.PerformActionStart with the held item. Without "
         "door_index the synthetic target uses component=-1. With door_index "
-        "the target uses the view-geometry component of that door. This enters the normal client action "
+        "the target uses the view-geometry component of that door. "
+        "component_index and cursor_pos together select one world component "
+        "without scanning: both are required, the target stays world, and "
+        "they are mutually exclusive with door_index. component_index is an "
+        "int from 0 through 2147483647, including values above 511. The call "
+        "needs an addon that announces action_use_component and otherwise "
+        "returns component_not_supported without calling the bridge. A result "
+        "that does not echo the same component_index is component_not_supported. "
+        "An index the object does not have is component_not_found. cursor_pos "
+        "is the world-space hit passed to the action; the selection centre is "
+        "not substituted. This enters the normal client action "
         "lifecycle, including client callbacks such as OnStartClient and, for "
         "AnimatedActionBase when its execution animation event arrives, "
         "OnExecuteClient; client-only mod code compiled under #ifndef SERVER "
@@ -6746,6 +8212,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         radius: StrictFloat = 5.0,
         target: StrictStr = "world",
         door_index: StrictInt | None = None,
+        component_index: StrictInt | None = None,
+        cursor_pos: list[StrictFloat] | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(action, str) or action == "":
@@ -6798,11 +8266,79 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         radius_value = _finite_float(radius, radius_error)
         if radius_value <= 0.0 or radius_value > 200.0:
             raise ToolError(radius_error)
+        component_mode = component_index is not None or cursor_pos is not None
+        if component_mode:
+            if component_index is None or cursor_pos is None:
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be set together with cursor_pos",
+                    )
+                )
+            if (
+                isinstance(component_index, bool)
+                or not isinstance(component_index, int)
+                or component_index < 0
+                or component_index > 2_147_483_647
+            ):
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be an int from 0 to 2147483647",
+                    )
+                )
+            if door_index is not None:
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be omitted when door_index is set",
+                    )
+                )
+            if target != "world":
+                raise ToolError(
+                    _bad_args(
+                        "component_index",
+                        component_index,
+                        "be omitted unless target is world",
+                    )
+                )
+            if classname == "":
+                raise ToolError(
+                    _bad_args(
+                        "classname",
+                        classname,
+                        "be a non-empty string when component_index is set",
+                    )
+                )
         args: dict[str, Any] = {"action": action, "radius": radius_value}
         if classname != "":
             args["classname"] = classname
         if pos is not None:
             args["pos"] = _require_vec3(pos, "pos")
+        if component_mode:
+            args["component_index"] = component_index
+            args["cursor_pos"] = _require_vec3(cursor_pos, "cursor_pos")
+            announced = False
+            try:
+                status = await runtime.bridge_status_payload()
+                announced = _client_peer_announces_command(
+                    status, "action_use_component"
+                )
+            except Exception:
+                announced = False
+            if not announced:
+                raise ToolError("component_not_supported")
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "action_use_component", args, "client", _timeout(timeout_s)
+                )
+            echoed = result.get("component_index") if isinstance(result, dict) else None
+            if echoed != component_index:
+                raise ToolError("component_not_supported")
+            return result
         if door_index is not None:
             announced = False
             try:
@@ -6847,7 +8383,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Block until a condition holds. condition ENUM: players_at_least, "
-            "players_at_most, log_matches, entity_state. entity_state requires "
+            "players_at_most, log_matches, entity_state, file_matches. "
+            "file_matches reads one relative file under the selected role's "
+            "profile of the single run this lease owns or adopted "
+            "(role=server|client|offline, profile_file relative, no regex). "
+            "It heartbeats that lease on every poll, including while the file "
+            "is missing. lookback_from=launch is rejected. Default "
+            "lookback_lines can match text already in the file; a boundary "
+            "marker (or lookback_lines=0, then the returned cursor) does not. "
+            "entity_state requires "
             "entity={type,pos,radius,field,equals}; it polls server telemetry_read "
             "object_at with an exact type and radius in (0,50]. field is found "
             "(bool), health01 (0..1), attachment_count, cargo_count or items_total "
@@ -6882,14 +8426,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "runs it reports multiple_idle_runs and adopts none). "
             "scanned reports which log files were read and how many "
             "lines each gave, so a no-match is visible as a no-match. "
-            "players_* and entity_state probes reach the box with this "
-            "session's lease and renew it while this wait stays open; "
-            "log_matches does not. "
+            "players_* and entity_state probes are reads and do not renew "
+            "the lease. log_matches does not renew. file_matches renews on "
+            "each poll through session_heartbeat. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )
     async def wait_for(
-        condition: Literal["players_at_least", "players_at_most", "log_matches", "entity_state"],
+        condition: Literal[
+            "players_at_least", "players_at_most", "log_matches", "entity_state",
+            "file_matches",
+        ],
         value: StrictInt = 0,
         pattern: str = "",
         timeout_s: StrictFloat = 180.0,
@@ -6898,6 +8445,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         lookback_from: Literal["lines", "launch"] = "lines",
         marker: str | dict[str, Any] | None = None,
         entity: dict[str, Any] | None = None,
+        profile_file: str | None = None,
+        role: Literal["server", "client", "offline"] = "server",
     ) -> dict[str, Any]:
         # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
         # in tool_lock. Any tool that waits on a human or a slow condition
@@ -6915,6 +8464,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             lookback_from=lookback_from,
             marker=marker,
             entity=entity,
+            profile_file=profile_file,
+            role=role,
         )
 
     def _pipeline_platform() -> str:
@@ -7106,6 +8657,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
+    _all_tools = app._tool_manager.list_tools
+
+    def _public_tools():
+        hidden = {LEASE_TTL_OBSERVE_TOOL, LEASE_LOCAL_TOOL}
+        return [tool for tool in _all_tools() if tool.name not in hidden]
+
+    app._tool_manager.list_tools = _public_tools  # type: ignore[method-assign]
     registered_tool_names = frozenset(
         tool.name for tool in app._tool_manager.list_tools()
     )
@@ -7113,8 +8671,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     runtime._registered_tool_names = registered_tool_names
     _tool_registry_overlay.update(_frozen_tool_registry_overlay(app, config))
     if _progressive_disclosure_enabled(config):
-        # Before install_result_freshness: its wrapper has to stay outermost.
+        # Before the result decorators: the freshness wrapper has to stay outermost.
         _install_catalog_change_notice(app, runtime)
+    # After catalog registration, before freshness, so every CallToolResult
+    # (including errors, images, and lists) can carry lease_ttl_s and freshness
+    # still sees the decorated result.
+    install_lease_ttl_annotation(app, runtime)
     observe_server_sources = install_result_freshness(app, server_sources)
     _original_list_tools = app.list_tools
 
@@ -7137,7 +8699,24 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
     parser = build_server_parser()
     parser.allow_abbrev = False
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        reject_glued_selector_flags(raw_argv)
+    except InstanceSelectionError as exc:
+        parser.error(exc.code)
     args = parser.parse_args(raw_argv)
+    from dayz_mcp.instance_context import (
+        reject_conflicting_environment,
+        validate_game_path,
+        validate_instance_token,
+    )
+
+    try:
+        instance_token = validate_instance_token(args.instance)
+        game_path = validate_game_path(args.game_path)
+        bind_instance_context(instance_token, game_path, replace=True)
+        reject_conflicting_environment(instance_token, int(args.port), game_path)
+    except InstanceSelectionError as exc:
+        parser.error(exc.code)
     tool_pack = args.tool_pack
     tool_pack_was_explicit = "--tool-pack" in raw_argv or any(
         token.startswith("--tool-pack=") for token in raw_argv
@@ -7172,6 +8751,8 @@ def parse_args(argv: list[str] | None = None) -> ServerConfig:
         auto_spawn_daemon=bool(args.auto_spawn_daemon),
         tool_pack=tool_pack,
         progressive_disclosure=bool(args.progressive_disclosure),
+        instance_token=instance_token,
+        game_path=game_path,
     )
 
 

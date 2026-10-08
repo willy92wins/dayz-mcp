@@ -1,0 +1,8 @@
+--- enforce linter: errors=2 baseline=2 new=0
+--- tests.test_client_lifecycle_7055_9336_9efc: rc=0
+Ran 17 tests in 2.541s
+
+OK
+--- waiting for a free fast-tier slot (other batches are gating)
+--- fast tier: ran=5678 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

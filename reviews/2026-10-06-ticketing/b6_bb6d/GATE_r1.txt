@@ -1,0 +1,7 @@
+--- tests.test_native_launcher_backend: rc=0
+Ran 49 tests in 11.284s
+
+OK (skipped=10)
+--- waiting for a free fast-tier slot (other batches are gating)
+--- fast tier: ran=5588 baseline_ran=5587 failures=2 new=0
+GAUNTLET_GATE: PASS

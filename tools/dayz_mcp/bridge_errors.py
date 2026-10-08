@@ -54,7 +54,9 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 
 _REMOTE_ERROR_CODES = frozenset({
     "audit_failed",
+    "arg_contract_mismatch",
     "bad_args",
+    "bridge_capability_missing",
     "bad_content_length",
     "bad_id",
     "bad_json",
@@ -66,6 +68,9 @@ _REMOTE_ERROR_CODES = frozenset({
     "bad_peer",
     "bad_purpose",
     "bad_wait_timeout",
+    # d17c-a: client-peer admission refused because the exact destination's
+    # registered client process is known dead. Process absence, not a crash.
+    "client_process_gone",
     "exec_not_allowed",
     "identity_mismatch",
     "invalid_identity",
@@ -208,19 +213,29 @@ def _is_safe_error_token(value: str) -> bool:
     )
 
 
+# Types whose ``code`` is a source constant and may follow the class name.
+# CliContractError is server_cli (relative_shared_root, invalid_build_lock_wait).
+_WIRE_CODE_TYPES = frozenset({
+    "NativeLauncherBackendError",
+    "CliContractError",
+})
+
+
 def _opaque_dayz_test_failure(exc: BaseException) -> str:
-    """`dayz_test_failed:<Type>`, plus `:<code>` when the launcher backend named one.
+    """`dayz_test_failed:<Type>`, plus `:<code>` when the failure named one.
 
     NativeLauncherBackendError (native_launcher_backend.py) keeps a source
     constant in ``code`` -- invalid_native_launcher_environment,
     native_launcher_create_failed, ... -- and any host detail in ``detail``,
-    which never travels. Only an identifier-shaped code crosses the wire.
-    An identifier-shaped ``fine_code`` is appended as a fourth part.
+    which never travels. CliContractError carries the same kind of ``code``
+    (relative_shared_root, invalid_build_lock_wait). Only an identifier-shaped
+    code crosses the wire. An identifier-shaped ``fine_code`` is appended as a
+    fourth part.
     Ficha ae65 (2026-09-04): build=true died in that backend and the caller saw
     the class name alone, with the code one frame away in the local log.
     """
     name = type(exc).__name__
-    code = getattr(exc, "code", None) if name == "NativeLauncherBackendError" else None
+    code = getattr(exc, "code", None) if name in _WIRE_CODE_TYPES else None
     if isinstance(code, str) and _is_safe_error_token(code):
         fine_code = getattr(exc, "fine_code", None)
         if isinstance(fine_code, str) and _is_safe_error_token(fine_code):

@@ -6,6 +6,7 @@ test_task7_rereview_regressions.py so tests stop importing each other
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -154,6 +155,16 @@ class LifecycleFixture:
     def __init__(self, *, confirmed_exit: bool = True) -> None:
         self.temporary = TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self._previous_shared_root = os.environ.get("DAYZ_MCP_SHARED_ROOT")
+        self._shared_restored = False
+        os.environ["DAYZ_MCP_SHARED_ROOT"] = str(self.root / "shared-root")
+        try:
+            self._finish_init(confirmed_exit=confirmed_exit)
+        except BaseException:
+            self.close()
+            raise
+
+    def _finish_init(self, *, confirmed_exit: bool) -> None:
         self.game = self.root / "DayZ"
         self.game.mkdir()
         for name in ("DayZDiag_x64.exe", "DayZ_BE.exe", "DayZ_x64.exe"):
@@ -222,7 +233,19 @@ class LifecycleFixture:
         lifecycle._replacement_witness_error = _frozen_witness  # type: ignore[method-assign]
 
     def close(self) -> None:
-        self.temporary.cleanup()
+        try:
+            temporary = getattr(self, "temporary", None)
+            if temporary is not None:
+                temporary.cleanup()
+                self.temporary = None
+        finally:
+            if not getattr(self, "_shared_restored", False):
+                previous = getattr(self, "_previous_shared_root", None)
+                if previous is None:
+                    os.environ.pop("DAYZ_MCP_SHARED_ROOT", None)
+                else:
+                    os.environ["DAYZ_MCP_SHARED_ROOT"] = previous
+                self._shared_restored = True
 
     def request(self, *, run_id: str | None = None) -> dict[str, object]:
         value: dict[str, object] = {

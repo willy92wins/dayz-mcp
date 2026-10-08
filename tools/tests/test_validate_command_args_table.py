@@ -417,6 +417,32 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("uid_wrong_type", {"full": True, "uid": 1}, (False, "bad_args")),
         ("extra_key", {"full": True, "extra": None}, (False, "bad_args")),
     ),
+    "player_kill": (
+        ("valid_uid", {"uid": "player-1"}, (True, None)),
+        ("empty_uid", {"uid": ""}, (False, "bad_args")),
+        ("missing_uid", {}, (False, "bad_args")),
+        ("uid_wrong_type", {"uid": 1}, (False, "bad_args")),
+        ("extra_key", {"uid": "player-1", "id": "player-1"}, (False, "bad_args")),
+    ),
+    "bot_start": (
+        (
+            "valid",
+            {
+                "object_id": 1,
+                "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT",
+                "bot_ttl_s": 5.0,
+            },
+            (True, None),
+        ),
+        ("ttl_zero", {"object_id": 1, "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT", "bot_ttl_s": 0}, (False, "bad_args")),
+        ("stop_action", {"object_id": 1, "action": "PLAYER_BOT_STOP_CURRENT", "bot_ttl_s": 5}, (False, "bad_args")),
+        ("missing_ttl", {"object_id": 1, "action": "PLAYER_BOT_RANDOMIZE_MOVEMENT"}, (False, "bad_args")),
+    ),
+    "bot_stop": (
+        ("valid", {"object_id": 1}, (True, None)),
+        ("zero_id", {"object_id": 0}, (False, "bad_args")),
+        ("missing", {}, (False, "bad_args")),
+    ),
     "player_godmode": (
         ("valid_off", {"godmode": False}, (True, None)),
         ("valid_on_with_uid", {"godmode": True, "uid": "player-1"}, (True, None)),
@@ -707,6 +733,39 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "empty_want",
             {"type": "House", "pos": [1.0, 2.0, 3.0], "want": []},
+            (False, "bad_args"),
+        ),
+    ),
+    "object_resolve": (
+        (
+            "valid",
+            {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 2.0},
+            (True, None),
+        ),
+        (
+            "radius_at_cap",
+            {"type": "CivilianSedan", "pos": [1.0, 2.0, 3.0], "radius": 50.0},
+            (True, None),
+        ),
+        ("missing_radius", {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0]}, (False, "bad_args")),
+        (
+            "radius_zero",
+            {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "radius_over_cap",
+            {"type": "CivilianSedan", "pos": [0.0, 0.0, 0.0], "radius": 50.1},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {
+                "type": "CivilianSedan",
+                "pos": [0.0, 0.0, 0.0],
+                "radius": 2.0,
+                "nearest": True,
+            },
             (False, "bad_args"),
         ),
     ),
@@ -1079,6 +1138,88 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "extra_key",
             {"action": "open", "target": "hands", "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "action_use_component": (
+        (
+            "valid_component_zero",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 0,
+                "cursor_pos": [1.0, 2.0, 3.0],
+            },
+            (True, None),
+        ),
+        (
+            "valid_component_876",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 876,
+                "cursor_pos": [1.0, 2.0, 3.0],
+                "pos": [4.0, 5.0, 6.0],
+                "radius": 200.0,
+            },
+            (True, None),
+        ),
+        (
+            "component_above_511",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 512,
+                "cursor_pos": [0.0, 0.0, 0.0],
+            },
+            (True, None),
+        ),
+        (
+            "negative_component",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": -1,
+                "cursor_pos": [0.0, 0.0, 0.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "bool_component",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": True,
+                "cursor_pos": [0.0, 0.0, 0.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "short_cursor",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 0,
+                "cursor_pos": [1.0, 2.0],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_cursor",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "component_index": 0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_component",
+            {
+                "action": "ActionOpenDoors",
+                "classname": "Land_House_2W03",
+                "cursor_pos": [1.0, 2.0, 3.0],
+            },
             (False, "bad_args"),
         ),
     ),

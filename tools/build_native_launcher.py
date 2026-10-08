@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
+from dayz_mcp.dayz_test_attestation import parse_attestation
 from dayz_mcp.dayz_test_request import (
     _path_is_within,
     _valid_local_absolute_path,
@@ -67,12 +68,14 @@ PACKAGED_MODULES = (
     "native_process_guard.py",
     "native_process_snapshot.py",
     "normal_daemon_policy.py",
+    "pack_only.py",
     "pinned_keyfile.py",
     "server_cli.py",
     # Pulled in on 2026-08-21 by pinned_keyfile: the duplicated FILE_STANDARD_INFO
     # moved here, and a packaged module importing an unpackaged one is a
     # ModuleNotFoundError inside app.pyz, not a build error.
     "win32_fileinfo.py",
+    "dayz_test_attestation.py",
 )
 def external_files() -> tuple[Path, ...]:
     return external_file_paths(require_dayz_layout())
@@ -254,25 +257,50 @@ def _acquire_cpython(lock: dict[str, object], *, offline: bool) -> Path:
     if offline:
         raise ValueError("cpython_cache_missing_or_drifted")
     cache.parent.mkdir(parents=True, exist_ok=True)
-    temporary = cache.with_name(cache.name + ".partial")
-    if temporary.exists():
-        temporary.unlink()
-    request = urllib.request.Request(str(expected["url"]), headers={"User-Agent": "DayZ-MCP-reproducible-builder/1"})
-    with urllib.request.urlopen(request, timeout=60) as response, temporary.open("xb") as output:
-        while True:
-            block = response.read(1024 * 1024)
-            if not block:
-                break
-            output.write(block)
-            if output.tell() > int(expected["size"]):
-                raise ValueError("cpython_download_size_drift")
-        output.flush()
-        os.fsync(output.fileno())
-    if temporary.stat().st_size != expected["size"] or _sha256(temporary) != expected["sha256"]:
-        temporary.unlink(missing_ok=True)
-        raise ValueError("cpython_download_integrity_failed")
-    os.replace(temporary, cache)
-    return cache
+    # One download lock and a per-process partial. Two builders must not share
+    # the same `.partial` file.
+    download_lock = cache.with_name(cache.name + ".download.lock")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(download_lock, flags, 0o600)
+    try:
+        import msvcrt
+
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        if cache.is_file() and cache.stat().st_size == expected["size"] and _sha256(cache) == expected["sha256"]:
+            return cache
+        temporary = cache.with_name(cache.name + f".partial.{os.getpid()}")
+        if temporary.exists():
+            temporary.unlink()
+        request = urllib.request.Request(str(expected["url"]), headers={"User-Agent": "DayZ-MCP-reproducible-builder/1"})
+        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("xb") as output:
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                output.write(block)
+                if output.tell() > int(expected["size"]):
+                    raise ValueError("cpython_download_size_drift")
+            output.flush()
+            os.fsync(output.fileno())
+        if temporary.stat().st_size != expected["size"] or _sha256(temporary) != expected["sha256"]:
+            temporary.unlink(missing_ok=True)
+            raise ValueError("cpython_download_integrity_failed")
+        os.replace(temporary, cache)
+        return cache
+    finally:
+        try:
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        os.close(descriptor)
 
 
 def _safe_archive_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
@@ -509,8 +537,15 @@ def validate_launcher_policy_source(value: object) -> None:
         raise ValueError("policy_source_schema")
     seen: set[tuple[str, str]] = set()
     for project in projects:
-        if type(project) is not dict or set(project) != _PROJECT_INTENT_KEYS:
+        if type(project) is not dict or not _PROJECT_INTENT_KEYS <= set(project) <= (
+            _PROJECT_INTENT_KEYS | {"attestation"}
+        ):
             raise ValueError("policy_source_schema")
+        if "attestation" in project:
+            try:
+                parse_attestation(project["attestation"])
+            except ValueError:
+                raise ValueError("policy_source_schema") from None
         if type(project["mod"]) is not str or _MOD_NAME.fullmatch(project["mod"]) is None:
             raise ValueError("policy_source_schema")
         _validate_root_intent(project["default_source"])
@@ -585,6 +620,11 @@ def seal_request_policy(source: dict[str, object]) -> dict[str, object]:
                     for item in project["mission_roots"]
                 ],
                 "mod": project["mod"],
+                **(
+                    {"attestation": project["attestation"]}
+                    if "attestation" in project
+                    else {}
+                ),
                 "mod_roots": [
                     _sealed_root(item["path"], allow_root_junction=item["allow_root_junction"])
                     for item in project["mod_roots"]

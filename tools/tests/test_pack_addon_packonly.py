@@ -59,7 +59,7 @@ class PackOnlyPredicateTest(unittest.TestCase):
 
     def test_worker_default_scan_matches_shared_predicate(self) -> None:
         worker = WORKER.read_text(encoding="utf-8")
-        self.assertIn('".p3d", ".paa", ".rvmat"', worker)
+        self.assertIn("pack_only.has_binarizable_assets", worker)
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "notes.txt").write_text("no assets\n", encoding="utf-8")
             self.assertEqual(

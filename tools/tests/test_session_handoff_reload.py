@@ -598,7 +598,7 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(dayz_test_tool, "open_approved_launcher", side_effect=ReachedLauncher) as launcher,
         ):
             with self.assertRaises(ReachedLauncher):
-                await dayz_test_tool.execute_dayz_test_run(runtime, project="Example", mode="all", preflight=True)
+                await dayz_test_tool.execute_dayz_test_run(runtime, project="Example", mode="all", preflight=False)
             launcher.assert_called_once_with("dayz-test-v1")
             self.assertEqual(runtime._control.state, "CLOSED")
             self.assertIsNone(runtime._control.active_lease_id)

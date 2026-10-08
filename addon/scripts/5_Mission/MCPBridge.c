@@ -21,6 +21,8 @@ class MCPBridge : Managed
 	protected const float TELEMETRY_OBJECT_AT_MAX_RADIUS = 50.0;
 	// F3.4 / F3.6: fixed lookup radius when type+pos resolve an in-world object.
 	protected const float OBJECT_LOOKUP_RADIUS = 25.0;
+	// object_resolve only. Callers pass this radius; it is not the 25 m lookup.
+	protected const float OBJECT_RESOLVE_RADIUS_MAX = 50.0;
 	// object_doors refuses a larger GetDoorCount instead of emitting an unbounded list.
 	protected const int DOOR_READ_MAX = 64;
 	// vehicle_door calls ForceUpdateLightsEnd this long after its write. Vanilla
@@ -33,12 +35,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,player_godmode,player_heal,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "3c77a99c95fd05a4";
+	protected const string SERVER_ARG_CONTRACT_HASH = "421895632da1ef7e";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -118,6 +120,7 @@ class MCPBridge : Managed
 	{
 		m_Tick = m_Tick + 1;
 		m_ElapsedS = m_ElapsedS + timeslice;
+		MCPBotControl.Tick(this, m_ElapsedS);
 
 		if (!m_Configured)
 		{
@@ -544,6 +547,18 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchPlayerGodmode(command, result);
 		}
+		else if (command.cmd == "player_kill")
+		{
+			postNow = DispatchPlayerKill(command, result);
+		}
+		else if (command.cmd == "bot_start")
+		{
+			postNow = DispatchBotStart(command, result);
+		}
+		else if (command.cmd == "bot_stop")
+		{
+			postNow = DispatchBotStop(command, result);
+		}
 		else if (command.cmd == "object_anim")
 		{
 			postNow = DispatchObjectAnim(command, result);
@@ -567,6 +582,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "object_inspect")
 		{
 			postNow = DispatchObjectInspect(command, result);
+		}
+		else if (command.cmd == "object_resolve")
+		{
+			postNow = DispatchObjectResolve(command, result);
 		}
 		else if (command.cmd == "world_time_set")
 		{
@@ -666,6 +685,7 @@ class MCPBridge : Managed
 		int objectId = command.args.object_id;
 		result.object_id = objectId;
 		result.deleted = 0;
+		MCPBotControl.OnObjectGone(this, objectId);
 
 		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
 		{
@@ -685,8 +705,9 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// hands_take validates on the server (object_id lives in m_RuntimeObjects)
-	// and asks the owning client to call PredictiveTakeEntityToHands. That call
+	// hands_take validates on the server (object_id lives in m_RuntimeObjects:
+	// world_spawn and inventory_attach register there) and asks the owning
+	// client to call PredictiveTakeEntityToHands. That call
 	// no-ops on a dedicated server (actiontakeitemtohands.c OnExecute returns
 	// before it). accepted is the synchronous verdict; confirmed stays false.
 	protected bool DispatchHandsTake(MCPCommand command, MCPResult result)
@@ -796,7 +817,8 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// world_spawn id of this object, or 0 when it is not in m_RuntimeObjects.
+	// Registry id of this object (world_spawn or inventory_attach), or 0 when it
+	// is not in m_RuntimeObjects. The id is this run only.
 	// map.GetElement / GetKey are O(n) (enscript.c:868, :878); foreach is the
 	// linear walk vanilla uses (effectmanager.c:547).
 	protected int RuntimeObjectId(Object subject)
@@ -1527,6 +1549,240 @@ class MCPBridge : Managed
 		return true;
 	}
 
+	// player_kill (inbox f4de). uid is required: an empty uid must not select the
+	// first human. Death is SetHealth(0), the server primitive EmoteManager.KillPlayer
+	// uses (emotemanager.c). EEKilled is not called. Body godmode is released for
+	// the hit only; the identity's remembered choice is not written. No respawn.
+	protected bool DispatchPlayerKill(MCPCommand command, MCPResult result)
+	{
+		string killUid;
+		Human killHuman;
+		PlayerBase killPlayer;
+		PlayerIdentity killIdentity;
+		bool damageAllowed;
+		MCPPlayerKill killReport;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		killUid = command.args.uid;
+		if (killUid == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		killHuman = FindHumanByUid(killUid);
+		if (!killHuman)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		killPlayer = PlayerBase.Cast(killHuman);
+		if (!killPlayer)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		killIdentity = killPlayer.GetIdentity();
+		if (!killIdentity)
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+		if (killIdentity.GetPlainId() != killUid)
+		{
+			result.ok = false;
+			result.error = "player_not_found";
+			return true;
+		}
+		if (!killPlayer.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+
+		damageAllowed = killPlayer.GetAllowDamage();
+		killReport = new MCPPlayerKill();
+		killReport.uid = killUid;
+		killReport.health_before = killPlayer.GetHealth("", "");
+		killReport.alive_before = killPlayer.IsAlive();
+		killReport.godmode_policy_preserved = true;
+		MCPGodmode.ReleaseBody(killPlayer, "player_kill");
+		killPlayer.SetHealth(0);
+		killReport.health_after = killPlayer.GetHealth("", "");
+		killReport.alive_after = killPlayer.IsAlive();
+		killReport.killed = !killReport.alive_after && killReport.health_after <= 0.0;
+		result.player_kill = killReport;
+		if (!killReport.killed)
+		{
+			killPlayer.SetAllowDamage(damageAllowed);
+			result.ok = false;
+			result.error = "kill_not_applied";
+			return true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+	// bot_start (inbox 120f). Wire shape is checked before any dummy init.
+	// On a build without the 1.30 bot macros, Available() is false and the
+	// answer is bot_unavailable with no mutation.
+	protected bool DispatchBotStart(MCPCommand command, MCPResult result)
+	{
+		string botError;
+		bool botStarted;
+		MCPBotReport botReport;
+		if (!BotStartArgsOk(command))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPBotControl.Available())
+		{
+			result.ok = false;
+			result.error = "bot_unavailable";
+			return true;
+		}
+		botStarted = false;
+		botError = MCPBotControl.Start(this, command.args.object_id, command.args.action, command.args.bot_ttl_s, m_ElapsedS, command.id, botStarted);
+		if (botError != "")
+		{
+			result.ok = false;
+			result.error = botError;
+			return true;
+		}
+		botReport = new MCPBotReport();
+		botReport.object_id = command.args.object_id;
+		botReport.action = command.args.action;
+		botReport.started = botStarted;
+		botReport.ttl_s = command.args.bot_ttl_s;
+		result.bot = botReport;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchBotStop(MCPCommand command, MCPResult result)
+	{
+		string botError;
+		bool botStopped;
+		string botReleasedBy;
+		MCPBotReport botReport;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPBotControl.Available())
+		{
+			result.ok = false;
+			result.error = "bot_unavailable";
+			return true;
+		}
+		botStopped = false;
+		botReleasedBy = "";
+		botError = MCPBotControl.Stop(this, command.args.object_id, botStopped, botReleasedBy);
+		if (botError != "")
+		{
+			result.ok = false;
+			result.error = botError;
+			return true;
+		}
+		botReport = new MCPBotReport();
+		botReport.object_id = command.args.object_id;
+		botReport.stopped = botStopped;
+		botReport.released_by = botReleasedBy;
+		result.bot = botReport;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool BotActionAllowed(string action)
+	{
+		if (action == "PLAYER_BOT_RANDOMIZE_STANCE")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_RANDOMIZE_MOVEMENT")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_SPAM_USER_ACTIONS")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SPAWN_OPEN")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SPAWN_OPEN_EAT")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SWAP_G2H")
+		{
+			return true;
+		}
+		if (action == "PLAYER_BOT_TEST_SWAP_INTERNAL")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected bool BotStartArgsOk(MCPCommand command)
+	{
+		float ttl;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			return false;
+		}
+		if (!BotActionAllowed(command.args.action))
+		{
+			return false;
+		}
+		ttl = command.args.bot_ttl_s;
+		if (!IsFiniteFloat(ttl))
+		{
+			return false;
+		}
+		if (ttl <= 0.0 || ttl > 30.0)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	Object RuntimeObjectById(int objectId)
+	{
+		if (objectId <= 0 || !m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			return null;
+		}
+		return m_RuntimeObjects.Get(objectId);
+	}
+
 	// player_heal vitals of one server PlayerBase (MCPPlayerVitals, MCPMessages.c).
 	// A stat that does not exist leaves its value at 0 (playerbase.c:7843-7868).
 	protected void FillPlayerVitals(PlayerBase target, MCPPlayerVitals vitals)
@@ -1858,6 +2114,11 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		// Same map and key as world_spawn (command id). This id is the created
+		// item for this run only, for both dests. object_delete of it removes
+		// the item. A retry is a second create.
+		m_RuntimeObjects.Insert(command.id, spawned);
+		result.object_id = command.id;
 		result.classname = command.args.classname;
 		result.type = spawned.GetType();
 		result.found = true;
@@ -1998,6 +2259,12 @@ class MCPBridge : Managed
 			}
 		}
 
+		// Same map and key as world_spawn (command id). This id is the created
+		// item for this run only; a later daemon restarts ids at 1. result.object_id
+		// below stays the destination owner. object_delete of item_object_id
+		// removes the worn or cargo item and leaves the owner registered.
+		m_RuntimeObjects.Insert(command.id, attachedItem);
+
 		result.classname = command.args.classname;
 		result.type = attachedItem.GetType();
 		result.found = true;
@@ -2009,6 +2276,7 @@ class MCPBridge : Managed
 		MCPInventoryAttachReceipt attachReceipt = new MCPInventoryAttachReceipt();
 		attachReceipt.dest = command.args.dest;
 		attachReceipt.slot = command.args.slot;
+		attachReceipt.item_object_id = command.id;
 		result.inventory_attach = attachReceipt;
 
 		MCPTelemetry attachTelemetry = new MCPTelemetry();
@@ -2261,9 +2529,10 @@ class MCPBridge : Managed
 	}
 
 	// Shared resolution for anim/inspect verbs. object_id > 0 selects from the runtime
-	// registry (objects created through world_spawn, fixture cars included) and needs no
-	// position; otherwise classname near pos. object_id_unknown covers never-registered
-	// and already-deleted ids alike (delete removes the registry entry).
+	// registry (world_spawn, inventory_attach's created item, fixture cars included)
+	// and needs no position; otherwise classname near pos. object_id_unknown covers
+	// never-registered and already-deleted ids alike (delete removes the registry entry).
+	// An inventory_attach id is the child, not the destination owner, and lasts this run.
 	protected Object ResolveCommandObject(MCPArgs args, out string error)
 	{
 		if (args.object_id > 0)
@@ -2300,6 +2569,63 @@ class MCPBridge : Managed
 		}
 
 		return FindUniqueObjectNearType(args.type, Vector(px, py, pz), OBJECT_LOOKUP_RADIUS, error);
+	}
+
+	// Register one existing object of args.type inside the caller's radius.
+	// Radius is finite and in (0, OBJECT_RESOLVE_RADIUS_MAX]. Exact type, one
+	// match. An object already in m_RuntimeObjects keeps that id; otherwise
+	// the id is command.id. FindUniqueObjectNearType is unchanged.
+	protected bool DispatchObjectResolve(MCPCommand command, MCPResult result)
+	{
+		string resolveError = "";
+		float px;
+		float py;
+		float pz;
+		float radius;
+		Object match;
+		int existingId;
+		int objectId;
+
+		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		px = command.args.pos.Get(0);
+		py = command.args.pos.Get(1);
+		pz = command.args.pos.Get(2);
+		radius = command.args.radius;
+		if (!IsFiniteFloat(px) || !IsFiniteFloat(py) || !IsFiniteFloat(pz) || !IsFiniteFloat(radius) || radius <= 0.0 || radius > OBJECT_RESOLVE_RADIUS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		match = FindUniqueObjectNearType(command.args.type, Vector(px, py, pz), radius, resolveError);
+		if (!match)
+		{
+			result.ok = false;
+			result.error = resolveError;
+			return true;
+		}
+
+		existingId = RuntimeObjectId(match);
+		objectId = existingId;
+		if (existingId <= 0)
+		{
+			m_RuntimeObjects.Insert(command.id, match);
+			objectId = command.id;
+		}
+
+		result.object_id = objectId;
+		result.type = match.GetType();
+		result.pos_real = new array<float>();
+		VectorToArray(match.GetPosition(), result.pos_real);
+		result.ok = true;
+		return true;
 	}
 
 	// Resolve a single world object by classname near pos. Zero matches -> object_not_found;
@@ -3045,6 +3371,15 @@ class MCPBridge : Managed
 		}
 
 		PopulateTelemetryObject(match, telemetry);
+		// Top-level lifetime for this EntityAI. A non-EntityAI omits it.
+		// Zero remaining_s or max_s is a real reading (entityai.c:3380, :3387).
+		EntityAI lifetimeEntity = EntityAI.Cast(match);
+		if (lifetimeEntity)
+		{
+			result.lifetime = new MCPSpawnLifetime();
+			result.lifetime.remaining_s = lifetimeEntity.GetLifetime();
+			result.lifetime.max_s = lifetimeEntity.GetLifetimeMax();
+		}
 		result.ok = true;
 		result.telemetry = telemetry;
 		return true;
@@ -4134,6 +4469,7 @@ class MCPBridge : Managed
 
 	void Shutdown()
 	{
+		MCPBotControl.ShutdownAll(this);
 		// A completed cached callback is no longer in m_CallbackRefs.
 		if (m_PollCallback)
 		{

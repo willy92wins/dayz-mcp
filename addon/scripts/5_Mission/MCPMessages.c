@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "10";
+const string MCP_BRIDGE_VERSION = "11";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -139,6 +139,11 @@ class MCPArgs
 	// action_use_door. Enforce ints default to 0, and 0 is a valid door, so
 	// the command name, not this field, turns door mode on.
 	int door_index;
+	// action_use_component. 0 is a valid component, so the command name, not
+	// this field, turns component mode on. cursor_pos is the world-space
+	// point the action measures; absent JSON leaves the array null.
+	int component_index;
+	ref array<float> cursor_pos;
 	// ui_dialog (wire v1.1). title is reused above. kind is this class only.
 	string kind;
 	string message;
@@ -184,6 +189,9 @@ class MCPArgs
 	// player_godmode: the state to set, true for godmode on. The tool always
 	// sends it; an absent key reads false, which is vanilla damage.
 	bool godmode;
+	// bot_start: seconds the server keeps the debug action running. An absent
+	// key reads 0, which the bridge refuses. bot_stop does not read it.
+	float bot_ttl_s;
 
 	void MCPArgs()
 	{
@@ -546,10 +554,14 @@ class MCPUiClickSequence
 	}
 };
 
+// dest and slot name where the item was created. item_object_id is that item's
+// same-run registry id (the inventory_attach command id). It is not the
+// destination owner: MCPResult.object_id stays the owner. 0 means unset.
 class MCPInventoryAttachReceipt
 {
 	string dest;
 	string slot;
+	int item_object_id;
 };
 
 // input_describe: one key of the selected alternative. index is BindKeyCount's index.
@@ -860,6 +872,34 @@ class MCPPlayerGodmode
 	bool after;
 };
 
+// player_kill reply. health_* is GetHealth("", "") around SetHealth(0).
+// alive_* is IsAlive() at those same reads. killed is true only when the body
+// is dead and its health is not above zero. godmode_policy_preserved is true
+// when the identity's remembered choice was not written. Primitives only.
+class MCPPlayerKill
+{
+	string uid;
+	float health_before;
+	float health_after;
+	bool alive_before;
+	bool alive_after;
+	bool killed;
+	bool godmode_policy_preserved;
+};
+
+// bot_start / bot_stop reply. started is the FSM accept bit. stopped is false
+// on an idempotent stop of an idle dummy. released_by names stop, ttl, death,
+// deleted, shutdown or idle. Primitives only.
+class MCPBotReport
+{
+	int object_id;
+	string action;
+	bool started;
+	float ttl_s;
+	bool stopped;
+	string released_by;
+};
+
 class MCPResult
 {
 	int id;
@@ -928,9 +968,11 @@ class MCPResult
 	string target;
 	float distance;
 	bool started;
-	// action_use_door. Same default-0 rule as MCPArgs.door_index: 0 is a valid
-	// door and a valid component, so the command name, not these fields, is
-	// what turns door mode on. Filled only by that command.
+	// action_use_door / action_use_component. Same default-0 rule as
+	// MCPArgs.door_index: 0 is a valid door and a valid component, so
+	// the command name, not these fields, is what turns the mode on.
+	// door_index is filled only by action_use_door. component_index is
+	// filled by action_use_door and action_use_component.
 	int door_index;
 	int component_index;
 	// ui_dialog nested payload. Unassigned on other commands.
@@ -959,6 +1001,10 @@ class MCPResult
 	ref MCPWorldTime world_time;
 	// ui_click mode="complete" read-back. Unassigned in direct mode and on other commands.
 	ref MCPUiClickSequence click_sequence;
+	// player_kill reply. Unassigned on its refusals and on other commands.
+	ref MCPPlayerKill player_kill;
+	// bot_start / bot_stop reply. Unassigned on their refusals and on other commands.
+	ref MCPBotReport bot;
 	// player_heal reply. Unassigned on its refusals and on other commands.
 	ref MCPPlayerHeal player_heal;
 	// player_godmode reply. Unassigned on its refusals and on other commands.
@@ -968,6 +1014,10 @@ class MCPResult
 	ref MCPPlayerMove player_move;
 	// player_trace header and paged samples. Unassigned on other commands.
 	ref MCPPlayerTraceRead player_trace;
+	// vehicle_telemetry heading. GetDirection of the seated transport
+	// (object.c:320): [x, y, z], the same vector vehicle_trace stores as
+	// direction_x/y/z. Unassigned when that player is not in a transport.
+	ref array<float> direction;
 };
 
 class MCPJob

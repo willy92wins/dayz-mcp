@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 79 typed
+game, put the world into a state, act, and read back what the engine did — 83 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -77,13 +77,13 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**79 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**83 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `key_press`,
 `lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
-`object_delete`, `object_doors`, `object_inspect`, `pipeline_feedback`, `pipeline_inbox`,
-`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `query_all_players`, `query_get_in_condition`,
+`object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `pipeline_feedback`, `pipeline_inbox`,
+`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
 `query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
 `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,
@@ -244,12 +244,25 @@ Three run modes (`python -m dayz_mcp`; `tools/dayz_mcp/server_cli.py:96-118`):
 
 Each of these fails closed with a named error instead of guessing (#93):
 
-- **Server config and profiles.** Each project's `dev_root\_server\serverDZ.cfg`
-  must exist, and so must the profile folders where `dayz_mcp.json` is seeded:
-  `dev_root\_server\profiles` for the server and `dev_root\_client\profiles` for
-  the client (offline mode uses the client's). Without them the server exits with
-  "Could not find server config", or the launch is refused with
-  `instance_config_missing`.
+- **Server config and profiles.** Each project's `dev_root\_server` and
+  `dev_root\_client` roots must already exist, and so must
+  `dev_root\_server\serverDZ.cfg`. The default instance also requires the
+  legacy leaves `dev_root\_server\profiles` and `dev_root\_client\profiles`
+  (offline uses the client leaf); this batch does not create those. A named
+  instance (`--instance <token>`) creates only the missing leaf
+  `profiles-<token>` under the existing role root during launch preparation,
+  and seeds `dayz_mcp.json` there. An existing file at that leaf, a missing
+  role root, or a `dayz_mcp.json` whose endpoint or key belongs to another
+  daemon is rejected and nothing above the leaf is created. Named VPP
+  SuperAdmins and credentials are not copied; put them in the named server
+  leaf when that instance should have them. Without the server config the
+  server exits with "Could not find server config". A profile the launcher
+  cannot seed is `instance_config_missing`.
+- **Mission storage that does not classify.** A launch refuses with
+  `storage_recovery_required` and does not delete world bytes. The precise
+  reason and the repair steps are in
+  [docs/STORAGE_RECOVERY.md](docs/STORAGE_RECOVERY.md). Stop retries, inventory
+  the mission, and restore only artifacts you can authenticate.
 - **One `mod` name per project.** Two projects that share a `mod` name are
   refused with `bad_project`. The name is also the PBO prefix.
 - **No retail client.** A running `DayZ_x64.exe` or `DayZ_BE.exe` blocks every

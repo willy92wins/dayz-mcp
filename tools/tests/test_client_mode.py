@@ -8,6 +8,7 @@ import time
 import unittest
 import urllib.error
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -16,7 +17,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import control_client, core, host_config, server
+from dayz_mcp import control_client, core, dayz_test_tool, host_config, server
 from dayz_mcp.server import ServerConfig
 from tests.daemon_helpers import (
     DaemonHttpServer,
@@ -963,12 +964,30 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
             lifecycle = AsyncMock(
                 return_value={
                     "runs": [
-                        {"run_id": "run-a", "profiles": str(profiles)},
-                        {"run_id": "run-a", "profiles": str(profiles)},  # deduped
+                        {
+                            "run_id": "run-a",
+                            "mod": "@ExampleMod",
+                            "profiles": str(profiles),
+                        },
+                        {  # deduped
+                            "run_id": "run-a",
+                            "mod": "@ExampleMod",
+                            "profiles": str(profiles),
+                        },
                     ]
                 }
             )
-            with patch.object(runtime, "lifecycle_status", new=lifecycle):
+            with patch.object(
+                runtime, "lifecycle_status", new=lifecycle
+            ), patch.object(
+                dayz_test_tool, "_close_project_policy",
+                # The sealed-project admission reads the approved-launcher
+                # registry, which this fixture replaces; the recorded anchor is
+                # still validated against this dev_root.
+                return_value=SimpleNamespace(
+                    mod="ExampleMod", dev_root=str(directory)
+                ),
+            ):
                 first = _content_json(await app.call_tool("logs_since", {}))
                 # H2: BOTH streams, not just the newest file -- engine errors
                 # live in the RPT while the script log is the one being written.

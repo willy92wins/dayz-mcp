@@ -16,13 +16,14 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import server  # noqa: E402
+from dayz_mcp import dayz_test_tool, server  # noqa: E402
 from dayz_mcp.server import ServerConfig, build_app  # noqa: E402
 
 from tests.client_helpers import _fixture_client_runtime
@@ -59,24 +60,40 @@ class CaptureTargetsRunClientTest(unittest.IsolatedAsyncioTestCase):
         )
         self._capture_patch.start()
         self.addCleanup(self._capture_patch.stop)
+        # The sealed-project admission reads the approved-launcher registry,
+        # which this fixture replaces; the recorded anchor is still validated
+        # against this dev_root.
+        policy_patch = patch.object(
+            dayz_test_tool, "_close_project_policy",
+            return_value=SimpleNamespace(mod="ExampleMod", dev_root=str(root)),
+        )
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
 
     def _with_run(self, state: str) -> None:
         # The run records the SERVER dir only; the client sibling is derived.
-        self.runtime.lifecycle_status = AsyncMock(
-            return_value={
-                "runs": [
-                    {
-                        "run_id": "run-a",
-                        "state": state,
-                        "profiles": str(self.server_profiles),
-                        "processes": [
-                            {"role": "server", "pid": 111},
-                            {"role": "client", "pid": 222},
-                        ],
-                    }
-                ]
-            }
-        )
+        # Capture reads lifecycle through the bounded control call, not
+        # runtime.lifecycle_status (that path lazy-spawns).
+        payload = {
+            "runs": [
+                {
+                    "run_id": "run-a",
+                    "state": state,
+                    "mod": "@ExampleMod",
+                    "profiles": str(self.server_profiles),
+                    "processes": [
+                        {"role": "server", "pid": 111},
+                        {"role": "client", "pid": 222},
+                    ],
+                }
+            ]
+        }
+
+        async def session_call(path: str, body: object = None, timeout_s: float | None = None):
+            self.assertEqual(path, "/lifecycle/status")
+            return payload
+
+        self.runtime._control._session_call = session_call
 
     async def _call(self) -> None:
         with self.assertRaises(Exception):

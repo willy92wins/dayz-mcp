@@ -1961,6 +1961,7 @@ class DaemonCoordinationActivationTest(unittest.TestCase):
                 self.assertIsNotNone(active.coordination_store)
                 self.assertIsNotNone(active.lifecycle_recovery_fault_store)
                 self.assertTrue((root / "coordination.json").exists())
+                active.root_writer_lease.release()
 
     def test_corrupt_manifest_arms_repair_fence_and_restart_does_not_mutate_it(self) -> None:
         from dayz_mcp.session_coordination import ClientIdentity
@@ -1987,6 +1988,9 @@ class DaemonCoordinationActivationTest(unittest.TestCase):
             self.assertIsNotNone(first.lifecycle)
             runs_path = Path(temporary) / "DayZ_MCP" / "runs.json"
             runs_path.write_bytes(b"corrupt-manifest")
+            # A second state is an independent writer. Release the first
+            # lifetime lease before the restart activations.
+            first.root_writer_lease.release()
 
             fenced = daemon.build_server_state(
                 _config(),
@@ -1999,6 +2003,7 @@ class DaemonCoordinationActivationTest(unittest.TestCase):
             self.assertEqual(fault["fault"]["scope"], "manifest")
             self.assertFalse(status["claimable"])
             self.assertEqual(runs_path.read_bytes(), b"corrupt-manifest")
+            fenced.root_writer_lease.release()
 
             restarted = daemon.build_server_state(
                 _config(),
@@ -2025,6 +2030,7 @@ class DaemonCoordinationActivationTest(unittest.TestCase):
             )
             self.assertEqual((granted_status, granted["status"]), (200, "active"))
             self.assertEqual(runs_path.read_bytes(), b'{"version":1,"runs":[]}\n')
+            restarted.root_writer_lease.release()
 
     def test_losing_candidate_creates_no_coordination_files(self) -> None:
         with TemporaryDirectory() as temporary:

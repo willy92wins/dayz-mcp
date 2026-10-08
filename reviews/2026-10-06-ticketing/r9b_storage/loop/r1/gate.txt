@@ -1,0 +1,46 @@
+--- tests.test_suite_structure (whole-suite ratchets): rc=0
+--- tests.test_storage_rotation_model: rc=0
+Ran 5 tests in 14.372s
+
+OK
+--- tests.test_storage_rotation_model on Python 3.11: rc=0 OK
+--- tests.test_dayz_test_storage: rc=0
+Ran 32 tests in 0.613s
+
+OK
+--- tests.test_dayz_test_storage on Python 3.11: rc=0 OK
+--- tests.test_storage_reset_visibility: rc=0
+Ran 31 tests in 1.573s
+
+OK
+--- tests.test_storage_reset_visibility on Python 3.11: rc=0 OK
+--- fast tier: ran=5854 baseline_ran=5587 failures=3 new=1
+FAIL: test_doc_size_claims_within_rounding (tests.test_docs_truth.ProjectMapSizesDocsTest.test_doc_size_claims_within_rounding)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\dzmcp_gauntlet\r9b_impl\ws\tools\tests\test_docs_truth.py", line 637, in test_doc_size_claims_within_rounding
+    self.assertEqual(
+    ~~~~~~~~~~~~~~~~^
+        offenders, [],
+        ^^^^^^^^^^^^^^
+        f"PROJECT-MAP size claims drifted: {offenders}. "
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        f"Update PROJECT-MAP.md by hand")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: ['CHANGELOG.md: claims 48 KB, file is 50461 B (49.3 KiB)'] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+'CHANGELOG.md: claims 48 KB, file is 50461 B (49.3 KiB)'
+
+- ['CHANGELOG.md: claims 48 KB, file is 50461 B (49.3 KiB)']
++ [] : PROJECT-MAP size claims drifted: ['CHANGELOG.md: claims 48 KB, file is 50461 B (49.3 KiB)']. Update PROJECT-MAP.md by hand
+
+======================================================================
+FAIL: test_fb_63c9_r2_default_stage_root_is_ignored_by_git (tests.test_pack_addon_staging.PackAddonStagingTest.test_fb_63c9_r2_default_stage_root_is_ignored_by_git)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\dzmcp_gauntlet\r9b_impl\ws\tools\tests\test_pack_addon_staging.py"
+GAUNTLET_GATE: FAIL
+ - new fast-tier failures (confirmed by re-run):
+FAIL: test_doc_size_claims_within_rounding (tests.test_docs_truth.ProjectMapSizesDocsTest.test_doc_size_claims_within_rounding)

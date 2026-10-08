@@ -453,7 +453,11 @@ def _default_knowledge_json() -> Path:
         return Path(override)
     local_app_data = os.environ.get("LOCALAPPDATA")
     base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-    return base / "DayZ_MCP" / "knowledge.json"
+    from dayz_mcp.instance_context import current_instance_token, state_root_name
+
+    token = current_instance_token()
+    folder = "DayZ_MCP" if token is None else state_root_name(token)
+    return base / folder / "knowledge.json"
 
 
 def _regular_lock_identity(path: Path, descriptor: int) -> tuple[int, int]:

@@ -416,6 +416,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const float CAMERA_JOB_TIMEOUT_S = 5.0;
 	protected const float CAMERA_SETTLE_STEP_S = 0.05;
 	protected const int CAMERA_DEFAULT_SETTLE_TICKS = 3;
+	// 0 keeps CAMERA_DEFAULT_SETTLE_TICKS. 600 is 30 s of settle.
+	protected const int CAMERA_SETTLE_TICKS_MAX = 600;
 	protected const int CAMERA_MODE_ORIENT = 1;
 	protected const int CAMERA_MODE_LOOKAT = 2;
 	protected const int CAMERA_MODE_MATRIX = 3;
@@ -447,7 +449,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// A component that is not that door returns -1 (actionopendoors.c:39-45),
 	// so the scan cannot stop on -1. Past this cap the result is
 	// door_component_not_found. One native call per index, once per command.
-	protected const int ACTION_USE_DOOR_COMPONENT_CAP = 512;
+	// 2048 covers a door whose only matching component is above 511 (index
+	// 876 on the reported building). It is not a component-count API: none
+	// was established, and the first match still wins.
+	protected const int ACTION_USE_DOOR_COMPONENT_CAP = 2048;
 	// input_describe: printable ASCII name, and the selected alternative's keys.
 	protected const int INPUT_NAME_MAX = 128;
 	protected const int INPUT_KEY_MAX = 16;
@@ -466,7 +471,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_move,player_respawn,player_trace," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_move," + "player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1173,6 +1178,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchActionUse(command, result);
 		}
+		else if (command.cmd == "action_use_component")
+		{
+			postNow = DispatchActionUse(command, result);
+		}
 		else if (command.cmd == "action_use_target")
 		{
 			postNow = DispatchActionUse(command, result);
@@ -1790,7 +1799,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		job.args = command.args;
 		job.phase = CAMERA_PHASE_APPLY;
 		job.sample_s_target = ResolveSettleSeconds(command.args);
-		job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;
+		// Settle plus the same five seconds of apply/report slack. A fixed
+		// five-second deadline cancelled a 200-tick settle (10 s) unfinished.
+		job.deadline_s = m_JobRunner.GetElapsedS() + job.sample_s_target + CAMERA_JOB_TIMEOUT_S;
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
@@ -2375,6 +2386,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.seat = "unknown";
 		result.type = transport.GetType();
 		result.classname = transport.ClassName();
+		// Same vector as vehicle_trace direction_x/y/z (Object.GetDirection, object.c:320).
+		result.direction = new array<float>();
+		VectorToArray(transport.GetDirection(), result.direction);
 
 		vehicleCommand = player.GetCommand_Vehicle();
 		if (vehicleCommand && vehicleCommand.GetTransport() == transport)
@@ -3855,6 +3869,45 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				cursorHitPos = doorBuilding.ModelToWorld(doorModelPos);
 				actionTarget = new ActionTarget(doorBuilding, null, doorComponent, cursorHitPos, 0);
 				result.component_index = doorComponent;
+			}
+			else if (command.cmd == "action_use_component")
+			{
+				// Echo before any refusal. 0 is a valid component, so an early
+				// return must not look like "component 0" by default alone.
+				int wantedComponent = command.args.component_index;
+				result.component_index = wantedComponent;
+				if (command.args.classname == "" || wantedComponent < 0)
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+
+				vector suppliedCursor;
+				if (!ArrayToVector(command.args.cursor_pos, suppliedCursor))
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+
+				// One lookup. GetActionComponentNameList returns -1 when the
+				// index is not found, 0 for a valid default component, and 1
+				// for a valid named component (object.c:197-198). 0 is kept:
+				// an empty name list is that default, not a missing component.
+				// cursor_pos is the caller's point; the selection centre is
+				// not guessed.
+				array<string> componentNames = new array<string>();
+				int componentState = targetObj.GetActionComponentNameList(wantedComponent, componentNames);
+				if (componentState < 0)
+				{
+					result.ok = false;
+					result.error = "component_not_found";
+					return true;
+				}
+
+				cursorHitPos = suppliedCursor;
+				actionTarget = new ActionTarget(targetObj, null, wantedComponent, cursorHitPos, 0);
 			}
 			else
 			{
@@ -5653,6 +5706,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		// A camera_set timeout does not prove the camera was not applied:
+		// apply can have succeeded before the settle deadline.
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = false;
@@ -5788,6 +5843,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		if (args.fov < 0.0 || !IsFiniteFloat(args.fov))
+		{
+			validation.error = "bad_args";
+			return validation;
+		}
+
+		// Absent JSON integers arrive as 0, which keeps the three-tick default.
+		if (args.settle_ticks < 0 || args.settle_ticks > CAMERA_SETTLE_TICKS_MAX)
 		{
 			validation.error = "bad_args";
 			return validation;

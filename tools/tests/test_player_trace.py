@@ -583,8 +583,8 @@ class PlayerTraceCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3c77a99c95fd05a4")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "10";', _source(MESSAGES_PATH))
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
+        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)
@@ -1167,7 +1167,11 @@ class PlayerTraceMessagesTest(unittest.TestCase):
     def test_the_result_owns_one_reference_and_the_args_are_reused(self) -> None:
         result_members = _class_members(self.messages, "MCPResult")
         self.assertEqual(result_members.count(("ref MCPPlayerTraceRead", FIELD)), 1)
-        self.assertEqual(result_members[-1], ("ref MCPPlayerTraceRead", FIELD))
+        # direction (c32c) is the last MCPResult ref; player_trace stays immediately before it.
+        self.assertEqual(
+            result_members[-2:],
+            [("ref MCPPlayerTraceRead", FIELD), ("ref array<float>", "direction")],
+        )
         self.assertNotIn(FIELD, {name for _type, name in _class_members(self.messages, "MCPJob")})
         args = _class_members(self.messages, "MCPArgs")
         for member in (
@@ -1200,7 +1204,7 @@ class PlayerTraceMessagesTest(unittest.TestCase):
         self.assertEqual(set(_entity()), {name for _type, name in EXPECTED_ENTITY_MEMBERS})
 
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
-        self.assertEqual(result_prune.PRUNABLE_FIELDS[-1], FIELD)
+        self.assertEqual(result_prune.PRUNABLE_FIELDS[-2:], (FIELD, "direction"))
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("vehicle_trace", {"ok": 1, FIELD: {}})
         self.assertNotIn(FIELD, unfilled)

@@ -172,6 +172,8 @@ def run_secure_launcher(
     launcher_id: str,
     *,
     max_wait_s: float | None = DEFAULT_MAX_WAIT_S,
+    instance_token: str | None = None,
+    game_path: str | None = None,
 ) -> int:
     if max_wait_s is not None and (
         isinstance(max_wait_s, bool)
@@ -194,7 +196,22 @@ def run_secure_launcher(
                 session_id=str(uuid.uuid4()),
                 task_label=f"secure-launcher:{launcher_id}"[:120],
             )
-            daemon_policy = load_normal_daemon_policy()
+            from dayz_mcp.server_cli import (
+                registration_name,
+                validate_game_path,
+                validate_instance_token,
+            )
+
+            token = validate_instance_token(instance_token)
+            validated_game = validate_game_path(game_path)
+            if token:
+                daemon_policy = load_normal_daemon_policy(
+                    server_name=registration_name(token)
+                )
+            else:
+                daemon_policy = load_normal_daemon_policy()
+            if validated_game is not None and validated_game not in daemon_policy.argv:
+                raise ValueError("game_path_not_in_provenance")
             control_client = ControlClient(
                 policy=daemon_policy,
                 identity=identity,
@@ -248,19 +265,51 @@ class _GenericParser(argparse.ArgumentParser):
 
 def _parser() -> argparse.ArgumentParser:
     parser = _GenericParser(
-        description="Run one registered native DayZ consumer after a durable lease wait"
+        description="Run one registered native DayZ consumer after a durable lease wait",
+        allow_abbrev=False,
     )
     parser.add_argument("launcher_id")
     parser.add_argument("--max-wait-s", type=float, default=DEFAULT_MAX_WAIT_S)
+    parser.add_argument("--instance", default="")
+    parser.add_argument("--game-path", default="")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    from dayz_mcp.server_cli import (
+        InstanceSelectionError,
+        reject_conflicting_environment,
+        selector_from_parsed,
+        validate_entry_selector,
+    )
+
     try:
+        token, game_path = validate_entry_selector(raw)
+        reject_conflicting_environment(token, None, game_path)
+    except InstanceSelectionError:
+        print("secure launcher: invalid arguments", file=sys.stderr, flush=True)
+        return 2
+    args = _parser().parse_args(raw)
+    try:
+        consumed_token, consumed_game = selector_from_parsed(args.instance, args.game_path)
+        if (consumed_token, consumed_game) != (token, game_path):
+            raise InstanceSelectionError("duplicate_instance_flag")
+        token, game_path = consumed_token, consumed_game
+        reject_conflicting_environment(token, None, game_path)
+    except InstanceSelectionError:
+        print("secure launcher: invalid arguments", file=sys.stderr, flush=True)
+        return 2
+    try:
+        selected = {}
+        if token:
+            selected["instance_token"] = token
+        if game_path:
+            selected["game_path"] = game_path
         return run_secure_launcher(
             args.launcher_id,
             max_wait_s=args.max_wait_s,
+            **selected,
         )
     except KeyboardInterrupt:
         return 130

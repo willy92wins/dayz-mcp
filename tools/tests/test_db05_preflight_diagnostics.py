@@ -19,7 +19,11 @@ class Db05DiagnosticsTest(unittest.IsolatedAsyncioTestCase):
         self.provider = _MutableSteamProvider()
         self.runtime = fixtures._Runtime({"runs": [{
             "run_id": fixtures.RUN_ID, "state": "RUNNING_IDLE",
-            "mod": "@ExampleMod", "processes": [],
+            "mod": "@ExampleMod",
+            # The extension admission validates this recorded anchor against
+            # the approved dev_root and the bound (default) leaf.
+            "profiles": r"P:\ExampleMod_Suite\_server\profiles",
+            "processes": [],
         }]})
         self.launch_error = None
         self.vpp = SimpleNamespace(error_code=None, missing=(), warnings=(), hint="")
@@ -71,35 +75,44 @@ class Db05DiagnosticsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_preflight_green_explicitly_discloses_steam_and_attach_checks(self):
         self.provider.active_user = 0
+        self.provider.active_user = 7
         dry = await self.run_tool(preflight=True, auto_remediate_steam=True)
         self.assertEqual(dry["status"], "succeeded")
         self.assertEqual(dry.get("preflight_skipped_checks"),
-                         ["steam_session", "extension_run", "client_replacement"])
-        self.evaluate.assert_not_called()
+                         ["extension_run", "client_replacement", "process_launch",
+                          "readiness", "initialization_evidence"])
+        self.assertNotIn("steam_session", dry["preflight_skipped_checks"])
+        self.evaluate.assert_called()
         self.remediate.assert_not_called()
-        self.assertEqual(self.runtime.lifecycle_calls, 0)
+        self.assertGreaterEqual(self.runtime.session_calls, 1)
+        self.provider.active_user = 0
         self.assertEqual(self.runtime.bridge_calls, 0)
         real = await self.run_tool()
         self.assertEqual(real["error_code"], "steam_session_stale")
         self.assertNotIn("preflight_skipped_checks", real)
-        self.assertEqual(self.launch.await_count, 1)  # only the fake preflight worker
+        self.assertEqual(self.launch.await_count, 0)  # preflight does not launch the worker
 
     async def test_preflight_all_discloses_only_applicable_host_checks(self):
         result = await self.run_tool(mode="all", preflight=True)
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(result.get("preflight_skipped_checks"), ["steam_session"])
-        self.evaluate.assert_not_called()
+        self.assertEqual(result.get("preflight_skipped_checks"),
+                         ["process_launch", "readiness", "initialization_evidence"])
+        self.evaluate.assert_called()
 
-    async def test_preflight_server_publishes_empty_list(self):
+    async def test_preflight_server_publishes_live_omissions_without_steam(self):
         result = await self.run_tool(mode="server", preflight=True)
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(result.get("preflight_skipped_checks"), [])
+        self.assertEqual(result.get("preflight_skipped_checks"),
+                         ["process_launch", "readiness", "initialization_evidence"])
         self.evaluate.assert_not_called()
 
     async def test_preflight_vpp_refusal_still_publishes_omissions(self):
         self.vpp.error_code = "vpp_preflight_failed"
-        for mode, skipped in (("client", ["steam_session", "extension_run", "client_replacement"]),
-                              ("server", [])):
+        for mode, skipped in (
+            ("client", ["extension_run", "client_replacement", "process_launch",
+                        "readiness", "initialization_evidence"]),
+            ("server", ["process_launch", "readiness", "initialization_evidence"]),
+        ):
             with self.subTest(mode=mode):
                 result = await self.run_tool(mode=mode, preflight=True)
                 self.assertEqual(result["error_code"], self.vpp.error_code)
@@ -107,11 +120,15 @@ class Db05DiagnosticsTest(unittest.IsolatedAsyncioTestCase):
         self.launch.assert_not_awaited()
         self.evaluate.assert_not_called()
 
-    async def test_preflight_worker_failure_still_publishes_omissions(self):
-        self.launch_error = "operation_cancelled"
+    async def test_preflight_steam_failure_still_publishes_omissions(self):
+        self.provider.active_user = 0
         result = await self.run_tool(mode="all", preflight=True)
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result.get("preflight_skipped_checks"), ["steam_session"])
+        self.assertEqual(result["error_code"], "steam_session_stale")
+        self.assertEqual(result.get("preflight_skipped_checks"),
+                         ["process_launch", "readiness", "initialization_evidence"])
+        self.launch.assert_not_awaited()
+        self.remediate.assert_not_called()
 
     async def test_real_success_keeps_existing_envelope(self):
         result = await self.run_tool()

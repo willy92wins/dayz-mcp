@@ -79,11 +79,15 @@ SERVER_COMMANDS = {
     "player_teleport",
     "player_heal",
     "player_godmode",
+    "player_kill",
+    "bot_start",
+    "bot_stop",
     "object_anim",
     "vehicle_door",
     "inventory_attach",
     "inventory_give",
     "object_inspect",
+    "object_resolve",
     "object_doors",
     "infected_drive",
     "entities_query",
@@ -114,6 +118,7 @@ CLIENT_COMMANDS = {
     "ui_dialog",
     "action_use",
     "action_use_door",
+    "action_use_component",
     "action_use_target",
     "anim_timeline",
     "weapon_aim",
@@ -130,6 +135,15 @@ _RUN_NOT_OWNED_HINT = (
     "This run has no owner (RUNNING_IDLE). Adopt it with session_acquire_wait: "
     "its grant adopts the single ownerless run"
 )
+# d17c-a: the one refusal every client-peer enqueue shares when the exact
+# destination's registered client is known dead. Bounded like every enqueue hint.
+_CLIENT_PROCESS_GONE_HINT = (
+    "The registered client process of this run is gone. Inspect session_status, "
+    "then reattach the client with dayz_test_run mode=client and run_id"
+)
+# Verdicts classify_registered_client_liveness may answer; anything else is
+# treated as unknown so a foreign shape can never read as a death.
+_CLIENT_GATE_VERDICTS = frozenset({"alive", "dead", "unknown", "none"})
 _DURABLE_UNREADABLE = "run_state_unavailable"
 VALID_PEERS = {"server", "client"}
 SESSION_ROUTES = {
@@ -644,7 +658,8 @@ def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
-        "settle_ticks": _integer_in_range(),
+        # 0 keeps the bridge default of three ticks. 600 is 30 s of settle.
+        "settle_ticks": _integer_in_range(minimum=0, maximum=600),
     }
     for field in vectors:
         validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3
@@ -766,6 +781,35 @@ def _player_move_variant(phase: str, direction: str | None) -> _SchemaVariant:
         validators["to"] = _is_real_vector3
         validators["radius"] = _SAFE_PLAYER_MOVE_RADIUS
     return _schema_variant(required=tuple(required), validators=validators)
+
+
+# bot_start allowlist. Names match EActions in 1.30 Bot.c transitions.
+# PLAYER_BOT_STOP_CURRENT and PLAYER_BOT_TEST_SWAP_C2H are not startable.
+BOT_TTL_MAX_S = 30.0
+BOT_START_ACTIONS = (
+    "PLAYER_BOT_RANDOMIZE_STANCE",
+    "PLAYER_BOT_RANDOMIZE_MOVEMENT",
+    "PLAYER_BOT_SPAM_USER_ACTIONS",
+    "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE",
+    "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH",
+    "PLAYER_BOT_TEST_SPAWN_OPEN",
+    "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY",
+    "PLAYER_BOT_TEST_SPAWN_OPEN_EAT",
+    "PLAYER_BOT_TEST_SWAP_G2H",
+    "PLAYER_BOT_TEST_SWAP_INTERNAL",
+)
+# Verbs an older PBO must never be handed. Admission and delivery both require
+# a fresh accredited server census that names the command and the current
+# arg-contract hash.
+_CAPABILITY_ADMISSION_COMMANDS = frozenset({
+    "player_kill",
+    "bot_start",
+    "bot_stop",
+    "object_resolve",
+})
+# Owner cleanup may deliver these without a live lease. Nothing else internal
+# skips the authority check.
+_OWNER_CLEANUP_COMMANDS = frozenset({"vehicle_release", "bot_stop"})
 
 
 # Command schemas keep the authenticated ingress contract in one place. Variants
@@ -911,6 +955,36 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    # uid is the whole argument. An empty string is not a player, and an extra
+    # key must not fall through to another body.
+    "player_kill": _command_schema(
+        _schema_variant(
+            required=("uid",),
+            validators={"uid": _is_non_empty_string},
+        )
+    ),
+    "bot_start": _command_schema(
+        _schema_variant(
+            required=("object_id", "action", "bot_ttl_s"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "action": _one_of(*BOT_START_ACTIONS),
+                "bot_ttl_s": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=0.0,
+                        maximum=BOT_TTL_MAX_S,
+                        minimum_inclusive=False,
+                    )
+                ),
+            },
+        )
+    ),
+    "bot_stop": _command_schema(
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        )
+    ),
     # heading and speed each travel with their _set flag, true: the bridge reads
     # an absent key as 0 or false (fb-20260930-065425-8779).
     "infected_drive": _command_schema(
@@ -1048,6 +1122,19 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "dest": _equal_to("cargo"),
             },
         ),
+    ),
+    # object_resolve registers one existing object. Radius is finite, in (0, 50].
+    "object_resolve": _command_schema(
+        _schema_variant(
+            required=("type", "pos", "radius"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
+                ),
+            },
+        )
     ),
     "object_inspect": _command_schema(
         _schema_variant(
@@ -1228,6 +1315,24 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "action": _is_non_empty_string,
                 "target": _one_of("hands", "self"),
                 "classname": _is_string,
+                "radius": _SAFE_RADIUS_200,
+            },
+        )
+    ),
+    # Component mode is the command name. component_index is not optional on
+    # action_use: 0 is a valid component, so an absent field cannot mean
+    # "no component". The index is any nonnegative Enforce int, including
+    # values above 511. cursor_pos is the world-space hit the action uses.
+    "action_use_component": _command_schema(
+        _schema_variant(
+            required=("action", "classname", "component_index", "cursor_pos"),
+            optional=("pos", "radius"),
+            validators={
+                "action": _is_non_empty_string,
+                "classname": _is_non_empty_string,
+                "component_index": _integer_in_range(minimum=0, maximum=2_147_483_647),
+                "cursor_pos": _is_real_vector3,
+                "pos": _is_real_vector3,
                 "radius": _SAFE_RADIUS_200,
             },
         )
@@ -1609,6 +1714,7 @@ class ServerState:
         self.client_dumps = ClientDumpRegistry()
         self.retail_probe: Callable[[], dict[str, object]] | None = None
         self.daemon_generation: str | None = None
+        self.instance_token: str | None = None
         self._lock = threading.RLock()
         self._fenced_runs: set[str] = set()
         self._next_id = 1
@@ -1621,9 +1727,9 @@ class ServerState:
         self._ever_bound = False
         self._seen_valid_inst_poll = False
         self._peer_last_class: dict[str, str] = {}
-        # peer -> {generation, commands|None, reason}. Overwritten on every
-        # poll: only the LAST accredited announcement of the CURRENT
-        # generation counts, and nothing here is ever inherited across one.
+        # peer -> announcement. Overwritten on every poll: only the LAST
+        # accredited announcement of the CURRENT generation, bound instance
+        # and fresh window counts. Nothing here is inherited across one.
         self._peer_caps: dict[str, dict] = {}
         self._bound_last_poll_at: dict[str, float | None] = {
             "server": None,
@@ -1648,6 +1754,7 @@ class ServerState:
         self._enqueued_at: dict[int, float] = {}
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
+        self._bot_by_lease: dict[str, set[int]] = {}
         self._fire_and_forget_ids: set[int] = set()
         self._audit_degraded_count = 0
         self._poll_delay_ms = 0
@@ -1695,6 +1802,65 @@ class ServerState:
             return False
         return config_path.is_file()
 
+    def _provision_named_profile_leaf(
+        self, profiles_dir: Path, role: str, expected_dir: str
+    ) -> None:
+        """Create only the named leaf under an existing role root.
+
+        Ancestors are not created. A file, a path that resolves outside the
+        role root, or a leaf that is not that directory after a concurrent
+        create fails closed. Credentials are checked before the create.
+        """
+        if role == "server":
+            role_root_name = "_server"
+        elif role in {"client", "offline"}:
+            role_root_name = "_client"
+        else:
+            raise BindingPrepareError("instance_config_missing")
+        role_root = profiles_dir.parent
+        project_root = role_root.parent
+        if role_root.name.casefold() != role_root_name.casefold():
+            raise BindingPrepareError("instance_config_missing")
+        if not project_root.is_dir() or not role_root.is_dir():
+            raise BindingPrepareError("instance_config_missing")
+        try:
+            resolved_project = project_root.resolve()
+            resolved_role = role_root.resolve()
+        except OSError as exc:
+            raise BindingPrepareError("instance_config_missing") from exc
+        if os.path.normcase(str(resolved_role.parent)) != os.path.normcase(str(resolved_project)):
+            raise BindingPrepareError("instance_config_missing")
+        if resolved_role.name.casefold() != role_root_name.casefold():
+            raise BindingPrepareError("instance_config_missing")
+        expected_leaf = resolved_role / expected_dir
+        try:
+            present = profiles_dir.exists() or profiles_dir.is_symlink()
+        except OSError as exc:
+            raise BindingPrepareError("instance_config_missing") from exc
+        if not present:
+            if (
+                not self.key
+                or isinstance(self.config_port, bool)
+                or not isinstance(self.config_port, int)
+            ):
+                raise BindingPrepareError("instance_config_missing")
+            try:
+                profiles_dir.mkdir(parents=False)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise BindingPrepareError("instance_config_missing") from exc
+        try:
+            if not profiles_dir.is_dir():
+                raise BindingPrepareError("instance_config_missing")
+            resolved_leaf = profiles_dir.resolve()
+        except BindingPrepareError:
+            raise
+        except OSError as exc:
+            raise BindingPrepareError("instance_config_missing") from exc
+        if os.path.normcase(str(resolved_leaf)) != os.path.normcase(str(expected_leaf)):
+            raise BindingPrepareError("instance_config_missing")
+
     def prepare(self, run_id: str, role: str, profiles_dir: str) -> str:
         from dayz_mcp.process_lifecycle import _valid_uuid4
         from dayz_mcp.runtime_state import atomic_write_json
@@ -1706,6 +1872,31 @@ class ServerState:
         ):
             raise BindingPrepareError("instance_config_missing")
         config_path = Path(profiles_dir) / "dayz_mcp.json"
+        token = getattr(self, "instance_token", None)
+        if token is not None:
+            from dayz_mcp.server_cli import InstanceSelectionError, profile_leaf_name
+
+            try:
+                expected_dir = profile_leaf_name(token)
+            except InstanceSelectionError as exc:
+                raise BindingPrepareError("instance_config_missing") from exc
+            if Path(profiles_dir).name.casefold() != expected_dir.casefold():
+                raise BindingPrepareError("instance_profile_owner_mismatch")
+            self._provision_named_profile_leaf(Path(profiles_dir), role, expected_dir)
+            if config_path.is_file():
+                try:
+                    existing = json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise BindingPrepareError("instance_config_missing") from exc
+                expected_url = "http://127.0.0.1:" + str(self.config_port) + "/"
+                if (
+                    not isinstance(existing, dict)
+                    or not isinstance(self.config_port, int)
+                    or isinstance(self.config_port, bool)
+                    or existing.get("url") != expected_url
+                    or existing.get("key") != self.key
+                ):
+                    raise BindingPrepareError("instance_endpoint_mismatch")
         if not config_path.is_file() and not self._seed_bridge_config(config_path):
             raise BindingPrepareError("instance_config_missing")
         try:
@@ -1906,6 +2097,7 @@ class ServerState:
         self._retired_roles.add(binding.role)
         if binding.role == "offline":
             self._retired_roles.update({"server", "client"})
+        self._invalidate_caps_for_instance_locked(instance)
         retired_pid = binding.pid
         self._bindings.pop(instance, None)
         self._bound_queues.pop(instance, None)
@@ -2575,6 +2767,80 @@ class ServerState:
             "detail": detail,
         }
 
+    def _capability_refusal_locked(
+        self, peer: str, cmd: str, instance: str | None = None
+    ) -> str | None:
+        """None when this command may be queued or delivered. Caller holds the lock.
+
+        A missing, stale, aged or foreign-binding census is
+        bridge_capability_missing. An announced census with a missing or
+        different arg-contract hash is arg_contract_mismatch, and that wins
+        over a missing command name.
+        """
+        if cmd not in _CAPABILITY_ADMISSION_COMMANDS:
+            return None
+        from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
+
+        view = self._capabilities_view_locked(peer)
+        if view.get("state") != "announced":
+            return "bridge_capability_missing"
+        entry = self._peer_caps.get(peer)
+        if not isinstance(entry, dict):
+            return "bridge_capability_missing"
+        announced_at = entry.get("announced_at")
+        if (
+            not isinstance(announced_at, (int, float))
+            or isinstance(announced_at, bool)
+            or (self._now() - float(announced_at)) >= PEER_STALE_S
+        ):
+            return "bridge_capability_missing"
+        if not isinstance(instance, str) or instance != entry.get("instance"):
+            return "bridge_capability_missing"
+        announced_hash = view.get("announced_arg_contract_hash")
+        if (
+            not isinstance(announced_hash, str)
+            or announced_hash != EXPECTED_SERVER_ARG_CONTRACT_HASH
+        ):
+            return "arg_contract_mismatch"
+        announced = view.get("announced_commands")
+        if not isinstance(announced, list) or cmd not in announced:
+            return "bridge_capability_missing"
+        return None
+
+    def _invalidate_caps_for_instance_locked(self, instance: str) -> None:
+        """Drop announcements that named a binding which is no longer current."""
+        for peer, entry in list(self._peer_caps.items()):
+            if isinstance(entry, dict) and entry.get("instance") == instance:
+                self._peer_caps.pop(peer, None)
+
+    def enqueue_bot_stops_for_lease(self, lease_id: str) -> dict[str, int]:
+        """Best-effort bot_stop for dummies that lease started. TTL still bounds them.
+
+        Caller should hold the queue lock so the fire-and-forget registration
+        cannot race delivery. The commands are owner-cleanup, not ownerless
+        mutations: delivery authorizes only this registered set.
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            object_ids = sorted(self._bot_by_lease.pop(lease_id, set()))
+            enqueued = 0
+            failed = 0
+            for object_id in object_ids:
+                status, payload = self.enqueue_command(
+                    "bot_stop",
+                    {"object_id": object_id},
+                    peer="server",
+                    internal=True,
+                )
+                command_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(command_id, int):
+                    self._fire_and_forget_ids.add(command_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
     def _enqueue_command(
         self,
         cmd: str,
@@ -2630,48 +2896,72 @@ class ServerState:
         commanded_run_id: str | None = None
         activity_epoch: float | None = None
         owner_session = owner_client.session_id if owner_client is not None else None
+        # d17c-a: a client-peer command whose exact destination's registered
+        # client is known dead is refused at once. The native identity probe
+        # runs with the loopback lock released, so admission resolves the
+        # fence twice and the publication pass revalidates the destination
+        # pin: a destination that changed while the probe ran never inherits
+        # the death verdict. The verdict is also tied to the pinned process
+        # identity: a snapshot that never observed the pinned client (a
+        # reattach confirmed against the station before its record is
+        # published) reads unknown instead of inheriting the superseded
+        # client's death.
+        gate_pin: tuple[str, str, int, int | None, str | None] | None = None
         with self._lock:
-            if self._stopping:
-                return 409, {"error": "enqueue_cancelled"}
-            fence_error_code, queue, fence_instance = self._enqueue_fence_target(
+            error, queue, fence_instance, gate_pin = self._admit_enqueue_locked(
                 peer, cmd, internal=internal, owner_session=owner_session
             )
-            if fence_error_code is not None or queue is None:
-                code = fence_error_code or "legacy_unbound"
-                self._fence_reject_counts[code] = (
-                    self._fence_reject_counts.get(code, 0) + 1
+            if error is not None:
+                return error
+            if gate_pin is None:
+                status, payload, commanded_run_id, activity_epoch = (
+                    self._publish_enqueue_locked(
+                        cmd,
+                        args,
+                        peer,
+                        queue,
+                        fence_instance,
+                        owner_client=owner_client,
+                        owner_lease_id=owner_lease_id,
+                        operation_timeout_s=operation_timeout_s,
+                        commit=commit,
+                        internal=internal,
+                    )
                 )
-                return self._fence_reject_response(code, peer=peer)
-            if self._peer_queue_len(peer) >= MAX_QUEUE:
-                return 429, {"error": "queue_full"}
-
-            command_id = self._next_id
-            self._next_id += 1
-            command = {"id": command_id, "cmd": cmd, "args": args}
-            if commit is not None and not commit(command_id):
-                return 409, {"error": "lease_invalid"}
-            if owner_client is not None and owner_lease_id is not None:
-                self._command_owner[command_id] = (owner_client, owner_lease_id)
-            queue.append(command)
-            enqueued_at = self._now()
-            self._enqueued_at[command_id] = enqueued_at
-            if operation_timeout_s > 0.0:
-                self._operation_deadlines[command_id] = (
-                    enqueued_at + operation_timeout_s
-                )
-            binding = (
-                self._bindings.get(fence_instance) if fence_instance else None
+                if status != 200:
+                    return status, payload
+        if gate_pin is not None:
+            gate_verdict = self._registered_client_verdict(
+                gate_pin[1], (gate_pin[3], gate_pin[4])
             )
-            self._seal_command(command_id, fence_instance, binding)
-            commanded_run_id = _binding_run_id(binding)
-            if command_requires_lease(cmd) and (
-                fence_instance is None
-                or binding is None
-                or binding.state != BINDING_BOUND
-            ):
-                self._unaccredited_mutation_enqueues += 1
-            if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
-                activity_epoch = time.time()
+            with self._lock:
+                error, queue, fence_instance, repin = self._admit_enqueue_locked(
+                    peer, cmd, internal=internal, owner_session=owner_session
+                )
+                if error is not None:
+                    return error
+                if repin == gate_pin and gate_verdict == "dead":
+                    return 409, {
+                        "error": "client_process_gone",
+                        "run_id": gate_pin[1],
+                        "hint": _CLIENT_PROCESS_GONE_HINT,
+                    }
+                status, payload, commanded_run_id, activity_epoch = (
+                    self._publish_enqueue_locked(
+                        cmd,
+                        args,
+                        peer,
+                        queue,
+                        fence_instance,
+                        owner_client=owner_client,
+                        owner_lease_id=owner_lease_id,
+                        operation_timeout_s=operation_timeout_s,
+                        commit=commit,
+                        internal=internal,
+                    )
+                )
+                if status != 200:
+                    return status, payload
 
         try:
             if not internal:
@@ -2680,7 +2970,177 @@ class ServerState:
                 )
         except Exception:
             pass
-        return 200, {"id": command_id, "peer": peer, "cmd": cmd}
+        return 200, payload
+
+    def _admit_enqueue_locked(
+        self,
+        peer: str,
+        cmd: str,
+        *,
+        internal: bool,
+        owner_session: str | None,
+    ) -> tuple[
+        tuple[int, dict] | None,
+        list[dict] | None,
+        str | None,
+        tuple[str, str, int, int | None, str | None] | None,
+    ]:
+        """Fence, capacity and gate-destination resolution under the lock.
+
+        Returns (error, queue, instance, client_gate_pin): error is the refusal
+        to answer with, and the pin is the exact bound client destination a
+        client-peer command would publish to, or None when there is none to
+        gate on. Caller holds self._lock; the probe that may follow must not.
+        """
+        if self._stopping:
+            return (409, {"error": "enqueue_cancelled"}), None, None, None
+        fence_error_code, queue, fence_instance = self._enqueue_fence_target(
+            peer, cmd, internal=internal, owner_session=owner_session
+        )
+        if fence_error_code is not None or queue is None:
+            code = fence_error_code or "legacy_unbound"
+            self._fence_reject_counts[code] = (
+                self._fence_reject_counts.get(code, 0) + 1
+            )
+            return self._fence_reject_response(code, peer=peer), None, None, None
+        if self._peer_queue_len(peer) >= MAX_QUEUE:
+            return (429, {"error": "queue_full"}), None, None, None
+        refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
+        if refusal is not None:
+            return (409, {"error": refusal}), None, None, None
+        pin = None
+        if peer == "client" and not internal:
+            pin = self._client_gate_pin_locked(fence_instance)
+        return None, queue, fence_instance, pin
+
+    def _client_gate_pin_locked(
+        self, instance: str | None
+    ) -> tuple[str, str, int, int | None, str | None] | None:
+        """Identity pin of the exact bound client destination, or None.
+
+        Caller holds self._lock. The pin carries the instance, the run it
+        serves, the station epoch and the announced process identity: any
+        rebind, replace or confirm produces a different pin, so a death
+        verdict captured for one destination is never inherited by another.
+        """
+        if not instance:
+            return None
+        binding = self._bindings.get(instance)
+        if binding is None or binding.state != BINDING_BOUND:
+            return None
+        run_id = _binding_run_id(binding)
+        if not run_id:
+            return None
+        return (
+            instance,
+            run_id,
+            binding.epoch,
+            binding.pid if isinstance(binding.pid, int) else None,
+            binding.creation_time_utc,
+        )
+
+    def _registered_client_verdict(
+        self, run_id: str, destination: tuple[int | None, str | None]
+    ) -> str:
+        """alive, dead, unknown or none for the run's registered client.
+
+        d17c-a: identity-sensitive admission classifies the registered client
+        and offline records through the lifecycle's full native identity
+        check, never through a PID census. destination is the pinned (pid,
+        creation_time) of the exact bound destination, and the helper reads a
+        death only when its snapshot observed that identity, so a client
+        confirmed against the station before its record is published keeps
+        today's admission instead of inheriting the superseded client's
+        death. Called with the loopback lock released. An unavailable or
+        older lifecycle without the helper, a failed probe, a destination
+        whose identity cannot be tied to the probe, or a foreign shape is
+        unknown, which keeps today's admission path instead of guessing a
+        death.
+        """
+        classify = getattr(
+            self.lifecycle, "classify_registered_client_liveness", None
+        )
+        if not callable(classify):
+            return "unknown"
+        pinned_pid, pinned_creation_time = destination
+        if (
+            not isinstance(pinned_pid, int)
+            or isinstance(pinned_pid, bool)
+            or not isinstance(pinned_creation_time, str)
+            or not pinned_creation_time
+        ):
+            return "unknown"
+        try:
+            verdict = classify(
+                run_id, destination=(pinned_pid, pinned_creation_time)
+            )
+        except Exception:
+            return "unknown"
+        return verdict if verdict in _CLIENT_GATE_VERDICTS else "unknown"
+
+    def _publish_enqueue_locked(
+        self,
+        cmd: str,
+        args: dict,
+        peer: str,
+        queue: list[dict],
+        fence_instance: str | None,
+        *,
+        owner_client: ClientIdentity | None,
+        owner_lease_id: str | None,
+        operation_timeout_s: float,
+        commit: Callable[[int], bool] | None,
+        internal: bool,
+    ) -> tuple[int, dict, str | None, float | None]:
+        """Assign the id, seal and append one admitted command.
+
+        Caller holds self._lock and admission passed immediately before, so
+        the exact commit below stays the authority linearization point.
+        """
+        command_id = self._next_id
+        self._next_id += 1
+        command = {"id": command_id, "cmd": cmd, "args": args}
+        if commit is not None and not commit(command_id):
+            return 409, {"error": "lease_invalid"}, None, None
+        if owner_client is not None and owner_lease_id is not None:
+            self._command_owner[command_id] = (owner_client, owner_lease_id)
+        if cmd == "bot_start" and isinstance(owner_lease_id, str) and owner_lease_id:
+            raw_object_id = args.get("object_id")
+            if (
+                isinstance(raw_object_id, int)
+                and not isinstance(raw_object_id, bool)
+                and raw_object_id > 0
+            ):
+                self._bot_by_lease.setdefault(owner_lease_id, set()).add(
+                    raw_object_id
+                )
+        queue.append(command)
+        enqueued_at = self._now()
+        self._enqueued_at[command_id] = enqueued_at
+        if operation_timeout_s > 0.0:
+            self._operation_deadlines[command_id] = (
+                enqueued_at + operation_timeout_s
+            )
+        binding = (
+            self._bindings.get(fence_instance) if fence_instance else None
+        )
+        self._seal_command(command_id, fence_instance, binding)
+        commanded_run_id = _binding_run_id(binding)
+        if command_requires_lease(cmd) and (
+            fence_instance is None
+            or binding is None
+            or binding.state != BINDING_BOUND
+        ):
+            self._unaccredited_mutation_enqueues += 1
+        activity_epoch: float | None = None
+        if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
+            activity_epoch = time.time()
+        return (
+            200,
+            {"id": command_id, "peer": peer, "cmd": cmd},
+            commanded_run_id,
+            activity_epoch,
+        )
 
     def _enqueue_exec_enforce(
         self,
@@ -3037,7 +3497,9 @@ class ServerState:
 
             # After the whole binding chain: the census belongs to THIS poll,
             # so it needs this poll's accreditation, not the previous one's.
-            self._record_poll_caps_locked(peer, caps, accredited, ach=ach)
+            self._record_poll_caps_locked(
+                peer, caps, accredited, ach=ach, instance=token, now=now
+            )
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (
@@ -3130,6 +3592,22 @@ class ServerState:
                         remaining.append(command)
                         continue
                     if (
+                        isinstance(command_name, str)
+                        and command_name in _CAPABILITY_ADMISSION_COMMANDS
+                        and deliver_accredited
+                    ):
+                        refusal = self._capability_refusal_locked(
+                            peer, command_name, token
+                        )
+                        if refusal is not None:
+                            self._mark_discarded(
+                                command,
+                                refusal,
+                                discarded_exec,
+                                finished_operations,
+                            )
+                            continue
+                    if (
                         isinstance(command_id, int)
                         and isinstance(command_name, str)
                         and command_requires_lease(command_name)
@@ -3140,7 +3618,7 @@ class ServerState:
                         if retail_quarantined:
                             discard_reason = "retail_quarantine"
                         elif (
-                            command_name == "vehicle_release"
+                            command_name in _OWNER_CLEANUP_COMMANDS
                             and command_id in self._fire_and_forget_ids
                         ):
                             pass
@@ -3290,7 +3768,15 @@ class ServerState:
         fire_and_forget = command_id in self._fire_and_forget_ids
         if fire_and_forget:
             self._fire_and_forget_ids.discard(command_id)
-            self._results.pop(command_id, None)
+            if command.get("cmd") == "bot_stop" and command_id not in self._results:
+                self._results[command_id] = {
+                    "id": command_id,
+                    "ok": False,
+                    "error": reason,
+                }
+                self._trim_results_locked()
+            else:
+                self._results.pop(command_id, None)
         elif command_id not in self._results:
             self._results[command_id] = {"id": command_id, "ok": False, "error": reason}
             if hint is not None:
@@ -3563,15 +4049,18 @@ class ServerState:
             session_id, reason, lease_id
         )
         cleanup["vehicle_release_enqueued"] = 0
-        if not vehicle_active:
+        with self._lock:
+            pending_bots = bool(self._bot_by_lease.get(lease_id))
+        if not vehicle_active and not pending_bots:
             return cleanup
 
         if self._retail_quarantined():
             cleanup["cleanup_degraded"] = ["retail_quarantine"]
             return cleanup
 
-        # Keep append + fire-and-forget tracking atomic with /poll. This command is
-        # internal and deliberately has no owner mapping or externally awaited result.
+        # Keep append + fire-and-forget tracking atomic with /poll. These
+        # commands are internal and have no owner mapping. Delivery authorizes
+        # only the registered owner-cleanup names.
         with self._lock:
             if (
                 coordination is not None
@@ -3579,15 +4068,24 @@ class ServerState:
             ):
                 cleanup["cleanup_degraded"] = ["cleanup_fenced"]
                 return cleanup
-            status, payload = self.enqueue_command(
-                "vehicle_release", {}, peer="client", internal=True
-            )
-            if status == 200:
-                command_id = payload["id"]
-                self._fire_and_forget_ids.add(command_id)
-                cleanup["vehicle_release_enqueued"] = 1
-            else:
-                cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
+            if vehicle_active:
+                status, payload = self.enqueue_command(
+                    "vehicle_release", {}, peer="client", internal=True
+                )
+                if status == 200:
+                    command_id = payload["id"]
+                    self._fire_and_forget_ids.add(command_id)
+                    cleanup["vehicle_release_enqueued"] = 1
+                else:
+                    cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
+            report = self.enqueue_bot_stops_for_lease(lease_id)
+        if report["enqueued"] or report["failed"]:
+            cleanup["bot_stop_enqueued"] = report["enqueued"]
+        if report["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("bot_stop_failed")
+            cleanup["cleanup_degraded"] = values
         return cleanup
 
     def _retail_quarantined(self) -> bool:
@@ -3679,26 +4177,35 @@ class ServerState:
         raw: str | None,
         accredited: bool,
         ach: str | None = None,
+        instance: str | None = None,
+        now: float | None = None,
     ) -> None:
         """Keep only the last accredited announcement, tagged with its generation.
 
         An unaccredited poll may come from anyone, so its census is not stored
         AND it does not keep the previous one alive: the peer goes back to
-        unknown. That is affordable here precisely because the census gates
-        nothing. ``ach`` (arg-contract hash) is stored alongside when present.
+        unknown. An accredited census also records the bound instance and the
+        state-clock time, so admission can reject an aged or replaced binding
+        before it allocates an id. ``ach`` is stored alongside when present.
         """
 
         if accredited:
             names, reason = parse_poll_caps(raw)
             ach_value = ach if isinstance(ach, str) and ach else None
+            announced_at = now if isinstance(now, (int, float)) else self._now()
+            announced_instance = instance if isinstance(instance, str) else None
         else:
             names, reason = None, "unaccredited"
             ach_value = None
+            announced_at = None
+            announced_instance = None
         self._peer_caps[peer] = {
             "generation": self.daemon_generation,
             "commands": names,
             "reason": reason,
             "arg_contract_hash": ach_value,
+            "announced_at": announced_at,
+            "instance": announced_instance,
         }
 
     def _capabilities_view_locked(self, peer: str) -> dict:
@@ -4219,7 +4726,8 @@ class Handler(BaseHTTPRequestHandler):
         elif action == "heartbeat":
             status, payload = coordination.heartbeat(client, body.get("lease_token"))
         elif action == "release":
-            status, payload = coordination.release(client, body.get("lease_token"))
+            release_token = body.get("lease_token")
+            status, payload = coordination.release(client, release_token)
         else:
             status = 200
             payload = coordination.status(client)

@@ -82,24 +82,19 @@ class RunsBackupGateTest(unittest.TestCase):
         self.assertTrue((self.migration / "runs-backup-receipt.json").is_file())
 
     def test_settled_migration_ignores_blockers_that_only_gate_writing(self) -> None:
-        # The quiescence assert ran before the receipt fast path, so a
-        # migration that had finished long ago still demanded an empty machine.
-        # Once every open session's `-m dayz_mcp` client counted as a blocker, no
-        # daemon could boot at all: each candidate died at its startup deadline
-        # with nothing left to write.
+        # A settled receipt has nothing left to write, so a listener does not
+        # block. A scan that still reports a writer does: the classifier, not
+        # the receipt, decides that. Clients are not writers and stay out of
+        # that scan result.
         self.paths.root.mkdir(parents=True)
         self.paths.runs_path.write_bytes(b'{"runs":[{"run_id":"settled"}]}\n')
         receipt = self.run_gate()
         backup_bytes = (self.migration / "runs.pre-v2.json").read_bytes()
         receipt_bytes = (self.migration / "runs-backup-receipt.json").read_bytes()
 
-        variants = (
-            {"scan_fn": lambda _allowed: (1234,)},
-            {"listener_fn": lambda _port: True},
-        )
-        for kwargs in variants:
-            with self.subTest(kwargs=sorted(kwargs)):
-                self.assertEqual(self.run_gate(**kwargs), receipt)
+        self.assertEqual(self.run_gate(listener_fn=lambda _port: True), receipt)
+        with self.assertRaisesRegex(RunsBackupGateError, "dayz_mcp_process_present"):
+            self.run_gate(scan_fn=lambda _allowed: (1234,))
 
         # Read-only has to mean read-only, or the skipped gate would be a real hole.
         self.assertEqual((self.migration / "runs.pre-v2.json").read_bytes(), backup_bytes)

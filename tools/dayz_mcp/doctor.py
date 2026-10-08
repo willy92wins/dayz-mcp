@@ -53,6 +53,8 @@ _VALUE_OPTIONS = frozenset(
         "--client-platform",
         "--task-label",
         "--tool-pack",
+        "--instance",
+        "--game-path",
     }
 )
 _BOOLEAN_OPTIONS = frozenset(
@@ -76,6 +78,8 @@ _DAEMON_VALUE_OPTIONS = frozenset(
         "--idle-timeout",
         "--exec-allowlist",
         "--exec-audit-path",
+        "--instance",
+        "--game-path",
     }
 )
 _DAEMON_BOOLEAN_OPTIONS = frozenset(
@@ -147,6 +151,8 @@ class _DaemonPolicy:
     enable_exec_enforce: bool
     exec_allowlist: str | None
     exec_audit_path: str | None = None
+    instance_token: str | None = None
+    game_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -268,6 +274,12 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         raise ValueError("invalid_daemon_policy")
     codex = shutil.which("codex.cmd") or "codex.cmd"
     guard = NativeProcessGuard()
+    from dayz_mcp.instance_context import (
+        current_instance_token,
+        registration_name,
+    )
+
+    selected_name = registration_name(current_instance_token())
     knowledge_pack_dir = resolve_pack_dir()
 
     def daemon_status(port: int, keyfile: str) -> dict[str, object]:
@@ -277,16 +289,16 @@ def default_sources(policy: AccreditedDaemonPolicy) -> DoctorSources:
         return _read_daemon_status(policy)
 
     return DoctorSources(
-        claude_config=lambda: _run_command(["claude", "mcp", "get", "dayz-mcp"]),
+        claude_config=lambda: _run_command(["claude", "mcp", "get", selected_name]),
         codex_config=lambda: _run_command(
-            [codex, "mcp", "get", "dayz-mcp", "--json"]
+            [codex, "mcp", "get", selected_name, "--json"]
         ),
         listener_pid=_listener_pid_resilient,
         process_argv=orphan_guard.command_argv_of,
         daemon_status=daemon_status,
         process_snapshot=orphan_guard.snapshot_processes_by_name,
         process_identity=guard.snapshot,
-        runtime_paths=RuntimePaths.from_env(),
+        runtime_paths=RuntimePaths.for_token(current_instance_token()),
         scan_roots=(Path(__file__).resolve().parents[3],),
         expected_command=sys.executable,
         knowledge_pack_dir=knowledge_pack_dir,
@@ -399,6 +411,8 @@ def _policy_from_options(options: dict[str, str | None]) -> _DaemonPolicy:
         enable_exec_enforce="--enable-exec-enforce" in options,
         exec_allowlist=allowlist,
         exec_audit_path=audit_path,
+        instance_token=options.get("--instance"),
+        game_path=options.get("--game-path"),
     )
 
 
@@ -1410,7 +1424,17 @@ def render_human(payload: dict[str, object]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Read-only DayZ-MCP session doctor")
+    from dayz_mcp.server_cli import (
+        InstanceSelectionError,
+        bind_instance_context,
+        selector_from_parsed,
+        validate_entry_selector,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Read-only DayZ-MCP session doctor",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "--daemon-policy", choices=("normal", "bootstrap"), required=True
     )
@@ -1420,7 +1444,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="treat externally opened retail DayZ as a failure",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument("--instance", default="")
+    parser.add_argument("--game-path", default="")
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = None
+    selection_error: InstanceSelectionError | None = None
+    try:
+        token, game_path = validate_entry_selector(raw)
+        try:
+            args = parser.parse_args(raw)
+        except SystemExit as exited:
+            if exited.code in (0, None):
+                raise
+            raise InstanceSelectionError("invalid_instance_token") from exited
+        consumed_token, consumed_game = selector_from_parsed(args.instance, args.game_path)
+        if (consumed_token, consumed_game) != (token, game_path):
+            raise InstanceSelectionError("duplicate_instance_flag")
+        bind_instance_context(token, game_path, replace=True)
+    except InstanceSelectionError as error:
+        selection_error = error
+    if selection_error is not None or args is None:
+        error = selection_error or InstanceSelectionError("invalid_instance_token")
+        payload = _diagnostic_failure("sources", error)
+        payload["exception_code"] = error.code
+        print(render_json(payload) if "--json" in raw else render_human(payload))
+        return 2
     try:
         policy = daemon_policy.load_daemon_policy(args.daemon_policy)
     except Exception as error:

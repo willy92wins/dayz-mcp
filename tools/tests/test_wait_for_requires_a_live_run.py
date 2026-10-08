@@ -34,6 +34,7 @@ from tests.test_wait_for_launch_and_contract import (
     _live_process,
     _profiles,
 )
+from tests.wait_for_helpers import PinnedClosePolicy
 
 
 NEEDLE = "[DayZ-MCP] leftover from a dead run"
@@ -52,6 +53,7 @@ def _live(profiles: Path, run_id: str = "run-live") -> dict:
     return {
         "run_id": run_id,
         "state": "RUNNING",
+        "mod": "@ExampleMod",
         "profiles": str(profiles),
         "processes": [_live_process()],
     }
@@ -68,7 +70,9 @@ async def _wait(runtime: _FakeRuntime, pattern: str = NEEDLE) -> dict:
     )
 
 
-class WaitForRequiresALiveRunTest(unittest.IsolatedAsyncioTestCase):
+class WaitForRequiresALiveRunTest(
+    PinnedClosePolicy, unittest.IsolatedAsyncioTestCase
+):
     async def test_only_exited_runs_raise_no_active_run(self) -> None:
         """EXITED rows still carry `profiles`, so the old path scanned their logs."""
 

@@ -14,10 +14,13 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Protocol
 
 from dayz_mcp import (
+    dayz_test_attestation,
     dayz_test_modes,
     dayz_test_request,
+    dayz_test_storage,
     dayz_test_worker,
     process_lifecycle,
+    request_path_authority,
     secure_launcher,
 )
 from dayz_mcp.launcher_registry import open_approved_launcher
@@ -106,6 +109,14 @@ _TRANSITION_IN_FLIGHT = (
 _TERMINAL_KEYS = frozenset(
     {"cleanup_degraded", "error_code", "exit_code", "ok", "run_id"}
 )
+_OPTIONAL_TERMINAL_KEYS = frozenset(
+    {
+        "attempt_run_id",
+        "launch_operation_id",
+        "storage_recovery_reason",
+        "storage_recovery_hint",
+    }
+)
 
 
 class DayzTestToolError(RuntimeError):
@@ -122,6 +133,11 @@ class WorkerTerminal:
     exit_code: int
     ok: bool
     run_id: str | None
+    attempt_run_id: str | None = None
+    launch_operation_id: str | None = None
+    attestation: dict[str, object] | None = None
+    storage_recovery_reason: str | None = None
+    storage_recovery_hint: str | None = None
 
 
 class _Runtime(Protocol):
@@ -316,6 +332,7 @@ def _extra_mods_with_bridge_default(
     project_mod: str,
     kill: bool,
     base_mods: list[str],
+    project_counts_as_bridge: bool = True,
 ) -> tuple[list[str] | None, tuple[str, ...]]:
     """Append @DayZ_MCP on extra_mods when this launch would miss the bridge.
 
@@ -330,6 +347,10 @@ def _extra_mods_with_bridge_default(
     casefold duplicate) is left unchanged.
     """
     if kill or _names_bridge(project_mod):
+        # The project folder is the bridge. A normal launch already counts it.
+        # An override excludes that folder and must not copy it back into
+        # extra_mods; presence is then decided on the effective list.
+        del project_counts_as_bridge
         return extra_mods, ()
     if extra_mods is not None and any(_names_bridge(item) for item in extra_mods):
         return extra_mods, ()
@@ -359,10 +380,15 @@ def _bridge_default_report(
 
 
 def _annotate_bridge_default(
-    result: dict[str, object], defaulted: list[str]
+    result: dict[str, object],
+    defaulted: list[str],
+    *,
+    project_mod_replaced: bool = False,
 ) -> dict[str, object]:
     if defaulted:
         result["extra_mods_defaulted"] = list(defaulted)
+    if project_mod_replaced:
+        result["project_mod_replaced"] = True
     return result
 
 
@@ -391,6 +417,7 @@ def build_run_request(
     server_wait_s: int = 60,
     kill: bool = False,
     replace_if_not_polling_since: int | None = None,
+    project_mod_override: bool = False,
 ) -> tuple[bytes, dayz_test_request.RequestProjectPolicy]:
     selected = _selected_policy(sealed_policies, project)
     if mode not in _accepted_modes():
@@ -413,6 +440,7 @@ def build_run_request(
         project_mod=selected.mod,
         kill=kill,
         base_mods=effective_base,
+        project_counts_as_bridge=not project_mod_override,
     )
 
     def _compose(
@@ -437,9 +465,11 @@ def build_run_request(
             "preflight": preflight,
             "run_id": run_id,
             "server_wait_s": server_wait_s,
-            "version": 1,
+            "version": 2 if project_mod_override else 1,
             "width": width,
         }
+        if project_mod_override:
+            document["project_mod_override"] = True
         if mods is not None:
             document["extra_mods"] = mods
         if public_base is not None:
@@ -451,6 +481,17 @@ def build_run_request(
             # once the gate has actually read the bridge: the value is the instant
             # of that reading, which start_run revalidates before killing anything.
             document["replace_if_not_polling_since"] = replace_if_not_polling_since
+        from dayz_mcp import server_cli
+
+        document["shared_lock_root"] = os.path.normpath(str(server_cli.shared_root()))
+        # The private worker environment is built from a fixed list and does
+        # not inherit DAYZ_MCP_BUILD_LOCK_WAIT_S. The sealed request is the
+        # accredited copy of the daemon's validated limit.
+        document["build_lock_wait_s"] = server_cli.build_lock_wait_s()
+        with server_cli._instance_bound_lock:
+            bound = server_cli._instance_bound
+        if bound is not None and bound[0]:
+            document["instance_token"] = bound[0]
         raw = json.dumps(
             document,
             ensure_ascii=False,
@@ -498,7 +539,10 @@ def build_run_request(
             public_extra = requested_extra
         else:
             raise
-    effective_mods = [selected.mod, *(public_extra or [])]
+    effective_mods = [
+        *( [] if project_mod_override else [selected.mod] ),
+        *(public_extra or []),
+    ]
     if not kill and not any(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
         for mod in effective_mods
@@ -566,6 +610,8 @@ def require_extension_run(
         )
     if run.get("mod") != "@" + selected_policy.mod:
         _fail("run_project_mismatch")
+    if _validated_recorded_leaf(selected_policy, run) is None:
+        _fail("lifecycle_status_invalid")
     return run
 
 
@@ -610,6 +656,33 @@ def _valid_uuid4(value: object) -> bool:
     return parsed.version == 4 and str(parsed) == value
 
 
+def _terminal_storage_pair(
+    value: dict[str, object], ok: bool, error_code: object
+) -> tuple[str, str] | None:
+    """The declared storage refusal, when the terminal carries a whole pair.
+
+    Both keys or neither, only on a failed storage-rejection terminal, the
+    token from the closed vocabulary and its canonical guidance. Anything
+    else is a malformed diagnostic, not a half truth to publish.
+    """
+    present_reason = "storage_recovery_reason" in value
+    present_hint = "storage_recovery_hint" in value
+    if not present_reason and not present_hint:
+        return None
+    if not present_hint or ok or error_code != "storage_recovery_required":
+        _fail("terminal_invalid")
+    reason = value.get("storage_recovery_reason")
+    hint = value.get("storage_recovery_hint")
+    if (
+        not isinstance(reason, str)
+        or not isinstance(hint, str)
+        or reason not in dayz_test_storage.STORAGE_RECOVERY_REASONS
+        or hint != dayz_test_storage.storage_recovery_hint(reason)
+    ):
+        _fail("terminal_invalid")
+    return reason, hint
+
+
 def parse_worker_terminal(
     stdout: bytes, stderr: bytes, process_exit_code: int
 ) -> WorkerTerminal:
@@ -637,10 +710,24 @@ def parse_worker_terminal(
         ).encode("utf-8")
     except (UnicodeError, ValueError, TypeError):
         _fail("terminal_invalid")
+    if not isinstance(value, dict) or canonical != stdout:
+        _fail("terminal_invalid")
+    keys = set(value)
+    optional = keys - _TERMINAL_KEYS
+    attestation_report = None
+    if "attestation" in keys:
+        try:
+            attestation_report = dayz_test_attestation.validate_report(
+                value.get("attestation")
+            )
+        except (TypeError, ValueError):
+            _fail("terminal_invalid")
+    allowed_optional = set(_OPTIONAL_TERMINAL_KEYS)
+    if attestation_report is not None:
+        allowed_optional.add("attestation")
     if (
-        not isinstance(value, dict)
-        or set(value) != _TERMINAL_KEYS
-        or canonical != stdout
+        not _TERMINAL_KEYS <= keys
+        or optional - allowed_optional
         or type(value.get("cleanup_degraded")) is not bool
         or type(value.get("ok")) is not bool
         or type(value.get("exit_code")) is not int
@@ -656,23 +743,58 @@ def parse_worker_terminal(
     if not valid_run:
         _fail("terminal_invalid")
     if ok:
-        if exit_code != 0 or error_code is not None or cleanup_degraded:
+        if (
+            exit_code != 0
+            or error_code is not None
+            or cleanup_degraded
+            or optional - {"attestation"}
+        ):
             _fail("terminal_invalid")
-    elif (
-        not 1 <= exit_code <= 255
-        or error_code not in dayz_test_worker.WORKER_ERROR_CODES
-        or cleanup_degraded
-        and run_id is None
-        or not cleanup_degraded
-        and run_id is not None
-    ):
-        _fail("terminal_invalid")
+        attempt_run_id = None
+        launch_operation_id = None
+        # A success carries no storage diagnostic pair. The ok branch above
+        # already refused any optional key beyond the attestation.
+        storage_recovery = None
+    else:
+        if (
+            not 1 <= exit_code <= 255
+            or error_code not in dayz_test_worker.WORKER_ERROR_CODES
+            or cleanup_degraded
+            and run_id is None
+            or not cleanup_degraded
+            and run_id is not None
+        ):
+            _fail("terminal_invalid")
+        attempt_run_id = value.get("attempt_run_id")
+        launch_operation_id = value.get("launch_operation_id")
+        if "attempt_run_id" in value and not _valid_uuid4(attempt_run_id):
+            _fail("terminal_invalid")
+        if "launch_operation_id" in value and (
+            not _valid_uuid4(launch_operation_id) or "attempt_run_id" not in value
+        ):
+            _fail("terminal_invalid")
+        if "attempt_run_id" not in value:
+            attempt_run_id = None
+        if "launch_operation_id" not in value:
+            launch_operation_id = None
+        storage_recovery = _terminal_storage_pair(value, ok, error_code)
     return WorkerTerminal(
         cleanup_degraded=cleanup_degraded,
         error_code=error_code,
         exit_code=exit_code,
         ok=ok,
         run_id=run_id,
+        attempt_run_id=attempt_run_id if isinstance(attempt_run_id, str) else None,
+        launch_operation_id=(
+            launch_operation_id if isinstance(launch_operation_id, str) else None
+        ),
+        attestation=attestation_report,
+        storage_recovery_reason=(
+            None if storage_recovery is None else storage_recovery[0]
+        ),
+        storage_recovery_hint=(
+            None if storage_recovery is None else storage_recovery[1]
+        ),
     )
 
 
@@ -709,6 +831,65 @@ async def _require_idle_session(runtime: _Runtime, *, tool: str) -> None:
         _fail("session_busy")
 
 
+def _planned_profile_leaf() -> str:
+    """Leaf of the bound instance. Unbound is the default ``profiles`` leaf."""
+    from dayz_mcp.server_cli import (
+        InstanceSelectionError,
+        bound_instance_token,
+        profile_leaf_name,
+    )
+
+    try:
+        return profile_leaf_name(bound_instance_token())
+    except InstanceSelectionError:
+        _fail("invalid_instance_token")
+
+
+def _paths_for_leaf(
+    policy: dayz_test_request.RequestProjectPolicy, mode: str, leaf: str
+) -> list[str]:
+    record = _mode_record(mode)
+    if record is None:
+        _fail(_mode_expected_error())
+    return [ntpath.join(policy.dev_root, root, leaf) for root in record.artifact_roots]
+
+
+def _validated_recorded_leaf(
+    policy: dayz_test_request.RequestProjectPolicy, run: dict[str, object]
+) -> str | None:
+    """The recorded profile leaf, after the anchor matches this instance.
+
+    The check runs before any requested role is chosen. A relative path, a
+    traversal, another project, another token, or a legacy leaf under a named
+    instance is rejected.
+    """
+    profiles = run.get("profiles")
+    if not isinstance(profiles, str) or not profiles or not ntpath.isabs(profiles):
+        return None
+    # Reject traversal in the recorded text. normpath would erase `..` and
+    # turn a different role's anchor into the approved leaf.
+    raw_parts = profiles.replace("/", "\\").split("\\")
+    if any(part == ".." for part in raw_parts):
+        return None
+    normalized = ntpath.normpath(profiles)
+    try:
+        leaf = _planned_profile_leaf()
+    except DayzTestToolError:
+        return None
+    if ntpath.basename(normalized).casefold() != leaf.casefold():
+        return None
+    parent = ntpath.basename(ntpath.dirname(normalized))
+    if parent.casefold() not in {"_server", "_client"}:
+        return None
+    dev_root = policy.dev_root
+    if not isinstance(dev_root, str) or not ntpath.isabs(dev_root):
+        return None
+    expected = ntpath.normcase(ntpath.normpath(ntpath.join(dev_root, parent, leaf)))
+    if ntpath.normcase(normalized) != expected:
+        return None
+    return leaf
+
+
 def _artifact_paths(
     policy: dayz_test_request.RequestProjectPolicy, mode: str
 ) -> list[str]:
@@ -718,28 +899,35 @@ def _artifact_paths(
     name it did not know: a mode whose roots the authority moved kept
     reporting the old ones, and an unknown mode reported a root it never
     wrote. An exact lookup that fails closed says so instead.
+
+    Before a run exists the leaf is the bound instance. The default instance
+    stays ``profiles``.
     """
-    record = _mode_record(mode)
-    if record is None:
-        _fail(_mode_expected_error())
-    return [
-        ntpath.join(policy.dev_root, root, "profiles")
-        for root in record.artifact_roots
-    ]
+    return _paths_for_leaf(policy, mode, _planned_profile_leaf())
 
 
 def _client_profile_roots(
-    policy: dayz_test_request.RequestProjectPolicy, mode: str
+    policy: dayz_test_request.RequestProjectPolicy,
+    mode: str,
+    run: dict[str, object] | None = None,
 ) -> list[str]:
     """The profile roots this mode starts a client in; never a server root.
 
-    offline is the client-side process that also hosts the mission.
+    offline is the client-side process that also hosts the mission. An
+    existing run keeps the leaf of its validated recorded anchor. An anchor
+    that does not belong to this instance yields no root.
     """
     record = _mode_record(mode)
     if record is None:
         return []
+    if run is not None:
+        leaf = _validated_recorded_leaf(policy, run)
+        if leaf is None:
+            return []
+    else:
+        leaf = _planned_profile_leaf()
     return [
-        ntpath.join(policy.dev_root, step.root, "profiles")
+        ntpath.join(policy.dev_root, step.root, leaf)
         for step in record.steps
         if step.kind == "start" and step.role in {"client", "offline"} and step.root
     ]
@@ -1452,12 +1640,29 @@ def _compact_result(
     steam_pid_repair: object = None,
     steam_restarted: object = None,
     client_dump_baseline: ClientDumpBaseline | None = None,
+    storage_rotated: bool | None = None,
+    storage_backup: str | None = None,
+    storage_reset_notice: str | None = None,
+    project_mod_replaced: bool = False,
 ) -> dict[str, object]:
     projection = readiness or _NULL_READINESS
     startup = _steam_prep_token(steam_startup)
     repair = _steam_prep_token(steam_pid_repair)
     restarted = steam_restarted if type(steam_restarted) is bool else None
-    return {
+    recovery_reason = terminal.storage_recovery_reason
+    recovery_hint = terminal.storage_recovery_hint
+    if (
+        terminal.ok
+        or terminal.error_code != "storage_recovery_required"
+        or not isinstance(recovery_reason, str)
+        or recovery_reason not in dayz_test_storage.STORAGE_RECOVERY_REASONS
+        or recovery_hint != dayz_test_storage.storage_recovery_hint(recovery_reason)
+    ):
+        recovery_reason = None
+        recovery_hint = None
+    if remediation is None and recovery_hint is not None:
+        remediation = recovery_hint
+    result: dict[str, object] = {
         "status": "succeeded" if terminal.ok else "failed",
         "project": project,
         "mode": mode,
@@ -1507,7 +1712,25 @@ def _compact_result(
             steam_startup=startup,
             dump_baseline=client_dump_baseline,
         ),
+        # null: this call did not observe a rotation (no status, another run,
+        # a launch that does not create storage, a call on an existing run,
+        # a legacy row). false: the run measured that it did not rotate. true
+        # is only that measurement. It is not evidence the economy restored
+        # the world.
+        "storage_rotated": storage_rotated if type(storage_rotated) is bool else None,
+        "storage_backup": storage_backup if storage_rotated is True else None,
+        "storage_reset_notice": (
+            storage_reset_notice if storage_rotated is True else None
+        ),
+        # null when this failure is not a declared storage refusal. The hint
+        # is the remediation above; the token is the decision, not daemon text.
+        "storage_recovery_reason": recovery_reason,
     }
+    if terminal.attestation is not None:
+        result["attestation"] = terminal.attestation
+    if project_mod_replaced:
+        result["project_mod_replaced"] = True
+    return result
 
 
 def _validate_terminal_context(
@@ -1535,7 +1758,10 @@ def _stop_artifacts(
         return []
     if not isinstance(profiles, str) or not profiles:
         _fail("lifecycle_status_invalid")
-    candidates = _artifact_paths(policy, "all")
+    leaf = _validated_recorded_leaf(policy, run)
+    if leaf is None:
+        _fail("lifecycle_status_invalid")
+    candidates = _paths_for_leaf(policy, "all", leaf)
     normalized = ntpath.normcase(ntpath.normpath(profiles))
     matches = [
         candidate
@@ -1559,7 +1785,7 @@ def _stop_artifacts(
     # already left the row (hung client, 8f76). Hung-client RPTs under
     # _client\profiles were then never collected on stop. Keep client-only
     # anchors as a single root; expand server anchors to the full "all" set.
-    server_roots = _artifact_paths(policy, "server")
+    server_roots = _paths_for_leaf(policy, "server", leaf)
     if matches == server_roots:
         return list(candidates)
     return matches
@@ -1740,6 +1966,7 @@ async def _execute_request(
     # writes its row before it spawns, and the transaction released and
     # verified its lease before this terminal was read, so no start of that id
     # can still be admitted. The error code is kept.
+    registered: object = None
     if (
         not terminal.ok
         and terminal.run_id is not None
@@ -1752,6 +1979,26 @@ async def _execute_request(
             registered = None
         if _run_unknown_to_store(registered, terminal.run_id):
             terminal = replace(terminal, run_id=None, cleanup_degraded=False)
+    # Storage is this attempt only, decided on the worker's terminal before any
+    # projection below turns a launch into a failure (client_dead_after_ack keeps
+    # the run it names). attempt_run_id is the worker's own id for the run it
+    # created or targeted; a failure terminal without it (an older worker, or a
+    # failure before any run) is unknown, not a license to use whatever run_id
+    # cleanup left behind. A call that names an existing run (reattach, stop)
+    # never rotates: the rotation that run recorded at its creation is not this
+    # call's observation, so the fields stay null on every terminal.
+    if expected_run_id is not None:
+        storage_run_id: str | None = None
+        storage_operation = None
+    elif terminal.attempt_run_id is not None:
+        storage_run_id = terminal.attempt_run_id
+        storage_operation = terminal.launch_operation_id
+    elif terminal.ok:
+        storage_run_id = terminal.run_id
+        storage_operation = None
+    else:
+        storage_run_id = None
+        storage_operation = None
     server_alive: bool | None = None
     client_alive: bool | None = None
     readiness: LaunchReadinessProjection | None = None
@@ -1797,6 +2044,17 @@ async def _execute_request(
     steam_startup, steam_pid_repair, steam_restarted = _steam_fields_from_status(
         status, terminal.run_id
     )
+    observed_status = status if isinstance(status, dict) else registered
+    if not preflight and storage_run_id is not None and not isinstance(observed_status, dict):
+        try:
+            observed_status = await runtime.lifecycle_status()
+        except Exception:
+            observed_status = None
+    storage_rotated, storage_backup, storage_reset_notice = (
+        _storage_observation_from_status(
+            observed_status, storage_run_id, storage_operation
+        )
+    )
     result = _compact_result(
         terminal=terminal,
         project=policy.mod,
@@ -1826,6 +2084,9 @@ async def _execute_request(
         steam_pid_repair=steam_pid_repair,
         steam_restarted=steam_restarted,
         client_dump_baseline=client_dump_baseline,
+        storage_rotated=storage_rotated,
+        storage_backup=storage_backup,
+        storage_reset_notice=storage_reset_notice,
     )
     if not terminal.ok and terminal.error_code == WORKER_INTERNAL_FAILURE:
         # 4fdf: the stage is known here, the exception class is not (see above).
@@ -1833,6 +2094,82 @@ async def _execute_request(
         result["exception_class"] = None
         result["remediation"] = _WORKER_INTERNAL_FAILURE_REMEDIATION
     return result
+
+
+def _operation_matches(row: dict[str, object], operation_id: str | None) -> bool:
+    """When both sides name an operation, they must be the same attempt."""
+    if operation_id is None:
+        return True
+    if "launch_operation_id" not in row or row.get("launch_operation_id") is None:
+        return True
+    return row.get("launch_operation_id") == operation_id
+
+
+def _decode_storage_observation(
+    row: dict[str, object],
+) -> tuple[bool | None, str | None, str | None]:
+    if "storage_rotated" not in row:
+        return None, None, None
+    rotated = row.get("storage_rotated")
+    if rotated is None:
+        return None, None, None
+    if rotated is False:
+        return False, None, None
+    if rotated is not True:
+        return None, None, None
+    backup = row.get("storage_backup")
+    notice = row.get("storage_reset_notice")
+    if (
+        not isinstance(backup, str)
+        or not backup
+        or any(separator in backup for separator in ("/", "\\", ":"))
+        or notice != dayz_test_storage.RESET_NOTICE
+    ):
+        return None, None, None
+    return True, backup, notice
+
+
+def _storage_observation_from_status(
+    status: object,
+    run_id: object,
+    operation_id: str | None = None,
+) -> tuple[bool | None, str | None, str | None]:
+    """The rotation stored for this attempt's run id, or unknown.
+
+    Exactly one live row naming the run id is the only authority, including
+    when its measurement is null or the keys are absent: a log entry must not
+    fill in a row that measured nothing. A row that names a different launch
+    operation is unknown for this attempt. The durable observation log is
+    consulted only when no live row names the run (an EXITED row already
+    pruned). No run id is unknown, not a guess about whichever run happens
+    to be in status.
+    """
+    if not isinstance(status, dict) or not isinstance(run_id, str) or not run_id:
+        return None, None, None
+    runs = status.get("runs")
+    if isinstance(runs, list):
+        matches = [
+            item
+            for item in runs
+            if isinstance(item, dict) and item.get("run_id") == run_id
+        ]
+        if len(matches) > 1:
+            return None, None, None
+        if len(matches) == 1:
+            if not _operation_matches(matches[0], operation_id):
+                return None, None, None
+            return _decode_storage_observation(matches[0])
+    observations = status.get("storage_observations")
+    if not isinstance(observations, list):
+        return None, None, None
+    found = [
+        item
+        for item in observations
+        if isinstance(item, dict) and item.get("run_id") == run_id
+    ]
+    if len(found) != 1 or not _operation_matches(found[0], operation_id):
+        return None, None, None
+    return _decode_storage_observation(found[0])
 
 
 def _steam_fields_from_status(
@@ -1849,6 +2186,411 @@ def _steam_fields_from_status(
         _steam_prep_token(prep.get("pid_repair")),
         restarted if type(restarted) is bool else None,
     )
+
+
+_MANAGED_BOX_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "UNRECONCILED"}
+)
+
+
+_PREFLIGHT_LIVE_OMISSIONS = (
+    "process_launch",
+    "readiness",
+    "initialization_evidence",
+)
+
+
+def _preflight_skipped_checks(mode: str, run_id: str | None) -> list[str]:
+    skipped: list[str] = []
+    if run_id is not None:
+        skipped.append("extension_run")
+        if _mode_starts_client(mode):
+            skipped.append("client_replacement")
+    skipped.extend(_PREFLIGHT_LIVE_OMISSIONS)
+    return skipped
+
+
+def _occupancy_from_box(box: object) -> tuple[bool | None, str | None]:
+    """Known occupancy from the read-only box snapshot.
+
+    ``scan_known`` / ``port_scan_known`` must both be true. Anything else,
+    including a snapshot that sets ``occupied`` because the scan did not run,
+    stays unknown (``null``), never a free or busy guess.
+    """
+    if not isinstance(box, dict):
+        return None, None
+    if box.get("scan_known") is not True or box.get("port_scan_known") is not True:
+        return None, None
+    runs = box.get("runs")
+    foreign = box.get("foreign")
+    occupied = box.get("occupied")
+    if type(occupied) is not bool or not isinstance(runs, list) or not isinstance(foreign, list):
+        return None, None
+    occupants = [
+        str(item.get("run_id"))
+        for item in runs
+        if isinstance(item, dict)
+        and item.get("state") in _MANAGED_BOX_STATES
+        and isinstance(item.get("run_id"), str)
+    ]
+    foreign_busy = any(isinstance(item, dict) for item in foreign)
+    occupant = occupants[0] if len(occupants) == 1 else None
+    if occupants or foreign_busy or occupied:
+        return True, occupant
+    return False, None
+
+
+async def _sample_box_occupancy(
+    runtime: _Runtime,
+) -> tuple[bool | None, str | None]:
+    """Advisory read of the box observer, not ``/lifecycle/status``.
+
+    Lifecycle status lists managed runs only. Foreign DayZ processes and the
+    scan flags live on the session box. A missing or failed observation is
+    null, not a guess that the box is free.
+    """
+    observe = getattr(runtime, "session_status", None)
+    if not callable(observe):
+        return None, None
+    try:
+        status = await observe()
+    except Exception:
+        return None, None
+    if not isinstance(status, dict) or "box" not in status:
+        return None, None
+    return _occupancy_from_box(status.get("box"))
+
+
+def _stamp_preflight(
+    result: dict[str, object],
+    *,
+    run_id: str | None,
+    box_busy: bool | None,
+    occupied_by_run_id: str | None,
+    skipped: list[str],
+    project_mod_replaced: bool,
+) -> dict[str, object]:
+    result["preflight"] = True
+    result["box_busy"] = box_busy
+    result["occupied_by_run_id"] = occupied_by_run_id
+    result["preflight_skipped_checks"] = list(skipped)
+    if run_id is not None:
+        result["run_id"] = run_id
+    if project_mod_replaced:
+        result["project_mod_replaced"] = True
+    return result
+
+
+async def _execute_preflight(
+    runtime: _Runtime,
+    *,
+    project: str,
+    mode: str,
+    mission: str,
+    build: bool,
+    clean: bool,
+    pack_only: bool,
+    run_id: str | None,
+    extra_mods: list[str] | None,
+    base_mods: list[str] | None,
+    server_mods: list[str] | None,
+    no_base_mods: bool,
+    no_file_patching: bool,
+    port: int,
+    width: int,
+    height: int,
+    player_name: str,
+    server_wait_s: int,
+    auto_remediate_steam: bool,
+    navmesh_data_server: bool,
+    project_mod_override: bool,
+    started_at: float,
+) -> dict[str, object]:
+    """Validate without a lease, a queue slot, a repair, or a process start."""
+    skipped = _preflight_skipped_checks(mode, run_id)
+    box_busy, occupied = await _sample_box_occupancy(runtime)
+
+    def finish(
+        result: dict[str, object], defaulted: list[str]
+    ) -> dict[str, object]:
+        stamped = _stamp_preflight(
+            result,
+            run_id=run_id,
+            box_busy=box_busy,
+            occupied_by_run_id=occupied,
+            skipped=skipped,
+            project_mod_replaced=project_mod_override,
+        )
+        return _annotate_bridge_default(
+            stamped, defaulted, project_mod_replaced=project_mod_override
+        )
+
+    with open_approved_launcher("dayz-test-v1") as opened:
+        opened.validate_native_pe()
+        with secure_launcher.load_verified_bundle(opened) as bundle:
+            raw_request, policy = build_run_request(
+                bundle.sealed_policies,
+                project=project,
+                mode=mode,
+                mission=mission,
+                build=build,
+                clean=clean,
+                pack_only=pack_only,
+                preflight=True,
+                run_id=run_id,
+                extra_mods=extra_mods,
+                base_mods=base_mods,
+                server_mods=server_mods,
+                no_base_mods=no_base_mods,
+                no_file_patching=no_file_patching,
+                navmesh_data_server=navmesh_data_server,
+                auto_remediate_steam=auto_remediate_steam,
+                port=port,
+                width=width,
+                height=height,
+                player_name=player_name,
+                server_wait_s=server_wait_s,
+                project_mod_override=project_mod_override,
+            )
+            bridge_default = _bridge_default_report(extra_mods, raw_request)
+            vpp = preflight_vpp_request(
+                raw_request, sealed_policies=bundle.sealed_policies
+            )
+            if vpp.error_code is not None:
+                refused = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=vpp.error_code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    remediation=vpp.hint,
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(refused, bridge_default)
+            if _mode_starts_client(mode):
+                desktop = await asyncio.to_thread(evaluate_prerun_desktop)
+                if desktop.error_code is not None:
+                    refused = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=desktop.error_code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        remediation=desktop.remediation,
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    return finish(refused, bridge_default)
+                try:
+                    steam = evaluate_steam_session()
+                except Exception:
+                    steam = SteamSessionResult(
+                        error_code=STEAM_SESSION_STALE,
+                        steam_registered_pid=None,
+                        steam_live_pids=(),
+                        remediation=REMEDIATION,
+                    )
+                # Client reattach does not start a new client during preflight.
+                # A stopped or stale Steam session must not turn that preflight
+                # into a failure: the supplied run id is the result, and a
+                # later real launch still hits this same gate. Modes that
+                # start a client without a run id (all, offline) keep the
+                # refusal. No repair runs on either path.
+                if steam.error_code is not None and run_id is None:
+                    failed = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code=steam.error_code,
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        steam_registered_pid=steam.steam_registered_pid,
+                        steam_live_pids=list(steam.steam_live_pids[:8]),
+                        remediation=steam.remediation,
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    return finish(failed, bridge_default)
+            parsed = dayz_test_request.parse_dayz_test_request(
+                raw_request, policies=_semantic_policies(bundle.sealed_policies)
+            )
+            try:
+                # Direct attribute, not getattr: assigning getattr's result
+                # and calling it with two arguments is the shape the runtime
+                # HTTP audit classifies as a dynamic HTTP callable.
+                runtime_policy = bundle.validated_worker_runtime(
+                    policy.mod, policy.dev_root
+                )
+            except Exception:
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code="runtime_policy_invalid",
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            try:
+                mission_path = dayz_test_worker._mission(parsed.payload, runtime_policy)
+                effective_directories = dayz_test_worker._effective_directories(
+                    parsed.payload, runtime_policy
+                )
+            except dayz_test_worker.DayzTestWorkerError as error:
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=error.code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            sealed = bundle.sealed_policies
+            if (
+                type(sealed) is tuple
+                and sealed
+                and all(
+                    type(item) is request_path_authority.SealedRequestProjectPolicy
+                    for item in sealed
+                )
+            ):
+                selected = next(
+                    (
+                        item
+                        for item in sealed
+                        if item.policy.mod == policy.mod
+                        and item.policy.dev_root == policy.dev_root
+                    ),
+                    None,
+                )
+                try:
+                    if selected is None:
+                        raise ValueError("invalid_dayz_test_path_authority")
+                    with request_path_authority.accredit_runtime_resolved_paths(
+                        selected,
+                        directories=effective_directories,
+                        mission=mission_path,
+                    ):
+                        pass
+                except ValueError:
+                    failed = _compact_result(
+                        terminal=WorkerTerminal(
+                            cleanup_degraded=False,
+                            error_code="invalid_dayz_test_path_authority",
+                            exit_code=1,
+                            ok=False,
+                            run_id=None,
+                        ),
+                        project=policy.mod,
+                        mode=mode,
+                        started_at=started_at,
+                        artifacts_paths=[],
+                        phase="validating",
+                        vpp_missing=list(vpp.missing),
+                        vpp_warnings=list(vpp.warnings),
+                    )
+                    return finish(failed, bridge_default)
+            attestation_document = None
+            try:
+                attestation_document = dayz_test_worker.assess_preflight(
+                    parsed.payload, runtime_policy, policy.attestation
+                )
+            except dayz_test_worker.DayzTestWorkerError as error:
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code=error.code,
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                        attestation=error.attestation,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            except ValueError as error:
+                token = str(error)
+                if not token.startswith("invalid_dayz_test_request:"):
+                    raise
+                failed = _compact_result(
+                    terminal=WorkerTerminal(
+                        cleanup_degraded=False,
+                        error_code="bad_" + token[len("invalid_") :],
+                        exit_code=1,
+                        ok=False,
+                        run_id=None,
+                    ),
+                    project=policy.mod,
+                    mode=mode,
+                    started_at=started_at,
+                    artifacts_paths=[],
+                    phase="validating",
+                    vpp_missing=list(vpp.missing),
+                    vpp_warnings=list(vpp.warnings),
+                )
+                return finish(failed, bridge_default)
+            succeeded = _compact_result(
+                terminal=WorkerTerminal(
+                    cleanup_degraded=False,
+                    error_code=None,
+                    exit_code=0,
+                    ok=True,
+                    run_id=run_id,
+                    attestation=attestation_document,
+                ),
+                project=policy.mod,
+                mode=mode,
+                started_at=started_at,
+                artifacts_paths=[],
+                phase="validating",
+                vpp_missing=list(vpp.missing),
+                vpp_warnings=list(vpp.warnings),
+            )
+            return finish(succeeded, bridge_default)
 
 
 async def execute_dayz_test_run(
@@ -1876,14 +2618,14 @@ async def execute_dayz_test_run(
     auto_remediate_steam: bool = False,
     navmesh_data_server: bool = False,
     client_start_budget_s: float | None = None,
+    project_mod_override: bool = False,
 ) -> dict[str, object]:
     """Run or preflight a request, with explicit omissions in this adapter.
 
     Every preflight envelope includes preflight_skipped_checks, even when empty.
-    It lists checks disabled specifically by preflight: steam_session,
-    extension_run (run state/project), and client_replacement (live client/bridge).
-    It is not a list of later checks unreached after an earlier refusal, nor a
-    guarantee that build, process launch or readiness will succeed.
+    It lists checks that need a live run: extension_run, client_replacement,
+    process_launch, readiness, and initialization_evidence. Steam is checked.
+    Preflight success is not a free box and not a future launch.
     """
     started_at = time.monotonic()
     if progress_cb is not None:
@@ -1894,14 +2636,32 @@ async def execute_dayz_test_run(
     # touched: a budget the caller got wrong must cost them an error message,
     # not a launched client that then gets refused.
     budget_s = _client_start_budget_s(client_start_budget_s)
-    preflight_skipped_checks: list[str] = []
     if preflight:
-        if _mode_starts_client(mode):
-            preflight_skipped_checks.append("steam_session")
-        if run_id is not None:
-            preflight_skipped_checks.append("extension_run")
-            if _mode_starts_client(mode):
-                preflight_skipped_checks.append("client_replacement")
+        return await _execute_preflight(
+            runtime,
+            project=project,
+            mode=mode,
+            mission=mission,
+            build=build,
+            clean=clean,
+            pack_only=pack_only,
+            run_id=run_id,
+            extra_mods=extra_mods,
+            base_mods=base_mods,
+            server_mods=server_mods,
+            no_base_mods=no_base_mods,
+            no_file_patching=no_file_patching,
+            port=port,
+            width=width,
+            height=height,
+            player_name=player_name,
+            server_wait_s=server_wait_s,
+            auto_remediate_steam=auto_remediate_steam,
+            navmesh_data_server=navmesh_data_server,
+            project_mod_override=project_mod_override,
+            started_at=started_at,
+        )
+    preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
     with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
@@ -1927,6 +2687,7 @@ async def execute_dayz_test_run(
                 "height": height,
                 "player_name": player_name,
                 "server_wait_s": server_wait_s,
+                "project_mod_override": project_mod_override,
             }
             raw_request, policy = build_run_request(
                 bundle.sealed_policies, **request_arguments
@@ -1963,7 +2724,7 @@ async def execute_dayz_test_run(
                 )
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
-                return _annotate_bridge_default(refused, bridge_default)
+                return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             if _mode_starts_client(mode):
                 # Gate body uses time.sleep / ImageGrab join. Run it off the
                 # broker event loop so other MCP sessions keep heartbeating.
@@ -1988,7 +2749,7 @@ async def execute_dayz_test_run(
                     )
                     if preflight:
                         refused["preflight_skipped_checks"] = preflight_skipped_checks
-                    return _annotate_bridge_default(refused, bridge_default)
+                    return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -2020,7 +2781,7 @@ async def execute_dayz_test_run(
                         vpp_missing=list(vpp.missing),
                         vpp_warnings=list(vpp.warnings),
                     )
-                    return _annotate_bridge_default(failed, bridge_default)
+                    return _annotate_bridge_default(failed, bridge_default, project_mod_replaced=project_mod_override)
             replacement: ClientReplacementDecision | None = None
             client_pids_before: tuple[int, ...] | None = None
             bridge_cause: str | None = None
@@ -2050,7 +2811,7 @@ async def execute_dayz_test_run(
                         vpp_warnings=list(vpp.warnings),
                     )
                     refused["run_not_extensible_cause"] = exc.cause
-                    return _annotate_bridge_default(refused, bridge_default)
+                    return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
                 if _mode_starts_client(mode):
                     # Relaunching this role supersedes the client already on the
                     # run (the role replacement inside start_run). The caller
@@ -2085,7 +2846,12 @@ async def execute_dayz_test_run(
                         bridge,
                         budget_s=budget_s,
                         start_stalled=_client_start_stall_evidence(
-                            record, _client_profile_roots(policy, mode)
+                            record,
+                            _client_profile_roots(
+                                policy,
+                                mode,
+                                _run_row(extension_status, run_id),
+                            ),
                         ),
                     )
                     if not replacement.replace:
@@ -2134,7 +2900,7 @@ async def execute_dayz_test_run(
                             and replacement.reason == _BRIDGE_STATUS_UNKNOWN
                         ):
                             refused["bridge_status_cause"] = bridge_cause
-                        return _annotate_bridge_default(refused, bridge_default)
+                        return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             if replacement is not None and replacement.replace:
                 # H-A2-2 / 79e2: the verdict reached here is two broker hops and
                 # one process start away from the kill, so it does not travel as
@@ -2149,8 +2915,17 @@ async def execute_dayz_test_run(
                 bridge_default = _bridge_default_report(extra_mods, raw_request)
             # 296b: the CLIENT profile roots whose dumps can name this
             # launch's death; the snapshot is taken when the launch executes.
+            recorded_run = (
+                _run_row(extension_status, run_id)
+                if run_id is not None and not preflight
+                else None
+            )
+            if recorded_run is not None and _validated_recorded_leaf(
+                policy, recorded_run
+            ) is None:
+                _fail("lifecycle_status_invalid")
             client_dump_roots = (
-                _client_profile_roots(policy, mode)
+                _client_profile_roots(policy, mode, recorded_run)
                 if not preflight and _mode_starts_client(mode)
                 else None
             )
@@ -2173,7 +2948,7 @@ async def execute_dayz_test_run(
             )
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
-            return _annotate_bridge_default(result, bridge_default)
+            return _annotate_bridge_default(result, bridge_default, project_mod_replaced=project_mod_override)
 
 
 def _run_row(status: object, run_id: str) -> dict[str, object] | None:
@@ -2640,9 +3415,11 @@ def _close_project_policy(
 
 def _artifact_candidates(
     policy: dayz_test_request.RequestProjectPolicy,
+    leaf: str | None = None,
 ) -> list[str] | None:
     try:
-        return _artifact_paths(policy, "all")
+        chosen = _planned_profile_leaf() if leaf is None else leaf
+        return _paths_for_leaf(policy, "all", chosen)
     except DayzTestToolError:
         return None
 
@@ -2653,7 +3430,10 @@ def _profiles_match_policy(
     profiles = run.get("profiles")
     if not isinstance(profiles, str) or not profiles:
         return False
-    candidates = _artifact_candidates(policy)
+    leaf = _validated_recorded_leaf(policy, run)
+    if leaf is None:
+        return False
+    candidates = _artifact_candidates(policy, leaf)
     if candidates is None:
         return False
     normalized = ntpath.normcase(ntpath.normpath(profiles))
@@ -2669,14 +3449,26 @@ def _close_role_folder(
     policy: dayz_test_request.RequestProjectPolicy,
     role: str,
     start_roots: dict[str, str],
+    run: dict[str, object] | None = None,
 ) -> str | None:
+    """One role folder. The recorded anchor is validated before this role.
+
+    ``run`` is optional so a caller that already proved the anchor can pass
+    it. Without a run there is no recorded leaf to keep, and the folder is
+    not invented from the legacy name.
+    """
+    if run is None:
+        return None
+    leaf = _validated_recorded_leaf(policy, run)
+    if leaf is None:
+        return None
     root = start_roots.get(role)
     if not isinstance(root, str) or not root:
         return None
-    candidates = _artifact_candidates(policy)
+    candidates = _artifact_candidates(policy, leaf)
     if candidates is None:
         return None
-    folder = ntpath.join(policy.dev_root, root, "profiles")
+    folder = ntpath.join(policy.dev_root, root, leaf)
     folder_norm = ntpath.normcase(ntpath.normpath(folder))
     if not any(
         ntpath.normcase(ntpath.normpath(candidate)) == folder_norm
@@ -3506,7 +4298,7 @@ async def execute_dayz_test_close(
             if role not in start_roots:
                 missing_rpt.append(role)
                 continue
-            folder = _close_role_folder(policy, role, start_roots)
+            folder = _close_role_folder(policy, role, start_roots, run)
             if folder is None:
                 missing_rpt.append(role)
                 continue
