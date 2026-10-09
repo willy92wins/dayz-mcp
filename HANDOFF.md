@@ -1,42 +1,39 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-08 16:50 (Madrid; medido: main, árboles vivos, launcher, PBO, daemons y caja)
+# DayZ-MCP - Estado vivo - 2026-10-08 22:05 (Madrid; medido: main, árboles vivos, launcher, PBO y procesos)
 
-- **main** = `685a6ad` (#224).
-  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main`, y T130 `C:\temp\DayZ_MCP_130` detached) están en `46833d7`: es el despliegue v11b del 2026-10-08.
-  - #223 (test de coordinación) y #224 (descripciones de captura y teleport) no tocan nada sellado y entran con la próxima promoción. Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
-- **Launcher `dayz-test-v1` resellado el 2026-10-08:**
-  - PE de LIVE `E1788375…` y de T130 `44372199…` (política POL130); mismo `app.pyz` `8B932082…`, ya con las copias en LF (6ed1).
-  - Pasos, backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v11b-20261008\` (`steps.log`, rama `backup/live-main-20261008` = `f8aad74`).
-- **PBO vivo:** `CC616EC7…` (puente "11", desde `686b15f`); sin cambios Enforce desde entonces.
-- **Instancias y daemons (16:47):**
-  - default: DayZ 1.29, `:8765`, `dayz-mcp`, gen `8dd1787c`;
-  - `130`: DayZ 1.30 Exp, `:8775`, `dayz-mcp-130`, gen `755bb6e0`.
-  - Los dos en reposo, sin lease, con la caja libre y sin faults.
-  - Doctors limpios, salvo `RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED` en la default (preexistente).
-- **Verificado en juego el 2026-10-08** (`reviews/2026-10-06-ticketing/ingame-v11b/RESULTS.md`):
-  - g5fix en la 130: carpetas `profiles-130` recreadas, y lecturas y cierre sobre la carpeta con nombre.
-  - Rotación de `storage_1` por cambio de modset.
-  - Rechazo de un journal con mayúsculas.
-  - Stage de AddonBuilder (#195): en SimpleGroup, G1-G5 del gate ODOL de 713a en verde (G6/G7 fallan igual que en el PBO desplegado); LFHeli_OH1 compila.
-  - 9941: el mecanismo de hold está medido (`SetIgnoreAutomaticInputEnd`).
-  - Overrides de aim: radianes por pulso.
+- **main** = `4233351` (#226).
+  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) siguen en `46833d7` (despliegue v11b del 2026-10-08).
+  - Pendiente de la próxima promoción:
+    - #223 y #224 (test y descripciones; nada sellado);
+    - #226 (855c: worker sellado). Necesita resellar y pasar `tools/dev/storage_recovery_joint_gate.py`.
+  - Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
+- **Launcher `dayz-test-v1`, resellado el 2026-10-08:**
+  - PE de LIVE `E1788375…` y de T130 `44372199…`; mismo `app.pyz` `8B932082…`.
+  - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v11b-20261008\` (`steps.log`).
+- **PBO vivo:** `CC616EC7…` (puente "11").
+- **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
+  - Al cierre, el orquestador registró sus harnesses cerrados y ningún proceso propio pendiente. El censo global de las 22:02 y la reconexión de otras sesiones no están acreditados en esta evidencia.
+- **Verificado en juego el 2026-10-08:** `reviews/2026-10-06-ticketing/ingame-v11b/RESULTS.md`.
 - **Riesgos abiertos:**
-  - 130: `dayz_test_close` no espera el logout, porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; ahí la desconexión va con `logoutTime 0`).
-  - Un rechazo de storage no publica `storage_recovery_reason`/`remediation` en el camino del lifecycle (`fb-20261008-141211-855c`).
-  - `dayz_test_run(build=true)` con binarize no empaqueta scripts, layouts ni stringtable (`fb-20261008-141215-222d`).
-  - Instaladores, doctors y tests lanzados desde la app de Claude escriben ficheros nuevos en la virtualización MSIX de `%LOCALAPPDATA%` (`fb-20261008-141157-e92d`).
-- **Ronda 2** (el dueño eligió A, B y C en la sesión del 2026-10-08; queda registrada en `reviews/2026-10-06-ticketing/triage3/TRIAGE3.md`):
-  - A: 855c + 2986 (Python). La spec de gpt-6.1-sol estaba en curso a las 16:50; la implementación aún no había empezado.
-  - B: el verbo `action_hold` (9941, Enforce). Spec de gpt-6.1-sol hecha; Grok 4.7 implementaba desde las 16:54.
-  - C: `action_cursor` + `player_look_at` (86a3, Enforce). Grok 4.7 implementaba desde las 16:45, con la spec de Sol y un anexo de medidas.
-  - Revisa gpt-6.1-sol; implementa Grok porque el GX10 estaba lleno.
-  - Los lotes Enforce (B y C) se mergean después de su ciclo in-game, con el PBO "12".
-- **Buzón abierto relevante:** 9941 y 9ab8 (hold), 86a3, 75e7/fade (foco al arrancar), 1d31, d490, a97e, 7695, y los cuatro riesgos de arriba.
+  - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`). El arreglo quedó aparcado: `reviews/2026-10-06-ticketing/round2/2986_PARKED.md`.
+  - El rechazo de storage sin `storage_recovery_reason` (855c) está arreglado en main, pero no desplegado.
+  - `dayz_test_run(build=true)` con binarize no empaqueta scripts (`fb-20261008-141215-222d`).
+  - Virtualización MSIX de `%LOCALAPPDATA%` para procesos lanzados desde la app de Claude (`fb-20261008-141157-e92d`).
+- **Ronda 2 (resultado):** `reviews/2026-10-06-ticketing/round2/ROUND2.md`.
+  - 855c: mergeado.
+  - 2986: aparcado.
+  - B `action_hold` (9941), C `action_cursor`/`player_look_at` (86a3) y la infraestructura del broker: parados tras su tope de rondas. El trabajo se conserva en `C:\Users\guill\dzmcp_gauntlet\` (`r2b_9941\ws`, `r2c_86a3\ws`, `r2i_broker\ws`).
+- **Siguiente sesión (decisión del dueño, 2026-10-08):**
+  1. gpt-6.1-sol recorta la infraestructura del broker a lo mínimo: abandono por id y token de binding completo, sin retención ni atribución de recibos.
+  2. Grok la implementa y Sol la revisa.
+  3. B y C, una ronda final encima.
+  4. PBO "12" y ciclo in-game.
+  5. Ventana de resellado para 855c (y lo que entre: 222d, foco de f298).
 - **Detalle:**
-  - Triaje: `reviews/2026-10-06-ticketing/triage3/`.
-  - Handoff de la sesión: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-08-HANDOFF-dayz-mcp-ticketing.md`.
+  - Notas: `C:\Users\guill\dzmcp_gauntlet\SESSION-STATE.md`.
+  - Handoff: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-08-HANDOFF-dayz-mcp-ticketing.md`.
 <!-- LIVE-STATE:END -->
 
 ---
