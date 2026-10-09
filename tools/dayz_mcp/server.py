@@ -849,10 +849,17 @@ async def _shielded_broker_cleanup(
         if budget_deadline is None
         else budget_deadline
     )
-    abandon = getattr(runtime, "abandon_bridge")
-    task = asyncio.create_task(
-        abandon(command_id, reason, budget_deadline=deadline)
-    )
+    # Called directly, not through getattr: security_runtime_audit flags a
+    # dynamically resolved call as dynamic_http. A runtime without the method
+    # has nothing to abandon.
+    try:
+        abandon = runtime.abandon_bridge(  # type: ignore[attr-defined]
+            command_id, reason, budget_deadline=deadline
+        )
+    except AttributeError:
+        _drop_broker_admit(runtime, command_id)
+        return None
+    task = asyncio.create_task(abandon)
     try:
         while not task.done():
             remaining = deadline - loop.time()

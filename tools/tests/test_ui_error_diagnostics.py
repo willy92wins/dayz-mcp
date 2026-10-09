@@ -149,6 +149,7 @@ def _fake_state(result: dict[str, Any]) -> SimpleNamespace:
     # before enqueue for the world-read fail-fast gate; give it a real shape.
     return SimpleNamespace(
         status_snapshot=loopback.ServerState("k").status_snapshot,
+        daemon_generation="test-generation",
         enqueue_command=lambda *args, **kwargs: (200, {"id": 41}),
         take_result=lambda command_id, remove=False: dict(result),
         abandon_command=lambda *args, **kwargs: None,
