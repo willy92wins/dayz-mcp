@@ -43,6 +43,9 @@ class MCPLookAtControl
 	protected static const int STABLE_TICKS = 3;
 	protected static const int HOLD_TICKS = 3;
 	protected static const float MAX_PULSE = 0.2;
+	// The camera shows an aim pulse a frame or more after it is sent; a fraction of the
+	// remaining error per frame converges where a full-error pulse overshoots and oscillates.
+	protected static const float GAIN = 0.2;
 
 	static void Reset()
 	{
@@ -387,8 +390,8 @@ class MCPLookAtControl
 		}
 		s_StableTicks = 0;
 		s_HoldTicks = 0;
-		pulseX = ClampPulse(WrapPi(desiredBearing - currentBearing));
-		pulseY = ClampPulse(WrapPi(desiredPitch - currentPitch));
+		pulseX = ClampPulse(GAIN * WrapPi(desiredBearing - currentBearing));
+		pulseY = ClampPulse(GAIN * WrapPi(desiredPitch - currentPitch));
 		hic = player.GetInputController();
 		if (!hic)
 		{
