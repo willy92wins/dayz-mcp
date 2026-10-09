@@ -770,5 +770,29 @@ class InputDescribeExistsRuleDocsTest(unittest.TestCase):
         )
 
 
+class NamespaceSourceMismatchDocsTest(unittest.TestCase):
+    """222d: the new code, the tool description, and the identity/namespace split."""
+
+    def test_code_description_and_readme_agree(self) -> None:
+        from dayz_mcp import dayz_test_worker
+        from dayz_mcp.dayz_test_tool import _NAMESPACE_SOURCE_MISMATCH_REMEDIATION
+
+        self.assertIn(
+            "build_namespace_source_mismatch",
+            dayz_test_worker.WORKER_ERROR_CODES,
+        )
+        server = _doc("tools/dayz_mcp/server.py")
+        description = server[server.index("async def dayz_test_run") - 2500 : server.index("async def dayz_test_run")]
+        self.assertIn("build_namespace_source_mismatch", description)
+        self.assertIn("ignoring ASCII case", description)
+        self.assertIn("pack_only=true", description)
+        self.assertIn("binarizable assets", description)
+        readme = _doc("README.md")
+        self.assertIn("PBO file name is not the `$PBOPREFIX$` namespace", readme)
+        self.assertIn("$PBOPREFIX$", readme)
+        self.assertIn("build_namespace_source_mismatch", readme)
+        self.assertIn(_NAMESPACE_SOURCE_MISMATCH_REMEDIATION, readme)
+
+
 if __name__ == "__main__":
     unittest.main()

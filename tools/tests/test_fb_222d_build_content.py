@@ -5,12 +5,21 @@ The harness compiles launcher.cpp. It does not start AddonBuilder or the sealed 
 
 from __future__ import annotations
 
+import atexit
+import asyncio
+import ctypes
+import dataclasses
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import unittest
+import unittest.mock
+from contextlib import nullcontext
 from pathlib import Path
+
+from dayz_mcp import dayz_test_request, dayz_test_tool, dayz_test_worker, native_broker_protocol
 
 import build_native_launcher
 
@@ -28,6 +37,7 @@ PATTERNS = (
 MANIFEST = b'{"format_version":1}\n'
 ADDON = r"C:\DayZ Tools\Bin\AddonBuilder\AddonBuilder.exe"
 SCRATCH = ROOT / "_scratch" / "fb222d"
+atexit.register(lambda: shutil.rmtree(SCRATCH, ignore_errors=True))
 
 
 def _sha(data: bytes) -> bytes:
@@ -260,8 +270,9 @@ class LauncherHarnessTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        if SCRATCH.exists():
-            shutil.rmtree(SCRATCH, ignore_errors=True)
+        # SCRATCH stays until process exit so later tests in this module can
+        # reuse the compiled harness. atexit removes it.
+        return None
 
     def _cwd(self) -> Path:
         path = SCRATCH / "cwd"
@@ -306,7 +317,7 @@ class LauncherHarnessTest(unittest.TestCase):
         self.assertNotEqual(code, 0, values)
 
     def test_include_stays_pinned_while_the_command_is_built(self) -> None:
-        source = SCRATCH / "mod"
+        source = SCRATCH / "LFHeli"
         source.mkdir(exist_ok=True)
         (source / "$PBOPREFIX$").write_bytes(b"LFHeli\n")
         target = r"C:\out\Addons"
@@ -352,8 +363,8 @@ class LauncherHarnessTest(unittest.TestCase):
         self.assertEqual(values["pbo"], r"C:\out\Addons\LFHeli_OH1.pbo")
 
     def test_quoting_order_and_clear(self) -> None:
-        source = SCRATCH / "mod with space"
-        source.mkdir(exist_ok=True)
+        source = SCRATCH / "quote" / "LFHeli"
+        source.mkdir(parents=True, exist_ok=True)
         (source / "$PBOPREFIX$").write_bytes(b"LFHeli\n")
         target = r"C:\out dir\Addons"
         temp = r"C:\tmp dir\build"
@@ -499,6 +510,8 @@ class LauncherHarnessTest(unittest.TestCase):
         self.assertLess(launch.index("ComposeAddonCommand("), launch.index("CreateProcessW("))
         compose = source[source.index("bool ComposeAddonCommand"):source.index("bool BuildPboPath")]
         self.assertLess(compose.index("ReadPboNamespace("), compose.index("BuildAddonCommand("))
+        self.assertLess(compose.index("BinarizeNamespaceMatchesSource("), compose.index("BuildAddonCommand("))
+        self.assertLess(compose.index("ReadPboNamespace("), compose.index("BinarizeNamespaceMatchesSource("))
         self.assertLess(compose.index("prefix_from_marker"), compose.index("BuildAddonCommand("))
         command = source[source.index("bool BuildAddonCommand"):source.index("bool BuildPboPath")]
         self.assertLess(command.index("IncludeListStillPinned()"), command.index('"-include="'))
@@ -510,6 +523,455 @@ class LauncherHarnessTest(unittest.TestCase):
         self.assertNotIn("-packonly", command[:command.index('"-include=')])
         harness = HARNESS.read_text(encoding="utf-8")
         self.assertNotIn("wWinMainCRTStartup", harness)
+
+    def _pinned(self, source: Path, prefix: str, pack_only: bool) -> tuple[int, dict[str, str]]:
+        code, values, _err = _run(
+            self.exe,
+            [
+                "pinned-build", "0", "1" if pack_only else "0", prefix,
+                str(source), r"C:\out\Addons", r"C:\tmp\build", ADDON,
+            ],
+            self._cwd(),
+        )
+        return code, values
+
+    def _namespace(self, source: Path, prefix: str) -> tuple[int, dict[str, str]]:
+        return _run(self.exe, ["namespace", prefix, str(source)], self._cwd())[:2]
+
+    def test_match_is_admitted_and_mismatch_is_refused(self) -> None:
+        # Dropping the gate admits the mismatch.
+        matched = SCRATCH / "gate" / "SimpleGroup"
+        matched.mkdir(parents=True)
+        (matched / "$PBOPREFIX$").write_bytes(b"SimpleGroup\n")
+        code, values = self._pinned(matched, "SimpleGroup", False)
+        self.assertEqual(code, 0, values)
+        self.assertIn('"-prefix=SimpleGroup"', values["command"])
+        mismatched = SCRATCH / "gate" / "LFHeli_OH1"
+        mismatched.mkdir()
+        (mismatched / "$PBOPREFIX$").write_bytes(b"LFHeli\n")
+        code, values = self._pinned(mismatched, "LFHeli_OH1", False)
+        self.assertNotEqual(code, 0, values)
+        self.assertEqual(values["ok"], "0")
+        self.assertEqual(values["command"], "")
+
+    def test_ascii_case_differs_and_a_different_name_does_not(self) -> None:
+        # A case-sensitive compare rejects simplegroup.
+        folder = SCRATCH / "case" / "SimpleGroup"
+        folder.mkdir(parents=True)
+        (folder / "$PBOPREFIX$").write_bytes(b"simplegroup\n")
+        code, values = self._pinned(folder, "SimpleGroup", False)
+        self.assertEqual(code, 0, values)
+        self.assertIn('"-prefix=simplegroup"', values["command"])
+        other = SCRATCH / "case" / "Other"
+        other.mkdir()
+        (other / "$PBOPREFIX$").write_bytes(b"SimpleGroup\n")
+        code, values = self._pinned(other, "OtherMod", False)
+        self.assertNotEqual(code, 0)
+
+    def test_multiseqment_namespace_is_refused_even_when_the_leaf_matches(self) -> None:
+        # Comparing only the namespace's last segment would admit folder B.
+        for name, payload in (("slash", b"A/B\n"), ("backslash", b"A\\B\n")):
+            folder = SCRATCH / "multi" / name / "B"
+            folder.mkdir(parents=True)
+            (folder / "$PBOPREFIX$").write_bytes(payload)
+            code, values = self._namespace(folder, "B")
+            self.assertEqual(code, 0, values)
+            self.assertEqual(values["namespace"], "A\\B")
+            code, values = self._pinned(folder, "B", False)
+            self.assertNotEqual(code, 0, values)
+        single = SCRATCH / "multi" / "only" / "B"
+        single.mkdir(parents=True)
+        (single / "$PBOPREFIX$").write_bytes(b"B\n")
+        code, values = self._pinned(single, "B", False)
+        self.assertEqual(code, 0, values)
+
+    def test_junction_source_uses_its_lexical_name(self) -> None:
+        # The resolved target's basename would be OtherName and would reject.
+        real = SCRATCH / "junction-gate" / "OtherName"
+        real.mkdir(parents=True)
+        (real / "$PBOPREFIX$").write_bytes(b"SimpleGroup\n")
+        link = SCRATCH / "junction-gate" / "SimpleGroup"
+        _junction(real, link)
+        code, values = self._pinned(link, "SimpleGroup", False)
+        self.assertEqual(code, 0, values)
+        self.assertIn('"-prefix=SimpleGroup"', values["command"])
+
+    def test_missing_marker_fallback_is_gated(self) -> None:
+        # Exempting the fallback would admit a folder that is not the prefix.
+        same = SCRATCH / "fallback" / "SimpleGroup"
+        same.mkdir(parents=True)
+        code, values = self._namespace(same, "SimpleGroup")
+        self.assertEqual(values["status"], "2")
+        self.assertEqual(values["namespace"], "SimpleGroup")
+        code, values = self._pinned(same, "SimpleGroup", False)
+        self.assertEqual(code, 0, values)
+        other = SCRATCH / "fallback" / "LFHeli_OH1"
+        other.mkdir()
+        code, values = self._pinned(other, "SimpleGroup", False)
+        self.assertNotEqual(code, 0, values)
+
+    def test_bom_lf_and_crlf_pass_and_extra_whitespace_fails(self) -> None:
+        # strip() would accept the padded markers.
+        for name, payload in (
+            ("bom", b"\xef\xbb\xbfLFHeli"),
+            ("lf", b"LFHeli\n"),
+            ("crlf", b"LFHeli\r\n"),
+        ):
+            folder = SCRATCH / "ws" / name / "LFHeli"
+            folder.mkdir(parents=True)
+            (folder / "$PBOPREFIX$").write_bytes(payload)
+            code, values = self._pinned(folder, "LFHeli", False)
+            self.assertEqual(code, 0, values)
+        for name, payload in (("padded", b" LFHeli\n"), ("trailing", b"LFHeli \n")):
+            folder = SCRATCH / "ws" / name / "LFHeli"
+            folder.mkdir(parents=True)
+            (folder / "$PBOPREFIX$").write_bytes(payload)
+            code, values = self._namespace(folder, "LFHeli")
+            self.assertEqual(values.get("status"), "0")
+            code, values = self._pinned(folder, "LFHeli", False)
+            self.assertNotEqual(code, 0)
+
+    def test_packonly_keeps_a_mismatched_namespace(self) -> None:
+        # Applying the gate to packonly would reject this command.
+        folder = SCRATCH / "pack-gate" / "LFHeli_OH1"
+        folder.mkdir(parents=True)
+        (folder / "$PBOPREFIX$").write_bytes(b"A\\B\n")
+        code, values = self._pinned(folder, "LFHeli_OH1", True)
+        self.assertEqual(code, 0, values)
+        self.assertIn('"-prefix=A\\B"', values["command"])
+        self.assertTrue(values["command"].endswith(" -packonly"))
+        code, values = self._pinned(folder, "LFHeli_OH1", False)
+        self.assertNotEqual(code, 0, values)
+
+    def test_root_without_a_leaf_is_refused_for_binarize(self) -> None:
+        code, values = self._pinned(Path(r"C:\\"), "SimpleGroup", False)
+        self.assertNotEqual(code, 0, values)
+
+
+def _exclusive_open(path: Path) -> bool:
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    handle = kernel.CreateFileW(
+        str(path), 0x80000000, 0, None, 3, 0x80, None
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid:
+        return False
+    kernel.CloseHandle(handle)
+    return True
+
+
+class WorkerNamespaceGateTest(unittest.TestCase):
+    """The worker pre-check matches the compiled gate and runs before stage."""
+
+    def _policy(self, source: Path, mod: str = "ExampleMod"):
+        policy = dayz_test_request.RequestProjectPolicy(
+            mod=mod,
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=str(source),
+            default_base_mods=(),
+            mission_roots=(r"C:\missions",),
+            mod_roots=(r"P:\Mods",),
+        )
+        runtime = dayz_test_worker.WorkerRuntimePolicy(
+            dev_root=policy.dev_root,
+            mod=mod,
+            diag_executable=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe",
+            game_directory=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
+            mission_aliases=(("chernarus", r"C:\missions\c"), ("livonia", r"C:\missions\l"), ("sakhal", r"C:\missions\s")),
+            mods_root=r"P:\Mods",
+            build_temp_root=r"P:\temp",
+            build_source_basename=None,
+        )
+        return policy, runtime
+
+    def _execute(
+        self,
+        source: Path,
+        *,
+        mod: str,
+        pack_only: bool = False,
+        has_assets: bool = True,
+        stage_calls: list[str] | None = None,
+        broker_calls: list[str] | None = None,
+        during_broker=None,
+    ):
+        policy, runtime = self._policy(source, mod)
+        raw = json.dumps(
+            {
+                "version": 1,
+                "dev_root": policy.dev_root,
+                "mod": mod,
+                "mode": "server",
+                "build": True,
+                "pack_only": pack_only,
+                "source": str(source),
+            }
+        ).encode("utf-8")
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+
+        class Broker:
+            def __init__(self) -> None:
+                self.requests: list = []
+
+            async def invoke(self, frame: bytes) -> dict[str, object]:
+                request = native_broker_protocol.decode_request(frame)
+                self.requests.append(request)
+                if request.kind is native_broker_protocol.BrokerKind.ADDON_BUILDER:
+                    if broker_calls is not None:
+                        broker_calls.append("broker")
+                    if during_broker is not None:
+                        during_broker()
+                    return {"ok": True, "exit_code": 0, "pbo_size": 64}
+                return {"ok": True, "state": "RUNNING", "run_id": request.payload.get("run_id")}
+
+        def stage(path: str):
+            if stage_calls is not None:
+                stage_calls.append(path)
+            return nullcontext(path)
+
+        broker = Broker()
+        result = asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(policy,),
+                runtime_policy=runtime,
+                broker=broker,
+                has_binarizable_assets=lambda _source: has_assets,
+                stage_build_source=stage,
+            )
+        )
+        return result, broker
+
+    def test_mismatch_is_before_stage_and_broker_and_match_reaches_both(self) -> None:
+        # Moving the check to after the stage would call the stage spy first.
+        root = SCRATCH / "worker-order"
+        bad = root / "LFHeli_OH1"
+        bad.mkdir(parents=True)
+        (bad / "$PBOPREFIX$").write_bytes(b"LFHeli\n")
+        stages: list[str] = []
+        brokers: list[str] = []
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            self._execute(bad, mod="LFHeli_OH1", stage_calls=stages, broker_calls=brokers)
+        self.assertEqual(raised.exception.code, "build_namespace_source_mismatch")
+        self.assertIsNone(raised.exception.run_id)
+        self.assertFalse(raised.exception.cleanup_degraded)
+        self.assertEqual(stages, [])
+        self.assertEqual(brokers, [])
+        good = root / "SimpleGroup"
+        good.mkdir()
+        (good / "$PBOPREFIX$").write_bytes(b"SimpleGroup\n")
+        stages.clear()
+        brokers.clear()
+        result, broker = self._execute(
+            good, mod="SimpleGroup", stage_calls=stages, broker_calls=brokers
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(len(stages), 1)
+        self.assertEqual(brokers, ["broker"])
+        self.assertEqual(broker.requests[0].kind, native_broker_protocol.BrokerKind.ADDON_BUILDER)
+
+    def test_marker_stays_open_through_the_broker_and_closes_on_rejection(self) -> None:
+        folder = SCRATCH / "pin" / "SimpleGroup"
+        folder.mkdir(parents=True)
+        marker = folder / "$PBOPREFIX$"
+        marker.write_bytes(b"SimpleGroup\n")
+        seen: list[bool] = []
+
+        def during() -> None:
+            seen.append(_exclusive_open(marker))
+
+        self._execute(folder, mod="SimpleGroup", during_broker=during)
+        self.assertEqual(seen, [False])
+        self.assertTrue(_exclusive_open(marker))
+        other = SCRATCH / "pin" / "LFHeli_OH1"
+        other.mkdir()
+        other_marker = other / "$PBOPREFIX$"
+        other_marker.write_bytes(b"LFHeli\n")
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError):
+            self._execute(other, mod="LFHeli_OH1")
+        self.assertTrue(_exclusive_open(other_marker))
+
+    def test_explicit_and_automatic_packonly_admit_a_mismatch(self) -> None:
+        # Gating packonly would raise before the broker.
+        folder = SCRATCH / "worker-pack" / "LFHeli_OH1"
+        folder.mkdir(parents=True)
+        (folder / "$PBOPREFIX$").write_bytes(b"LFHeli\n")
+        brokers: list[str] = []
+        result, _broker = self._execute(
+            folder, mod="LFHeli_OH1", pack_only=True, has_assets=True, broker_calls=brokers
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(brokers, ["broker"])
+        brokers.clear()
+        result, broker = self._execute(
+            folder, mod="LFHeli_OH1", pack_only=False, has_assets=False, broker_calls=brokers
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIs(broker.requests[0].payload["pack_only"], True)
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            self._execute(folder, mod="LFHeli_OH1", pack_only=False, has_assets=True)
+        self.assertEqual(raised.exception.code, "build_namespace_source_mismatch")
+
+    def test_worker_reproduces_native_limits_and_does_not_fall_back(self) -> None:
+        # Falling back on an invalid marker would return the prefix instead.
+        folder = SCRATCH / "limits" / "SimpleGroup"
+        folder.mkdir(parents=True)
+        (folder / "$PBOPREFIX$").write_bytes(b"")
+        pin = dayz_test_worker._PrefixPin()
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            dayz_test_worker._read_pbo_namespace(str(folder), "SimpleGroup", pin)
+        self.assertEqual(raised.exception.code, "build_source_unavailable")
+        pin.close()
+        missing = SCRATCH / "limits-missing"
+        pin = dayz_test_worker._PrefixPin()
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+            dayz_test_worker._read_pbo_namespace(str(missing), "SimpleGroup", pin)
+        self.assertEqual(raised.exception.code, "build_source_unavailable")
+        absent = SCRATCH / "limits" / "NoMarker"
+        absent.mkdir()
+        pin = dayz_test_worker._PrefixPin()
+        self.assertEqual(
+            dayz_test_worker._read_pbo_namespace(str(absent), "SimpleGroup", pin),
+            "SimpleGroup",
+        )
+        self.assertTrue(dayz_test_worker.win32_fileinfo.invalid_handle(pin.handle))
+        linked = SCRATCH / "limits-link"
+        linked.mkdir()
+        target = SCRATCH / "limits-link-target.txt"
+        target.write_bytes(b"SimpleGroup\n")
+        os.link(target, linked / "$PBOPREFIX$")
+        os.link(target, SCRATCH / "limits-link-alias.txt")
+        pin = dayz_test_worker._PrefixPin()
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError):
+            dayz_test_worker._read_pbo_namespace(str(linked), "SimpleGroup", pin)
+        via = SCRATCH / "limits-reparse"
+        via.mkdir()
+        real = SCRATCH / "limits-reparse-real"
+        real.mkdir()
+        _junction(real, via / "$PBOPREFIX$")
+        pin = dayz_test_worker._PrefixPin()
+        with self.assertRaises(dayz_test_worker.DayzTestWorkerError):
+            dayz_test_worker._read_pbo_namespace(str(via), "SimpleGroup", pin)
+
+    def test_worker_and_harness_agree_on_the_corpus(self) -> None:
+        # Skipping '/' normalization would decode A/B differently from the harness, and a
+        # case-sensitive worker comparison would refuse the "case-*" rows the harness admits.
+        exe = LauncherHarnessTest.exe
+        corpus = SCRATCH / "corpus"
+        cases = {
+            "plain": ("LFHeli", b"LFHeli"),
+            "slash": ("LFHeli", b"A/B"),
+            "bom": ("LFHeli", b"\xef\xbb\xbfLFHeli\r\n"),
+            "space": ("LFHeli", b"LFHeli \n"),
+            "missing": ("LFHeli", None),
+            "case-marker": ("LFHeli", b"lfheli\n"),
+            "case-folder": ("lfheli", b"LFHeli"),
+            "case-fallback": ("lfheli", None),
+            "multi-leaf": ("LFHeli", b"X/LFHeli"),
+            "segment-64": ("LFHeli", b"A" * 64),
+            "segment-65": ("LFHeli", b"A" * 65),
+            "lead-dash": ("LFHeli", b"-LFHeli"),
+            "two-lines": ("LFHeli", b"LFHeli\nX"),
+            "crlf-only": ("LFHeli", b"\r\n"),
+            "utf16": ("LFHeli", b"\xff\xfeL\x00"),
+        }
+        for name, (leaf, payload) in cases.items():
+            folder = corpus / name / leaf
+            folder.mkdir(parents=True)
+            if payload is not None:
+                (folder / "$PBOPREFIX$").write_bytes(payload)
+            code, values, _err = _run(exe, ["namespace", "LFHeli", str(folder)], SCRATCH / "cwd")
+            pin = dayz_test_worker._PrefixPin()
+            try:
+                try:
+                    namespace = dayz_test_worker._read_pbo_namespace(str(folder), "LFHeli", pin)
+                    worker_ok = True
+                except dayz_test_worker.DayzTestWorkerError as error:
+                    namespace = ""
+                    worker_ok = False
+                    self.assertEqual(error.code, "build_source_unavailable")
+            finally:
+                pin.close()
+            if code == 0:
+                self.assertTrue(worker_ok, name)
+                self.assertEqual(namespace, values["namespace"])
+            else:
+                self.assertFalse(worker_ok, name)
+            build_code, build_values, _err = _run(
+                exe,
+                ["pinned-build", "0", "0", "LFHeli", str(folder), r"C:\out\Addons", r"C:\tmp\build", ADDON],
+                SCRATCH / "cwd",
+            )
+            leaf_matches = dayz_test_worker._binarize_namespace_matches(
+                namespace or "LFHeli", str(folder)
+            )
+            if worker_ok and leaf_matches:
+                self.assertEqual(build_code, 0, build_values)
+            else:
+                self.assertNotEqual(build_code, 0, name)
+            if name.startswith("case-"):
+                # ASCII case alone never refuses a binarize, natively or in the worker.
+                self.assertEqual(build_code, 0, name)
+                self.assertTrue(worker_ok and leaf_matches, name)
+
+
+class RemediationSelectionTest(unittest.IsolatedAsyncioTestCase):
+    async def _result(self, error_code: str) -> dict[str, object]:
+        body = json.dumps(
+            {
+                "cleanup_degraded": False,
+                "error_code": error_code,
+                "exit_code": 1,
+                "ok": False,
+                "run_id": None,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        async def execute(_raw: object, **kwargs: object) -> int:
+            kwargs["output_sink"]("stdout", body)
+            kwargs["output_sink"]("stderr", b"")
+            return 1
+
+        class Runtime:
+            daemon_policy = None
+
+        with unittest.mock.patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=execute,
+        ):
+            return await dayz_test_tool._execute_request(
+                Runtime(),
+                opened_launcher=None,
+                verified_bundle=None,
+                raw_request=b"{}",
+                policy=type("Policy", (), {"mod": "ExampleMod"})(),
+                public_mode="server",
+                artifacts_paths=[],
+                started_at=0.0,
+                preflight=False,
+                expected_run_id=None,
+                progress_cb=None,
+            )
+
+    async def test_only_the_new_code_gets_the_remediation(self) -> None:
+        # Omitting the code selection leaves remediation null for this failure.
+        result = await self._result("build_namespace_source_mismatch")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "build_namespace_source_mismatch")
+        self.assertIsNone(result["run_id"])
+        self.assertIs(result["cleanup_degraded"], False)
+        self.assertEqual(
+            result["remediation"],
+            dayz_test_tool._NAMESPACE_SOURCE_MISMATCH_REMEDIATION,
+        )
+        other = await self._result("build_failed")
+        self.assertIsNone(other["remediation"])
+        self.assertNotEqual(other["error_code"], "build_namespace_source_mismatch")
 
 
 if __name__ == "__main__":

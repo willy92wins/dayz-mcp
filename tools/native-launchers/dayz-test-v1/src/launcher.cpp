@@ -1187,6 +1187,49 @@ bool DecodePboNamespace(const BYTE* data, DWORD size, wchar_t* out, DWORD capaci
     return CopyText(out, capacity, normalized);
 }
 
+wchar_t AsciiFold(wchar_t character) {
+    if (character >= L'A' && character <= L'Z')
+        return static_cast<wchar_t>(character - L'A' + L'a');
+    return character;
+}
+
+bool AsciiFoldEqual(const wchar_t* left, const wchar_t* right) {
+    DWORD index = 0;
+    for (;; ++index) {
+        wchar_t a = AsciiFold(left[index]);
+        wchar_t b = AsciiFold(right[index]);
+        if (a != b) return false;
+        if (a == L'\0') return true;
+    }
+}
+
+// Last non-empty lexical component. Trailing '\\' only; no '.'/'..' or link resolution.
+bool SourceLeaf(const wchar_t* source, wchar_t* out, DWORD capacity) {
+    if (source == nullptr || out == nullptr || capacity == 0) return false;
+    DWORD length = 0;
+    while (source[length] != L'\0') ++length;
+    while (length > 0 && source[length - 1] == L'\\') --length;
+    if (length == 0) return false;
+    DWORD start = length;
+    while (start > 0 && source[start - 1] != L'\\') --start;
+    if (start == 0) return false;
+    DWORD count = length - start;
+    if (count == 0 || count >= capacity) return false;
+    for (DWORD index = 0; index < count; ++index) out[index] = source[start + index];
+    out[count] = L'\0';
+    return true;
+}
+
+// Binarize only. A multi-segment namespace never matches one folder name.
+bool BinarizeNamespaceMatchesSource(const wchar_t* pbo_namespace, const wchar_t* source) {
+    if (pbo_namespace == nullptr || pbo_namespace[0] == L'\0') return false;
+    for (DWORD index = 0; pbo_namespace[index] != L'\0'; ++index)
+        if (pbo_namespace[index] == L'\\') return false;
+    wchar_t leaf[1024]{};
+    if (!SourceLeaf(source, leaf, ARRAYSIZE(leaf))) return false;
+    return AsciiFoldEqual(pbo_namespace, leaf);
+}
+
 // Only ERROR_FILE_NOT_FOUND, after a validated source directory, copies
 // request.prefix. The copy goes to `out`; request.prefix is never written.
 bool ReadPboNamespace(const AddonRequest& request, wchar_t* out, DWORD capacity, HANDLE* pinned) {
@@ -1280,6 +1323,11 @@ bool ComposeAddonCommand(const AddonRequest& request, const wchar_t* addon,
         return false;
     }
     bool prefix_from_marker = *prefix_file != nullptr;
+    // Refuse before the child is composed. The pin stays with the caller.
+    if (!request.pack_only &&
+        !BinarizeNamespaceMatchesSource(pbo_namespace, request.source)) {
+        return false;
+    }
     return BuildAddonCommand(request, addon, pbo_namespace, *prefix_file, prefix_from_marker,
                              application, app_capacity, command, command_capacity);
 }

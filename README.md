@@ -263,8 +263,8 @@ Each of these fails closed with a named error instead of guessing (#93):
   reason and the repair steps are in
   [docs/STORAGE_RECOVERY.md](docs/STORAGE_RECOVERY.md). Stop retries, inventory
   the mission, and restore only artifacts you can authenticate.
-- **One `mod` name per project.** Two projects that share a `mod` name are
-  refused with `bad_project`. The name is also the PBO prefix.
+- **One `mod` name per project.** Shared `mod` names are `bad_project`. The PBO file name is not the `$PBOPREFIX$` namespace. `build_namespace_source_mismatch`: "Binarize requires the source folder name to match the PBO namespace, ignoring ASCII case. Use pack_only=true if binarization is unnecessary; for a single-segment namespace, rename the source folder compatibly with the project's registered source policy; otherwise use the project's own build." `pack_only` is exempt.
+
 - **No retail client.** A running `DayZ_x64.exe` or `DayZ_BE.exe` blocks every
   test run with `retail_quarantine`. Close it first.
 - **Which DayZDiag.** The daemon starts only the `DayZDiag_x64.exe` under

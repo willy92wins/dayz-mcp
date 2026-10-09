@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gc
 import json
 import os
@@ -200,19 +201,24 @@ class BuildLockWaitTests(unittest.TestCase):
         sha256: str | None = None,
         wait_s: float | None = None,
         cancel_event: asyncio.Event | None = None,
+        policy: dayz_test_request.RequestProjectPolicy | None = None,
+        source: str | None = None,
     ) -> tuple[_Broker, object]:
+        selected = _POLICY if policy is None else policy
         if canonical is None:
             document: dict[str, object] = {
                 "version": 1,
-                "dev_root": _POLICY.dev_root,
-                "mod": _POLICY.mod,
+                "dev_root": selected.dev_root,
+                "mod": selected.mod,
                 "mode": "server",
                 "build": True,
             }
+            if source is not None:
+                document["source"] = source
             if wait_s is not None:
                 document["build_lock_wait_s"] = wait_s
             parsed = dayz_test_request.parse_dayz_test_request(
-                json.dumps(document).encode("utf-8"), policies=(_POLICY,)
+                json.dumps(document).encode("utf-8"), policies=(selected,)
             )
             canonical = parsed.canonical_bytes
             sha256 = parsed.sha256
@@ -228,7 +234,7 @@ class BuildLockWaitTests(unittest.TestCase):
             return await dayz_test_worker.execute_dayz_test_worker(
                 canonical,
                 request_sha256=sha256 or "",
-                request_policies=(_POLICY,),
+                request_policies=(selected,),
                 runtime_policy=_RUNTIME,
                 broker=broker,
                 id_fn=lambda: next(ids),
@@ -259,8 +265,11 @@ class BuildLockWaitTests(unittest.TestCase):
                 "DAYZ_MCP_BUILD_LOCK_WAIT_S": "60",
             }
             began = time.monotonic()
+            source = Path(temporary) / "ExampleMod"
+            source.mkdir()
+            policy = dataclasses.replace(_POLICY, default_source=str(source))
             with mock.patch.dict(os.environ, environment):
-                broker, result = self._run_build()
+                broker, result = self._run_build(policy=policy, source=str(source))
             elapsed = time.monotonic() - began
             holder.join(5)
             self.assertTrue(finished.is_set())

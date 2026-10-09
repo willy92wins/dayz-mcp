@@ -21,8 +21,10 @@ the refusal is exactly {"error": ...}. The fixes, one per layer:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -254,38 +256,42 @@ class DaemonStartRefusalTest(unittest.TestCase):
         _claim_box(self.fixture.coordinator, IDENTITY_B)
         broker = _DaemonBroker(self.state, self.fixture.token)
         policy = _policy()
-        parsed = dayz_test_request.parse_dayz_test_request(
-            json.dumps(
-                {
-                    "version": 1,
-                    "dev_root": policy.dev_root,
-                    "mod": policy.mod,
-                    "mode": "all",
-                    "build": True,
-                    "extra_mods": ["@DayZ_MCP"],
-                }
-            ).encode("utf-8"),
-            policies=(policy,),
-        )
-        ids = iter((RUN_ID, _OPERATION_ID))
-
-        with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
-            asyncio.run(
-                dayz_test_worker.execute_dayz_test_worker(
-                    parsed.canonical_bytes,
-                    request_sha256=parsed.sha256,
-                    request_policies=(policy,),
-                    runtime_policy=_worker_runtime(self.fixture.game),
-                    broker=broker,
-                    id_fn=lambda: next(ids),
-                    readiness_probe=_ready,
-                    has_binarizable_assets=lambda _source: True,
-                    # bf5c / 8cf9: a binarizing build is staged from the real
-                    # source, and P:\ExampleMod is not one. The stage is not
-                    # what this incident is about.
-                    stage_build_source=nullcontext,
-                )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / policy.mod
+            source.mkdir()
+            policy = dataclasses.replace(policy, default_source=str(source))
+            parsed = dayz_test_request.parse_dayz_test_request(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "dev_root": policy.dev_root,
+                        "mod": policy.mod,
+                        "mode": "all",
+                        "build": True,
+                        "extra_mods": ["@DayZ_MCP"],
+                        "source": str(source),
+                    }
+                ).encode("utf-8"),
+                policies=(policy,),
             )
+            ids = iter((RUN_ID, _OPERATION_ID))
+
+            with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+                asyncio.run(
+                    dayz_test_worker.execute_dayz_test_worker(
+                        parsed.canonical_bytes,
+                        request_sha256=parsed.sha256,
+                        request_policies=(policy,),
+                        runtime_policy=_worker_runtime(self.fixture.game),
+                        broker=broker,
+                        id_fn=lambda: next(ids),
+                        readiness_probe=_ready,
+                        has_binarizable_assets=lambda _source: True,
+                        # bf5c / 8cf9: a binarizing build is staged from the real
+                        # source. This incident is the refusal after that build.
+                        stage_build_source=nullcontext,
+                    )
+                )
 
         self.assertEqual(raised.exception.code, "active_run_exists")
         self.assertIsNone(raised.exception.run_id)
