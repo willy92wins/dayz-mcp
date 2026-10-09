@@ -11,12 +11,12 @@ ni OCR**. Control + datos son **engine-native** (CreateObjectEx, StartCommand_Ve
 Car setters, RestApi async, RaycastRVProxy, SetTimeMultiplier). La captura visual es la
 única pieza no-native: `MakeScreenshot` está roto (T165276) → se hace por **window-grab**
 externo del cliente renderizado (pasivo, solo lee píxeles). Arquitectura cerrada y **en
-producción**: 79 tools registradas (corregido 2026-10-01) y puente en `MCP_BRIDGE_VERSION = "10"`
+producción**: 86 tools registradas (lista en `README.md:80`, contada el 2026-10-09) y puente en `MCP_BRIDGE_VERSION = "12"`
 (`addon/scripts/5_Mission/MCPMessages.c:1`). Las 5 fases del plan original están cerradas.
 
 ## Definición de Producto Final
 **Qué es "terminado" → [`product-spec.md`](product-spec.md)** — contrato de aceptación
-(11 tools en 6 dominios en el alcance original —hoy 79 registradas—, seguridad fail-closed, captura visual, criterios verificables por
+(11 tools en 6 dominios en el alcance original —hoy 86 registradas—, seguridad fail-closed, captura visual, criterios verificables por
 fase, fuera de alcance, paridad). Leerlo antes de planificar cualquier fase. El Grill de
 plan (Modo B) exige que cada fase trace a un criterio de ahí.
 

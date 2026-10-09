@@ -1,39 +1,52 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-08 22:05 (Madrid; medido: main, árboles vivos, launcher, PBO y procesos)
+# DayZ-MCP - Estado vivo - 2026-10-09 15:17 (Madrid; medido: main, árboles vivos, launcher, PBO, procesos e instancias)
 
-- **main** = `4233351` (#226).
-  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) siguen en `46833d7` (despliegue v11b del 2026-10-08).
-  - Pendiente de la próxima promoción:
-    - #223 y #224 (test y descripciones; nada sellado);
-    - #226 (855c: worker sellado). Necesita resellar y pasar `tools/dev/storage_recovery_joint_gate.py`.
+- **main** = `58132b6` (#229, puente "12").
+  - Hoy entraron:
+    - #227 (docs);
+    - #228 (infraestructura del broker: abandono por id, release registrada y token de binding completo);
+    - #229 (puente "12": `action_hold` 9941, `action_cursor`/`player_look_at` 86a3).
+  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) están en `58132b6`, sin cambios en ficheros versionados.
   - Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
-- **Launcher `dayz-test-v1`, resellado el 2026-10-08:**
-  - PE de LIVE `E1788375…` y de T130 `44372199…`; mismo `app.pyz` `8B932082…`.
-  - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v11b-20261008\` (`steps.log`).
-- **PBO vivo:** `CC616EC7…` (puente "11").
+- **Launcher `dayz-test-v1`, resellado el 2026-10-09 en la ventana v12:**
+  - PE de LIVE `3EBCF9CE…` y de T130 `DAC6F497…`; mismo `app.pyz` `D41F9EEF…`.
+  - `check_native_launcher_registry.py` y el check del lock dan ok en los dos árboles.
+  - Lleva el worker de 855c (#226) y la infraestructura de #228.
+  - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v12-20261009\` (`steps.log`).
+- **PBO vivo:** `177471A7…` (puente "12", construido desde `944a358`, la cabeza de #229, con procedencia comprobada).
+  - Los anteriores se conservan junto a él (`*.swapped_out_*`).
 - **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
-  - Al cierre, el orquestador registró sus harnesses cerrados y ningún proceso propio pendiente. El censo global de las 22:02 y la reconexión de otras sesiones no están acreditados en esta evidencia.
-- **Verificado en juego el 2026-10-08:** `reviews/2026-10-06-ticketing/ingame-v11b/RESULTS.md`.
+  - A las 15:17 ninguna tenía lease, cola ni run, y no había procesos DayZ.
+  - Los dos daemons corren desde las 13:37, cuando los arrancaron los harnesses del ciclo in-game. La ventana cerró a las 14:22.
+  - Los clientes de otras sesiones se cerraron en la ventana con permiso del dueño. Después aparecieron cadenas de cliente nuevas: una desde las 14:32, sin atribuir, y a las 15:15 las de otra sesión de Claude.
+- **Verificado en juego el 2026-10-09:** `reviews/2026-10-06-ticketing/ingame-v12/RESULTS.md`.
+  - 855c: rechazo con `journal_name_invalid`, remediación y un solo arranque.
+  - 9941: hold con final natural, timeout, cancelación por el broker con su release, y repetición.
+  - 8308: el hold sostuvo beber y comer en 1.29, y beber en 1.30, hasta el final o el plazo. La cantidad y el agua no se leyeron (`fb98`).
+  - 86a3: look-at convergente y cursor.
+- **Buzón:**
+  - Resueltas: 855c, 9941, 86a3, 8308, b58f y 33ed.
+  - Nuevas: c852, 204e, ca47, d9c8, 5880 y fb98.
 - **Riesgos abiertos:**
-  - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`). El arreglo quedó aparcado: `reviews/2026-10-06-ticketing/round2/2986_PARKED.md`.
-  - El rechazo de storage sin `storage_recovery_reason` (855c) está arreglado en main, pero no desplegado.
-  - `dayz_test_run(build=true)` con binarize no empaqueta scripts (`fb-20261008-141215-222d`).
-  - Virtualización MSIX de `%LOCALAPPDATA%` para procesos lanzados desde la app de Claude (`fb-20261008-141157-e92d`).
-- **Ronda 2 (resultado):** `reviews/2026-10-06-ticketing/round2/ROUND2.md`.
-  - 855c: mergeado.
-  - 2986: aparcado.
-  - B `action_hold` (9941), C `action_cursor`/`player_look_at` (86a3) y la infraestructura del broker: parados tras su tope de rondas. El trabajo se conserva en `C:\Users\guill\dzmcp_gauntlet\` (`r2b_9941\ws`, `r2c_86a3\ws`, `r2i_broker\ws`).
-- **Siguiente sesión (decisión del dueño, 2026-10-08):**
-  1. gpt-6.1-sol recorta la infraestructura del broker a lo mínimo: abandono por id y token de binding completo, sin retención ni atribución de recibos.
-  2. Grok la implementa y Sol la revisa.
-  3. B y C, una ronda final encima.
-  4. PBO "12" y ciclo in-game.
-  5. Ventana de resellado para 855c (y lo que entre: 222d, foco de f298).
+  - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; aparcado: `round2/2986_PARKED.md`).
+  - `dayz_test_run(build=true)` con binarize no empaqueta scripts en lo desplegado (`222d`).
+    - El diseño B está aprobado por Sol en #230.
+    - Espera su aceptación en la próxima ventana de resellado. No mergear antes.
+  - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`); la aceptación FenceKit de 9941 quedó INCONCLUSA.
+  - En los tres lanzamientos en 1.29 de este ciclo, el cliente quedó en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
+  - El linter offline no detecta casts entre tipos no relacionados (`c852`).
+  - La puerta de 855c necesita un alias de misión en la policy sellada (`d9c8`).
+  - Ningún verbo lee la cantidad de un ítem. El agua y la energía solo las devuelve `player_heal`, antes y después de curar: falta una lectura que no cambie nada. Además, en 1.29 `completed_cycles` queda en 0 al beber y comer (`fb98`).
+  - Virtualización MSIX de `%LOCALAPPDATA%` (`e92d`).
+- **Siguiente:**
+  1. Ventana de resellado para 222d (#230): aceptación con SimpleGroup y LFHeli_OH1 contra los PBO buenos (spec §4), y merge.
+  2. Investigar `204e` (toggle de colocación) y `f4e6` (según su informe, un run 1.30 se cerró sin que lo pidiera su sesión).
+  3. Peticiones abiertas: `8b1c` (verbo de foco), el rediseño de 2986 y `fb98`.
 - **Detalle:**
   - Notas: `C:\Users\guill\dzmcp_gauntlet\SESSION-STATE.md`.
-  - Handoff: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-08-HANDOFF-dayz-mcp-ticketing.md`.
+  - Handoff: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-09-HANDOFF-dayz-mcp-ticketing.md`.
 <!-- LIVE-STATE:END -->
 
 ---
@@ -69,7 +82,7 @@ La cola antigua quedó vacía en la v1.3: 0ab2 (#31), 546d (#26), a429 (#29), 2e
 
 ## Superficie (no recontar a ciegas)
 
-- README / architecture / `build_app`: **75 tools** (+ `exec_enforce` opt-in).
+- README / architecture / `build_app`: **86 tools** (+ `exec_enforce` opt-in). Contadas el 2026-10-09 con `build_app`; coinciden una a una con la lista de `README.md:80`.
 - `server.py` es una fachada desde #186: las definiciones de dominio viven en `tool_catalog.py`, `bridge_readiness.py`, `bridge_errors.py`, `tool_args.py`, `world_results.py`, `launch_logs.py` y `box_occupancy.py`, y `dayz_mcp.server` las reexporta. `build_app` sigue entero en `server.py`.
 - Suite de tests: `tools/tests/test_*.py`.
   - Suite completa: `tools\.venv-mcp\Scripts\python.exe -m unittest discover -s tests -t .` desde `tools\`; sin pytest.
