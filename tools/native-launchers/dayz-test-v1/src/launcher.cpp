@@ -3,12 +3,35 @@
 #include <bcrypt.h>
 #include <stdint.h>
 
+#ifndef DAYZ_MCP_LAUNCHER_TEST
 #include "../generated/closure_manifest.h"
 #include "../generated/addon_roots.h"
+#endif
+
+#ifdef DAYZ_MCP_LAUNCHER_TEST
+struct DzmcpTestApi {
+    int (*validate)();
+    int (*include_open)();
+    int (*close_include)();
+    int (*ns)(const wchar_t* source, const wchar_t* prefix, wchar_t* out, int out_cap, int* handle_open);
+    int (*close_ns)();
+    int (*command)(
+        int clear, int pack_only, const wchar_t* prefix, const wchar_t* source,
+        const wchar_t* target, const wchar_t* temp, const wchar_t* addon,
+        wchar_t* command, int command_cap, wchar_t* pbo, int pbo_cap,
+        int* include_open, int* prefix_open);
+};
+extern DzmcpTestApi g_dzmcp_test_api;
+DzmcpTestApi g_dzmcp_test_api{};
+#endif
 
 namespace {
 
 constexpr DWORD kMaxFrameBytes = 65536;
+constexpr char kAddonBuilderIncludeList[] =
+    "*.c;*.layout;*.imageset;*.xml;*.csv;*.paa;*.rvmat;*.json;*.ogg;*.wav;*.wss;*.edds;*.bisurf;*.ptc;*.emat\n";
+constexpr DWORD kAddonBuilderIncludeBytes = sizeof(kAddonBuilderIncludeList) - 1;
+constexpr DWORD kPboPrefixMaxBytes = 512;
 constexpr BYTE kBrokerVersion = 1;
 constexpr char kBrokerMagic[] = "DZM1";
 constexpr char kAnnouncementMagic[] = "DZA1";
@@ -349,13 +372,64 @@ bool MarkerDigest(BYTE digest[kHashBytes]) {
     return hex[64] == '\0';
 }
 
+HANDLE gIncludeListHandle = nullptr;
+
 void ClosePinned(PinnedClosure* closure) {
     if (closure == nullptr) return;
     while (closure->count != 0) {
         --closure->count;
-        CloseHandle(closure->handles[closure->count]);
+        HANDLE file = closure->handles[closure->count];
         closure->handles[closure->count] = nullptr;
+        if (file != nullptr && file == gIncludeListHandle) {
+            gIncludeListHandle = nullptr;
+        }
+        if (file != nullptr) {
+            CloseHandle(file);
+        }
     }
+}
+
+bool IncludeListPath(const wchar_t* path) {
+    return path != nullptr && SameBundlePathText(path, L"addonbuilder-include.lst");
+}
+
+bool IncludeListBytes(HANDLE file) {
+    LARGE_INTEGER size{};
+    BYTE buffer[160]{};
+    DWORD read = 0;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart != kAddonBuilderIncludeBytes ||
+        kAddonBuilderIncludeBytes >= sizeof(buffer) ||
+        !ReadFile(file, buffer, kAddonBuilderIncludeBytes, &read, nullptr) ||
+        read != kAddonBuilderIncludeBytes) {
+        return false;
+    }
+    BYTE different = 0;
+    for (DWORD index = 0; index < kAddonBuilderIncludeBytes; ++index) {
+        different |= static_cast<BYTE>(buffer[index] ^ static_cast<BYTE>(kAddonBuilderIncludeList[index]));
+    }
+    LARGE_INTEGER start{};
+    SetFilePointerEx(file, start, nullptr, FILE_BEGIN);
+    SecureZero(buffer, sizeof(buffer));
+    return different == 0;
+}
+
+bool IncludeListStillPinned() {
+    return gIncludeListHandle != nullptr && gIncludeListHandle != INVALID_HANDLE_VALUE &&
+           GetFileType(gIncludeListHandle) == FILE_TYPE_DISK;
+}
+
+// The command's -include path is this closure entry, not a second lookup that
+// could name a different file than the one ValidateClosure pinned.
+bool PinnedIncludePath(wchar_t* destination, DWORD capacity) {
+    const ClosureEntry* found = nullptr;
+    for (DWORD index = 0; index < kClosureEntryCount; ++index) {
+        const ClosureEntry& entry = kClosureEntries[index];
+        if (entry.kind != ClosureKind::BUNDLE || !IncludeListPath(entry.path)) continue;
+        if (found != nullptr) return false;
+        found = &entry;
+    }
+    if (found == nullptr || !IncludeListStillPinned()) return false;
+    return BundlePath(found->path, destination, capacity);
 }
 
 bool PinEntry(const ClosureEntry& expected, PinnedClosure* closure) {
@@ -386,7 +460,8 @@ bool PinEntry(const ClosureEntry& expected, PinnedClosure* closure) {
               (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
               !standard.Directory && !standard.DeletePending && standard.NumberOfLinks == 1 &&
               static_cast<uint64_t>(standard.EndOfFile.QuadPart) == expected.size &&
-              HashHandle(file, digest) && SameBytes(digest, expected.sha256, kHashBytes);
+              HashHandle(file, digest) && SameBytes(digest, expected.sha256, kHashBytes) &&
+              (!IncludeListPath(expected.path) || IncludeListBytes(file));
     if (ok && expected.require_identity) {
         ok = identity.VolumeSerialNumber == expected.volume_serial_number &&
              SameBytes(identity.FileId.Identifier, expected.file_id, 16);
@@ -398,6 +473,9 @@ bool PinEntry(const ClosureEntry& expected, PinnedClosure* closure) {
         return false;
     }
     closure->handles[closure->count++] = file;
+    if (expected.kind == ClosureKind::BUNDLE && IncludeListPath(expected.path)) {
+        gIncludeListHandle = file;
+    }
     return true;
 }
 
@@ -434,6 +512,25 @@ bool ValidateClosure(PinnedClosure* closure) {
         return false;
     }
     closure->handles[closure->count++] = manifest;
+    DWORD include_matches = 0;
+    bool include_external = false;
+    for (DWORD index = 0; index < kClosureEntryCount; ++index) {
+        if (!IncludeListPath(kClosureEntries[index].path)) continue;
+        ++include_matches;
+        if (kClosureEntries[index].kind != ClosureKind::BUNDLE) include_external = true;
+    }
+    if (include_external) {
+        ClosePinned(closure);
+        return false;
+    }
+    if (include_matches == 0) {
+        ClosePinned(closure);
+        return false;
+    }
+    if (include_matches > 1) {
+        ClosePinned(closure);
+        return false;
+    }
     for (DWORD index = 0; index < kClosureEntryCount; ++index) {
         if (!PinEntry(kClosureEntries[index], closure)) {
             ClosePinned(closure);
@@ -1029,10 +1126,126 @@ const ClosureEntry* SealedAddonBuilderEntry() {
     return found;
 }
 
+bool SourceDirectoryAccessible(const wchar_t* source) {
+    if (source == nullptr || source[0] == L'\0') return false;
+    HANDLE directory = CreateFileW(
+        source, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) return false;
+    FILE_STANDARD_INFO standard{};
+    bool ok = GetFileInformationByHandleEx(
+                  directory, FileStandardInfo, &standard, sizeof(standard)) &&
+              standard.Directory && !standard.DeletePending;
+    CloseHandle(directory);
+    return ok;
+}
+
+bool DecodePboNamespace(const BYTE* data, DWORD size, wchar_t* out, DWORD capacity) {
+    if (data == nullptr || size > kPboPrefixMaxBytes) return false;
+    if (size >= 2 && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF)))
+        return false;
+    DWORD start = 0;
+    if (size >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) start = 3;
+    DWORD end = size;
+    if (end >= start + 2 && data[end - 2] == '\r' && data[end - 1] == '\n') end -= 2;
+    else if (end > start && data[end - 1] == '\n') end -= 1;
+    if (end < start) return false;
+    DWORD length = end - start;
+    if (length < 1 || length > 255) return false;
+    wchar_t normalized[256]{};
+    for (DWORD index = 0; index < length; ++index) {
+        BYTE value = data[start + index];
+        if (value < 0x20 || value > 0x7E || value == '"' || value == ' ' || value == ':' ||
+            value == '<' || value == '>' || value == '|' || value == '*' || value == '?' ||
+            value == '\'') {
+            return false;
+        }
+        normalized[index] = value == '/' ? L'\\' : static_cast<wchar_t>(value);
+    }
+    normalized[length] = L'\0';
+    if (normalized[0] == L'\\') return false;
+    DWORD segment = 0;
+    for (DWORD index = 0; index <= length; ++index) {
+        if (index != length && normalized[index] != L'\\') continue;
+        DWORD count = index - segment;
+        if (count < 1 || count > 64) return false;
+        wchar_t lead = normalized[segment];
+        bool lead_ok = (lead >= L'A' && lead <= L'Z') || (lead >= L'a' && lead <= L'z') ||
+                       (lead >= L'0' && lead <= L'9') || lead == L'_';
+        if (!lead_ok) return false;
+        for (DWORD cursor = 1; cursor < count; ++cursor) {
+            wchar_t character = normalized[segment + cursor];
+            bool ok = (character >= L'A' && character <= L'Z') ||
+                      (character >= L'a' && character <= L'z') ||
+                      (character >= L'0' && character <= L'9') || character == L'_' ||
+                      character == L'-';
+            if (!ok) return false;
+        }
+        segment = index + 1;
+    }
+    return CopyText(out, capacity, normalized);
+}
+
+// Only ERROR_FILE_NOT_FOUND, after a validated source directory, copies
+// request.prefix. The copy goes to `out`; request.prefix is never written.
+bool ReadPboNamespace(const AddonRequest& request, wchar_t* out, DWORD capacity, HANDLE* pinned) {
+    if (out == nullptr || capacity == 0 || pinned == nullptr) return false;
+    *pinned = nullptr;
+    out[0] = L'\0';
+    if (!SourceDirectoryAccessible(request.source)) return false;
+    wchar_t path[2048]{};
+    if (!CopyText(path, ARRAYSIZE(path), request.source) ||
+        !AppendText(path, ARRAYSIZE(path), L"\\$PBOPREFIX$")) {
+        return false;
+    }
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    SecureZero(path, sizeof(path));
+    if (file == INVALID_HANDLE_VALUE) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND)
+            return CopyText(out, capacity, request.prefix);
+        return false;
+    }
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    FILE_STANDARD_INFO standard{};
+    bool opened = GetFileType(file) == FILE_TYPE_DISK &&
+                  GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+                  GetFileInformationByHandleEx(file, FileStandardInfo, &standard, sizeof(standard)) &&
+                  (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                  !standard.Directory && !standard.DeletePending && standard.NumberOfLinks == 1 &&
+                  standard.EndOfFile.QuadPart >= 0 &&
+                  static_cast<uint64_t>(standard.EndOfFile.QuadPart) <= kPboPrefixMaxBytes;
+    BYTE data[kPboPrefixMaxBytes]{};
+    DWORD size = opened ? static_cast<DWORD>(standard.EndOfFile.QuadPart) : 0;
+    DWORD read = 0;
+    opened = opened && (size == 0 || ReadFile(file, data, size, &read, nullptr)) && read == size &&
+             DecodePboNamespace(data, size, out, capacity);
+    SecureZero(data, sizeof(data));
+    if (!opened) {
+        CloseHandle(file);
+        out[0] = L'\0';
+        return false;
+    }
+    *pinned = file;
+    return true;
+}
+
 bool BuildAddonCommand(const AddonRequest& request, const wchar_t* addon,
+                       const wchar_t* pbo_namespace, HANDLE prefix_file, bool prefix_from_marker,
                        wchar_t* application, DWORD app_capacity,
                        wchar_t* command, DWORD command_capacity) {
-    if (addon == nullptr || addon[0] == L'\0') return false;
+    wchar_t include_path[32768]{};
+    if (prefix_from_marker &&
+        (prefix_file == nullptr || GetFileType(prefix_file) != FILE_TYPE_DISK)) {
+        return false;
+    }
+    if (!request.pack_only &&
+        (!IncludeListStillPinned() || !PinnedIncludePath(include_path, ARRAYSIZE(include_path)))) {
+        return false;
+    }
+    if (addon == nullptr || addon[0] == L'\0' || pbo_namespace == nullptr || pbo_namespace[0] == L'\0')
+        return false;
     for (DWORD index = 0; addon[index] != L'\0'; ++index)
         if (addon[index] == L'"' || addon[index] < L' ') return false;
     return CopyText(application, app_capacity, addon) &&
@@ -1041,13 +1254,34 @@ bool BuildAddonCommand(const AddonRequest& request, const wchar_t* addon,
            AppendText(command, command_capacity, L"\"") &&
            AppendQuoted(command, command_capacity, request.source) &&
            AppendQuoted(command, command_capacity, request.target) &&
-           AppendText(command, command_capacity, L" -prefix=") &&
-           AppendText(command, command_capacity, request.prefix) &&
+           AppendText(command, command_capacity, L" \"-prefix=") &&
+           AppendText(command, command_capacity, pbo_namespace) &&
+           AppendText(command, command_capacity, L"\"") &&
            AppendText(command, command_capacity, L" \"-temp=") &&
            AppendText(command, command_capacity, request.temp) &&
            AppendText(command, command_capacity, L"\"") &&
+           (request.pack_only ||
+            (AppendText(command, command_capacity, L" \"-include=") &&
+             AppendText(command, command_capacity, include_path) &&
+             AppendText(command, command_capacity, L"\""))) &&
            (!request.clear || AppendText(command, command_capacity, L" -clear")) &&
            (!request.pack_only || AppendText(command, command_capacity, L" -packonly"));
+}
+
+// Single production call into BuildAddonCommand. The harness uses this function,
+// so a handle closed immediately before that call fails the compiled command tests.
+bool ComposeAddonCommand(const AddonRequest& request, const wchar_t* addon,
+                         wchar_t* application, DWORD app_capacity,
+                         wchar_t* command, DWORD command_capacity,
+                         HANDLE* prefix_file) {
+    wchar_t pbo_namespace[256]{};
+    if (prefix_file == nullptr ||
+        !ReadPboNamespace(request, pbo_namespace, ARRAYSIZE(pbo_namespace), prefix_file)) {
+        return false;
+    }
+    bool prefix_from_marker = *prefix_file != nullptr;
+    return BuildAddonCommand(request, addon, pbo_namespace, *prefix_file, prefix_from_marker,
+                             application, app_capacity, command, command_capacity);
 }
 
 bool BuildPboPath(const AddonRequest& request, wchar_t* destination, DWORD capacity) {
@@ -1203,10 +1437,22 @@ bool PublishAnnouncement(LaunchKind kind, const wchar_t* manifest_path) {
     return ok;
 }
 
+struct PboPrefixPin {
+    HANDLE file = nullptr;
+    void Close() {
+        if (file != nullptr && file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            file = nullptr;
+        }
+    }
+    ~PboPrefixPin() { Close(); }
+};
+
 BOOL LaunchApprovedChild(LaunchKind kind, const BYTE* broker_frame,
                          DWORD broker_frame_bytes, const SecretState* secrets,
                          HANDLE cancel_handle, HANDLE private_cancel_handle,
                          ChildOutput* output) {
+    PboPrefixPin pbo_prefix_pin{};
     if (output == nullptr || secrets == nullptr ||
         (kind != LaunchKind::PRIVATE_WORKER && kind != LaunchKind::LIFECYCLE_CLI &&
          kind != LaunchKind::ADDON_BUILDER)) {
@@ -1229,7 +1475,8 @@ BOOL LaunchApprovedChild(LaunchKind kind, const BYTE* broker_frame,
         manifest_path = addon_entry->path;
         if (frame_header.stdin_bytes != 0 ||
             !ParseAddonRequest(broker_frame + sizeof(BrokerHeader), frame_header.payload_bytes, &addon) ||
-            !BuildAddonCommand(addon, manifest_path, application, ARRAYSIZE(application), command, ARRAYSIZE(command)) ||
+            !ComposeAddonCommand(addon, manifest_path, application, ARRAYSIZE(application),
+                                 command, ARRAYSIZE(command), &pbo_prefix_pin.file) ||
             !BuildPboPath(addon, pbo_path, ARRAYSIZE(pbo_path)) ||
             !CapturePboSnapshot(pbo_path, true, &pbo_before))
             return FALSE;
@@ -1477,6 +1724,96 @@ BOOL LaunchApprovedChild(LaunchKind kind, const BYTE* broker_frame,
     }
     return broker_ok ? TRUE : FALSE;
 }
+
+#ifdef DAYZ_MCP_LAUNCHER_TEST
+PinnedClosure gTestClosure{};
+HANDLE gTestPrefix = nullptr;
+
+int TestValidate() {
+    ClosePinned(&gTestClosure);
+    return ValidateClosure(&gTestClosure) ? 1 : 0;
+}
+
+int TestIncludeOpen() {
+    return IncludeListStillPinned() ? 1 : 0;
+}
+
+int TestCloseInclude() {
+    if (gIncludeListHandle == nullptr) return 0;
+    HANDLE file = gIncludeListHandle;
+    gIncludeListHandle = nullptr;
+    for (DWORD index = 0; index < gTestClosure.count; ++index) {
+        if (gTestClosure.handles[index] == file) gTestClosure.handles[index] = nullptr;
+    }
+    CloseHandle(file);
+    return 1;
+}
+
+int TestNamespace(const wchar_t* source, const wchar_t* prefix, wchar_t* out, int out_cap, int* handle_open) {
+    if (gTestPrefix != nullptr) {
+        CloseHandle(gTestPrefix);
+        gTestPrefix = nullptr;
+    }
+    AddonRequest request{};
+    if (prefix == nullptr || !CopyText(request.prefix, ARRAYSIZE(request.prefix), prefix) ||
+        source == nullptr || !CopyText(request.source, ARRAYSIZE(request.source), source)) {
+        return 0;
+    }
+    wchar_t saved[65]{};
+    CopyText(saved, ARRAYSIZE(saved), request.prefix);
+    bool ok = ReadPboNamespace(request, out, static_cast<DWORD>(out_cap), &gTestPrefix);
+    if (lstrcmpW(saved, request.prefix) != 0) return 0;
+    if (handle_open != nullptr) *handle_open = gTestPrefix != nullptr ? 1 : 0;
+    if (!ok) return 0;
+    return gTestPrefix != nullptr ? 1 : 2;
+}
+
+int TestCloseNamespace() {
+    if (gTestPrefix == nullptr) return 0;
+    CloseHandle(gTestPrefix);
+    gTestPrefix = nullptr;
+    return 1;
+}
+
+int TestCommand(int clear, int pack_only, const wchar_t* prefix, const wchar_t* source,
+                const wchar_t* target, const wchar_t* temp, const wchar_t* addon,
+                wchar_t* command, int command_cap, wchar_t* pbo, int pbo_cap,
+                int* include_open, int* prefix_open) {
+    AddonRequest request{};
+    request.clear = clear != 0;
+    request.pack_only = pack_only != 0;
+    if (!CopyText(request.prefix, ARRAYSIZE(request.prefix), prefix) ||
+        !CopyText(request.source, ARRAYSIZE(request.source), source) ||
+        !CopyText(request.target, ARRAYSIZE(request.target), target) ||
+        !CopyText(request.temp, ARRAYSIZE(request.temp), temp)) {
+        return 0;
+    }
+    wchar_t application[32768]{};
+    HANDLE pinned = nullptr;
+    bool ok = ComposeAddonCommand(request, addon, application, ARRAYSIZE(application),
+                                  command, static_cast<DWORD>(command_cap), &pinned) &&
+              BuildPboPath(request, pbo, static_cast<DWORD>(pbo_cap));
+    if (prefix_open != nullptr) *prefix_open = pinned != nullptr ? 1 : 0;
+    if (include_open != nullptr) *include_open = IncludeListStillPinned() ? 1 : 0;
+    if (pinned != nullptr) {
+        CloseHandle(pinned);
+    }
+    return ok ? 1 : 0;
+}
+
+struct RegisterTestApi {
+    RegisterTestApi() {
+        g_dzmcp_test_api.validate = &TestValidate;
+        g_dzmcp_test_api.include_open = &TestIncludeOpen;
+        g_dzmcp_test_api.close_include = &TestCloseInclude;
+        g_dzmcp_test_api.ns = &TestNamespace;
+        g_dzmcp_test_api.close_ns = &TestCloseNamespace;
+        g_dzmcp_test_api.command = &TestCommand;
+    }
+};
+
+RegisterTestApi gRegisterTestApi;
+#endif
 
 }  // namespace
 
