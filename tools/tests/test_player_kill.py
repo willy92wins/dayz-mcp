@@ -206,7 +206,11 @@ class PlayerKillAdmissionTest(unittest.TestCase):
         status, body = state.enqueue_command("player_kill", {"uid": UID}, peer="server")
         self.assertEqual(status, 200, body)
         self.assertEqual(body["cmd"], "player_kill")
-        self.assertEqual(bound_queue(state, "server"), [{"id": 1, "cmd": "player_kill", "args": {"uid": UID}}])
+        queued = [
+            {key: value for key, value in command.items() if key != "_broker_pin"}
+            for command in bound_queue(state, "server")
+        ]
+        self.assertEqual(queued, [{"id": 1, "cmd": "player_kill", "args": {"uid": UID}}])
         status, bad = state.enqueue_command("player_kill", {"uid": ""}, peer="server")
         self.assertEqual((status, bad), (400, {"error": "bad_args"}))
         self.assertEqual(len(bound_queue(state, "server")), 1)

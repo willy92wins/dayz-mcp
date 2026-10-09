@@ -18,6 +18,7 @@ from tests.fence_helpers import announced_capabilities
 class _ResultState:
     def __init__(self, result: dict) -> None:
         self.result = result
+        self.daemon_generation = "generation-test"
 
     def enqueue_command(
         self,

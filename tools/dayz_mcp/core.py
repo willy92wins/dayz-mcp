@@ -115,6 +115,8 @@ def _peer_status(
         "binding_state": peer_snapshot.get("binding_state"),
         "instance_prefix": peer_snapshot.get("instance_prefix"),
         "bound_last_poll_age_s": peer_snapshot.get("bound_last_poll_age_s"),
+        "run_id": peer_snapshot.get("run_id"),
+        "binding_token": peer_snapshot.get("binding_token"),
     }
 
 
@@ -158,6 +160,9 @@ def build_status(
     fence = snapshot.get("fence")
     if isinstance(fence, dict):
         payload["fence"] = fence
+    generation = snapshot.get("daemon_generation")
+    if isinstance(generation, str) and generation:
+        payload["daemon_generation"] = generation
     return payload
 
 

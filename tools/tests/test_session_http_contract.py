@@ -293,7 +293,7 @@ class SessionHttpTest(SessionLoopback, unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(set(body), {"id"})
+        self.assertEqual(set(body), {"id", "daemon_generation"})
 
     def test_enqueue_names_only_the_lease_the_command_renewed(self) -> None:
         token, acquired = self.acquire()
@@ -308,7 +308,7 @@ class SessionHttpTest(SessionLoopback, unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(set(body), {"id", "lease_id"})
+        self.assertEqual(set(body), {"id", "lease_id", "daemon_generation"})
         self.assertEqual(body["lease_id"], acquired["lease_id"])
         # An old client that only reads id still parses the additive body.
         self.assertIsInstance(int(body["id"]), int)
@@ -324,7 +324,7 @@ class SessionHttpTest(SessionLoopback, unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(set(body), {"id"})
+        self.assertEqual(set(body), {"id", "daemon_generation"})
 
     def test_lifecycle_close_names_the_lease_authorize_renewed(self) -> None:
         token, acquired = self.acquire()

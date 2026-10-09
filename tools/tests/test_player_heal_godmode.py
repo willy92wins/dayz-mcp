@@ -1491,6 +1491,7 @@ class _ResultState:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result: dict[str, Any] | None = result
         self.enqueued: list[tuple[str, dict[str, Any], str | None]] = []
+        self.daemon_generation = "generation-test"
 
     def enqueue_command(self, cmd: str, args: dict, peer: str | None = None, **_kwargs: Any) -> tuple[int, dict]:
         self.enqueued.append((cmd, dict(args), peer))

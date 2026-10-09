@@ -4,6 +4,7 @@ from __future__ import annotations
 # Every transition into RUNNING_IDLE goes through the fence; the poll
 # re-validates after re-acquiring the lock.
 
+import copy
 import errno
 import hmac
 import json
@@ -15,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -131,6 +133,22 @@ CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+# Releases the broker publishes when it abandons a delivered command: (source
+# command, release command, builder of the release arguments from the source's
+# id and admitted arguments). ServerState uses this table unless a caller
+# passes its own; a verb with a cleanup command adds its entry here.
+RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = ()
+# Cleanup of one admitted command. The budget belongs to the runtimes; this
+# process only answers the one transition those runtimes call.
+_ABANDON_REASONS = frozenset({"cancelled", "tool_timeout"})
+_FENCE_PEER_NAMES = frozenset({"server", "client"})
+_BROKER_FENCE_ERRORS = frozenset(
+    {
+        "bad_binding_fence",
+        "binding_changed",
+        "broker_infrastructure_missing",
+    }
+)
 _RUN_NOT_OWNED_HINT = (
     "This run has no owner (RUNNING_IDLE). Adopt it with session_acquire_wait: "
     "its grant adopts the single ownerless run"
@@ -247,6 +265,57 @@ def peer_for_command(cmd: str) -> str:
     if cmd in CLIENT_COMMANDS:
         return "client"
     return "server"
+
+
+class _FenceOmitted:
+    """Enqueue parameter default: the caller did not send expected_fence."""
+
+
+_FENCE_OMITTED = _FenceOmitted()
+
+
+def parse_binding_fence(value: object) -> dict | None:
+    """Closed fence shape. The token is opaque: separators are not a structure."""
+
+    if not isinstance(value, dict) or set(value) != {"generation", "peers"}:
+        return None
+    generation = value.get("generation")
+    peers = value.get("peers")
+    if not isinstance(generation, str) or not generation:
+        return None
+    if not isinstance(peers, dict) or not peers:
+        return None
+    parsed: dict[str, dict[str, str]] = {}
+    for name, row in peers.items():
+        if name not in _FENCE_PEER_NAMES or not isinstance(row, dict):
+            return None
+        if set(row) != {"run_id", "binding_token"}:
+            return None
+        run_id = row.get("run_id")
+        token = row.get("binding_token")
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or not isinstance(token, str)
+            or not token
+        ):
+            return None
+        parsed[name] = {"run_id": run_id, "binding_token": token}
+    return {"generation": generation, "peers": parsed}
+
+
+def _fence_peers_match(expected_peers: Mapping, current_peers: Mapping) -> bool:
+    """Named peers only. A missing live row is not a match and is not a prefix."""
+
+    for peer, row in expected_peers.items():
+        live = current_peers.get(peer)
+        if not isinstance(live, Mapping) or not isinstance(row, Mapping):
+            return False
+        if live.get("run_id") != row.get("run_id"):
+            return False
+        if live.get("binding_token") != row.get("binding_token"):
+            return False
+    return True
 
 
 def _binding_run_id(binding: object | None) -> str | None:
@@ -1694,6 +1763,7 @@ class ServerState:
         time_fn: Callable[[], float] | None = None,
         coordination: SessionCoordinator | None = None,
         config_port: int | None = None,
+        release_registry: tuple | None = None,
     ) -> None:
         self.key = key
         # Loopback port this daemon owns. Only read to seed a bridge config
@@ -1713,7 +1783,12 @@ class ServerState:
         # by every MCP process; in memory only.
         self.client_dumps = ClientDumpRegistry()
         self.retail_probe: Callable[[], dict[str, object]] | None = None
-        self.daemon_generation: str | None = None
+        self.daemon_generation: str | None = uuid.uuid4().hex
+        self._broker_mac_key = os.urandom(32)
+        self._broker_rows: dict[int, dict] = {}
+        self._release_by_source: dict[str, tuple[str, Callable]] = {}
+        self._release_target_names: frozenset[str] = frozenset()
+        self._install_release_registry(release_registry)
         self.instance_token: str | None = None
         self._lock = threading.RLock()
         self._fenced_runs: set[str] = set()
@@ -1771,6 +1846,205 @@ class ServerState:
 
     def _now(self) -> float:
         return self._time_fn()
+
+    def _install_release_registry(self, registry: object) -> None:
+        """Freeze source→release at composition. Targets never join the catalog."""
+
+        if registry is None:
+            registry = RELEASE_REGISTRY
+        if not isinstance(registry, tuple):
+            raise ValueError("bad_release_registry")
+        sources: list[str] = []
+        targets: list[str] = []
+        parsed: list[tuple[str, str, Callable]] = []
+        for entry in registry:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 3
+                or not isinstance(entry[0], str)
+                or not isinstance(entry[1], str)
+                or not callable(entry[2])
+            ):
+                raise ValueError("bad_release_registry")
+            sources.append(entry[0])
+            targets.append(entry[1])
+            parsed.append((entry[0], entry[1], entry[2]))
+        # Declared names are visible to a mistaken whitelist union. They are
+        # not catalog members unless the command already was.
+        self._release_target_names = frozenset(targets)
+        catalog = self.whitelisted_commands()
+        seen: set[str] = set()
+        for source, target, _builder in parsed:
+            # Targets stay inside the base catalog. Exec is never a release
+            # target, including when enable_exec_enforce has added it to
+            # whitelisted_commands(): a release must not skip that command's
+            # admission gate.
+            if (
+                source not in catalog
+                or target not in WHITELISTED_COMMANDS
+                or target not in catalog
+                or source not in _COMMAND_ARG_SCHEMAS
+                or target not in _COMMAND_ARG_SCHEMAS
+                or peer_for_command(source) != peer_for_command(target)
+                or source in seen
+            ):
+                raise ValueError("bad_release_registry")
+            seen.add(source)
+        if set(sources) & set(targets):
+            raise ValueError("bad_release_registry")
+        self._release_by_source = {
+            source: (target, builder) for source, target, builder in parsed
+        }
+
+    def _lease_proof(self, token: str) -> str:
+        return hmac.new(
+            self._broker_mac_key, token.encode("utf-8"), "sha256"
+        ).hexdigest()
+
+    def _peer_identity_locked(self, peer: str) -> tuple[str, str] | None:
+        """One complete BOUND identity for peer, or None. Never a prefix."""
+
+        active = self._active_bindings_for_peer(peer)
+        if any(binding.state == BINDING_AMBIGUOUS for binding in active):
+            return None
+        bound = [
+            binding for binding in active if binding.state == BINDING_BOUND
+        ]
+        if len(bound) != 1:
+            return None
+        binding = bound[0]
+        run_id = _binding_run_id(binding)
+        creation = binding.creation_time_utc
+        if (
+            not isinstance(binding.instance, str)
+            or not binding.instance
+            or not isinstance(binding.epoch, int)
+            or isinstance(binding.epoch, bool)
+            or not isinstance(binding.pid, int)
+            or isinstance(binding.pid, bool)
+            or binding.pid <= 0
+            or not isinstance(creation, str)
+            or not creation
+            or not isinstance(run_id, str)
+            or not run_id
+        ):
+            return None
+        token = (
+            f"{binding.instance}|{binding.epoch}|{binding.pid}|{creation}"
+        )
+        return run_id, token
+
+    def _destination_requires_identity_locked(self, peer: str) -> bool:
+        return any(
+            binding.state == BINDING_BOUND
+            for binding in self._active_bindings_for_peer(peer)
+        )
+
+    def _binding_admission_locked(
+        self, peer: str, fence: dict | None, *, internal: bool = False
+    ) -> tuple[int, dict] | None:
+        """Compare generation and named peers under the caller's lock.
+
+        A BOUND destination must be one complete identity. A peer with no
+        binding keeps the legacy queue: gated tests still dispatch that way.
+        """
+
+        del internal
+        if self._destination_requires_identity_locked(peer):
+            if self._peer_identity_locked(peer) is None:
+                return 409, {"error": "broker_infrastructure_missing"}
+        if fence is None:
+            return None
+        generation = self.daemon_generation
+        if not isinstance(generation, str) or not generation:
+            return 409, {"error": "broker_infrastructure_missing"}
+        if generation != fence["generation"]:
+            return 409, {"error": "binding_changed"}
+        current: dict[str, dict[str, str]] = {}
+        for name in fence["peers"]:
+            identity = self._peer_identity_locked(name)
+            if identity is None:
+                return 409, {"error": "broker_infrastructure_missing"}
+            current[name] = {
+                "run_id": identity[0],
+                "binding_token": identity[1],
+            }
+        if not _fence_peers_match(fence["peers"], current):
+            return 409, {"error": "binding_changed"}
+        return None
+
+    def _destination_pin_locked(
+        self, peer: str, instance: str | None
+    ) -> dict:
+        if not instance:
+            return {"legacy": True, "peer": peer, "instance": None}
+        binding = self._bindings.get(instance)
+        return {
+            "legacy": False,
+            "peer": peer,
+            "instance": instance,
+            "epoch": binding.epoch if binding is not None else None,
+            "pid": binding.pid if binding is not None else None,
+            "creation_time_utc": (
+                binding.creation_time_utc if binding is not None else None
+            ),
+            "run_id": _binding_run_id(binding),
+            "role": binding.role if binding is not None else None,
+        }
+
+    def _pin_has_complete_identity(self, pin: object) -> bool:
+        """True when the stored destination pin is one complete binding.
+
+        A legacy queue has no opaque identity. A release is never published
+        there.
+        """
+
+        if not isinstance(pin, dict) or pin.get("legacy") is True:
+            return False
+        instance = pin.get("instance")
+        epoch = pin.get("epoch")
+        pid = pin.get("pid")
+        creation = pin.get("creation_time_utc")
+        run_id = pin.get("run_id")
+        if not isinstance(instance, str) or not instance:
+            return False
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            return False
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        if not isinstance(creation, str) or not creation:
+            return False
+        if not isinstance(run_id, str) or not run_id:
+            return False
+        return True
+
+    def _pin_matches_locked(self, pin: object) -> bool:
+        if not isinstance(pin, dict):
+            return False
+        peer = pin.get("peer")
+        if peer not in VALID_PEERS:
+            return False
+        if pin.get("legacy") is True:
+            if self._peer_identity_locked(peer) is not None:
+                return False
+            return peer in self._legacy_queues
+        instance = pin.get("instance")
+        if not isinstance(instance, str) or not instance:
+            return False
+        binding = self._bindings.get(instance)
+        if binding is None or binding.state != BINDING_BOUND:
+            return False
+        if binding.epoch != pin.get("epoch") or binding.pid != pin.get("pid"):
+            return False
+        if binding.creation_time_utc != pin.get("creation_time_utc"):
+            return False
+        if _binding_run_id(binding) != pin.get("run_id"):
+            return False
+        return binding.role == peer or binding.role == "offline"
+
+    def _drop_broker_row_locked(self, command_id: object) -> None:
+        if isinstance(command_id, int) and not isinstance(command_id, bool):
+            self._broker_rows.pop(command_id, None)
 
     def _seed_bridge_config(self, config_path: Path) -> bool:
         """Write the bridge config a launched role needs when the deploy left none.
@@ -2576,20 +2850,41 @@ class ServerState:
         lease_token: str | None = None,
         operation_timeout_s: float = 0.0,
         internal: bool = False,
+        expected_fence: object = _FENCE_OMITTED,
+        lease_token_for_proof: str | None = None,
     ) -> tuple[int, dict]:
+        if expected_fence is _FENCE_OMITTED:
+            parsed_fence = None
+        else:
+            parsed_fence = parse_binding_fence(expected_fence)
+            if parsed_fence is None:
+                return 400, {"error": "bad_binding_fence"}
         safe_operation_timeout_s, timeout_valid = _safe_operation_timeout(
             operation_timeout_s
         )
+        proof_token = lease_token if lease_token_for_proof is None else lease_token_for_proof
+        if proof_token is not None and not isinstance(proof_token, str):
+            proof_token = None
         # Timeout validation stays after authorize to preserve lease-first ordering.
         if self.coordination is None or internal:
+            # HTTP still names an admitter when no lease coordinator is wired.
+            # Embedded callers omit the payload and stay on the local trust path.
+            owner_client = None
+            if not internal and identity_payload is not None:
+                try:
+                    owner_client = ClientIdentity.from_payload(identity_payload)
+                except ValueError:
+                    return 400, {"error": "invalid_identity"}
             return self._enqueue_command(
                 cmd,
                 args,
                 peer,
-                owner_client=None,
+                owner_client=owner_client,
                 owner_lease_id=None,
                 operation_timeout_s=safe_operation_timeout_s,
                 internal=internal,
+                expected_fence=parsed_fence,
+                lease_token=proof_token if isinstance(proof_token, str) else None,
             )
 
         try:
@@ -2700,12 +2995,14 @@ class ServerState:
                     safe_cmd,
                     args,
                     safe_peer,
-                    owner_client=(
-                        client if decision.owner_session_id is not None else None
-                    ),
+                    owner_client=client,
                     owner_lease_id=decision.lease_id,
                     operation_timeout_s=safe_operation_timeout_s,
                     commit=commit if reservation_owner is not None else None,
+                    expected_fence=parsed_fence,
+                    lease_token=safe_lease_token
+                    if isinstance(safe_lease_token, str)
+                    else None,
                 )
             if status != 200:
                 error = payload.get("error")
@@ -2852,6 +3149,8 @@ class ServerState:
         operation_timeout_s: float = 0.0,
         commit: Callable[[int], bool] | None = None,
         internal: bool = False,
+        expected_fence: dict | None = None,
+        lease_token: str | None = None,
     ) -> tuple[int, dict]:
         if cmd not in self.whitelisted_commands():
             return 400, {"error": "not_whitelisted"}
@@ -2891,6 +3190,8 @@ class ServerState:
                 operation_timeout_s,
                 commit,
                 internal=internal,
+                expected_fence=expected_fence,
+                lease_token=lease_token,
             )
 
         commanded_run_id: str | None = None
@@ -2926,6 +3227,8 @@ class ServerState:
                         operation_timeout_s=operation_timeout_s,
                         commit=commit,
                         internal=internal,
+                        expected_fence=expected_fence,
+                        lease_token=lease_token,
                     )
                 )
                 if status != 200:
@@ -2958,6 +3261,8 @@ class ServerState:
                         operation_timeout_s=operation_timeout_s,
                         commit=commit,
                         internal=internal,
+                        expected_fence=expected_fence,
+                        lease_token=lease_token,
                     )
                 )
                 if status != 200:
@@ -3091,15 +3396,36 @@ class ServerState:
         operation_timeout_s: float,
         commit: Callable[[int], bool] | None,
         internal: bool,
+        expected_fence: dict | None = None,
+        lease_token: str | None = None,
     ) -> tuple[int, dict, str | None, float | None]:
         """Assign the id, seal and append one admitted command.
 
         Caller holds self._lock and admission passed immediately before, so
         the exact commit below stays the authority linearization point.
+        The binding fence is compared again here, including after a probe
+        that dropped this lock.
         """
+        refusal = self._binding_admission_locked(
+            peer, expected_fence, internal=internal
+        )
+        if refusal is not None:
+            return refusal[0], refusal[1], None, None
         command_id = self._next_id
         self._next_id += 1
-        command = {"id": command_id, "cmd": cmd, "args": args}
+        release_plan: tuple[str, dict] | None = None
+        if not internal:
+            release_plan, release_error = self._prepare_release_locked(
+                cmd, command_id, args
+            )
+            if release_error is not None:
+                return 400, {"error": release_error}, None, None
+        command = {
+            "id": command_id,
+            "cmd": cmd,
+            "args": args,
+            "_broker_pin": self._destination_pin_locked(peer, fence_instance),
+        }
         if commit is not None and not commit(command_id):
             return 409, {"error": "lease_invalid"}, None, None
         if owner_client is not None and owner_lease_id is not None:
@@ -3135,12 +3461,76 @@ class ServerState:
         activity_epoch: float | None = None
         if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
             activity_epoch = time.time()
+        self._remember_broker_row_locked(
+            command_id,
+            cmd=cmd,
+            args=args,
+            peer=peer,
+            fence_instance=fence_instance,
+            owner_client=owner_client,
+            owner_lease_id=owner_lease_id,
+            lease_token=lease_token,
+            release_plan=release_plan,
+            internal=internal,
+        )
         return (
             200,
-            {"id": command_id, "peer": peer, "cmd": cmd},
+            {
+                "id": command_id,
+                "peer": peer,
+                "cmd": cmd,
+                "daemon_generation": self.daemon_generation,
+            },
             commanded_run_id,
             activity_epoch,
         )
+
+    def _prepare_release_locked(
+        self, cmd: str, command_id: int, args: dict
+    ) -> tuple[tuple[str, dict] | None, str | None]:
+        registered = self._release_by_source.get(cmd)
+        if registered is None:
+            return None, None
+        target, builder = registered
+        try:
+            built = builder(command_id, copy.deepcopy(args))
+        except Exception:
+            return None, "bad_release_builder"
+        if not isinstance(built, dict):
+            return None, "bad_release_builder"
+        args_ok, _args_error = validate_command_args(target, built)
+        if not args_ok:
+            return None, "bad_release_builder"
+        return (target, built), None
+
+    def _remember_broker_row_locked(
+        self,
+        command_id: int,
+        *,
+        cmd: str,
+        args: dict,
+        peer: str,
+        fence_instance: str | None,
+        owner_client: ClientIdentity | None,
+        owner_lease_id: str | None,
+        lease_token: str | None,
+        release_plan: tuple[str, dict] | None,
+        internal: bool,
+    ) -> None:
+        proof = None
+        if isinstance(lease_token, str) and lease_token and owner_lease_id:
+            proof = self._lease_proof(lease_token)
+        self._broker_rows[command_id] = {
+            "owner": owner_client,
+            "lease_id": owner_lease_id,
+            "lease_proof": proof,
+            "cmd": cmd,
+            "args": copy.deepcopy(args) if isinstance(args, dict) else {},
+            "pin": self._destination_pin_locked(peer, fence_instance),
+            "state": "queued",
+            "release": None if internal else release_plan,
+            "internal": internal,
+        }
 
     def _enqueue_exec_enforce(
         self,
@@ -3151,6 +3541,8 @@ class ServerState:
         operation_timeout_s: float,
         commit: Callable[[int], bool] | None = None,
         internal: bool = False,
+        expected_fence: dict | None = None,
+        lease_token: str | None = None,
     ) -> tuple[int, dict]:
         expr = args.get("expr", "")
         main_fn = args.get("main_fn", "")
@@ -3173,6 +3565,11 @@ class ServerState:
         with self._lock:
             if self._stopping:
                 return 409, {"error": "enqueue_cancelled"}
+            early_fence = self._binding_admission_locked(
+                peer, expected_fence, internal=internal
+            )
+            if early_fence is not None:
+                return early_fence
             fence_error_code, _queue, _fence_instance = self._enqueue_fence_target(
                 peer, "exec_enforce", internal=internal, owner_session=owner_session
             )
@@ -3202,6 +3599,7 @@ class ServerState:
         commit_failed = False
         capacity_lost = False
         fence_lost = False
+        binding_refusal: tuple[int, dict] | None = None
         fence_error_code: str | None = None
         commanded_run_id: str | None = None
         activity_epoch: float | None = None
@@ -3223,29 +3621,73 @@ class ServerState:
             elif commit is not None and not commit(command_id):
                 commit_failed = True
             else:
-                queue.append(command)
-                enqueued_at = self._now()
-                self._enqueued_at[command_id] = enqueued_at
-                if operation_timeout_s > 0.0:
-                    self._operation_deadlines[command_id] = (
-                        enqueued_at + operation_timeout_s
-                    )
-                if owner_client is not None and owner_lease_id is not None:
-                    self._command_owner[command_id] = (owner_client, owner_lease_id)
-                binding = (
-                    self._bindings.get(fence_instance) if fence_instance else None
+                late_fence = self._binding_admission_locked(
+                    peer, expected_fence, internal=internal
                 )
-                self._seal_command(command_id, fence_instance, binding)
-                commanded_run_id = _binding_run_id(binding)
-                if (
-                    fence_instance is None
-                    or binding is None
-                    or binding.state != BINDING_BOUND
-                ):
-                    self._unaccredited_mutation_enqueues += 1
-                if not internal and isinstance(commanded_run_id, str) and commanded_run_id:
-                    activity_epoch = time.time()
+                if late_fence is not None:
+                    binding_refusal = late_fence
+                else:
+                    release_plan, release_error = (None, None)
+                    if not internal:
+                        release_plan, release_error = self._prepare_release_locked(
+                            "exec_enforce", command_id, command_args
+                        )
+                    if release_error is not None:
+                        binding_refusal = (400, {"error": release_error})
+                    else:
+                        command["_broker_pin"] = self._destination_pin_locked(
+                            peer, fence_instance
+                        )
+                        queue.append(command)
+                        self._remember_broker_row_locked(
+                            command_id,
+                            cmd="exec_enforce",
+                            args=command_args,
+                            peer=peer,
+                            fence_instance=fence_instance,
+                            owner_client=owner_client,
+                            owner_lease_id=owner_lease_id,
+                            lease_token=lease_token,
+                            release_plan=release_plan,
+                            internal=internal,
+                        )
+                        enqueued_at = self._now()
+                        self._enqueued_at[command_id] = enqueued_at
+                        if operation_timeout_s > 0.0:
+                            self._operation_deadlines[command_id] = (
+                                enqueued_at + operation_timeout_s
+                            )
+                        if owner_client is not None and owner_lease_id is not None:
+                            self._command_owner[command_id] = (
+                                owner_client,
+                                owner_lease_id,
+                            )
+                        binding = (
+                            self._bindings.get(fence_instance)
+                            if fence_instance
+                            else None
+                        )
+                        self._seal_command(command_id, fence_instance, binding)
+                        commanded_run_id = _binding_run_id(binding)
+                        if (
+                            fence_instance is None
+                            or binding is None
+                            or binding.state != BINDING_BOUND
+                        ):
+                            self._unaccredited_mutation_enqueues += 1
+                        if (
+                            not internal
+                            and isinstance(commanded_run_id, str)
+                            and commanded_run_id
+                        ):
+                            activity_epoch = time.time()
 
+        if binding_refusal is not None:
+            try:
+                self.exec_audit(expr_text, "discarded", main_fn_text, command_id)
+            except Exception:
+                pass
+            return binding_refusal
         if commit_failed or capacity_lost or fence_lost:
             try:
                 self.exec_audit(expr_text, "discarded", main_fn_text, command_id)
@@ -3267,7 +3709,12 @@ class ServerState:
                 )
         except Exception:
             pass
-        return 200, {"id": command_id, "peer": peer, "cmd": "exec_enforce"}
+        return 200, {
+            "id": command_id,
+            "peer": peer,
+            "cmd": "exec_enforce",
+            "daemon_generation": self.daemon_generation,
+        }
 
     def _note_run_command_activity(
         self,
@@ -3309,33 +3756,299 @@ class ServerState:
         self._operation_deadlines.pop(command_id, None)
         self._command_owner.pop(command_id, None)
         self._command_fence.pop(command_id, None)
+        self._drop_broker_row_locked(command_id)
 
-    def abandon_command(
-        self, command_id: int, reason: str = "tool_timeout"
+    def request_abandon(
+        self,
+        *,
+        identity_payload: object,
+        generation: object,
+        command_id: object,
+        reason: object,
+        lease_token: object = None,
+        lease_token_supplied: bool = False,
+    ) -> tuple[int, dict]:
+        """HTTP abandon. Identity, generation, id, reason, and the original lease."""
+
+        if (
+            not isinstance(generation, str)
+            or not generation
+            or type(command_id) is not int
+            or command_id <= 0
+            or not isinstance(reason, str)
+            or reason not in _ABANDON_REASONS
+        ):
+            return 400, {"error": "bad_abandon"}
+        try:
+            client = ClientIdentity.from_payload(identity_payload)
+        except ValueError:
+            return 400, {"error": "bad_abandon"}
+        if lease_token_supplied and lease_token is not None and not isinstance(
+            lease_token, str
+        ):
+            return 400, {"error": "bad_abandon"}
+        presented = lease_token if isinstance(lease_token, str) else None
+        quarantine = self._retail_quarantine_reason()
+        with self._lock:
+            if generation != self.daemon_generation:
+                return 409, {"error": "daemon_generation_changed"}
+            row = self._broker_rows.get(command_id)
+            if row is None:
+                return 200, {"status": "noop"}
+            if not self._abandon_authorized_locked(row, client, presented):
+                return 403, {"error": "abandon_forbidden"}
+            outcome = self._abandon_row_locked(command_id, reason, quarantine)
+        self._flush_abandon_outcome(outcome)
+        return int(outcome["http_status"]), dict(outcome["body"])
+
+    def _abandon_authorized_locked(
+        self,
+        row: dict,
+        client: ClientIdentity,
+        lease_token: str | None,
     ) -> bool:
+        owner = row.get("owner")
+        if not isinstance(owner, ClientIdentity):
+            return False
+        if (
+            owner.session_id != client.session_id
+            or owner.platform != client.platform
+            or owner.pid != client.pid
+            or owner.ppid != client.ppid
+            or owner.started_at_utc != client.started_at_utc
+        ):
+            return False
+        proof = row.get("lease_proof")
+        if not isinstance(proof, str) or not proof:
+            return lease_token is None
+        if not isinstance(lease_token, str):
+            return False
+        presented = self._lease_proof(lease_token)
+        return hmac.compare_digest(presented, proof)
+
+    def _abandon_row_locked(
+        self, command_id: int, reason: str, quarantine: str | None
+    ) -> dict:
+        """One active row leaves under the caller's lock. At most one release."""
+
+        row = self._broker_rows.pop(command_id, None)
         discarded_exec: list[tuple[str, str, int]] = []
         finished_operations: list[
             tuple[ClientIdentity, str, int, str, str]
         ] = []
-        owner_to_finish: tuple[ClientIdentity, str, int] | None = None
-        with self._lock:
-            existed = (
-                command_id in self._enqueued_at
-                or command_id in self._results
-                or command_id in self._command_owner
-                or command_id in self._fire_and_forget_ids
+        body: dict = {"status": "noop"}
+        http_status = 200
+        finish_exact: list[tuple[str, str, int]] = []
+        if row is None:
+            return {
+                "http_status": http_status,
+                "body": body,
+                "discarded_exec": discarded_exec,
+                "finished_operations": finished_operations,
+                "finish_exact": finish_exact,
+                "existed": False,
+            }
+        exact = self._exact_operation_locked(row, command_id)
+        if exact is not None:
+            finish_exact.append(exact)
+        state_name = row.get("state")
+        if state_name == "queued":
+            self._remove_queued_command_locked(
+                command_id, reason, discarded_exec
             )
+            body = {"status": "dropped"}
+        elif state_name == "delivered":
+            self._forget_command_tracking_locked(command_id)
+            release = row.get("release")
+            if not isinstance(release, tuple) or len(release) != 2:
+                body = {"status": "abandoned"}
+            else:
+                published, cause, release_id = self._publish_release_locked(
+                    row, release, quarantine
+                )
+                if published and release_id is not None:
+                    body = {"status": "release_queued", "release_id": release_id}
+                else:
+                    body = {"status": "cleanup_degraded", "cause": cause}
+        else:
+            body = {"status": "noop"}
+        return {
+            "http_status": http_status,
+            "body": body,
+            "discarded_exec": discarded_exec,
+            "finished_operations": finished_operations,
+            "finish_exact": finish_exact,
+            "existed": True,
+        }
+
+    def _exact_operation_locked(
+        self, row: dict, command_id: int
+    ) -> tuple[str, str, int] | None:
+        owner = row.get("owner")
+        lease_id = row.get("lease_id")
+        if (
+            isinstance(owner, ClientIdentity)
+            and isinstance(lease_id, str)
+            and lease_id
+        ):
+            return (owner.session_id, lease_id, command_id)
+        return None
+
+    def _remove_queued_command_locked(
+        self,
+        command_id: int,
+        reason: str,
+        discarded_exec: list[tuple[str, str, int]],
+    ) -> None:
+        """Drop one queued id. No retained result: abandonment is not a result."""
+
+        del reason
+        for key, queue in self._iter_mutable_queues():
+            survivors: list[dict] = []
+            for command in queue:
+                if command.get("id") == command_id:
+                    if command.get("cmd") == "exec_enforce" and self.exec_audit is not None:
+                        args = command.get("args", {})
+                        if isinstance(args, dict):
+                            expr = args.get("expr", "")
+                            main_fn = args.get("main_fn", "")
+                        else:
+                            expr = ""
+                            main_fn = ""
+                        discarded_exec.append((str(expr), str(main_fn), command_id))
+                else:
+                    survivors.append(command)
+            if key in self._legacy_queues:
+                self._legacy_queues[key] = survivors
+            else:
+                self._bound_queues[key] = survivors
+        self._results.pop(command_id, None)
+        self._forget_command_tracking_locked(command_id)
+
+    def _cleanup_dispatch_locked(self, command_id: object, command_name: str) -> bool:
+        """Owner-cleanup names, and internal releases, poll without a live claim."""
+
+        if command_id not in self._fire_and_forget_ids:
+            return False
+        if command_name in _OWNER_CLEANUP_COMMANDS:
+            return True
+        row = self._broker_rows.get(command_id)
+        return isinstance(row, dict) and row.get("internal") is True
+
+    def _forget_command_tracking_locked(self, command_id: int) -> None:
+        self._command_fence.pop(command_id, None)
+        self._enqueued_at.pop(command_id, None)
+        self._operation_deadlines.pop(command_id, None)
+        self._command_owner.pop(command_id, None)
+        self._fire_and_forget_ids.discard(command_id)
+        self._broker_rows.pop(command_id, None)
+
+    def _publish_release_locked(
+        self,
+        row: dict,
+        release: tuple[str, dict],
+        quarantine: str | None,
+    ) -> tuple[bool, str, int | None]:
+        target, release_args = release
+        pin = row.get("pin")
+        if not self._pin_has_complete_identity(pin):
+            return False, "unidentified_destination", None
+        if not self._pin_matches_locked(pin):
+            return False, "destination_changed", None
+        if quarantine is not None and command_requires_lease(target):
+            return False, "quarantine", None
+        release_peer = pin.get("peer")
+        if (
+            not isinstance(release_peer, str)
+            or self._peer_queue_len(release_peer) >= MAX_QUEUE
+        ):
+            return False, "queue_full", None
+        if pin.get("legacy") is True:
+            queue = self._legacy_queues.get(pin.get("peer"))
+        else:
+            queue = self._bound_queues.get(pin.get("instance"))
+        if queue is None or self._stopping:
+            return False, "destination_changed", None
+        if not isinstance(release_args, dict):
+            return False, "publish_failed", None
+        release_id = self._next_id
+        self._next_id += 1
+        command = {
+            "id": release_id,
+            "cmd": target,
+            "args": copy.deepcopy(release_args),
+            "_broker_pin": copy.deepcopy(pin),
+        }
+        queue.append(command)
+        enqueued_at = self._now()
+        self._enqueued_at[release_id] = enqueued_at
+        # Same dispatch exception as owner cleanup: delivery does not claim a
+        # live lease, so the release still polls after the original lease expires.
+        self._fire_and_forget_ids.add(release_id)
+        owner = row.get("owner")
+        lease_id = row.get("lease_id")
+        if isinstance(owner, ClientIdentity) and isinstance(lease_id, str) and lease_id:
+            self._command_owner[release_id] = (owner, lease_id)
+        instance = pin.get("instance") if isinstance(pin, dict) else None
+        binding = self._bindings.get(instance) if isinstance(instance, str) else None
+        self._seal_command(
+            release_id, instance if isinstance(instance, str) else None, binding
+        )
+        self._broker_rows[release_id] = {
+            "owner": owner if isinstance(owner, ClientIdentity) else None,
+            "lease_id": lease_id if isinstance(lease_id, str) else None,
+            "lease_proof": row.get("lease_proof"),
+            "cmd": target,
+            "args": copy.deepcopy(release_args),
+            "pin": copy.deepcopy(pin),
+            "state": "queued",
+            "release": None,
+            "internal": True,
+        }
+        return True, "", release_id
+
+    def _flush_abandon_outcome(self, outcome: dict) -> None:
+        for expr, main_fn, discarded_id in outcome["discarded_exec"]:
+            try:
+                if self.exec_audit is not None:
+                    self.exec_audit(expr, "discarded", main_fn, discarded_id)
+            except Exception:
+                pass
+        self._finish_operations(outcome["finished_operations"])
+        coordination = self.coordination
+        if coordination is None:
+            return
+        for session_id, lease_id, finished_id in outcome.get("finish_exact", ()):
+            coordination.finish_operation_exact(
+                session_id,
+                lease_id,
+                finished_id,
+                command_succeeded=False,
+            )
+
+    def abandon_command(
+        self, command_id: int, reason: str = "tool_timeout"
+    ) -> dict:
+        quarantine = self._retail_quarantine_reason()
+        with self._lock:
+            tracked = command_id in self._broker_rows
+            outcome = (
+                self._abandon_row_locked(command_id, reason, quarantine)
+                if tracked
+                else None
+            )
+        if outcome is not None:
+            self._flush_abandon_outcome(outcome)
+            return dict(outcome["body"])
+        # No active row. A terminal result stays where it is. A queued id that
+        # never grew a row is removed without inventing a retained result.
+        discarded_exec: list[tuple[str, str, int]] = []
+        with self._lock:
             found_queued = False
             for key, queue in self._iter_mutable_queues():
                 survivors: list[dict] = []
                 for command in queue:
                     if command.get("id") == command_id:
-                        self._mark_discarded(
-                            command,
-                            reason,
-                            discarded_exec,
-                            finished_operations,
-                        )
                         found_queued = True
                     else:
                         survivors.append(command)
@@ -3343,31 +4056,17 @@ class ServerState:
                     self._legacy_queues[key] = survivors
                 else:
                     self._bound_queues[key] = survivors
-            self._command_fence.pop(command_id, None)
-            had_result = command_id in self._results
-            owner = self._command_owner.pop(command_id, None)
-            self._results.pop(command_id, None)
-            self._enqueued_at.pop(command_id, None)
-            self._operation_deadlines.pop(command_id, None)
-            self._fire_and_forget_ids.discard(command_id)
-            if owner is not None and not found_queued and not had_result:
-                owner_to_finish = (owner[0], owner[1], command_id)
-
+            if found_queued:
+                self._forget_command_tracking_locked(command_id)
         for expr, main_fn, discarded_id in discarded_exec:
             try:
                 if self.exec_audit is not None:
                     self.exec_audit(expr, "discarded", main_fn, discarded_id)
             except Exception:
                 pass
-        self._finish_operations(finished_operations)
-        if owner_to_finish is not None and self.coordination is not None:
-            self.coordination.finish_operation_exact(
-                owner_to_finish[0].session_id,
-                owner_to_finish[1],
-                owner_to_finish[2],
-                command_succeeded=False,
-            )
-        return existed or found_queued
+        if found_queued:
+            return {"status": "dropped"}
+        return {"status": "noop"}
 
     def reap_expired_commands(self, now: float | None = None) -> int:
         if now is None:
@@ -3378,11 +4077,12 @@ class ServerState:
                 for command_id, deadline in self._operation_deadlines.items()
                 if now >= deadline
             ]
-        return sum(
-            1
-            for command_id in expired
-            if self.abandon_command(command_id, "tool_timeout")
-        )
+        abandoned = 0
+        for command_id in expired:
+            body = self.abandon_command(command_id, "tool_timeout")
+            if isinstance(body, dict) and body.get("status") != "noop":
+                abandoned += 1
+        return abandoned
 
     def whitelisted_commands(self) -> set[str]:
         commands = set(WHITELISTED_COMMANDS)
@@ -3617,10 +4317,7 @@ class ServerState:
                         discard_reason = ""
                         if retail_quarantined:
                             discard_reason = "retail_quarantine"
-                        elif (
-                            command_name in _OWNER_CLEANUP_COMMANDS
-                            and command_id in self._fire_and_forget_ids
-                        ):
+                        elif self._cleanup_dispatch_locked(command_id, command_name):
                             pass
                         elif owner is None:
                             discard_reason = "authority_missing"
@@ -3642,6 +4339,18 @@ class ServerState:
                     wire_command = dict(command)
                     wire_command.pop("owner_session_id", None)
                     wire_command.pop("owner_lease_id", None)
+                    pin = wire_command.pop("_broker_pin", None)
+                    if isinstance(pin, dict) and not self._pin_matches_locked(pin):
+                        self._mark_discarded(
+                            command,
+                            "destination_changed",
+                            discarded_exec,
+                            finished_operations,
+                        )
+                        continue
+                    tracked = self._broker_rows.get(command_id)
+                    if isinstance(tracked, dict) and tracked.get("state") == "queued":
+                        tracked["state"] = "delivered"
                     commands.append(wire_command)
                 queue[:] = remaining + queue[len(snapshot) :]
                 if commands and self._poll_delay_ms > 0:
@@ -3785,6 +4494,7 @@ class ServerState:
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
         self._command_fence.pop(command_id, None)
+        self._drop_broker_row_locked(command_id)
         # Discard is terminal for owner attribution. A leftover mapping
         # makes pending_for_owner over-count until MAX_RESULTS eviction.
         owner = self._command_owner.pop(command_id, None)
@@ -3835,6 +4545,7 @@ class ServerState:
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
         self._command_owner.pop(command_id, None)
+        self._drop_broker_row_locked(command_id)
 
     def _trim_results_locked(self) -> None:
         # Caller holds self._lock. Dict insertion order is store order; the
@@ -3908,6 +4619,7 @@ class ServerState:
                 self._enqueued_at.pop(command_id, None)
                 self._operation_deadlines.pop(command_id, None)
                 owner = self._command_owner.pop(command_id, None)
+                self._drop_broker_row_locked(command_id)
                 if owner is not None:
                     owner_operation = (owner[0], owner[1], command_id)
             elif command_id in self._fire_and_forget_ids:
@@ -3915,6 +4627,10 @@ class ServerState:
                 self._results.pop(command_id, None)
                 self._enqueued_at.pop(command_id, None)
                 self._operation_deadlines.pop(command_id, None)
+                owner = self._command_owner.pop(command_id, None)
+                self._drop_broker_row_locked(command_id)
+                if owner is not None:
+                    owner_operation = (owner[0], owner[1], command_id)
             else:
                 t_enqueue = self._enqueued_at.get(command_id)
                 if t_enqueue is not None:
@@ -3924,6 +4640,7 @@ class ServerState:
                 self._results[command_id] = stored
                 self._trim_results_locked()
                 owner = self._command_owner.get(command_id)
+                self._drop_broker_row_locked(command_id)
                 if owner is not None:
                     owner_operation = (owner[0], owner[1], command_id)
 
@@ -3962,6 +4679,7 @@ class ServerState:
                     self._enqueued_at.pop(command_id, None)
                     self._operation_deadlines.pop(command_id, None)
                     owner = self._command_owner.pop(command_id, None)
+                    self._drop_broker_row_locked(command_id)
                     if owner is not None:
                         owner_operation = (owner[0], owner[1], command_id)
             else:
@@ -4152,6 +4870,11 @@ class ServerState:
                     "bound_last_poll_age_s": bound_age,
                     "capabilities": self._capabilities_view_locked(peer),
                 }
+                identity = self._peer_identity_locked(peer)
+                peers[peer]["run_id"] = None if identity is None else identity[0]
+                peers[peer]["binding_token"] = (
+                    None if identity is None else identity[1]
+                )
             rejects = {code: 0 for code in FENCE_MUTATION_REJECT_CODES}
             rejects.update(
                 {code: int(count) for code, count in self._fence_reject_counts.items()}
@@ -4169,6 +4892,7 @@ class ServerState:
             "last_client_request_at": last_client_request_at,
             "audit_degraded_count": audit_degraded_count,
             "fence": fence,
+            "daemon_generation": self.daemon_generation,
         }
 
     def _record_poll_caps_locked(
@@ -4367,6 +5091,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_enqueue()
             return
 
+        if parsed.path == "/abandon":
+            self.state.touch_client()
+            self._handle_abandon()
+            return
+
         session_action = SESSION_ROUTES.get(parsed.path)
         if session_action is not None:
             self.state.touch_client()
@@ -4511,6 +5240,10 @@ class Handler(BaseHTTPRequestHandler):
         cmd = body.get("cmd")
         args = body.get("args", {})
         peer = body.get("peer")
+        if "expected_fence" in body:
+            expected_fence: object = body.get("expected_fence")
+        else:
+            expected_fence = _FENCE_OMITTED
         status, payload = self.state.enqueue_command(
             cmd,
             args,
@@ -4518,6 +5251,7 @@ class Handler(BaseHTTPRequestHandler):
             identity_payload=body.get("identity"),
             lease_token=body.get("lease_token"),
             operation_timeout_s=body.get("operation_timeout_s", 0.0),
+            expected_fence=expected_fence,
         )
         payload = self._persist_coordination(payload)
         if status != 200:
@@ -4525,10 +5259,36 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._log(f"ENQUEUE id={payload['id']} peer={payload['peer']} cmd={payload['cmd']}")
-        response = {"id": payload["id"]}
+        response = {
+            "id": payload["id"],
+            "daemon_generation": payload.get("daemon_generation"),
+        }
         if "cleanup_degraded" in payload:
             response["cleanup_degraded"] = payload["cleanup_degraded"]
         self._json(200, self._with_renewed_lease(response))
+
+    def _handle_abandon(self) -> None:
+        body = self._read_json()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"error": "bad_abandon"})
+            return
+        allowed = {"identity", "generation", "id", "reason", "lease_token"}
+        if set(body) - allowed or not {"identity", "generation", "id", "reason"} <= set(
+            body
+        ):
+            self._json(400, {"error": "bad_abandon"})
+            return
+        status, payload = self.state.request_abandon(
+            identity_payload=body.get("identity"),
+            generation=body.get("generation"),
+            command_id=body.get("id"),
+            reason=body.get("reason"),
+            lease_token=body.get("lease_token"),
+            lease_token_supplied="lease_token" in body,
+        )
+        self._json(status, payload)
 
     def _adopt_on_grant(self, client: ClientIdentity, payload: dict) -> dict:
         """P-J2: a granted box lease adopts the unique ownerless RUNNING_IDLE run.

@@ -618,9 +618,17 @@ class UiDialogClientRuntimeTest(unittest.IsolatedAsyncioTestCase):
             calls.append((args, kwargs))
             return 200, {}
 
+        runtime._broker_admits = {9: {"generation": "generation-test", "lease_token": None}}
         runtime._call = boom
-        await runtime.abandon_bridge(9, "tool_timeout")
-        self.assertEqual(calls, [])
+        outcome = await runtime.abandon_bridge(9, "tool_timeout")
+        self.assertEqual(len(calls), 1)
+        method, path, payload = calls[0][0][:3]
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/abandon")
+        self.assertEqual(payload["id"], 9)
+        self.assertEqual(payload["reason"], "tool_timeout")
+        self.assertEqual(payload["generation"], "generation-test")
+        self.assertEqual(outcome.get("http_status"), 200)
 
     async def test_enqueue_and_probe_pending(self) -> None:
         runtime = _fixture_client_runtime(

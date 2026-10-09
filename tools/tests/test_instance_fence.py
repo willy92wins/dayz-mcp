@@ -878,7 +878,13 @@ class StatusAndVersionFenceTest(unittest.TestCase):
         state = loopback.ServerState("k")
         _bind(state, INST_C1, "client", 2001)
         snapshot = state.status_snapshot()
-        blob = json.dumps(snapshot)
+        token = snapshot["peers"]["client"].get("binding_token")
+        self.assertEqual(token, state.bound_instance_token("run-fence", "client"))
+        self.assertTrue(str(token).startswith(INST_C1 + "|"))
+        redacted = json.loads(json.dumps(snapshot))
+        redacted["peers"]["client"]["binding_token"] = None
+        redacted["peers"]["server"]["binding_token"] = None
+        blob = json.dumps(redacted)
         self.assertNotIn(INST_C1, blob)
         prefix = snapshot["peers"]["client"].get("instance_prefix")
         self.assertEqual(prefix, uuid.UUID(INST_C1).hex[:8])
