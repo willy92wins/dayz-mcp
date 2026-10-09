@@ -610,12 +610,27 @@ class Fb19b5ToolsLayoutTest(unittest.TestCase):
         self.assertLess(launch.index("addon_entry == nullptr"), launch.index("manifest_path = addon_entry->path"))
         self.assertLess(
             launch.index("manifest_path = addon_entry->path"),
-            launch.index("BuildAddonCommand(addon, manifest_path,"),
+            launch.index("ComposeAddonCommand(addon, manifest_path,"),
         )
         self.assertLess(
-            launch.index("BuildAddonCommand(addon, manifest_path,"),
+            launch.index("ComposeAddonCommand(addon, manifest_path,"),
             launch.index("PublishAnnouncement(kind, manifest_path)"),
         )
+        self.assertIn("const ClosureEntry* addon_entry = SealedAddonBuilderEntry();", launch)
+        self.assertIn("&pbo_prefix_pin.file", launch)
+        self.assertLess(
+            launch.index("ComposeAddonCommand(addon, manifest_path,"),
+            launch.index("CreateProcessW("),
+        )
+        compose = source[source.index("bool ComposeAddonCommand") : source.index("bool BuildPboPath")]
+        self.assertLess(compose.index("ReadPboNamespace("), compose.index("BuildAddonCommand("))
+        self.assertLess(compose.index("prefix_from_marker"), compose.index("BuildAddonCommand("))
+        self.assertLess(command.index("IncludeListStillPinned()"), command.index('"-include="'))
+        self.assertLess(command.index("GetFileType(prefix_file)"), command.index('"-include="'))
+        self.assertIn("PinnedIncludePath", command)
+        self.assertIn("pbo_namespace", command)
+        self.assertNotIn("request.prefix", command)
+        self.assertIn("BuildPboPath(addon, pbo_path", launch)
 
     @requires_built_bundle
     def test_built_bundle_consumer_chain_accepts_the_broker_under_each_variable(self) -> None:

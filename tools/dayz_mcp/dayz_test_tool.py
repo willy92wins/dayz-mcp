@@ -1814,6 +1814,13 @@ _SERVER_START_HUNG_REMEDIATION = (
 # named there and the class is published as unknown (null), not left out.
 WORKER_INTERNAL_FAILURE = "internal_failure"
 WORKER_INTERNAL_FAILURE_REASON = "sealed_worker_exception"
+_NAMESPACE_SOURCE_MISMATCH = "build_namespace_source_mismatch"
+_NAMESPACE_SOURCE_MISMATCH_REMEDIATION = (
+    "Binarize requires the source folder name to match the PBO namespace, "
+    "ignoring ASCII case. Use pack_only=true if binarization is unnecessary; "
+    "for a single-segment namespace, rename the source folder compatibly with "
+    "the project's registered source policy; otherwise use the project's own build."
+)
 _WORKER_INTERNAL_FAILURE_REMEDIATION = (
     "the sealed dayz-test-v1 worker ended on an exception it does not "
     "classify, and it reports no exception class. Retry once; if it fails "
@@ -2067,6 +2074,8 @@ async def _execute_request(
         remediation=(
             _SERVER_START_HUNG_REMEDIATION
             if terminal.error_code == SERVER_START_HUNG
+            else _NAMESPACE_SOURCE_MISMATCH_REMEDIATION
+            if terminal.error_code == _NAMESPACE_SOURCE_MISMATCH
             else None
         ),
         client_terminated=client_terminated,

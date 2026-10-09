@@ -45,6 +45,13 @@ SPECIAL_BUNDLE_FILES = frozenset(
         "reproducibility.json",
     }
 )
+# Direct-copy selection for AddonBuilder -include. Binarizable inputs (*.p3d,
+# config.cpp, model.cfg) stay out so Binarize/CfgConvert still see them.
+# ASCII, no BOM, one trailing LF. The sealed launcher pins these exact bytes.
+ADDONBUILDER_INCLUDE_NAME = "addonbuilder-include.lst"
+ADDONBUILDER_INCLUDE_BYTES = (
+    b"*.c;*.layout;*.imageset;*.xml;*.csv;*.paa;*.rvmat;*.json;*.ogg;*.wav;*.wss;*.edds;*.bisurf;*.ptc;*.emat\n"
+)
 _FINGERPRINT_KEYS = frozenset(
     {
         "app_pyz_sha256",
@@ -770,6 +777,11 @@ def validate_request_policy_document(value: object) -> None:
         seen.add(identity)
 
 
+def write_addonbuilder_include(staging: Path) -> None:
+    """Write the sealed direct-copy list before the closure manifest is built."""
+    (staging / ADDONBUILDER_INCLUDE_NAME).write_bytes(ADDONBUILDER_INCLUDE_BYTES)
+
+
 def _bundle_entry(path: Path, root: Path) -> dict[str, object]:
     details = _file_details(path, directory=False, open_reparse=True)
     if details["reparse_tag"] != 0 or details["links"] != 1:
@@ -1094,6 +1106,7 @@ def _prepare_staging(
     (staging / "build-contract.json").write_bytes(
         canonical_json_bytes(_build_contract(source_files))
     )
+    write_addonbuilder_include(staging)
     manifest = _manifest(staging)
     (staging / "closure-manifest.json").write_bytes(canonical_json_bytes(manifest))
     _write_header(staging, manifest)

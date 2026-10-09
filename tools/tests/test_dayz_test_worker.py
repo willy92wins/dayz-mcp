@@ -4,7 +4,9 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from dayz_mcp import (
     dayz_test_readiness,
@@ -334,16 +336,59 @@ class DayzTestWorkerTests(unittest.TestCase):
 
     def test_build_auto_packonly_then_all_starts_server_waits_and_extends_client(self) -> None:
         broker = _Broker()
-        result = self._run(
-            _raw(
-                mode="all",
-                build=True,
-                clean=True,
-                source=r"P:\ExampleMod\BuIlD_SrC",
-            ),
-            broker,
-            has_assets=False,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "ExampleMod"
+            source = root / "BuIlD_SrC"
+            source.mkdir(parents=True)
+            policy = dataclasses.replace(POLICY, default_source=str(root))
+            parsed = dayz_test_request.parse_dayz_test_request(
+                _raw(
+                    mode="all",
+                    build=True,
+                    clean=True,
+                    source=str(source),
+                    dev_root=POLICY.dev_root,
+                    mod=POLICY.mod,
+                ),
+                policies=(policy,),
+            )
+            # _raw still carries POLICY paths; re-parse against the temp root.
+            raw = json.dumps(
+                {
+                    "version": 1,
+                    "dev_root": POLICY.dev_root,
+                    "mod": POLICY.mod,
+                    "mode": "all",
+                    "build": True,
+                    "clean": True,
+                    "source": str(source),
+                }
+            ).encode("utf-8")
+            parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+            ids = iter(
+                (
+                    "12345678-1234-4234-8234-1234567890ab",
+                    "87654321-4321-4321-8321-ba0987654321",
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                )
+            )
+
+            async def readiness(_run_id: str, _port: int, _timeout: int) -> object:
+                return dayz_test_readiness.ReadinessResult(ready=True, error_code=None)
+
+            result = asyncio.run(
+                dayz_test_worker.execute_dayz_test_worker(
+                    parsed.canonical_bytes,
+                    request_sha256=parsed.sha256,
+                    request_policies=(policy,),
+                    runtime_policy=RUNTIME,
+                    broker=broker,
+                    id_fn=lambda: next(ids),
+                    readiness_probe=readiness,
+                    has_binarizable_assets=lambda _source: False,
+                )
+            )
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(
@@ -393,16 +438,30 @@ class DayzTestWorkerTests(unittest.TestCase):
         )
         broker = _Broker()
 
-        result = asyncio.run(
-            dayz_test_worker.execute_dayz_test_worker(
-                parsed.canonical_bytes,
-                request_sha256=parsed.sha256,
-                request_policies=(policy,),
-                runtime_policy=runtime,
-                broker=broker,
-                has_binarizable_assets=lambda _source: False,
+        with tempfile.TemporaryDirectory() as temporary:
+            source_dir = Path(temporary) / "Other_PC"
+            source_dir.mkdir()
+            policy = dataclasses.replace(policy, default_source=str(source_dir))
+            parsed = dayz_test_request.parse_dayz_test_request(
+                _raw(
+                    dev_root=policy.dev_root,
+                    mod=policy.mod,
+                    build=True,
+                    clean=True,
+                    source=str(source_dir),
+                ),
+                policies=(policy,),
             )
-        )
+            result = asyncio.run(
+                dayz_test_worker.execute_dayz_test_worker(
+                    parsed.canonical_bytes,
+                    request_sha256=parsed.sha256,
+                    request_policies=(policy,),
+                    runtime_policy=runtime,
+                    broker=broker,
+                    has_binarizable_assets=lambda _source: False,
+                )
+            )
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(
@@ -446,22 +505,38 @@ class DayzTestWorkerTests(unittest.TestCase):
 
     def test_required_basename_accepts_matching_source_case_insensitively(self) -> None:
         runtime = dataclasses.replace(RUNTIME, build_source_basename="build_src")
-        for source in (r"P:\ExampleMod\build_src", r"P:\ExampleMod\BUILD_SRC"):
-            with self.subTest(source=source):
-                broker = _Broker()
-                parsed = dayz_test_request.parse_dayz_test_request(
-                    _raw(build=True, clean=True, source=source), policies=(POLICY,)
-                )
-                result = asyncio.run(
-                    dayz_test_worker.execute_dayz_test_worker(
-                        parsed.canonical_bytes,
-                        request_sha256=parsed.sha256,
-                        request_policies=(POLICY,),
-                        runtime_policy=runtime,
-                        broker=broker,
-                        has_binarizable_assets=lambda _source: False,
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "ExampleMod"
+            root.mkdir()
+            policy = dataclasses.replace(POLICY, default_source=str(root))
+            for leaf in ("build_src", "BUILD_SRC"):
+                source = root / leaf
+                if not source.exists():
+                    source.mkdir()
+                with self.subTest(source=leaf):
+                    broker = _Broker()
+                    raw = json.dumps(
+                        {
+                            "version": 1,
+                            "dev_root": POLICY.dev_root,
+                            "mod": POLICY.mod,
+                            "mode": "server",
+                            "build": True,
+                            "clean": True,
+                            "source": str(source),
+                        }
+                    ).encode("utf-8")
+                    parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+                    result = asyncio.run(
+                        dayz_test_worker.execute_dayz_test_worker(
+                            parsed.canonical_bytes,
+                            request_sha256=parsed.sha256,
+                            request_policies=(policy,),
+                            runtime_policy=runtime,
+                            broker=broker,
+                            has_binarizable_assets=lambda _source: False,
+                        )
                     )
-                )
                 self.assertEqual(result.exit_code, 0)
                 self.assertEqual(
                     broker.requests[0].kind,

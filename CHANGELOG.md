@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The dayz-test launcher passes AddonBuilder a sealed direct-copy include list and uses the source `$PBOPREFIX$` as `-prefix` while the PBO file name stays the request prefix (inbox 222d).
+- A binarize whose `$PBOPREFIX$` namespace does not match the source folder name is refused before AddonBuilder (`build_namespace_source_mismatch`); `pack_only` is unchanged (inbox 222d).
 - Published-description clarifications only (no parameter, result or error-code change): `capture_screenshot` states that `frame_stale=false` means the render advanced, not that texture streaming finished, and `player_teleport` notes that a capture right after a long teleport can show an untextured scene (reported, not a measured duration) (inbox c440).
 - `capture_screenshot` still grabs at most 5 frames. The frame evidence records `requested_frames`, `effective_frames` and `frame_limit`, and `limit_reason=frame_limit` when the request was cut. Published metadata on both capture entry points warns `frames_capped`. The tool description states the cap (inbox 5aa8).
 - `scene_raycast` description documents the rvproxy radius-zero substitution (requested `radius=0` currently runs with an effective radius of 0.05 m), the engine-returned `pos` without contact-point reconstruction, that `method='bullet'` does not use radius, and that the reported floor sweep-centre offset is not promised for all surfaces (inbox 449e).

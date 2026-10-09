@@ -23,6 +23,7 @@ from dayz_mcp import (
     dayz_test_storage,
     native_broker_protocol,
     pack_only,
+    win32_fileinfo,
 )
 
 try:
@@ -69,6 +70,7 @@ WORKER_ERROR_CODES = frozenset(
     {
         "build_busy",
         "build_failed",
+        "build_namespace_source_mismatch",
         "build_source_link_outside",
         "build_source_unavailable",
         "build_stage_unavailable",
@@ -1395,6 +1397,173 @@ def _staged_build_source(source: str) -> Iterator[str]:
             _remove_build_stage(stage, junctions)
 
 
+_KERNEL32 = win32_fileinfo.bind_common_kernel32()
+
+
+class _PrefixPin:
+    """The $PBOPREFIX$ handle, held until the broker returns or the build fails."""
+
+    def __init__(self) -> None:
+        self.handle: object = None
+
+    def close(self) -> None:
+        handle = self.handle
+        self.handle = None
+        if not win32_fileinfo.invalid_handle(handle):
+            _KERNEL32.CloseHandle(handle)
+
+
+def _source_directory_accessible(source: str) -> bool:
+    # Same open as the native reader: a junction is a directory here, and the
+    # reparse point itself is what gets checked. The handle is not kept.
+    directory = _KERNEL32.CreateFileW(
+        source,
+        win32_fileinfo.FILE_READ_ATTRIBUTES,
+        win32_fileinfo.FILE_SHARE_READ
+        | win32_fileinfo.FILE_SHARE_WRITE
+        | win32_fileinfo.FILE_SHARE_DELETE,
+        None,
+        win32_fileinfo.OPEN_EXISTING,
+        win32_fileinfo.FILE_FLAG_BACKUP_SEMANTICS | win32_fileinfo.FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if win32_fileinfo.invalid_handle(directory):
+        return False
+    standard = win32_fileinfo.standard_info(_KERNEL32, directory)
+    _KERNEL32.CloseHandle(directory)
+    return (
+        standard is not None
+        and bool(standard.Directory)
+        and not bool(standard.DeletePending)
+    )
+
+
+def _decode_pbo_namespace(data: bytes) -> str | None:
+    # Mirrors DecodePboNamespace: one trailing LF or CRLF, optional UTF-8 BOM,
+    # '/' becomes '\', no trim, no second line, no UTF-16.
+    if len(data) > win32_fileinfo.PBO_PREFIX_MAX_BYTES:
+        return None
+    if len(data) >= 2 and data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return None
+    start = 3 if len(data) >= 3 and data[:3] == b"\xef\xbb\xbf" else 0
+    end = len(data)
+    if end >= start + 2 and data[end - 2] == 0x0D and data[end - 1] == 0x0A:
+        end -= 2
+    elif end > start and data[end - 1] == 0x0A:
+        end -= 1
+    if end < start:
+        return None
+    length = end - start
+    if length < 1 or length > 255:
+        return None
+    characters: list[str] = []
+    for value in data[start:end]:
+        if (
+            value < 0x20
+            or value > 0x7E
+            or value in (0x22, 0x20, 0x3A, 0x3C, 0x3E, 0x7C, 0x2A, 0x3F, 0x27)
+        ):
+            return None
+        characters.append("\\" if value == 0x2F else chr(value))
+    if characters[0] == "\\":
+        return None
+    segment = 0
+    for index in range(length + 1):
+        if index != length and characters[index] != "\\":
+            continue
+        count = index - segment
+        if count < 1 or count > 64:
+            return None
+        lead = characters[segment]
+        if not (("A" <= lead <= "Z") or ("a" <= lead <= "z") or ("0" <= lead <= "9") or lead == "_"):
+            return None
+        for cursor in range(1, count):
+            character = characters[segment + cursor]
+            if not (
+                ("A" <= character <= "Z")
+                or ("a" <= character <= "z")
+                or ("0" <= character <= "9")
+                or character in ("_", "-")
+            ):
+                return None
+        segment = index + 1
+    return "".join(characters)
+
+
+def _read_pbo_namespace(source: str, prefix: str, pin: _PrefixPin) -> str:
+    """Namespace from the original source. Invalid marker data does not fall back.
+
+    Only a missing marker, after the source directory checked out, copies prefix.
+    A marker that opens is left in `pin` until the caller closes it.
+    """
+    if not _source_directory_accessible(source):
+        raise _failed("build_source_unavailable")
+    marker = source + "\\$PBOPREFIX$"
+    file = _KERNEL32.CreateFileW(
+        marker,
+        win32_fileinfo.GENERIC_READ,
+        win32_fileinfo.FILE_SHARE_READ,
+        None,
+        win32_fileinfo.OPEN_EXISTING,
+        win32_fileinfo.FILE_ATTRIBUTE_NORMAL | win32_fileinfo.FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if win32_fileinfo.invalid_handle(file):
+        if win32_fileinfo.last_win32_error() == win32_fileinfo.ERROR_FILE_NOT_FOUND:
+            return prefix
+        raise _failed("build_source_unavailable")
+    standard = win32_fileinfo.standard_info(_KERNEL32, file)
+    tag = win32_fileinfo.attribute_tag_info(_KERNEL32, file)
+    size = 0
+    opened = (
+        _KERNEL32.GetFileType(file) == win32_fileinfo.FILE_TYPE_DISK
+        and tag is not None
+        and standard is not None
+        and (int(tag.FileAttributes) & win32_fileinfo.FILE_ATTRIBUTE_REPARSE_POINT) == 0
+        and not bool(standard.Directory)
+        and not bool(standard.DeletePending)
+        and int(standard.NumberOfLinks) == 1
+        and int(standard.EndOfFile) >= 0
+        and int(standard.EndOfFile) <= win32_fileinfo.PBO_PREFIX_MAX_BYTES
+    )
+    if opened:
+        size = int(standard.EndOfFile)
+    data = b"" if size == 0 else win32_fileinfo.read_handle(_KERNEL32, file, size)
+    namespace = _decode_pbo_namespace(data) if opened and data is not None and len(data) == size else None
+    if namespace is None:
+        _KERNEL32.CloseHandle(file)
+        raise _failed("build_source_unavailable")
+    pin.handle = file
+    return namespace
+
+
+def _ascii_fold(value: str) -> str:
+    return "".join(chr(ord(character) + 32) if "A" <= character <= "Z" else character for character in value)
+
+
+def _source_leaf(source: str) -> str | None:
+    """Last non-empty lexical component. Trailing '\\' only. No '.'/'..' resolution."""
+    text = source
+    while text.endswith("\\"):
+        text = text[:-1]
+    if "\\" not in text:
+        return None
+    leaf = text[text.rfind("\\") + 1 :]
+    if not leaf:
+        return None
+    return leaf
+
+
+def _binarize_namespace_matches(namespace: str, source: str) -> bool:
+    # A folder name cannot stand in for a multi-segment namespace.
+    if "\\" in namespace:
+        return False
+    leaf = _source_leaf(source)
+    if leaf is None:
+        return False
+    return _ascii_fold(namespace) == _ascii_fold(leaf)
+
+
 async def execute_dayz_test_worker(
     canonical_request: bytes,
     *,
@@ -1503,9 +1672,8 @@ async def execute_dayz_test_worker(
         # bf5c / 8cf9: only a binarizing build is staged; -packonly runs no
         # binarize and keeps building from the source itself. The stage lives
         # inside the shared build lock and is removed before the lock is released.
-        staging = (
-            contextlib.nullcontext(source) if pack_only else stage_build_source(source)
-        )
+        # The namespace gate runs on the original source, after the effective
+        # mode and before stage_build_source or any ADDON_BUILDER frame.
         try:
             async with async_shared_build_lock(
                 target,
@@ -1516,19 +1684,31 @@ async def execute_dayz_test_worker(
             ):
                 if cancelled():
                     raise _failed("operation_cancelled")
-                with staging as build_source:
-                    result = await _invoke(
-                        broker,
-                        native_broker_protocol.BrokerKind.ADDON_BUILDER,
-                        {
-                            "clear": bool(payload["clean"]),
-                            "pack_only": pack_only,
-                            "prefix": runtime.mod,
-                            "source": build_source,
-                            "target": target,
-                            "temp": temp,
-                        },
+                prefix_pin = _PrefixPin()
+                try:
+                    namespace = _read_pbo_namespace(source, runtime.mod, prefix_pin)
+                    if not pack_only and not _binarize_namespace_matches(namespace, source):
+                        raise _failed("build_namespace_source_mismatch")
+                    staging = (
+                        contextlib.nullcontext(source)
+                        if pack_only
+                        else stage_build_source(source)
                     )
+                    with staging as build_source:
+                        result = await _invoke(
+                            broker,
+                            native_broker_protocol.BrokerKind.ADDON_BUILDER,
+                            {
+                                "clear": bool(payload["clean"]),
+                                "pack_only": pack_only,
+                                "prefix": runtime.mod,
+                                "source": build_source,
+                                "target": target,
+                                "temp": temp,
+                            },
+                        )
+                finally:
+                    prefix_pin.close()
         except BuildLockBusy:
             raise _failed("build_busy") from None
         except BuildLockCancelled:

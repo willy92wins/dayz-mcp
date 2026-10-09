@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path, PureWindowsPath
 
@@ -494,7 +495,8 @@ class NativeLauncherBundleTest(unittest.TestCase):
         self.assertIn("BuildAddonCommand", source)
         self.assertIn("AddonResponse", source)
         self.assertIn("AddonBuilder\\\\AddonBuilder.exe", source)
-        self.assertIn("AppendText(command, command_capacity, request.prefix)", source)
+        self.assertIn("AppendText(command, command_capacity, pbo_namespace)", source)
+        self.assertIn("AppendText(destination, capacity, request.prefix)", source)
 
     def test_cpp_broker_rejects_nested_private_and_invalid_responses(self) -> None:
         source = (BUNDLE_DIR / "src" / "launcher.cpp").read_text(encoding="utf-8")
@@ -762,6 +764,37 @@ class PackagedModuleListsAgreeTest(unittest.TestCase):
             f"dayz_mcp/{name}" for name in native_bundle._APP_PACKAGED_MODULES
         }
         self.assertEqual(set(native_bundle._APP_MEMBERS), expected)
+
+    def test_synthetic_staging_pins_the_addonbuilder_include_list(self) -> None:
+        builder = importlib.import_module(BUILD_MODULE)
+        include = builder.ADDONBUILDER_INCLUDE_BYTES
+        self.assertEqual(include, builder.ADDONBUILDER_INCLUDE_BYTES)
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "one"
+            second = Path(directory) / "two"
+            for staging in (first, second):
+                staging.mkdir()
+                (staging / "request-policy.json").write_bytes(b"{}\n")
+                (staging / "worker-runtime.json").write_bytes(b"{}\n")
+                builder.write_addonbuilder_include(staging)
+            self.assertEqual((first / "addonbuilder-include.lst").read_bytes(), include)
+            self.assertEqual(
+                (first / "addonbuilder-include.lst").read_bytes(),
+                (second / "addonbuilder-include.lst").read_bytes(),
+            )
+            with unittest.mock.patch.object(builder, "external_files", return_value=()):
+                manifest = builder._manifest(first)
+                again = builder._manifest(second)
+            self.assertEqual(
+                builder.canonical_json_bytes(manifest),
+                builder.canonical_json_bytes(again),
+            )
+            matches = [item for item in manifest["entries"] if item["path"] == "addonbuilder-include.lst"]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(matches[0]["kind"], "bundle")
+            self.assertEqual(matches[0]["size"], len(include))
+            self.assertEqual(matches[0]["sha256"], hashlib.sha256(include).hexdigest().upper())
+            self.assertNotIn("identity", matches[0])
 
 
 if __name__ == "__main__":
