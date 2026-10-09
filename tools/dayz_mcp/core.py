@@ -38,7 +38,7 @@ else:
     _kernel32 = None
 
 
-EXPECTED_BRIDGE_VERSION = "11"
+EXPECTED_BRIDGE_VERSION = "12"
 
 # Peer version_state values that must block command delivery / enqueue.
 BLOCKED_VERSION_STATES = {"legacy_blocked", "version_mismatch"}
@@ -114,6 +114,7 @@ def _peer_status(
         "observed_this_generation": observed_this_generation,
         "binding_state": peer_snapshot.get("binding_state"),
         "instance_prefix": peer_snapshot.get("instance_prefix"),
+        "run_id": peer_snapshot.get("run_id"),
         "bound_last_poll_age_s": peer_snapshot.get("bound_last_poll_age_s"),
         "run_id": peer_snapshot.get("run_id"),
         "binding_token": peer_snapshot.get("binding_token"),
@@ -156,6 +157,7 @@ def build_status(
         "server_version": expected_bridge_version,
         "expected_game_version": expected_game_version,
         "require_version": require_version,
+        "daemon_generation": snapshot.get("daemon_generation"),
     }
     fence = snapshot.get("fence")
     if isinstance(fence, dict):

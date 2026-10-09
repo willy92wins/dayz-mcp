@@ -2126,6 +2126,63 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
+    "action_hold_cancel": (
+        ("valid", {"hold_id": "abc"}, (True, None)),
+        ("empty_id", {"hold_id": ""}, (False, "bad_args")),
+        ("missing_id", {}, (False, "bad_args")),
+        ("extra", {"hold_id": "abc", "extra": 1}, (False, "bad_args")),
+    ),
+    "action_hold": (
+        (
+            "world",
+            {"action": "ActionDeployObject", "selector": "world", "hold_timeout_s": 1.0},
+            (True, None),
+        ),
+        (
+            "hands",
+            {
+                "action": "ActionDeployObject",
+                "selector": "hands",
+                "target": "hands",
+                "classname": "FenceKit",
+                "hold_timeout_s": 1.0,
+            },
+            (True, None),
+        ),
+        (
+            "self",
+            {
+                "action": "ActionBandageSelf",
+                "selector": "self",
+                "target": "self",
+                "hold_timeout_s": 1.0,
+            },
+            (True, None),
+        ),
+        (
+            "hands_without_target",
+            {
+                "action": "ActionDeployObject",
+                "selector": "hands",
+                "hold_timeout_s": 1.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "missing_selector",
+            {"action": "ActionDeployObject", "hold_timeout_s": 1.0},
+            (False, "bad_args"),
+        ),
+        (
+            "bool_timeout",
+            {
+                "action": "ActionDeployObject",
+                "selector": "world",
+                "hold_timeout_s": True,
+            },
+            (False, "bad_args"),
+        ),
+    ),
     "weapon_sights": (
         ("valid_ironsights", {"mode": "ironsights"}, (True, None)),
         ("valid_optics", {"mode": "optics"}, (True, None)),
@@ -2134,6 +2191,48 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("unhashable_mode", {"mode": ["ironsights"]}, (False, "bad_args")),
         ("missing_mode", {}, (False, "bad_args")),
         ("extra_key", {"mode": "none", "extra": None}, (False, "bad_args")),
+    ),
+    "action_cursor": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"target": "Car"}, (False, "bad_args")),
+    ),
+    "player_look_at": (
+        ("valid", {"pos": [0.0, 1.0, 10.0], "timeout_s": 0.1}, (True, None)),
+        ("missing_timeout", {"pos": [0.0, 1.0, 10.0]}, (False, "bad_args")),
+        ("timeout_zero", {"pos": [0.0, 1.0, 10.0], "timeout_s": 0.0}, (False, "bad_args")),
+        ("timeout_nan", {"pos": [0.0, 1.0, 10.0], "timeout_s": float("nan")}, (False, "bad_args")),
+        ("timeout_bool", {"pos": [0.0, 1.0, 10.0], "timeout_s": True}, (False, "bad_args")),
+        ("bad_pos", {"pos": [0.0, 1.0], "timeout_s": 0.1}, (False, "bad_args")),
+        (
+            "extra_key",
+            {"pos": [0.0, 1.0, 10.0], "timeout_s": 0.1, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    "player_look_at_release": (
+        ("valid", {"command_id": 1}, (True, None)),
+        ("zero", {"command_id": 0}, (False, "bad_args")),
+        ("bool", {"command_id": True}, (False, "bad_args")),
+        ("missing", {}, (False, "bad_args")),
+        ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
+    ),
+    "action_cursor_ids": (
+        (
+            "valid",
+            {"net_low": [1], "net_high": [2], "run_token": "run-a"},
+            (True, None),
+        ),
+        (
+            "length_mismatch",
+            {"net_low": [1], "net_high": [2, 3], "run_token": "run-a"},
+            (False, "bad_args"),
+        ),
+        ("missing_token", {"net_low": [1], "net_high": [2]}, (False, "bad_args")),
+        (
+            "extra_key",
+            {"net_low": [1], "net_high": [2], "run_token": "run-a", "extra": None},
+            (False, "bad_args"),
+        ),
     ),
 }
 

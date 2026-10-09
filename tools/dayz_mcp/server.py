@@ -68,6 +68,12 @@ from dayz_mcp.core import (
 )
 from dayz_mcp.effective_schema_core import project_server_config_identity
 from dayz_mcp.tool_registry_fingerprint import capture_registry_snapshot
+from dayz_mcp.action_hold import (
+    hold_command_args,
+    normalize_hold_observation,
+    parse_action_selector,
+    validate_hold_budget,
+)
 from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS, next_step, ok_next_step, with_next_step
 from dayz_mcp.knowledge import register_knowledge_tools
 from dayz_mcp.occupant_seat import occupant_client_seated
@@ -140,6 +146,8 @@ from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
 # dayz_mcp.server.<name> is still the same object for every name it had.
+from dayz_mcp.action_cursor import execute_action_cursor
+from dayz_mcp.look_at_control import execute_player_look_at
 from dayz_mcp.tool_catalog import (
     _COMPACT_DESCRIPTION_MARKER,
     _FULL_CATALOG_PLATFORMS,
@@ -1142,9 +1150,56 @@ class Runtime:
                 if not result.get("ok"):
                     raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
-            await asyncio.sleep(POLL_INTERVAL_S)
+            try:
+                await asyncio.sleep(POLL_INTERVAL_S)
+            except asyncio.CancelledError:
+                self.state.abandon_command(command_id, "tool_cancelled")
+                raise
 
         raise ToolError(f"timeout waiting for {cmd} id={command_id}; {self.liveness_message(peer)}")
+
+    async def enqueue_action_hold(
+        self, args: dict[str, Any], timeout_s: float
+    ) -> tuple[int, str]:
+        self.touch()
+        self.ensure_peer_allowed("client")
+        status, payload = self.state.enqueue_command(
+            "action_hold",
+            args,
+            peer="client",
+            operation_timeout_s=timeout_s,
+            expected_fence=_FENCE_OMITTED,
+        )
+        if status != 200:
+            broker_error = _broker_error_text(payload)
+            if broker_error is not None:
+                raise ToolError(broker_error)
+            raise ToolError(
+                _public_enqueue_error(payload, status_snapshot=self.status(), peer="client")
+                if isinstance(payload, dict)
+                else payload.get("error", f"enqueue_failed_http_{status}")
+            )
+        minted = payload.get("hold_id") if isinstance(payload, dict) else None
+        if "id" not in payload or not isinstance(minted, str) or minted == "":
+            raise ToolError("hold_result_incompatible")
+        command_id = int(payload["id"])
+        _remember_broker_admit(
+            self,
+            command_id,
+            payload.get("daemon_generation") or self.state.daemon_generation,
+            None,
+        )
+        return command_id, minted
+
+    async def await_action_hold(
+        self, command_id: int, minted_hold_id: str, timeout_s: float
+    ) -> dict[str, Any]:
+        result = await self.await_enqueued(
+            "action_hold", command_id, "client", timeout_s
+        )
+        if result.get("hold_id") != minted_hold_id or result.get("hold_protocol") != 1:
+            raise ToolError("hold_result_incompatible")
+        return result
 
     async def enqueue_bridge(
         self,
@@ -2474,6 +2529,86 @@ class ClientRuntime:
             return command_id
         finally:
             self._allow_stale_policy = previous
+
+    async def enqueue_action_hold(
+        self, args: dict[str, Any], timeout_s: float
+    ) -> tuple[int, str]:
+        self.touch()
+        deadline = self._time_fn() + timeout_s
+        lease_token, _ticket = self._session_state_snapshot()
+        request_payload: dict[str, Any] = {
+            "identity": self.identity.to_payload(),
+            "cmd": "action_hold",
+            "args": args,
+            "peer": "client",
+            "operation_timeout_s": timeout_s,
+        }
+        if lease_token is not None:
+            request_payload["lease_token"] = lease_token
+        previous = self._allow_stale_policy
+        self._allow_stale_policy = False
+        command_id: int | None = None
+        try:
+            status, payload = await _enqueue_through_cancellation(
+                self,
+                lambda: self._call(
+                    "POST",
+                    "/enqueue",
+                    request_payload,
+                    None,
+                    timeout_s,
+                    deadline,
+                ),
+                lease_token,
+            )
+            if status == 200:
+                minted = payload.get("hold_id") if isinstance(payload, dict) else None
+                if "id" not in payload or not isinstance(minted, str) or minted == "":
+                    raise ToolError("hold_result_incompatible")
+                command_id = int(payload["id"])
+                _remember_broker_admit(
+                    self, command_id, payload.get("daemon_generation"), lease_token
+                )
+            try:
+                await self._accept_command_renewal(payload)
+            except asyncio.CancelledError:
+                if command_id is not None:
+                    await _shielded_broker_cleanup(self, command_id, "cancelled")
+                raise
+            if status != 200:
+                broker_error = _broker_error_text(payload)
+                if broker_error is not None:
+                    raise ToolError(broker_error)
+                error = self._enqueue_error(payload)
+                if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
+                    self._control._clear_matching_lease(lease_token)
+                    await self._finish_carrier_io()
+                if _remote_error_code(payload) in {"version_blocked", "lease_required"}:
+                    try:
+                        snapshot = await self.bridge_status_payload(
+                            timeout_s=LIVENESS_STATUS_TIMEOUT_S
+                        )
+                    except Exception:
+                        snapshot = None
+                    error = _public_enqueue_error(
+                        payload, status_snapshot=snapshot, peer="client"
+                    )
+                raise ToolError(error)
+            assert command_id is not None
+            minted_out = payload.get("hold_id")
+            return command_id, str(minted_out)
+        finally:
+            self._allow_stale_policy = previous
+
+    async def await_action_hold(
+        self, command_id: int, minted_hold_id: str, timeout_s: float
+    ) -> dict[str, Any]:
+        result = await self.await_enqueued(
+            "action_hold", command_id, "client", timeout_s
+        )
+        if result.get("hold_id") != minted_hold_id or result.get("hold_protocol") != 1:
+            raise ToolError("hold_result_incompatible")
+        return result
 
     async def probe_bridge_result(
         self, cmd: str, command_id: int, peer: str
@@ -7523,6 +7658,45 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("camera_get", args, "client", _timeout(timeout_s))
 
+    @app.tool(
+        description=(
+            "Read the local player's real action cursor. No lease. No target "
+            "selector: the snapshot is whatever the cursor has selected. The "
+            "client reads the HUD cursor after its own update and does not "
+            "call Update, Can, or any action. The server then resolves "
+            "network pairs to registry ids for this run only. "
+            "visible_hierarchy is the effective visibility. A hidden cursor "
+            "or an empty target is still a successful read. ok does not mean "
+            "an action is available, authoritative, or drawn."
+        )
+    )
+    async def action_cursor(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await execute_action_cursor(runtime, timeout_s)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Turn the local player's view toward pos by "
+            "ONE_FRAME OverrideAimChangeX/Y pulses, measured in radians on "
+            "2026-10-08 (positive yaw to the right, positive pitch up). The "
+            "bridge reads the camera direction and stops only when that "
+            "direction stays within 1 degree for three ticks and three "
+            "further ticks without pulses, or fails closed. It does not "
+            "report the commanded angle as success and does not require a "
+            "weapon. First person, idle, standing or crouched, weapon "
+            "lowered, no freelook, tracking, scripted camera or concurrent "
+            "action. Budget 3 s."
+        )
+    )
+    async def player_look_at(
+        pos: list[StrictFloat],
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await execute_player_look_at(runtime, pos, timeout_s)
+
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
         "release the camera. camera_set has no off mode. The bridge closes this "
@@ -8584,169 +8758,120 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         cursor_pos: list[StrictFloat] | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        if not isinstance(action, str) or action == "":
-            raise ToolError(_bad_args("action", action, "be a non-empty string"))
-        if not isinstance(classname, str):
-            raise ToolError(_bad_args("classname", classname, "be a string"))
-        if not isinstance(target, str) or target not in {"world", "hands", "self"}:
-            raise ToolError(
-                _bad_args("target", target, "be 'world', 'hands' or 'self'")
-            )
-        if pos is not None and target != "world":
-            raise ToolError(
-                _bad_args("pos", pos, "be omitted unless target is world")
-            )
-        if classname != "" and target == "self":
-            raise ToolError(
-                _bad_args("classname", classname, "be omitted when target is self")
-            )
-        if door_index is not None:
-            if (
-                isinstance(door_index, bool)
-                or not isinstance(door_index, int)
-                or door_index < 0
-                or door_index >= 64
-            ):
-                raise ToolError(
-                    _bad_args("door_index", door_index, "be an int from 0 to 63")
-                )
-            if target != "world":
-                raise ToolError(
-                    _bad_args(
-                        "door_index",
-                        door_index,
-                        "be omitted unless target is world",
-                    )
-                )
-            if classname == "":
-                raise ToolError(
-                    _bad_args(
-                        "classname",
-                        classname,
-                        "be a non-empty string when door_index is set",
-                    )
-                )
-        radius_error = _bad_args(
-            "radius",
+        parsed = parse_action_selector(
+            action,
+            classname,
+            pos,
             radius,
-            "be a finite number greater than 0 and at most 200",
+            target,
+            door_index,
+            component_index,
+            cursor_pos,
         )
-        radius_value = _finite_float(radius, radius_error)
-        if radius_value <= 0.0 or radius_value > 200.0:
-            raise ToolError(radius_error)
-        component_mode = component_index is not None or cursor_pos is not None
-        if component_mode:
-            if component_index is None or cursor_pos is None:
-                raise ToolError(
-                    _bad_args(
-                        "component_index",
-                        component_index,
-                        "be set together with cursor_pos",
-                    )
-                )
-            if (
-                isinstance(component_index, bool)
-                or not isinstance(component_index, int)
-                or component_index < 0
-                or component_index > 2_147_483_647
-            ):
-                raise ToolError(
-                    _bad_args(
-                        "component_index",
-                        component_index,
-                        "be an int from 0 to 2147483647",
-                    )
-                )
-            if door_index is not None:
-                raise ToolError(
-                    _bad_args(
-                        "component_index",
-                        component_index,
-                        "be omitted when door_index is set",
-                    )
-                )
-            if target != "world":
-                raise ToolError(
-                    _bad_args(
-                        "component_index",
-                        component_index,
-                        "be omitted unless target is world",
-                    )
-                )
-            if classname == "":
-                raise ToolError(
-                    _bad_args(
-                        "classname",
-                        classname,
-                        "be a non-empty string when component_index is set",
-                    )
-                )
-        args: dict[str, Any] = {"action": action, "radius": radius_value}
-        if classname != "":
-            args["classname"] = classname
-        if pos is not None:
-            args["pos"] = _require_vec3(pos, "pos")
-        if component_mode:
-            args["component_index"] = component_index
-            args["cursor_pos"] = _require_vec3(cursor_pos, "cursor_pos")
+        if parsed.announce is not None:
             announced = False
             try:
                 status = await runtime.bridge_status_payload()
-                announced = _client_peer_announces_command(
-                    status, "action_use_component"
-                )
+                announced = _client_peer_announces_command(status, parsed.announce)
             except Exception:
                 announced = False
             if not announced:
-                raise ToolError("component_not_supported")
-            async with runtime.tool_lock:
-                result = await runtime.call_bridge(
-                    "action_use_component", args, "client", _timeout(timeout_s)
-                )
-            echoed = result.get("component_index") if isinstance(result, dict) else None
-            if echoed != component_index:
-                raise ToolError("component_not_supported")
-            return result
-        if door_index is not None:
-            announced = False
-            try:
-                status = await runtime.bridge_status_payload()
-                announced = _client_peer_announces_command(status, "action_use_door")
-            except Exception:
-                announced = False
-            if not announced:
-                raise ToolError("door_not_supported")
-            args["door_index"] = door_index
-            async with runtime.tool_lock:
-                result = await runtime.call_bridge(
-                    "action_use_door", args, "client", _timeout(timeout_s)
-                )
-            echoed = result.get("door_index") if isinstance(result, dict) else None
-            if echoed != door_index:
-                raise ToolError("door_not_supported")
-            return result
-        if target == "world":
-            async with runtime.tool_lock:
-                return await runtime.call_bridge(
-                    "action_use", args, "client", _timeout(timeout_s)
-                )
+                raise ToolError(parsed.unsupported or "target_not_supported")
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                parsed.command, parsed.args, "client", _timeout(timeout_s)
+            )
+        if parsed.echo_key is not None:
+            echoed = result.get(parsed.echo_key) if isinstance(result, dict) else None
+            if echoed != parsed.echo_value:
+                raise ToolError(parsed.unsupported or "target_not_supported")
+        return result
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Hold one continuous user action on the local "
+            "player until it finishes, is cancelled, or hold_timeout_s elapses. "
+            "Selectors match action_use (target, door_index, component_index, "
+            "cursor_pos) and only ActionContinuousBase is accepted; anything "
+            "else returns not_continuous and starts nothing. An addon that "
+            "does not announce action_hold returns hold_not_supported and "
+            "nothing is sent. The reply is one observation of THIS execution: "
+            "end_state finished, cancel, timeout, rejected or unknown; reason; "
+            "action_state of this execution or null; duration_s from the local "
+            "start through drain; completed_cycles of client progress events "
+            "(cycles_scope client_progress), including zero; already_placed "
+            "only when the client data is PlaceObjectActionData, false kept; "
+            "flag_restored and cleanup_complete. ok true means the observation "
+            "is valid. Only end_state finished is a local UA_FINISHED. "
+            "Placement and other effects need their own read. A transport "
+            "failure is hold_result_unknown, not end_state timeout, and is not "
+            "retried. After the client is retired, an unreconciled hold stays "
+            "fenced for that run (hold_unreconciled); a cancel acknowledgement "
+            "does not clear it, and a new run does. hold_timeout_s is finite, greater than 0 and at most 120 "
+            "(default 30) and starts before the local start, acceptance "
+            "included. timeout_s is the Python budget, finite, at least "
+            "hold_timeout_s + 15 and at most 300 (default 45)."
+        )
+    )
+    async def action_hold(
+        action: str,
+        classname: str = "",
+        pos: list[StrictFloat] | None = None,
+        radius: StrictFloat = 5.0,
+        target: StrictStr = "world",
+        door_index: StrictInt | None = None,
+        component_index: StrictInt | None = None,
+        cursor_pos: list[StrictFloat] | None = None,
+        hold_timeout_s: StrictFloat = 30.0,
+        timeout_s: StrictFloat = 45.0,
+    ) -> dict[str, Any]:
+        hold_value, timeout_value = validate_hold_budget(hold_timeout_s, timeout_s)
+        deadline = time.monotonic() + timeout_value
+
+        def remaining() -> float:
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                raise ToolError("hold_result_unknown")
+            return left
+
+        parsed = parse_action_selector(
+            action,
+            classname,
+            pos,
+            radius,
+            target,
+            door_index,
+            component_index,
+            cursor_pos,
+        )
         announced = False
         try:
-            status = await runtime.bridge_status_payload()
-            announced = _client_peer_announces_command(status, "action_use_target")
+            async with asyncio.timeout(remaining()):
+                status = await runtime.bridge_status_payload()
+            announced = _client_peer_announces_command(status, "action_hold")
+        except TimeoutError as exc:
+            raise ToolError("hold_result_unknown") from exc
         except Exception:
             announced = False
         if not announced:
-            raise ToolError("target_not_supported")
-        args["target"] = target
-        async with runtime.tool_lock:
-            result = await runtime.call_bridge(
-                "action_use_target", args, "client", _timeout(timeout_s)
-            )
-        echoed = result.get("target") if isinstance(result, dict) else None
-        if echoed != target:
-            raise ToolError("target_not_supported")
-        return result
+            raise ToolError("hold_not_supported")
+        args = hold_command_args(parsed, hold_value)
+        try:
+            async with asyncio.timeout(remaining()):
+                async with runtime.tool_lock:
+                    command_id, minted = await runtime.enqueue_action_hold(
+                        args, remaining()
+                    )
+                    raw = await runtime.await_action_hold(
+                        command_id, minted, remaining()
+                    )
+        except TimeoutError as exc:
+            raise ToolError("hold_result_unknown") from exc
+        except ToolError as exc:
+            if str(exc).startswith("timeout waiting for action_hold"):
+                raise ToolError("hold_result_unknown") from exc
+            raise
+        return normalize_hold_observation(raw, minted)
 
     @app.tool(
         description=(

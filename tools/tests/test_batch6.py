@@ -32,13 +32,13 @@ class Batch6Test(unittest.TestCase):
     def test_expected_bridge_version_is_10(self) -> None:
         # Bumped 9 -> 10 on 2026-08-29 with the T13/T14 client verbs; the
         # equality gate in core.py forces a matched daemon/PBO pair.
-        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "11")
+        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "12")
 
     def test_mcp_bridge_version_const_is_10(self) -> None:
         messages = (
             addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
         ).read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
         self.assertNotIn('const string MCP_BRIDGE_VERSION = "9";', messages)
 
     def test_entities_query_in_server_commands(self) -> None:

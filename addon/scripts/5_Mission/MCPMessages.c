@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "11";
+const string MCP_BRIDGE_VERSION = "12";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -149,6 +149,14 @@ class MCPArgs
 	string message;
 	float timeout_s;
 	ref array<ref MCPDialogField> fields;
+	// action_hold. selector is world, hands, self, door or component.
+	// door_index_set / component_index_set are required for those selectors:
+	// a missing Enforce int arrives as 0, which is a real index.
+	string selector;
+	float hold_timeout_s;
+	string hold_id;
+	bool door_index_set;
+	bool component_index_set;
 
 	// F3.7 infected_drive - heading in DEGREES (bridge converts to radians).
 	// Unless mode is release, both flags must be true (see the class comment).
@@ -192,6 +200,12 @@ class MCPArgs
 	// bot_start: seconds the server keeps the debug action running. An absent
 	// key reads 0, which the bridge refuses. bot_stop does not read it.
 	float bot_ttl_s;
+	// action_cursor_ids. Parallel network pairs. run_token is echoed.
+	ref array<int> net_low;
+	ref array<int> net_high;
+	string run_token;
+	// player_look_at_release. The command id that owns the aim overrides.
+	int command_id;
 
 	void MCPArgs()
 	{
@@ -205,6 +219,8 @@ class MCPArgs
 		want = new array<string>();
 		sources = new array<string>();
 		fields = new array<ref MCPDialogField>();
+		net_low = new array<int>();
+		net_high = new array<int>();
 		component = -1;
 		dik = -1;
 		limit = 64;
@@ -653,6 +669,11 @@ class MCPWeaponAction
 	bool ironsights;
 	bool optics;
 	string mode;
+
+	void SetFireReason(string value)
+	{
+		reason = value;
+	}
 };
 
 // object_doors payload. door_count is GetDoorCount. doors is empty when the
@@ -900,6 +921,108 @@ class MCPBotReport
 	string released_by;
 };
 
+class MCPCursorRef
+{
+	bool present;
+	string classname;
+	ref array<float> pos;
+	int net_low;
+	int net_high;
+
+	void MCPCursorRef()
+	{
+		pos = new array<float>();
+	}
+};
+
+class MCPCursorTarget
+{
+	bool present;
+	ref MCPCursorRef object_ref;
+	ref MCPCursorRef parent_ref;
+	int component_index;
+	ref array<float> cursor_pos;
+
+	void MCPCursorTarget()
+	{
+		object_ref = new MCPCursorRef();
+		parent_ref = new MCPCursorRef();
+		cursor_pos = new array<float>();
+		component_index = -1;
+	}
+};
+
+class MCPCursorSlot
+{
+	string slot;
+	string action_class;
+	string input_name;
+	int count;
+	string widget;
+};
+
+class MCPCursorWidget
+{
+	string name;
+	bool exists;
+	string path;
+	string widget_type;
+	bool visible;
+	bool visible_hierarchy;
+	float screen_x;
+	float screen_y;
+	float screen_w;
+	float screen_h;
+};
+
+class MCPActionCursor
+{
+	int read_tick;
+	int cursor_update_tick;
+	string item_description_input;
+	ref MCPCursorTarget manager_target;
+	ref MCPCursorTarget cursor_target;
+	ref MCPCursorRef display_object;
+	ref array<ref MCPCursorSlot> manager_slots;
+	ref array<ref MCPCursorSlot> cursor_slots;
+	ref array<ref MCPCursorWidget> widgets;
+
+	void MCPActionCursor()
+	{
+		manager_target = new MCPCursorTarget();
+		cursor_target = new MCPCursorTarget();
+		display_object = new MCPCursorRef();
+		manager_slots = new array<ref MCPCursorSlot>();
+		cursor_slots = new array<ref MCPCursorSlot>();
+		widgets = new array<ref MCPCursorWidget>();
+	}
+};
+
+class MCPLookAt
+{
+	bool converged;
+	float error_initial_deg;
+	float error_final_deg;
+	int ticks;
+	float duration_s;
+	string pose;
+	string termination;
+	int stable_ticks;
+	int hold_ticks;
+	int pulses;
+};
+
+class MCPCursorIds
+{
+	ref array<int> object_ids;
+	string run_token;
+
+	void MCPCursorIds()
+	{
+		object_ids = new array<int>();
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1018,6 +1141,27 @@ class MCPResult
 	// (object.c:320): [x, y, z], the same vector vehicle_trace stores as
 	// direction_x/y/z. Unassigned when that player is not in a transport.
 	ref array<float> direction;
+	// action_cursor snapshot. Unassigned on other commands.
+	ref MCPActionCursor action_cursor;
+	// player_look_at report. Unassigned on other commands.
+	ref MCPLookAt look_at;
+	// action_cursor_ids registry ids. Unassigned on other commands.
+	ref MCPCursorIds cursor_ids;
+	// action_hold observation. Unassigned on other commands.
+	int hold_protocol;
+	string hold_id;
+	string end_state;
+	string reason;
+	int action_state;
+	bool action_state_known;
+	float duration_s;
+	int completed_cycles;
+	string cycles_scope;
+	bool placed_known;
+	bool already_placed;
+	bool flag_restored;
+	bool cleanup_complete;
+	bool matched;
 };
 
 class MCPJob

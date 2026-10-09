@@ -10,7 +10,11 @@ from dayz_mcp import loopback
 from dayz_mcp.bridge_readiness import _BRIDGE_COMMAND_TOOLS
 from dayz_mcp.server import ServerConfig, ToolError, build_app
 from tests._addon_paths import addon_root
-from tests.bridge_client_capabilities_helpers import announced_caps, dispatch_census
+from tests.bridge_client_capabilities_helpers import (
+    _method_body,
+    announced_caps,
+    dispatch_census,
+)
 
 
 COMMAND = "action_use"
@@ -306,11 +310,7 @@ class ActionUseComponentContractTest(unittest.TestCase):
 
     def test_bridge_looks_up_one_component_and_uses_the_supplied_cursor(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        start = source.index('command.cmd == "action_use_component"')
-        # The second occurrence is the world-target branch, not the dispatcher.
-        start = source.index('command.cmd == "action_use_component"', start + 1)
-        end = source.index("actionTarget = new ActionTarget(targetObj, null, -1", start)
-        branch = source[start:end]
+        branch = _method_body(source, "protected bool ApplyComponentSelection(")
         self.assertEqual(
             branch.count("GetActionComponentNameList(wantedComponent, componentNames)"),
             1,

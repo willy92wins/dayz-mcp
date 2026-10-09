@@ -8,210 +8,34 @@ handlers, and a real ServerState plus coordinator. No DayZ process is started.
 from __future__ import annotations
 
 import asyncio
-import http.client
 import os
 import threading
 import time
 import unittest
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
-import psutil
-
-from dayz_mcp import core, daemon, loopback, server
-from dayz_mcp.accredited_daemon_transport import (
-    AccreditedTransportError,
-    verified_daemon_http_request,
-)
-from dayz_mcp.native_process_guard import identity_hashes
+from dayz_mcp import core, loopback, server
+from dayz_mcp.accredited_daemon_transport import AccreditedTransportError
 from dayz_mcp.server import ServerConfig, ToolError
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.broker_binding_helpers import BrokerFixture, ProbeLifecycle, release_registry
 from tests.client_helpers import _fixture_client_runtime
 from tests.daemon_helpers import _http
-from tests.fence_helpers import INST_CLIENT, INST_SERVER, PID_CLIENT, PID_SERVER
+from tests.fence_helpers import (
+    INST_CLIENT,
+    INST_SERVER,
+    PID_CLIENT,
+    PID_SERVER,
+    poll_census_query,
+)
 
 _CTIME = "2026-08-18T00:00:00.000000Z"
 
-
-def _release_registry():
-    return (
-        (
-            "vehicle_telemetry",
-            "vehicle_release",
-            lambda command_id, args: {},
-        ),
-    )
-
-
-class _Running:
-    state = "RUNNING"
-
-
-class _Lifecycle:
-    def __init__(self, run_id: str, on_probe=None) -> None:
-        self._run_ids = {run_id}
-        self.manifest = self
-        self.on_probe = on_probe
-
-    def remember(self, run_id: str) -> None:
-        self._run_ids.add(run_id)
-
-    def get(self, run_id: str):
-        if run_id in self._run_ids:
-            return _Running()
-        return None
-
-    def classify_registered_client_liveness(self, run_id, destination):
-        if self.on_probe is not None:
-            self.on_probe(run_id, destination)
-        return "alive"
-
-    def public_status(self) -> dict:
-        return {}
-
-
-class BrokerFixture:
-    def __init__(self, test: unittest.TestCase, *, registry=None, coordination=False):
-        self.test = test
-        self.patches = []
-        coordinator = None
-        if coordination:
-            coordinator = SessionCoordinator(daemon_generation="broker-gen")
-        self.state = loopback.ServerState(
-            "broker-key",
-            coordination=coordinator,
-            release_registry=registry,
-            time_fn=time.monotonic,
-        )
-        self.state.daemon_generation = "broker-gen"
-        if coordination:
-            self.state.retail_probe = lambda: {"known": True, "processes": []}
-        # /status as the daemon serves it (core.build_status), not the bare
-        # loopback's raw snapshot: a broker client only ever sees the former.
-        self.httpd = loopback.create_http_server(
-            0,
-            self.state,
-            log_sink=lambda _message: None,
-            reclaim_orphans=False,
-            status_provider=daemon.make_status_provider(ServerConfig(), self.state),
-        )
-        self.httpd.daemon_threads = False
-        self.port = int(self.httpd.server_address[1])
-        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-        self.thread.start()
-        self.runtime = self._runtime()
-
-    def _runtime(self) -> server.ClientRuntime:
-        config = ServerConfig(
-            mode="client",
-            key="broker-key",
-            port=self.port,
-            log_sink=lambda _message: None,
-            auto_spawn_daemon=False,
-            client_platform="codex",
-        )
-        runtime = _fixture_client_runtime(config)
-        # The fixture keyfile lives only during construction. Keep this
-        # runtime's captured authority stable so revalidation does not
-        # consult the live host registration.
-        policy = runtime._credential_provider.policy
-
-        def _stable_authority() -> None:
-            policy.__post_init__()
-
-        object.__setattr__(policy, "_revalidation_hook", _stable_authority)
-        real = verified_daemon_http_request
-        executable = runtime._daemon_executable
-        argv = list(runtime._daemon_argv)
-        cwd = runtime._daemon_cwd
-        hashes = identity_hashes(executable, argv)
-        observed: dict[str, object] = {}
-
-        class Guard:
-            def snapshot(self, pid: int) -> dict:
-                return {
-                    "pid": pid,
-                    "creation_time_utc": _CTIME,
-                    "executable_sha256": hashes["executable_sha256"],
-                    "command_line_sha256": hashes["command_line_sha256"],
-                    "identity_scheme": "psutil-argv-v2",
-                    "identity_complete": True,
-                }
-
-        def connection_factory(host: str, port: int, timeout: float):
-            connection = http.client.HTTPConnection(host, port, timeout)
-            connect = connection.connect
-
-            def connect_and_note() -> None:
-                connect()
-                observed["sock"] = connection.sock
-
-            connection.connect = connect_and_note  # type: ignore[method-assign]
-            return connection
-
-        def connections_fn():
-            sock = observed.get("sock")
-            if sock is None:
-                return []
-            return [
-                SimpleNamespace(
-                    status=psutil.CONN_ESTABLISHED,
-                    laddr=sock.getpeername(),
-                    raddr=sock.getsockname(),
-                    pid=os.getpid(),
-                )
-            ]
-
-        def wrapped(**kwargs):
-            kwargs["connection_factory"] = connection_factory
-            kwargs["connections_fn"] = connections_fn
-            kwargs["get_executable"] = lambda _pid: executable
-            kwargs["get_argv"] = lambda _pid: list(argv)
-            kwargs["get_cwd"] = lambda _pid: cwd
-            kwargs["guard"] = Guard()
-            return real(**kwargs)
-
-        # The credential provider captured the function at construction.
-        # The wrapper still executes the real verifier and a real socket.
-        runtime._credential_provider._request_fn = lambda **kwargs: wrapped(
-            time_fn=runtime._time_fn, **kwargs
-        )
-        return runtime
-
-    def stop(self) -> None:
-        self.httpd.shutdown()
-        self.thread.join(timeout=2)
-        self.httpd.server_close()
-
-    def bind(self, instance: str, role: str, pid: int, run_id: str = "run-broker") -> str:
-        self.state.install_bound_peer(
-            instance=instance,
-            role=role,
-            pid=pid,
-            run_id=run_id,
-            creation_time_utc=_CTIME,
-        )
-        token = self.state.bound_instance_token(run_id, role)
-        self.test.assertIsInstance(token, str)
-        return token
-
-    def http_abandon(self, identity: dict, generation: str, command_id: int, reason: str, token=None):
-        body = {
-            "identity": identity,
-            "generation": generation,
-            "id": command_id,
-            "reason": reason,
-        }
-        if token is not None:
-            body["lease_token"] = token
-        return _http(
-            f"http://127.0.0.1:{self.port}",
-            "POST",
-            "/abandon",
-            "broker-key",
-            payload=body,
-        )
+# Names the original module used. The fixture lives in a helper so other tests
+# can reuse it without a test-to-test import.
+_Lifecycle = ProbeLifecycle
+_release_registry = release_registry
 
 
 class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
@@ -1003,6 +827,104 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         degraded = await runtime.abandon_bridge(command_id, "cancelled")
         self.assertEqual(degraded.get("status"), "cleanup_degraded", degraded)
         self.assertTrue(degraded.get("cause"))
+
+    def _hold_fixture(self) -> BrokerFixture:
+        fixture = self._open(coordination=True)
+        fixture.bind(INST_CLIENT, "client", PID_CLIENT)
+        fixture.state.lifecycle = _Lifecycle("run-broker")
+        identity = fixture.runtime.identity
+        status, grant = fixture.state.coordination.acquire(identity, "broker-hold")
+        self.assertEqual(status, 200, grant)
+        fixture.runtime._control.active_lease_token = grant["lease_token"]
+        return fixture
+
+    async def _deliver_hold(self, fixture: BrokerFixture) -> tuple[int, str]:
+        query = poll_census_query("client")
+        fixture.state.record_poll(
+            "client",
+            "12~1.29",
+            instance=INST_CLIENT,
+            source_pid=PID_CLIENT,
+            caps=query["caps"],
+        )
+        command_id, minted = await fixture.runtime.enqueue_action_hold(
+            {
+                "action": "ActionDeployObject",
+                "selector": "hands",
+                "target": "hands",
+                "classname": "FenceKit",
+                "hold_timeout_s": 120.0,
+            },
+            135.0,
+        )
+        _status, polled = fixture.state.record_poll(
+            "client",
+            "12~1.29",
+            instance=INST_CLIENT,
+            source_pid=PID_CLIENT,
+            caps=query["caps"],
+        )
+        self.assertIn(command_id, [item["id"] for item in polled["commands"]])
+        self.assertTrue(fixture.state._holds[minted]["delivered"])
+        return command_id, minted
+
+    async def test_f13_cancelled_await_queues_one_directed_cancel(self) -> None:
+        fixture = self._hold_fixture()
+        command_id, minted = await self._deliver_hold(fixture)
+        task = asyncio.create_task(
+            fixture.runtime.await_action_hold(command_id, minted, 120.0)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        cancels = [
+            item
+            for item in fixture.state._bound_queues[INST_CLIENT]
+            if item.get("cmd") == "action_hold_cancel"
+        ]
+        self.assertEqual(len(cancels), 1)
+        self.assertEqual(cancels[0]["args"]["hold_id"], minted)
+
+    async def test_f15_unknown_result_id_does_not_reconcile(self) -> None:
+        fixture = self._hold_fixture()
+        command_id, minted = await self._deliver_hold(fixture)
+        abandoned = await fixture.runtime.abandon_bridge(command_id, "cancelled")
+        self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
+        self.assertIn("run-broker", fixture.state._hold_blocked_runs)
+        status, body = _http(
+            f"http://127.0.0.1:{fixture.port}",
+            "POST",
+            "/result",
+            "broker-key",
+            payload={
+                "id": 999999,
+                "ok": 1,
+                "hold_protocol": 0,
+                "hold_id": minted,
+                "cleanup_complete": 1,
+                "end_state": "finished",
+            },
+            query={"inst": INST_CLIENT},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIs(body.get("discarded"), True)
+        self.assertIn("run-broker", fixture.state._hold_blocked_runs)
+        status, refused = fixture.state.enqueue_command(
+            "action_hold",
+            {
+                "action": "ActionDeployObject",
+                "selector": "hands",
+                "target": "hands",
+                "classname": "FenceKit",
+                "hold_timeout_s": 1.0,
+            },
+            peer="client",
+            identity_payload=fixture.runtime.identity.to_payload(),
+            lease_token=fixture.runtime._control.active_lease_token,
+            operation_timeout_s=30.0,
+        )
+        self.assertEqual((status, refused.get("error")), (409, "hold_unreconciled"))
 
 
 if __name__ == "__main__":

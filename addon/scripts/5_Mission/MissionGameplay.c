@@ -19,6 +19,9 @@ modded class MissionGameplay
 
 	override void OnUpdate(float timeslice)
 	{
+		// The HUD cursor updates inside super. Stamp the frame first so that
+		// update and a later action_cursor read share one tick.
+		MCPFrame.Advance();
 		super.OnUpdate(timeslice);
 
 		MCPClientBridge bridge = MCPClientBridge.Get();

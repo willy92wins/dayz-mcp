@@ -143,7 +143,7 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    on this stand (see "The exit reality"). Tear down with `vehicle_release`
    and `object_delete` of the fixture (`vehicle_release` only aborts the
    trace and clears the drive-control state,
-   `MCPClientBridge.c:2601-2606` — it is not a get-out); verify the ejection
+   `MCPClientBridge.c:2623-2628` — it is not a get-out); verify the ejection
    via telemetry (`not_seated`), then `restore_gameplay`.
 10. Release the session lease.
 
@@ -217,7 +217,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: `vehicle_release`, then
    `object_delete` of the registered fixture id — the release only clears
-   trace/control (`MCPClientBridge.c:2601-2606`), the delete performs the
+   trace/control (`MCPClientBridge.c:2623-2628`), the delete performs the
    ejection, verified via telemetry (`not_seated`) — then
    `restore_gameplay` and the session release.
 

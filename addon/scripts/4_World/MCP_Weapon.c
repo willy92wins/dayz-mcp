@@ -1314,6 +1314,15 @@ modded class PlayerBase
 		PlayerBase live;
 		super.CommandHandler(pDt, pCurrentCommandID, pCurrentCommandFinished);
 		MCPServerWeaponRequests();
+		// player_look_at pulses on this tick even when no weapon override is active.
+		if (GetGame())
+		{
+			live = PlayerBase.Cast(GetGame().GetPlayer());
+			if (this == live)
+			{
+				MCPLookAtControl.OnCommandHandler(live, pDt);
+			}
+		}
 		if (!MCPWeaponControl.IsBusy())
 		{
 			return;

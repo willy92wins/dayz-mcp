@@ -310,7 +310,7 @@ class PlayerKillSourceTest(unittest.TestCase):
         self.assertNotIn("EEHitBy", self.body)
         self.assertNotIn("player_respawn", self.body)
         self.assertNotIn("Choose(", self.body)
-        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', self.messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', self.messages)
         self.assertIn("player_kill", loopback.SERVER_COMMANDS)
         self.assertEqual(server.SERVER_ARG_CONTRACT["player_kill"], ("uid",))
         self.assertIn(

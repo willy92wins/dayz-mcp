@@ -38,9 +38,13 @@
       "world_spawn": "world_spawn",
       "world_time_get": "world_time_get",
       "world_time_set": "world_time_set",
-      "world_weather_set": "world_weather_set"
+      "world_weather_set": "world_weather_set",
+      "action_cursor_ids": null
     },
     "client": {
+      "action_cursor": "action_cursor",
+      "action_hold": "action_hold",
+      "action_hold_cancel": "",
       "action_use": "action_use",
       "action_use_component": "action_use",
       "action_use_door": "action_use",
@@ -52,6 +56,8 @@
       "input_describe": "input_describe",
       "input_trigger": "input_trigger",
       "key_press": "key_press",
+      "player_look_at": "player_look_at",
+      "player_look_at_release": null,
       "player_move": "player_move",
       "player_respawn": "player_respawn",
       "player_trace": "player_trace",

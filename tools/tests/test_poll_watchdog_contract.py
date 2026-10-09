@@ -435,12 +435,18 @@ class PollWatchdogContractTest(unittest.TestCase):
         poll_reset_idx = shutdown.index("if (pollDistinct)")
         posted_result_idx = shutdown.index("if (m_Ctx)")
         self.assertLess(poll_reset_idx, posted_result_idx)
+        # The poll reset is only the distinct-context block. The hold terminal
+        # POST is earlier, before callback detach, so it is outside this slice.
         poll_block = shutdown[poll_reset_idx:posted_result_idx]
         self.assertNotIn("postedTerminal", poll_block)
+        self.assertNotIn("PostActionHoldJob", poll_block)
 
         posted_idx = shutdown.index("postedTerminal = true;")
         detach_poll_idx = shutdown.index("pollCb.DetachBridge()")
         detach_result_idx = shutdown.index("resultCb.DetachBridge()")
+        hold_post_idx = shutdown.index("PostActionHoldJob(holdJob)")
+        self.assertLess(hold_post_idx, detach_poll_idx)
+        self.assertLess(hold_post_idx, detach_result_idx)
         ctx_null_idx = shutdown.index("m_PollCtx = null;")
         shared_null_idx = shutdown.index("m_Ctx = null;")
         self.assertLess(posted_idx, detach_poll_idx)

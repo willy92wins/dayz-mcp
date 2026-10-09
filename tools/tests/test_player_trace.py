@@ -584,7 +584,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)
@@ -1167,9 +1167,21 @@ class PlayerTraceMessagesTest(unittest.TestCase):
     def test_the_result_owns_one_reference_and_the_args_are_reused(self) -> None:
         result_members = _class_members(self.messages, "MCPResult")
         self.assertEqual(result_members.count(("ref MCPPlayerTraceRead", FIELD)), 1)
-        # direction (c32c) is the last MCPResult ref; player_trace stays immediately before it.
+        # direction (c32c) stays immediately after player_trace. Later refs are
+        # the 86a3 cursor and look-at payloads. action_hold scalars follow them.
+        trace_at = result_members.index(("ref MCPPlayerTraceRead", FIELD))
         self.assertEqual(
-            result_members[-2:],
+            result_members[trace_at:trace_at + 5],
+            [
+                ("ref MCPPlayerTraceRead", FIELD),
+                ("ref array<float>", "direction"),
+                ("ref MCPActionCursor", "action_cursor"),
+                ("ref MCPLookAt", "look_at"),
+                ("ref MCPCursorIds", "cursor_ids"),
+            ],
+        )
+        self.assertEqual(
+            result_members[trace_at:trace_at + 2],
             [("ref MCPPlayerTraceRead", FIELD), ("ref array<float>", "direction")],
         )
         self.assertNotIn(FIELD, {name for _type, name in _class_members(self.messages, "MCPJob")})
@@ -1204,7 +1216,10 @@ class PlayerTraceMessagesTest(unittest.TestCase):
         self.assertEqual(set(_entity()), {name for _type, name in EXPECTED_ENTITY_MEMBERS})
 
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
-        self.assertEqual(result_prune.PRUNABLE_FIELDS[-2:], (FIELD, "direction"))
+        self.assertEqual(
+            result_prune.PRUNABLE_FIELDS[-5:],
+            (FIELD, "direction", "action_cursor", "look_at", "cursor_ids"),
+        )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("vehicle_trace", {"ok": 1, FIELD: {}})
         self.assertNotIn(FIELD, unfilled)
