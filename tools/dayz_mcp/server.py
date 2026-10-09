@@ -791,16 +791,17 @@ def _broker_error_text(payload: object) -> str | None:
 
 
 def _broker_status_capable(payload: object) -> bool:
-    """True when /status publishes daemon generation and opaque peer tokens."""
+    """True when the daemon's /status (core.build_status, the schema a broker
+    client receives) publishes the daemon generation and each peer's opaque
+    binding token and run."""
 
     if not isinstance(payload, dict):
         return False
     generation = payload.get("daemon_generation")
-    peers = payload.get("peers")
-    if not isinstance(generation, str) or not generation or not isinstance(peers, dict):
+    if not isinstance(generation, str) or not generation:
         return False
-    for name in ("server", "client"):
-        row = peers.get(name)
+    for name in ("server_peer", "client_peer"):
+        row = payload.get(name)
         if (
             not isinstance(row, dict)
             or "binding_token" not in row

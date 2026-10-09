@@ -1743,6 +1743,10 @@ class _BoundPeerDispatchable:
     def get(self, run_id: str) -> object | None:
         if run_id in self._run_ids:
             return _BoundPeerRunning()
+
+    def public_status(self) -> dict[str, object]:
+        # The daemon's /status provider reads this; the stand-in has no processes.
+        return {}
         return None
 
 
@@ -4707,10 +4711,14 @@ class ServerState:
                 for command in queue:
                     command_id = command.get("id")
                     owner = self._command_owner.get(command_id)
+                    row = self._broker_rows.get(command_id)
                     if (
                         owner is not None
                         and owner[0].session_id == session_id
                         and (lease_id is None or owner[1] == lease_id)
+                        # The release of an abandoned command is that command's
+                        # cleanup: ending the lease must not discard it.
+                        and not (isinstance(row, dict) and row.get("internal") is True)
                     ):
                         self._mark_discarded(
                             command, reason, discarded_exec, finished_operations

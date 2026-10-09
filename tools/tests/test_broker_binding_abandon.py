@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import psutil
 
-from dayz_mcp import core, loopback, server
+from dayz_mcp import core, daemon, loopback, server
 from dayz_mcp.accredited_daemon_transport import (
     AccreditedTransportError,
     verified_daemon_http_request,
@@ -67,6 +67,9 @@ class _Lifecycle:
             self.on_probe(run_id, destination)
         return "alive"
 
+    def public_status(self) -> dict:
+        return {}
+
 
 class BrokerFixture:
     def __init__(self, test: unittest.TestCase, *, registry=None, coordination=False):
@@ -84,8 +87,14 @@ class BrokerFixture:
         self.state.daemon_generation = "broker-gen"
         if coordination:
             self.state.retail_probe = lambda: {"known": True, "processes": []}
+        # /status as the daemon serves it (core.build_status), not the bare
+        # loopback's raw snapshot: a broker client only ever sees the former.
         self.httpd = loopback.create_http_server(
-            0, self.state, log_sink=lambda _message: None, reclaim_orphans=False
+            0,
+            self.state,
+            log_sink=lambda _message: None,
+            reclaim_orphans=False,
+            status_provider=daemon.make_status_provider(ServerConfig(), self.state),
         )
         self.httpd.daemon_threads = False
         self.port = int(self.httpd.server_address[1])
@@ -262,6 +271,27 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(older["server_peer"]["binding_token"])
         self.assertIsNone(older["client_peer"]["run_id"])
+
+    async def test_fence_from_production_status_admits(self) -> None:
+        fixture = self._open()
+        fixture.bind(INST_SERVER, "server", PID_SERVER)
+        status = await fixture.runtime.bridge_status_payload()
+        fence = {
+            "generation": status["daemon_generation"],
+            "peers": {
+                "server": {
+                    "run_id": status["server_peer"]["run_id"],
+                    "binding_token": status["server_peer"]["binding_token"],
+                }
+            },
+        }
+        command_id = await fixture.runtime.enqueue_bridge(
+            "query_player_state", {}, "server", 2.0, expected_fence=fence
+        )
+        self.assertEqual(
+            [command["id"] for command in fixture.state._bound_queues[INST_SERVER]],
+            [command_id],
+        )
 
     async def test_admission_fence(self) -> None:
         changed = {"done": False}
@@ -813,6 +843,60 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(allowed, 200, allowed_body)
         self.assertEqual(allowed_body.get("status"), "dropped")
         self.assertNotIn(payload["id"], fixture.state._broker_rows)
+
+    def test_lease_release_keeps_a_queued_release(self) -> None:
+        state = loopback.ServerState(
+            "k", release_registry=_release_registry(), time_fn=time.monotonic
+        )
+        state.coordination = SessionCoordinator(
+            daemon_generation="broker-gen",
+            cleanup=lambda session_id, lease_id, reason, vehicle_active: (
+                state.cleanup_owner(session_id, lease_id, reason, vehicle_active)
+            ),
+        )
+        state.daemon_generation = "broker-gen"
+        state.retail_probe = lambda: {"known": True, "processes": []}
+        state.install_bound_peer(
+            instance=INST_CLIENT,
+            role="client",
+            pid=PID_CLIENT,
+            run_id="run-broker",
+            creation_time_utc=_CTIME,
+        )
+        owner = ClientIdentity(
+            "codex", os.getpid(), os.getppid(), _CTIME, "session-owner", ""
+        )
+        acquired = state.coordination.acquire(owner, "trace")
+        self.assertEqual(acquired[0], 200, acquired)
+        token = acquired[1]["lease_token"]
+        status, payload = state.enqueue_command(
+            "vehicle_telemetry",
+            {},
+            peer="client",
+            identity_payload=owner.to_payload(),
+            lease_token=token,
+        )
+        self.assertEqual(status, 200, payload)
+        state.record_poll("client", None, instance=INST_CLIENT, source_pid=PID_CLIENT)
+        abandoned, abandoned_body = state.request_abandon(
+            identity_payload=owner.to_payload(),
+            generation="broker-gen",
+            command_id=payload["id"],
+            reason="cancelled",
+            lease_token=token,
+            lease_token_supplied=True,
+        )
+        self.assertEqual(abandoned_body.get("status"), "release_queued", abandoned_body)
+        released = state.coordination.release(owner, token, "owner_release")
+        self.assertEqual(released[0], 200, released)
+        polled, body = state.record_poll(
+            "client", None, instance=INST_CLIENT, source_pid=PID_CLIENT
+        )
+        self.assertEqual(polled, 200, body)
+        self.assertEqual(
+            [command["id"] for command in body["commands"]],
+            [abandoned_body["release_id"]],
+        )
 
     def test_release_owner_cleared_on_terminal_result(self) -> None:
         state = loopback.ServerState(
