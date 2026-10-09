@@ -66,7 +66,7 @@ See `../ingame-v12/RESULTS.md`. 855c, 9941, 8308 and 86a3 were accepted.
   - fb98: `completed_cycles` stays 0 for drink and eat on 1.29. No verb reads an item's quantity, and only `player_heal` returns the player's water, around a heal.
 
 ## Delegation notes
-- Grok carried every implementation round (222d: 1.92 + 0.76 USD). The Sonnet fallback (automatic switch on an exhausted Grok balance, `claude -p --safe-mode`) was built and probed but never needed. The probe was one turn: Bash and Write allowed, git commit denied (`SESSION-STATE.md:446-449`).
+- Grok carried every implementation round (222d: 1.92 + 0.76 USD). The Sonnet fallback (automatic switch on an exhausted Grok balance, `claude -p --safe-mode`) was built and probed but never needed. The probe reported four turns: answer.txt was written through Write, and the Bash call containing git commit was denied (`sonnet_probe\batch\r1\sonnet.json`).
 - Every review was gpt-6.1-sol's. Orchestrator edits were reviewed by Sol in scoped passes before merging:
   - `wt\SOL_R3I_ORCH*.md`: four passes, the last two APPROVED;
   - `v12_integ\SOL_CLOSURE.md`: APPROVED;
