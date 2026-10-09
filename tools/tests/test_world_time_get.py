@@ -517,6 +517,7 @@ class WorldTimeGetToolTest(unittest.IsolatedAsyncioTestCase):
 
         state = SimpleNamespace(
             enqueue_command=enqueue,
+            daemon_generation="generation-test",
             take_result=lambda *_args, **_kwargs: {"ok": 0, "error": "world_unavailable"},
         )
         with patch.object(self.runtime, "status", return_value=ready), patch.object(

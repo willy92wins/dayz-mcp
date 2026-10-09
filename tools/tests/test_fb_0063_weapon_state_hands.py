@@ -254,7 +254,7 @@ class WeaponHandsAppToolTest(unittest.IsolatedAsyncioTestCase):
         planted: dict[str, object] = {"type": "", "object_id": 0}
         real_enqueue = runtime.state.enqueue_command
 
-        def enqueue(cmd, args, peer="server", operation_timeout_s=0.0):
+        def enqueue(cmd, args, peer="server", operation_timeout_s=0.0, **_kwargs):
             status, body = real_enqueue(
                 cmd, args, peer=peer, operation_timeout_s=operation_timeout_s
             )

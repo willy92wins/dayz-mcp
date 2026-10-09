@@ -830,6 +830,7 @@ class CompleteToolTest(unittest.IsolatedAsyncioTestCase):
 
         state = SimpleNamespace(
             enqueue_command=enqueue,
+            daemon_generation="generation-test",
             take_result=lambda *_args, **_kwargs: dict(bridge_answer),
         )
         patches = (

@@ -101,6 +101,7 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
     LoopbackServer,
+    _FENCE_OMITTED,
     is_printable_input_name,
     read_key,
 )
@@ -370,6 +371,14 @@ LIVENESS_STATUS_TIMEOUT_S = 1.0
 # just renewed share it, so a burst does not fsync once per call.
 _CARRIER_REFRESH_S = 5.0
 POLL_INTERVAL_S = 0.05
+_BROKER_CLEANUP_BUDGET_S = 2.0
+_BROKER_ADMISSION_ERRORS = frozenset(
+    {
+        "bad_binding_fence",
+        "binding_changed",
+        "broker_infrastructure_missing",
+    }
+)
 WAIT_FOR_MAX_TIMEOUT_S = 600.0
 BOX_WAIT_MAX_S = 600.0
 BOX_WAIT_POLL_S = 1.0
@@ -772,6 +781,161 @@ class ServerConfig:
     game_path: str | None = None
 
 
+def _broker_error_text(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, str) and error in _BROKER_ADMISSION_ERRORS:
+        return error
+    return None
+
+
+def _broker_status_capable(payload: object) -> bool:
+    """True when the daemon's /status (core.build_status, the schema a broker
+    client receives) publishes the daemon generation and each peer's opaque
+    binding token and run."""
+
+    if not isinstance(payload, dict):
+        return False
+    generation = payload.get("daemon_generation")
+    if not isinstance(generation, str) or not generation:
+        return False
+    for name in ("server_peer", "client_peer"):
+        row = payload.get(name)
+        if (
+            not isinstance(row, dict)
+            or "binding_token" not in row
+            or "run_id" not in row
+        ):
+            return False
+    return True
+
+
+def _drop_broker_admit(runtime: object, command_id: int | None) -> None:
+    if command_id is None:
+        return
+    admits = getattr(runtime, "_broker_admits", None)
+    if isinstance(admits, dict):
+        admits.pop(command_id, None)
+
+
+def _remember_broker_admit(
+    runtime: object,
+    command_id: int,
+    generation: object,
+    lease_token: object,
+) -> None:
+    admits = getattr(runtime, "_broker_admits", None)
+    if not isinstance(admits, dict):
+        admits = {}
+        setattr(runtime, "_broker_admits", admits)
+    admits[command_id] = {
+        "generation": generation if isinstance(generation, str) else "",
+        "lease_token": lease_token if isinstance(lease_token, str) else None,
+    }
+
+
+async def _shielded_broker_cleanup(
+    runtime: object, command_id: int, reason: str, budget_deadline: float | None = None
+) -> object:
+    """Abandon with a private 2s budget. Repeated cancellation does not extend it
+    and does not replace the caller's original exception. budget_deadline (loop
+    time) lets a caller that already spent part of the budget pass what remains;
+    the abandon gets the same absolute deadline, so its transport stops there too."""
+
+    loop = asyncio.get_running_loop()
+    deadline = (
+        loop.time() + _BROKER_CLEANUP_BUDGET_S
+        if budget_deadline is None
+        else budget_deadline
+    )
+    # Called directly, not through getattr: security_runtime_audit flags a
+    # dynamically resolved call as dynamic_http. A runtime without the method
+    # has nothing to abandon.
+    try:
+        abandon = runtime.abandon_bridge(  # type: ignore[attr-defined]
+            command_id, reason, budget_deadline=deadline
+        )
+    except AttributeError:
+        _drop_broker_admit(runtime, command_id)
+        return None
+    task = asyncio.create_task(abandon)
+    try:
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0.0:
+                task.cancel()
+                break
+            try:
+                await asyncio.wait_for(asyncio.shield(task), remaining)
+            except asyncio.CancelledError:
+                continue
+            except (asyncio.TimeoutError, Exception):
+                task.cancel()
+                break
+    finally:
+        admits = getattr(runtime, "_broker_admits", None)
+        if isinstance(admits, dict):
+            admits.pop(command_id, None)
+    if task.done() and not task.cancelled():
+        try:
+            return task.result()
+        except Exception:
+            return None
+    return None
+
+
+def _consume_late_outcome(task: asyncio.Future) -> None:
+    # The caller has gone; retrieving the outcome keeps a late failure from
+    # being reported as an exception that was never retrieved.
+    if not task.cancelled():
+        task.exception()
+
+
+async def _enqueue_through_cancellation(
+    runtime: object,
+    request: Callable[[], tuple[int, Any]],
+    lease_token: object,
+) -> tuple[int, Any]:
+    """Run one /enqueue request so a cancellation cannot lose an admitted id.
+
+    The request runs in a worker thread that a cancellation does not stop. A
+    cancellation while it is in flight waits for its answer within the cleanup
+    budget, abandons a command the daemon admitted with what remains of that
+    budget, then propagates. A request still unanswered when the budget ends is
+    left to the daemon's operation deadline."""
+
+    loop = asyncio.get_running_loop()
+    request_task = asyncio.ensure_future(asyncio.to_thread(request))
+    try:
+        return await asyncio.shield(request_task)
+    except asyncio.CancelledError:
+        deadline = loop.time() + _BROKER_CLEANUP_BUDGET_S
+        while not request_task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0.0:
+                break
+            try:
+                await asyncio.wait({request_task}, timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+        if (
+            request_task.done()
+            and not request_task.cancelled()
+            and request_task.exception() is None
+        ):
+            status, payload = request_task.result()
+            command_id = payload.get("id") if status == 200 and isinstance(payload, dict) else None
+            if isinstance(command_id, int) and not isinstance(command_id, bool):
+                _remember_broker_admit(
+                    runtime, command_id, payload.get("daemon_generation"), lease_token
+                )
+                await _shielded_broker_cleanup(runtime, command_id, "cancelled", deadline)
+        elif not request_task.done():
+            request_task.add_done_callback(_consume_late_outcome)
+        raise
+
+
 class Runtime:
     def __init__(self, config: ServerConfig) -> None:
         self.config = config
@@ -896,16 +1060,30 @@ class Runtime:
             f"version_state={peer_status['version_state']}"
         )
 
-    async def call_bridge(self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float) -> dict[str, Any]:
+    async def call_bridge(
+        self,
+        cmd: str,
+        args: dict[str, Any],
+        peer: str,
+        timeout_s: float,
+        expected_fence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         self.touch()
         early = _world_read_not_ready(self, cmd, self.status())
         if early is not None:
             return early
         self.ensure_peer_allowed(peer)
         status, payload = self.state.enqueue_command(
-            cmd, args, peer=peer, operation_timeout_s=timeout_s
+            cmd,
+            args,
+            peer=peer,
+            operation_timeout_s=timeout_s,
+            expected_fence=_FENCE_OMITTED if expected_fence is None else expected_fence,
         )
         if status != 200:
+            broker_error = _broker_error_text(payload)
+            if broker_error is not None:
+                raise ToolError(broker_error)
             raise ToolError(
                 _public_enqueue_error(payload, status_snapshot=self.status(), peer=peer)
                 if isinstance(payload, dict)
@@ -913,7 +1091,22 @@ class Runtime:
             )
 
         command_id = int(payload["id"])
-        result = await self.wait_for_result(cmd, command_id, peer, timeout_s)
+        _remember_broker_admit(
+            self,
+            command_id,
+            payload.get("daemon_generation") or self.state.daemon_generation,
+            None,
+        )
+        try:
+            result = await self.wait_for_result(cmd, command_id, peer, timeout_s)
+        except asyncio.CancelledError:
+            await _shielded_broker_cleanup(self, command_id, "cancelled")
+            raise
+        except ToolError:
+            await _shielded_broker_cleanup(self, command_id, "tool_timeout")
+            raise
+        finally:
+            _drop_broker_admit(self, command_id)
         return _with_bridge_success_hints(self, cmd, result)
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
@@ -951,24 +1144,42 @@ class Runtime:
                 return result_prune.prune_unfilled_fields(cmd, result)
             await asyncio.sleep(POLL_INTERVAL_S)
 
-        self.state.abandon_command(command_id, "tool_timeout")
         raise ToolError(f"timeout waiting for {cmd} id={command_id}; {self.liveness_message(peer)}")
 
     async def enqueue_bridge(
-        self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float
+        self,
+        cmd: str,
+        args: dict[str, Any],
+        peer: str,
+        timeout_s: float,
+        expected_fence: dict[str, Any] | None = None,
     ) -> int:
         self.touch()
         self.ensure_peer_allowed(peer)
         status, payload = self.state.enqueue_command(
-            cmd, args, peer=peer, operation_timeout_s=timeout_s
+            cmd,
+            args,
+            peer=peer,
+            operation_timeout_s=timeout_s,
+            expected_fence=_FENCE_OMITTED if expected_fence is None else expected_fence,
         )
         if status != 200:
+            broker_error = _broker_error_text(payload)
+            if broker_error is not None:
+                raise ToolError(broker_error)
             raise ToolError(
                 _public_enqueue_error(payload, status_snapshot=self.status(), peer=peer)
                 if isinstance(payload, dict)
                 else payload.get("error", f"enqueue_failed_http_{status}")
             )
-        return int(payload["id"])
+        command_id = int(payload["id"])
+        _remember_broker_admit(
+            self,
+            command_id,
+            payload.get("daemon_generation") or self.state.daemon_generation,
+            None,
+        )
+        return command_id
 
     async def probe_bridge_result(
         self, cmd: str, command_id: int, peer: str
@@ -976,12 +1187,33 @@ class Runtime:
         result = self.state.take_result(command_id, remove=True)
         if result is None:
             return None
+        _drop_broker_admit(self, command_id)
         if not result.get("ok"):
             raise _bridge_error(result, cmd)
         return result_prune.prune_unfilled_fields(cmd, result)
 
-    async def abandon_bridge(self, command_id: int, reason: str) -> None:
-        self.state.abandon_command(command_id, reason)
+    async def abandon_bridge(
+        self, command_id: int, reason: str, budget_deadline: float | None = None
+    ) -> dict[str, Any]:
+        del budget_deadline  # in-process transition: no transport to bound
+        body = await asyncio.to_thread(self.state.abandon_command, command_id, reason)
+        if isinstance(body, dict):
+            return body
+        return {"status": "noop"}
+
+    async def await_enqueued(
+        self, cmd: str, command_id: int, peer: str, timeout_s: float
+    ) -> dict[str, Any]:
+        try:
+            return await self.wait_for_result(cmd, command_id, peer, timeout_s)
+        except asyncio.CancelledError:
+            await _shielded_broker_cleanup(self, command_id, "cancelled")
+            raise
+        except ToolError:
+            await _shielded_broker_cleanup(self, command_id, "tool_timeout")
+            raise
+        finally:
+            _drop_broker_admit(self, command_id)
 
     def audit_exec(self, expr: str, verdict: str, main_fn: str = "", command_id: int | None = None) -> None:
         audit_path = self.exec_audit_path()
@@ -1980,7 +2212,13 @@ class ClientRuntime:
             )
             if not retryable:
                 raise ToolError("daemon_response_ambiguous") from None
-            if not self._ensure_daemon(call_deadline):
+            try:
+                daemon_ready = self._ensure_daemon(call_deadline)
+            except (ConnectionError, OSError):
+                # A deadline that expires inside the discovery probe raises a bare
+                # TimeoutError there; it is the same expired budget as above.
+                daemon_ready = False
+            if not daemon_ready:
                 if path == "/await":
                     raise _CallBudgetExpired() from None
                 raise ToolError(self._daemon_missing_error()) from None
@@ -2013,7 +2251,14 @@ class ClientRuntime:
                 raise _CallBudgetExpired() from None
             raise ToolError("daemon_unavailable") from None
 
-    async def call_bridge(self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float) -> dict[str, Any]:
+    async def call_bridge(
+        self,
+        cmd: str,
+        args: dict[str, Any],
+        peer: str,
+        timeout_s: float,
+        expected_fence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         deadline = self._time_fn() + timeout_s
         if cmd in _BRIDGE_WORLD_READ_COMMANDS:
             # BUG-037: the liveness probe must not outlive the caller's deadline.
@@ -2042,20 +2287,40 @@ class ClientRuntime:
         }
         if lease_token is not None:
             request_payload["lease_token"] = lease_token
+        if expected_fence is not None:
+            request_payload["expected_fence"] = expected_fence
+            await self._require_broker_infrastructure(timeout_s, deadline)
         previous = self._allow_stale_policy
         self._allow_stale_policy = not command_requires_lease(cmd)
+        command_id: int | None = None
         try:
-            status, payload = await asyncio.to_thread(
-                self._call,
-                "POST",
-                "/enqueue",
-                request_payload,
-                None,
-                timeout_s,
-                deadline,
+            status, payload = await _enqueue_through_cancellation(
+                self,
+                lambda: self._call(
+                    "POST", "/enqueue", request_payload, None, timeout_s, deadline
+                ),
+                lease_token,
             )
-            await self._accept_command_renewal(payload)
+            if status == 200:
+                if "id" not in payload:
+                    raise ToolError("daemon_bad_enqueue_response")
+                generation = payload.get("daemon_generation")
+                if expected_fence is not None and (
+                    not isinstance(generation, str) or not generation
+                ):
+                    raise ToolError("broker_infrastructure_missing")
+                command_id = int(payload["id"])
+                _remember_broker_admit(self, command_id, generation, lease_token)
+            try:
+                await self._accept_command_renewal(payload)
+            except asyncio.CancelledError:
+                if command_id is not None:
+                    await _shielded_broker_cleanup(self, command_id, "cancelled")
+                raise
             if status != 200:
+                broker_error = _broker_error_text(payload)
+                if broker_error is not None:
+                    raise ToolError(broker_error)
                 error = self._enqueue_error(payload)
                 if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                     self._control._clear_matching_lease(lease_token)
@@ -2071,15 +2336,22 @@ class ClientRuntime:
                         payload, status_snapshot=snapshot, peer=peer
                     )
                 raise ToolError(error)
-            if "id" not in payload:
-                raise ToolError("daemon_bad_enqueue_response")
-            command_id = int(payload["id"])
-            result = await self._await_result(
-                cmd, command_id, peer, timeout_s, deadline=deadline
-            )
+            assert command_id is not None
+            try:
+                result = await self._await_result(
+                    cmd, command_id, peer, timeout_s, deadline=deadline
+                )
+            except asyncio.CancelledError:
+                await _shielded_broker_cleanup(self, command_id, "cancelled")
+                raise
+            except ToolError as exc:
+                if str(exc).startswith("timeout waiting"):
+                    await _shielded_broker_cleanup(self, command_id, "tool_timeout")
+                raise
             return _with_bridge_success_hints(self, cmd, result)
         finally:
             self._allow_stale_policy = previous
+            _drop_broker_admit(self, command_id)
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         return await self.call_bridge("exec_enforce", args, "server", timeout_s)
@@ -2130,7 +2402,12 @@ class ClientRuntime:
         )
 
     async def enqueue_bridge(
-        self, cmd: str, args: dict[str, Any], peer: str, timeout_s: float
+        self,
+        cmd: str,
+        args: dict[str, Any],
+        peer: str,
+        timeout_s: float,
+        expected_fence: dict[str, Any] | None = None,
     ) -> int:
         self.touch()
         deadline = self._time_fn() + timeout_s
@@ -2144,20 +2421,40 @@ class ClientRuntime:
         }
         if lease_token is not None:
             request_payload["lease_token"] = lease_token
+        if expected_fence is not None:
+            request_payload["expected_fence"] = expected_fence
+            await self._require_broker_infrastructure(timeout_s, deadline)
         previous = self._allow_stale_policy
         self._allow_stale_policy = not command_requires_lease(cmd)
+        command_id: int | None = None
         try:
-            status, payload = await asyncio.to_thread(
-                self._call,
-                "POST",
-                "/enqueue",
-                request_payload,
-                None,
-                timeout_s,
-                deadline,
+            status, payload = await _enqueue_through_cancellation(
+                self,
+                lambda: self._call(
+                    "POST", "/enqueue", request_payload, None, timeout_s, deadline
+                ),
+                lease_token,
             )
-            await self._accept_command_renewal(payload)
+            if status == 200:
+                if "id" not in payload:
+                    raise ToolError("daemon_bad_enqueue_response")
+                generation = payload.get("daemon_generation")
+                if expected_fence is not None and (
+                    not isinstance(generation, str) or not generation
+                ):
+                    raise ToolError("broker_infrastructure_missing")
+                command_id = int(payload["id"])
+                _remember_broker_admit(self, command_id, generation, lease_token)
+            try:
+                await self._accept_command_renewal(payload)
+            except asyncio.CancelledError:
+                if command_id is not None:
+                    await _shielded_broker_cleanup(self, command_id, "cancelled")
+                raise
             if status != 200:
+                broker_error = _broker_error_text(payload)
+                if broker_error is not None:
+                    raise ToolError(broker_error)
                 error = self._enqueue_error(payload)
                 if _remote_error_code(payload) in _STALE_LEASE_ERRORS and lease_token is not None:
                     self._control._clear_matching_lease(lease_token)
@@ -2173,9 +2470,8 @@ class ClientRuntime:
                         payload, status_snapshot=snapshot, peer=peer
                     )
                 raise ToolError(error)
-            if "id" not in payload:
-                raise ToolError("daemon_bad_enqueue_response")
-            return int(payload["id"])
+            assert command_id is not None
+            return command_id
         finally:
             self._allow_stale_policy = previous
 
@@ -2201,17 +2497,85 @@ class ClientRuntime:
         if status != 200:
             raise ToolError(str(payload.get("error") or payload))
         if payload.get("status") == "done":
+            _drop_broker_admit(self, command_id)
             result = payload.get("result") or {}
             if not result.get("ok"):
                 raise _bridge_error(result, cmd)
             return result_prune.prune_unfilled_fields(cmd, result)
         return None
 
-    async def abandon_bridge(self, command_id: int, reason: str) -> None:
-        # Client mode has no daemon /abandon route. An undelivered command
-        # expires via COMMAND_TTL_S; a delivered one is reaped by its
-        # operation deadline. This method is a documented no-op.
-        return
+    async def abandon_bridge(
+        self, command_id: int, reason: str, budget_deadline: float | None = None
+    ) -> dict[str, Any]:
+        # budget_deadline is event-loop time; what remains is measured when this
+        # coroutine actually starts, so a late start cannot extend the budget.
+        budget = (
+            _BROKER_CLEANUP_BUDGET_S
+            if budget_deadline is None
+            else budget_deadline - asyncio.get_running_loop().time()
+        )
+        if budget <= 0.0:
+            return {"status": "cleanup_degraded", "cause": "budget_exhausted"}
+        admits = getattr(self, "_broker_admits", None)
+        admit = admits.get(command_id) if isinstance(admits, dict) else None
+        generation = admit.get("generation") if isinstance(admit, dict) else None
+        lease_token = admit.get("lease_token") if isinstance(admit, dict) else None
+        body: dict[str, Any] = {
+            "identity": self.identity.to_payload(),
+            "generation": generation if isinstance(generation, str) else "",
+            "id": command_id,
+            "reason": reason,
+        }
+        if isinstance(lease_token, str):
+            body["lease_token"] = lease_token
+        # The deadline bounds the request, the discovery and the one retry of
+        # _call: nothing is sent after the caller's cleanup budget.
+        status, payload = await asyncio.to_thread(
+            self._call,
+            "POST",
+            "/abandon",
+            body,
+            None,
+            budget,
+            self._time_fn() + budget,
+        )
+        if not isinstance(payload, dict):
+            return {"status": "noop", "http_status": status}
+        payload = dict(payload)
+        payload["http_status"] = status
+        return payload
+
+    async def _require_broker_infrastructure(self, timeout_s: float, deadline: float) -> None:
+        """Refuse a fenced call before enqueue when this daemon cannot fence."""
+
+        remaining = deadline - self._time_fn()
+        budget = min(float(timeout_s), remaining) if remaining > 0.0 else float(timeout_s)
+        status, payload = await asyncio.to_thread(
+            self._call,
+            "GET",
+            "/status",
+            None,
+            None,
+            budget,
+            deadline,
+        )
+        if status != 200 or not _broker_status_capable(payload):
+            raise ToolError("broker_infrastructure_missing")
+
+    async def await_enqueued(
+        self, cmd: str, command_id: int, peer: str, timeout_s: float
+    ) -> dict[str, Any]:
+        try:
+            return await self._await_result(cmd, command_id, peer, timeout_s)
+        except asyncio.CancelledError:
+            await _shielded_broker_cleanup(self, command_id, "cancelled")
+            raise
+        except ToolError as exc:
+            if str(exc).startswith("timeout waiting"):
+                await _shielded_broker_cleanup(self, command_id, "tool_timeout")
+            raise
+        finally:
+            _drop_broker_admit(self, command_id)
 
     async def _liveness_message(self, peer: str) -> str:
         # The whole body is guarded, not just the fetch: this runs inside the

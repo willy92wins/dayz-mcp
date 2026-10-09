@@ -1646,6 +1646,7 @@ class PlayerTraceToolTest(unittest.IsolatedAsyncioTestCase):
 
         state = SimpleNamespace(
             enqueue_command=enqueue,
+            daemon_generation="generation-test",
             take_result=lambda *_args, **_kwargs: json.loads(json.dumps(bridge_answer)),
         )
         patches = (

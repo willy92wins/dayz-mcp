@@ -144,6 +144,7 @@ def _fake_bridge_state(result: dict) -> SimpleNamespace:
     # before enqueue; give it a real shape, as test_ui_error_diagnostics does.
     return SimpleNamespace(
         status_snapshot=loopback.ServerState("k").status_snapshot,
+        daemon_generation="test-generation",
         enqueue_command=lambda *args, **kwargs: (200, {"id": 41}),
         take_result=lambda command_id, remove=False: dict(result),
         abandon_command=lambda *args, **kwargs: None,
