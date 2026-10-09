@@ -1,47 +1,51 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-09 15:17 (Madrid; medido: main, árboles vivos, launcher, PBO, procesos e instancias)
+# DayZ-MCP - Estado vivo - 2026-10-09 23:51 (Madrid; medido: main, árboles vivos, launcher, PBO, procesos e instancias)
 
-- **main** = `58132b6` (#229, puente "12").
+- **main** = `9f3e7de` (#230, 222d).
   - Hoy entraron:
     - #227 (docs);
-    - #228 (infraestructura del broker: abandono por id, release registrada y token de binding completo);
-    - #229 (puente "12": `action_hold` 9941, `action_cursor`/`player_look_at` 86a3).
-  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) están en `58132b6`, sin cambios en ficheros versionados.
+    - #228 (infraestructura del broker);
+    - #229 (puente "12");
+    - #231 (docs de la ventana v12);
+    - #230 (222d: lista de include sellada, `$PBOPREFIX$` como namespace y rechazo de un binarize cuyo namespace no coincide con la carpeta fuente).
+  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) están en `9f3e7de`, sin cambios en ficheros versionados.
   - Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
-- **Launcher `dayz-test-v1`, resellado el 2026-10-09 en la ventana v12:**
-  - PE de LIVE `3EBCF9CE…` y de T130 `DAC6F497…`; mismo `app.pyz` `D41F9EEF…`.
-  - `check_native_launcher_registry.py` y el check del lock dan ok en los dos árboles.
-  - Lleva el worker de 855c (#226) y la infraestructura de #228.
-  - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\v12-20261009\` (`steps.log`).
-- **PBO vivo:** `177471A7…` (puente "12", construido desde `944a358`, la cabeza de #229, con procedencia comprobada).
-  - Los anteriores se conservan junto a él (`*.swapped_out_*`).
+- **Launcher `dayz-test-v1`, resellado el 2026-10-09 en la segunda ventana de 222d (22:19-23:49):**
+  - PE de LIVE `CA9E262F…` y de T130 `F2048F35…`; mismo `app.pyz` `9DCC15BA…`.
+  - La lista `addonbuilder-include.lst` es igual al literal sellado.
+  - `check_native_launcher_registry.py` y el check del lock dan ok en los dos árboles después de pasar a `main`.
+  - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\w222d2-20261009\` (`steps.log`).
+- **PBO vivo:** `177471A7…` (puente "12"), sin cambios.
 - **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
-  - A las 15:17 ninguna tenía lease, cola ni run, y no había procesos DayZ.
-  - Los dos daemons corren desde las 13:37, cuando los arrancaron los harnesses del ciclo in-game. La ventana cerró a las 14:22.
-  - Los clientes de otras sesiones se cerraron en la ventana con permiso del dueño. Después aparecieron cadenas de cliente nuevas: una desde las 14:32, sin atribuir, y a las 15:15 las de otra sesión de Claude.
-- **Verificado en juego el 2026-10-09:** `reviews/2026-10-06-ticketing/ingame-v12/RESULTS.md`.
-  - 855c: rechazo con `journal_name_invalid`, remediación y un solo arranque.
-  - 9941: hold con final natural, timeout, cancelación por el broker con su release, y repetición.
-  - 8308: el hold sostuvo beber y comer en 1.29, y beber en 1.30, hasta el final o el plazo. La cantidad y el agua no se leyeron (`fb98`).
-  - 86a3: look-at convergente y cursor.
+  - A las 23:51 no había procesos DayZ.
+  - El daemon default corre desde las 23:22, arrancado por el cliente de una sesión de Codex. El de 130, desde las 23:45, por el harness de la aceptación.
+  - Clientes a las 23:51: cuatro cadenas de Codex y una de esta sesión.
+- **Caída del 2026-10-09, de 20:55 a 23:21:**
+  - `~/.codex/config.toml` se reescribió con `enabled = true` en las dos entradas `dayz-mcp*`. Probablemente lo hizo la app de Codex; no se observó quién.
+  - El gate de procedencia solo admite `command`, `args` y `tool_timeout_sec` (`tools/dayz_mcp/host_config.py:73`), así que todo cliente moría al arrancar con `daemon_provenance_conflict`.
+  - Se quitó la línea con permiso del dueño. Puede volver a escribirse; arreglo duradero pedido en `ace5`.
+- **Verificado en juego el 2026-10-09:**
+  - v12: `reviews/2026-10-06-ticketing/ingame-v12/RESULTS.md` (855c, 9941, 8308, 86a3).
+  - 222d: `reviews/2026-10-06-ticketing/ingame-w222d/RESULTS.md`.
+    - SimpleGroup con binarize sale completo: 62 de 62 copias idénticas a la fuente, `config.bin` y modelos ODOL.
+    - LFHeli_OH1 con binarize se rechaza con `build_namespace_source_mismatch` y su remediación, sin AddonBuilder y sin tocar el PBO desplegado.
 - **Buzón:**
-  - Resueltas: 855c, 9941, 86a3, 8308, b58f y 33ed.
-  - Nuevas: c852, 204e, ca47, d9c8, 5880 y fb98.
+  - Resueltas hoy: 855c, 9941, 86a3, 8308, b58f, 33ed, 222d y b855.
+  - Nuevas: c852, 204e, ca47, d9c8, 5880, fb98, ace5 y la corrección 9d9b.
 - **Riesgos abiertos:**
+  - El gate de procedencia muere ante una clave que añada un host (`ace5`); la app de Codex puede volver a escribir `enabled = true`.
   - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; aparcado: `round2/2986_PARKED.md`).
-  - `dayz_test_run(build=true)` con binarize no empaqueta scripts en lo desplegado (`222d`).
-    - El diseño B está aprobado por Sol en #230.
-    - Espera su aceptación en la próxima ventana de resellado. No mergear antes.
+  - `-packonly` con un namespace distinto de la carpeta (lo permite el diseño B) no se ha probado con las Tools reales.
   - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`); la aceptación FenceKit de 9941 quedó INCONCLUSA.
-  - En los tres lanzamientos en 1.29 de este ciclo, el cliente quedó en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
+  - En los tres lanzamientos en 1.29 del ciclo v12, el cliente quedó en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
   - El linter offline no detecta casts entre tipos no relacionados (`c852`).
   - La puerta de 855c necesita un alias de misión en la policy sellada (`d9c8`).
   - Ningún verbo lee la cantidad de un ítem. El agua y la energía solo las devuelve `player_heal`, antes y después de curar: falta una lectura que no cambie nada. Además, en 1.29 `completed_cycles` queda en 0 al beber y comer (`fb98`).
   - Virtualización MSIX de `%LOCALAPPDATA%` (`e92d`).
 - **Siguiente:**
-  1. Ventana de resellado para 222d (#230): aceptación con SimpleGroup y LFHeli_OH1 contra los PBO buenos (spec §4), y merge.
+  1. Arreglo duradero de `ace5`: aceptar `enabled = true` en las entradas de Codex, con su test.
   2. Investigar `204e` (toggle de colocación) y `f4e6` (según su informe, un run 1.30 se cerró sin que lo pidiera su sesión).
   3. Peticiones abiertas: `8b1c` (verbo de foco), el rediseño de 2986 y `fb98`.
 - **Detalle:**
