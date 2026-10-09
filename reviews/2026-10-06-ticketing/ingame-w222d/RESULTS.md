@@ -39,7 +39,7 @@ differences.
     "-temp=P:\temp\SimpleGroup" "-include=<bundle>\addonbuilder-include.lst" -clear`.
   - The server compiled every script module and logged `[SimpleGroup] Config loaded`. The stack trace about
     `PluginConfigDebugProfile` in the same log also appears in three earlier server logs: the SimpleGroup and
-    LFHeli_OH1 runs of 2026-10-08, and a DayZ_MCP run at 20:15 that day
+    LFHeli_OH1 runs of 2026-10-08, and a DayZ_MCP run at 20:15 on 2026-10-09
     (`w222d2-20261009\plugin-error-preexisting.txt`).
 - **LFHeli_OH1: FAIL.** `LFHeli_OH1.pbo` has prefix `LFHeli`, the 32 include-list files and `config.bin`, but all 7
   models are missing.

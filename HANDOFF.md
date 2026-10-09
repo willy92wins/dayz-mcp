@@ -21,8 +21,8 @@
 - **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
   - Censo de las 23:57: `w222d2-20261009\step7-census.txt`.
     - No había procesos DayZ.
-    - El daemon default corre desde las 23:22:18. A esa hora el único cliente vivo era de una sesión de Codex (desde las 23:21:07). El de 130 corre desde las 23:45:47, arrancado por el harness de la aceptación.
-    - Clientes: dos cadenas default y tres de 130 de la sesión de Codex, y una default de esta sesión.
+    - El daemon default arrancó a las 23:22:18; el censo recoge una cadena Codex iniciada a las 23:21:07. El de 130 arrancó a las 23:45:47, con el harness de la aceptación.
+    - Clientes: dos cadenas default y tres de 130 de la sesión de Codex, y una default de esta sesión. El resumen del censo cuenta siete: la séptima (`156216`) es el propio comando de medición, cuyo texto contiene los patrones que busca; el listado por proceso del mismo fichero muestra las seis.
 - **Caída por la config de Codex** (`reviews/2026-10-06-ticketing/ingame-w222d/RESULTS.md`):
   - `~/.codex/config.toml` (mtime 20:55:02) llevaba `enabled = true` en las dos entradas `dayz-mcp*`; no se observó quién lo escribió.
   - El gate de procedencia solo admite `command`, `args` y `tool_timeout_sec` (`tools/dayz_mcp/host_config.py:73`): un cliente que arranca con esa clave muere con `daemon_provenance_conflict`. El primer fallo observado fue a las 22:19.
@@ -38,7 +38,7 @@
     - 855c, 9941, 86a3 y 8308 (`ingame-v12/RESULTS.md`);
     - b58f y 33ed (`round3/ROUND3.md`);
     - 222d y b855 (`ingame-w222d/RESULTS.md`).
-  - Nuevas: c852, 204e, ca47, d9c8, 5880 y fb98 (`round3/ROUND3.md`), y ace5 con su corrección 9d9b (`ingame-w222d/RESULTS.md`).
+  - Nuevas: c852, 204e, ca47, d9c8, 5880 y fb98 (`round3/ROUND3.md`), ace5 (`ingame-w222d/RESULTS.md`) y su corrección 9d9b (`C:\Users\guill\dzmcp_gauntlet\SESSION-STATE.md:616`).
 - **Riesgos abiertos.** Los dos primeros son de esta ventana; los demás vienen del LIVE-STATE revisado en #231.
   - El gate de procedencia muere ante una clave que añada un host (`ace5`).
   - `-packonly` con un namespace distinto de la carpeta (lo permite el diseño B) no se ha probado con las Tools reales.
