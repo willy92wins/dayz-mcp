@@ -1,7 +1,7 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-09 23:51 (Madrid; medido: main, árboles vivos, launcher, PBO, procesos e instancias)
+# DayZ-MCP - Estado vivo - 2026-10-09 23:57 (Madrid; medido: main, árboles vivos, launcher, PBO, procesos e instancias)
 
 - **main** = `9f3e7de` (#230, 222d).
   - Hoy entraron:
@@ -13,31 +13,36 @@
   - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) están en `9f3e7de`, sin cambios en ficheros versionados.
   - Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
 - **Launcher `dayz-test-v1`, resellado el 2026-10-09 en la segunda ventana de 222d (22:19-23:49):**
-  - PE de LIVE `CA9E262F…` y de T130 `F2048F35…`; mismo `app.pyz` `9DCC15BA…`.
+  - PE de LIVE `CA9E262F…` y de T130 `F2048F35…`; `app.pyz` `9DCC15BA…`, medido tras el resellado.
   - La lista `addonbuilder-include.lst` es igual al literal sellado.
-  - `check_native_launcher_registry.py` y el check del lock dan ok en los dos árboles después de pasar a `main`.
+  - `check_native_launcher_registry.py` y el check del lock dan ok en los dos árboles: re-ejecutados a las 23:57, después de pasar a `main` (`C:\Users\guill\DayZ_MCP_backups\w222d2-20261009\step6-checks-*.log`).
   - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\w222d2-20261009\` (`steps.log`).
 - **PBO vivo:** `177471A7…` (puente "12"), sin cambios.
 - **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
-  - A las 23:51 no había procesos DayZ.
-  - El daemon default corre desde las 23:22, arrancado por el cliente de una sesión de Codex. El de 130, desde las 23:45, por el harness de la aceptación.
-  - Clientes a las 23:51: cuatro cadenas de Codex y una de esta sesión.
-- **Caída del 2026-10-09, de 20:55 a 23:21:**
-  - `~/.codex/config.toml` se reescribió con `enabled = true` en las dos entradas `dayz-mcp*`. Probablemente lo hizo la app de Codex; no se observó quién.
-  - El gate de procedencia solo admite `command`, `args` y `tool_timeout_sec` (`tools/dayz_mcp/host_config.py:73`), así que todo cliente moría al arrancar con `daemon_provenance_conflict`.
-  - Se quitó la línea con permiso del dueño. Puede volver a escribirse; arreglo duradero pedido en `ace5`.
+  - Censo de las 23:57: `w222d2-20261009\step7-census.txt`.
+    - No había procesos DayZ.
+    - El daemon default corre desde las 23:22:18. A esa hora el único cliente vivo era de una sesión de Codex (desde las 23:21:07). El de 130 corre desde las 23:45:47, arrancado por el harness de la aceptación.
+    - Clientes: dos cadenas default y tres de 130 de la sesión de Codex, y una default de esta sesión.
+- **Caída por la config de Codex** (`reviews/2026-10-06-ticketing/ingame-w222d/RESULTS.md`):
+  - `~/.codex/config.toml` (mtime 20:55:02) llevaba `enabled = true` en las dos entradas `dayz-mcp*`; no se observó quién lo escribió.
+  - El gate de procedencia solo admite `command`, `args` y `tool_timeout_sec` (`tools/dayz_mcp/host_config.py:73`): un cliente que arranca con esa clave muere con `daemon_provenance_conflict`. El primer fallo observado fue a las 22:19.
+  - Recuperación: la entrada `dayz-mcp` perdió la clave en una reescritura con mtime 23:21:05, y la línea de `dayz-mcp-130` se quitó a las 23:44:53 con permiso del dueño.
+  - Puede volver a escribirse; el arreglo duradero está pedido en `ace5`.
 - **Verificado en juego el 2026-10-09:**
   - v12: `reviews/2026-10-06-ticketing/ingame-v12/RESULTS.md` (855c, 9941, 8308, 86a3).
   - 222d: `reviews/2026-10-06-ticketing/ingame-w222d/RESULTS.md`.
     - SimpleGroup con binarize sale completo: 62 de 62 copias idénticas a la fuente, `config.bin` y modelos ODOL.
     - LFHeli_OH1 con binarize se rechaza con `build_namespace_source_mismatch` y su remediación, sin AddonBuilder y sin tocar el PBO desplegado.
 - **Buzón:**
-  - Resueltas hoy: 855c, 9941, 86a3, 8308, b58f, 33ed, 222d y b855.
-  - Nuevas: c852, 204e, ca47, d9c8, 5880, fb98, ace5 y la corrección 9d9b.
-- **Riesgos abiertos:**
-  - El gate de procedencia muere ante una clave que añada un host (`ace5`); la app de Codex puede volver a escribir `enabled = true`.
-  - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; aparcado: `round2/2986_PARKED.md`).
+  - Resueltas hoy:
+    - 855c, 9941, 86a3 y 8308 (`ingame-v12/RESULTS.md`);
+    - b58f y 33ed (`round3/ROUND3.md`);
+    - 222d y b855 (`ingame-w222d/RESULTS.md`).
+  - Nuevas: c852, 204e, ca47, d9c8, 5880 y fb98 (`round3/ROUND3.md`), y ace5 con su corrección 9d9b (`ingame-w222d/RESULTS.md`).
+- **Riesgos abiertos.** Los dos primeros son de esta ventana; los demás vienen del LIVE-STATE revisado en #231.
+  - El gate de procedencia muere ante una clave que añada un host (`ace5`).
   - `-packonly` con un namespace distinto de la carpeta (lo permite el diseño B) no se ha probado con las Tools reales.
+  - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; aparcado: `round2/2986_PARKED.md`).
   - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`); la aceptación FenceKit de 9941 quedó INCONCLUSA.
   - En los tres lanzamientos en 1.29 del ciclo v12, el cliente quedó en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
   - El linter offline no detecta casts entre tipos no relacionados (`c852`).

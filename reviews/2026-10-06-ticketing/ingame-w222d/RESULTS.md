@@ -21,8 +21,9 @@ Calibration: these give FAIL:
 - the two builds of the v11b cycle (SimpleGroup by omission, LFHeli_OH1 by prefix);
 - in each window, a mutant of the new SimpleGroup build with one entry dropped, and one with the prefix replaced.
 
-The deployed SimpleGroup PBO was built from an older source: 3 scripts are missing from it and 7 differ. The
-decisive check is therefore against the frozen source, and the reference only classifies differences.
+The deployed SimpleGroup PBO was built from a different source: 3 scripts of the frozen source are missing from it
+and 7 differ. The decisive check is therefore against the frozen source, and the reference only classifies
+differences.
 
 ## Window 1 (20:36-20:52): design B, PR #230 head `05637e3`
 - **Quiescence:** the last DayZ server had ended at 20:16. 8 client chains were closed (two Claude sessions, the Codex
@@ -37,7 +38,9 @@ decisive check is therefore against the frozen source, and the reference only cl
   - The sampled AddonBuilder command line is `"<stage>\SimpleGroup" "P:\Mods\@SimpleGroup\Addons" "-prefix=SimpleGroup"
     "-temp=P:\temp\SimpleGroup" "-include=<bundle>\addonbuilder-include.lst" -clear`.
   - The server compiled every script module and logged `[SimpleGroup] Config loaded`. The stack trace about
-    `PluginConfigDebugProfile` in the same log also appears in older runs without this change.
+    `PluginConfigDebugProfile` in the same log also appears in three earlier server logs: the SimpleGroup and
+    LFHeli_OH1 runs of 2026-10-08, and a DayZ_MCP run at 20:15 that day
+    (`w222d2-20261009\plugin-error-preexisting.txt`).
 - **LFHeli_OH1: FAIL.** `LFHeli_OH1.pbo` has prefix `LFHeli`, the 32 include-list files and `config.bin`, but all 7
   models are missing.
   - binarize was started with the output folder `P:\temp\LFHeli_OH1\LFHeli`, the temp folder plus the prefix.
@@ -60,15 +63,24 @@ starts, with a specific error and a remediation.
 
 ## Window 2 (22:19-23:49): PR #230 head `1380e0c`
 - **Quiescence and reseal:** only this session's two client chains were open, and no daemon ran. Both trees were
-  resealed, with the include list equal to the literal. The 19 regression modules ran 428 tests, OK.
-- **Interruption.** The harnesses could not start: `daemon_provenance_conflict` at `tools/dayz_mcp/host_config.py:255`.
-  - At 20:55 `~/.codex/config.toml` had been rewritten with `enabled = true` added to both `[mcp_servers.dayz-mcp*]`
-    entries. The writer was most likely the Codex app; that was not observed.
-  - The gate accepts only `command`, `args` and `tool_timeout_sec` there (`host_config.py:73`), so every DayZ-MCP
-    client failed at startup from 20:55, in any session.
-  - With the owner's approval the remaining line was removed; the TOML is otherwise equal. Inbox
-    `fb-20261009-215009-ace5` asks for the durable fix.
-  - Meanwhile a Codex session had reconnected and ran a DayZ_MCP server from 23:36 to 23:41 on the candidate tree.
+  resealed, with the include list equal to the literal. The 19 regression modules ran 428 tests: OK, with 4 skips. Two
+  stage tests need the symlink privilege, and two `test_docs_truth` cases depend on the checkout (`addon/`
+  present).
+- **Interruption.** At 22:19 this session's own clients refused `session_status`. At 22:2x both harnesses failed
+  to start with `daemon_provenance_conflict` at `tools/dayz_mcp/host_config.py:255`
+  (`w222d2-20261009\harness-provenance-conflict-traceback.txt`).
+  - Compared with the window-1 backup, `~/.codex/config.toml` (mtime 20:55:02) carried `enabled = true` in both
+    `[mcp_servers.dayz-mcp*]` entries. Who wrote it was not observed.
+  - The gate accepts only `command`, `args` and `tool_timeout_sec` there (`host_config.py:73`). A client of that
+    instance that starts while the key is present fails at startup, in any session. The first failure observed
+    was at 22:19.
+  - Recovery:
+    - the `dayz-mcp` entry lost the key in a rewrite with mtime 23:21:05, and a Codex client started at 23:21:07;
+    - the `dayz-mcp-130` line was removed at 23:44:53 with the owner's approval, the TOML otherwise equal.
+    - Inbox `fb-20261009-215009-ace5` asks for the durable fix.
+  - Meanwhile a Codex session had reconnected, and a DayZ_MCP server ran from 23:36 to 23:41 on the candidate tree.
+    The evidence: the server RPT `DayZDiag_x64_2026-10-09_23-36-34.RPT`, last written at 23:41:48, and the Codex
+    client (23:21:07) and default daemon (23:22:18) in `w222d2-20261009\step7-census.txt`.
 - **SimpleGroup: PASS again.**
   - Same result: 70 entries, 62/62 byte-identical copies, `config.bin` and 6 ODOL models, the same argv shape.
   - The two new mutants give FAIL.
@@ -81,11 +93,14 @@ starts, with a specific error and a remediation.
     The AddonBuilder user log gained 0 bytes.
 - **Close:**
   - #230 merged as `9f3e7de`. Its `tools/` is identical to `1380e0c`; only #231's docs differ.
-  - LIVE moved to `main` and T130 detached on `9f3e7de`. The lock and registry checks pass on both: PE `CA9E262F` and
-    `F2048F35`, `app.pyz` `9DCC15BA`.
+  - LIVE moved to `main` and T130 detached on `9f3e7de`.
+  - The lock and registry checks pass on both when rerun at 23:57 after the move (`step6-checks-live.log`,
+    `step6-checks-t130.log`), with PE `CA9E262F` and `F2048F35`. The `app.pyz` hash `9DCC15BA` was measured right
+    after the reseal.
 
 ## Not verified
 - `-packonly` with a namespace that differs from the folder (allowed by design B) was not run with real Tools.
 - Projects other than SimpleGroup and LFHeli_OH1 were not built.
 - The models of the SimpleGroup build were checked as ODOL, not opened.
-- The ODOL bytes differ between builds, a known AddonBuilder variation.
+- Between the two windows' SimpleGroup builds only `data\t2\t2_flagpole.p3d` differs (same size, different
+  bytes). The cause was not isolated.
