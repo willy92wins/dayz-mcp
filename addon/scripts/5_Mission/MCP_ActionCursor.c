@@ -57,10 +57,18 @@ modded class ActionTargetsCursor
 		super.GetTarget();
 	}
 
+#ifdef DAYZ_1_29
 	override void Update()
 	{
 		m_MCPRefreshSeen = false;
 		super.Update();
+#else
+	// 1.30 added the fullUpdate parameter to the vanilla signature.
+	override void Update(bool fullUpdate = true)
+	{
+		m_MCPRefreshSeen = false;
+		super.Update(fullUpdate);
+#endif
 		if (!m_MCPRefreshSeen)
 		{
 			return;
