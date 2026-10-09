@@ -49,6 +49,7 @@ _INITIAL_CORE_NAMES = frozenset(
 # one is held only took the information away from weak callers (b753).
 _INITIAL_READ_TOOL_NAMES = frozenset(
     {
+        "action_cursor",
         "camera_get",
         "entities_query",
         "input_describe",

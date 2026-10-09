@@ -95,7 +95,13 @@ def _lease_free_read_tools() -> set[str]:
     """
     fronted = _bridge_commands_by_tool()
     reads = {tool for tool, commands in fronted.items() if commands <= READ_ONLY_COMMANDS}
-    unfronted = READ_ONLY_COMMANDS - set().union(*fronted.values())
+    mapped = {
+        command
+        for mapping in server._BRIDGE_COMMAND_TOOLS.values()
+        for command in mapping
+    }
+    # A command mapped to None is internal. It is not an unfronted public tool.
+    unfronted = READ_ONLY_COMMANDS - mapped
     return reads | unfronted
 
 

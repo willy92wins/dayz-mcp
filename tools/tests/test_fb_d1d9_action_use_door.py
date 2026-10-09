@@ -156,11 +156,10 @@ class ActionUseDoorToolTest(unittest.IsolatedAsyncioTestCase):
         # refusal there fails here until the description names it too.
         tools = {tool.name: tool for tool in await self.app.list_tools()}
         description = tools[COMMAND].description or ""
-        body = _method_body(
-            BRIDGE_PATH.read_text(encoding="utf-8"), "protected bool DispatchActionUse("
+        door = _method_body(
+            BRIDGE_PATH.read_text(encoding="utf-8"), "protected bool ApplyDoorSelection("
         )
-        door = _if_body(body, 'command.cmd == "action_use_door"')
-        codes = set(re.findall(r'result\.error = "(\w+)"', door))
+        codes = set(re.findall(r'result\.error = "(\w+)"', door)) - {"bad_args"}
         self.assertEqual(
             codes, {"not_a_building", "door_out_of_range", "door_component_not_found"}
         )
@@ -426,7 +425,7 @@ class ActionUseDoorEnforceContractTest(unittest.TestCase):
     def test_door_branch_builds_the_component_target_and_names_the_errors(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
         body = _method_body(source, "protected bool DispatchActionUse(")
-        door = _if_body(body, 'command.cmd == "action_use_door"')
+        door = _method_body(source, "protected bool ApplyDoorSelection(")
         self.assertIn("ACTION_USE_DOOR_COMPONENT_CAP", source)
         self.assertIn("ACTION_USE_DOOR_COMPONENT_CAP", door)
         for token in (
@@ -481,8 +480,7 @@ class ActionUseDoorEnforceContractTest(unittest.TestCase):
         self,
     ) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        body = _method_body(source, "protected bool DispatchActionUse(")
-        door = _squash(_if_body(body, 'command.cmd == "action_use_door"'))
+        door = _squash(_method_body(source, "protected bool ApplyDoorSelection("))
         blocks = (
             ("range check", _squash(DOOR_RANGE_CHECK)),
             ("component scan", _squash(DOOR_COMPONENT_SCAN)),

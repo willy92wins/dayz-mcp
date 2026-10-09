@@ -74,6 +74,8 @@ READ_ONLY = {
     "weapon_state",
     "input_describe",
     "world_time_get",
+    "action_cursor",
+    "action_cursor_ids",
 }
 
 

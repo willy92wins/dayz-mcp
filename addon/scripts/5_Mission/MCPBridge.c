@@ -35,7 +35,7 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -619,6 +619,10 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchWeaponState(command, result);
 		}
+		else if (command.cmd == "action_cursor_ids")
+		{
+			postNow = DispatchActionCursorIds(command, result);
+		}
 		else if (command.cmd == "entities_query")
 		{
 			postNow = DispatchEntitiesQuery(command, result);
@@ -839,6 +843,54 @@ class MCPBridge : Managed
 			}
 		}
 		return 0;
+	}
+
+	// Resolve captured network pairs against the run registry. Does not Insert.
+	protected bool DispatchActionCursorIds(MCPCommand command, MCPResult result)
+	{
+		int count;
+		int index;
+		int low;
+		int high;
+		Object resolved;
+		MCPArgs args;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		args = command.args;
+		if (!args.net_low || !args.net_high)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		count = args.net_low.Count();
+		if (count != args.net_high.Count() || count > 16)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		result.cursor_ids = new MCPCursorIds();
+		result.cursor_ids.run_token = args.run_token;
+		index = 0;
+		while (index < count)
+		{
+			low = args.net_low.Get(index);
+			high = args.net_high.Get(index);
+			resolved = null;
+			if (GetGame())
+			{
+				resolved = GetGame().GetObjectByNetworkId(low, high);
+			}
+			result.cursor_ids.object_ids.Insert(RuntimeObjectId(resolved));
+			index = index + 1;
+		}
+		result.ok = true;
+		return true;
 	}
 
 	// Server read. "Local player" on this peer is ResolvePlayer: empty uid is

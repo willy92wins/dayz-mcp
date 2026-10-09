@@ -106,6 +106,12 @@ PRUNABLE_FIELDS = (
     # vehicle_telemetry fills it with the seated transport's GetDirection.
     # Omitted when the player is not in a transport (c32c).
     "direction",
+    # action_cursor fills it with the HUD snapshot (86a3).
+    "action_cursor",
+    # player_look_at fills it with the measured convergence report (86a3).
+    "look_at",
+    # action_cursor_ids fills it with registry ids for the captured pairs.
+    "cursor_ids",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -135,18 +141,46 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
 # accepted (untyped write), found and object_id (PostJobSuccess, broadly
 # attributed).
 OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
-    "door_index": frozenset({"action_use_door"}),
-    "component_index": frozenset({"action_use_door", "action_use_component"}),
+    "door_index": frozenset({"action_use_door", "action_hold"}),
+    "component_index": frozenset({
+        "action_use_door",
+        "action_use_component",
+        "action_hold",
+    }),
     "clicked": frozenset({"ui_click"}),
     "handler": frozenset({"ui_click"}),
     "user_id": frozenset({"ui_click"}),
     "delivered": frozenset({"key_press"}),
     "dik": frozenset({"key_press"}),
     "requested": frozenset({"player_respawn"}),
-    "action": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
-    "target": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
-    "distance": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
-    "started": frozenset({"action_use", "action_use_door", "action_use_target", "action_use_component"}),
+    "action": frozenset({
+        "action_use",
+        "action_use_door",
+        "action_use_target",
+        "action_use_component",
+        "action_hold",
+    }),
+    "target": frozenset({
+        "action_use",
+        "action_use_door",
+        "action_use_target",
+        "action_use_component",
+        "action_hold",
+    }),
+    "distance": frozenset({
+        "action_use",
+        "action_use_door",
+        "action_use_target",
+        "action_use_component",
+        "action_hold",
+    }),
+    "started": frozenset({
+        "action_use",
+        "action_use_door",
+        "action_use_target",
+        "action_use_component",
+        "action_hold",
+    }),
     "confirmed": frozenset({"hands_take", "weapon_state"}),
     "sent": frozenset({"exec_enforce", "notify_players"}),
     "deleted": frozenset({"object_delete"}),
@@ -169,6 +203,22 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "owner_identity": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
     "net_id_low": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
     "net_id_high": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
+    # action_hold observation. The flat MCPResult sends the defaults on every
+    # verb; only the hold commands write them, and 0 / false are answers.
+    "hold_protocol": frozenset({"action_hold", "action_hold_cancel"}),
+    "hold_id": frozenset({"action_hold", "action_hold_cancel"}),
+    "end_state": frozenset({"action_hold"}),
+    "reason": frozenset({"action_hold"}),
+    "action_state": frozenset({"action_hold"}),
+    "action_state_known": frozenset({"action_hold"}),
+    "duration_s": frozenset({"action_hold"}),
+    "completed_cycles": frozenset({"action_hold"}),
+    "cycles_scope": frozenset({"action_hold"}),
+    "placed_known": frozenset({"action_hold"}),
+    "already_placed": frozenset({"action_hold"}),
+    "flag_restored": frozenset({"action_hold"}),
+    "cleanup_complete": frozenset({"action_hold", "action_hold_cancel"}),
+    "matched": frozenset({"action_hold_cancel"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries

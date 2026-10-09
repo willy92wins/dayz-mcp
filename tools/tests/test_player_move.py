@@ -648,7 +648,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "11";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)
@@ -1705,22 +1705,36 @@ class PlayerMovePayloadTest(unittest.TestCase):
         for owner in ("MCPResult", "MCPJob"):
             with self.subTest(owner=owner):
                 self.assertEqual(_class_members(self.messages, owner).count(("ref MCPPlayerMove", FIELD)), 1)
-        # player_move sits just before player_trace. direction (c32c) is last.
+        # player_move sits just before player_trace. direction (c32c) is followed
+        # by the 86a3 refs action_cursor, look_at and cursor_ids.
         result_members = _class_members(self.messages, "MCPResult")
+        move_at = result_members.index(("ref MCPPlayerMove", FIELD))
         self.assertEqual(
-            result_members[-3:],
+            result_members[move_at:move_at + 6],
             [
                 ("ref MCPPlayerMove", FIELD),
                 ("ref MCPPlayerTraceRead", "player_trace"),
                 ("ref array<float>", "direction"),
+                ("ref MCPActionCursor", "action_cursor"),
+                ("ref MCPLookAt", "look_at"),
+                ("ref MCPCursorIds", "cursor_ids"),
             ],
         )
+        self.assertEqual(result_members[move_at + 6][1], "hold_protocol")
         self.assertLess(self.messages.index("class MCPPlayerMove"), self.messages.index("class MCPResult"))
 
     def test_the_reply_is_prunable_and_a_refusal_keeps_its_zero_facts(self) -> None:
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-3:], (FIELD, "player_trace", "direction")
+            result_prune.PRUNABLE_FIELDS[-6:],
+            (FIELD, "player_trace", "direction", "action_cursor", "look_at", "cursor_ids"),
+        )
+        self.assertEqual(
+            result_prune.PRUNABLE_FIELDS[
+                result_prune.PRUNABLE_FIELDS.index(FIELD):
+                result_prune.PRUNABLE_FIELDS.index(FIELD) + 3
+            ],
+            (FIELD, "player_trace", "direction"),
         )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("world_spawn", {"ok": 1, FIELD: {}})

@@ -32,6 +32,7 @@ def _minimal_args(cmd: str) -> dict:
         "weapon_state",
         "weapon_fire",
         "world_time_get",
+        "action_cursor",
     }:
         return {}
 
@@ -175,6 +176,10 @@ def _minimal_args(cmd: str) -> dict:
         # kind must be one of ui_dialog.KINDS and title is required. It shares no
         # keys with ui_reload_layout despite both being ui_* verbs.
         return {"kind": "acknowledge", "title": "t", "message": "m"}
+    if cmd == "action_hold":
+        return {"action": "use", "selector": "world", "hold_timeout_s": 1.0}
+    if cmd == "action_hold_cancel":
+        return {"hold_id": "hold-1"}
     if cmd == "action_use":
         return {"action": "use"}
     if cmd == "action_use_target":
@@ -198,6 +203,12 @@ def _minimal_args(cmd: str) -> dict:
         }
     if cmd == "bot_stop":
         return {"object_id": 1}
+    if cmd == "player_look_at":
+        return {"pos": [0.0, 0.0, 0.0], "timeout_s": 0.1}
+    if cmd == "player_look_at_release":
+        return {"command_id": 1}
+    if cmd == "action_cursor_ids":
+        return {"net_low": [1], "net_high": [2], "run_token": "run"}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

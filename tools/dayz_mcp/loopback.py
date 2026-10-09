@@ -95,6 +95,7 @@ SERVER_COMMANDS = {
     "entities_query",
     "hands_take",
     "weapon_state",
+    "action_cursor_ids",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -118,6 +119,8 @@ CLIENT_COMMANDS = {
     "ui_reload_layout",
     "ui_focus",
     "ui_dialog",
+    "action_hold",
+    "action_hold_cancel",
     "action_use",
     "action_use_door",
     "action_use_component",
@@ -127,6 +130,9 @@ CLIENT_COMMANDS = {
     "weapon_fire",
     "weapon_raise",
     "weapon_sights",
+    "action_cursor",
+    "player_look_at",
+    "player_look_at_release",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -137,7 +143,18 @@ WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
 # command, release command, builder of the release arguments from the source's
 # id and admitted arguments). ServerState uses this table unless a caller
 # passes its own; a verb with a cleanup command adds its entry here.
-RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = ()
+RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
+    (
+        "player_look_at",
+        "player_look_at_release",
+        lambda command_id, args: {"command_id": command_id},
+    ),
+    (
+        "action_hold",
+        "action_hold_cancel",
+        lambda command_id, args: {"hold_id": args["hold_id"]},
+    ),
+)
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
 # process only answers the one transition those runtimes call.
 _ABANDON_REASONS = frozenset({"cancelled", "tool_timeout"})
@@ -487,6 +504,120 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+_ACTION_HOLD_SELECTORS = frozenset({"world", "hands", "self", "door", "component"})
+_ACTION_HOLD_KEYS = frozenset(
+    {
+        "action",
+        "selector",
+        "classname",
+        "pos",
+        "radius",
+        "hold_timeout_s",
+        "hold_id",
+        "target",
+        "door_index",
+        "door_index_set",
+        "component_index",
+        "component_index_set",
+        "cursor_pos",
+    }
+)
+
+
+def _validate_action_hold_args(args: dict) -> tuple[bool, str | None]:
+    """Closed selector. Door and component indexes are present only when set.
+
+    Enforce reads a missing int as 0, which is a real index, so those modes
+    require the matching *_set flag. hold_id is optional here: the daemon
+    assigns it after this check.
+    """
+
+    if set(args) - _ACTION_HOLD_KEYS:
+        return False, "bad_args"
+    action = args.get("action")
+    selector = args.get("selector")
+    if not _is_non_empty_string(action) or not isinstance(selector, str):
+        return False, "bad_args"
+    if selector not in _ACTION_HOLD_SELECTORS:
+        return False, "bad_args"
+    hold_timeout = args.get("hold_timeout_s")
+    if (
+        not _is_real_number(hold_timeout)
+        or float(hold_timeout) <= 0.0
+        or float(hold_timeout) > 120.0
+    ):
+        return False, "bad_args"
+    if "hold_id" in args and not _is_non_empty_string(args.get("hold_id")):
+        return False, "bad_args"
+    if "radius" in args and not (
+        _is_real_number(args.get("radius"))
+        and 0.0 < float(args["radius"]) <= 200.0
+    ):
+        return False, "bad_args"
+    if "pos" in args and not _is_real_vector3(args.get("pos")):
+        return False, "bad_args"
+    if "classname" in args and not isinstance(args.get("classname"), str):
+        return False, "bad_args"
+    if selector == "self":
+        if args.get("target") != "self":
+            return False, "bad_args"
+        if args.get("classname", "") != "" or "pos" in args:
+            return False, "bad_args"
+        if "door_index" in args or "component_index" in args or "cursor_pos" in args:
+            return False, "bad_args"
+    elif selector == "hands":
+        if args.get("target") != "hands":
+            return False, "bad_args"
+        if "pos" in args or "door_index" in args or "component_index" in args:
+            return False, "bad_args"
+        if "cursor_pos" in args:
+            return False, "bad_args"
+    elif selector == "world":
+        if "target" in args and args.get("target") not in ("", "world"):
+            return False, "bad_args"
+        if "door_index" in args or "component_index" in args or "cursor_pos" in args:
+            return False, "bad_args"
+        if "door_index_set" in args or "component_index_set" in args:
+            return False, "bad_args"
+    elif selector == "door":
+        if "target" in args:
+            return False, "bad_args"
+        if not _is_non_empty_string(args.get("classname")):
+            return False, "bad_args"
+        if args.get("door_index_set") is not True:
+            return False, "bad_args"
+        door_index = args.get("door_index")
+        if (
+            isinstance(door_index, bool)
+            or not isinstance(door_index, int)
+            or door_index < 0
+            or door_index > 63
+        ):
+            return False, "bad_args"
+        if "component_index" in args or "cursor_pos" in args or "component_index_set" in args:
+            return False, "bad_args"
+    else:
+        if "target" in args:
+            return False, "bad_args"
+        if not _is_non_empty_string(args.get("classname")):
+            return False, "bad_args"
+        if args.get("component_index_set") is not True:
+            return False, "bad_args"
+        component_index = args.get("component_index")
+        if (
+            isinstance(component_index, bool)
+            or not isinstance(component_index, int)
+            or component_index < 0
+            or component_index > 2_147_483_647
+        ):
+            return False, "bad_args"
+        if not _is_real_vector3(args.get("cursor_pos")):
+            return False, "bad_args"
+        if "door_index" in args or "door_index_set" in args:
+            return False, "bad_args"
+    return True, None
+
+
 # input_describe name. Printable ASCII so the Enforce ToAscii check (32..126)
 # accepts every string this predicate accepts. 128 matches MCPClientBridge.c
 # INPUT_NAME_MAX.
@@ -581,6 +712,29 @@ def _reject_numeric_errors(validator: _FieldValidator) -> _FieldValidator:
             return False
 
     return validate
+
+
+def _is_i32_list(value: object) -> bool:
+    if not isinstance(value, list) or len(value) > 16:
+        return False
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            return False
+        if item < -2147483648 or item > 2147483647:
+            return False
+    return True
+
+
+def _validate_action_cursor_ids(args: dict) -> tuple[bool, str | None]:
+    if set(args) != {"net_low", "net_high", "run_token"}:
+        return False, "bad_args"
+    if not _is_i32_list(args.get("net_low")) or not _is_i32_list(args.get("net_high")):
+        return False, "bad_args"
+    if len(args["net_low"]) != len(args["net_high"]):
+        return False, "bad_args"
+    if not _is_string(args.get("run_token")):
+        return False, "bad_args"
+    return True, None
 
 
 def _is_real_vector3(value: object) -> bool:
@@ -875,10 +1029,16 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "bot_start",
     "bot_stop",
     "object_resolve",
+    "action_cursor_ids",
 })
+# Client verbs an older PBO must not be handed. Checked on the client census
+# (no server arg-contract hash) at enqueue and again at delivery.
+_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
-_OWNER_CLEANUP_COMMANDS = frozenset({"vehicle_release", "bot_stop"})
+_OWNER_CLEANUP_COMMANDS = frozenset(
+    {"vehicle_release", "bot_stop", "player_look_at_release", "action_hold_cancel"}
+)
 
 
 # Command schemas keep the authenticated ingress contract in one place. Variants
@@ -1364,6 +1524,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     "ui_dialog": _command_schema(delegated=_validate_ui_dialog_args),
+    "action_hold": _command_schema(delegated=_validate_action_hold_args),
+    "action_hold_cancel": _command_schema(
+        _schema_variant(
+            required=("hold_id",),
+            validators={"hold_id": _is_non_empty_string},
+        )
+    ),
     "action_use": _command_schema(
         _schema_variant(
             required=("action",),
@@ -1658,6 +1825,20 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"mode": _one_of("ironsights", "optics", "none")},
         )
     ),
+    "action_cursor": _command_schema(_schema_variant()),
+    "player_look_at": _command_schema(
+        _schema_variant(
+            required=("pos", "timeout_s"),
+            validators={"pos": _is_real_vector3, "timeout_s": _SAFE_POSITIVE_REAL},
+        )
+    ),
+    "player_look_at_release": _command_schema(
+        _schema_variant(
+            required=("command_id",),
+            validators={"command_id": _integer_in_range(minimum=1)},
+        )
+    ),
+    "action_cursor_ids": _command_schema(delegated=_validate_action_cursor_ids),
 }
 
 
@@ -1787,6 +1968,8 @@ class ServerState:
         # by every MCP process; in memory only.
         self.client_dumps = ClientDumpRegistry()
         self.retail_probe: Callable[[], dict[str, object]] | None = None
+        # Embedded mode has no daemon bootstrap. A generation exists from
+        # construction; the daemon replaces it with its process generation.
         self.daemon_generation: str | None = uuid.uuid4().hex
         self._broker_mac_key = os.urandom(32)
         self._broker_rows: dict[int, dict] = {}
@@ -1834,6 +2017,9 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
+        self._holds: dict[str, dict[str, object]] = {}
+        self._hold_by_command: dict[int, str] = {}
+        self._hold_blocked_runs: set[str] = set()
         self._fire_and_forget_ids: set[int] = set()
         self._audit_degraded_count = 0
         self._poll_delay_ms = 0
@@ -2248,6 +2434,10 @@ class ServerState:
                 self._retired_roles.discard("client")
 
     def retire_role(self, run_id: str, role: str, reason: str) -> None:
+        with self._lock:
+            instance = self._role_index.get((run_id, role))
+        if isinstance(instance, str):
+            self._fence_delivered_holds_for_instance(instance)
         discarded_exec: list[tuple[str, str, int]] = []
         finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
         with self._lock:
@@ -2261,6 +2451,7 @@ class ServerState:
         self._flush_queue_discards(discarded_exec, finished_operations)
 
     def retire_run(self, run_id: str, reason: str) -> None:
+        self._fence_delivered_holds(run_id=run_id)
         discarded_exec: list[tuple[str, str, int]] = []
         finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
         with self._lock:
@@ -2361,7 +2552,7 @@ class ServerState:
         if binding is None:
             return
         self._station_epoch += 1
-        queue = self._bound_queues.get(instance, [])
+        queue = list(self._bound_queues.get(instance, []))
         _, retirement = fence_error("binding_retired", retirement_reason=reason)
         hint = retirement.get("hint")
         self._discard_queue(
@@ -3108,6 +3299,39 @@ class ServerState:
             return "bridge_capability_missing"
         return None
 
+    def _client_announce_refusal_locked(
+        self, peer: str, cmd: str, instance: str | None
+    ) -> str | None:
+        """None when this client command was announced by the destination now bound.
+
+        Caller holds the lock. A census from another instance, or one that
+        does not name the command, is hold_not_supported. Re-checked at
+        delivery so a destination change after enqueue cannot hand the verb
+        to an older PBO.
+        """
+
+        if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
+            return None
+        view = self._capabilities_view_locked(peer)
+        if view.get("state") != "announced":
+            return "hold_not_supported"
+        entry = self._peer_caps.get(peer)
+        if not isinstance(entry, dict):
+            return "hold_not_supported"
+        announced_at = entry.get("announced_at")
+        if (
+            not isinstance(announced_at, (int, float))
+            or isinstance(announced_at, bool)
+            or (self._now() - float(announced_at)) >= PEER_STALE_S
+        ):
+            return "hold_not_supported"
+        if not isinstance(instance, str) or instance != entry.get("instance"):
+            return "hold_not_supported"
+        announced = view.get("announced_commands")
+        if not isinstance(announced, list) or cmd not in announced:
+            return "hold_not_supported"
+        return None
+
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:
         """Drop announcements that named a binding which is no longer current."""
         for peer, entry in list(self._peer_caps.items()):
@@ -3317,6 +3541,12 @@ class ServerState:
         refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
+        if not internal:
+            client_refusal = self._client_announce_refusal_locked(
+                peer, cmd, fence_instance
+            )
+            if client_refusal is not None:
+                return (409, {"error": client_refusal}), None, None, None
         pin = None
         if peer == "client" and not internal:
             pin = self._client_gate_pin_locked(fence_instance)
@@ -3415,6 +3645,21 @@ class ServerState:
         )
         if refusal is not None:
             return refusal[0], refusal[1], None, None
+        binding_for_hold = (
+            self._bindings.get(fence_instance) if fence_instance else None
+        )
+        hold_run_id = _binding_run_id(binding_for_hold)
+        if cmd == "action_hold":
+            if isinstance(hold_run_id, str) and hold_run_id in self._hold_blocked_runs:
+                return 409, {"error": "hold_unreconciled"}, None, None
+        # Mint before the release plan so action_hold_cancel sees this hold_id.
+        minted_hold_id: str | None = None
+        if cmd == "action_hold":
+            minted_hold_id = uuid.uuid4().hex
+            while minted_hold_id in self._holds:
+                minted_hold_id = uuid.uuid4().hex
+            args = dict(args)
+            args["hold_id"] = minted_hold_id
         command_id = self._next_id
         self._next_id += 1
         release_plan: tuple[str, dict] | None = None
@@ -3444,6 +3689,28 @@ class ServerState:
                 self._bot_by_lease.setdefault(owner_lease_id, set()).add(
                     raw_object_id
                 )
+        if cmd == "action_hold" and minted_hold_id is not None:
+            owner_session = (
+                owner_client.session_id if owner_client is not None else ""
+            )
+            self._holds[minted_hold_id] = {
+                "command_id": command_id,
+                "session_id": owner_session,
+                "lease_id": owner_lease_id or "",
+                "run_id": hold_run_id or "",
+                "instance": fence_instance or "",
+                "epoch": binding_for_hold.epoch if binding_for_hold is not None else 0,
+                "pid": (
+                    binding_for_hold.pid
+                    if binding_for_hold is not None
+                    and isinstance(binding_for_hold.pid, int)
+                    else 0
+                ),
+                "delivered": False,
+                "closed": False,
+                "needs_fence": False,
+            }
+            self._hold_by_command[command_id] = minted_hold_id
         queue.append(command)
         enqueued_at = self._now()
         self._enqueued_at[command_id] = enqueued_at
@@ -3477,14 +3744,17 @@ class ServerState:
             release_plan=release_plan,
             internal=internal,
         )
+        response: dict[str, object] = {
+            "id": command_id,
+            "peer": peer,
+            "cmd": cmd,
+            "daemon_generation": self.daemon_generation,
+        }
+        if minted_hold_id is not None:
+            response["hold_id"] = minted_hold_id
         return (
             200,
-            {
-                "id": command_id,
-                "peer": peer,
-                "cmd": cmd,
-                "daemon_generation": self.daemon_generation,
-            },
+            response,
             commanded_run_id,
             activity_epoch,
         )
@@ -3860,9 +4130,11 @@ class ServerState:
             self._remove_queued_command_locked(
                 command_id, reason, discarded_exec
             )
+            self._settle_hold_for_command_locked(command_id, delivered=False)
             body = {"status": "dropped"}
         elif state_name == "delivered":
             self._forget_command_tracking_locked(command_id)
+            self._settle_hold_for_command_locked(command_id, delivered=True)
             release = row.get("release")
             if not isinstance(release, tuple) or len(release) != 2:
                 body = {"status": "abandoned"}
@@ -4062,6 +4334,7 @@ class ServerState:
                     self._bound_queues[key] = survivors
             if found_queued:
                 self._forget_command_tracking_locked(command_id)
+                self._settle_hold_for_command_locked(command_id, delivered=False)
         for expr, main_fn, discarded_id in discarded_exec:
             try:
                 if self.exec_audit is not None:
@@ -4146,6 +4419,7 @@ class ServerState:
                 if binding is None:
                     if token in self._retired_instances:
                         bind_label = "binding_retired"
+                        self._peer_last_class[peer] = bind_label
                     elif not self._ever_bound:
                         bind_label = "unbound_after_restart"
                     else:
@@ -4295,6 +4569,7 @@ class ServerState:
                     ):
                         remaining.append(command)
                         continue
+                    refusal = None
                     if (
                         isinstance(command_name, str)
                         and command_name in _CAPABILITY_ADMISSION_COMMANDS
@@ -4303,14 +4578,30 @@ class ServerState:
                         refusal = self._capability_refusal_locked(
                             peer, command_name, token
                         )
-                        if refusal is not None:
-                            self._mark_discarded(
-                                command,
-                                refusal,
-                                discarded_exec,
-                                finished_operations,
-                            )
-                            continue
+                    if (
+                        refusal is None
+                        and isinstance(command_name, str)
+                        and command_name in _CLIENT_ANNOUNCED_COMMANDS
+                        and deliver_accredited
+                    ):
+                        refusal = self._client_announce_refusal_locked(
+                            peer, command_name, token
+                        )
+                    if refusal is not None:
+                        self._mark_discarded(
+                            command,
+                            refusal,
+                            discarded_exec,
+                            finished_operations,
+                        )
+                        continue
+                    if (
+                        command_name == "action_hold"
+                        and isinstance(hold_run_id, str)
+                        and hold_run_id in self._hold_blocked_runs
+                    ):
+                        remaining.append(command)
+                        continue
                     if (
                         isinstance(command_id, int)
                         and isinstance(command_name, str)
@@ -4355,6 +4646,12 @@ class ServerState:
                     tracked = self._broker_rows.get(command_id)
                     if isinstance(tracked, dict) and tracked.get("state") == "queued":
                         tracked["state"] = "delivered"
+                    if command_name == "action_hold" and isinstance(command_id, int):
+                        delivered_hold = self._hold_by_command.get(command_id)
+                        if delivered_hold is not None:
+                            record = self._holds.get(delivered_hold)
+                            if record is not None:
+                                record["delivered"] = True
                     commands.append(wire_command)
                 queue[:] = remaining + queue[len(snapshot) :]
                 if commands and self._poll_delay_ms > 0:
@@ -4577,7 +4874,19 @@ class ServerState:
             if fence is not None:
                 target_instance, target_epoch, _target_pid = fence
                 if target_instance in self._retired_instances:
-                    return 409, {"error": "binding_retired"}
+                    mapped_hold = self._hold_by_command.get(command_id)
+                    hold_record = (
+                        self._holds.get(mapped_hold)
+                        if isinstance(mapped_hold, str)
+                        else None
+                    )
+                    own_hold = (
+                        isinstance(hold_record, dict)
+                        and hold_record.get("command_id") == command_id
+                        and hold_record.get("instance") == target_instance
+                    )
+                    if not own_hold:
+                        return 409, {"error": "binding_retired"}
                 presented = instance or ""
                 if target_instance and presented != target_instance:
                     self._audit_fence(
@@ -4647,6 +4956,9 @@ class ServerState:
                 self._drop_broker_row_locked(command_id)
                 if owner is not None:
                     owner_operation = (owner[0], owner[1], command_id)
+            self._note_hold_result_locked(
+                command_id, stored, discarded, instance or ""
+            )
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
@@ -4748,6 +5060,164 @@ class ServerState:
                 if owner[0].session_id == session_id
             )
 
+    def _hold_records_for(self, session_id: str, lease_id: str) -> list[dict[str, object]]:
+        return [
+            record
+            for record in self._holds.values()
+            if record.get("session_id") == session_id
+            and record.get("lease_id") == lease_id
+            and record.get("closed") is not True
+        ]
+
+    def _command_queued_locked(self, command_id: int) -> bool:
+        for _key, queue in self._iter_mutable_queues():
+            for command in queue:
+                if command.get("id") == command_id:
+                    return True
+        return False
+
+    def _refresh_hold_block_locked(self, run_id: str) -> None:
+        if not run_id:
+            return
+        blocked = any(
+            record.get("run_id") == run_id and record.get("needs_fence") is True
+            for record in self._holds.values()
+        )
+        if blocked:
+            self._hold_blocked_runs.add(run_id)
+        else:
+            self._hold_blocked_runs.discard(run_id)
+
+    def _fence_hold_open_locked(self, hold_id: str) -> None:
+        """Block new holds on this run until the hold command's own result.
+
+        A cancel acknowledgement does not clear this fence. Another run id is
+        not in the blocked set.
+        """
+
+        record = self._holds.get(hold_id)
+        if record is None or record.get("closed") is True:
+            return
+        record["needs_fence"] = True
+        run_id = record.get("run_id")
+        if isinstance(run_id, str):
+            self._refresh_hold_block_locked(run_id)
+
+    def _close_hold_locked(self, hold_id: str, *, needs_fence: bool) -> None:
+        record = self._holds.get(hold_id)
+        if record is None:
+            return
+        record["closed"] = True
+        record["needs_fence"] = needs_fence
+        run_id = record.get("run_id")
+        if isinstance(run_id, str):
+            self._refresh_hold_block_locked(run_id)
+
+    def _retire_queued_holds(self, session_id: str, lease_id: str) -> None:
+        """A hold still only in the queue ended when that queue entry was dropped.
+
+        A delivered hold stays open: clearing the queue does not end it.
+        """
+
+        with self._lock:
+            for hold_id, record in list(self._holds.items()):
+                if record.get("session_id") != session_id:
+                    continue
+                if record.get("lease_id") != lease_id or record.get("closed") is True:
+                    continue
+                if record.get("delivered") is True:
+                    continue
+                command_id = record.get("command_id")
+                if isinstance(command_id, int) and self._command_queued_locked(command_id):
+                    continue
+                self._close_hold_locked(hold_id, needs_fence=False)
+
+    def _fence_open_holds(self, session_id: str, lease_id: str) -> int:
+        with self._lock:
+            fenced = 0
+            for hold_id, record in list(self._holds.items()):
+                if record.get("session_id") != session_id:
+                    continue
+                if record.get("lease_id") != lease_id or record.get("closed") is True:
+                    continue
+                self._close_hold_locked(hold_id, needs_fence=True)
+                fenced += 1
+            return fenced
+
+    def _fence_delivered_holds(self, run_id: str | None = None) -> None:
+        """Keep a retired run's delivered hold fenced. No cancel is published.
+
+        A cancel acknowledgement cannot clear the fence. The hold command's
+        own protocol-1 result can. A different run id is not in this set.
+        """
+
+        with self._lock:
+            for hold_id, record in list(self._holds.items()):
+                if record.get("delivered") is not True or record.get("closed") is True:
+                    continue
+                if run_id is not None and record.get("run_id") != run_id:
+                    continue
+                self._fence_hold_open_locked(hold_id)
+
+    def _fence_delivered_holds_for_instance(self, instance: str) -> None:
+        with self._lock:
+            for hold_id, record in list(self._holds.items()):
+                if record.get("instance") != instance:
+                    continue
+                if record.get("delivered") is not True or record.get("closed") is True:
+                    continue
+                self._fence_hold_open_locked(hold_id)
+
+    def _settle_hold_for_command_locked(self, command_id: int, *, delivered: bool) -> None:
+        """Caller holds self._lock. Abandon fences a delivered hold; a queued one ends."""
+
+        hold_id = self._hold_by_command.get(command_id)
+        if not isinstance(hold_id, str):
+            return
+        record = self._holds.get(hold_id)
+        if record is None or record.get("closed") is True:
+            return
+        if delivered:
+            self._fence_hold_open_locked(hold_id)
+        else:
+            self._close_hold_locked(hold_id, needs_fence=False)
+
+    def _note_hold_result_locked(
+        self, command_id: int, body: dict, lost: bool, presented: str
+    ) -> None:
+        """Reconcile only the recorded hold command from its original destination.
+
+        An echoed hold_id on any other command id, including action_hold_cancel,
+        is not authority. A cancel acknowledgement never clears the fence.
+        """
+
+        hold_id = self._hold_by_command.get(command_id)
+        if not isinstance(hold_id, str):
+            return
+        record = self._holds.get(hold_id)
+        if record is None or record.get("command_id") != command_id:
+            return
+        if record.get("instance") != presented:
+            return
+        echoed = body.get("hold_id")
+        protocol = body.get("hold_protocol")
+        cleanup_complete = body.get("cleanup_complete")
+        if cleanup_complete == 0:
+            cleanup_complete = False
+        elif cleanup_complete == 1:
+            cleanup_complete = True
+        if protocol != 1 or echoed != hold_id:
+            return
+        if record.get("closed") is True and record.get("needs_fence") is False:
+            return
+        if cleanup_complete is True:
+            self._close_hold_locked(hold_id, needs_fence=False)
+            return
+        if record.get("closed") is not True and (
+            lost or cleanup_complete is False
+        ):
+            self._close_hold_locked(hold_id, needs_fence=True)
+
     def cleanup_owner(
         self,
         session_id: str,
@@ -4775,13 +5245,52 @@ class ServerState:
             session_id, reason, lease_id
         )
         cleanup["vehicle_release_enqueued"] = 0
+        self._retire_queued_holds(session_id, lease_id)
+        if self._retail_quarantined():
+            fenced = self._fence_open_holds(session_id, lease_id)
+            if fenced:
+                degraded = cleanup.get("cleanup_degraded", [])
+                values = list(degraded) if isinstance(degraded, list) else []
+                if "retail_quarantine" not in values:
+                    values.append("retail_quarantine")
+                values.append("hold_cancel_unconfirmed")
+                cleanup["cleanup_degraded"] = values
+        else:
+            delivered_ids: list[int] = []
+            with self._lock:
+                for record in self._holds.values():
+                    if record.get("session_id") != session_id:
+                        continue
+                    if record.get("lease_id") != lease_id or record.get("closed") is True:
+                        continue
+                    if record.get("delivered") is not True:
+                        continue
+                    command_id = record.get("command_id")
+                    if isinstance(command_id, int) and not isinstance(command_id, bool):
+                        delivered_ids.append(command_id)
+            enqueued = 0
+            for command_id in delivered_ids:
+                degraded = cleanup.get("cleanup_degraded", [])
+                values = list(degraded) if isinstance(degraded, list) else []
+                if "hold_cancel_unconfirmed" not in values:
+                    values.append("hold_cancel_unconfirmed")
+                cleanup["cleanup_degraded"] = values
+                body = self.abandon_command(command_id, "cancelled")
+                if isinstance(body, dict) and body.get("status") == "release_queued":
+                    enqueued += 1
+            if enqueued:
+                cleanup["hold_cancel_enqueued"] = enqueued
         with self._lock:
             pending_bots = bool(self._bot_by_lease.get(lease_id))
         if not vehicle_active and not pending_bots:
             return cleanup
 
         if self._retail_quarantined():
-            cleanup["cleanup_degraded"] = ["retail_quarantine"]
+            existing = cleanup.get("cleanup_degraded", [])
+            values = list(existing) if isinstance(existing, list) else []
+            if "retail_quarantine" not in values:
+                values.append("retail_quarantine")
+            cleanup["cleanup_degraded"] = values
             return cleanup
 
         # Keep append + fire-and-forget tracking atomic with /poll. These
@@ -4863,7 +5372,7 @@ class ServerState:
             peers = {}
             for peer in sorted(VALID_PEERS):
                 poll_at = last_poll_at.get(peer)
-                bind_state, prefix, bound_age, depth = self._peer_status_view(
+                bind_state, prefix, run_id, bound_age, depth = self._peer_status_view(
                     peer, now
                 )
                 peers[peer] = {
@@ -4875,6 +5384,7 @@ class ServerState:
                     "version": versions.get(peer),
                     "binding_state": bind_state,
                     "instance_prefix": prefix,
+                    "run_id": run_id,
                     "bound_last_poll_age_s": bound_age,
                     "capabilities": self._capabilities_view_locked(peer),
                 }
@@ -5009,6 +5519,7 @@ class ServerState:
             state = self._peer_last_class.get(peer, BINDING_LEGACY)
             chosen = None
         prefix = instance_prefix(chosen.instance) if chosen is not None else None
+        run_id = chosen.run_id if chosen is not None and isinstance(chosen.run_id, str) and chosen.run_id else None
         bound_at = self._bound_last_poll_at.get(peer)
         bound_age = None if bound_at is None else max(0.0, now - bound_at)
         if chosen is not None and chosen.state == BINDING_BOUND:
@@ -5020,7 +5531,7 @@ class ServerState:
             )
         else:
             depth = len(self._legacy_queues.get(peer, []))
-        return state, prefix, bound_age, depth
+        return state, prefix, run_id, bound_age, depth
 
     def cancel_pending(self, reason: str = "server_stopping") -> None:
         discarded_exec: list[tuple[str, str, int]] = []
@@ -5271,6 +5782,8 @@ class Handler(BaseHTTPRequestHandler):
             "id": payload["id"],
             "daemon_generation": payload.get("daemon_generation"),
         }
+        if isinstance(payload.get("hold_id"), str) and payload.get("hold_id"):
+            response["hold_id"] = payload["hold_id"]
         if "cleanup_degraded" in payload:
             response["cleanup_degraded"] = payload["cleanup_degraded"]
         self._json(200, self._with_renewed_lease(response))

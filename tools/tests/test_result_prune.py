@@ -220,9 +220,10 @@ class ResultPruneTest(unittest.TestCase):
         # every verb, so a plain action_use read component_index 0 although its
         # target used -1. Driven off the real whitelist like the test above.
         verbs = (loopback.SERVER_COMMANDS | loopback.CLIENT_COMMANDS) - {
-            "action_use_door"
+            "action_use_door",
+            "action_hold",
         }
-        component_owners = {"action_use_door", "action_use_component"}
+        component_owners = {"action_use_door", "action_use_component", "action_hold"}
         action_owners = result_prune.OWNED_SCALAR_FIELDS["started"]
         self.assertIn("action_use", verbs)
         for verb in sorted(verbs):
@@ -257,15 +258,14 @@ class ResultPruneTest(unittest.TestCase):
                 )
                 self.assertEqual(pruned["door_index"], door)
                 self.assertEqual(pruned["component_index"], component)
-        # door_index still has exactly one owner. component_index is also
-        # written by action_use_component (fde3).
+        # action_hold door and component selectors echo the same indexes.
         self.assertEqual(
             result_prune.OWNED_SCALAR_FIELDS["door_index"],
-            frozenset({"action_use_door"}),
+            frozenset({"action_use_door", "action_hold"}),
         )
         self.assertEqual(
             result_prune.OWNED_SCALAR_FIELDS["component_index"],
-            frozenset({"action_use_door", "action_use_component"}),
+            frozenset({"action_use_door", "action_use_component", "action_hold"}),
         )
 
     def test_vehicle_scalars_have_exactly_their_writing_commands_as_owners(self) -> None:
@@ -402,19 +402,43 @@ GENERIC_SCALAR_OWNERS = {
     "dik": ({"key_press"}, 0),
     "requested": ({"player_respawn"}, 0),
     "action": (
-        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        {
+            "action_use",
+            "action_use_door",
+            "action_use_target",
+            "action_use_component",
+            "action_hold",
+        },
         "",
     ),
     "target": (
-        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        {
+            "action_use",
+            "action_use_door",
+            "action_use_target",
+            "action_use_component",
+            "action_hold",
+        },
         "",
     ),
     "distance": (
-        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        {
+            "action_use",
+            "action_use_door",
+            "action_use_target",
+            "action_use_component",
+            "action_hold",
+        },
         0.0,
     ),
     "started": (
-        {"action_use", "action_use_door", "action_use_target", "action_use_component"},
+        {
+            "action_use",
+            "action_use_door",
+            "action_use_target",
+            "action_use_component",
+            "action_hold",
+        },
         False,
     ),
     "confirmed": ({"hands_take", "weapon_state"}, 0),
@@ -425,7 +449,7 @@ GENERIC_SCALAR_OWNERS = {
     "source": ({"object_anim"}, ""),
     "deferred": ({"inventory_give"}, 0),
     "count_total": ({"entities_query"}, 0),
-    "component_index": ({"action_use_door", "action_use_component"}, 0),
+    "component_index": ({"action_use_door", "action_use_component", "action_hold"}, 0),
 }
 
 # Deliberately not owned. A stale 0 here is still not dropped.

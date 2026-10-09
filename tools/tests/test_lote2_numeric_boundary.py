@@ -101,7 +101,20 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 6 from f4de/120f (player_kill timeout_s, bot_start object_id/ttl_s/timeout_s,
         # bot_stop object_id/timeout_s). uid and action are strings.
         # + 3 from 9d8c (object_resolve pos/radius/timeout_s; type is a string).
-        self.assertEqual(len(rows), 177)
+        # + 3 from 86a3 (action_cursor timeout_s, player_look_at pos and timeout_s).
+        # + 7 from action_hold (hold_timeout_s, timeout_s, radius, door_index,
+        # component_index, pos, cursor_pos). action, classname and target are strings.
+        # 177 before either batch, plus both additions.
+        self.assertEqual(len(rows), 187)
+        self.assertIn(("action_cursor", "timeout_s", "float"), rows)
+        self.assertIn(("player_look_at", "pos", "vector"), rows)
+        self.assertIn(("player_look_at", "timeout_s", "float"), rows)
+        self.assertIn(("action_hold", "hold_timeout_s", "float"), rows)
+        self.assertIn(("action_hold", "timeout_s", "float"), rows)
+        self.assertIn(("action_hold", "door_index", "int"), rows)
+        self.assertIn(("action_hold", "component_index", "int"), rows)
+        self.assertIn(("action_hold", "pos", "vector"), rows)
+        self.assertIn(("action_hold", "cursor_pos", "vector"), rows)
         self.assertIn(("action_use", "component_index", "int"), rows)
         self.assertIn(("action_use", "cursor_pos", "vector"), rows)
         self.assertIn(("player_heal", "timeout_s", "float"), rows)

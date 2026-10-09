@@ -1138,6 +1138,7 @@ class OwnedScalarCensusControlTest(unittest.TestCase):
                 "action_use_component",
                 "action_use_door",
                 "action_use_target",
+                "action_hold",
             },
         )
 

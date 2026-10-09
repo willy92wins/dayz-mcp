@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 83 typed
+game, put the world into a state, act, and read back what the engine did — 86 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -77,13 +77,13 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**83 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**86 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
-`action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
+`action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `key_press`,
 `lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `pipeline_feedback`, `pipeline_inbox`,
-`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
+`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
 `query_player_state`, `restore_gameplay`, `scene_raycast`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
 `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,

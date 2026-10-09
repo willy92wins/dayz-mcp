@@ -43,6 +43,10 @@ READ_ONLY_COMMANDS = frozenset(
         "input_describe",
         # Server read of the in-game clock (World.GetDate); it writes nothing.
         "world_time_get",
+        # Client read of the action cursor. The server correlate that
+        # resolves its network pairs is the same read, not a mutation.
+        "action_cursor",
+        "action_cursor_ids",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

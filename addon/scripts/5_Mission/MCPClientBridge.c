@@ -471,7 +471,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press,player_move," + "player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press," + "player_look_at,player_look_at_release,player_move,player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -489,6 +489,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const float POLL_WATCHDOG_S = 30.0;
 	protected float m_Backoff;
 	protected int m_Tick;
+	protected int m_ActionHoldCommandId;
 	protected int m_TickPollSent;
 	protected int m_TickPollCallback;
 	protected bool m_PollInFlight;
@@ -528,6 +529,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Accum = 0.0;
 		m_Backoff = 0.0;
 		m_Tick = 0;
+		m_ActionHoldCommandId = -1;
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
@@ -1221,6 +1223,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "player_trace")
 		{
 			postNow = DispatchPlayerTrace(command, result);
+		}
+		else if (command.cmd == "action_cursor")
+		{
+			postNow = DispatchActionCursor(command, result);
+		}
+		else if (command.cmd == "player_look_at")
+		{
+			postNow = DispatchPlayerLookAt(command, result);
+		}
+		else if (command.cmd == "player_look_at_release")
+		{
+			postNow = DispatchPlayerLookAtRelease(command, result);
+		}
+		else if (command.cmd == "action_hold")
+		{
+			postNow = DispatchActionHold(command, result);
+		}
+		else if (command.cmd == "action_hold_cancel")
+		{
+			postNow = DispatchActionHoldCancel(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -3642,12 +3664,186 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		Log("dialog result state=" + dialog.state + " reason=" + dialog.reason);
 	}
 
+	// Door cursor and echoed indexes. Called only from the action_use_door gate
+	// and the action_hold door gate. Returns false when result.error is set.
+	protected bool ApplyDoorSelection(MCPCommand command, MCPResult result, Object targetObj, bool holdCommand, out vector cursorHitPos, out ActionTarget actionTarget)
+	{
+		cursorHitPos = targetObj.GetPosition();
+		actionTarget = null;
+		if (holdCommand && !command.args.door_index_set)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return false;
+		}
+
+		// Echo the requested index before any refusal. The int defaults
+		// to 0, which is a real door, so an early return would otherwise
+		// look like door 0 to the caller.
+		int wantedDoor = command.args.door_index;
+		result.door_index = wantedDoor;
+
+		Building doorBuilding = Building.Cast(targetObj);
+		if (!doorBuilding)
+		{
+			result.ok = false;
+			result.error = "not_a_building";
+			return false;
+		}
+
+		int doorCount = doorBuilding.GetDoorCount();
+		if (wantedDoor < 0 || wantedDoor >= doorCount)
+		{
+			result.ok = false;
+			result.error = "door_out_of_range";
+			return false;
+		}
+
+		int doorComponent = -1;
+		int componentScan = 0;
+		while (componentScan < ACTION_USE_DOOR_COMPONENT_CAP && doorComponent < 0)
+		{
+			if (doorBuilding.GetDoorIndex(componentScan) == wantedDoor)
+			{
+				doorComponent = componentScan;
+			}
+
+			componentScan = componentScan + 1;
+		}
+
+		if (doorComponent < 0)
+		{
+			result.ok = false;
+			result.error = "door_component_not_found";
+			return false;
+		}
+
+		array<string> doorComponentNames = new array<string>();
+		doorBuilding.GetActionComponentNameList(doorComponent, doorComponentNames);
+		bool doorSelectionFound = false;
+		string doorSelection = "";
+		int nameScan = 0;
+		string doorComponentName = "";
+		while (nameScan < doorComponentNames.Count() && !doorSelectionFound)
+		{
+			doorComponentName = doorComponentNames.Get(nameScan);
+			if (doorComponentName.Contains("doorstwin"))
+			{
+				nameScan = nameScan + 1;
+			}
+			else
+			{
+				doorSelection = doorComponentName;
+				doorSelectionFound = true;
+			}
+		}
+
+		if (!doorSelectionFound)
+		{
+			result.ok = false;
+			result.error = "door_component_not_found";
+			return false;
+		}
+
+		vector doorModelPos = doorBuilding.GetSelectionPositionMS(doorSelection);
+		cursorHitPos = doorBuilding.ModelToWorld(doorModelPos);
+		actionTarget = new ActionTarget(doorBuilding, null, doorComponent, cursorHitPos, 0);
+		result.component_index = doorComponent;
+		return true;
+	}
+
+	// Component cursor and echoed index. Called only from the action_use_component
+	// gate and the action_hold component gate. Returns false when result.error is set.
+	protected bool ApplyComponentSelection(MCPCommand command, MCPResult result, Object targetObj, bool holdCommand, out vector cursorHitPos, out ActionTarget actionTarget)
+	{
+		cursorHitPos = targetObj.GetPosition();
+		actionTarget = null;
+		if (holdCommand && !command.args.component_index_set)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return false;
+		}
+
+		// Echo before any refusal. 0 is a valid component, so an early
+		// return must not look like "component 0" by default alone.
+		int wantedComponent = command.args.component_index;
+		result.component_index = wantedComponent;
+		if (command.args.classname == "" || wantedComponent < 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return false;
+		}
+
+		vector suppliedCursor;
+		if (!ArrayToVector(command.args.cursor_pos, suppliedCursor))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return false;
+		}
+
+		// One lookup. GetActionComponentNameList returns -1 when the
+		// index is not found, 0 for a valid default component, and 1
+		// for a valid named component (object.c:197-198). 0 is kept:
+		// an empty name list is that default, not a missing component.
+		// cursor_pos is the caller's point; the selection centre is
+		// not guessed.
+		array<string> componentNames = new array<string>();
+		int componentState = targetObj.GetActionComponentNameList(wantedComponent, componentNames);
+		if (componentState < 0)
+		{
+			result.ok = false;
+			result.error = "component_not_found";
+			return false;
+		}
+
+		cursorHitPos = suppliedCursor;
+		actionTarget = new ActionTarget(targetObj, null, wantedComponent, cursorHitPos, 0);
+		return true;
+	}
+
 	// Starts a user action on the local player. Returns after PerformActionStart;
 	// UseAcknowledgment() is true (actionbase.c:1146-1148) so the server still
 	// re-evaluates. Waiting here would freeze the sim tick.
 	protected bool DispatchActionUse(MCPCommand command, MCPResult result)
 	{
 		result.started = false;
+
+		bool holdCommand = command.cmd == "action_hold";
+		string holdSelector = "";
+		if (holdCommand)
+		{
+			if (!command.args)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+
+			holdSelector = command.args.selector;
+			if (holdSelector != "world" && holdSelector != "hands" && holdSelector != "self" && holdSelector != "door" && holdSelector != "component")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+
+			if (command.args.hold_id == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+
+			if (!IsFiniteFloat(command.args.hold_timeout_s) || command.args.hold_timeout_s <= 0.0 || command.args.hold_timeout_s > 120.0)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
 
 		if (!command.args || command.args.action == "")
 		{
@@ -3696,10 +3892,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		if (holdCommand && !ActionContinuousBase.Cast(action))
+		{
+			result.ok = false;
+			result.error = "not_continuous";
+			return true;
+		}
+
 		result.action = action.Type().ToString();
 
 		string targetMode;
-		if (command.cmd == "action_use_target")
+		if (command.cmd == "action_use_target" || (holdCommand && (holdSelector == "hands" || holdSelector == "self")))
 		{
 			targetMode = command.args.target;
 			if (targetMode != "hands" && targetMode != "self")
@@ -3797,117 +4000,31 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			vector cursorHitPos = targetObj.GetPosition();
 			if (command.cmd == "action_use_door")
 			{
-				// Echo the requested index before any refusal. The int defaults
-				// to 0, which is a real door, so an early return would otherwise
-				// look like door 0 to the caller.
-				int wantedDoor = command.args.door_index;
-				result.door_index = wantedDoor;
-
-				Building doorBuilding = Building.Cast(targetObj);
-				if (!doorBuilding)
+				if (!ApplyDoorSelection(command, result, targetObj, holdCommand, cursorHitPos, actionTarget))
 				{
-					result.ok = false;
-					result.error = "not_a_building";
 					return true;
 				}
-
-				int doorCount = doorBuilding.GetDoorCount();
-				if (wantedDoor < 0 || wantedDoor >= doorCount)
-				{
-					result.ok = false;
-					result.error = "door_out_of_range";
-					return true;
-				}
-
-				int doorComponent = -1;
-				int componentScan = 0;
-				while (componentScan < ACTION_USE_DOOR_COMPONENT_CAP && doorComponent < 0)
-				{
-					if (doorBuilding.GetDoorIndex(componentScan) == wantedDoor)
-					{
-						doorComponent = componentScan;
-					}
-
-					componentScan = componentScan + 1;
-				}
-
-				if (doorComponent < 0)
-				{
-					result.ok = false;
-					result.error = "door_component_not_found";
-					return true;
-				}
-
-				array<string> doorComponentNames = new array<string>();
-				doorBuilding.GetActionComponentNameList(doorComponent, doorComponentNames);
-				bool doorSelectionFound = false;
-				string doorSelection = "";
-				int nameScan = 0;
-				string doorComponentName = "";
-				while (nameScan < doorComponentNames.Count() && !doorSelectionFound)
-				{
-					doorComponentName = doorComponentNames.Get(nameScan);
-					if (doorComponentName.Contains("doorstwin"))
-					{
-						nameScan = nameScan + 1;
-					}
-					else
-					{
-						doorSelection = doorComponentName;
-						doorSelectionFound = true;
-					}
-				}
-
-				if (!doorSelectionFound)
-				{
-					result.ok = false;
-					result.error = "door_component_not_found";
-					return true;
-				}
-
-				vector doorModelPos = doorBuilding.GetSelectionPositionMS(doorSelection);
-				cursorHitPos = doorBuilding.ModelToWorld(doorModelPos);
-				actionTarget = new ActionTarget(doorBuilding, null, doorComponent, cursorHitPos, 0);
-				result.component_index = doorComponent;
 			}
 			else if (command.cmd == "action_use_component")
 			{
-				// Echo before any refusal. 0 is a valid component, so an early
-				// return must not look like "component 0" by default alone.
-				int wantedComponent = command.args.component_index;
-				result.component_index = wantedComponent;
-				if (command.args.classname == "" || wantedComponent < 0)
+				if (!ApplyComponentSelection(command, result, targetObj, holdCommand, cursorHitPos, actionTarget))
 				{
-					result.ok = false;
-					result.error = "bad_args";
 					return true;
 				}
-
-				vector suppliedCursor;
-				if (!ArrayToVector(command.args.cursor_pos, suppliedCursor))
+			}
+			else if (command.cmd == "action_hold" && holdSelector == "door")
+			{
+				if (!ApplyDoorSelection(command, result, targetObj, holdCommand, cursorHitPos, actionTarget))
 				{
-					result.ok = false;
-					result.error = "bad_args";
 					return true;
 				}
-
-				// One lookup. GetActionComponentNameList returns -1 when the
-				// index is not found, 0 for a valid default component, and 1
-				// for a valid named component (object.c:197-198). 0 is kept:
-				// an empty name list is that default, not a missing component.
-				// cursor_pos is the caller's point; the selection centre is
-				// not guessed.
-				array<string> componentNames = new array<string>();
-				int componentState = targetObj.GetActionComponentNameList(wantedComponent, componentNames);
-				if (componentState < 0)
+			}
+			else if (command.cmd == "action_hold" && holdSelector == "component")
+			{
+				if (!ApplyComponentSelection(command, result, targetObj, holdCommand, cursorHitPos, actionTarget))
 				{
-					result.ok = false;
-					result.error = "component_not_found";
 					return true;
 				}
-
-				cursorHitPos = suppliedCursor;
-				actionTarget = new ActionTarget(targetObj, null, wantedComponent, cursorHitPos, 0);
 			}
 			else
 			{
@@ -3952,6 +4069,40 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		if (command.cmd == "action_hold")
+		{
+			if (amc.MCP_HoldBusy() || MCPHoldControl.IsActive())
+			{
+				result.ok = false;
+				result.error = "action_in_progress";
+				return true;
+			}
+
+			MCPHoldControl.Begin(amc, player, action, command.args.hold_id, command.args.hold_timeout_s);
+			amc.PerformActionStart(action, actionTarget, heldItem, NULL);
+			if (!MCPHoldControl.HasData() && !MCPHoldControl.Ready())
+			{
+				MCPHoldControl.NoteSetupFailed();
+			}
+
+			if (MCPHoldControl.Ready())
+			{
+				ApplyHoldObservation(result, MCPHoldControl.Take());
+				return true;
+			}
+
+			MCPJob holdJob = new MCPJob();
+			holdJob.id = command.id;
+			holdJob.kind = "action_hold";
+			holdJob.deadline_s = m_JobRunner.GetElapsedS() + command.args.hold_timeout_s + 8.0;
+			holdJob.tick_poll_sent = result.tick_poll_sent;
+			holdJob.tick_poll_callback = result.tick_poll_callback;
+			holdJob.tick_dispatch = result.tick_dispatch;
+			m_ActionHoldCommandId = command.id;
+			m_JobRunner.AddJob(holdJob);
+			return false;
+		}
+
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
@@ -3967,6 +4118,93 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.started = true;
 		result.ok = true;
 		return true;
+	}
+
+	protected bool DispatchActionHold(MCPCommand command, MCPResult result)
+	{
+		return DispatchActionUse(command, result);
+	}
+
+	protected bool DispatchActionHoldCancel(MCPCommand command, MCPResult result)
+	{
+		result.ok = true;
+		result.hold_protocol = 1;
+		if (!command.args || command.args.hold_id == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		result.hold_id = command.args.hold_id;
+		result.matched = MCPHoldControl.Cancel(command.args.hold_id);
+		if (!result.matched)
+		{
+			result.cleanup_complete = true;
+			return true;
+		}
+
+		result.cleanup_complete = MCPHoldControl.PeekCleanupComplete();
+		return true;
+	}
+
+	protected void ApplyHoldObservation(MCPResult result, MCPHoldObservation observation)
+	{
+		result.ok = true;
+		result.hold_protocol = 1;
+		if (!observation)
+		{
+			result.end_state = "unknown";
+			result.reason = "lost";
+			result.started = false;
+			result.flag_restored = false;
+			result.cleanup_complete = false;
+			result.completed_cycles = 0;
+			result.cycles_scope = "client_progress";
+			result.action_state_known = false;
+			result.duration_s = 0;
+			return;
+		}
+
+		result.hold_id = observation.hold_id;
+		result.started = observation.started;
+		result.end_state = observation.end_state;
+		result.reason = observation.reason;
+		result.action_state = observation.action_state;
+		result.action_state_known = observation.action_state_known;
+		result.duration_s = observation.duration_s;
+		result.completed_cycles = observation.completed_cycles;
+		result.cycles_scope = observation.cycles_scope;
+		result.placed_known = observation.placed_known;
+		result.already_placed = observation.already_placed;
+		result.flag_restored = observation.flag_restored;
+		result.cleanup_complete = observation.cleanup_complete;
+		if (m_ActionHoldCommandId == result.id)
+		{
+			m_ActionHoldCommandId = -1;
+		}
+	}
+
+	protected void PostActionHoldJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return;
+		}
+
+		MCPHoldControl.Maintain();
+		if (!MCPHoldControl.Ready())
+		{
+			MCPHoldControl.Shutdown("job_timeout");
+		}
+
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		ApplyHoldObservation(result, MCPHoldControl.Take());
+		PostResult(result);
 	}
 
 	protected Object FindNearestObjectNearClient(vector pos, float radius, string classFilter, Object skip)
@@ -4660,6 +4898,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessPlayerMoveJob(job);
 		}
+		else if (job.kind == "player_look_at")
+		{
+			return ProcessPlayerLookAtJob(job);
+		}
+		else if (job.kind == "action_hold")
+		{
+			MCPHoldControl.Maintain();
+			return MCPHoldControl.Ready();
+		}
 
 		return false;
 	}
@@ -4782,7 +5029,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (verb == "weapon_fire")
 		{
 			job.weapon_action.accepted = MCPWeaponControl.FireAccepted();
-			job.weapon_action.reason = MCPWeaponControl.FireReason();
+			job.weapon_action.SetFireReason(MCPWeaponControl.FireReason());
 			return true;
 		}
 		if (verb == "weapon_sights")
@@ -5622,6 +5869,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			PostPlayerMoveJob(job);
 		}
+
+		if (job.kind == "player_look_at")
+		{
+			PostPlayerLookAtJob(job);
+		}
+
+		if (job.kind == "action_hold")
+		{
+			PostActionHoldJob(job);
+		}
 	}
 
 	override void MCP_PostJobFailure(MCPJob job)
@@ -5641,6 +5898,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job && job.kind == "player_move")
 		{
 			PostPlayerMoveJob(job);
+			return;
+		}
+
+		if (job && job.kind == "player_look_at")
+		{
+			PostPlayerLookAtJob(job);
 			return;
 		}
 
@@ -5703,6 +5966,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "player_move")
 		{
 			PostPlayerMoveTimeout(job);
+			return;
+		}
+
+		if (job.kind == "player_look_at")
+		{
+			if (MCPLookAtControl.Generation() == job.generation)
+			{
+				MCPLookAtControl.Release("deadline");
+			}
+			PostPlayerLookAtJob(job);
+			return;
+		}
+
+		if (job.kind == "action_hold")
+		{
+			PostActionHoldJob(job);
 			return;
 		}
 
@@ -6248,6 +6527,187 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
+	protected bool DispatchActionCursor(MCPCommand command, MCPResult result)
+	{
+		Mission mission;
+		IngameHud hud;
+		ActionTargetsCursor cursor;
+		PlayerBase player;
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player || !player.IsPlayerSelected())
+		{
+			result.ok = false;
+			result.error = "no_player";
+			return true;
+		}
+		mission = GetGame().GetMission();
+		hud = IngameHud.Cast(mission);
+		if (!hud && mission)
+		{
+			hud = IngameHud.Cast(mission.GetHud());
+		}
+		if (!hud)
+		{
+			result.ok = false;
+			result.error = "cursor_unavailable";
+			return true;
+		}
+		cursor = hud.MCP_ActionTargetsCursor();
+		if (!cursor)
+		{
+			result.ok = false;
+			result.error = "cursor_unavailable";
+			return true;
+		}
+		if (cursor.MCP_Readiness() != "")
+		{
+			result.ok = false;
+			result.error = cursor.MCP_Readiness();
+			return true;
+		}
+		result.action_cursor = new MCPActionCursor();
+		cursor.MCP_Fill(result.action_cursor, MCPFrame.Tick());
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchPlayerLookAt(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		vector target;
+		float budget;
+		string refusal;
+		int generation;
+		MCPJob job;
+		if (!command.args || !ArrayToVector(command.args.pos, target))
+		{
+			result.ok = false;
+			result.error = "bad_pos";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "no_player";
+			return true;
+		}
+		if (m_ActiveCam || m_CameraHandoffPending)
+		{
+			result.ok = false;
+			result.error = "script_camera";
+			return true;
+		}
+		if (MCPWeaponControl.IsBusy())
+		{
+			result.ok = false;
+			result.error = "controller_busy";
+			return true;
+		}
+		if (HasExclusiveJob() || MCPLookAtControl.IsActive())
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+		refusal = MCPLookAtControl.PoseRefusal(player);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+		budget = command.args.timeout_s;
+		if (budget <= 0.0)
+		{
+			result.ok = false;
+			result.error = "bad_timeout";
+			return true;
+		}
+		if (budget > 3.0)
+		{
+			budget = 3.0;
+		}
+		generation = MCPLookAtControl.Begin(player, target, budget, command.id);
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "player_look_at";
+		job.generation = generation;
+		job.deadline_s = m_JobRunner.GetElapsedS() + budget;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	protected bool DispatchPlayerLookAtRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		MCPLookAtControl.ReleaseOwned(command.args.command_id, "cancelled");
+		result.ok = true;
+		return true;
+	}
+
+	protected bool ProcessPlayerLookAtJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return false;
+		}
+		if (MCPLookAtControl.Generation() != job.generation)
+		{
+			job.error = "snapshot_invalidated";
+			return true;
+		}
+		if (!MCPLookAtControl.IsFinished())
+		{
+			return false;
+		}
+		return true;
+	}
+
+	protected void PostPlayerLookAtJob(MCPJob job)
+	{
+		MCPResult result;
+		if (!job)
+		{
+			return;
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		MCPLookAtReport report;
+		MCPLookAt lookAt = new MCPLookAt();
+		result.look_at = lookAt;
+		report = new MCPLookAtReport();
+		MCPLookAtControl.Fill(report);
+		lookAt.converged = report.converged;
+		lookAt.error_initial_deg = report.error_initial_deg;
+		lookAt.error_final_deg = report.error_final_deg;
+		lookAt.ticks = report.ticks;
+		lookAt.duration_s = report.duration_s;
+		lookAt.pose = report.pose;
+		lookAt.termination = report.termination;
+		lookAt.stable_ticks = report.stable_ticks;
+		lookAt.hold_ticks = report.hold_ticks;
+		lookAt.pulses = report.pulses;
+		result.ok = true;
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+		}
+		PostResult(result);
+	}
+
 	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
 	// the form the daemon and both installers write. It is the RestContext base
 	// that "poll?..." and "result?..." are appended to, so the final "/" belongs
@@ -6540,6 +7000,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Drops every override this bridge armed. Same method for the
 		// restore_gameplay command, vehicle get-in cleanup and shutdown.
 		MCPWeaponControl.ReleaseAll("cleared");
+		MCPLookAtControl.Release("restore");
 		// A held input_trigger key too. Shutdown releases first, as shutdown.
 		MCPInputTriggerControl.ReleaseAll("restore");
 		// And an active player_move, the same way.
@@ -6920,6 +7381,24 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).
 		ReleaseCamera();
+
+		// Post the hold terminal before detaching result callbacks. PostResult
+		// inserts a new callback; doing that after DetachBridge would keep
+		// m_Bridge on a callback the shutdown pass never cleared.
+		if (m_ActionHoldCommandId >= 0)
+		{
+			MCPCommand holdCommand = new MCPCommand();
+			holdCommand.cmd = "action_hold";
+			if (holdCommand.cmd == "action_hold")
+			{
+				MCPHoldControl.Shutdown("shutdown");
+				MCPJob holdJob = new MCPJob();
+				holdJob.id = m_ActionHoldCommandId;
+				PostActionHoldJob(holdJob);
+				postedTerminal = true;
+				m_ActionHoldCommandId = -1;
+			}
+		}
 
 		// A completed cached callback is absent from m_PollCallbackRefs.
 		if (m_PollCallback)

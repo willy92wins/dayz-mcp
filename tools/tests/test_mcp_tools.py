@@ -1464,7 +1464,7 @@ class BridgeCapabilityComparisonTest(unittest.IsolatedAsyncioTestCase):
         # otherwise show up as a permanent mismatch blamed on the bridge.
         for peer, mapping in _CENSUS_FIXTURE["peers"].items():
             for command, tool in mapping.items():
-                if tool is None:
+                if tool is None or tool == "":
                     continue
                 with self.subTest(f"{peer}:{command}"):
                     self.assertIn(tool, self.registered)
