@@ -6541,8 +6541,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 		mission = GetGame().GetMission();
-		hud = IngameHud.Cast(mission);
-		if (!hud && mission)
+		if (mission)
 		{
 			hud = IngameHud.Cast(mission.GetHud());
 		}
