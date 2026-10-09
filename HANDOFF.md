@@ -19,12 +19,12 @@
   - Los anteriores se conservan junto a él (`*.swapped_out_*`).
 - **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
   - A las 15:17 ninguna tenía lease, cola ni run, y no había procesos DayZ.
-  - Los dos daemons volvieron a las 13:37, al cerrar la ventana.
-  - Los clientes de otras sesiones se cerraron en la ventana con permiso del dueño. Desde las 14:32 hay otra vez cadenas de cliente de otras sesiones.
+  - Los dos daemons corren desde las 13:37, cuando los arrancaron los harnesses del ciclo in-game. La ventana cerró a las 14:22.
+  - Los clientes de otras sesiones se cerraron en la ventana con permiso del dueño. Después aparecieron cadenas de cliente nuevas: una desde las 14:32, sin atribuir, y a las 15:15 las de otra sesión de Claude.
 - **Verificado en juego el 2026-10-09:** `reviews/2026-10-06-ticketing/ingame-v12/RESULTS.md`.
   - 855c: rechazo con `journal_name_invalid`, remediación y un solo arranque.
   - 9941: hold con final natural, timeout, cancelación por el broker con su release, y repetición.
-  - 8308: beber y comer siguen mientras se mantiene el hold, en 1.29 y 1.30. La cantidad y el agua no se leyeron (`fb98`).
+  - 8308: el hold sostuvo beber y comer en 1.29, y beber en 1.30, hasta el final o el plazo. La cantidad y el agua no se leyeron (`fb98`).
   - 86a3: look-at convergente y cursor.
 - **Buzón:**
   - Resueltas: 855c, 9941, 86a3, 8308, b58f y 33ed.
@@ -35,14 +35,14 @@
     - El diseño B está aprobado por Sol en #230.
     - Espera su aceptación en la próxima ventana de resellado. No mergear antes.
   - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`); la aceptación FenceKit de 9941 quedó INCONCLUSA.
-  - Tras cada lanzamiento en 1.29 el cliente queda en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
+  - En los tres lanzamientos en 1.29 de este ciclo, el cliente quedó en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
   - El linter offline no detecta casts entre tipos no relacionados (`c852`).
   - La puerta de 855c necesita un alias de misión en la policy sellada (`d9c8`).
-  - Ningún verbo lee la cantidad de un ítem ni el agua o la energía del jugador, y en 1.29 `completed_cycles` queda en 0 al beber y comer (`fb98`).
+  - Ningún verbo lee la cantidad de un ítem. El agua y la energía solo las devuelve `player_heal`, antes y después de curar: falta una lectura que no cambie nada. Además, en 1.29 `completed_cycles` queda en 0 al beber y comer (`fb98`).
   - Virtualización MSIX de `%LOCALAPPDATA%` (`e92d`).
 - **Siguiente:**
   1. Ventana de resellado para 222d (#230): aceptación con SimpleGroup y LFHeli_OH1 contra los PBO buenos (spec §4), y merge.
-  2. Investigar `204e` (toggle de colocación) y `f4e6` (un run 1.30 cerrado por otra sesión).
+  2. Investigar `204e` (toggle de colocación) y `f4e6` (según su informe, un run 1.30 se cerró sin que lo pidiera su sesión).
   3. Peticiones abiertas: `8b1c` (verbo de foco), el rediseño de 2986 y `fb98`.
 - **Detalle:**
   - Notas: `C:\Users\guill\dzmcp_gauntlet\SESSION-STATE.md`.

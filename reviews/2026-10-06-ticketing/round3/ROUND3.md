@@ -9,10 +9,13 @@ The owner's plan from 2026-10-08:
 
 All five steps are done.
 
+Paths below without a repository prefix are under `C:\Users\guill\dzmcp_gauntlet\`, outside the repository: loop
+states, specifications, reviews and `SESSION-STATE.md`, the orchestrator's running notes.
+
 ## Broker infrastructure (#228, merged)
-- **Spec.** gpt-6.1-sol narrowed `SPEC_R2I` to `SPEC_R3I`: abandon by id and the complete binding token. There is no retention ledger, no admission receipts and no `executed_by`; those are documented limits. The spec fixed eight joint cases, each with one mutation, and a two-round budget.
-- **Rounds.** Grok 4.7 ran two loop rounds (CHANGES_REQUIRED twice). The orchestrator granted one consolidation round (directive: unfenced commands keep the legacy queue, identity is required only for fenced peers and releases, no exec release target). Sol: APPROVED. Grok spend: 9.34 USD.
-- **Races found by the receiver**, by repeating the new joint module (it failed about 1 run in 8 and 1 in 4):
+- **Spec.** gpt-6.1-sol narrowed `SPEC_R2I` to `SPEC_R3I`: abandon by id and the complete binding token. There is no retention ledger, no admission receipts and no `executed_by`; those are documented limits. The spec fixed eight joint cases, each with one mutation, and a two-round budget (`sol_specs\SPEC_R3I.md:192-211`).
+- **Rounds.** Grok 4.7 ran two loop rounds (CHANGES_REQUIRED twice). The orchestrator granted one consolidation round (directive: unfenced commands keep the legacy queue, identity is required only for fenced peers and releases, no exec release target). Sol: APPROVED. Grok spend: 9.35 USD (the three `cost` values in `r3i_broker\PROGRESS.txt`).
+- **Races found by the receiver**, by repeating the new joint module. It failed about 1 run in 8 and 1 in 4, as recorded in the orchestrator's notes (`SESSION-STATE.md:489`):
   - a cancellation while `/enqueue` was in flight lost the admitted id;
   - a deadline that expired inside daemon discovery escaped `_call` as a bare `TimeoutError` and skipped the timeout cleanup (a pre-existing bug).
   - Both were fixed. Sol's scoped re-checks added two more fixes: the abandon transport now honours the cleanup budget, including a late task start, and a late `/enqueue` failure is consumed.
@@ -25,12 +28,12 @@ All five steps are done.
   - eight slow-tier test doubles lacked `daemon_generation`.
   - Both were fixed.
   - Lesson: for runtime-contract changes, run the whole suite locally before pushing.
-- **Receiver mutant replay:** 14 of 14 red.
+- **Receiver mutant replay:** 14 of 14 red (`wt\mutants_r3i.py`; orchestrator's notes, `SESSION-STATE.md:510`).
 
 ## Final rounds and integration (#229, merged after the in-game cycle)
 - **Rebase.** 9941 and 86a3 were rebased on the infrastructure by a three-way merge. Their final rounds (Grok, fresh session, orchestrator directives) each left one P2, and both were the infrastructure defects above. After the fixes, both closure reviews were APPROVED.
 - **Integration.** Integrating both into one tree (Grok, one round) hit one interaction: the scalar census could not type `result.look_at.duration_s` once 9941 made `MCPResult.duration_s` a watched scalar. The orchestrator fixed it with a typed local, and Sol APPROVED.
-- **In game.** The cycle found three more defects, all fixed and approved by Sol:
+- **In game.** The cycle found three more defects. All three were fixed, and Sol's scoped review of the fixes was APPROVED (`wt\SOL_BRIDGE12_INGAME.md`):
   - a 1.29 compile error (an unrelated-type cast the linter missed);
   - `player_look_at` oscillating until its deadline (gain 0.2 per frame);
   - a 1.30 compile error (`ActionTargetsCursor.Update` gained a parameter).
@@ -60,8 +63,11 @@ See `../ingame-v12/RESULTS.md`. 855c, 9941, 8308 and 86a3 were accepted.
   - ca47: the 1.30 `ActionTargetsCursor.Update` signature;
   - d9c8: the joint gate needs a mission alias;
   - 5880: the pause menu after a 1.29 launch;
-  - fb98: `completed_cycles` stays 0 for drink and eat on 1.29, and no verb reads an item's quantity or the player's water.
+  - fb98: `completed_cycles` stays 0 for drink and eat on 1.29. No verb reads an item's quantity, and only `player_heal` returns the player's water, around a heal.
 
 ## Delegation notes
-- Grok carried every implementation round (222d: 1.92 + 0.76 USD). The Sonnet fallback (automatic switch on an exhausted Grok balance, `claude -p --safe-mode`) was built and probed but never needed.
-- Every review was gpt-6.1-sol's. Orchestrator edits were reviewed by Sol in scoped passes before merging.
+- Grok carried every implementation round (222d: 1.92 + 0.76 USD). The Sonnet fallback (automatic switch on an exhausted Grok balance, `claude -p --safe-mode`) was built and probed but never needed. The probe was one turn: Bash and Write allowed, git commit denied (`SESSION-STATE.md:446-449`).
+- Every review was gpt-6.1-sol's. Orchestrator edits were reviewed by Sol in scoped passes before merging:
+  - `wt\SOL_R3I_ORCH*.md`: four passes, the last two APPROVED;
+  - `v12_integ\SOL_CLOSURE.md`: APPROVED;
+  - `wt\SOL_BRIDGE12_INGAME.md`: APPROVED.

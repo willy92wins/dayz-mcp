@@ -1,7 +1,8 @@
 # v12 window, 2026-10-09: bridge "12" and the reseal that deploys 855c
 
 Owner go-ahead (2026-10-09): the orchestrator closes the other sessions' MCP clients only when no game runs, and
-never touches a game. Step log and backups: `C:\Users\guill\DayZ_MCP_backups\v12-20261009\` (`steps.log`).
+never touches a game. Step log and backups: `C:\Users\guill\DayZ_MCP_backups\v12-20261009\` (`steps.log`). Raw call
+outputs, one file per call: `C:\Users\guill\dzmcp_gauntlet\ingame\evidence_v12\`.
 
 ## Deploy
 - **Quiescence:** 13:21-13:31, ten minutes with no DayZ process. Both instances had no owner, no queue and a free box. 13 client chains were closed and both daemons stopped. The orchestrator's own 222d batch was paused, because its Grok process respawned MCP clients.
@@ -15,7 +16,7 @@ never touches a game. Step log and backups: `C:\Users\guill\DayZ_MCP_backups\v12
 
 ## Defects found in game and fixed (PR #229)
 1. **1.29 compile error.** `mcpclientbridge.c(6544): Types 'IngameHud' and 'Mission' are not related` (86a3 cast the Mission to IngameHud). The offline linter did not report it. Fixed in `2f7f11c`.
-2. **Look-at never converged.** `player_look_at` ended with termination `deadline` on every target: the view overshot and oscillated about 14° off. The camera shows an aim pulse a frame or more late, so a full-error pulse every frame overcorrects. Fixed in `42e47bd`: a gain of 0.2 per frame.
+2. **Look-at never converged.** `player_look_at` ended with termination `deadline` on every target: the view overshot and oscillated about 14° off. Likely cause (a hypothesis; it was not isolated): the camera shows an aim pulse a frame or more late, so a full-error pulse every frame overcorrects. Fixed in `42e47bd` with a gain of 0.2 per frame, which converged on every target tried.
 3. **1.30 compile error.** `mcp_actioncursor.c(60): Overloaded function 'Update' not compatible`. Vanilla `ActionTargetsCursor.Update()` became `Update(bool fullUpdate = true)` in 1.30. Fixed in `944a358`: the override selects its signature with `#ifdef DAYZ_1_29`.
 
 ## Accepted
@@ -34,14 +35,14 @@ never touches a game. Step log and backups: `C:\Users\guill\DayZ_MCP_backups\v12
 - **8308** (a drink or eat action now runs while held).
   - 1.29: the apple ran to a natural finish, which this component reaches only once the item's quantity is spent (`cacontinuousquantityrepeat.c:44-46`, `:66-68`). The drink ran to its deadline. Both report `completed_cycles=0`, because vanilla 1.29 calls `OnCompletePogress` only when the item runs out (`:56-59` vs `:66-68`).
   - 1.30: the drink timed out at 8.57 s with `completed_cycles=5`, because 1.30 calls `OnCompletePogress` after each repeat.
-  - Not read: the bottle quantity and the water stat. No verb reads them (inbox fb98).
+  - Not read: the bottle quantity and the water stat. No verb reads an item's quantity. Water and energy are returned only by `player_heal`, before and after its heal, so there is no read that changes nothing (inbox fb98).
 - **86a3 `player_look_at` / `action_cursor`** (after the gain fix).
   - 1.29 convergence:
     - ground at 3 m: 29.1° → 0.47° (16 ticks, 0.53 s);
     - far ahead: 29.7° → 0.80°;
     - 90° right: 90.0° → 0.34° (33 ticks);
     - crossing ±180°: 90.4° → 0.23°;
-    - after the final PBO: 0.33°.
+    - after the final PBO, 90° right: 90.0° → 0.33° (33 ticks; `c86a3.20-final-pbo-east-90.json`).
   - 1.30 convergence: 52.7° → 0.69° (24 ticks).
   - `action_cursor` on a spawned Apple: the sample is fresh and coherent, the target is the exact object (Apple, id 65), the primary slot is `ActionTakeItem`, the row widgets are visible and `item_flag_icon` is hidden. With an empty scene the cursor is hidden.
   - Cancelling a 180° look-at through MCP 0.318 s in: `player_look_at_release` (id 71) was delivered 12 ticks after the command, and the look-at (id 70) ended `ok=0` (not converged).
@@ -50,4 +51,4 @@ never touches a game. Step log and backups: `C:\Users\guill\DayZ_MCP_backups\v12
 - **9941, FenceKit + `ActionDeployObject` hold.** The placement toggle through `action_use(ActionTogglePlaceObject)` never enabled placement (`setup_failed` every time; the deploy reported `condition_failed`). A pause menu open after the launch was found and closed (`ui_click continuebtn`), with no change.
 - **9941:** death, player change and shutdown during a hold were not run.
 - **86a3:** the SimpleGroup protected-vehicle icon needs SimpleGroup loaded, and script-camera/freelook rejection was not run.
-- After every launch on 1.29 the client showed the in-game pause menu until `ui_click continuebtn` (see 1d31).
+- In the three 1.29 launches of this cycle, the client showed the in-game pause menu until `ui_click continuebtn` (see 1d31).
