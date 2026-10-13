@@ -1202,6 +1202,7 @@ from pathlib import Path
 from dayz_mcp.identity_migration import daemon_startup_election
 from dayz_mcp.runtime_state import RuntimePaths
 root, start, release, result = map(Path, sys.argv[1:])
+result.with_name(result.name + '.ready').write_text('ready', encoding='ascii')
 while not start.exists():
     time.sleep(0.005)
 paths = RuntimePaths(root, root / 'audit', root / 'coordination.json', root / 'runs.json')
@@ -1228,6 +1229,26 @@ with daemon_startup_election(paths) as elected:
                 for result in results
             ]
             try:
+                # fb-20261010-150111-a383: six interpreters starting and importing
+                # dayz_mcp on a loaded runner can take most of a fixed 8 s. The wave
+                # starts once every candidate is up, so the deadline below measures
+                # the election alone.
+                ready = [result.with_name(result.name + ".ready") for result in results]
+                deadline = time.monotonic() + 60.0
+                while (
+                    any(not marker.exists() for marker in ready)
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                self.assertEqual(
+                    [
+                        (index, child.poll())
+                        for index, (marker, child) in enumerate(zip(ready, children))
+                        if not marker.exists()
+                    ],
+                    [],
+                    "candidates (index, exit code) that never started",
+                )
                 start.write_text("start", encoding="ascii")
                 deadline = time.monotonic() + 8.0
                 while (
@@ -1235,7 +1256,15 @@ with daemon_startup_election(paths) as elected:
                     and time.monotonic() < deadline
                 ):
                     time.sleep(0.01)
-                self.assertTrue(all(result.exists() for result in results))
+                self.assertEqual(
+                    [
+                        (index, child.poll())
+                        for index, (result, child) in enumerate(zip(results, children))
+                        if not result.exists()
+                    ],
+                    [],
+                    "candidates (index, exit code) with no election result",
+                )
                 self.assertEqual(
                     [result.read_text(encoding="ascii") for result in results].count("1"),
                     1,
