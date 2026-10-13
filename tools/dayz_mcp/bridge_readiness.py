@@ -233,6 +233,7 @@ def _has_ready_snapshot_shape(status: object) -> bool:
 SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
+    "hands_attach": ("object_id", "slot", "uid"),
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
@@ -276,6 +277,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "bot_stop": "bot_stop",
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
+        "hands_attach": "hands_attach",
         "hands_take": "hands_take",
         "infected_drive": "infected_drive",
         "inventory_attach": "inventory_attach",

@@ -104,8 +104,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 3 from 86a3 (action_cursor timeout_s, player_look_at pos and timeout_s).
         # + 7 from action_hold (hold_timeout_s, timeout_s, radius, door_index,
         # component_index, pos, cursor_pos). action, classname and target are strings.
+        # + 2 from 9608 (hands_attach object_id/timeout_s; slot and uid are strings).
         # 177 before either batch, plus both additions.
-        self.assertEqual(len(rows), 187)
+        self.assertEqual(len(rows), 189)
+        self.assertIn(("hands_attach", "object_id", "int"), rows)
+        self.assertIn(("hands_attach", "timeout_s", "float"), rows)
         self.assertIn(("action_cursor", "timeout_s", "float"), rows)
         self.assertIn(("player_look_at", "pos", "vector"), rows)
         self.assertIn(("player_look_at", "timeout_s", "float"), rows)

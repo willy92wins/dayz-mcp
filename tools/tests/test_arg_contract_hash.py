@@ -36,12 +36,13 @@ class ArgContractHashTest(unittest.TestCase):
             server_module.server_arg_contract_canonical(),
             "bot_start=action,bot_ttl_s,object_id\n"
             "bot_stop=object_id\n"
+            "hands_attach=object_id,slot,uid\n"
             "object_resolve=pos,radius,type\n"
             "player_kill=uid\n"
             "vehicle_prepare_fixture=mode,pos,radius,type",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

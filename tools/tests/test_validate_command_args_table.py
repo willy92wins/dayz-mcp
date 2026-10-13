@@ -826,6 +826,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
         ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
     ),
+    "hands_attach": (
+        ("valid", {"object_id": 1, "slot": "LargeBattery"}, (True, None)),
+        (
+            "valid_with_uid",
+            {"object_id": 7, "slot": "LargeBattery", "uid": "player-1"},
+            (True, None),
+        ),
+        ("extra_key", {"object_id": 1, "slot": "LargeBattery", "extra": None}, (False, "bad_args")),
+        ("missing_slot", {"object_id": 1}, (False, "bad_args")),
+        ("empty_slot", {"object_id": 1, "slot": ""}, (False, "bad_args")),
+        ("missing_object_id", {"slot": "LargeBattery"}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True, "slot": "LargeBattery"}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0, "slot": "LargeBattery"}, (False, "bad_args")),
+    ),
     "weapon_state": (
         ("empty", {}, (True, None)),
         ("valid_with_uid", {"uid": "player-1"}, (True, None)),

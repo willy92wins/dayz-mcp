@@ -6868,7 +6868,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} "
             "Put a reachable item into a player's hands via "
-            "PredictiveTakeEntityToHands. object_id is a same-run registry id "
+            "PredictiveTakeEntityToHands: on the ground, in the player's own "
+            "inventory, or in an attachment slot of a world entity (a "
+            "BatteryCharger's battery) that can release it. object_id is a same-run registry id "
             "from world_spawn.object_id, inventory_attach.item_object_id or "
             "inventory_give.object_id. The take is predictive and "
             "asynchronous: accepted=true with confirmed=false means the server "
@@ -6895,6 +6897,48 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("hands_take", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} "
+            "Put the item in a player's hands into one attachment slot of a "
+            "world entity via PredictiveTakeEntityToTargetAttachmentEx. The "
+            "same object moves, so its registry id and its state (a "
+            "battery's energy) carry over; inventory_attach does not do that, "
+            "it creates a new item. object_id is the destination's same-run "
+            "registry id (world_spawn, object_resolve or inventory_attach); "
+            "slot is the slot name (LargeBattery). The destination must be "
+            "within reach, not worn or carried by any player, have that slot "
+            "free and accept the item. Errors: hands_empty, slot_not_found, "
+            "slot_occupied, not_reachable, hands_blocked, cannot_attach. The "
+            "move is predictive and asynchronous: accepted=true with "
+            "confirmed=false means the server accepted the request. "
+            "inventory_attach.item_object_id is the held item's registry id, "
+            "0 when it was never registered. Confirm with weapon_state (hands "
+            "empty) and telemetry_read on the destination (the item in "
+            "attachment_items). uid empty (default) targets the first human. "
+            "No OS input and no client focus."
+        )
+    )
+    async def hands_attach(
+        object_id: StrictInt,
+        slot: str,
+        uid: str = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(object_id, int) or isinstance(object_id, bool):
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        if object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        if not isinstance(slot, str) or slot == "":
+            raise ToolError(_bad_args("slot", slot, "be a non-empty string"))
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        args: dict[str, Any] = {"object_id": object_id, "slot": slot}
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("hands_attach", args, "server", _timeout(timeout_s))
 
     @app.tool(
         description=(

@@ -11,6 +11,7 @@
       "bot_stop": "bot_stop",
       "entities_query": "entities_query",
       "exec_enforce": null,
+      "hands_attach": "hands_attach",
       "hands_take": "hands_take",
       "infected_drive": "infected_drive",
       "inventory_attach": "inventory_attach",

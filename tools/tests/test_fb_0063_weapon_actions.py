@@ -114,9 +114,9 @@ class WeaponActionIngressTest(unittest.TestCase):
             (True, None),
         )
         self.assertGreater(loopback.WEAPON_AIM_ABS_MAX, math.pi)
-        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "421895632da1ef7e")
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
         bridge = BRIDGE.read_text(encoding="utf-8")
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "421895632da1ef7e"', bridge)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "4f90284258023d98"', bridge)
         for verb in VERBS:
             self.assertNotIn(f'"{verb}"', bridge)
 

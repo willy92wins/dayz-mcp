@@ -94,6 +94,7 @@ SERVER_COMMANDS = {
     "infected_drive",
     "entities_query",
     "hands_take",
+    "hands_attach",
     "weapon_state",
     "action_cursor_ids",
 }
@@ -1030,6 +1031,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "bot_stop",
     "object_resolve",
     "action_cursor_ids",
+    "hands_attach",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
 # (no server arg-contract hash) at enqueue and again at delivery.
@@ -1412,6 +1414,19 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             optional=("uid",),
             validators={
                 "object_id": _integer_in_range(minimum=1),
+                "uid": _is_string,
+            },
+        )
+    ),
+    # hands_attach is predictive like hands_take: the held item into one
+    # attachment slot of a registered world entity (9608).
+    "hands_attach": _command_schema(
+        _schema_variant(
+            required=("object_id", "slot"),
+            optional=("uid",),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "slot": _is_non_empty_string,
                 "uid": _is_string,
             },
         )

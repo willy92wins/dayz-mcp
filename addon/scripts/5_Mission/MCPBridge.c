@@ -35,12 +35,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "421895632da1ef7e";
+	protected const string SERVER_ARG_CONTRACT_HASH = "4f90284258023d98";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -611,6 +611,10 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchHandsTake(command, result);
 		}
+		else if (command.cmd == "hands_attach")
+		{
+			postNow = DispatchHandsAttach(command, result);
+		}
 		else if (command.cmd == "object_doors")
 		{
 			postNow = DispatchObjectDoors(command, result);
@@ -810,6 +814,141 @@ class MCPBridge : Managed
 		}
 
 		if (!player.MCPRequestTakeToHands(item, result.type))
+		{
+			result.ok = false;
+			result.error = "rpc_failed";
+			return true;
+		}
+		result.ok = true;
+		result.accepted = true;
+		result.confirmed = false;
+		return true;
+	}
+
+	// hands_attach (fb-20261011-215405-9608) puts the item in a player's hands
+	// into one attachment slot of a registered world entity, the same object,
+	// so its registry id and state (a CarBattery's energy) carry over. Same
+	// shape as hands_take: the server checks, the owning client runs
+	// PredictiveTakeEntityToTargetAttachmentEx, accepted is the synchronous
+	// verdict and confirmed stays false. object_id is the destination;
+	// inventory_attach.item_object_id is the held item's registry id, 0 when
+	// it was never registered.
+	protected bool DispatchHandsAttach(MCPCommand command, MCPResult result)
+	{
+		result.accepted = false;
+		result.confirmed = false;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (command.args.slot == "")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		int objectId = command.args.object_id;
+		result.object_id = objectId;
+		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			result.ok = false;
+			result.error = "object_id_unknown";
+			return true;
+		}
+
+		Object registered = m_RuntimeObjects.Get(objectId);
+		if (!registered)
+		{
+			result.ok = false;
+			result.error = "object_id_stale";
+			return true;
+		}
+
+		EntityAI target = EntityAI.Cast(registered);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = "not_entity_ai";
+			return true;
+		}
+
+		string playerError = "";
+		PlayerBase player = ResolvePlayer(command.args, playerError);
+		if (!player)
+		{
+			result.ok = false;
+			result.error = playerError;
+			return true;
+		}
+
+		EntityAI held = player.GetEntityInHands();
+		if (held)
+		{
+			result.type = held.GetType();
+		}
+		int slotId = InventorySlots.GetSlotIdFromString(command.args.slot);
+		string refusal = player.MCPHandsAttachRefusal(target, slotId);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+
+		MCPInventoryAttachReceipt attachReceipt = new MCPInventoryAttachReceipt();
+		attachReceipt.dest = "attachment";
+		attachReceipt.slot = command.args.slot;
+		attachReceipt.item_object_id = RuntimeObjectId(held);
+		result.inventory_attach = attachReceipt;
+
+		if (!GetGame().IsMultiplayer())
+		{
+			if (!ScriptInputUserData.CanStoreInputUserData())
+			{
+				result.ok = false;
+				result.error = "input_busy";
+				return true;
+			}
+			player.PredictiveTakeEntityToTargetAttachmentEx(target, held, slotId);
+			result.ok = true;
+			result.accepted = true;
+			result.confirmed = false;
+			return true;
+		}
+
+		int netLow = 0;
+		int netHigh = 0;
+		target.GetNetworkID(netLow, netHigh);
+		if (netLow == 0)
+		{
+			if (netHigh == 0)
+			{
+				result.ok = false;
+				result.error = "not_networked";
+				return true;
+			}
+		}
+		held.GetNetworkID(netLow, netHigh);
+		if (netLow == 0)
+		{
+			if (netHigh == 0)
+			{
+				result.ok = false;
+				result.error = "not_networked";
+				return true;
+			}
+		}
+		if (!player.GetIdentity())
+		{
+			result.ok = false;
+			result.error = "no_identity";
+			return true;
+		}
+
+		if (!player.MCPRequestAttachFromHands(target, target.GetType(), held, result.type, command.args.slot))
 		{
 			result.ok = false;
 			result.error = "rpc_failed";

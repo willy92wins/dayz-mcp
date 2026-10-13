@@ -298,6 +298,8 @@ COERCIBLE_ALLOWLIST.update(
         ("exec_enforce", "main_fn"): (
             "free text entry function name; empty is the default"
         ),
+        ("hands_attach", "slot"): "free text slot name",
+        ("hands_attach", "uid"): "free text player id, empty means first human",
         ("hands_take", "uid"): "free text player id, empty means first human",
         ("infected_drive", "type"): "free text classname",
         ("infected_drive", "mode"): _OPTIONAL_ID,

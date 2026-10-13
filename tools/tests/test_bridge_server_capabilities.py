@@ -65,6 +65,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "bot_stop",
     "entities_query",
     "exec_enforce",
+    "hands_attach",
     "hands_take",
     "infected_drive",
     "inventory_attach",

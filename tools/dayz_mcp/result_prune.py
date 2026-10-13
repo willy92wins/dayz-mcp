@@ -181,7 +181,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
         "action_use_component",
         "action_hold",
     }),
-    "confirmed": frozenset({"hands_take", "weapon_state"}),
+    "confirmed": frozenset({"hands_attach", "hands_take", "weapon_state"}),
     "sent": frozenset({"exec_enforce", "notify_players"}),
     "deleted": frozenset({"object_delete"}),
     "y": frozenset({"surface_query"}),

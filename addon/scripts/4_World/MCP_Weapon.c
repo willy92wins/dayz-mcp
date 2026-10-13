@@ -1,5 +1,7 @@
 // Above ERPCs.RPC_END (erpcs.c:207). DIAG_DEVELOPER shifts that enum; this does not.
 const int MCP_RPC_HANDS_TAKE = 78541063;
+// hands_attach's server-to-owner request (fb-20261011-215405-9608).
+const int MCP_RPC_HANDS_ATTACH = 78541067;
 // ScriptInputUserData types of the owner's weapon_fire and weapon_raise.
 // Vanilla INPUT_UDT_* are 1..16 (_constants.c:2-19); these sit far above
 // them, beside MCP_RPC_HANDS_TAKE, so the small ids of other mods miss them.
@@ -1001,7 +1003,10 @@ modded class PlayerBase
 		super.OnRPC(sender, rpc_type, ctx);
 		if (rpc_type != MCP_RPC_HANDS_TAKE)
 		{
-			return;
+			if (rpc_type != MCP_RPC_HANDS_ATTACH)
+			{
+				return;
+			}
 		}
 		// Dedicated server must not take: ActionTakeItemToHands bails there,
 		// and PredictiveTakeEntityToHands needs the input-user-data channel.
@@ -1015,6 +1020,11 @@ modded class PlayerBase
 		}
 		if (GetGame().IsDedicatedServer())
 		{
+			return;
+		}
+		if (rpc_type == MCP_RPC_HANDS_ATTACH)
+		{
+			MCPApplyHandsAttachRpc(ctx);
 			return;
 		}
 		MCPApplyHandsTakeRpc(ctx);
@@ -1059,8 +1069,8 @@ modded class PlayerBase
 	}
 
 	// Same predicates DispatchHandsTake used, so the client recheck cannot
-	// drift from the server. Own cargo/attachment, a BaseBuildingBase
-	// attachment that can detach, or ground within UAMaxDistances.DEFAULT
+	// drift from the server. Own cargo/attachment, an attachment of a world
+	// entity that can detach, or ground, within UAMaxDistances.DEFAULT
 	// (actionconstants.c:112).
 	string MCPHandsTakeRefusal(ItemBase item)
 	{
@@ -1162,13 +1172,18 @@ modded class PlayerBase
 			return "not_reachable";
 		}
 
+		// Another player's item, worn or carried, is never taken.
+		if (owner)
+		{
+			return "not_reachable";
+		}
+
+		// An attachment of any world entity, not only BaseBuildingBase: a
+		// CarBattery in a BatteryCharger's slot (fb-20261011-215405-9608).
+		// The detach predicates and the reach check below still apply.
 		EntityAI parent = item.GetHierarchyParent();
 		if (parent)
 		{
-			if (!BaseBuildingBase.Cast(parent))
-			{
-				return "not_reachable";
-			}
 			string detachError = MCPHandsTakeAttachmentError(item);
 			if (detachError != "")
 			{
@@ -1217,7 +1232,7 @@ modded class PlayerBase
 		return "";
 	}
 
-	protected bool MCPHandsTakeWithinReach(ItemBase item)
+	protected bool MCPHandsTakeWithinReach(EntityAI item)
 	{
 		float reach = UAMaxDistances.DEFAULT;
 		float reachSq = reach * reach;
@@ -1303,6 +1318,251 @@ modded class PlayerBase
 			return;
 		}
 		PredictiveTakeEntityToHands(item);
+	}
+
+	// hands_attach (fb-20261011-215405-9608): the item in this player's hands
+	// into one attachment slot of a world entity. Same predicates on the
+	// server and in the owner's recheck, like MCPHandsTakeRefusal.
+	string MCPHandsAttachRefusal(EntityAI target, int slotId)
+	{
+		if (!target)
+		{
+			return "not_entity_ai";
+		}
+		EntityAI item = GetEntityInHands();
+		if (!item)
+		{
+			return "hands_empty";
+		}
+		if (target == item)
+		{
+			return "cannot_attach";
+		}
+		// A world entity only: nothing worn or carried by any player.
+		if (target.GetHierarchyRootPlayer())
+		{
+			return "not_reachable";
+		}
+		if (target.IsSetForDeletion())
+		{
+			return "not_reachable";
+		}
+		GameInventory targetInventory = target.GetInventory();
+		if (!targetInventory)
+		{
+			return "inventory_unavailable";
+		}
+		if (!InventorySlots.IsSlotIdValid(slotId))
+		{
+			return "slot_not_found";
+		}
+		if (!targetInventory.HasAttachmentSlot(slotId))
+		{
+			return "slot_not_found";
+		}
+		if (targetInventory.FindAttachment(slotId))
+		{
+			return "slot_occupied";
+		}
+		if (!MCPHandsTakeWithinReach(target))
+		{
+			return "not_reachable";
+		}
+		HumanInventory handsInventory = GetHumanInventory();
+		if (!handsInventory)
+		{
+			return "hands_blocked";
+		}
+		if (!handsInventory.CanRemoveEntityInHands())
+		{
+			return "hands_blocked";
+		}
+		if (!item.CanPutAsAttachment(target))
+		{
+			return "cannot_attach";
+		}
+		if (!target.CanReceiveAttachment(item, slotId))
+		{
+			return "cannot_attach";
+		}
+		if (!targetInventory.CanAddAttachmentEx(item, slotId))
+		{
+			return "cannot_attach";
+		}
+		return "";
+	}
+
+	// Server side: ask the owner to run the predictive attach. The slot
+	// travels by name; both types are the classnames the server checked.
+	// Returns false when the RPC was not sent.
+	bool MCPRequestAttachFromHands(EntityAI target, string targetType, EntityAI item, string itemType, string slotName)
+	{
+		if (!target)
+		{
+			return false;
+		}
+		if (!item)
+		{
+			return false;
+		}
+		if (targetType == "")
+		{
+			return false;
+		}
+		if (itemType == "")
+		{
+			return false;
+		}
+		PlayerIdentity identity = GetIdentity();
+		if (!identity)
+		{
+			return false;
+		}
+		int targetLow = 0;
+		int targetHigh = 0;
+		target.GetNetworkID(targetLow, targetHigh);
+		int itemLow = 0;
+		int itemHigh = 0;
+		item.GetNetworkID(itemLow, itemHigh);
+		ScriptRPC rpc = new ScriptRPC();
+		if (!rpc.Write(targetLow))
+		{
+			return false;
+		}
+		if (!rpc.Write(targetHigh))
+		{
+			return false;
+		}
+		if (!rpc.Write(targetType))
+		{
+			return false;
+		}
+		if (!rpc.Write(itemLow))
+		{
+			return false;
+		}
+		if (!rpc.Write(itemHigh))
+		{
+			return false;
+		}
+		if (!rpc.Write(itemType))
+		{
+			return false;
+		}
+		if (!rpc.Write(slotName))
+		{
+			return false;
+		}
+		rpc.Send(this, MCP_RPC_HANDS_ATTACH, true, identity);
+		return true;
+	}
+
+	protected void MCPDropHandsAttach(string reason)
+	{
+		Print("[DayZ_MCP] hands_attach dropped reason=" + reason);
+	}
+
+	protected void MCPApplyHandsAttachRpc(ParamsReadContext ctx)
+	{
+		int targetLow = 0;
+		int targetHigh = 0;
+		string targetType = "";
+		int itemLow = 0;
+		int itemHigh = 0;
+		string itemType = "";
+		string slotName = "";
+		if (!ctx.Read(targetLow))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ctx.Read(targetHigh))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ctx.Read(targetType))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ctx.Read(itemLow))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ctx.Read(itemHigh))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ctx.Read(itemType))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ctx.Read(slotName))
+		{
+			MCPDropHandsAttach("read_failed");
+			return;
+		}
+		if (!ScriptInputUserData.CanStoreInputUserData())
+		{
+			MCPDropHandsAttach("input_busy");
+			return;
+		}
+		EntityAI target = EntityAI.Cast(GetGame().GetObjectByNetworkId(targetLow, targetHigh));
+		if (!target)
+		{
+			MCPDropHandsAttach("not_streamed");
+			return;
+		}
+		// Compare stored strings, as MCPApplyHandsTakeRpc does: a recycled
+		// network id of another class must not pass.
+		string seenTargetType = target.GetType();
+		if (targetType == "")
+		{
+			MCPDropHandsAttach("type_mismatch");
+			return;
+		}
+		if (seenTargetType != targetType)
+		{
+			MCPDropHandsAttach("type_mismatch");
+			return;
+		}
+		EntityAI held = GetEntityInHands();
+		if (!held)
+		{
+			MCPDropHandsAttach("hands_empty");
+			return;
+		}
+		int heldLow = 0;
+		int heldHigh = 0;
+		held.GetNetworkID(heldLow, heldHigh);
+		if (heldLow != itemLow)
+		{
+			MCPDropHandsAttach("hands_changed");
+			return;
+		}
+		if (heldHigh != itemHigh)
+		{
+			MCPDropHandsAttach("hands_changed");
+			return;
+		}
+		string seenItemType = held.GetType();
+		if (seenItemType != itemType)
+		{
+			MCPDropHandsAttach("hands_changed");
+			return;
+		}
+		int slotId = InventorySlots.GetSlotIdFromString(slotName);
+		string refusal = MCPHandsAttachRefusal(target, slotId);
+		if (refusal != "")
+		{
+			MCPDropHandsAttach(refusal);
+			return;
+		}
+		PredictiveTakeEntityToTargetAttachmentEx(target, held, slotId);
 	}
 
 	// super runs HandleWeapons first; the shot is after that. The server
