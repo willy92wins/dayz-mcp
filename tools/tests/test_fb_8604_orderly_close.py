@@ -1771,6 +1771,185 @@ class ToolWait8604Test(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("warnings", result)
         self.assertTrue(result["graceful"])
 
+    # fb-20261013-143037-0093 (2986). Lines from run 612202d5 (DayZ
+    # 1.30.164014) and a DayZ 1.29.163709 run. Until it exits, the 1.30 server
+    # leaves its RPT at 58513 bytes, cut inside the AUDIO line below and before
+    # both connect lines; its script log already holds the addon connect line.
+    _RPT_130_ON_DISK = (
+        "16:24:07.267 [Login]: Adding player Dev (12442596) to login queue "
+        "at position 0\n"
+        "16:24:07.267 [StateMachine]: Player Dev (dpnid 12442596 uid ) "
+        "Entering AuthPlayerLoginState\n"
+        "16:24:08.680 El jugador Dev se está conectando.\n"
+        "16:24:08.785 [StateMachine]: Player Dev (dpnid 12442596 uid "
+        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=) Entering "
+        "CreateNetObjectsLoginState\n"
+        "16:24:17.788    AUDIO     (E): Sound set "
+        "'Motohelmet_pushHeavy_SoundVoice_Char_SoundSet' references missing "
+        "sound shader 'pushHeavy_female_1_motohelmet_SoundV"
+    )
+    _RPT_130_AT_EXIT = (
+        "oice_Char_SoundShader'\n"
+        "16:24:17.824 El jugador Dev "
+        "(id=HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= "
+        "pos=<1189.3, 5392.5, 162.5>) se ha conectado.\n"
+        '16:24:17.824 Player "Dev" (steamID=76561198141021937 '
+        "pos=<1189.3, 5392.5, 162.5>) is connected\n"
+        "16:27:58.813 [Disconnect]: Finish script disconnect 12442596 "
+        "(HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=)\n"
+    )
+    _SCRIPT_130_CONNECT = (
+        "16:24:17.834  SCRIPT       : [DayZ_MCP] godmode on=1 "
+        "uid=76561198141021937 reason=connect\n"
+        "16:25:00.436 SCRIPT       : [DayZ-MCP] poll commands=1 "
+        "sent_tick=345594 callback_tick=346132\n"
+    )
+    _SCRIPT_130_LOGOUT = (
+        "16:27:58.813  SCRIPT       : [Logout]: New player "
+        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= with instant logout\n"
+        "16:27:58.813  SCRIPT       : [DayZ_MCP] godmode released "
+        "uid=76561198141021937 reason=disconnect\n"
+        "16:27:58.813  SCRIPT       : [Logout]: Player "
+        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n"
+    )
+    _RPT_129 = (
+        "15:33:36.51  [StateMachine]: Player Dev (dpnid 13730253 uid "
+        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=) Entering "
+        "CreateNetObjectsLoginState\n"
+        '15:33:53.819 Player "Dev" (steamID=76561198141021937 '
+        "pos=<4875.0, 10470.0, 337.2>) is connected\n"
+    )
+    _SCRIPT_129_CONNECT = (
+        " SCRIPT       : [DayZ_MCP] godmode on=1 uid=76561198141021937 "
+        "reason=connect\n"
+    )
+    _SCRIPT_129_LOGOUT = (
+        " SCRIPT       : [Logout]: New player "
+        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= with logout time 15\n"
+        "SCRIPT       : [DayZ_MCP] godmode released uid= reason=disconnect\n"
+        "SCRIPT       : [Logout]: Player "
+        "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg= finished\n"
+    )
+
+    def _logs_2986(
+        self, runtime: CloseToolRuntime, rpt: str, script_text: str
+    ) -> Path:
+        _write_rpt(runtime.server_rpt, rpt)
+        script = runtime.server_rpt.parent / "script_test.log"
+        script.write_text(script_text, encoding="utf-8")
+        return script
+
+    async def _append_after_client_close(
+        self, runtime: CloseToolRuntime, script: Path, text: str
+    ) -> None:
+        while not any(roles == ("client",) for roles, _at in runtime.close_at):
+            await asyncio.sleep(0.01)
+        runtime.logout_at = time.monotonic()
+        script.write_text(script.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+    async def test_2986_130_script_log_connect_waits_for_the_logout(self) -> None:
+        # The RPT on disk has no connect line; the script log's addon line
+        # and its derived uid keep the server open until the logout line.
+        runtime = self._runtime()
+        script = self._logs_2986(
+            runtime, self._RPT_130_ON_DISK, self._SCRIPT_130_CONNECT
+        )
+        runtime.append_on_close = self._RPT_130_AT_EXIT + TERMINATION
+        runtime.reap_event = "run_reaped"
+        runtime.logout_at = None
+        writer = asyncio.create_task(
+            self._append_after_client_close(runtime, script, self._SCRIPT_130_LOGOUT)
+        )
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        await writer
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        # >=, not >: see the coarse-clock note in the client-first test above.
+        self.assertGreaterEqual(server_at, runtime.logout_at)
+        self.assertEqual(runtime.role_calls, [("client",), ("server",)])
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Dev", "logout_finished": True}],
+        )
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
+        self.assertFalse(_serialized_has_host_path(result, self.root))
+
+    async def test_2986_129_script_log_connect_adds_no_second_row(self) -> None:
+        # 1.29 has both connect lines on disk: one player, one row.
+        runtime = self._runtime()
+        script = self._logs_2986(runtime, self._RPT_129, self._SCRIPT_129_CONNECT)
+        self._arm_graceful(runtime)
+        runtime.logout_at = None
+        writer = asyncio.create_task(
+            self._append_after_client_close(runtime, script, self._SCRIPT_129_LOGOUT)
+        )
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        await writer
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        self.assertGreaterEqual(server_at, runtime.logout_at)
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Dev", "logout_finished": True}],
+        )
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
+
+    @slow_test
+    async def test_2986_130_without_the_logout_waits_to_the_cap_and_warns(
+        self,
+    ) -> None:
+        runtime = self._runtime()
+        self._logs_2986(runtime, self._RPT_130_ON_DISK, self._SCRIPT_130_CONNECT)
+        runtime.append_on_close = self._RPT_130_AT_EXIT + TERMINATION
+        runtime.reap_event = "run_reaped"
+        result = await _close_tool(runtime, graceful_timeout_s=0.4)
+        client_at = next(at for roles, at in runtime.close_at if roles == ("client",))
+        server_at = next(at for roles, at in runtime.close_at if roles == ("server",))
+        self.assertGreaterEqual(server_at - client_at, 0.3)
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Dev", "logout_finished": False}],
+        )
+        self.assertEqual(
+            result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED]
+        )
+        self.assertTrue(result["graceful"])
+
+    async def test_2986_other_godmode_lines_are_not_connections(self) -> None:
+        # player_godmode and the disconnect release use the same prefix.
+        runtime = self._runtime()
+        self._logs_2986(
+            runtime,
+            self._RPT_130_ON_DISK,
+            "20:53:04.501 SCRIPT       : [DayZ_MCP] godmode on=1 "
+            "uid=76561198141021937 reason=player_godmode\n"
+            "16:27:58.813  SCRIPT       : [DayZ_MCP] godmode released "
+            "uid=76561198141021937 reason=disconnect\n",
+        )
+        runtime.append_on_close = self._RPT_130_AT_EXIT + TERMINATION
+        runtime.reap_event = "run_reaped"
+        started = time.monotonic()
+        result = await _close_tool(runtime, graceful_timeout_s=2)
+        self.assertLess(time.monotonic() - started, 0.6)
+        self.assertEqual(result["logout_wait_s"], 0.0)
+        self.assertEqual(result["logout_players"], [])
+        self.assertNotIn("warnings", result)
+        self.assertTrue(result["graceful"])
+
+
+class Fb2986LogoutIdTest(unittest.TestCase):
+    def test_logout_id_is_the_rpt_uid_of_the_steam_id(self) -> None:
+        # Run 612202d5's RPT: `Player "Dev" (steamID=76561198141021937 ...)`
+        # and `[StateMachine]: Player Dev (... uid HmY1...=)`.
+        self.assertEqual(
+            dayz_test_tool._logout_id("76561198141021937"),
+            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=",
+        )
+        self.assertNotEqual(
+            dayz_test_tool._logout_id("76561198141021938"),
+            "HmY1S7eL2O_9JLwh-z8c0b6n30Ngil26ZWZJGYm7QZg=",
+        )
+
 
 class Fb62c5LongLogTest(unittest.TestCase):
     """Markers past the old 8 MiB head and tail still decide the warning.

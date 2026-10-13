@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import math
 import ntpath
@@ -3330,6 +3332,17 @@ _LOGOUT_FINISHED_ID_RE = re.compile(br"\[Logout\]: Player (\S+) finished\b")
 _PLAYER_UID_RE = re.compile(
     br"\[StateMachine\]: Player (.+?) \([^)\n]*\buid (\S+?)\)"
 )
+# fb-20261013-143037-0093 (2986). DayZ 1.30 holds the RPT's connect line in
+# memory until the server exits: a killed 1.30 server's RPT ends mid-line
+# before `is connected`, while its script log already holds this addon line
+# (MCPGodmode.Note, from MissionServer.InvokeOnConnect) and every later one.
+# The uid is the identity's plain id. The `[Logout]` id is the base64url
+# SHA-256 of it (`_logout_id`), the same pair the RPT shows as `steamID=` and
+# the `[StateMachine]` uid. An id that does not match only leaves the player
+# unfinished: the wait runs to its cap and warns.
+_SCRIPT_CONNECT_RE = re.compile(
+    br"\[DayZ_MCP\] godmode on=[01] uid=([0-9]+) reason=connect\b"
+)
 # fb-20260928-032049-62c5. The logout phase is min(this, graceful_timeout_s)
 # and does not consume the termination deadline.
 _LOGOUT_WAIT_S = 30.0
@@ -3731,6 +3744,12 @@ def _player_token(raw: bytes) -> str | None:
     return text
 
 
+def _logout_id(plain_id: str) -> str:
+    """The `[Logout]: Player <id> finished` id of an identity's plain id."""
+    digest = hashlib.sha256(plain_id.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii")
+
+
 @dataclass(frozen=True, slots=True)
 class _LogoutBoundary:
     """Byte sizes taken before the client close. A later line is verifiable
@@ -3786,6 +3805,9 @@ class _LogoutWatch:
     A player is saved only when the uid linked to that name logs out after
     that player's last connect line and after the pre-close boundary. A line
     from before the boundary, or a uid that was never linked, does not count.
+    A script-log connect line brings its own link: the `_logout_id` of its
+    plain id, under the name an RPT state line already gave that uid, or under
+    the plain id when no such line is on disk.
     """
 
     __slots__ = (
@@ -3856,6 +3878,19 @@ class _LogoutWatch:
             self.connects.append((event, name))
             if name not in self.order:
                 self.order.append(name)
+        for match in _SCRIPT_CONNECT_RE.finditer(window):
+            if match.end() <= carry_len:
+                continue
+            plain = _player_token(match.group(1))
+            if not plain:
+                continue
+            uid = _logout_id(plain)
+            name = self._linked_name(uid) or plain
+            offset = window_start + match.start()
+            self.uid_links.append((self._event(path, inode, offset), name, uid))
+            self.connects.append((self._event(path, inode, offset), name))
+            if name not in self.order:
+                self.order.append(name)
         for match in _LOGOUT_FINISHED_ID_RE.finditer(window):
             if match.end() <= carry_len:
                 continue
@@ -3864,6 +3899,13 @@ class _LogoutWatch:
                 continue
             event = self._event(path, inode, window_start + match.start())
             self.logouts.append((event, token))
+
+    def _linked_name(self, uid: str) -> str | None:
+        """The name of the latest link to this uid, if any."""
+        for _event, name, linked in reversed(self.uid_links):
+            if linked == uid:
+                return name
+        return None
 
     def _remember(
         self, key: str, inode: int, offset: int, carry: bytes
