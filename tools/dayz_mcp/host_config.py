@@ -245,6 +245,13 @@ def _registration_from_entry(
     if not isinstance(entry, dict):
         raise HostConfigError("daemon_provenance_conflict")
     entry_keys = set(entry)
+    # The Codex app writes `enabled = true` into its MCP entries on its own
+    # (fb-20261009-215009-ace5). True is Codex's default, so it changes nothing
+    # the daemon runs; any other value is still a conflict.
+    if platform == "codex" and "enabled" in entry:
+        if entry["enabled"] is not True:
+            raise HostConfigError("daemon_provenance_conflict")
+        entry_keys.discard("enabled")
     expected_keys = _ENTRY_KEYS[platform]
     claude_default_env = (
         platform == "claude"

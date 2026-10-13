@@ -282,14 +282,14 @@ class SupervisedFlagRegistrationTests(unittest.TestCase):
             entry["tool_timeout_sec"] = host_config.CODEX_TIMEOUT_SECONDS
         return entry
 
-    def _write_pair(self, claude_extra=(), codex_extra=()):
+    def _write_pair(self, claude_extra=(), codex_extra=(), codex_lines=()):
         claude = {"mcpServers": {"dayz-mcp": self._entry("claude", claude_extra)}}
         self.paths["claude"].write_bytes((json.dumps(claude) + chr(10)).encode())
         entry = self._entry("codex", codex_extra)
         lines = ["[mcp_servers.dayz-mcp]",
                  f"command = {json.dumps(entry['command'])}",
                  f"args = {json.dumps(entry['args'])}",
-                 f"tool_timeout_sec = {host_config.CODEX_TIMEOUT_SECONDS}", ""]
+                 f"tool_timeout_sec = {host_config.CODEX_TIMEOUT_SECONDS}", *codex_lines, ""]
         self.paths["codex"].write_bytes(chr(10).join(lines).encode())
 
     def _resolve(self):
@@ -345,6 +345,37 @@ class SupervisedFlagRegistrationTests(unittest.TestCase):
         self._write_pair(("--supervised", "--supervised"), ("--supervised", "--supervised"))
         with self.assertRaises(host_config.HostConfigError):
             self._resolve()
+
+    # fb-20261009-215009-ace5: the Codex app adds `enabled = true` to its entries.
+    # True is Codex's own default, so the entry still pins the same daemon and must
+    # resolve. Any other value, and the key on a Claude entry, stays a conflict.
+    def test_codex_enabled_true_resolves(self):
+        self._write_pair(codex_lines=("enabled = true",))
+        self.assertEqual(self._resolve().port, 18765)
+
+    def test_codex_enabled_other_values_conflict(self):
+        for value in ("false", "1", '"true"', "[true]"):
+            with self.subTest(value=value):
+                self._write_pair(codex_lines=(f"enabled = {value}",))
+                with self.assertRaises(host_config.HostConfigError) as caught:
+                    self._resolve()
+                self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+    def test_claude_enabled_key_still_conflicts(self):
+        self._write_pair(codex_lines=("enabled = true",))
+        claude = json.loads(self.paths["claude"].read_bytes())
+        claude["mcpServers"]["dayz-mcp"]["enabled"] = True
+        self.paths["claude"].write_bytes((json.dumps(claude) + chr(10)).encode())
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+    def test_a_second_unknown_codex_key_still_conflicts(self):
+        self._write_pair(codex_lines=("enabled = true", 'untrusted = "extra"'))
+        with self.assertRaises(host_config.HostConfigError) as caught:
+            self._resolve()
+        self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
 
 if __name__ == "__main__":
     unittest.main()
