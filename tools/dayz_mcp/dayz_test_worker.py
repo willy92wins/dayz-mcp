@@ -152,6 +152,8 @@ class WorkerRuntimePolicy:
     # Optional per-project build gate: when set, build requests must name a
     # source directory with exactly this basename (case-insensitive).
     build_source_basename: str | None
+    server_extra_args: tuple[str, ...] = ()
+    client_extra_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +282,53 @@ def _valid_build_source_basename(value: object) -> bool:
     return type(value) is str and _BUILD_SOURCE_BASENAME.fullmatch(value) is not None
 
 
+MAX_EXTRA_ARGS = 32
+MAX_EXTRA_ARG_LENGTH = 256
+_EXTRA_ARG = re.compile(
+    r"-[A-Za-z][A-Za-z0-9_]{0,63}(?:=[!#-~]+)?|[A-Za-z][A-Za-z0-9_]{0,63}=[!#-~]+"
+)
+_MANAGED_ARG_NAMES = frozenset({"x", "y"})
+_MANAGED_ARG_PREFIXES = (
+    "config",
+    "connect",
+    "filepatching",
+    "mission",
+    "mod",
+    "name",
+    "nopause",
+    "port",
+    "profiles",
+    "server",
+    "servermod",
+    "startnavmeshdataserver",
+    "storage",
+    "window",
+)
+
+
+def valid_extra_args(value: object) -> bool:
+    """Host-policy arguments: bounded, printable ASCII, never a managed flag."""
+    if type(value) not in (list, tuple) or len(value) > MAX_EXTRA_ARGS:
+        return False
+    names: set[str] = set()
+    for item in value:
+        if (
+            type(item) is not str
+            or not 1 <= len(item) <= MAX_EXTRA_ARG_LENGTH
+            or _EXTRA_ARG.fullmatch(item) is None
+        ):
+            return False
+        name = item.lstrip("-").split("=", 1)[0].casefold()
+        if (
+            name in _MANAGED_ARG_NAMES
+            or name.startswith(_MANAGED_ARG_PREFIXES)
+            or name in names
+        ):
+            return False
+        names.add(name)
+    return True
+
+
 _REQUIRED_MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal"})
 
 
@@ -308,6 +357,10 @@ def runtime_policy_acceptable(runtime: WorkerRuntimePolicy) -> bool:
             )
         )
         and _valid_build_source_basename(runtime.build_source_basename)
+        and type(runtime.server_extra_args) is tuple
+        and type(runtime.client_extra_args) is tuple
+        and valid_extra_args(runtime.server_extra_args)
+        and valid_extra_args(runtime.client_extra_args)
     )
 
 
@@ -323,6 +376,8 @@ _WORKER_RUNTIME_PROJECT_KEYS = frozenset(
         "mods_root",
     }
 )
+
+_WORKER_RUNTIME_EXTRA_ARGS_KEYS = frozenset({"client_extra_args", "server_extra_args"})
 
 
 def worker_runtime_from_document(
@@ -347,8 +402,16 @@ def worker_runtime_from_document(
     seen: set[tuple[str, str]] = set()
     selected: WorkerRuntimePolicy | None = None
     for item in document["projects"]:
-        if type(item) is not dict or set(item) != _WORKER_RUNTIME_PROJECT_KEYS:
+        if type(item) is not dict or not (
+            _WORKER_RUNTIME_PROJECT_KEYS
+            <= set(item)
+            <= _WORKER_RUNTIME_PROJECT_KEYS | _WORKER_RUNTIME_EXTRA_ARGS_KEYS
+        ):
             raise ValueError("worker_runtime_invalid")
+        # The builder writes an extra-args list only when it is non-empty.
+        for key in _WORKER_RUNTIME_EXTRA_ARGS_KEYS & set(item):
+            if type(item[key]) is not list or not item[key] or not valid_extra_args(item[key]):
+                raise ValueError("worker_runtime_invalid")
         if type(item["mod"]) is not str or not item["mod"]:
             raise ValueError("worker_runtime_invalid")
         if type(item["dev_root"]) is not str:
@@ -376,6 +439,8 @@ def worker_runtime_from_document(
             mods_root=item["mods_root"],
             build_temp_root=item["build_temp_root"],
             build_source_basename=item["build_source_basename"],
+            server_extra_args=tuple(item.get("server_extra_args", ())),
+            client_extra_args=tuple(item.get("client_extra_args", ())),
         )
         if not runtime_policy_acceptable(policy):
             raise ValueError("worker_runtime_invalid")
@@ -557,6 +622,7 @@ def _start_core(
                 "-serverMod="
                 + ";".join(_mod_path(value, runtime) for value in server_mods)
             )
+        argv.extend(runtime.server_extra_args)
         profiles = server_profiles
     elif role == "client":
         argv = [
@@ -573,6 +639,7 @@ def _start_core(
         ]
         if not payload["no_file_patching"]:
             argv.append("-filePatching")
+        argv.extend(runtime.client_extra_args)
         profiles = client_profiles
     elif role == "offline":
         argv = [

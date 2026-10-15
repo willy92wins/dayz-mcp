@@ -27,6 +27,7 @@ from dayz_mcp.dayz_test_request import (
     _valid_mod_entry,
     _valid_string_list,
 )
+from dayz_mcp.dayz_test_worker import valid_extra_args
 from dayz_mcp.dayz_tools_paths import external_file_paths, require_dayz_layout
 
 
@@ -493,6 +494,7 @@ _WORKER_PROJECT_KEYS = frozenset(
         "mods_root",
     }
 )
+_EXTRA_ARGS_KEYS = frozenset({"client_extra_args", "server_extra_args"})
 
 
 def resolve_launcher_policy_path(cli_path: Path | str | None = None) -> Path:
@@ -545,7 +547,7 @@ def validate_launcher_policy_source(value: object) -> None:
     seen: set[tuple[str, str]] = set()
     for project in projects:
         if type(project) is not dict or not _PROJECT_INTENT_KEYS <= set(project) <= (
-            _PROJECT_INTENT_KEYS | {"attestation"}
+            _PROJECT_INTENT_KEYS | {"attestation"} | _EXTRA_ARGS_KEYS
         ):
             raise ValueError("policy_source_schema")
         if "attestation" in project:
@@ -553,6 +555,9 @@ def validate_launcher_policy_source(value: object) -> None:
                 parse_attestation(project["attestation"])
             except ValueError:
                 raise ValueError("policy_source_schema") from None
+        for key in _EXTRA_ARGS_KEYS & set(project):
+            if type(project[key]) is not list or not valid_extra_args(project[key]):
+                raise ValueError("policy_source_schema")
         if type(project["mod"]) is not str or _MOD_NAME.fullmatch(project["mod"]) is None:
             raise ValueError("policy_source_schema")
         _validate_root_intent(project["default_source"])
@@ -657,6 +662,9 @@ def derive_worker_runtime(source: dict[str, object]) -> dict[str, object]:
                 "mods_root": project["mods_root"],
             }
         )
+        for key in sorted(_EXTRA_ARGS_KEYS):
+            if project.get(key):
+                projects[-1][key] = list(project[key])
     return {"format_version": 1, "projects": projects}
 
 
@@ -673,8 +681,11 @@ def validate_worker_runtime_document(value: object) -> None:
         raise ValueError("worker_runtime_schema")
     seen: set[tuple[str, str]] = set()
     for project in projects:
-        if type(project) is not dict or set(project) != _WORKER_PROJECT_KEYS:
+        if type(project) is not dict or not _WORKER_PROJECT_KEYS <= set(project) <= _WORKER_PROJECT_KEYS | _EXTRA_ARGS_KEYS:
             raise ValueError("worker_runtime_schema")
+        for key in _EXTRA_ARGS_KEYS & set(project):
+            if type(project[key]) is not list or not project[key] or not valid_extra_args(project[key]):
+                raise ValueError("worker_runtime_schema")
         if type(project["mod"]) is not str or not project["mod"]:
             raise ValueError("worker_runtime_schema")
         aliases = project["mission_aliases"]
