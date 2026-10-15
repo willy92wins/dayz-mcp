@@ -282,11 +282,11 @@ class SupervisedFlagRegistrationTests(unittest.TestCase):
             entry["tool_timeout_sec"] = host_config.CODEX_TIMEOUT_SECONDS
         return entry
 
-    def _write_pair(self, claude_extra=(), codex_extra=(), codex_lines=()):
-        claude = {"mcpServers": {"dayz-mcp": self._entry("claude", claude_extra)}}
+    def _write_pair(self, claude_extra=(), codex_extra=(), codex_lines=(), name="dayz-mcp"):
+        claude = {"mcpServers": {name: self._entry("claude", claude_extra)}}
         self.paths["claude"].write_bytes((json.dumps(claude) + chr(10)).encode())
         entry = self._entry("codex", codex_extra)
-        lines = ["[mcp_servers.dayz-mcp]",
+        lines = [f"[mcp_servers.{name}]",
                  f"command = {json.dumps(entry['command'])}",
                  f"args = {json.dumps(entry['args'])}",
                  f"tool_timeout_sec = {host_config.CODEX_TIMEOUT_SECONDS}", *codex_lines, ""]
@@ -369,6 +369,17 @@ class SupervisedFlagRegistrationTests(unittest.TestCase):
         with self.assertRaises(host_config.HostConfigError) as caught:
             self._resolve()
         self.assertEqual(str(caught.exception), "daemon_provenance_conflict")
+
+    def test_codex_enabled_true_resolves_on_the_130_registration(self):
+        # ace5 hit both entries; the 1.30 one is dayz-mcp-130 (--instance 130).
+        instance = ("--instance", "130")
+        self._write_pair(claude_extra=instance, codex_extra=instance,
+                         codex_lines=("enabled = true",), name="dayz-mcp-130")
+        provenance = host_config.resolve_daemon_provenance(
+            claude_path=self.paths["claude"], codex_path=self.paths["codex"],
+            server_name="dayz-mcp-130",
+        )
+        self.assertEqual(provenance.port, 18765)
 
     def test_a_second_unknown_codex_key_still_conflicts(self):
         self._write_pair(codex_lines=("enabled = true", 'untrusted = "extra"'))
