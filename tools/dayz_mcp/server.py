@@ -4462,6 +4462,9 @@ async def _observe_steam_app_view() -> dict[str, Any] | None:
     try:
         pending = cache["pending"]
         if pending is None:
+            # An observation that finished since the check above serves this call.
+            if time.monotonic() < cache["expires"]:
+                return cache["value"]
             pending = concurrent.futures.Future()
             cache.update(pending=pending, started=now)
             try:

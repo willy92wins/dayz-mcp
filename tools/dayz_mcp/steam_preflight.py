@@ -419,7 +419,7 @@ def _read_stable_snapshot(provider: SteamPreflightProvider) -> SteamActiveProces
     return first
 
 
-def _safe_live_pids(provider: SteamPreflightProvider) -> tuple[int, ...] | None:
+def _all_live_pids(provider: SteamPreflightProvider) -> frozenset[int] | None:
     try:
         raw_pids = provider.steam_process_pids()
         pids = set()
@@ -429,7 +429,12 @@ def _safe_live_pids(provider: SteamPreflightProvider) -> tuple[int, ...] | None:
             pids.add(pid)
     except Exception:
         return None
-    return tuple(sorted(pids)[:_MAX_LIVE_PIDS])
+    return frozenset(pids)
+
+
+def _safe_live_pids(provider: SteamPreflightProvider) -> tuple[int, ...] | None:
+    pids = _all_live_pids(provider)
+    return None if pids is None else tuple(sorted(pids)[:_MAX_LIVE_PIDS])
 
 
 def evaluate_steam_session(
@@ -479,6 +484,16 @@ def evaluate_steam_session(
     return result
 
 
+def _read_real_view(provider: SteamPreflightProvider) -> SteamActiveProcessSnapshot | None:
+    """A stable snapshot of the real HKCU, or None. A real-registry provider
+    that fell back to winreg read this process's own copy: the comparison
+    would be with itself."""
+    snapshot = _read_stable_snapshot(provider)
+    if snapshot is None or getattr(provider, "real_registry_unavailable", None):
+        return None
+    return snapshot
+
+
 def _read_app_view_pid(provider: SteamPreflightProvider) -> object:
     """The pid this process's view registers, _APP_VIEW_ABSENT when the key or
     a value is not there, None when it cannot be read."""
@@ -501,10 +516,10 @@ def observe_app_steam_view(
     running steam.exe and this process's view does not: it registers a pid that
     is gone, 0 or another program's, a value that is not a running pid, or
     nothing (the key or a value is absent). A DayZ launched from this app's
-    shells will not find Steam. Running means listed in the process list, which
-    holds no exited process. This process's view is read before and after the
-    real one and must not change in between: Steam restarting writes 0, then
-    its new pid, to the one key both views share when there is no copy.
+    shells will not find Steam. Running means listed in the whole process
+    list, which holds no exited process. Each view is read again after the
+    other and must not have changed: Steam restarting writes 0, then its new
+    pid, to the one key both views share when there is no copy.
 
     Returns None when the views agree, when the real HKCU cannot be read through
     WMI (nothing to compare against), when no running Steam is registered there
@@ -519,14 +534,12 @@ def observe_app_steam_view(
         )
         app = WindowsSteamPreflightProvider() if app_provider is None else app_provider
         app_pid = _read_app_view_pid(app)
-        real_snapshot = _read_stable_snapshot(real)
-        # A real-registry provider that fell back to winreg read this process's
-        # own copy: the comparison would be with itself.
-        if real_snapshot is None or getattr(real, "real_registry_unavailable", None):
+        real_snapshot = _read_real_view(real)
+        if app_pid is None or real_snapshot is None:
             return None
-        if app_pid is None or _read_app_view_pid(app) != app_pid:
+        if _read_app_view_pid(app) != app_pid or _read_real_view(real) != real_snapshot:
             return None
-        live_pids = _safe_live_pids(real)
+        live_pids = _all_live_pids(real)
         real_pid = real_snapshot.pid
         if live_pids is None or real_pid not in live_pids or app_pid in live_pids:
             return None

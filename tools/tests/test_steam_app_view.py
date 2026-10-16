@@ -95,11 +95,17 @@ class ObserveAppSteamViewTest(unittest.TestCase):
 
     def test_it_stays_quiet_when_a_dayz_from_this_app_would_find_steam(self) -> None:
         other_steam = {**_PROCESSES, 5150: _STEAM_EXE}
+        # More steam.exe than steam_live_pids reports (8): the whole list counts.
+        nine_steams = {pid: _STEAM_EXE for pid in range(1001, 1010)}
         cases = {
             "views_agree": (_View(_LIVE_STEAM), _View(_LIVE_STEAM)),
             "copy_names_another_running_steam": (
                 _View(5150, processes=other_steam),
                 _View(_LIVE_STEAM, processes=other_steam),
+            ),
+            "copy_names_the_ninth_running_steam": (
+                _View(1009, processes=nine_steams),
+                _View(1001, processes=nine_steams),
             ),
         }
         for name, (app, real) in cases.items():
@@ -124,6 +130,10 @@ class ObserveAppSteamViewTest(unittest.TestCase):
             # Steam restarting writes 0, then its new pid, to the one key both
             # views read when there is no copy.
             "copy_changed_meanwhile": (_View([0, _LIVE_STEAM]), _View(_LIVE_STEAM)),
+            "real_key_went_back_meanwhile": (
+                _View(_GONE_STEAM),
+                _View([_LIVE_STEAM, _LIVE_STEAM, _GONE_STEAM, _GONE_STEAM]),
+            ),
             "process_list_unreadable": (
                 _View(_GONE_STEAM, processes=denied),
                 _View(_LIVE_STEAM, processes=denied),
@@ -248,19 +258,22 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["warnings"][-1], sp.STEAM_APP_VIEW_STALE)
                 self.assertEqual(result["steam_app_view"], _ADVISORY)
 
-    async def test_the_observation_runs_outside_the_tool_lock(self) -> None:
-        held: list[bool] = []
+    async def test_the_observation_runs_in_its_own_daemon_thread_outside_the_tool_lock(
+        self,
+    ) -> None:
+        seen: list[tuple[bool, str, bool]] = []
 
         def observe() -> dict:
-            held.append(self.runtime.tool_lock.locked())
+            thread = threading.current_thread()
+            seen.append((self.runtime.tool_lock.locked(), thread.name, thread.daemon))
             return dict(_ADVISORY)
 
         for tool in _TOOLS:
             with self.subTest(tool), self.observed(side_effect=observe):
-                held.clear()
+                seen.clear()
                 self.expire()
                 await self.call(tool)
-                self.assertEqual(held, [False])
+                self.assertEqual(seen, [(False, "dayz-mcp-steam-app-view", True)])
 
     async def test_a_quiet_or_failed_observation_adds_nothing_and_is_kept(self) -> None:
         for name, behaviour in (
@@ -279,6 +292,8 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
     async def test_one_observation_serves_the_calls_inside_its_ttl(self) -> None:
         with self.observed(return_value=dict(_ADVISORY)) as observe:
             await self.call("session_status")
+            ttl = server._steam_app_view_cache["expires"] - time.monotonic()
+            self.assertTrue(25.0 < ttl <= 30.0, ttl)
             second = await self.call("session_status")
             self.assertEqual(second["steam_app_view"], _ADVISORY)
             observe.assert_called_once_with()
@@ -286,33 +301,67 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
             await self.call("session_status")
             self.assertEqual(observe.call_count, 2)
 
+    async def test_an_observation_that_finishes_meanwhile_is_not_started_again(self) -> None:
+        # Its thread fills the cache between this call's freshness check and
+        # its look at the pending observation.
+        class _FinishesWhenPendingIsRead(dict):
+            finished = False
+
+            def __getitem__(self, key):
+                if key == "pending" and not self.finished:
+                    self.finished = True
+                    self.update(
+                        value=dict(_ADVISORY), expires=time.monotonic() + 30.0, pending=None
+                    )
+                return super().__getitem__(key)
+
+        racy = _FinishesWhenPendingIsRead(
+            expires=0.0, value=None, pending=object(), started=0.0
+        )
+        with (
+            patch.object(server, "_steam_app_view_cache", racy),
+            self.observed(return_value=None) as observe,
+        ):
+            result = await self.call("session_status")
+        self.assertEqual(result["steam_app_view"], _ADVISORY)
+        observe.assert_not_called()
+
     @slow_test
     async def test_a_hung_observation_holds_no_tool_and_is_not_started_again(self) -> None:
         release = threading.Event()
         self.addCleanup(release.set)
 
         def hung() -> dict:
-            release.wait(5)
+            release.wait(10)
             return dict(_ADVISORY)
 
-        with (
-            patch.object(server, "_STEAM_APP_VIEW_WAIT_S", 0.2),
-            self.observed(side_effect=hung) as observe,
-        ):
+        with self.observed(side_effect=hung) as observe:
             began = time.monotonic()
             first = await self.call("session_status")
-            self.assertLess(time.monotonic() - began, 2.0)
+            # The 2 s wait, not the query's 10 s.
+            self.assertLess(time.monotonic() - began, 5.0)
             second = await self.call("session_acquire")
-            for result in (first, second):
+            third = await self.call("session_acquire_wait")
+            for result in (first, second, third):
                 self.assertEqual(result["status"], "active")
                 self.assertNotIn("steam_app_view", result)
             observe.assert_called_once_with()
-            # When the query comes back, its answer serves the next calls.
+            threads = [
+                thread
+                for thread in threading.enumerate()
+                if thread.name == "dayz-mcp-steam-app-view"
+            ]
+            self.assertEqual([thread.daemon for thread in threads], [True])
+            # Calls past the wait do not wrap the hung future again: only the
+            # first call's callback is on it (concurrent.futures keeps them in
+            # _done_callbacks).
             pending = server._steam_app_view_cache["pending"]
+            self.assertEqual(len(pending._done_callbacks), 1)
+            # When the query comes back, its answer serves the next calls.
             release.set()
             await asyncio.wait_for(asyncio.wrap_future(pending), 5)
-            third = await self.call("session_status")
-            self.assertEqual(third["steam_app_view"], _ADVISORY)
+            after = await self.call("session_status")
+            self.assertEqual(after["steam_app_view"], _ADVISORY)
             observe.assert_called_once_with()
 
     @slow_test

@@ -18,14 +18,14 @@ warning steam_app_view_stale.
 Deleting the key from inside the app leaves a marker that still hides the real
 one, so the copy is removed offline. Run this as administrator, as the same
 user, with the app fully closed (tray included). By default it backs up the
-hive and lists the Valve keys in the copy, and changes nothing. -Apply deletes
+hive and lists the Valve keys in the copy, and deletes nothing. -Apply deletes
 Software\Valve from the copy, and the app reads the real keys again.
 
 Rollback: with the app closed, copy the backed-up User.dat* files back into the
 Helium folder.
 
 .PARAMETER Apply
-Delete Software\Valve from the app's copy. Without it nothing is changed.
+Delete Software\Valve from the app's copy. Without it nothing is deleted.
 
 .PARAMETER PackageFamily
 The app's package family name. Claude's is the default; for Codex, read it with
@@ -70,6 +70,13 @@ if ($package) {
     }
 }
 
+$mountName = 'DayZMcpAppHelium'
+$root = "Registry::HKEY_USERS\$mountName"
+# Whatever is mounted under this name is not this run's, so it is left alone.
+if (Test-Path -LiteralPath $root) {
+    throw "HKU\$mountName is already mounted, by a run that did not finish. Run 'reg unload HKU\$mountName' and run this again."
+}
+
 # Back up the hive and its transaction logs before anything else. A hive still
 # in use fails the copy here, before anything is changed.
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -79,8 +86,6 @@ Get-ChildItem -LiteralPath $helium -Filter 'User.dat*' -Force |
     Copy-Item -Destination $backup
 Write-Host "Backup: $backup"
 
-$mountName = 'DayZMcpAppHelium'
-$root = "Registry::HKEY_USERS\$mountName"
 try {
     & reg.exe load "HKU\$mountName" $hive | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -113,8 +118,8 @@ try {
     }
 }
 finally {
-    # Unload whenever the hive is mounted, also after a load this run did not
-    # see succeed. The registry provider keeps key handles until they are
+    # Mounted now means mounted by this run, also by a load it did not see
+    # succeed. The registry provider keeps key handles until they are
     # collected, and reg unload fails while one is open, so collect and retry.
     if (Test-Path -LiteralPath $root) {
         $unloaded = $false
