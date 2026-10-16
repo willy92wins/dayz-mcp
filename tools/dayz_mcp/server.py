@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import inspect
 import json
 import math
@@ -4426,22 +4427,63 @@ async def _observe_caller_tool_registry_stale(
 # 2026-10-16 (steam_preflight.observe_app_steam_view): the lease and status tools
 # are what an agent calls before it launches DayZ by hand, so they carry the
 # steam_app_view_stale advisory. session_status is polled, and a frozen copy lasts
-# days, so one observation (WMI and a few process probes) serves every call for
-# _STEAM_APP_VIEW_TTL_S.
+# days, so one observation (WMI and the process list) serves every call for
+# _STEAM_APP_VIEW_TTL_S, a failed one included.
+# WMI calls have no timeout (wmi_host), so the observation runs in its own daemon
+# thread, one at a time, and the tools wait for it at most _STEAM_APP_VIEW_WAIT_S
+# from its start: a query that never returns holds neither a tool nor the shared
+# executor, and is not started again (Codex review of #239).
 _STEAM_APP_VIEW_TTL_S = 30.0
-_steam_app_view_cache: dict[str, Any] = {"expires": 0.0, "value": None}
+_STEAM_APP_VIEW_WAIT_S = 2.0
+_steam_app_view_cache: dict[str, Any] = {
+    "expires": 0.0,
+    "value": None,
+    "pending": None,
+    "started": 0.0,
+}
+
+
+def _run_steam_app_view_observation(done: concurrent.futures.Future) -> None:
+    try:
+        value = observe_app_steam_view()
+    except Exception:
+        value = None
+    _steam_app_view_cache.update(
+        value=value, expires=time.monotonic() + _STEAM_APP_VIEW_TTL_S, pending=None
+    )
+    done.set_result(value)
 
 
 async def _observe_steam_app_view() -> dict[str, Any] | None:
-    if time.monotonic() < _steam_app_view_cache["expires"]:
-        return _steam_app_view_cache["value"]
+    cache = _steam_app_view_cache
+    now = time.monotonic()
+    if now < cache["expires"]:
+        return cache["value"]
     try:
-        value = await asyncio.to_thread(observe_app_steam_view)
+        pending = cache["pending"]
+        if pending is None:
+            pending = concurrent.futures.Future()
+            cache.update(pending=pending, started=now)
+            try:
+                threading.Thread(
+                    target=_run_steam_app_view_observation,
+                    args=(pending,),
+                    name="dayz-mcp-steam-app-view",
+                    daemon=True,
+                ).start()
+            except Exception:
+                cache["pending"] = None
+                raise
+        remaining = cache["started"] + _STEAM_APP_VIEW_WAIT_S - now
+        # Past the wait, a hung query is not wrapped again: each wrap adds a
+        # callback to its future, on every polled call.
+        if remaining <= 0:
+            return None
+        return await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(pending)), remaining
+        )
     except Exception:
-        value = None
-    _steam_app_view_cache["value"] = value
-    _steam_app_view_cache["expires"] = time.monotonic() + _STEAM_APP_VIEW_TTL_S
-    return value
+        return None
 
 
 def _annotate_steam_app_view(

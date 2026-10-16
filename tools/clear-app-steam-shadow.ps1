@@ -11,8 +11,9 @@ on hide the real key from every process of that app. Once a Steam started from
 one of the app's shells has written HKCU\Software\Valve there, the copy keeps
 that Steam's ActiveProcess pid after it exits. A DayZ started later from the
 app's shells reads it and stops at "Unable to locate a running instance of
-Steam". dayz_test_run is not affected (its daemon runs outside the app), and
-session_status names the state with the warning steam_app_view_stale.
+Steam". dayz_test_run is not affected while its daemon runs outside the app
+(dayz-mcp starts it through WMI), and session_status names the state with the
+warning steam_app_view_stale.
 
 Deleting the key from inside the app leaves a marker that still hides the real
 one, so the copy is removed offline. Run this as administrator, as the same
@@ -55,8 +56,10 @@ if (-not (Test-Path -LiteralPath $hive)) {
     throw "$hive not found. Pass the app's package family with -PackageFamily."
 }
 
-# The hive is in use while any process of the app runs; reg load below fails
-# then too, this only names the processes.
+# The hive is in use while any process of the app runs. This names only the
+# processes whose image is in the app's package folder: the shells and tools the
+# app starts run other images and hold the hive too, and for them the backup copy
+# below fails, before anything is changed.
 $package = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq $PackageFamily }
 if ($package) {
     $running = Get-Process | Where-Object {
@@ -77,12 +80,12 @@ Get-ChildItem -LiteralPath $helium -Filter 'User.dat*' -Force |
 Write-Host "Backup: $backup"
 
 $mountName = 'DayZMcpAppHelium'
-& reg.exe load "HKU\$mountName" $hive | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "reg load failed (exit $LASTEXITCODE): the hive is in use. Close the app fully, or restart Windows, and run this again."
-}
+$root = "Registry::HKEY_USERS\$mountName"
 try {
-    $root = "Registry::HKEY_USERS\$mountName"
+    & reg.exe load "HKU\$mountName" $hive | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "reg load failed (exit $LASTEXITCODE): the hive is in use. Close the app fully, or restart Windows, and run this again."
+    }
     $valve = "$root\Software\Valve"
     if (-not (Test-Path -LiteralPath $valve)) {
         Write-Host 'The copy has no Software\Valve: there is nothing to remove.'
@@ -105,18 +108,26 @@ try {
             Write-Host 'Deleted Software\Valve from the copy.'
         }
         else {
-            Write-Host 'Nothing changed. Run again with -Apply to delete it.'
+            Write-Host 'Nothing was deleted. Run again with -Apply to delete it.'
         }
     }
 }
 finally {
-    # The registry provider keeps key handles until they are collected, and
-    # reg unload fails while one is open.
-    [GC]::Collect()
-    [GC]::WaitForPendingFinalizers()
-    & reg.exe unload "HKU\$mountName" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "reg unload failed. Run 'reg unload HKU\$mountName' (or restart Windows) before you open the app."
+    # Unload whenever the hive is mounted, also after a load this run did not
+    # see succeed. The registry provider keeps key handles until they are
+    # collected, and reg unload fails while one is open, so collect and retry.
+    if (Test-Path -LiteralPath $root) {
+        $unloaded = $false
+        for ($attempt = 1; $attempt -le 5 -and -not $unloaded; $attempt++) {
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            & reg.exe unload "HKU\$mountName" | Out-Null
+            $unloaded = $LASTEXITCODE -eq 0
+            if (-not $unloaded) { Start-Sleep -Seconds 1 }
+        }
+        if (-not $unloaded) {
+            Write-Warning "reg unload failed. Run 'reg unload HKU\$mountName' (or restart Windows) before you open the app."
+        }
     }
 }
 

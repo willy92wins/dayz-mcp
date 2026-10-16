@@ -56,16 +56,21 @@ REMEDIATION_PYWIN32_MISSING = (
 # observe_app_steam_view names it; it refuses nothing.
 STEAM_APP_VIEW_STALE = "steam_app_view_stale"
 REMEDIATION_STEAM_APP_VIEW_STALE = (
-    "This MCP client runs inside an app (Claude or Codex) whose private copy of "
-    "the registry registers Steam as a process that is gone, while the real "
-    "registry names the running Steam. dayz_test_run is not affected: its daemon "
-    "reads the real one. A DayZ started from this app's shells reads the stale "
-    "copy and stops at 'Unable to locate a running instance of Steam'. Start it "
-    "with dayz_test_run, or from outside the app (Steam, Explorer, or WMI's "
+    "This MCP client reads a private copy of the registry, which the app it runs "
+    "in (Claude or Codex) keeps for every process it starts, and that copy does "
+    "not register the running Steam that the real registry names. A DayZ started "
+    "from this app's shells reads the same copy and stops at 'Unable to locate a "
+    "running instance of Steam'. dayz_test_run is not affected while its daemon "
+    "runs outside the app, where dayz-mcp starts it through WMI; a daemon started "
+    "without WMI reads the copy too and refuses the launch. Start DayZ with "
+    "dayz_test_run, or from outside the app (Steam, Explorer, or WMI's "
     "Win32_Process.Create). Never write or delete Steam's registry keys, or start "
     "Steam, from this app's shells: that is what freezes the copy. To remove the "
     "copy, see README \"A DayZ started by hand cannot find Steam\"."
 )
+# How this process's view reads when Steam's key or value is not there: a
+# tombstone in the app's copy hides the real key that way (LL-516).
+_APP_VIEW_ABSENT = "absent"
 _ACTIVE_PROCESS_KEY = r"Software\Valve\Steam\ActiveProcess"
 _STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
@@ -474,18 +479,37 @@ def evaluate_steam_session(
     return result
 
 
+def _read_app_view_pid(provider: SteamPreflightProvider) -> object:
+    """The pid this process's view registers, _APP_VIEW_ABSENT when the key or
+    a value is not there, None when it cannot be read."""
+    try:
+        snapshot = provider.read_active_process()
+    except FileNotFoundError:
+        return _APP_VIEW_ABSENT
+    except Exception:
+        return None
+    return snapshot.pid if isinstance(snapshot, SteamActiveProcessSnapshot) else None
+
+
 def observe_app_steam_view(
     app_provider: SteamPreflightProvider | None = None,
     real_provider: SteamPreflightProvider | None = None,
 ) -> dict[str, object] | None:
     """This process's view of ActiveProcess against the user's real HKCU.
 
-    Returns the steam_app_view_stale advisory when the two views name different
-    pids, the real one is a live steam.exe and this process's one is not: a DayZ
-    launched from this app's shells will not find Steam. Returns None when the
-    views agree, when the real HKCU cannot be read through WMI (nothing to
-    compare against), when Steam is not running at all (dayz_test_run names
-    that itself) and on any failure: it is advice, never a gate.
+    Returns the steam_app_view_stale advisory when the real HKCU registers a
+    running steam.exe and this process's view does not: it registers a pid that
+    is gone, 0 or another program's, a value that is not a running pid, or
+    nothing (the key or a value is absent). A DayZ launched from this app's
+    shells will not find Steam. Running means listed in the process list, which
+    holds no exited process. This process's view is read before and after the
+    real one and must not change in between: Steam restarting writes 0, then
+    its new pid, to the one key both views share when there is no copy.
+
+    Returns None when the views agree, when the real HKCU cannot be read through
+    WMI (nothing to compare against), when no running Steam is registered there
+    (dayz_test_run names that itself) and on any failure: it is advice, never a
+    gate.
     """
     try:
         real = (
@@ -493,28 +517,24 @@ def observe_app_steam_view(
             if real_provider is None
             else real_provider
         )
+        app = WindowsSteamPreflightProvider() if app_provider is None else app_provider
+        app_pid = _read_app_view_pid(app)
         real_snapshot = _read_stable_snapshot(real)
         # A real-registry provider that fell back to winreg read this process's
         # own copy: the comparison would be with itself.
         if real_snapshot is None or getattr(real, "real_registry_unavailable", None):
             return None
-        app = WindowsSteamPreflightProvider() if app_provider is None else app_provider
-        app_snapshot = _read_stable_snapshot(app)
-        if app_snapshot is None:
+        if app_pid is None or _read_app_view_pid(app) != app_pid:
             return None
+        live_pids = _safe_live_pids(real)
         real_pid = real_snapshot.pid
-        app_pid = app_snapshot.pid
-        if not _is_int(real_pid) or real_pid <= 0 or not _is_int(app_pid):
-            return None
-        if app_pid == real_pid or not _registered_is_live_steam(real, real_pid):
-            return None
-        if app_pid > 0 and _registered_is_live_steam(app, app_pid):
+        if live_pids is None or real_pid not in live_pids or app_pid in live_pids:
             return None
     except Exception:
         return None
     return {
         "code": STEAM_APP_VIEW_STALE,
-        "app_view_pid": app_pid,
+        "app_view_pid": app_pid if _is_int(app_pid) else None,
         "real_pid": real_pid,
         "remediation": REMEDIATION_STEAM_APP_VIEW_STALE,
     }

@@ -285,9 +285,10 @@ Claude Desktop and Codex keep a private copy of the registry for every process
 they start. Once a Steam started from one of their shells has written its keys
 there, that copy keeps naming that Steam after it exits. A DayZ you start later
 from the app's shells reads it and stops at "Unable to locate a running instance
-of Steam", while `dayz_test_run`, whose daemon runs outside the app, still
-launches. `session_status`, `session_acquire_wait` and `session_acquire` name it
-with the warning `steam_app_view_stale`.
+of Steam", while `dayz_test_run` still launches as long as its daemon runs
+outside the app (dayz-mcp starts it through WMI). `session_status`,
+`session_acquire_wait` and `session_acquire` name it with the warning
+`steam_app_view_stale`.
 
 - Start that DayZ from outside the app: from Steam, from Explorer, or through
   WMI (`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments
