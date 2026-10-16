@@ -102,16 +102,16 @@ class NativeSourceSealTests(unittest.TestCase):
         opened.root = self.root
         external = {"kind": "external", "path": r"C:\Steam\DayZ\DayZDiag_x64.exe",
                     "size": 1, "sha256": "0" * 64, "identity": None}
-        with (
-            patch.object(launcher_registry._OpenedLauncher, "revalidate"),
-            patch.object(native_bundle, "_parse_manifest", return_value=([external], pins)),
-            patch.object(native_bundle, "_open_verified_file",
-                         side_effect=ValueError("invalid_native_launcher_bundle")),
-        ):
-            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
-                with server._typed_dayz_test_value_errors():
-                    native_bundle.load_verified_bundle(opened)
-        self.assertEqual(caught.exception.code, "invalid_native_launcher_bundle__external_drift")
+        for failure in (ValueError("invalid_native_launcher_bundle"), FileNotFoundError(2, "gone")):
+            with self.subTest(failure=type(failure).__name__), (
+                patch.object(launcher_registry._OpenedLauncher, "revalidate"),
+                patch.object(native_bundle, "_parse_manifest", return_value=([external], pins)),
+                patch.object(native_bundle, "_open_verified_file", side_effect=failure),
+            ):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    with server._typed_dayz_test_value_errors():
+                        native_bundle.load_verified_bundle(opened)
+                self.assertEqual(caught.exception.code, "invalid_native_launcher_bundle__external_drift")
         manifest_path.unlink()
 
     def test_each_pin_failure_survives_mcp_error_typing(self):
