@@ -165,7 +165,9 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
                     tool, arguments, {"return_value": dict(_ADVISORY)}
                 )
                 self.assertEqual(result["status"], "active")
-                self.assertEqual(result["warnings"][:2], ["already_here", sp.STEAM_APP_VIEW_STALE])
+                # session_acquire_wait may add tool_registry_stale_reopen_client in between.
+                self.assertEqual(result["warnings"][0], "already_here")
+                self.assertEqual(result["warnings"][-1], sp.STEAM_APP_VIEW_STALE)
                 self.assertEqual(result["steam_app_view"], _ADVISORY)
 
     async def test_a_quiet_or_failed_observation_adds_nothing(self) -> None:
