@@ -103,7 +103,8 @@ class NativeSourceSealTests(unittest.TestCase):
         external = {"kind": "external", "path": r"C:\Steam\DayZ\DayZDiag_x64.exe",
                     "size": 1, "sha256": "0" * 64, "identity": None}
         for failure in (ValueError("invalid_native_launcher_bundle"), FileNotFoundError(2, "gone")):
-            with self.subTest(failure=type(failure).__name__), (
+            with (
+                self.subTest(failure=type(failure).__name__),
                 patch.object(launcher_registry._OpenedLauncher, "revalidate"),
                 patch.object(native_bundle, "_parse_manifest", return_value=([external], pins)),
                 patch.object(native_bundle, "_open_verified_file", side_effect=failure),
