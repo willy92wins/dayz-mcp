@@ -1536,13 +1536,19 @@ def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
                 bundle_hashes[relative] = str(item["sha256"])
             else:
                 path = Path(str(item["path"]))
-                stream = _open_verified_file(
-                    path,
-                    expected_size=item["size"],
-                    expected_sha256=item["sha256"],
-                    root=None,
-                    identity=item["identity"],
-                )
+                try:
+                    stream = _open_verified_file(
+                        path,
+                        expected_size=item["size"],
+                        expected_sha256=item["sha256"],
+                        root=None,
+                        identity=item["identity"],
+                    )
+                except ValueError as error:
+                    # A Steam update rewrites pinned game/tool binaries
+                    # (fb-20261016-144210-11b4). Name it so the caller knows to
+                    # renew the bundle; doctor lists the drifted paths.
+                    raise ValueError("invalid_native_launcher_bundle__external_drift") from error
             streams.append(stream)
             info = os.fstat(stream.fileno())
             identity = PathIdentity(

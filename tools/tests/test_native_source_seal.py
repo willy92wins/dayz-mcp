@@ -90,6 +90,30 @@ class NativeSourceSealTests(unittest.TestCase):
         # A pinned manifest handle must be released on rejection (Windows delete).
         manifest_path.unlink()
 
+    def test_loader_names_a_drifted_external_file(self):
+        # fb-20261016-144210-11b4: a Steam update rewrote a pinned game binary and
+        # dayz_test_run said only invalid_native_launcher_bundle.
+        source_root = Path(native_bundle.__file__).parent
+        pins = {name: hashlib.sha256((source_root / module).read_bytes()).hexdigest().upper()
+                for name, module in PINS.items()}
+        manifest_path = self.root / "closure-manifest.json"
+        manifest_path.write_bytes((json.dumps(pins, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        opened = object.__new__(launcher_registry._OpenedLauncher)
+        opened.root = self.root
+        external = {"kind": "external", "path": r"C:\Steam\DayZ\DayZDiag_x64.exe",
+                    "size": 1, "sha256": "0" * 64, "identity": None}
+        with (
+            patch.object(launcher_registry._OpenedLauncher, "revalidate"),
+            patch.object(native_bundle, "_parse_manifest", return_value=([external], pins)),
+            patch.object(native_bundle, "_open_verified_file",
+                         side_effect=ValueError("invalid_native_launcher_bundle")),
+        ):
+            with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                with server._typed_dayz_test_value_errors():
+                    native_bundle.load_verified_bundle(opened)
+        self.assertEqual(caught.exception.code, "invalid_native_launcher_bundle__external_drift")
+        manifest_path.unlink()
+
     def test_each_pin_failure_survives_mcp_error_typing(self):
         source_root = Path(native_bundle.__file__).parent
         pins = {key: hashlib.sha256((source_root / module).read_bytes()).hexdigest().upper()
