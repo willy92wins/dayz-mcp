@@ -279,6 +279,25 @@ Each of these fails closed with a named error instead of guessing (#93):
   must find the same DayZ Tools. If DayZ Tools move, build and register the
   launcher again (steps 2 and 3 under "What is deliberately not in this repo").
 
+### A DayZ started by hand cannot find Steam
+
+Claude Desktop and Codex keep a private copy of the registry for every process
+they start. Once a Steam started from one of their shells has written its keys
+there, that copy keeps naming that Steam after it exits. A DayZ you start later
+from the app's shells reads it and stops at "Unable to locate a running instance
+of Steam", while `dayz_test_run`, whose daemon runs outside the app, still
+launches. `session_status`, `session_acquire_wait` and `session_acquire` name it
+with the warning `steam_app_view_stale`.
+
+- Start that DayZ from outside the app: from Steam, from Explorer, or through
+  WMI (`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments
+  @{CommandLine='"<exe>" <args>'; CurrentDirectory='<dir>'}`).
+- Never start Steam, or write or delete its registry keys, from the app's
+  shells: that is what freezes the copy.
+- To remove the copy, close the app fully and run
+  `tools\clear-app-steam-shadow.ps1` from an elevated PowerShell. It backs up
+  the app's hive and lists the Valve keys in it; `-Apply` deletes them.
+
 ## Security model
 
 Fail-closed from the first line: the listener binds `127.0.0.1` only, every request

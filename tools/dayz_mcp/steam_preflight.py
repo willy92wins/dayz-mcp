@@ -48,6 +48,24 @@ REMEDIATION_PYWIN32_MISSING = (
     "Re-run the dayz-mcp installer (requirements-mcp.txt declares pywin32), restart "
     "the MCP client, then retry dayz_test_run."
 )
+# 2026-10-16: an agent's own Start-Process of DayZ, from a shell inside the Claude
+# app, read the app's private copy of ActiveProcess (pid 67468, a Steam gone since
+# 2026-10-06) and stopped at "Unable to locate a running instance of Steam", while
+# every dayz_test_run that day launched: its daemon runs outside the app and reads
+# the real key (277748). Nothing told the agent its view was frozen.
+# observe_app_steam_view names it; it refuses nothing.
+STEAM_APP_VIEW_STALE = "steam_app_view_stale"
+REMEDIATION_STEAM_APP_VIEW_STALE = (
+    "This MCP client runs inside an app (Claude or Codex) whose private copy of "
+    "the registry registers Steam as a process that is gone, while the real "
+    "registry names the running Steam. dayz_test_run is not affected: its daemon "
+    "reads the real one. A DayZ started from this app's shells reads the stale "
+    "copy and stops at 'Unable to locate a running instance of Steam'. Start it "
+    "with dayz_test_run, or from outside the app (Steam, Explorer, or WMI's "
+    "Win32_Process.Create). Never write or delete Steam's registry keys, or start "
+    "Steam, from this app's shells: that is what freezes the copy. To remove the "
+    "copy, see README \"A DayZ started by hand cannot find Steam\"."
+)
 _ACTIVE_PROCESS_KEY = r"Software\Valve\Steam\ActiveProcess"
 _STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
@@ -454,6 +472,52 @@ def evaluate_steam_session(
     ):
         return replace(result, remediation=REMEDIATION_PYWIN32_MISSING)
     return result
+
+
+def observe_app_steam_view(
+    app_provider: SteamPreflightProvider | None = None,
+    real_provider: SteamPreflightProvider | None = None,
+) -> dict[str, object] | None:
+    """This process's view of ActiveProcess against the user's real HKCU.
+
+    Returns the steam_app_view_stale advisory when the two views name different
+    pids, the real one is a live steam.exe and this process's one is not: a DayZ
+    launched from this app's shells will not find Steam. Returns None when the
+    views agree, when the real HKCU cannot be read through WMI (nothing to
+    compare against), when Steam is not running at all (dayz_test_run names
+    that itself) and on any failure: it is advice, never a gate.
+    """
+    try:
+        real = (
+            WindowsSteamPreflightProvider(real_registry=True)
+            if real_provider is None
+            else real_provider
+        )
+        real_snapshot = _read_stable_snapshot(real)
+        # A real-registry provider that fell back to winreg read this process's
+        # own copy: the comparison would be with itself.
+        if real_snapshot is None or getattr(real, "real_registry_unavailable", None):
+            return None
+        app = WindowsSteamPreflightProvider() if app_provider is None else app_provider
+        app_snapshot = _read_stable_snapshot(app)
+        if app_snapshot is None:
+            return None
+        real_pid = real_snapshot.pid
+        app_pid = app_snapshot.pid
+        if not _is_int(real_pid) or real_pid <= 0 or not _is_int(app_pid):
+            return None
+        if app_pid == real_pid or not _registered_is_live_steam(real, real_pid):
+            return None
+        if app_pid > 0 and _registered_is_live_steam(app, app_pid):
+            return None
+    except Exception:
+        return None
+    return {
+        "code": STEAM_APP_VIEW_STALE,
+        "app_view_pid": app_pid,
+        "real_pid": real_pid,
+        "remediation": REMEDIATION_STEAM_APP_VIEW_STALE,
+    }
 
 
 def _evaluate_with(selected_provider: SteamPreflightProvider) -> SteamSessionResult:

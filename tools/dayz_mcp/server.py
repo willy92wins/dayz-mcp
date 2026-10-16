@@ -140,6 +140,7 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
     public_audit_stage,
 )
+from dayz_mcp.steam_preflight import STEAM_APP_VIEW_STALE, observe_app_steam_view
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
 from dayz_mcp import player_move as player_move_contract
@@ -4422,6 +4423,41 @@ async def _observe_caller_tool_registry_stale(
         return True
 
 
+# 2026-10-16 (steam_preflight.observe_app_steam_view): the lease and status tools
+# are what an agent calls before it launches DayZ by hand, so they carry the
+# steam_app_view_stale advisory. session_status is polled, and a frozen copy lasts
+# days, so one observation (WMI and a few process probes) serves every call for
+# _STEAM_APP_VIEW_TTL_S.
+_STEAM_APP_VIEW_TTL_S = 30.0
+_steam_app_view_cache: dict[str, Any] = {"expires": 0.0, "value": None}
+
+
+async def _observe_steam_app_view() -> dict[str, Any] | None:
+    if time.monotonic() < _steam_app_view_cache["expires"]:
+        return _steam_app_view_cache["value"]
+    try:
+        value = await asyncio.to_thread(observe_app_steam_view)
+    except Exception:
+        value = None
+    _steam_app_view_cache["value"] = value
+    _steam_app_view_cache["expires"] = time.monotonic() + _STEAM_APP_VIEW_TTL_S
+    return value
+
+
+def _annotate_steam_app_view(
+    payload: Any, view: dict[str, Any] | None
+) -> Any:
+    if view is None or not isinstance(payload, dict):
+        return payload
+    warnings = payload.get("warnings")
+    warnings = list(warnings) if isinstance(warnings, list) else []
+    if STEAM_APP_VIEW_STALE not in warnings:
+        warnings.append(STEAM_APP_VIEW_STALE)
+    payload["warnings"] = warnings
+    payload["steam_app_view"] = dict(view)
+    return payload
+
+
 # fb-20260930-171015-4fdf. This process builds the request with the modules it
 # loaded at start, and the sealed worker it launches comes from the bundle on
 # disk; load_verified_bundle compares that bundle with the files on disk, not
@@ -4925,9 +4961,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(purpose, str) or not purpose.strip():
             raise ToolError("bad_purpose")
         client = _client_runtime()
+        steam_view = await _observe_steam_app_view()
         async with client.tool_lock:
             return _with_ok_next_step(
-                await client.session_acquire(purpose.strip()), "session_acquire"
+                _annotate_steam_app_view(
+                    await client.session_acquire(purpose.strip()), steam_view
+                ),
+                "session_acquire",
             )
 
     @app.tool(
@@ -4979,6 +5019,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             observe_server_sources
         )
         client = _client_runtime()
+        steam_view = await _observe_steam_app_view()
         async with client.tool_lock:
             payload = await client.session_acquire_wait(
                 purpose.strip(), validated_wait, report
@@ -4986,7 +5027,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # tools/list_changed for the revealed catalog is sent by
         # _install_catalog_change_notice once this call returns.
         return _with_ok_next_step(
-            _annotate_caller_tool_registry(payload, caller_stale),
+            _annotate_steam_app_view(
+                _annotate_caller_tool_registry(payload, caller_stale), steam_view
+            ),
             "session_acquire_wait",
         )
 
@@ -5068,6 +5111,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     )
     async def session_status() -> dict[str, Any]:
         client = _client_runtime()
+        steam_view = await _observe_steam_app_view()
         async with client.tool_lock:
             status = await client.session_status()
             box = status.get("box")
@@ -5093,7 +5137,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 status, caller_session or None
             )
             await _attach_revalidated_runs_retired_recently(client, status)
-            return _with_ok_next_step(status, "session_status")
+            return _with_ok_next_step(
+                _annotate_steam_app_view(status, steam_view), "session_status"
+            )
 
     @app.tool(
         name=LEASE_TTL_OBSERVE_TOOL,
