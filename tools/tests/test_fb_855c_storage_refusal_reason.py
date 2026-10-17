@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from dayz_mcp import dayz_test_request, dayz_test_storage, dayz_test_tool, dayz_test_worker
@@ -222,9 +225,19 @@ class JointGateAssertionTest(unittest.TestCase):
         # d9c8: the build writes the mission roots into request-policy.json and the
         # aliases into worker-runtime.json only. The gate looked for aliases in
         # request-policy.json, so it always stopped, and an alias mission is shared
-        # by every launch through that alias. These are the bytes the staging writes.
+        # by every launch through that alias. These are the bytes the staging writes,
+        # under the names it writes them to.
         import build_native_launcher
+        from tests._source_snapshot import source_of
         from tests.test_build_native_launcher_policy import make_fixture_source
+
+        staging = source_of(build_native_launcher._prepare_staging)
+        for line in (
+            "policy_bytes, runtime_bytes = _emit_policy_documents(host)",
+            '(staging / "request-policy.json").write_bytes(policy_bytes)',
+            '(staging / "worker-runtime.json").write_bytes(runtime_bytes)',
+        ):
+            self.assertIn(line, staging)
 
         gate = self._gate()
         self.assertEqual(gate._bundle_dir(), build_native_launcher.CANONICAL_BUNDLE)
@@ -236,11 +249,13 @@ class JointGateAssertionTest(unittest.TestCase):
         missions = Path(other["mission_roots"][0]["path"])
         foreign = root / "other-missions"
         heli = missions / "dayzOffline.heli"
+        deerisle = missions / "dayzOffline.deerisle"
         made = missions / "storage-joint-gate"
-        for path in (foreign / "storage-joint-gate", heli, made):
+        for path in (foreign / "storage-joint-gate", heli, deerisle, made):
             path.mkdir(parents=True)
         other["mission_roots"].append({"path": str(foreign), "allow_root_junction": False})
         other["mission_aliases"]["heli"] = str(heli)
+        source["projects"][1]["mission_aliases"]["deerisle"] = str(deerisle)
         policy_bytes, runtime_bytes = build_native_launcher._emit_policy_documents(source)
         bundle = root / "bundle"
         bundle.mkdir()
@@ -253,6 +268,7 @@ class JointGateAssertionTest(unittest.TestCase):
         for refused in (
             missions / "dayzOffline.chernarusplus",  # the chernarus alias of both projects
             heli,  # an alias of the other project only
+            deerisle,  # an alias of DayZ_MCP only, the second project
             foreign / "storage-joint-gate",  # inside a mission root of the other project only
             root / "source",  # inside no mission root
         ):
@@ -279,6 +295,79 @@ class JointGateAssertionTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 gate.main(["--run", "--mission", str(mission / "missing"), "--mcp-command", "server"])
         self.assertEqual(bundles, [gate._bundle_dir(), mission])
+
+    def test_run_sends_the_admitted_path_and_plants_there_for_the_call_only(self) -> None:
+        # d9c8: dayz_test_run gets the path admitted_mission returns, not an alias,
+        # and the journal is planted in that directory while the call runs.
+        gate = self._gate()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        given = root / "given"
+        admitted_dir = root / "admitted"
+        for path in (given, admitted_dir):
+            path.mkdir()
+        audit = root / "events.jsonl"
+        bundle = root / "bundle"
+        operation = self._one_operation()
+        refusal = {
+            "status": "failed",
+            "error_code": "storage_recovery_required",
+            "storage_recovery_reason": "journal_name_invalid",
+            "remediation": gate.canonical_remediation(),
+            "run_id": None,
+            "cleanup_degraded": False,
+        }
+        admitted: list[tuple[Path, Path, str]] = []
+        runs: list[dict[str, object]] = []
+        planted: list[bool] = []
+
+        def admit(mission: Path, path: Path, project: str) -> str:
+            admitted.append((mission, path, project))
+            return str(admitted_dir)
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc) -> None:
+                return None
+
+            async def initialize(self) -> None:
+                return None
+
+            async def call_tool(self, name, arguments, read_timeout_seconds=None):
+                payload: dict[str, object] = {}
+                if name == "session_acquire_wait":
+                    payload = {"lease_token": "T"}
+                elif name == "session_status":
+                    payload = {"owner": {"client": {"session": "S"}}}
+                elif name == "dayz_test_run":
+                    runs.append(arguments)
+                    planted.append((admitted_dir / gate.PLANTED_NAME).is_file())
+                    audit.write_text(
+                        "".join(json.dumps(item) + "\n" for item in operation),
+                        encoding="utf-8",
+                    )
+                    payload = refusal
+                return SimpleNamespace(structuredContent=payload)
+
+        @contextlib.asynccontextmanager
+        async def stdio_client(_server):
+            yield None, None
+
+        with patch.object(gate, "admitted_mission", admit), patch(
+            "mcp.client.stdio.stdio_client", stdio_client
+        ), patch("mcp.ClientSession", lambda _read, _write: Session()), contextlib.redirect_stdout(
+            io.StringIO()
+        ):
+            self.assertEqual(asyncio.run(gate._run_async(given, "server", bundle, audit)), 0)
+        self.assertEqual(admitted, [(given, bundle, gate.PROJECT)])
+        self.assertEqual(
+            runs, [{"project": gate.PROJECT, "mode": "all", "mission": str(admitted_dir)}]
+        )
+        self.assertEqual(planted, [True])
+        self.assertEqual(list(given.iterdir()) + list(admitted_dir.iterdir()), [])
 
     def _one_operation(self, *, session: str = "S", run_id: str = "R") -> list[dict[str, object]]:
         return [
