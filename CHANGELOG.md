@@ -84,6 +84,7 @@ The first release verified on DayZ 1.30. On the stable build 1.30.164.078, out o
 
 - DayZ still takes the foreground for about 2.5 s when the server starts and again when the client starts (fade, 75e7).
 - A Steam update of DayZ or DayZ Tools changes binaries the native launcher pins, so `dayz_test_run` answers `invalid_native_launcher_bundle__external_drift` until the launcher is built and registered again. `python -m dayz_mcp.doctor` names the steps.
+- On DayZ 1.30, `action_use` and `action_hold` check an action's `Can()` but not `CanBeStarted()`, which DayZ 1.30 also requires before it starts an action itself (`ActionManagerClient`). So they can try to start an action DayZ would not start, such as the construction part info action, whose `CanBeStarted()` is always false. This comes from reading the scripts and has not been seen in game.
 
 ## [1.3] - 2026-10-01
 
