@@ -60,6 +60,27 @@ class ActionUseHeldItemContractTest(unittest.TestCase):
         )
 
 
+class ActionUseCanBeStartedTest(unittest.TestCase):
+    def test_can_be_started_is_asked_after_can_and_before_any_start(self) -> None:
+        # Known issue of 1.4: 1.30 starts an input's action only when CanBeStarted()
+        # is true (actionmanagerclient.c:336), and PerformActionStart does not ask,
+        # so action_use and action_hold started what that path would not.
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        body = _method_body(source, "protected bool DispatchActionUse(")
+        check = "if (!action.CanBeStarted())"
+        self.assertIn(check, body)
+        self.assertEqual(body.count("action.CanBeStarted()"), 1)
+        guarded = body.split("#ifndef DAYZ_1_29\n")
+        self.assertEqual(len(guarded), 2, "one 1.29 guard: 1.29 has no CanBeStarted()")
+        before, block = guarded[0], guarded[1].split("#endif\n")[0]
+        self.assertIn(check, block)
+        self.assertIn('result.error = "condition_failed";', block)
+        self.assertIn("return true;", block)
+        self.assertNotIn("#", block)
+        self.assertIn("if (!action.Can(player, actionTarget, heldItem))", before)
+        self.assertNotIn("amc.PerformActionStart(", before + block)
+
+
 class ActionUseAppToolTest(unittest.IsolatedAsyncioTestCase):
     async def test_app_tool_registered_and_forwards(self) -> None:
         app, runtime = server.build_app(
