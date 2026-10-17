@@ -83,7 +83,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-30 (UTC)
 - `CHANGELOG.md` - 66 KB, touched 2026-10-17 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-09-30 (UTC)
-- `dayz-harness-apis.md` - 26 KB, touched 2026-09-30 (UTC)
+- `dayz-harness-apis.md` - 26 KB, touched 2026-10-17 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-30 (UTC)
 - `GATES.md` - 4 KB, touched 2026-09-30 (UTC)
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-09-30 (UTC)
