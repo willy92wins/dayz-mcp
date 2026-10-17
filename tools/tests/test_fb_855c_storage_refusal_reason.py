@@ -230,7 +230,7 @@ class JointGateAssertionTest(unittest.TestCase):
         # under the names it writes them to.
         import build_native_launcher
         from tests._source_snapshot import source_of
-        from tests.test_build_native_launcher_policy import make_fixture_source
+        from tests.launcher_policy_helpers import make_fixture_source
 
         # Every statement that names a document or its bytes, compared whole: a later
         # write over either file counts too, and the layout of a line does not
