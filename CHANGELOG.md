@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- `docs/RELEASE.md` plays one game with the release PBO before the tag (new step 5). It swaps the PBO in with `swap_pbo.ps1` where test runs load it, plays without `-filePatching`, checks that the server and the client both loaded the release's PBO, and keeps that check, `bridge_status`, `dayz_test_close`, the RPT logs and the server's script log as the release's evidence. Step 2 builds the PBO into a folder of its own: with no `-Destination`, `pack-addon.ps1` replaces the PBO test runs load and keeps no copy of it.
+- `docs/RELEASE.md` plays one game with the release PBO before the tag (new step 5). It swaps the PBO in with `swap_pbo.ps1` where test runs load it, plays without `-filePatching`, checks while the run is up that its server and client both run with the release's PBO, and keeps that check, `bridge_status`, `dayz_test_close`, the RPT logs and the server's script log as the release's evidence. Step 2 builds the PBO into a folder of its own: with no `-Destination`, `pack-addon.ps1` replaces the PBO test runs load and keeps no copy of it.
 
 ## [1.4] - 2026-10-17
 
