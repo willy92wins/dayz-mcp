@@ -86,11 +86,13 @@ Get-ChildItem -LiteralPath $helium -Filter 'User.dat*' -Force |
     Copy-Item -Destination $backup
 Write-Host "Backup: $backup"
 
+$mounted = $false
 try {
     & reg.exe load "HKU\$mountName" $hive | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "reg load failed (exit $LASTEXITCODE): the hive is in use. Close the app fully, or restart Windows, and run this again."
     }
+    $mounted = $true
     $valve = "$root\Software\Valve"
     if (-not (Test-Path -LiteralPath $valve)) {
         Write-Host 'The copy has no Software\Valve: there is nothing to remove.'
@@ -118,10 +120,12 @@ try {
     }
 }
 finally {
-    # Mounted now means mounted by this run, also by a load it did not see
-    # succeed. The registry provider keeps key handles until they are
-    # collected, and reg unload fails while one is open, so collect and retry.
-    if (Test-Path -LiteralPath $root) {
+    # Only a hive this run mounted is unloaded: a run started at the same time
+    # passes the check above too, and its failed load must not unload this one.
+    # A load stopped before it was seen to succeed is left for that check to
+    # name. The registry provider keeps key handles until they are collected,
+    # and reg unload fails while one is open, so collect and retry.
+    if ($mounted) {
         $unloaded = $false
         for ($attempt = 1; $attempt -le 5 -and -not $unloaded; $attempt++) {
             [GC]::Collect()

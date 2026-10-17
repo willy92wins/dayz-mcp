@@ -80,6 +80,8 @@ class ObserveAppSteamViewTest(unittest.TestCase):
             "pid_written_as_text": (str(_LIVE_STEAM), None),
             # Not truncated to a DWORD, so not the live Steam's pid.
             "pid_wider_than_a_dword": (2**32 + _LIVE_STEAM, 2**32 + _LIVE_STEAM),
+            # REG_MULTI_SZ: winreg returns a list, one per read (Codex review of #239).
+            "pid_written_as_a_list": ([[str(_LIVE_STEAM)], [str(_LIVE_STEAM)]], None),
         }
         for name, (copy, app_view_pid) in cases.items():
             with self.subTest(name):
@@ -92,6 +94,12 @@ class ObserveAppSteamViewTest(unittest.TestCase):
                         "remediation": sp.REMEDIATION_STEAM_APP_VIEW_STALE,
                     },
                 )
+        # The real pid counts wherever it stands in the whole list, the ninth too.
+        nine_steams = {pid: _STEAM_EXE for pid in range(1001, 1010)}
+        advisory = sp.observe_app_steam_view(
+            _View(_GONE_STEAM, processes=nine_steams), _View(1009, processes=nine_steams)
+        )
+        self.assertEqual((advisory or {}).get("real_pid"), 1009)
 
     def test_it_stays_quiet_when_a_dayz_from_this_app_would_find_steam(self) -> None:
         other_steam = {**_PROCESSES, 5150: _STEAM_EXE}
@@ -338,8 +346,8 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
         with self.observed(side_effect=hung) as observe:
             began = time.monotonic()
             first = await self.call("session_status")
-            # The 2 s wait, not the query's 10 s.
-            self.assertLess(time.monotonic() - began, 5.0)
+            # The 2 s wait, not the query's 10 s, nor a wait twice as long.
+            self.assertLess(time.monotonic() - began, 3.5)
             second = await self.call("session_acquire")
             third = await self.call("session_acquire_wait")
             for result in (first, second, third):

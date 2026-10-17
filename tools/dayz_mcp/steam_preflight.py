@@ -517,9 +517,9 @@ def observe_app_steam_view(
     is gone, 0 or another program's, a value that is not a running pid, or
     nothing (the key or a value is absent). A DayZ launched from this app's
     shells will not find Steam. Running means listed in the whole process
-    list, which holds no exited process. Each view is read again after the
-    other and must not have changed: Steam restarting writes 0, then its new
-    pid, to the one key both views share when there is no copy.
+    list as it is read. Each view is read again after the other and must read
+    the same: Steam restarting writes 0, then its new pid, to the one key both
+    views share when there is no copy.
 
     Returns None when the views agree, when the real HKCU cannot be read through
     WMI (nothing to compare against), when no running Steam is registered there
@@ -541,7 +541,12 @@ def observe_app_steam_view(
             return None
         live_pids = _all_live_pids(real)
         real_pid = real_snapshot.pid
-        if live_pids is None or real_pid not in live_pids or app_pid in live_pids:
+        # A REG_MULTI_SZ pid reads as a list, which a set cannot be asked about.
+        if (
+            live_pids is None
+            or real_pid not in live_pids
+            or (_is_int(app_pid) and app_pid in live_pids)
+        ):
             return None
     except Exception:
         return None
