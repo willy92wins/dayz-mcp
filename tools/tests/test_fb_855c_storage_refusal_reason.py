@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import io
@@ -231,13 +232,25 @@ class JointGateAssertionTest(unittest.TestCase):
         from tests._source_snapshot import source_of
         from tests.test_build_native_launcher_policy import make_fixture_source
 
-        staging = source_of(build_native_launcher._prepare_staging)
-        for line in (
-            "policy_bytes, runtime_bytes = _emit_policy_documents(host)",
-            '(staging / "request-policy.json").write_bytes(policy_bytes)',
-            '(staging / "worker-runtime.json").write_bytes(runtime_bytes)',
-        ):
-            self.assertIn(line, staging)
+        # Every statement that names a document or its bytes, compared whole: a later
+        # write over either file counts too, and the layout of a line does not
+        # (Codex review of d9c8 v3, G1).
+        staging = ast.parse(source_of(build_native_launcher._prepare_staging)).body[0]
+        words = ("request-policy.json", "worker-runtime.json", "policy_bytes", "runtime_bytes")
+        self.assertEqual(
+            [
+                ast.unparse(node)
+                for node in ast.walk(staging)
+                if isinstance(node, ast.stmt)
+                and node is not staging
+                and any(word in ast.unparse(node) for word in words)
+            ],
+            [
+                "policy_bytes, runtime_bytes = _emit_policy_documents(host)",
+                "(staging / 'request-policy.json').write_bytes(policy_bytes)",
+                "(staging / 'worker-runtime.json').write_bytes(runtime_bytes)",
+            ],
+        )
 
         gate = self._gate()
         self.assertEqual(gate._bundle_dir(), build_native_launcher.CANONICAL_BUNDLE)
@@ -296,19 +309,30 @@ class JointGateAssertionTest(unittest.TestCase):
                 gate.main(["--run", "--mission", str(mission / "missing"), "--mcp-command", "server"])
         self.assertEqual(bundles, [gate._bundle_dir(), mission])
 
-    def test_run_sends_the_admitted_path_and_plants_there_for_the_call_only(self) -> None:
-        # d9c8: dayz_test_run gets the path admitted_mission returns, not an alias,
-        # and the journal is planted in that directory while the call runs.
+    def _fake_run(
+        self,
+        answer: dict[str, object] | None = None,
+        *,
+        audited: bool = True,
+        touched: bool = False,
+    ) -> SimpleNamespace:
+        """_run_async against a fake server: what it called, and what it left behind."""
         gate = self._gate()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        given = root / "given"
-        admitted_dir = root / "admitted"
-        for path in (given, admitted_dir):
+        run = SimpleNamespace(
+            gate=gate,
+            given=root / "given",
+            mission=root / "admitted",
+            bundle=root / "bundle",
+            admitted=[],
+            calls=[],
+            planted=[],
+        )
+        for path in (run.given, run.mission):
             path.mkdir()
         audit = root / "events.jsonl"
-        bundle = root / "bundle"
         operation = self._one_operation()
         refusal = {
             "status": "failed",
@@ -318,13 +342,10 @@ class JointGateAssertionTest(unittest.TestCase):
             "run_id": None,
             "cleanup_degraded": False,
         }
-        admitted: list[tuple[Path, Path, str]] = []
-        runs: list[dict[str, object]] = []
-        planted: list[bool] = []
 
         def admit(mission: Path, path: Path, project: str) -> str:
-            admitted.append((mission, path, project))
-            return str(admitted_dir)
+            run.admitted.append((mission, path, project))
+            return str(run.mission)
 
         class Session:
             async def __aenter__(self):
@@ -337,19 +358,22 @@ class JointGateAssertionTest(unittest.TestCase):
                 return None
 
             async def call_tool(self, name, arguments, read_timeout_seconds=None):
+                run.calls.append((name, arguments))
                 payload: dict[str, object] = {}
                 if name == "session_acquire_wait":
                     payload = {"lease_token": "T"}
                 elif name == "session_status":
                     payload = {"owner": {"client": {"session": "S"}}}
                 elif name == "dayz_test_run":
-                    runs.append(arguments)
-                    planted.append((admitted_dir / gate.PLANTED_NAME).is_file())
-                    audit.write_text(
-                        "".join(json.dumps(item) + "\n" for item in operation),
-                        encoding="utf-8",
-                    )
-                    payload = refusal
+                    run.planted.append((run.mission / gate.PLANTED_NAME).is_file())
+                    if audited:
+                        audit.write_text(
+                            "".join(json.dumps(item) + "\n" for item in operation),
+                            encoding="utf-8",
+                        )
+                    if touched:
+                        (run.mission / "types.xml").write_text("a", encoding="utf-8")
+                    payload = refusal if answer is None else answer
                 return SimpleNamespace(structuredContent=payload)
 
         @contextlib.asynccontextmanager
@@ -361,13 +385,70 @@ class JointGateAssertionTest(unittest.TestCase):
         ), patch("mcp.ClientSession", lambda _read, _write: Session()), contextlib.redirect_stdout(
             io.StringIO()
         ):
-            self.assertEqual(asyncio.run(gate._run_async(given, "server", bundle, audit)), 0)
-        self.assertEqual(admitted, [(given, bundle, gate.PROJECT)])
+            try:
+                run.result = asyncio.run(gate._run_async(run.given, "server", run.bundle, audit))
+            except (Exception, SystemExit) as error:
+                run.result = error
+        return run
+
+    def test_run_sends_the_admitted_path_and_plants_there_for_the_call_only(self) -> None:
+        # d9c8: dayz_test_run gets the path admitted_mission returns, not an alias,
+        # and the journal is planted in that directory while the call runs. The
+        # lease that names this caller goes first: the server refuses dayz_test_run
+        # while the session holds one (Codex review of d9c8 v3, G3).
+        run = self._fake_run()
+        self.assertEqual(run.result, 0)
+        self.assertEqual(run.admitted, [(run.given, run.bundle, run.gate.PROJECT)])
         self.assertEqual(
-            runs, [{"project": gate.PROJECT, "mode": "all", "mission": str(admitted_dir)}]
+            run.calls,
+            [
+                ("session_acquire_wait", {"purpose": "storage recovery joint gate: caller identity"}),
+                ("session_status", {}),
+                ("session_release", {"lease_token": "T"}),
+                (
+                    "dayz_test_run",
+                    {"project": run.gate.PROJECT, "mode": "all", "mission": str(run.mission)},
+                ),
+                ("session_status", {}),
+            ],
         )
-        self.assertEqual(planted, [True])
-        self.assertEqual(list(given.iterdir()) + list(admitted_dir.iterdir()), [])
+        self.assertEqual(run.planted, [True])
+        self.assertEqual(list(run.given.iterdir()) + list(run.mission.iterdir()), [])
+
+    def test_each_check_fails_the_run_and_the_journal_still_goes(self) -> None:
+        # Codex review of d9c8 v3, G2: a server that refuses the path's authority, an
+        # audit without the operation and a storage change each fail the run alone,
+        # and none of them leaves the journal behind.
+        authority = {"status": "failed", "error_code": "invalid_dayz_test_path_authority"}
+        for case, options, message in (
+            ("public", {"answer": authority}, "error_code is not storage_recovery_required"),
+            ("operation", {"audited": False}, "expected exactly one lifecycle start request"),
+            ("storage", {"touched": True}, "storage tree changed besides the planted journal"),
+        ):
+            with self.subTest(case=case):
+                run = self._fake_run(**options)
+                self.assertIsInstance(run.result, SystemExit)
+                self.assertIn(message, str(run.result))
+                self.assertEqual(run.planted, [True])
+                self.assertFalse((run.mission / run.gate.PLANTED_NAME).exists())
+
+    def test_a_journal_write_that_fails_halfway_is_removed(self) -> None:
+        # Codex review of d9c8 v3, F1: the journal is written inside the try, so a
+        # write that fails after making the file leaves nothing behind.
+        planted = self._gate().PLANTED_NAME
+        write_text = Path.write_text
+
+        def halfway(path: Path, text: str, *args, **kwargs) -> int:
+            if path.name != planted:
+                return write_text(path, text, *args, **kwargs)
+            write_text(path, text[:1], *args, **kwargs)
+            raise OSError("disk full")
+
+        with patch.object(Path, "write_text", halfway):
+            run = self._fake_run()
+        self.assertIsInstance(run.result, OSError)
+        self.assertEqual(run.planted, [])
+        self.assertEqual(list(run.mission.iterdir()), [])
 
     def _one_operation(self, *, session: str = "S", run_id: str = "R") -> list[dict[str, object]]:
         return [

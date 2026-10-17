@@ -984,20 +984,15 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
     def test_checker_recovery_names_the_command_the_registry_needs(self) -> None:
         # c9aa: after a replace, rollback-last restores an older dayz-test-v1 entry and
         # install refuses it, so a registry that holds the launcher is told to replace it.
-        def recovery(output: str) -> list[str]:
-            # Every line but the header and the failures, so a second command on any
-            # other line counts too.
+        def only(failure: str, command: str) -> list[str]:
+            # The whole output, so a second command on any line counts, a failure
+            # line included (third Codex review of #240, V3).
             return [
-                line
-                for line in output.splitlines()
-                if line != "NATIVE LAUNCHER REGISTRY DRIFT" and not line.startswith("- ")
-            ]
-
-        def only(command: str) -> list[str]:
-            return [
+                "NATIVE LAUNCHER REGISTRY DRIFT",
+                f"- {failure}",
                 "Recovery: python build_native_launcher.py --offline --verify-reproducible, "
                 f"then python -m dayz_mcp.launcher_registry_update {command} "
-                "--expected-sha256 <sha256 of the current tools/approved-launchers.json>."
+                "--expected-sha256 <sha256 of the current tools/approved-launchers.json>.",
             ]
 
         with TemporaryDirectory() as directory:
@@ -1010,9 +1005,12 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
                 with redirect_stderr(stderr):
                     code, output = _run_checker_against_fixture(registry, lock, receipts, entry)
                 self.assertEqual((code, stderr.getvalue()), (1, ""))
-                return recovery(output)
+                return output.splitlines()
 
-            self.assertEqual(check(_entry()), only("install-dayz-test-v1"))
+            self.assertEqual(
+                check(_entry()),
+                only("registry holds 0 launchers, expected exactly 1", "install-dayz-test-v1"),
+            )
             with patch.object(updater, "_validated_entry", return_value=_entry()):
                 updater._install_transition(
                     registry_path=registry,
@@ -1021,7 +1019,10 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
                     bundle=root,
                     expected_sha256=updater._sha256(BASELINE),
                 )
-            self.assertEqual(check(_entry_with_sha("B" * 64)), only("replace-dayz-test-v1"))
+            self.assertEqual(
+                check(_entry_with_sha("B" * 64)),
+                only(f"sha256: registry={'A' * 64!r} bundle={'B' * 64!r}", "replace-dayz-test-v1"),
+            )
 
 
 def _place_orphan_names(

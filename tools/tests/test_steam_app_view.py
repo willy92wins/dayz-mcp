@@ -404,14 +404,17 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
 
 
 # Prints the script's parse errors, every assignment to the preference (with 1 when
-# it is a statement of the script's own body) and every reg.exe call, by offset.
+# it is a statement of the script's own body), every token outside a comment that
+# names it, and every call to reg however it is spelled, by offset.
 _PREFERENCE_PROBE = r"""
 $tokens = $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile('SCRIPT', [ref]$tokens, [ref]$errors)
 'errors ' + $errors.Count
 $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -match 'PSNativeCommandUseErrorActionPreference$' }, $true) |
     ForEach-Object { 'set ' + [int]($_.Parent -eq $ast.EndBlock) + ' ' + $_.Extent.StartOffset + ' ' + $_.Extent.Text }
-$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'reg.exe' }, $true) |
+$tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match 'PSNativeCommandUseErrorActionPreference' } |
+    ForEach-Object { 'name ' + $_.Extent.StartOffset }
+$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.CommandElements[0].Extent.Text -match '(^[''"]?|[\\/])reg(\.exe)?[''"]?$' }, $true) |
     ForEach-Object { 'reg ' + $_.Extent.StartOffset }
 """
 
@@ -425,7 +428,9 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
         # throw, which skips its retries and its warning. The script turns it off at
         # script scope, before its first reg.exe. Read as lines of text, an assignment
         # that never runs (under an if, in a function, a comment or a script block) and
-        # a later one back to $true passed too (Codex review of #240, U1).
+        # a later one back to $true passed too (Codex review of #240, U1). So did a
+        # later Set-Variable or ${...} assignment, and a reg call spelled other than
+        # reg.exe before the assignment (third Codex review of #240, V1 and V2).
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if shell is None:
             self.skipTest("PowerShell is not installed")
@@ -451,6 +456,8 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
             [(top, text) for top, _offset, text in assignments],
             [("1", "$PSNativeCommandUseErrorActionPreference = $false")],
         )
+        names = [int(line.split()[1]) for line in lines if line.startswith("name ")]
+        self.assertEqual(names, [int(assignments[0][1])])
         reg = [int(line.split()[1]) for line in lines if line.startswith("reg ")]
         self.assertTrue(reg)
         self.assertLess(int(assignments[0][1]), min(reg))

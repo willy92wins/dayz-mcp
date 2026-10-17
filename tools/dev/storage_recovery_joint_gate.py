@@ -424,7 +424,10 @@ async def _run_async(
         raise SystemExit(f"mission already has rotation names: {conflict}")
     planted = mission / PLANTED_NAME
     if planted.exists():
-        raise SystemExit("planted journal already exists; refusing to overwrite")
+        raise SystemExit(
+            "planted journal already exists; refusing to overwrite. A run that died, "
+            "or whose cleanup failed, leaves it: remove it by hand and run again"
+        )
     server = StdioServerParameters(command=parts[0], args=parts[1:])
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
@@ -439,8 +442,9 @@ async def _run_async(
             )
             caller_session = await _own_client_session(session)
             audit_before = _audit_lines(audit_file)
-            planted.write_text("{}\n", encoding="utf-8")
             try:
+                # Inside the try: a write that fails after making the file is removed too.
+                planted.write_text("{}\n", encoding="utf-8")
                 called = await _call(
                     session,
                     "dayz_test_run",
