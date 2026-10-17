@@ -315,6 +315,7 @@ class JointGateAssertionTest(unittest.TestCase):
         *,
         audited: bool = True,
         touched: bool = False,
+        existing: str | None = None,
     ) -> SimpleNamespace:
         """_run_async against a fake server: what it called, and what it left behind."""
         gate = self._gate()
@@ -332,6 +333,8 @@ class JointGateAssertionTest(unittest.TestCase):
         )
         for path in (run.given, run.mission):
             path.mkdir()
+        if existing is not None:
+            (run.mission / gate.PLANTED_NAME).write_text(existing, encoding="utf-8")
         audit = root / "events.jsonl"
         operation = self._one_operation()
         refusal = {
@@ -449,6 +452,29 @@ class JointGateAssertionTest(unittest.TestCase):
         self.assertIsInstance(run.result, OSError)
         self.assertEqual(run.planted, [])
         self.assertEqual(list(run.mission.iterdir()), [])
+
+    def test_a_journal_the_cleanup_cannot_see_is_still_removed(self) -> None:
+        # Codex review of #241, W1: the cleanup asked is_file() first, and an
+        # observation that fails answers False, so the run passed and left the journal.
+        planted = self._gate().PLANTED_NAME
+        is_file = Path.is_file
+
+        def blind(path: Path, *args, **kwargs) -> bool:
+            return False if path.name == planted else is_file(path, *args, **kwargs)
+
+        with patch.object(Path, "is_file", blind):
+            run = self._fake_run()
+        self.assertEqual(run.result, 0)
+        self.assertEqual(list(run.mission.iterdir()), [])
+
+    def test_a_journal_already_there_is_named_and_kept(self) -> None:
+        # Codex review of #241, W5: the refusal names the file to remove by hand.
+        run = self._fake_run(existing="left by an earlier run\n")
+        journal = run.mission / run.gate.PLANTED_NAME
+        self.assertIsInstance(run.result, SystemExit)
+        self.assertIn(str(journal), str(run.result))
+        self.assertEqual(journal.read_text(encoding="utf-8"), "left by an earlier run\n")
+        self.assertEqual(run.calls, [])
 
     def _one_operation(self, *, session: str = "S", run_id: str = "R") -> list[dict[str, object]]:
         return [
