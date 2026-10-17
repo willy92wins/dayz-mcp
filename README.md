@@ -146,6 +146,7 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 ## What you need
 
 - Windows, with DayZ and DayZ Tools installed (the server talks to `DayZDiag_x64`)
+- DayZ 1.30: v1.4 is verified on 1.30.164.078, the stable build since 2026-10-15
 - Python **3.11 or newer**
 - A DayZ server you are allowed to run mods on. The daemon binds `127.0.0.1` only and
   sits on the same machine as the game it drives — there is no remote mode and no
