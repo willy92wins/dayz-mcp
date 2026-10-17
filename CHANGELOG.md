@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/RELEASE.md` plays one game with the release PBO before the tag (new step 5). It swaps the PBO in with `swap_pbo.ps1` where test runs load it, plays without `-filePatching`, checks while the run is up that its server and client both run with the release's PBO, and keeps that check, `bridge_status`, `dayz_test_close`, the RPT logs and the server's script log as the release's evidence. Step 2 builds the PBO into a folder of its own: with no `-Destination`, `pack-addon.ps1` replaces the PBO test runs load and keeps no copy of it.
+
 ## [1.4] - 2026-10-17
 
 The first release verified on DayZ 1.30. On the stable build 1.30.164.078, out on 2026-10-15, `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 12) passes its handshake, and `dayz_test_close` closes both in order. 12 new public tools, 87 in all.

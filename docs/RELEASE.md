@@ -34,8 +34,14 @@ on a host without that environment.
 [EXACT]
 
 ```powershell
-.\tools\pack-addon.ps1 -ModName DayZ_MCP
+$BuildDir = Join-Path ([System.IO.Path]::GetTempPath()) `
+  ("dayz-mcp-release-build-" + [guid]::NewGuid().ToString("N"))
+.\tools\pack-addon.ps1 -ModName DayZ_MCP -Destination (Join-Path $BuildDir "@DayZ_MCP\Addons")
 ```
+
+With no `-Destination` the script writes into `<DayZ>\!Workshop\@DayZ_MCP\Addons`,
+the PBO test runs load, and keeps no copy of the one it replaces. Build into a
+folder of its own; step 5 swaps the PBO in.
 
 It packs the committed `addon/` at HEAD, which step 1 left clean. Before packing
 it writes `mcp_build.json` into the staged addon root: the commit, the `addon/`
@@ -142,7 +148,127 @@ if ($Manifest.pbo_sha256 -ne $Expected["DayZ_MCP.pbo"]) {
 }
 ```
 
-## 5. Tag and create the GitHub Release
+## 5. Play one game with the release PBO
+
+The release's CHANGELOG section names the DayZ build it supports. Verify that
+before the tag: swap the PBO from step 2 in where test runs load it, then play one
+run on that build. A run that fails stops the release here. Every session's runs
+load that PBO, so hold the lease (`session_acquire_wait`) for the swap.
+
+Test runs load the mod from the `mods_root` of the `DayZ_MCP` project in the
+host's `launcher-policy.json`
+([`tools/README-mcp.md`](../tools/README-mcp.md#native-launcher-host-policy)).
+When that folder is not `!Workshop`, set `$Addons` to its `@DayZ_MCP\Addons`
+before the block. Set `$Old` to the SHA-256 of the PBO you expect to replace, one
+you know: the previous release's `pbo_sha256`, or the hash your last swap
+installed. Check a PBO you do not know with `tools/dev/pbo_provenance.py` first.
+The swap refuses any other PBO.
+
+[EXACT]
+
+```powershell
+$New = (Get-FileHash -LiteralPath $Pbo -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($New -ne $Manifest.pbo_sha256) { throw "This PBO is not the one in the ZIP" }
+if (-not $Addons) {
+  $Workshop = "C:\Program Files (x86)\Steam\steamapps\common\DayZ\!Workshop"
+  if ($env:DAYZ_PATH) { $Workshop = Join-Path $env:DAYZ_PATH "!Workshop" }
+  $Addons = Join-Path $Workshop "@DayZ_MCP\Addons"
+}
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\dev\swap_pbo.ps1 `
+  -Build $Pbo -WantNew $New -WantOld $Old -Destination $Addons
+if ($LASTEXITCODE -ne 0) { throw "swap_pbo.ps1 did not swap the PBO" }
+```
+
+The previous PBO stays beside the live one as `DayZ_MCP.pbo.swapped_out_*`. Then
+release the lease: `dayz_test_run` takes its own and refuses to start while your
+session holds one. Run
+`dayz_test_run(project="DayZ_MCP", mode="all", no_file_patching=true)` on that
+DayZ build. Without `-filePatching` the game reads the mod's files from the PBO
+only. Adopt the run with `session_acquire_wait`, since `dayz_test_close` needs the
+lease, and call `bridge_status`. The lease lapses 120 s after the last call that
+renews it
+([`tools/dayz_mcp/session_coordination.py:15`](../tools/dayz_mcp/session_coordination.py#L15)),
+and `session_status` does not renew it: call `session_heartbeat` before then, and
+adopt the run again if it lapsed. While the run is up, check which game each of
+its peers runs and which PBO it loaded. Set `$RunId` and `$Profiles` to the
+`run_id` and `artifacts_paths` that `dayz_test_run` returned, and `$Port` to the
+port you passed it (2302 by default). The block reads only the `DayZDiag_x64.exe`
+processes that run with one of those profile folders and that port:
+
+[EXACT]
+
+```powershell
+$ErrorActionPreference = "Stop"
+$Peers = @(Get-CimInstance Win32_Process -Filter "Name = 'DayZDiag_x64.exe'" |
+  Where-Object {
+    $Line = [string]$_.CommandLine
+    $Root = [regex]::Match($Line,
+      '"-profiles=(?<v>[^"]*)"|(?<!\S)-profiles=(?<v>\S+)')
+    $Root.Success -and $Root.Groups["v"].Value -in $Profiles -and
+      $Line -match "(?<!\S)-port=$Port(?!\S)"
+  })
+if ($Peers.Count -ne 2) {
+  throw "Expected run $RunId's server and client, found $($Peers.Count)"
+}
+$Loaded = @(foreach ($Peer in $Peers) {
+  $Line = [string]$Peer.CommandLine
+  if ($Line -match '(?<!\S)-filePatching(?!\S)') {
+    throw "PID $($Peer.ProcessId) runs with -filePatching"
+  }
+  $Mod = @([regex]::Matches($Line, '"-mod=(?<v>[^"]*)"|(?<!\S)-mod=(?<v>\S+)') |
+    ForEach-Object { $_.Groups["v"].Value -split ";" } |
+    Where-Object { $_ -and (Split-Path -Leaf $_) -eq "@DayZ_MCP" })
+  if ($Mod.Count -ne 1) {
+    throw "PID $($Peer.ProcessId) does not load one @DayZ_MCP"
+  }
+  $Hash = (Get-FileHash -LiteralPath (Join-Path $Mod[0] "Addons\DayZ_MCP.pbo") `
+    -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($Hash -ne $New) {
+    throw "PID $($Peer.ProcessId) loads another PBO from $($Mod[0])"
+  }
+  $Exe = (Get-Item -LiteralPath $Peer.ExecutablePath).VersionInfo
+  [pscustomobject]@{
+    run_id = $RunId
+    pid = $Peer.ProcessId
+    started_utc = $Peer.CreationDate.ToUniversalTime().ToString("o")
+    role = if ($Line -match '(?<!\S)-server(?!\S)') { "server" } else { "client" }
+    exe = $Peer.ExecutablePath
+    file_version = $Exe.FileVersion
+    product_version = $Exe.ProductVersion
+    mod = $Mod[0]
+    pbo_sha256 = $Hash
+  }
+})
+if (@($Loaded | Where-Object { $_.role -eq "server" }).Count -ne 1) {
+  throw "Expected one server and one client"
+}
+$Loaded | ConvertTo-Json
+```
+
+Then close the run with `dayz_test_close` and release the lease. Save this
+evidence before the tag:
+
+- From `bridge_status`, both peers: `version` `<bridge_version>~<game version>`
+  with the game version the CHANGELOG names, `version_state` `ok`, capabilities
+  `match`, and one `run_id`. The poll handshake compares the game version only when
+  `expected_game_version` is set
+  ([`tools/dayz_mcp/core.py:69-70`](../tools/dayz_mcp/core.py#L69-L70)), so `ok`
+  alone does not prove the build.
+- The JSON above: the run's id and, for each of its two peers, the process id and
+  start time, the role, the executable and its version, and the `@DayZ_MCP` folder
+  it runs with, whose PBO had the release's `pbo_sha256` while the run was up.
+- From `dayz_test_close`: `graceful`, `roles` with the server and the client, each
+  with `termination_line` true, `logout_players` not empty with every logout
+  finished, and no `warnings`. `player_state_not_saved` means the logout wait timed
+  out.
+- The server and client RPT logs, and the server's script log. The server's RPT
+  shows the player's connection, the `[Disconnect]` lines and
+  `--- Termination successfully completed ---`; `[Logout]: Player … finished` is
+  in its script log. Both RPTs also log
+  `ANIMATION (E): Can't load …/Anims/cfg/skeletons.anim.xml`: the mod ships no
+  animations, and that line does not stop a run.
+
+## 6. Tag and create the GitHub Release
 
 Create the tag at the clean commit recorded in `VERSION.json`, push that tag, and
 require GitHub CLI to find the remote tag before publishing. Upload only the three
@@ -165,7 +291,7 @@ gh release create "v$Version" `
   --generate-notes
 ```
 
-## 6. Post-release checks
+## 7. Post-release checks
 
 Query the published release, require the exact asset set, download fresh copies,
 and repeat the checksum procedure from step 4 with `$Dist` set to `$DownloadDir`.
@@ -199,8 +325,9 @@ if ((git rev-list -n 1 "v$Version") -ne $DownloadedManifest.git_sha) {
 }
 ```
 
-Finally, call `bridge_status` from an MCP session after loading the released
-addon, then run the read-only doctor documented in
+Matching checksums tie the published PBO to step 5's run: while it was up, the
+`@DayZ_MCP` of each of its peers held a PBO with the same `pbo_sha256`. Finally,
+run the read-only doctor documented in
 [`tools/README-mcp.md:37-44`](../tools/README-mcp.md#L37-L44).
 
 [EXACT]
