@@ -189,11 +189,17 @@ lease, and call `bridge_status`. The lease lapses 120 s after the last call that
 renews it
 ([`tools/dayz_mcp/session_coordination.py:15`](../tools/dayz_mcp/session_coordination.py#L15)),
 and `session_status` does not renew it: call `session_heartbeat` before then, and
-adopt the run again if it lapsed. While the run is up, check which game each of
-its peers runs and which PBO it loaded. Set `$RunId` and `$Profiles` to the
-`run_id` and `artifacts_paths` that `dayz_test_run` returned, and `$Port` to the
-port you passed it (2302 by default). The block reads only the `DayZDiag_x64.exe`
-processes that run with one of those profile folders and that port:
+adopt the run again if it lapsed. While the run is up, check which game and which
+PBO run with its profile folders and port. Set `$Profiles` to the `artifacts_paths`
+that `dayz_test_run` returned and `$Port` to the port you passed it (2302 by
+default). The block reads only the `DayZDiag_x64.exe` processes that run with one
+of those profile folders and that port, and stops unless they are one server and
+one client. Both started after the swap: right before it moves the PBO in,
+`swap_pbo.ps1` checks that no DayZ process runs
+([`tools/dev/swap_pbo.ps1:318-323`](../tools/dev/swap_pbo.ps1#L318-L323)). The
+block cannot tell them from the processes of another run of the same project and
+instance that another session starts on that port after the swap: the profile
+folders do not carry the run's id.
 
 [EXACT]
 
@@ -208,7 +214,7 @@ $Peers = @(Get-CimInstance Win32_Process -Filter "Name = 'DayZDiag_x64.exe'" |
       $Line -match "(?<!\S)-port=$Port(?!\S)"
   })
 if ($Peers.Count -ne 2) {
-  throw "Expected run $RunId's server and client, found $($Peers.Count)"
+  throw "Expected the run's server and client, found $($Peers.Count)"
 }
 $Loaded = @(foreach ($Peer in $Peers) {
   $Line = [string]$Peer.CommandLine
@@ -228,7 +234,6 @@ $Loaded = @(foreach ($Peer in $Peers) {
   }
   $Exe = (Get-Item -LiteralPath $Peer.ExecutablePath).VersionInfo
   [pscustomobject]@{
-    run_id = $RunId
     pid = $Peer.ProcessId
     started_utc = $Peer.CreationDate.ToUniversalTime().ToString("o")
     role = if ($Line -match '(?<!\S)-server(?!\S)') { "server" } else { "client" }
@@ -254,9 +259,10 @@ evidence before the tag:
   `expected_game_version` is set
   ([`tools/dayz_mcp/core.py:69-70`](../tools/dayz_mcp/core.py#L69-L70)), so `ok`
   alone does not prove the build.
-- The JSON above: the run's id and, for each of its two peers, the process id and
-  start time, the role, the executable and its version, and the `@DayZ_MCP` folder
-  it runs with, whose PBO had the release's `pbo_sha256` while the run was up.
+- The JSON above: for each of the two processes the block read, the process id
+  and start time, the role, the executable and its version, and the `@DayZ_MCP`
+  folder it runs with, whose PBO had the release's `pbo_sha256` when the block
+  hashed it.
 - From `dayz_test_close`: `graceful`, `roles` with the server and the client, each
   with `termination_line` true, `logout_players` not empty with every logout
   finished, and no `warnings`. `player_state_not_saved` means the logout wait timed
@@ -325,9 +331,10 @@ if ((git rev-list -n 1 "v$Version") -ne $DownloadedManifest.git_sha) {
 }
 ```
 
-Matching checksums tie the published PBO to step 5's run: while it was up, the
-`@DayZ_MCP` of each of its peers held a PBO with the same `pbo_sha256`. Finally,
-run the read-only doctor documented in
+Matching checksums tie the published PBO to step 5's check: the `@DayZ_MCP` of
+both processes it read, the server and the client with the run's profile folders
+and port, held a PBO with the same `pbo_sha256` when the check ran. Finally, run
+the read-only doctor documented in
 [`tools/README-mcp.md:37-44`](../tools/README-mcp.md#L37-L44).
 
 [EXACT]
