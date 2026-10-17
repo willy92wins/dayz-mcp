@@ -34,8 +34,14 @@ on a host without that environment.
 [EXACT]
 
 ```powershell
-.\tools\pack-addon.ps1 -ModName DayZ_MCP
+$BuildDir = Join-Path ([System.IO.Path]::GetTempPath()) `
+  ("dayz-mcp-release-build-" + [guid]::NewGuid().ToString("N"))
+.\tools\pack-addon.ps1 -ModName DayZ_MCP -Destination (Join-Path $BuildDir "@DayZ_MCP\Addons")
 ```
+
+With no `-Destination` the script writes into `<DayZ>\!Workshop\@DayZ_MCP\Addons`,
+the PBO test runs load, and keeps no copy of the one it replaces. Build into a
+folder of its own; step 5 swaps the PBO in.
 
 It packs the committed `addon/` at HEAD, which step 1 left clean. Before packing
 it writes `mcp_build.json` into the staged addon root: the commit, the `addon/`
@@ -142,7 +148,44 @@ if ($Manifest.pbo_sha256 -ne $Expected["DayZ_MCP.pbo"]) {
 }
 ```
 
-## 5. Tag and create the GitHub Release
+## 5. Play one game with the release PBO
+
+The release's CHANGELOG section names the DayZ build it supports. Verify that
+before the tag: swap the PBO from step 2 in where test runs load it, then play one
+run on that build. A run that fails stops the release here.
+
+[EXACT]
+
+```powershell
+$New = (Get-FileHash -LiteralPath $Pbo -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($New -ne $Manifest.pbo_sha256) { throw "This PBO is not the one in the ZIP" }
+$Workshop = "C:\Program Files (x86)\Steam\steamapps\common\DayZ\!Workshop"
+if ($env:DAYZ_PATH) { $Workshop = Join-Path $env:DAYZ_PATH "!Workshop" }
+$Live = Join-Path $Workshop "@DayZ_MCP\Addons\DayZ_MCP.pbo"
+$Old = (Get-FileHash -LiteralPath $Live -Algorithm SHA256).Hash
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\dev\swap_pbo.ps1 `
+  -Build $Pbo -WantNew $New -WantOld $Old
+if ($LASTEXITCODE -ne 0) { throw "swap_pbo.ps1 did not swap the PBO" }
+```
+
+The previous PBO stays beside the live one as `DayZ_MCP.pbo.swapped_out_*`. Then,
+from an MCP session that holds the lease, run `dayz_test_run(mode="all")` on that
+DayZ build, call `bridge_status`, and close the run with `dayz_test_close`. Save
+this evidence before the tag:
+
+- From `bridge_status`, both peers: `version` `<bridge_version>~<game version>`
+  with the game version the CHANGELOG names, `version_state` `ok`, capabilities
+  `match`, and one `run_id`. The poll handshake compares the game version only when
+  `expected_game_version` is set
+  ([`tools/dayz_mcp/core.py:69-70`](../tools/dayz_mcp/core.py#L69-L70)), so `ok`
+  alone does not prove the build.
+- From `dayz_test_close`: `graceful`, `logout_players` not empty with every logout
+  finished, and no `warnings`. `player_state_not_saved` means the logout wait timed
+  out.
+- The server and client RPT logs. The server's shows the player's connection,
+  `[Logout]: Player … finished` and `--- Termination successfully completed ---`.
+
+## 6. Tag and create the GitHub Release
 
 Create the tag at the clean commit recorded in `VERSION.json`, push that tag, and
 require GitHub CLI to find the remote tag before publishing. Upload only the three
@@ -165,7 +208,7 @@ gh release create "v$Version" `
   --generate-notes
 ```
 
-## 6. Post-release checks
+## 7. Post-release checks
 
 Query the published release, require the exact asset set, download fresh copies,
 and repeat the checksum procedure from step 4 with `$Dist` set to `$DownloadDir`.
@@ -199,8 +242,8 @@ if ((git rev-list -n 1 "v$Version") -ne $DownloadedManifest.git_sha) {
 }
 ```
 
-Finally, call `bridge_status` from an MCP session after loading the released
-addon, then run the read-only doctor documented in
+The checksums prove the published PBO is the one step 5 played. Finally, run the
+read-only doctor documented in
 [`tools/README-mcp.md:37-44`](../tools/README-mcp.md#L37-L44).
 
 [EXACT]
