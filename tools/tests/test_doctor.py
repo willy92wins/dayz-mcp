@@ -1824,11 +1824,15 @@ class NativeBundleExternalsTests(unittest.TestCase):
         )
         self.assertEqual(drift["severity"], "FAIL")
         self.assertIn(entries[0]["path"], drift["drifted"])
-        remediation = str(drift["remediation"])
-        # c9aa: rollback-last then install fails once a replace has run.
-        self.assertIn("replace-dayz-test-v1", remediation)
-        self.assertIn("<sha256 of the current tools/approved-launchers.json>", remediation)
-        self.assertNotIn("rollback-last", remediation)
+        # c9aa: rollback-last then install fails once a replace has run. From tools/,
+        # "python tools/build_native_launcher.py" names a file that is not there.
+        self.assertEqual(
+            drift["remediation"],
+            "From tools/, renew the native bundle: "
+            "python build_native_launcher.py --offline --verify-reproducible, then "
+            "python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 "
+            "--expected-sha256 <sha256 of the current tools/approved-launchers.json>.",
+        )
 
     def test_missing_external_is_reported_not_bundle_entries(self) -> None:
         if doctor is None:

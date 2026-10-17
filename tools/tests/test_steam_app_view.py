@@ -13,6 +13,9 @@ of #239).
 from __future__ import annotations
 
 import asyncio
+import base64
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -400,19 +403,57 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["steam_app_view"], _ADVISORY)
 
 
+# Prints the script's parse errors, every assignment to the preference (with 1 when
+# it is a statement of the script's own body) and every reg.exe call, by offset.
+_PREFERENCE_PROBE = r"""
+$tokens = $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('SCRIPT', [ref]$tokens, [ref]$errors)
+'errors ' + $errors.Count
+$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -match 'PSNativeCommandUseErrorActionPreference$' }, $true) |
+    ForEach-Object { 'set ' + [int]($_.Parent -eq $ast.EndBlock) + ' ' + $_.Extent.StartOffset + ' ' + $_.Extent.Text }
+$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'reg.exe' }, $true) |
+    ForEach-Object { 'reg ' + $_.Extent.StartOffset }
+"""
+
+
 class ClearAppSteamShadowScriptTest(unittest.TestCase):
-    """tools/clear-app-steam-shadow.ps1, read as text: no PowerShell runs it here."""
+    """tools/clear-app-steam-shadow.ps1, read by PowerShell's own parser: nothing runs it."""
 
     def test_reg_exe_is_judged_by_its_exit_code_alone(self) -> None:
         # Fifth Codex review of #239 (T1): in PowerShell 7.3 and later, a caller's
         # $PSNativeCommandUseErrorActionPreference = $true makes a failed `reg unload`
         # throw, which skips its retries and its warning. The script turns it off at
-        # script scope, before its first reg.exe.
+        # script scope, before its first reg.exe. Read as lines of text, an assignment
+        # that never runs (under an if, in a function, a comment or a script block) and
+        # a later one back to $true passed too (Codex review of #240, U1).
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if shell is None:
+            self.skipTest("PowerShell is not installed")
         script = Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1"
-        lines = script.read_text(encoding="utf-8").splitlines()
-        preference = lines.index("$PSNativeCommandUseErrorActionPreference = $false")
-        reg = [n for n, line in enumerate(lines) if line.lstrip().startswith("& reg.exe ")]
-        self.assertLess(preference, min(reg))
+        probe = _PREFERENCE_PROBE.replace("SCRIPT", str(script).replace("'", "''"))
+        result = subprocess.run(
+            [
+                shell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                base64.b64encode(probe.encode("utf-16-le")).decode("ascii"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("errors 0", lines)
+        assignments = [line.split(" ", 3)[1:] for line in lines if line.startswith("set ")]
+        self.assertEqual(
+            [(top, text) for top, _offset, text in assignments],
+            [("1", "$PSNativeCommandUseErrorActionPreference = $false")],
+        )
+        reg = [int(line.split()[1]) for line in lines if line.startswith("reg ")]
+        self.assertTrue(reg)
+        self.assertLess(int(assignments[0][1]), min(reg))
 
 
 if __name__ == "__main__":

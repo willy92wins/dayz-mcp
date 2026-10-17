@@ -515,11 +515,12 @@ def check_native_bundle_externals(
     # The drift is in a launcher the registry holds, so its entry is replaced in place: after
     # an earlier replace, `rollback-last` restores an older dayz-test-v1 entry and
     # `install-dayz-test-v1` refuses it (inbox c9aa). The CAS of `replace-dayz-test-v1` is the
-    # sha256 of tools/approved-launchers.json as it is now; the PE hash is never it.
+    # sha256 of tools/approved-launchers.json as it is now; the PE hash is never it. Both
+    # commands run from tools/, as the checker's Recovery and README-mcp.md say.
     sha_token = approved_sha256 or "<sha256 of the current tools/approved-launchers.json>"
     remediation = (
-        "Renew the native bundle: "
-        "python tools/build_native_launcher.py --offline --verify-reproducible, then "
+        "From tools/, renew the native bundle: "
+        "python build_native_launcher.py --offline --verify-reproducible, then "
         "python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 "
         f"--expected-sha256 {sha_token}."
     )

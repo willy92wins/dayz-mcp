@@ -6,7 +6,7 @@ import io
 import json
 import os
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -985,7 +985,13 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
         # c9aa: after a replace, rollback-last restores an older dayz-test-v1 entry and
         # install refuses it, so a registry that holds the launcher is told to replace it.
         def recovery(output: str) -> list[str]:
-            return [line for line in output.splitlines() if line.startswith("Recovery:")]
+            # Every line but the header and the failures, so a second command on any
+            # other line counts too.
+            return [
+                line
+                for line in output.splitlines()
+                if line != "NATIVE LAUNCHER REGISTRY DRIFT" and not line.startswith("- ")
+            ]
 
         def only(command: str) -> list[str]:
             return [
@@ -997,9 +1003,16 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             registry, lock, receipts = self._paths(root)
-            code, output = _run_checker_against_fixture(registry, lock, receipts, _entry())
-            self.assertEqual(code, 1)
-            self.assertEqual(recovery(output), only("install-dayz-test-v1"))
+
+            def check(entry: dict[str, object]) -> list[str]:
+                # The checker writes nothing to stderr, a second recovery included.
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    code, output = _run_checker_against_fixture(registry, lock, receipts, entry)
+                self.assertEqual((code, stderr.getvalue()), (1, ""))
+                return recovery(output)
+
+            self.assertEqual(check(_entry()), only("install-dayz-test-v1"))
             with patch.object(updater, "_validated_entry", return_value=_entry()):
                 updater._install_transition(
                     registry_path=registry,
@@ -1008,11 +1021,7 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
                     bundle=root,
                     expected_sha256=updater._sha256(BASELINE),
                 )
-            code, output = _run_checker_against_fixture(
-                registry, lock, receipts, _entry_with_sha("B" * 64)
-            )
-            self.assertEqual(code, 1)
-            self.assertEqual(recovery(output), only("replace-dayz-test-v1"))
+            self.assertEqual(check(_entry_with_sha("B" * 64)), only("replace-dayz-test-v1"))
 
 
 def _place_orphan_names(
