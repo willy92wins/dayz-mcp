@@ -1,7 +1,7 @@
 # DayZ Enforce API — referencia para el harness de autotest
 
 > **Fuente:** source vanilla bajo `<vanilla scripts root>`, DayZ 1.30.164078. El 2026-10-17 se
-> reanclaron las citas desde la 1.29: 90 se movieron con el texto igual, y `CreateObject` y
+> reanclaron las citas desde la 1.29: 96 se movieron con el texto igual, y `CreateObject` y
 > `CreateStaticObjectUsingP3D` ganaron `bool objSpawner = false`.
 > **Nivel de verificación:** 122 APIs cosechadas por un Workflow de 27 agentes con pasada de
 > verificación adversarial (cite-then-verify por subagente), **menos 4 descartadas por
@@ -10,7 +10,10 @@
 > Catálogo: **128 símbolos únicos** (122 cosechadas − 4 `GAME_TEMPLATE` + 12 de 2ª ronda
 = 130 brutas; 2 colisiones colapsan al deduplicar). El fichero además cita posiciones
 en la prosa y algunas entradas comparten posición bajo otro nombre, por lo que lleva
-**más citas `path:line` únicas (135) que entradas de catálogo**; no falta nada.
+**más citas `path:line` únicas (135) que entradas de catálogo**. Ese número cuenta cada
+`fichero.c:línea` escrito entero, con el rango `restapi.c:32-33` como una cita. No cuenta
+el `/:175` del punto 10 del runbook ni las seis líneas de método abreviadas tras
+`uainput.c:33`; con ellas, el fichero apunta a 142 posiciones distintas.
 No sustituye a la skill `enforce-script-reference`; es un
 > índice operativo para construir el harness. Generado 2026-06-06.
 
@@ -55,7 +58,7 @@ No sustituye a la skill `enforce-script-reference`; es un
 
 **Input por script — alternativa a teclas SO** (uainput.c, verificado por mí):
 - `UAInputAPI GetUApi()` -> uainput.c:279 · `class UAInputAPI` -> uainput.c:205
-- `UAInput` (uainput.c:33): `ForceEnable(bool)` :83 · `ForceDisable(bool)` :84 · `Supress()` :74 · `LocalPress()` :50 · `LocalHold()` :52 · `LocalValue()` :48
+- `UAInput` (uainput.c:33): `ForceEnable(bool)` :93 · `ForceDisable(bool)` :94 · `Supress()` :84 · `LocalPress()` :60 · `LocalHold()` :62 · `LocalValue()` :58
 > Permite **forzar/suprimir una acción mapeada por script en el cliente** -> puede esquivar el
 > "riesgo nuclear" del spike (raw input) para acciones bindeadas. Para conducir, `Car.SetThrottle/SetSteering` es aún más directo.
 
