@@ -43,6 +43,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# reg.exe is judged by its exit code alone. In PowerShell 7.3 and later a
+# profile that sets this to $true makes a failed native command throw, and a
+# failed unload would then skip the retries below.
+$PSNativeCommandUseErrorActionPreference = $false
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -74,7 +78,7 @@ $mountName = 'DayZMcpAppHelium'
 $root = "Registry::HKEY_USERS\$mountName"
 # Whatever is mounted under this name is not this run's, so it is left alone.
 if (Test-Path -LiteralPath $root) {
-    throw "HKU\$mountName is already mounted, by a run that did not finish. Run 'reg unload HKU\$mountName' and run this again."
+    throw "HKU\$mountName is already mounted: another run of this script is still going, or one did not finish. If none is running, run 'reg unload HKU\$mountName' and run this again."
 }
 
 # Back up the hive and its transaction logs before anything else. A hive still

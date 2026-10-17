@@ -82,6 +82,8 @@ class ObserveAppSteamViewTest(unittest.TestCase):
             "pid_wider_than_a_dword": (2**32 + _LIVE_STEAM, 2**32 + _LIVE_STEAM),
             # REG_MULTI_SZ: winreg returns a list, one per read (Codex review of #239).
             "pid_written_as_a_list": ([[str(_LIVE_STEAM)], [str(_LIVE_STEAM)]], None),
+            # REG_NONE or an empty REG_BINARY: winreg returns None (same review).
+            "pid_with_no_data": (None, None),
         }
         for name, (copy, app_view_pid) in cases.items():
             with self.subTest(name):

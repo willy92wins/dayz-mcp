@@ -56,11 +56,13 @@ REMEDIATION_PYWIN32_MISSING = (
 # observe_app_steam_view names it; it refuses nothing.
 STEAM_APP_VIEW_STALE = "steam_app_view_stale"
 REMEDIATION_STEAM_APP_VIEW_STALE = (
-    "This MCP client reads a private copy of the registry, which the app it runs "
-    "in (Claude or Codex) keeps for every process it starts, and that copy does "
-    "not register the running Steam that the real registry names. A DayZ started "
-    "from this app's shells reads the same copy and stops at 'Unable to locate a "
-    "running instance of Steam'. dayz_test_run is not affected while its daemon "
+    "The registry as this MCP client reads it does not register the running Steam "
+    "that the real registry names. Unless session_status stops showing this "
+    "warning a minute later (the key was rewritten while it was read), the cause "
+    "is the private copy of the registry that the app the client runs in (Claude "
+    "or Codex) keeps for every process it starts. A DayZ started from this app's "
+    "shells reads that copy and stops at 'Unable to locate a running instance of "
+    "Steam'. dayz_test_run is not affected while its daemon "
     "runs outside the app, where dayz-mcp starts it through WMI; a daemon started "
     "without WMI reads the copy too and refuses the launch. Start DayZ with "
     "dayz_test_run, or from outside the app (Steam, Explorer, or WMI's "
@@ -71,6 +73,9 @@ REMEDIATION_STEAM_APP_VIEW_STALE = (
 # How this process's view reads when Steam's key or value is not there: a
 # tombstone in the app's copy hides the real key that way (LL-516).
 _APP_VIEW_ABSENT = "absent"
+# How it reads a pid value with no data (REG_NONE, an empty REG_BINARY), which
+# winreg returns as None: a value that is not a pid, not a failed read.
+_APP_VIEW_EMPTY = "empty"
 _ACTIVE_PROCESS_KEY = r"Software\Valve\Steam\ActiveProcess"
 _STEAM_KEY = r"Software\Valve\Steam"
 _MAX_LIVE_PIDS = 8
@@ -496,14 +501,17 @@ def _read_real_view(provider: SteamPreflightProvider) -> SteamActiveProcessSnaps
 
 def _read_app_view_pid(provider: SteamPreflightProvider) -> object:
     """The pid this process's view registers, _APP_VIEW_ABSENT when the key or
-    a value is not there, None when it cannot be read."""
+    a value is not there, _APP_VIEW_EMPTY when the pid value has no data, None
+    when it cannot be read."""
     try:
         snapshot = provider.read_active_process()
     except FileNotFoundError:
         return _APP_VIEW_ABSENT
     except Exception:
         return None
-    return snapshot.pid if isinstance(snapshot, SteamActiveProcessSnapshot) else None
+    if not isinstance(snapshot, SteamActiveProcessSnapshot):
+        return None
+    return _APP_VIEW_EMPTY if snapshot.pid is None else snapshot.pid
 
 
 def observe_app_steam_view(
