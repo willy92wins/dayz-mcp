@@ -57,9 +57,9 @@ REMEDIATION_PYWIN32_MISSING = (
 STEAM_APP_VIEW_STALE = "steam_app_view_stale"
 REMEDIATION_STEAM_APP_VIEW_STALE = (
     "The registry as this MCP client reads it does not register the running Steam "
-    "that the real registry names. Unless session_status stops showing this "
-    "warning a minute later (the key was rewritten while it was read), the cause "
-    "is the private copy of the registry that the app the client runs in (Claude "
+    "that the real registry names. A key rewritten while it was read can give this "
+    "warning once; if session_status still shows it a minute later, the likely "
+    "cause is the private copy of the registry that the app the client runs in (Claude "
     "or Codex) keeps for every process it starts. A DayZ started from this app's "
     "shells reads that copy and stops at 'Unable to locate a running instance of "
     "Steam'. dayz_test_run is not affected while its daemon "

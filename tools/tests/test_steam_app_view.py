@@ -18,6 +18,7 @@ import threading
 import time
 import unittest
 from contextlib import nullcontext
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import server
@@ -397,6 +398,21 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
         observe.assert_called_once_with()
         for result in results:
             self.assertEqual(result["steam_app_view"], _ADVISORY)
+
+
+class ClearAppSteamShadowScriptTest(unittest.TestCase):
+    """tools/clear-app-steam-shadow.ps1, read as text: no PowerShell runs it here."""
+
+    def test_reg_exe_is_judged_by_its_exit_code_alone(self) -> None:
+        # Fifth Codex review of #239 (T1): in PowerShell 7.3 and later, a caller's
+        # $PSNativeCommandUseErrorActionPreference = $true makes a failed `reg unload`
+        # throw, which skips its retries and its warning. The script turns it off at
+        # script scope, before its first reg.exe.
+        script = Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1"
+        lines = script.read_text(encoding="utf-8").splitlines()
+        preference = lines.index("$PSNativeCommandUseErrorActionPreference = $false")
+        reg = [n for n, line in enumerate(lines) if line.lstrip().startswith("& reg.exe ")]
+        self.assertLess(preference, min(reg))
 
 
 if __name__ == "__main__":
