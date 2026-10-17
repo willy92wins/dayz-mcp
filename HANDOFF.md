@@ -1,61 +1,59 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-09 23:57 (Madrid; medido: main, árboles vivos, launcher, PBO, procesos e instancias)
+# DayZ-MCP - Estado vivo - 2026-10-17 (Madrid; árboles vivos, launcher, PBO, procesos e instancias medidos a las 17:55; main tras el merge de #244)
 
-- **main** = `9f3e7de` (#230, 222d).
-  - Hoy entraron:
-    - #227 (docs);
-    - #228 (infraestructura del broker);
-    - #229 (puente "12");
-    - #231 (docs de la ventana v12);
-    - #230 (222d: lista de include sellada, `$PBOPREFIX$` como namespace y rechazo de un binarize cuyo namespace no coincide con la carpeta fuente).
-  - Los árboles vivos (LIVE `DayZ_MCP_dev` en `main` y T130 `C:\temp\DayZ_MCP_130`, detached) están en `9f3e7de`, sin cambios en ficheros versionados.
-  - Se hace fast-forward solo dentro de una promoción; nunca `reset --hard`.
-- **Launcher `dayz-test-v1`, resellado el 2026-10-09 en la segunda ventana de 222d (22:19-23:49):**
-  - PE de LIVE `CA9E262F…` y de T130 `F2048F35…`; `app.pyz` `9DCC15BA…`, medido tras el resellado.
-  - La lista `addonbuilder-include.lst` es igual al literal sellado.
-  - `check_native_launcher_registry.py` y el check del lock dan ok en los dos árboles: re-ejecutados a las 23:57, después de pasar a `main` (`C:\Users\guill\DayZ_MCP_backups\w222d2-20261009\step6-checks-*.log`).
-  - Backups y vuelta atrás: `C:\Users\guill\DayZ_MCP_backups\w222d2-20261009\` (`steps.log`).
-- **PBO vivo:** `177471A7…` (puente "12"), sin cambios.
-- **Instancias:** default (1.29, `:8765`, `dayz-mcp`) y `130` (1.30 Exp, `:8775`, `dayz-mcp-130`).
-  - Censo de las 23:57: `w222d2-20261009\step7-census.txt`.
-    - No había procesos DayZ.
-    - El daemon default arrancó a las 23:22:18; el censo recoge una cadena Codex iniciada a las 23:21:07. El de 130 arrancó a las 23:45:47, con el harness de la aceptación.
-    - Clientes: dos cadenas default y tres de 130 de la sesión de Codex, y una default de esta sesión. El resumen del censo cuenta siete: la séptima (`156216`) es el propio comando de medición, cuyo texto contiene los patrones que busca; el listado por proceso del mismo fichero muestra las seis.
-- **Caída por la config de Codex** (`reviews/2026-10-06-ticketing/ingame-w222d/RESULTS.md`):
-  - `~/.codex/config.toml` (mtime 20:55:02) llevaba `enabled = true` en las dos entradas `dayz-mcp*`; no se observó quién lo escribió.
-  - El gate de procedencia solo admite `command`, `args` y `tool_timeout_sec` (`tools/dayz_mcp/host_config.py:73`): un cliente que arranca con esa clave muere con `daemon_provenance_conflict`. El primer fallo observado fue a las 22:19.
-  - Recuperación: la entrada `dayz-mcp` perdió la clave en una reescritura con mtime 23:21:05, y la línea de `dayz-mcp-130` se quitó a las 23:44:53 con permiso del dueño.
-  - Puede volver a escribirse; el arreglo duradero está pedido en `ace5`.
-- **Verificado en juego el 2026-10-09:**
-  - v12: `reviews/2026-10-06-ticketing/ingame-v12/RESULTS.md` (855c, 9941, 8308, 86a3).
-  - 222d: `reviews/2026-10-06-ticketing/ingame-w222d/RESULTS.md`.
-    - SimpleGroup con binarize sale completo: 62 de 62 copias idénticas a la fuente, `config.bin` y modelos ODOL.
-    - LFHeli_OH1 con binarize se rechaza con `build_namespace_source_mismatch` y su remediación, sin AddonBuilder y sin tocar el PBO desplegado.
-- **Buzón:**
-  - Resueltas hoy:
-    - 855c, 9941, 86a3 y 8308 (`ingame-v12/RESULTS.md`);
-    - b58f y 33ed (`round3/ROUND3.md`);
-    - 222d y b855 (`ingame-w222d/RESULTS.md`).
-  - Nuevas: c852, 204e, ca47, d9c8, 5880 y fb98 (`round3/ROUND3.md`), ace5 (`ingame-w222d/RESULTS.md`) y su corrección 9d9b (`C:\Users\guill\dzmcp_gauntlet\SESSION-STATE.md:616`).
-- **Riesgos abiertos.** Los dos primeros son de esta ventana; los demás vienen del LIVE-STATE revisado en #231.
-  - El gate de procedencia muere ante una clave que añada un host (`ace5`).
-  - `-packonly` con un namespace distinto de la carpeta (lo permite el diseño B) no se ha probado con las Tools reales.
-  - 130: `dayz_test_close` no espera el logout porque el RPT de la 1.30 escribe la conexión en español (`fb-20261008-141137-2986`; aparcado: `round2/2986_PARKED.md`).
-  - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`); la aceptación FenceKit de 9941 quedó INCONCLUSA.
-  - En los tres lanzamientos en 1.29 del ciclo v12, el cliente quedó en el menú de pausa hasta `ui_click continuebtn` (`5880`, 1d31).
-  - El linter offline no detecta casts entre tipos no relacionados (`c852`).
-  - La puerta de 855c necesita un alias de misión en la policy sellada (`d9c8`).
-  - Ningún verbo lee la cantidad de un ítem. El agua y la energía solo las devuelve `player_heal`, antes y después de curar: falta una lectura que no cambie nada. Además, en 1.29 `completed_cycles` queda en 0 al beber y comer (`fb98`).
+- **main** = `659191e` (#244).
+  - Desde el LIVE-STATE anterior (main `9f3e7de`, 9/10) entraron:
+    - #232 (docs de las ventanas de 222d);
+    - #233 (9608: `hands_take` desde cualquier attachment del mundo, y `hands_attach`; a383: la ola bug046 ya no falla al azar);
+    - #234 (2986 y 0093: `dayz_test_close` espera el logout en 1.30 por la línea de conexión del script log);
+    - #235 y #237 (ace5 y 1d4d: el gate de procedencia acepta el `enabled = true` que escribe la app de Codex, también en `dayz-mcp-130`);
+    - #238 (11b4: el bundle nativo nombra un binario externo cambiado o borrado);
+    - #239 (`steam_app_view_stale`: la app guarda una copia congelada del registro de Steam);
+    - #240 (c9aa: doctor renueva un launcher desviado con `replace-dayz-test-v1`);
+    - #241 (d9c8: la puerta de `storage_recovery_joint_gate` manda la ruta de la misión y nunca planta en una misión alias);
+    - #242 (la release v1.4);
+    - #243 (`docs/RELEASE.md` juega una partida con el PBO de la release antes del tag);
+    - #244 (`server_extra_args` y `client_extra_args` en la policy del host; es el #236 de @kinkurono-dev).
+  - Los árboles vivos no siguen a main. LIVE (`DayZ_MCP_dev`) está detached en `b8c8d10` (v1.4) y T130 (`C:\temp\DayZ_MCP_130`) detached en `d825aa2`, sin cambios en ficheros versionados. Sin seguimiento: `tools/native-launchers/dayz-test-v1/addonbuilder-include.lst` en los dos y `reviews/2026-10-13-9608/` en LIVE. Su rama local `main` sigue en `3c27f33`.
+  - Se mueven solo dentro de una promoción, con resellado; nunca `reset --hard`. Los extras de #244 tocan el worker sellado y el lock: no cambian nada en un árbol hasta que se reselle en ese commit.
+- **Release v1.4** (2026-10-17): la primera verificada en DayZ 1.30. La partida `334956a8-55cc-4398-81ab-367bfa83636c` corrió en 1.30.164.078 antes del tag. Evidencia: `C:\Users\guill\DayZ_MCP_backups\release-v1.4\EVIDENCE.md`.
+  - Known issue: `action_use` y `action_hold` no comprueban `CanBeStarted()`. El arreglo cambia el PBO y lo revisa el dueño.
+- **Launcher `dayz-test-v1`:** LIVE se reselló el 16/10 en la 1.30 y T130 el 17/10.
+  - LIVE: PE `3E7FF1A7…`, `approved-launchers.json` `913AAABE…`. T130: PE `D432700C…`, `approved-launchers.json` `682113CD…`. `app.pyz` `E258B0BF…` en los dos.
+  - En los dos, `check_native_launcher_registry.py` da ok con la procedencia anclada (23 transiciones en LIVE, 8 en T130), y `write_packaged_modules_lock.py --check` también.
+  - Cada actualización de Steam de DayZ o de DayZ Tools cambia hashes que el launcher fija y obliga a resellar (11b4).
+- **PBO vivo:** `7078C2E4…` (542 178 B, el de la v1.4) en `P:\Mods\@DayZ_MCP\Addons\`. `P:\Mods`, el `mods_root` de las dos policies, es un junction a `!Workshop`, así que default y 130 cargan el mismo PBO. El anterior sigue al lado como `DayZ_MCP.pbo.swapped_out_20261017T150136Z_D35364034BAE6392`.
+- **Instancias:**
+  - default: `C:\Program Files (x86)\Steam\steamapps\common\DayZ`, DayZDiag 1.30.164.078 (estable desde el 15/10), `:8765`, `dayz-mcp`.
+  - `130`: `E:\SteamLibrary\steamapps\common\DayZ Exp`, DayZDiag 1.30.164.200, `:8775`, `dayz-mcp-130`.
+  - `P:\scripts` es la 1.30; la 1.29 quedó en `P:\scripts_1.29_backup_20261016`. `P:` es un subst que se pierde al reiniciar, y sin él no se resella ni se construye el PBO.
+  - Censo de las 17:55: ningún proceso DayZ del MCP (había una partida normal del dueño, con BattlEye). El daemon de 8765 (pid 50984) corría desde las 17:00:38; 8775 no tenía daemon. Clientes: 20 procesos en 6 cadenas en 8765, y 16 en 4 en 8775.
+- **Buzón** (`C:\Users\guill\AppData\Local\DayZ_MCP\inbox\feedback.jsonl`), contado a las 23:25: 916 entradas y 869 resoluciones. Hay 100 abiertas, 14 de ellas nuestras: 8 del MCP y 6 del Pack.
+  - Cerradas el 17/10 con su evidencia: bedf (T130 resellado), c9aa (#240), 11b4 (#238; las rutas desviadas siguen solo en doctor, porque el wire nunca lleva rutas del host), 2986 y 0093 (#234), ace5, 9d9b y 1d4d (#235, #237), d9c8 (#241), y del Pack ca47, c852, 25af, 5c98 y 35c1 (Pack #113) y 818e (Pack #117).
+  - Abiertas el 17/10, del Pack:
+    - e6d6 (O1: el validador tarda un tiempo cuadrático en una sentencia larga de argumentos de plantilla; solo con entrada adversarial);
+    - dada (`ES-EMPTY-IFDEF` falla dos bloques vacíos que la 1.30 trae y ejecuta sin caerse);
+    - 6b76 (con la vanilla 1.30, `ES-SYNCVAR-CONTRACT` acepta un override sin parámetros de `RegisterConstructionSyncVariables` en una clase que no deriva de `EntityAI`; es el límite que documenta el Pack #117).
+    - 818e se abrió y se cerró el mismo día, con el Pack #117.
+  - Siguen abiertas, nuestras: 204e, 5880, 8b1c, e92d, a97e, 75e7, fade y fb98; del Pack, a59b, 7ce1, 7b9e, e6d6, dada y 6b76.
+- **Riesgos abiertos:**
+  - «unable to locate running instance of steam» al lanzar desde la app: la copia congelada del registro de Steam (#239, Pack #113). Falta que el dueño pase el script de limpieza de Steam con Claude cerrado.
+  - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`).
+  - El cliente se queda en el menú de pausa hasta `ui_click continuebtn` (`5880`).
   - Virtualización MSIX de `%LOCALAPPDATA%` (`e92d`).
+  - Ningún verbo lee la cantidad de un ítem sin cambiarla (`fb98`).
+  - `dayz-harness-apis.md` sigue anclado en el source de la 1.29.
+  - El Pack sigue declarando la 1.29 como build de anclaje (`sources/source-map.json`: 1.29.0.163451), como se decidió en el Pack #117; su control vanilla ya pasa en la 1.30.164078.
 - **Siguiente:**
-  1. Arreglo duradero de `ace5`: aceptar `enabled = true` en las entradas de Codex, con su test.
-  2. Investigar `204e` (toggle de colocación) y `f4e6` (según su informe, un run 1.30 se cerró sin que lo pidiera su sesión).
-  3. Peticiones abiertas: `8b1c` (verbo de foco), el rediseño de 2986 y `fb98`.
-- **Detalle:**
-  - Notas: `C:\Users\guill\dzmcp_gauntlet\SESSION-STATE.md`.
-  - Handoff: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-10-09-HANDOFF-dayz-mcp-ticketing.md`.
+  1. `CanBeStarted()` en `action_use` y `action_hold` (cambia el PBO; lo revisa el dueño).
+  2. Reanclar `dayz-harness-apis.md` en la 1.30.
+  3. Pack: medir en un mod de prueba la regla del bloque vacío (dada); siguen abiertas O1 (e6d6) y 6b76.
+  4. Los extras de #244 llegan a LIVE y T130 solo con un resellado, que decide el dueño.
+  5. Las fichas de diseño (8b1c, el foco; fb98; 9ab8) se hablan con el dueño antes de tocarlas.
+  6. La tabla de árboles de debajo de este bloque es del 01/10 (PBO `4F3DD79D…`): ponerla al día.
+- **Detalle:** la evidencia de la v1.4 está en `C:\Users\guill\DayZ_MCP_backups\release-v1.4\`, y las revisiones de Codex de esta ventana en `C:\Users\guill\dzmcp_gauntlet\reviews\`.
 <!-- LIVE-STATE:END -->
 
 ---
