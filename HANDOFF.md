@@ -31,10 +31,10 @@
   - `P:\scripts` es la 1.30; la 1.29 quedó en `P:\scripts_1.29_backup_20261016`. `P:` es un subst que se pierde al reiniciar, y sin él no se resella ni se construye el PBO.
   - Censo de las 17:55: ningún proceso DayZ del MCP (había una partida normal del dueño, con BattlEye). El daemon de 8765 (pid 50984) corría desde las 17:00:38; 8775 no tenía daemon. Clientes: 20 procesos en 6 cadenas en 8765, y 16 en 4 en 8775.
 - **Buzón** (`C:\Users\guill\AppData\Local\DayZ_MCP\inbox\feedback.jsonl`), contado a las 23:25: 916 entradas y 869 resoluciones. Hay 100 abiertas, 14 de ellas nuestras: 8 del MCP y 6 del Pack.
-  - Cerradas el 17/10 con su evidencia: bedf (T130 resellado), c9aa (#240), 11b4 (#238; las rutas desviadas siguen solo en doctor, porque el wire nunca lleva rutas del host), 2986 y 0093 (#234), ace5, 9d9b y 1d4d (#235, #237), d9c8 (#241), y del Pack ca47, c852, 25af, 5c98 y 35c1 (Pack #113) y 818e (Pack #117).
+  - Cerradas el 17/10 con su evidencia: bedf (T130 resellado), c9aa (#240), 11b4 (#238; las rutas desviadas siguen solo en doctor, porque el error del bundle no las lleva al wire), 2986 y 0093 (#234), ace5, 9d9b y 1d4d (#235, #237), d9c8 (#241), y del Pack ca47, c852, 25af, 5c98 y 35c1 (Pack #113) y 818e (Pack #117).
   - Abiertas el 17/10, del Pack:
     - e6d6 (O1: el validador tarda un tiempo cuadrático en una sentencia larga de argumentos de plantilla; solo con entrada adversarial);
-    - dada (`ES-EMPTY-IFDEF` falla dos bloques vacíos que la 1.30 trae y ejecuta sin caerse);
+    - dada (`ES-EMPTY-IFDEF` falla dos bloques vacíos que trae la 1.30: la partida de la v1.4 ejecutó sin caerse el de `DIAG_DEVELOPER`, y el de `ENABLE_LOGGING` no quedó medido, porque necesita `-doScriptLogs=1`);
     - 6b76 (con la vanilla 1.30, `ES-SYNCVAR-CONTRACT` acepta un override sin parámetros de `RegisterConstructionSyncVariables` en una clase que no deriva de `EntityAI`; es el límite que documenta el Pack #117).
     - 818e se abrió y se cerró el mismo día, con el Pack #117.
   - Siguen abiertas, nuestras: 204e, 5880, 8b1c, e92d, a97e, 75e7, fade y fb98; del Pack, a59b, 7ce1, 7b9e, e6d6, dada y 6b76.
