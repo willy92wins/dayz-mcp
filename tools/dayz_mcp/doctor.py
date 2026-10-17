@@ -512,14 +512,16 @@ def check_native_bundle_externals(
                 checked=len(externals),
             )
         ]
-    # The CAS of `install-dayz-test-v1` is the sha256 of tools/approved-launchers.json AFTER
-    # `rollback-last`, which cannot be known before the rollback runs; the PE hash is never it.
-    sha_token = approved_sha256 or "<sha256 of tools/approved-launchers.json after rollback-last>"
+    # The drift is in a launcher the registry holds, so its entry is replaced in place: after
+    # an earlier replace, `rollback-last` restores an older dayz-test-v1 entry and
+    # `install-dayz-test-v1` refuses it (inbox c9aa). The CAS of `replace-dayz-test-v1` is the
+    # sha256 of tools/approved-launchers.json as it is now; the PE hash is never it.
+    sha_token = approved_sha256 or "<sha256 of the current tools/approved-launchers.json>"
     remediation = (
         "Renew the native bundle: "
         "python tools/build_native_launcher.py --offline --verify-reproducible, then "
-        "python -m dayz_mcp.launcher_registry_update rollback-last, then "
-        f"install-dayz-test-v1 --expected-sha256 {sha_token}."
+        "python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 "
+        f"--expected-sha256 {sha_token}."
     )
     return [
         _finding(

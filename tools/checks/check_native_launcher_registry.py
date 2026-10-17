@@ -115,10 +115,14 @@ def main() -> int:
         print("NATIVE LAUNCHER REGISTRY DRIFT")
         for failure in failures:
             print(f"- {failure}")
+        # A registry that holds the launcher is renewed in place: after an earlier replace,
+        # rollback-last restores an older entry and install refuses it (inbox c9aa).
+        held = any(item["id"] == LAUNCHER_ID for item in entries)
+        command = "replace-dayz-test-v1" if held else "install-dayz-test-v1"
         print(
             "Recovery: python build_native_launcher.py --offline --verify-reproducible, "
-            "then python -m dayz_mcp.launcher_registry_update rollback-last followed by "
-            "install-dayz-test-v1 --expected-sha256 <sha of the empty baseline registry>."
+            f"then python -m dayz_mcp.launcher_registry_update {command} "
+            "--expected-sha256 <sha256 of the current tools/approved-launchers.json>."
         )
         return 1
 

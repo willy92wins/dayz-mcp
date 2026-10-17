@@ -175,13 +175,16 @@ The builder reads a host-only intent file. It never loads the published example.
    directory and `build_native_launcher.py` renews that directory with `os.replace`, so after
    `python build_native_launcher.py --offline --verify-reproducible` every `dayz_test_run` fails
    with `launcher_root_identity_drift` until the registry is renewed:
-   `python -m dayz_mcp.launcher_registry_update rollback-last`, then
-   `python -m dayz_mcp.launcher_registry_update install-dayz-test-v1 --expected-sha256 <sha256 of the CURRENT tools/approved-launchers.json>`.
-   The CAS value is the hash of the registry file after the rollback, never the PE's hash
-   (`launcher_registry_cas_mismatch` otherwise), and `install` without the rollback fails with
-   `launcher_registry_version_already_installed`. `bootstrap` is create-only: it never resets an
-   existing registry. A Steam client update invalidates the sealed bundle the same way (the
-   closure manifest pins four Steam DLLs by size and sha256): rebuild, then run this cycle.
+   `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1 --expected-sha256 <sha256 of the CURRENT tools/approved-launchers.json>`.
+   The CAS value is the hash of the registry file before the replace, never the PE's hash
+   (`launcher_registry_cas_mismatch` otherwise). `replace` swaps the dayz-test-v1 entry in one
+   write, so the registry always holds a launcher. Do not renew with `rollback-last` then
+   `install-dayz-test-v1`: after an earlier replace, the rollback restores an older dayz-test-v1
+   entry and `install` refuses it with `launcher_registry_version_already_installed`
+   (fb-20261016-155416-c9aa). `bootstrap` is create-only: it never resets an existing
+   registry. An update of DayZ or DayZ Tools invalidates the sealed bundle the same way (the
+   closure manifest pins the diag executable and DayZ Tools' files by size and sha256; Steam's
+   own client DLLs stay out of it): rebuild, then run this cycle.
    Live MCP client sessions keep the tool code and the bundle layout they started with: after a
    tools deploy, a daemon restart or a bundle layout change, reopen the client session.
 

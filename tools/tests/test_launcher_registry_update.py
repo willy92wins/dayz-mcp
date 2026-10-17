@@ -981,6 +981,36 @@ class AbortedPreparedRecoveryTest(unittest.TestCase):
             self.assertIn("stalled", output)
             self.assertEqual(updater._sha256(registry.read_bytes()), sha_b)
 
+    def test_checker_recovery_names_the_command_the_registry_needs(self) -> None:
+        # c9aa: after a replace, rollback-last restores an older dayz-test-v1 entry and
+        # install refuses it, so a registry that holds the launcher is told to replace it.
+        def recovery(output: str) -> str:
+            return next(line for line in output.splitlines() if line.startswith("Recovery:"))
+
+        cas = "--expected-sha256 <sha256 of the current tools/approved-launchers.json>."
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            code, output = _run_checker_against_fixture(registry, lock, receipts, _entry())
+            self.assertEqual(code, 1)
+            self.assertIn("launcher_registry_update install-dayz-test-v1 " + cas, recovery(output))
+            self.assertNotIn("rollback-last", recovery(output))
+            with patch.object(updater, "_validated_entry", return_value=_entry()):
+                updater._install_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(BASELINE),
+                )
+            code, output = _run_checker_against_fixture(
+                registry, lock, receipts, _entry_with_sha("B" * 64)
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("launcher_registry_update replace-dayz-test-v1 " + cas, recovery(output))
+            self.assertNotIn("install-dayz-test-v1", recovery(output))
+            self.assertNotIn("rollback-last", recovery(output))
+
 
 def _place_orphan_names(
     receipts: Path, dead: Path, live_tx: Path, dead_name: str, live_name: str

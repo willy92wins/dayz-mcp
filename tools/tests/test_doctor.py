@@ -1825,8 +1825,10 @@ class NativeBundleExternalsTests(unittest.TestCase):
         self.assertEqual(drift["severity"], "FAIL")
         self.assertIn(entries[0]["path"], drift["drifted"])
         remediation = str(drift["remediation"])
-        self.assertIn("rollback-last", remediation)
-        self.assertIn("install-dayz-test-v1", remediation)
+        # c9aa: rollback-last then install fails once a replace has run.
+        self.assertIn("replace-dayz-test-v1", remediation)
+        self.assertIn("<sha256 of the current tools/approved-launchers.json>", remediation)
+        self.assertNotIn("rollback-last", remediation)
 
     def test_missing_external_is_reported_not_bundle_entries(self) -> None:
         if doctor is None:
