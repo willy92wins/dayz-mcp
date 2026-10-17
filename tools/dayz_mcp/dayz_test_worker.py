@@ -287,7 +287,8 @@ MAX_EXTRA_ARG_LENGTH = 256
 _EXTRA_ARG = re.compile(
     r"-[A-Za-z][A-Za-z0-9_]{0,63}(?:=[!#-~]+)?|[A-Za-z][A-Za-z0-9_]{0,63}=[!#-~]+"
 )
-_MANAGED_ARG_NAMES = frozenset({"x", "y"})
+# -par=FILE reads more arguments from that file, which this filter does not see.
+_MANAGED_ARG_NAMES = frozenset({"par", "x", "y"})
 _MANAGED_ARG_PREFIXES = (
     "config",
     "connect",

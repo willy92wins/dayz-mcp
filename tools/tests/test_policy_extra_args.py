@@ -168,6 +168,10 @@ MANAGED = (
     "mod=@X",
     "port=2402",
     "--mod=@X",
+    "-par=C:\\p.txt",
+    "par=C:\\p.txt",
+    "-PAR=C:\\p.txt",
+    "-Par",
 )
 
 MALFORMED = (
@@ -226,7 +230,7 @@ class ExtraArgsGrammarTest(unittest.TestCase):
                 self.assertFalse(dayz_test_worker.valid_extra_args([argument]))
 
     def test_x_and_y_are_managed_only_as_whole_names(self) -> None:
-        self.assertTrue(dayz_test_worker.valid_extra_args(["-xray", "-yield=1"]))
+        self.assertTrue(dayz_test_worker.valid_extra_args(["-xray", "-yield=1", "-parse=1", "-parallel"]))
         self.assertFalse(dayz_test_worker.valid_extra_args(["-X=1"]))
         self.assertFalse(dayz_test_worker.valid_extra_args(["-Y"]))
 
@@ -329,7 +333,7 @@ class BuilderPolicyTest(unittest.TestCase):
         runtime = self.builder.derive_worker_runtime(
             self._document(server_extra_args=list(SERVER_ARGS))
         )
-        for value in ([], ["-mod=@X"], "-doWeaponLog", [1]):
+        for value in ([], ["-mod=@X"], ["-par=C:\\p.txt"], "-doWeaponLog", [1]):
             for key in ("server_extra_args", "client_extra_args"):
                 broken = json.loads(json.dumps(runtime))
                 broken["projects"][0][key] = value
@@ -387,11 +391,27 @@ class AppRuntimeLoaderTest(unittest.TestCase):
             {"extra_args": ["-a"]},
             {"server_extra_args": "-a"},
             {"client_extra_args": {"-a": 1}},
+            {"server_extra_args": []},
+            {"client_extra_args": []},
+            {"server_extra_args": ["-par=C:\\p.txt"]},
+            {"client_extra_args": ["-par=C:\\p.txt"]},
         ):
             with self.subTest(fields=fields), self.assertRaisesRegex(
                 RuntimeError, "worker_runtime_invalid"
             ):
                 self._load(self._project(**fields))
+
+    def test_worker_document_refuses_present_empty_lists(self) -> None:
+        for key in ("server_extra_args", "client_extra_args"):
+            project = self._project(**{key: []})
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ValueError, "worker_runtime_invalid"
+            ):
+                dayz_test_worker.worker_runtime_from_document(
+                    {"format_version": 1, "projects": [project]},
+                    project["mod"],
+                    project["dev_root"],
+                )
 
 
 class WorkerArgvTest(unittest.TestCase):

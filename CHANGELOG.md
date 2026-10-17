@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- The host launcher policy can give each project `server_extra_args` and `client_extra_args`: DayZDiag arguments appended after the managed ones to that project's server and client launches (not offline). They come only from `launcher-policy.json`, are sealed in `worker-runtime.json`, and no tool or request field can set them. The builder and the sealed worker both refuse more than 32 entries, entries over 256 characters, anything but `-name`, `-name=value` or `name=value` in printable ASCII without space or `"`, repeated names, and every flag the launcher manages. Takes effect after a launcher rebuild (`tools/README-mcp.md`, Native launcher host policy).
+- The host launcher policy can give each project `server_extra_args` and `client_extra_args`: DayZDiag arguments appended after the managed ones to that project's server and client launches (not offline). They come only from `launcher-policy.json`, are sealed in `worker-runtime.json`, and no tool or request field can set them. The builder and the sealed worker both refuse more than 32 entries, entries over 256 characters, anything but `-name`, `-name=value` or `name=value` in printable ASCII without space or `"`, repeated names, every flag the launcher manages, and `-par`, which reads more arguments from a file. Takes effect after a launcher rebuild (`tools/README-mcp.md`, Native launcher host policy).
 
 ### Changed
 
