@@ -71,19 +71,19 @@ Todas con cita `file:line`. Guard: `—` = unguarded (vanilla); `DIAG` = requier
 
 **Llegar a un player controlable** (CONTROL):
 - `proto native int Connect(UIScriptedMenu parent, string IpAddress, int port, string password)` — game.c:251 `—`
-- `OnClientNewEvent(PlayerIdentity, vector pos, ParamsReadContext)` — missionserver.c:536 `—`
-- `CreateCharacter(PlayerIdentity, vector pos, ParamsReadContext, string name)` — missionserver.c:486 `—`
-- `InvokeOnConnect(PlayerBase, PlayerIdentity)` — missionserver.c:422 `—` (gate de "controlable")
+- `OnClientNewEvent(PlayerIdentity, vector pos, ParamsReadContext)` — missionserver.c:549 `—`
+- `CreateCharacter(PlayerIdentity, vector pos, ParamsReadContext, string name)` — missionserver.c:499 `—`
+- `InvokeOnConnect(PlayerBase, PlayerIdentity)` — missionserver.c:435 `—` (gate de "controlable")
 
 **Escenario** (CONTROL):
 - `CreateObjectEx(string type, vector pos, int iFlags, int iRotation)` — game.c:702 `—`
-- `World.SetDate(...)` — usado en tu autospawn_init.c:15 · `World.SetTimeMultiplier(float)` — world.c:19 `—`
+- `World.SetDate(...)` — usado en tu autospawn_init.c:15 · `World.SetTimeMultiplier(float)` — world.c:14 `—`
 - `WeatherPhenomenon` — weather.c:28 `—`
 
 **Vehículo** (CONTROL):
-- `StartCommand_Vehicle(Transport, posIdx, seat, bool)` — human.c:1492 `—` (asiento conductor = `(t,0,0)`)
-- `Car.SetThrottle/SetSteering/SetBrake/ShiftTo` — car.c:202/196/214/271 `—`
-- `IsGettingIn()` / `IsGettingOut()` — human.c:705/706 `—` (predicado de "ya sentado")
+- `StartCommand_Vehicle(Transport, posIdx, seat, bool)` — human.c:1526 `—` (asiento conductor = `(t,0,0)`)
+- `Car.SetThrottle/SetSteering/SetBrake/ShiftTo` — car.c:191/185/203/260 `—`
+- `IsGettingIn()` / `IsGettingOut()` — human.c:727/728 `—` (predicado de "ya sentado")
 
 **Cámara + captura** (CAPTURE — client-only):
 - `SetCameraEx(int cam, const vector mat[4])` — enworld.c:56 `—` (pose por matriz)
@@ -97,7 +97,7 @@ Todas con cita `file:line`. Guard: `—` = unguarded (vanilla); `DIAG` = requier
 - `class RestCallback : Managed` — restapi.c:50 `—`
 - `JsonFileLoader<T>.JsonLoadFile/JsonSaveFile` — jsonfileloader.c:105/134 `—` · `JsonSerializer` — gameplay.c:49 `—`
 - `ExecuteEnforceScript(string expr, string mainFnName)` — game.c:776 `—` (send), pero el **resultado** del script-console es `DIAG`
-- Tick hook del loop de comandos: `MissionGameplay.TickScheduler(float)` — missiongameplay.c:216 `—`
+- Tick hook del loop de comandos: `MissionGameplay.TickScheduler(float)` — missiongameplay.c:225 `—`
 
 ---
 
@@ -238,7 +238,7 @@ Default sin `save_fullres` devuelve un único `Image` (ahora JPEG) — backward-
 ## 7. Seguridad — fail-closed desde el día 1 (no fase final)
 
 `RestApi` habla con URLs arbitrarias **sin auth**, y el send-path de `ExecuteEnforceScript`
-(playerbase.c:5698) ejecuta Enforce arbitrario server-side. Combinado = agujero de
+(playerbase.c:5982) ejecuta Enforce arbitrario server-side. Combinado = agujero de
 server-takeover. Por R6 (fail-closed), de salida:
 
 - **Bind 127.0.0.1** (nunca 0.0.0.0); fallar si no se puede constatar el binding.

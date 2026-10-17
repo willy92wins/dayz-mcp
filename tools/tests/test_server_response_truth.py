@@ -633,7 +633,7 @@ class TimeMultiplierProducerContractTest(unittest.TestCase):
         world = Path(r"P:\scripts\3_Game\global\world.c")
         if not world.is_file():
             self.skipTest("vanilla World.c not mounted")
-        world_src = world.read_text(encoding="utf-8")
+        world_src = world.read_text(encoding="utf-8", errors="replace")
         self.assertIn("proto native void SetTimeMultiplier", world_src)
         self.assertNotIn("GetTimeMultiplier", world_src)
 

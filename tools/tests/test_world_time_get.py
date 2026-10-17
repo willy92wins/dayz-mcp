@@ -363,7 +363,7 @@ class VanillaWorldPremiseTest(unittest.TestCase):
     def test_vanilla_world_reads_the_date_and_has_no_multiplier_getter(self) -> None:
         if not VANILLA_WORLD.is_file():
             self.skipTest("vanilla world.c not mounted")
-        world = VANILLA_WORLD.read_text(encoding="utf-8")
+        world = VANILLA_WORLD.read_text(encoding="utf-8", errors="replace")
         self.assertRegex(
             world,
             r"proto\s+void\s+GetDate\(out int year, out int month, out int day, "

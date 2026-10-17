@@ -123,7 +123,7 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **The API key cannot go in an HTTP header.** `RestContext.SetHeader(string)` sets Content-Type only (`restapi.c:135-141`; `tools/README-mcp.md:7`). The key travels as `?key=` (`addon/scripts/5_Mission/MCPBridge.c:226`). The listener binds `127.0.0.1`; there is no `0.0.0.0` mode and no remote mode (`product-spec.md:168`).
 
-**`SetTimeMultiplier(0)` freezes the entire simulation**, animations included (`world.c:19`; `dayz-mcp-architecture.md:185-187`). Condition lighting and weather after seating and animations have finished, not before a pending get-in.
+**`SetTimeMultiplier(0)` freezes the entire simulation**, animations included (`world.c:14`; `dayz-mcp-architecture.md:185-187`). Condition lighting and weather after seating and animations have finished, not before a pending get-in.
 
 **`infected_drive` `speed` is not metres per second.** `speed=3` measured **0.91 m/s** (`tools/tests/test_task9_spawn_phase_markers.py:105`). The scale is uncalibrated.
 
@@ -140,7 +140,7 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 **Not tested:**
 
 - Navmesh follow: `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition`, `PGFilter.SetCost` (all in `aiworld.c`; the four protos are adjacent but none has been driven). `AIWorld` has a private constructor (`aiworld.c`, `private void AIWorld()`); `new PGFilter()` has not been instantiated in-game.
-- Survivor locomotion overrides: `HumanInputController.OverrideMovementSpeed` / `OverrideMovementAngle` / `OverrideAimChangeX` / `OverrideAimChangeY` (`human.c:234-243`) and the vanilla bot FSM under `4_world/systems/bot/`. Whether a synthetic survivor population is viable is open.
+- Survivor locomotion overrides: `HumanInputController.OverrideMovementSpeed` / `OverrideMovementAngle` / `OverrideAimChangeX` / `OverrideAimChangeY` (`human.c:253-262`) and the vanilla bot FSM under `4_world/systems/bot/`. Whether a synthetic survivor population is viable is open.
 - Calibrating `infected_drive` `speed` to m/s.
 
 ## What you need

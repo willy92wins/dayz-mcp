@@ -2166,7 +2166,10 @@ class VanillaPremiseTest(unittest.TestCase):
         player = self._vanilla(r"4_world\entities\manbase\playerbase.c")
         self.assertIn("bool IsPlayerDisconnected()\n\t{\n\t\treturn m_PlayerDisconnectProcessed;", player)
         disconnect = _block_after(player, player.index("void OnDisconnect()"))
-        self.assertTrue(disconnect.rstrip().endswith("SetPlayerDisconnected(true);"))
+        # At the top level of the body, so it runs on every disconnect (1.30 adds
+        # a sandstorm cleanup after it).
+        before = disconnect[: disconnect.index("SetPlayerDisconnected(true);")]
+        self.assertEqual(before.count("{"), before.count("}"))
         self.assertEqual(player.count("void OnReconnect()"), 1)
         mission = self._vanilla(r"5_mission\mission\missionserver.c")
         reconnect = _block_after(

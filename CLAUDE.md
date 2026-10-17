@@ -45,7 +45,7 @@ plan (Modo B) exige que cada fase trace a un criterio de ahí.
   `?key=…`. (Caveat fase 4: puede filtrarse a logs; con bind 127.0.0.1 la exposición es local.)
 - **Server-authoritative**: la posición/estado se leen en `MissionServer` (autoritativo), no
   en el cliente. `g_Game.GetPlayers(out array<Man>)` (game.c:947) + `Object.GetPosition()`
-  (object.c:293).
+  (object.c:287).
 
 ## Estructura del repo
 ```
