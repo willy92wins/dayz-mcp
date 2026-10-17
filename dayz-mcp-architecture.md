@@ -273,7 +273,7 @@ mirar la carpeta) para no diseñar la fase 3 sobre una API rota.
 - **Bloqueo del loop:** `*_now` en el tick congela 60 Hz por el RTT → usar callbacks async. (decidido)
 - **Headless no captura:** server-only no rinde → la fase visual exige cliente con renderer.
 - **Time-freeze deadlock:** `SetTimeMultiplier(0)` para animaciones pendientes → ordenar conditioning.
-- **DIAG_DEVELOPER asimétrico:** el *resultado* de `exec_enforce` (script-console) es `#ifdef DIAG_DEVELOPER` (scriptconsoleenfscripttab.c:208) aunque el send sea `#ifdef DEVELOPER` → el harness exige build `DIAG_DEVELOPER`.
+- **DIAG_DEVELOPER asimétrico:** el *resultado* de `exec_enforce` (script-console) es `#ifdef DIAG_DEVELOPER` (scriptconsoleenfscripttab.c:210) aunque el send sea `#ifdef DEVELOPER` → el harness exige build `DIAG_DEVELOPER`.
 - **Stale-frame** en screenshots (best-of-N por frame-diff: `choose_stable_frame` elige el frame de menor delta adyacente; no hay umbral de rechazo).
 - **Version drift** de opcodes RPC (pinear + validar en handshake).
 - **BattlEye / filePatching** en loops de hot-reload (0x00020005) — ya cubierto por tu infra diag.

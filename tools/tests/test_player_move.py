@@ -2114,6 +2114,30 @@ class PlayerMoveErrorDetailTest(unittest.TestCase):
         self.assertEqual(str(server._bridge_error({"ok": 0, "error": "not_held"}, COMMAND)), "not_held")
 
 
+# PlayerBase.OnDisconnect up to the flag player_move reads, without comments and
+# with whitespace collapsed. 1.29 and 1.30 have this same code, which reaches the
+# flag on every disconnect (release review, 2026-10-17); 1.30 runs a sandstorm
+# cleanup after it. New code before the flag could return or branch around it,
+# so the premise fails until that code is read again.
+_ON_DISCONNECT_UNTIL_THE_FLAG = (
+    'Debug.Log("Player disconnected:"+this.ToString(),"Connect"); '
+    "g_Game.GetAnalyticsServer().OnPlayerDisconnect(this); "
+    "StatsEventDisconnectedData data = new StatsEventDisconnectedData(); "
+    "data.m_CharacterId = g_Game.GetDatabaseID(); "
+    'data.m_Reason = "Disconnected"; '
+    "Analytics.PlayerDisconnected(data); "
+    "if (m_AnalyticsTimer) m_AnalyticsTimer.Stop(); "
+    "UpdatePlayerMeasures(); "
+    "SetPlayerDisconnected(true);"
+)
+
+
+def _sets_the_flag_on_every_disconnect(player: str) -> bool:
+    clean = _without_comments(player)
+    body = _flat(_block_after(clean, clean.index("void OnDisconnect()")))
+    return body.startswith(_ON_DISCONNECT_UNTIL_THE_FLAG)
+
+
 class VanillaPremiseTest(unittest.TestCase):
     """The premises, read from the vanilla scripts: they hold with or without this verb."""
 
@@ -2165,11 +2189,7 @@ class VanillaPremiseTest(unittest.TestCase):
         self.assertIn("proto native PlayerIdentity GetIdentity();", man)
         player = self._vanilla(r"4_world\entities\manbase\playerbase.c")
         self.assertIn("bool IsPlayerDisconnected()\n\t{\n\t\treturn m_PlayerDisconnectProcessed;", player)
-        disconnect = _block_after(player, player.index("void OnDisconnect()"))
-        # At the top level of the body, so it runs on every disconnect (1.30 adds
-        # a sandstorm cleanup after it).
-        before = disconnect[: disconnect.index("SetPlayerDisconnected(true);")]
-        self.assertEqual(before.count("{"), before.count("}"))
+        self.assertTrue(_sets_the_flag_on_every_disconnect(player))
         self.assertEqual(player.count("void OnReconnect()"), 1)
         mission = self._vanilla(r"5_mission\mission\missionserver.c")
         reconnect = _block_after(
@@ -2191,6 +2211,31 @@ class VanillaPremiseTest(unittest.TestCase):
             "|| (GetParent() != null && GetParent().IsInherited(Transport));",
             implement,
         )
+
+
+class DisconnectPremiseCheckTest(unittest.TestCase):
+    """Release review Q1: the OnDisconnect check fails where the flag can be skipped."""
+
+    @staticmethod
+    def _player(body: str) -> str:
+        return "class PlayerBase\n{\n\tvoid OnDisconnect()\n\t{\n" + body + "\n\t}\n}\n"
+
+    def test_only_the_reviewed_code_reaches_the_flag(self) -> None:
+        reviewed = _ON_DISCONNECT_UNTIL_THE_FLAG
+        call = "SetPlayerDisconnected(true);"
+        head = reviewed[: -len(call)]
+        self.assertTrue(_sets_the_flag_on_every_disconnect(self._player(reviewed + " Cleanup();")))
+        for body in (
+            head + "if (gate) " + call,
+            head + "if (gate) Cleanup(); else " + call,
+            "if (gate) return; " + reviewed,
+            head + "if (gate) { // }\n" + call + " }",
+            head + 'if (gate) { Print("}"); ' + call + " }",
+            head + "// " + call + "\nif (gate) " + call,
+            head + "if (gate) " + call + " if (other) " + call,
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(_sets_the_flag_on_every_disconnect(self._player(body)))
 
 
 if __name__ == "__main__":
