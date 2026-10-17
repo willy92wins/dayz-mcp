@@ -152,7 +152,8 @@ if ($Manifest.pbo_sha256 -ne $Expected["DayZ_MCP.pbo"]) {
 
 The release's CHANGELOG section names the DayZ build it supports. Verify that
 before the tag: swap the PBO from step 2 in where test runs load it, then play one
-run on that build. A run that fails stops the release here.
+run on that build. A run that fails stops the release here. Every session's runs
+load that PBO, so hold the lease (`session_acquire_wait`) for the swap.
 
 [EXACT]
 
@@ -168,10 +169,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\dev\swap_pbo.ps1 `
 if ($LASTEXITCODE -ne 0) { throw "swap_pbo.ps1 did not swap the PBO" }
 ```
 
-The previous PBO stays beside the live one as `DayZ_MCP.pbo.swapped_out_*`. Then,
-from an MCP session that holds the lease, run `dayz_test_run(mode="all")` on that
-DayZ build, call `bridge_status`, and close the run with `dayz_test_close`. Save
-this evidence before the tag:
+The previous PBO stays beside the live one as `DayZ_MCP.pbo.swapped_out_*`. Then
+release the lease: `dayz_test_run` takes its own and refuses to start while your
+session holds one. Run `dayz_test_run(project="DayZ_MCP", mode="all")` on that
+DayZ build and adopt the run with `session_acquire_wait`, since `dayz_test_close`
+needs the lease. Call `bridge_status`, close the run with `dayz_test_close`, and
+release the lease. Save this evidence before the tag:
 
 - From `bridge_status`, both peers: `version` `<bridge_version>~<game version>`
   with the game version the CHANGELOG names, `version_state` `ok`, capabilities
@@ -182,8 +185,12 @@ this evidence before the tag:
 - From `dayz_test_close`: `graceful`, `logout_players` not empty with every logout
   finished, and no `warnings`. `player_state_not_saved` means the logout wait timed
   out.
-- The server and client RPT logs. The server's shows the player's connection,
-  `[Logout]: Player … finished` and `--- Termination successfully completed ---`.
+- The server and client RPT logs, and the server's script log. The server's RPT
+  shows the player's connection, the `[Disconnect]` lines and
+  `--- Termination successfully completed ---`; `[Logout]: Player … finished` is
+  in its script log. Both RPTs also log
+  `ANIMATION (E): Can't load …/Anims/cfg/skeletons.anim.xml`: the mod ships no
+  animations, and that line does not stop a run.
 
 ## 6. Tag and create the GitHub Release
 
