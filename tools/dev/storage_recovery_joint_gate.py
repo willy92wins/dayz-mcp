@@ -425,8 +425,8 @@ async def _run_async(
     planted = mission / PLANTED_NAME
     if planted.exists():
         raise SystemExit(
-            "planted journal already exists; refusing to overwrite. A run that died, "
-            "or whose cleanup failed, leaves it: remove it by hand and run again"
+            f"planted journal already exists, refusing to overwrite: {planted}. A run "
+            "that died, or whose cleanup failed, leaves it: remove it by hand and run again"
         )
     server = StdioServerParameters(command=parts[0], args=parts[1:])
     async with stdio_client(server) as (read, write):
@@ -460,8 +460,9 @@ async def _run_async(
                 after = _inventory(mission)
                 _assert_storage(before, after)
             finally:
-                if planted.is_file():
-                    planted.unlink()
+                # Not behind is_file(): an observation that fails answers False and
+                # would leave the journal (Codex review of #241, W1).
+                planted.unlink(missing_ok=True)
             status = await _call(session, "session_status", {})
             print(json.dumps({"mission": target, "dayz_test_run": called, "session_status": status}, indent=2))
     print("joint gate assertions passed")
