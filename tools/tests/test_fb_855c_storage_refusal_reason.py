@@ -218,35 +218,67 @@ class JointGateAssertionTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gate._assert_storage(before, after)
 
-    def test_supplied_mission_must_be_the_policy_alias(self) -> None:
+    def test_mission_is_inside_its_project_roots_and_no_alias_names_it(self) -> None:
+        # d9c8: the build writes the mission roots into request-policy.json and the
+        # aliases into worker-runtime.json only. The gate looked for aliases in
+        # request-policy.json, so it always stopped, and an alias mission is shared
+        # by every launch through that alias. These are the bytes the staging writes.
+        import build_native_launcher
+        from tests.test_build_native_launcher_policy import make_fixture_source
+
         gate = self._gate()
+        self.assertEqual(gate._bundle_dir(), build_native_launcher.CANONICAL_BUNDLE)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        mission = root / "exclusive"
-        other = root / "chernarus"
-        mission.mkdir()
-        other.mkdir()
-        policy = root / "request-policy.json"
-        policy.write_text(
-            json.dumps(
-                {
-                    "projects": [
-                        {
-                            "mod": "DayZ_MCP",
-                            "mission_aliases": {
-                                "chernarus": str(other),
-                                "exclusive": str(mission),
-                            },
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        self.assertEqual(gate.resolve_policy_mission(mission, policy), "exclusive")
-        with self.assertRaises(SystemExit):
-            gate.resolve_policy_mission(root / "missing", policy)
+        source = make_fixture_source(root, mods=("OtherMod", gate.PROJECT))
+        other = source["projects"][0]
+        missions = Path(other["mission_roots"][0]["path"])
+        foreign = root / "other-missions"
+        heli = missions / "dayzOffline.heli"
+        made = missions / "storage-joint-gate"
+        for path in (foreign / "storage-joint-gate", heli, made):
+            path.mkdir(parents=True)
+        other["mission_roots"].append({"path": str(foreign), "allow_root_junction": False})
+        other["mission_aliases"]["heli"] = str(heli)
+        policy_bytes, runtime_bytes = build_native_launcher._emit_policy_documents(source)
+        bundle = root / "bundle"
+        bundle.mkdir()
+        (bundle / "request-policy.json").write_bytes(policy_bytes)
+        with self.assertRaisesRegex(SystemExit, "worker-runtime.json"):
+            gate.admitted_mission(made, bundle)
+        (bundle / "worker-runtime.json").write_bytes(runtime_bytes)
+
+        self.assertEqual(gate.admitted_mission(made, bundle), str(made))
+        for refused in (
+            missions / "dayzOffline.chernarusplus",  # the chernarus alias of both projects
+            heli,  # an alias of the other project only
+            foreign / "storage-joint-gate",  # inside a mission root of the other project only
+            root / "source",  # inside no mission root
+        ):
+            with self.subTest(mission=refused), self.assertRaises(SystemExit):
+                gate.admitted_mission(refused, bundle)
+
+    def test_main_passes_the_bundle_and_refuses_a_missing_mission(self) -> None:
+        gate = self._gate()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        mission = Path(temporary.name)
+        bundles: list[Path] = []
+
+        async def run(_mission, _command, bundle, _audit) -> int:
+            bundles.append(bundle)
+            return 0
+
+        argv = ["--run", "--mission", str(mission), "--mcp-command", "server"]
+        with patch.object(gate, "_run_async", run), patch.dict(
+            "os.environ", {"DAYZ_MCP_STORAGE_RECOVERY_JOINT": "1"}
+        ):
+            self.assertEqual(gate.main(argv), 0)
+            self.assertEqual(gate.main(argv + ["--bundle", str(mission)]), 0)
+            with self.assertRaises(SystemExit):
+                gate.main(["--run", "--mission", str(mission / "missing"), "--mcp-command", "server"])
+        self.assertEqual(bundles, [gate._bundle_dir(), mission])
 
     def _one_operation(self, *, session: str = "S", run_id: str = "R") -> list[dict[str, object]]:
         return [

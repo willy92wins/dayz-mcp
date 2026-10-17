@@ -11,9 +11,8 @@ Procedure (exclusive instance, lease, policy-admitted test mission):
 2. Plant ``STORAGE_1.modset.rotation.0123456789abcdef0123456789abcdef.json``
    (the canonical journal spelling is different; this name is the invalid one
    the recovery vocabulary calls ``journal_name_invalid``).
-3. Resolve the policy alias of project ``DayZ_MCP`` whose directory is the
-   supplied mission, and call the public tool
-   ``dayz_test_run(project="DayZ_MCP", mode="all", mission=<that alias>)``
+3. Call the public tool
+   ``dayz_test_run(project="DayZ_MCP", mode="all", mission=<its absolute path>)``
    through the MCP SDK stdio client. Do not substitute ``Broker.invoke``,
    ``_lifecycle_main``, the HTTP transport, ``start_run``, ``_worker_main``,
    the terminal parser, or the result builder.
@@ -48,6 +47,13 @@ Usage after reseal::
         --mission C:\\path\\to\\exclusive\\mission ^
         --mcp-command "<already-running-client-command>"
 
+``--mission`` is a directory made for this gate inside a mission root of
+``DayZ_MCP`` (request-policy.json of the bundle). The gate refuses a directory
+that a mission alias names (worker-runtime.json): while the planted journal
+exists, every launch through that alias is refused too (d9c8). The bundle is
+``tools/native-launchers/dayz-test-v1`` of this tree; ``--bundle`` names the
+bundle of another tree.
+
 ``--mcp-command`` is a stdio MCP server command line. This script uses the MCP
 SDK client (newline-delimited JSON, ``initialize``, bounded ``tools/call``).
 It does not spawn DayZ itself.
@@ -73,14 +79,13 @@ _INIT_TIMEOUT_S = 30.0
 _CALL_TIMEOUT_S = 120.0
 
 
-def _policy_path() -> Path:
-    """The sealed request policy the public server admits projects from."""
-    return (
-        Path(__file__).resolve().parents[1]
-        / "native-launchers"
-        / "dayz-test-v1"
-        / "request-policy.json"
-    )
+def _bundle_dir() -> Path:
+    """The sealed bundle the build renews in this tree.
+
+    Its request-policy.json holds the mission roots the public server admits,
+    and its worker-runtime.json the mission aliases the worker resolves.
+    """
+    return Path(__file__).resolve().parents[1] / "native-launchers" / "dayz-test-v1"
 
 
 def _same_dir(mission: Path, raw: str) -> bool:
@@ -95,40 +100,60 @@ def _same_dir(mission: Path, raw: str) -> bool:
     )
 
 
-def resolve_policy_mission(
-    mission: Path, policy_path: Path, project: str = PROJECT
-) -> str:
-    """Return the single alias of ``project`` whose path is ``mission``."""
+def _bundle_projects(path: Path) -> list[object]:
     try:
-        data = json.loads(policy_path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"launcher policy is not readable: {exc}") from exc
+        raise SystemExit(f"{path} is not readable: {exc}") from exc
     projects = data.get("projects") if isinstance(data, dict) else None
     if not isinstance(projects, list):
-        raise SystemExit("launcher policy has no projects")
-    selected = next(
-        (
-            item
-            for item in projects
-            if isinstance(item, dict) and item.get("mod") == project
-        ),
-        None,
-    )
-    if not isinstance(selected, dict):
-        raise SystemExit(f"project {project} is not in the launcher policy")
-    aliases = selected.get("mission_aliases")
-    if not isinstance(aliases, dict) or not aliases:
-        raise SystemExit(f"project {project} has no mission_aliases")
-    matches = [
-        token
-        for token, raw in aliases.items()
-        if isinstance(token, str) and token and isinstance(raw, str) and _same_dir(mission, raw)
+        raise SystemExit(f"{path} has no projects")
+    return projects
+
+
+def admitted_mission(mission: Path, bundle: Path, project: str = PROJECT) -> str:
+    """The absolute path of ``mission`` that dayz_test_run is called with (d9c8).
+
+    dayz_test_run admits a path inside a mission root of ``project``. A
+    directory that a mission alias of any project names is refused: other
+    launches use it, and the planted journal would refuse every launch through
+    that alias.
+    """
+    tools = Path(__file__).resolve().parents[1]
+    if str(tools) not in sys.path:
+        sys.path.insert(0, str(tools))
+    # The rule dayz_test_run admits a mission path by.
+    from dayz_mcp.dayz_test_request import _path_is_within
+
+    target = os.path.abspath(mission)
+    policy = bundle / "request-policy.json"
+    selected = [
+        item
+        for item in _bundle_projects(policy)
+        if isinstance(item, dict) and item.get("mod") == project
     ]
-    if len(matches) != 1:
-        raise SystemExit(
-            f"supplied mission is not exactly one policy alias of {project}: {matches}"
-        )
-    return matches[0]
+    if len(selected) != 1:
+        raise SystemExit(f"project {project} is not exactly once in {policy}")
+    roots = selected[0].get("mission_roots")
+    paths = tuple(
+        root["path"]
+        for root in (roots if isinstance(roots, list) else [])
+        if isinstance(root, dict) and isinstance(root.get("path"), str)
+    )
+    if not _path_is_within(target, paths):
+        raise SystemExit(f"{target} is not inside a mission root of {project} in {policy}")
+    runtime = bundle / "worker-runtime.json"
+    for item in _bundle_projects(runtime):
+        aliases = item.get("mission_aliases") if isinstance(item, dict) else None
+        if not isinstance(aliases, dict):
+            raise SystemExit(f"{runtime} has a project without mission_aliases")
+        for token, raw in aliases.items():
+            if isinstance(raw, str) and _same_dir(Path(target), raw):
+                raise SystemExit(
+                    f"{target} is the {token} mission of {item.get('mod')} in {runtime}: "
+                    "use a directory made for this gate"
+                )
+    return target
 
 
 def _inventory(mission: Path) -> dict[str, tuple[str, int | None]]:
@@ -377,13 +402,14 @@ async def _call(session: object, name: str, arguments: dict[str, object]) -> dic
 async def _run_async(
     mission: Path,
     mcp_command: str,
-    policy_path: Path,
+    bundle: Path,
     audit_path: Path | None = None,
 ) -> int:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    alias = resolve_policy_mission(mission, policy_path, PROJECT)
+    target = admitted_mission(mission, bundle, PROJECT)
+    mission = Path(target)
     parts = shlex.split(mcp_command, posix=(os.name != "nt"))
     if not parts:
         raise SystemExit("mcp command is empty")
@@ -418,7 +444,7 @@ async def _run_async(
                 called = await _call(
                     session,
                     "dayz_test_run",
-                    {"project": PROJECT, "mode": "all", "mission": alias},
+                    {"project": PROJECT, "mode": "all", "mission": target},
                 )
                 _assert_public(called, remediation)
                 audit_after = _audit_lines(audit_file)
@@ -433,7 +459,7 @@ async def _run_async(
                 if planted.is_file():
                     planted.unlink()
             status = await _call(session, "session_status", {})
-            print(json.dumps({"mission": alias, "dayz_test_run": called, "session_status": status}, indent=2))
+            print(json.dumps({"mission": target, "dayz_test_run": called, "session_status": status}, indent=2))
     print("joint gate assertions passed")
     return 0
 
@@ -441,12 +467,12 @@ async def _run_async(
 def run_gate(
     mission: Path,
     mcp_command: str,
-    policy_path: Path | None = None,
+    bundle: Path | None = None,
     audit_path: Path | None = None,
 ) -> int:
     if not mission.is_dir():
         raise SystemExit(f"mission is not a directory: {mission}")
-    path = policy_path if policy_path is not None else _policy_path()
+    path = bundle if bundle is not None else _bundle_dir()
     return asyncio.run(_run_async(mission, mcp_command, path, audit_path))
 
 
@@ -455,7 +481,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--mission", type=Path)
     parser.add_argument("--mcp-command")
-    parser.add_argument("--policy", type=Path)
+    parser.add_argument("--bundle", type=Path)
     args = parser.parse_args(argv)
     if not args.run:
         print(__doc__)
@@ -470,7 +496,7 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
-    return run_gate(args.mission, args.mcp_command, args.policy)
+    return run_gate(args.mission, args.mcp_command, args.bundle)
 
 
 if __name__ == "__main__":
