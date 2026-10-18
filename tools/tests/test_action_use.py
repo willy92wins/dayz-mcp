@@ -27,6 +27,51 @@ def _method_body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated method: {signature}")
 
 
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _mutate(source: str, old: str, new: str) -> str:
+    if source.count(old) != 1:
+        raise AssertionError(f"mutant anchor must be unique: {old!r}")
+    return source.replace(old, new, 1)
+
+
+# The 1.30 guard, whitespace-squashed and without its comment. Its words and
+# their order let three mutants live (#249 K1): the guard only in the
+# action_use_door branch, the negative with ok true, and `return true` outside
+# the `if`, which also stops every permitted start.
+CAN_BE_STARTED_GUARD = """
+if (!action.CanBeStarted())
+{
+    result.ok = false;
+    result.error = "condition_failed";
+    return true;
+}
+"""
+
+
+def verify_can_be_started_guard(body: str) -> None:
+    if body.count("action.CanBeStarted()") != 1:
+        raise AssertionError("one CanBeStarted() check")
+    guarded = body.split("#ifndef DAYZ_1_29\n")
+    if len(guarded) != 2:
+        raise AssertionError("one 1.29 guard: 1.29 has no CanBeStarted()")
+    before, block = guarded[0], guarded[1].split("#endif\n")[0]
+    code = "\n".join(
+        line for line in block.splitlines() if not line.strip().startswith("//")
+    )
+    if _squash(code) != _squash(CAN_BE_STARTED_GUARD):
+        raise AssertionError(f"not the negative of Can(): {block!r}")
+    # At method level: the five commands share DispatchActionUse.
+    if before.count("{") != before.count("}"):
+        raise AssertionError("the guard is inside a branch")
+    if "if (!action.Can(player, actionTarget, heldItem))" not in before:
+        raise AssertionError("CanBeStarted() is asked before Can()")
+    if "amc.PerformActionStart(" in before + block:
+        raise AssertionError("an action starts before CanBeStarted() is asked")
+
+
 class ActionUseIngressTest(unittest.TestCase):
     def setUp(self) -> None:
         self.state = loopback.ServerState("test-key")
@@ -61,24 +106,43 @@ class ActionUseHeldItemContractTest(unittest.TestCase):
 
 
 class ActionUseCanBeStartedTest(unittest.TestCase):
-    def test_can_be_started_is_asked_after_can_and_before_any_start(self) -> None:
-        # Known issue of 1.4: 1.30 starts an input's action only when CanBeStarted()
-        # is true (actionmanagerclient.c:336), and PerformActionStart does not ask,
-        # so action_use and action_hold started what that path would not.
+    # Known issue of 1.4: 1.30 starts an input's action only when CanBeStarted()
+    # is true (actionmanagerclient.c:336), and PerformActionStart does not ask,
+    # so action_use and action_hold started what that path would not.
+    def setUp(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        body = _method_body(source, "protected bool DispatchActionUse(")
-        check = "if (!action.CanBeStarted())"
-        self.assertIn(check, body)
-        self.assertEqual(body.count("action.CanBeStarted()"), 1)
-        guarded = body.split("#ifndef DAYZ_1_29\n")
-        self.assertEqual(len(guarded), 2, "one 1.29 guard: 1.29 has no CanBeStarted()")
-        before, block = guarded[0], guarded[1].split("#endif\n")[0]
-        self.assertIn(check, block)
-        self.assertIn('result.error = "condition_failed";', block)
-        self.assertIn("return true;", block)
-        self.assertNotIn("#", block)
-        self.assertIn("if (!action.Can(player, actionTarget, heldItem))", before)
-        self.assertNotIn("amc.PerformActionStart(", before + block)
+        self.body = _method_body(source, "protected bool DispatchActionUse(")
+
+    def test_can_be_started_is_asked_after_can_and_before_any_start(self) -> None:
+        verify_can_be_started_guard(self.body)
+
+    def test_can_be_started_mutants_are_red(self) -> None:
+        body = self.body
+        mutants = {
+            "door_only": _mutate(
+                _mutate(
+                    body,
+                    "#ifndef DAYZ_1_29\n",
+                    '\t\tif (command.cmd == "action_use_door")\n\t\t{\n#ifndef DAYZ_1_29\n',
+                ),
+                "#endif\n",
+                "#endif\n\t\t}\n",
+            ),
+            "ok_true": _mutate(
+                body,
+                "if (!action.CanBeStarted())\n\t\t{\n\t\t\tresult.ok = false;\n",
+                "if (!action.CanBeStarted())\n\t\t{\n\t\t\tresult.ok = true;\n",
+            ),
+            "return_outside_if": _mutate(
+                body,
+                "\t\t\treturn true;\n\t\t}\n#endif\n",
+                "\t\t}\n\t\treturn true;\n#endif\n",
+            ),
+        }
+        for label, mutant in mutants.items():
+            with self.subTest(mutant=label):
+                with self.assertRaises(AssertionError):
+                    verify_can_be_started_guard(mutant)
 
 
 class ActionUseAppToolTest(unittest.IsolatedAsyncioTestCase):
