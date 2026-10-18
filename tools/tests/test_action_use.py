@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import method_body
 from dayz_mcp import loopback, server
 from dayz_mcp.session_coordination import command_requires_lease
 
@@ -11,36 +13,11 @@ from dayz_mcp.session_coordination import command_requires_lease
 COMMAND = "action_use"
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+DISPATCH = "protected bool DispatchActionUse(MCPCommand command, MCPResult result)"
 
-
-def _method_body(source: str, signature: str) -> str:
-    start = source.index(signature)
-    brace = source.index("{", start)
-    depth = 0
-    for index in range(brace, len(source)):
-        if source[index] == "{":
-            depth += 1
-        elif source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return source[brace + 1 : index]
-    raise AssertionError(f"unterminated method: {signature}")
-
-
-def _squash(text: str) -> str:
-    return " ".join(text.split())
-
-
-def _mutate(source: str, old: str, new: str) -> str:
-    if source.count(old) != 1:
-        raise AssertionError(f"mutant anchor must be unique: {old!r}")
-    return source.replace(old, new, 1)
-
-
-# The 1.30 guard, whitespace-squashed and without its comment. Its words and
-# their order let three mutants live (#249 K1): the guard only in the
-# action_use_door branch, the negative with ok true, and `return true` outside
-# the `if`, which also stops every permitted start.
+# The 1.30 guard, compared without whitespace once method_body() has blanked
+# the comments. Its words and their order let three mutants live (#249 K1) and
+# a brace count three more (K2); test_can_be_started_mutants_are_red has them.
 CAN_BE_STARTED_GUARD = """
 if (!action.CanBeStarted())
 {
@@ -49,27 +26,59 @@ if (!action.CanBeStarted())
     return true;
 }
 """
+_GUARD = re.compile(
+    r"^[ \t]*#ifndef[ \t]+DAYZ_1_29[ \t]*\n(?P<block>.*?)^[ \t]*#endif\b", re.M | re.S
+)
+_STRING_OR_BRACE = re.compile(r'"(?:\\.|[^"\\])*"|[{}]')
 
 
-def verify_can_be_started_guard(body: str) -> None:
-    if body.count("action.CanBeStarted()") != 1:
-        raise AssertionError("one CanBeStarted() check")
-    guarded = body.split("#ifndef DAYZ_1_29\n")
-    if len(guarded) != 2:
+def _bare(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def _one_guard(text: str) -> re.Match[str]:
+    guards = list(_GUARD.finditer(text))
+    if len(guards) != 1:
         raise AssertionError("one 1.29 guard: 1.29 has no CanBeStarted()")
-    before, block = guarded[0], guarded[1].split("#endif\n")[0]
-    code = "\n".join(
-        line for line in block.splitlines() if not line.strip().startswith("//")
-    )
-    if _squash(code) != _squash(CAN_BE_STARTED_GUARD):
+    return guards[0]
+
+
+def verify_can_be_started_guard(source: str) -> None:
+    body = method_body(source, DISPATCH)
+    if len(re.findall(r"\bCanBeStarted\b", body)) != 1:
+        raise AssertionError("one CanBeStarted() check")
+    guard = _one_guard(body)
+    before, block = body[: guard.start()], guard.group("block")
+    if _bare(block) != _bare(CAN_BE_STARTED_GUARD):
         raise AssertionError(f"not the negative of Can(): {block!r}")
-    # At method level: the five commands share DispatchActionUse.
-    if before.count("{") != before.count("}"):
+    # A statement of the method itself, so the five commands all ask it: no
+    # brace or #if open before it, and not the body of an if, else or loop
+    # without braces. Comments are blank and string literals do not count.
+    depth = sum({"{": 1, "}": -1}.get(token, 0) for token in _STRING_OR_BRACE.findall(before))
+    if depth != 0:
         raise AssertionError("the guard is inside a branch")
-    if "if (!action.Can(player, actionTarget, heldItem))" not in before:
+    if len(re.findall(r"^[ \t]*#if", before, re.M)) != len(re.findall(r"^[ \t]*#endif\b", before, re.M)):
+        raise AssertionError("the guard is inside another #if")
+    code = re.sub(r"^[ \t]*#.*$", "", before, flags=re.M).rstrip()
+    if code and code[-1] not in ";}":
+        raise AssertionError("the guard is the body of a statement without braces")
+    if _bare("if (!action.Can(player, actionTarget, heldItem))") not in _bare(before):
         raise AssertionError("CanBeStarted() is asked before Can()")
-    if "amc.PerformActionStart(" in before + block:
+    if re.search(r"\b(?:Perform)?ActionStart\b", before + block):
         raise AssertionError("an action starts before CanBeStarted() is asked")
+
+
+def _around_guard(source: str, before: str, after: str) -> str:
+    guard = _one_guard(source)
+    return source[: guard.start()] + before + guard.group() + after + source[guard.end() :]
+
+
+def _in_guard(source: str, pattern: str, replacement: str) -> str:
+    guard = _one_guard(source)
+    block, count = re.subn(pattern, replacement, guard.group("block"))
+    if count != 1:
+        raise AssertionError(f"pattern must match once in the guard: {pattern!r}")
+    return source[: guard.start("block")] + block + source[guard.end("block") :]
 
 
 class ActionUseIngressTest(unittest.TestCase):
@@ -91,7 +100,7 @@ class ActionUseIngressTest(unittest.TestCase):
 class ActionUseHeldItemContractTest(unittest.TestCase):
     def test_dispatch_passes_real_item_in_hands(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        body = _method_body(source, "protected bool DispatchActionUse(")
+        body = method_body(source, DISPATCH)
         self.assertIn("GetItemInHands()", body)
         self.assertIn("ItemBase heldItem", body)
         self.assertIn("heldItem = player.GetItemInHands()", body)
@@ -110,39 +119,47 @@ class ActionUseCanBeStartedTest(unittest.TestCase):
     # is true (actionmanagerclient.c:336), and PerformActionStart does not ask,
     # so action_use and action_hold started what that path would not.
     def setUp(self) -> None:
-        source = BRIDGE_PATH.read_text(encoding="utf-8")
-        self.body = _method_body(source, "protected bool DispatchActionUse(")
+        self.source = BRIDGE_PATH.read_text(encoding="utf-8")
 
     def test_can_be_started_is_asked_after_can_and_before_any_start(self) -> None:
-        verify_can_be_started_guard(self.body)
+        verify_can_be_started_guard(self.source)
 
     def test_can_be_started_mutants_are_red(self) -> None:
-        body = self.body
+        source = self.source
+        door = 'if (command.cmd == "action_use_door")\n'
         mutants = {
-            "door_only": _mutate(
-                _mutate(
-                    body,
-                    "#ifndef DAYZ_1_29\n",
-                    '\t\tif (command.cmd == "action_use_door")\n\t\t{\n#ifndef DAYZ_1_29\n',
-                ),
-                "#endif\n",
-                "#endif\n\t\t}\n",
-            ),
-            "ok_true": _mutate(
-                body,
-                "if (!action.CanBeStarted())\n\t\t{\n\t\t\tresult.ok = false;\n",
-                "if (!action.CanBeStarted())\n\t\t{\n\t\t\tresult.ok = true;\n",
-            ),
-            "return_outside_if": _mutate(
-                body,
-                "\t\t\treturn true;\n\t\t}\n#endif\n",
-                "\t\t}\n\t\treturn true;\n#endif\n",
-            ),
+            # The guard for action_use_door alone leaves the other four
+            # commands starting what 1.30 would not.
+            "door_only": _around_guard(source, door + "{\n", "\n}"),
+            "door_only_unbraced": _around_guard(source, door, ""),
+            "door_only_comment_brace": _around_guard(source, door + "{ // }\n", "\n} // {"),
+            "door_only_string_brace": _around_guard(source, door + '{ string unused = "}";\n', "\n}"),
+            "inside_another_if": _around_guard(source, "#ifdef DAYZ_MCP_NEVER\n", "\n#endif"),
+            "ok_true": _in_guard(source, r"result\s*\.\s*ok\s*=\s*false\s*;", "result.ok = true;"),
+            # Also stops every allowed start.
+            "return_outside_if": _in_guard(source, r"return\s+true\s*;(\s*)\}", r"}\1return true;"),
         }
         for label, mutant in mutants.items():
             with self.subTest(mutant=label):
                 with self.assertRaises(AssertionError):
                     verify_can_be_started_guard(mutant)
+
+    def test_harmless_edits_keep_the_guard_green(self) -> None:
+        # #249 K3: layout, comments and braces in a comment or a string are not
+        # the guard's business.
+        source = self.source
+        variants = {
+            "spaces_for_tabs": source.replace("\t", "    "),
+            "comment_in_the_if": _in_guard(source, r"(result\s*\.\s*ok\s*=)", r"// why\n\1"),
+            "trailing_comment": _in_guard(source, r"(return\s+true\s*;)", r"\1 // done"),
+            "braces_in_a_comment_and_a_string": _around_guard(
+                source, '// } {\nstring unused = "}";\n', ""
+            ),
+        }
+        for label, variant in variants.items():
+            with self.subTest(variant=label):
+                self.assertNotEqual(variant, source)
+                verify_can_be_started_guard(variant)
 
 
 class ActionUseAppToolTest(unittest.IsolatedAsyncioTestCase):
