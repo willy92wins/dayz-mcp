@@ -16,7 +16,7 @@
   - LIVE: PE `3E7FF1A7…`, `approved-launchers.json` `913AAABE…`. T130: PE `D432700C…`, `approved-launchers.json` `682113CD…`. `app.pyz` `E258B0BF…` en los dos.
   - En los dos, `check_native_launcher_registry.py` da ok con la procedencia anclada (23 transiciones en LIVE, 8 en T130), y `write_packaged_modules_lock.py --check` también.
   - Cada actualización de Steam de DayZ o de DayZ Tools cambia hashes que el launcher fija y obliga a resellar (11b4).
-- **PBO vivo:** `7078C2E4…` (542 178 B, el de la v1.4) en `P:\Mods\@DayZ_MCP\Addons\`. `P:\Mods`, el `mods_root` de las dos policies, es un junction a `!Workshop`, así que default y 130 cargan el mismo PBO. El anterior sigue al lado como `DayZ_MCP.pbo.swapped_out_20261017T150136Z_D35364034BAE6392`. `pbo_provenance.py` contra `b8c8d10` da OK en sus 24 ficheros y el marcador (01:37 del 18/10).
+- **PBO vivo:** `7078C2E4…` (542 178 B, el de la v1.4) en `P:\Mods\@DayZ_MCP\Addons\`. `P:\Mods`, el `mods_root` de las dos policies, es un junction a `!Workshop`, así que default y 130 cargan el mismo PBO. El anterior sigue al lado como `DayZ_MCP.pbo.swapped_out_20261017T150136Z_D35364034BAE6392`. `pbo_provenance.py` contra `b8c8d10` da OK en sus 24 ficheros y el marcador (01:38 del 18/10).
 - **Instancias:**
   - default: `C:\Program Files (x86)\Steam\steamapps\common\DayZ`, DayZDiag 1.30.164.078 (estable desde el 15/10), `:8765`, `dayz-mcp`.
   - `130`: `E:\SteamLibrary\steamapps\common\DayZ Exp`, DayZDiag 1.30.164.200, `:8775`, `dayz-mcp-130`.
@@ -40,7 +40,7 @@
   - Ningún verbo lee la cantidad de un ítem sin cambiarla (`fb98`).
   - El Pack sigue declarando la 1.29 como build de anclaje (`sources/source-map.json`: 1.29.0.163451), como se decidió en el Pack #117; su control vanilla ya pasa en la 1.30.164078.
 - **Siguiente:**
-  1. `CanBeStarted()` en `action_use` y `action_hold`: el arreglo está hecho y va en el siguiente PR. Cambia el PBO, así que lo revisa y lo mergea el dueño, y la prueba en el juego espera a su OK.
+  1. `CanBeStarted()` en `action_use` y `action_hold`: el arreglo está pendiente de PR. Cambia el PBO, así que lo revisa y lo mergea el dueño, y la prueba en el juego espera a su OK.
   2. Pack: medir en un mod de prueba la regla del bloque vacío (dada); siguen abiertas O1 (e6d6) y 6b76.
   3. Los extras de #244 llegan a LIVE y T130 solo con un resellado, que decide el dueño.
   4. Las fichas de diseño (8b1c, el foco; fb98; 9ab8) se hablan con el dueño antes de tocarlas.
@@ -53,10 +53,10 @@
 
 | Árbol | Qué es | Estado 2026-10-18, 01:37 (Madrid) |
 |---|---|---|
-| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO**: copia suelta de septiembre (sus ficheros más nuevos son del 15/09). De los 24 ficheros de `addon/` en `main`, 5 son iguales, 8 difieren y 11 faltan; tiene 13 que git no tiene (11 `.bak*`, `CLAUDE.md` y `gui/layouts/hot/mcp_hot.layout`). No empaquetar desde aquí (ficha `fb-20260925-233932-aa11`). |
+| `P:\DayZ_MCP` | Addon compilable (`$PBOPREFIX$=DayZ_MCP`). **Sin `.git`.** | **DESFASADO**: copia suelta de septiembre (sus ficheros más nuevos son del 15/09). De los 24 ficheros de `addon/` en `main`, 5 son iguales, 8 difieren y 11 faltan; tiene 13 que git no tiene (11 backups, nueve `.bak*` y dos `_bak*`, más `CLAUDE.md` y `gui/layouts/hot/mcp_hot.layout`). No empaquetar desde aquí (ficha `fb-20260925-233932-aa11`). |
 | `P:\DayZ_MCP_dev` (=`...\DayZ Projects\DayZ_MCP_dev`), LIVE | Repo de producto (Python MCP, plans, reviews, este HANDOFF). `addon/` es la copia git del bridge. | Git `https://github.com/willy92wins/dayz-mcp.git`. HEAD detached en `b8c8d10` (v1.4), que es su `origin/main`: 4 commits por detrás de `main` (`dd619ff`) al medirlo. Su rama local `main` sigue en `3c27f33`. Sin cambios en ficheros versionados. Los backups de sesión viven en `C:/Users/guill/DayZ_MCP_backups/`, fuera del repo. |
 | `C:\temp\DayZ_MCP_130`, T130 | Worktree del repo de LIVE para la instancia 130 (su gitdir está en `DayZ_MCP_dev\.git\worktrees\DayZ_MCP_130`). | HEAD detached en `d825aa2` (#235), 10 commits por detrás de `dd619ff`. Ve las mismas ramas que LIVE. Sin cambios en ficheros versionados. |
-| `…\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado. `P:\Mods`, el `mods_root` de las dos policies, es un junction a `!Workshop`, así que lo cargan las dos instancias. | SHA-256 `7078C2E4AC2231976D7AFD4A0B0EE677F9822C371F3FAA927B2EA356212E600A` (542 178 B), construido desde `b8c8d10` (v1.4) y puesto el 2026-10-17 a las 17:01; procedencia 24/24 más el marcador. El `addon/` de `b8c8d10` es el mismo árbol que el de `dd619ff`. Se sustituye solo con DayZ parado, el lease tomado y `tools/dev/swap_pbo.ps1 -WantOld <sha vivo>`. |
+| `…\!Workshop\@DayZ_MCP\Addons\DayZ_MCP.pbo` | PBO desplegado. `P:\Mods`, el `mods_root` de las dos policies, es un junction a `!Workshop`, así que lo cargan las dos instancias. | SHA-256 `7078C2E4AC2231976D7AFD4A0B0EE677F9822C371F3FAA927B2EA356212E600A` (542 178 B), construido desde `b8c8d10` (v1.4) y puesto el 2026-10-17 a las 17:01; procedencia 24/24 más el marcador (01:38). El `addon/` de `b8c8d10` es el mismo árbol que el de `dd619ff`. Se sustituye solo con DayZ parado, el lease tomado y `tools/dev/swap_pbo.ps1 -WantOld <sha vivo>`. |
 | `C:\Users\guill\Repos\dayz-mcp` | Otro clone | Rancio: `main` en `a41580f` (2026-09-26), 159 commits por detrás de `dd619ff`, sin commits propios y con `HANDOFF.md` modificado sin commit. No usarlo como checkout. |
 
 Empaquetar SOLO desde `DayZ_MCP_dev\addon`. `pack-addon.ps1 -Ref <sha> -PackOnly -Clear -Destination …` empaqueta el `addon/` de git en esa ref y mete en la raíz del PBO `mcp_build.json` (commit, árbol de `addon/` y hora UTC de la build; no está en git), así que un PBO dice desde qué commit se construyó. Después, `tools/dev/pbo_provenance.py <pbo> <repo> <ref>` compara fichero a fichero, exige que el `prefix` de la cabecera sea el de `addon/$PBOPREFIX$` y que esa marca lleve el commit de `<ref>`, y sale con un código distinto de 0 ante cualquier diferencia. `-Source` cambia el árbol empaquetado y no debe apuntar a `DayZ_MCP`.
