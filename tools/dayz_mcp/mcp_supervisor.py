@@ -36,12 +36,13 @@ The lease is carried by dayz_mcp.session_handoff, whose contract the rehearsal o
 hands the carrier PATH to each worker generation and lets the worker write and consume
 it, which also covers a worker that dies unplanned.
 
-A worker that has had no host line, no answer and no call in flight for the idle
-timeout is retired, and the next host line starts a new one and replays the handshake
-into it, as a recycle does. A host that keeps the stdin of a finished thread open then
-holds this process alone, not the worker too (inbox d345). The lease and the session's
-identity cross that gap as they cross a recycle, and an idle worker would not have
-renewed the lease either: only a call does (SESSION_TTL_S).
+A worker that has had no host line, no answer, no call in flight and no request of its
+own waiting on the host for the idle timeout is retired, and the next host line starts
+a new one and replays the handshake into it, as a recycle does. A host that keeps the
+stdin of a finished thread open then holds this process alone, not the worker too
+(inbox d345). The lease and the session's identity cross that gap as they cross a
+recycle: a worker that takes the lease over puts the carrier back as it found it. An
+idle worker would not have renewed the lease either: only a call does (SESSION_TTL_S).
 """
 
 from __future__ import annotations
@@ -136,6 +137,9 @@ class _Generation:
     # Set before a planned retirement closes stdin, so the pump reads the EOF that
     # follows as the expected end and not as a transport failure.
     retired: bool = False
+    # Ids of the requests this worker sent the host that the host has not answered.
+    # The worker waits on them, so it is not retired for idleness.
+    awaiting_host: set[object] = field(default_factory=set)
 
 
 def terminate_tree(process: WorkerProcess, *, log: Callable[[str], None]) -> None:
@@ -305,6 +309,9 @@ class Supervisor:
         generation = _Generation(process=process, number=self._generation)
         with self._state:
             self._current = generation
+            # A worker runs again, whoever started it: the next host line must not
+            # start another (review F3 of #255).
+            self._parked = False
         self._log(
             f"worker generation={generation.number} launcher_pid={process.pid} "
             "(launcher, not necessarily the serving interpreter)"
@@ -364,6 +371,10 @@ class Supervisor:
                 if amended is not None:
                     self._send_host(amended)
                     continue
+            elif ident is not None:
+                # A request of the worker's own. Counted before the host can answer it.
+                with self._state:
+                    generation.awaiting_host.add(ident)
             self._write_host(raw)
         with self._state:
             retired = generation.retired
@@ -392,16 +403,29 @@ class Supervisor:
     # -- the recycle -----------------------------------------------------------
 
     def recycle(self, request_id: object) -> None:
+        if self._reserve_recycle(request_id):
+            self._recycle_reserved(request_id)
+
+    def _reserve_recycle(self, request_id: object) -> bool:
+        """Mark a recycle as running, or answer why none can start.
+
+        The host line that asks for one reserves it before the thread that runs it
+        starts, so no idle retirement can come in between (review F3 of #255).
+        """
+        with self._state:
+            if self._current is None:
+                self._reply(request_id, {"error": "no_worker"}, is_error=True)
+                return False
+            if self._draining:
+                self._reply(request_id, {"error": "recycle_already_running"}, is_error=True)
+                return False
+            self._draining = True
+            return True
+
+    def _recycle_reserved(self, request_id: object) -> None:
         started = self._monotonic()
         with self._state:
             generation = self._current
-            if generation is None:
-                self._reply(request_id, {"error": "no_worker"}, is_error=True)
-                return
-            if self._draining:
-                self._reply(request_id, {"error": "recycle_already_running"}, is_error=True)
-                return
-            self._draining = True
 
         try:
             drained, remaining = self._drain(generation)
@@ -573,6 +597,7 @@ class Supervisor:
                 or generation.failed
                 or generation.retired
                 or generation.inflight
+                or generation.awaiting_host
                 or idle_s < self._idle_timeout_s
             ):
                 return False
@@ -601,10 +626,7 @@ class Supervisor:
         except OSError as exc:
             self._log(f"no worker could be started after the idle retirement: {exc}")
             return
-        replayed = self._replay_handshake(replacement)
-        with self._state:
-            self._parked = False
-        if not replayed:
+        if not self._replay_handshake(replacement):
             self._log("the worker started after the idle retirement did not take the handshake")
             return
         # It serves the sources on disk now, as a recycle does.
@@ -797,9 +819,11 @@ class Supervisor:
             and isinstance(params, dict)
             and params.get("name") == RELOAD_TOOL_NAME
         ):
-            threading.Thread(
-                target=self.recycle, args=(ident,), daemon=True, name="dayz-mcp-recycle"
-            ).start()
+            if self._reserve_recycle(ident):
+                threading.Thread(
+                    target=self._recycle_reserved, args=(ident,), daemon=True,
+                    name="dayz-mcp-recycle",
+                ).start()
             return
 
         if ident is not None and method is not None:
@@ -818,6 +842,10 @@ class Supervisor:
                     )
                     return
                 generation.inflight[ident] = method
+        elif ident is not None:
+            # The host's answer to a request of the worker's.
+            with self._state:
+                generation.awaiting_host.discard(ident)
         self._send_worker(generation, raw)
 
     def run(self, in_stream: object) -> None:

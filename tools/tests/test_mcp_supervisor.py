@@ -790,6 +790,26 @@ class WorkerDeathTest(SupervisorTestBase):
         self.assertEqual(answered["result"], {"ok": True})
 
 
+class _LateRecycleThreading:
+    """threading as mcp_supervisor sees it, with the recycle's thread held before it runs."""
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(threading, name)
+
+    def Thread(self, *, target, args=(), daemon=None, name=None) -> threading.Thread:  # noqa: N802
+        if name != "dayz-mcp-recycle":
+            return threading.Thread(target=target, args=args, daemon=daemon, name=name)
+
+        def late() -> None:
+            self._release.wait(DEADLINE_S)
+            target(*args)
+
+        return threading.Thread(target=late, daemon=daemon, name=name)
+
+
 class IdleRetirementTest(SupervisorTestBase):
     """A worker idle for the idle timeout is retired until the host speaks (inbox d345).
 
@@ -1029,6 +1049,107 @@ class IdleRetirementTest(SupervisorTestBase):
         self.supervisor.handle_host_line(self._call(10))
         self.assertEqual(len(self.workers), 2)
         self.workers[1].wait_for_sent(lambda m: m.get("id") == 10)
+
+    def test_a_request_of_the_workers_keeps_it_until_the_host_answers(self) -> None:
+        # Review F2 of #255: the answer has to reach the worker that asked.
+        worker = self.start()
+        self._handshake()
+        worker.push_raw(b'{"jsonrpc":"2.0","id":"w-1","method":"ping"}\n')
+        self.host.wait_for(lambda m: m.get("id") == "w-1")
+        self.ahead_s += 600.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.supervisor.handle_host_line(b'{"jsonrpc":"2.0","id":"w-1","result":{}}\n')
+        self.assertEqual(
+            worker.wait_for_sent(lambda m: m.get("id") == "w-1"),
+            {"jsonrpc": "2.0", "id": "w-1", "result": {}},
+        )
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        self.assertEqual(len(self.workers), 1)
+
+    def test_a_request_answered_before_its_relay_returns_does_not_keep_the_worker(self) -> None:
+        # The request is counted before it reaches the host, which can answer at once.
+        worker = self.start()
+        self._handshake()
+        write = self.host.write
+
+        def answer_at_once(raw: bytes) -> None:
+            write(raw)
+            if b'"method":"ping"' in raw:
+                self.supervisor.handle_host_line(b'{"jsonrpc":"2.0","id":"w-2","result":{}}\n')
+
+        self.host.write = answer_at_once  # type: ignore[method-assign]
+        worker.push_raw(b'{"jsonrpc":"2.0","id":"w-2","method":"ping"}\n')
+        # The pump relays in order: once this line is out, the ping's turn is over.
+        worker.push_raw(b'{"jsonrpc":"2.0","method":"notifications/message","params":{}}\n')
+        self.host.wait_for(lambda m: m.get("method") == "notifications/message")
+        self.assertEqual(worker.wait_for_sent(lambda m: m.get("id") == "w-2")["result"], {})
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+    def test_no_worker_is_retired_between_a_reload_request_and_its_recycle(self) -> None:
+        # Review F3 and F4 of #255: the recycle's thread can start after the timeout.
+        import dayz_mcp.mcp_supervisor as module
+        from unittest.mock import patch
+
+        first = self.start()
+        self._handshake()
+        release = threading.Event()
+        with patch.object(module, "threading", _LateRecycleThreading(release)):
+            self.supervisor.handle_host_line(reload_call(7))
+            self.ahead_s += 60.0
+            self.assertFalse(self.supervisor.park_if_idle())
+            self.assertFalse(first.stdin_closed.is_set())
+            release.set()
+            reply = self.host.wait_for(lambda m: m.get("id") == 7)
+        self.assertEqual(result_text(reply)["status"], "recycled")
+        self.supervisor.handle_host_line(self._call(9))
+        self.workers[1].wait_for_sent(lambda m: m.get("id") == 9)
+        self.assertEqual(len(self.workers), 2)
+
+    def test_a_reload_after_a_failed_wake_leaves_one_worker(self) -> None:
+        # The line could start no worker, its reload starts one, and the next line
+        # must not start another beside it (review F3 of #255).
+        self.start()
+        self._handshake()
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        failures = [OSError("no interpreter")]
+
+        def second_spawn_works() -> FakeWorker:
+            if failures:
+                raise failures.pop()
+            return self._spawn()
+
+        self.supervisor._spawn = second_spawn_works  # type: ignore[method-assign]
+        self.supervisor.handle_host_line(reload_call(10))
+        self.assertEqual(result_text(self.host.wait_for(lambda m: m.get("id") == 10))["status"], "recycled")
+        self.supervisor.handle_host_line(self._call(11))
+        self.workers[1].wait_for_sent(lambda m: m.get("id") == 11)
+        self.assertEqual(len(self.workers), 2)
+
+    def test_a_wake_whose_worker_dies_in_the_replay_announces_nothing(self) -> None:
+        # Review F5 of #255: the line gets the dead worker's answer, and the host is
+        # not told of a catalogue that no worker serves.
+        self.start()
+        self._handshake()
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+        def dying_spawn() -> FakeWorker:
+            replacement = FakeWorker(2000, auto_answer=self.auto_answer)
+            replacement.stdout.close()
+            self.workers.append(replacement)
+            return replacement
+
+        self.supervisor._spawn = dying_spawn  # type: ignore[method-assign]
+        self.supervisor.handle_host_line(self._call(9))
+        answer = result_text(self.host.wait_for(lambda m: m.get("id") == 9))
+        self.assertEqual((answer["error"], answer["generation"]), ("worker_died", 2))
+        self.assertNotIn(
+            "notifications/tools/list_changed", [m.get("method") for m in self.host.messages()]
+        )
+        self.assertFalse(any(m.get("id") == 9 for m in self.workers[-1].sent))
 
     def test_run_watches_for_idleness_only_with_a_timeout(self) -> None:
         for idle_timeout_s, polls in ((0.0, []), (8.0, [5.0]), (60.0, [15.0]), (3600.0, [60.0])):

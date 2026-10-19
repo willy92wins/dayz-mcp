@@ -378,8 +378,9 @@ DEFAULT_TOOL_TIMEOUT_S = 15.0
 LIVENESS_STATUS_TIMEOUT_S = 1.0
 # At most one lease-carrier rewrite per this many seconds
 # (ClientRuntime._refresh_lease_carrier). Heartbeats and commands the daemon
-# just renewed share it, so a burst does not fsync once per call.
-_CARRIER_REFRESH_S = 5.0
+# just renewed share it, so a burst does not fsync once per call. The carrier's
+# age bound allows for it (session_handoff.MAX_HANDOFF_AGE_S).
+_CARRIER_REFRESH_S = session_handoff.CARRIER_REFRESH_S
 POLL_INTERVAL_S = 0.05
 _BROKER_CLEANUP_BUDGET_S = 2.0
 _BROKER_ADMISSION_ERRORS = frozenset(
@@ -1505,6 +1506,24 @@ class ClientRuntime:
                 f"SESSION: adopted lease {carried.lease_id} from worker generation "
                 f"{carried.generation}; ownership re-checked by the daemon"
             )
+            # Reading it removed the carrier. Put it back as it was, stamp included,
+            # so a worker retired for idleness before it renews the lease hands it on
+            # too (inbox d345, review F1 of #255); the age bound still counts from
+            # the last write.
+            try:
+                with self._carrier_lock:
+                    session_handoff.write_handoff(
+                        self._handoff_path,
+                        identity=self.identity,
+                        lease_token=carried.lease_token,
+                        lease_id=carried.lease_id,
+                        generation=carried.generation,
+                        now=lambda: carried.written_at,
+                    )
+            except (OSError, ValueError, TypeError) as exc:
+                self._log(f"SESSION: carrier write failed: {exc}")
+                if isinstance(exc, session_handoff.TombstoneStillRejects):
+                    self._carrier_degraded = True
 
     def _mint_identity(self, config: ServerConfig) -> ClientIdentity:
         return ClientIdentity(
