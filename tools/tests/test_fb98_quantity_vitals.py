@@ -169,20 +169,38 @@ class _Vitals:
 
 
 def _translated(signature: str, namespace: dict[str, Any], class_types: tuple[str, ...]) -> Any:
-    """One MCPBridge method, with `new X()` read as `X()` and `pos[i]` as `pos.At(i)`
-    outside its string literals, which the translator does not read."""
-    body = method_body(BRIDGE, signature)
+    """One MCPBridge method, adapted for the translator. The classes it builds
+    are the ones the namespace fakes."""
+    built = tuple(name for name, fake in namespace.items() if isinstance(fake, type))
+    body = _adapted(method_body(BRIDGE, signature), built)
+    return translate(signature + "\n{" + body + "}\n", signature, namespace, class_types=class_types)
+
+
+def _adapted(body: str, built: tuple[str, ...]) -> str:
+    """``body`` with `new X()` read as `X()` and `pos[i]` as `pos.At(i)` outside
+    its string literals, which the translator does not read.
+
+    The source is checked first, so neither rewrite hides a source that already
+    reads the rewritten way (Codex H6): Enforce's vector declares no At, and a
+    class in ``built`` is built only with new.
+    """
     pieces: list[str] = []
     last = 0
     for literal in _ENFORCE_STRING.finditer(body):
-        pieces.append(_rewrite(body[last : literal.start()]))
+        pieces.append(_rewrite(body[last : literal.start()], built))
         pieces.append(literal.group())
         last = literal.end()
-    pieces.append(_rewrite(body[last:]))
-    return translate(signature + "\n{" + "".join(pieces) + "}\n", signature, namespace, class_types=class_types)
+    pieces.append(_rewrite(body[last:], built))
+    return "".join(pieces)
 
 
-def _rewrite(code: str) -> str:
+def _rewrite(code: str, built: tuple[str, ...]) -> str:
+    if re.search(r"\.\s*At\s*\(", code):
+        raise AssertionError("the source calls .At(), which only a rewritten pos[i] may")
+    for name in built:
+        for call in re.finditer(rf"\b{name}\s*\(", code):
+            if not re.search(r"\bnew\s+$", code[: call.start()]):
+                raise AssertionError(f"the source calls {name}() without new")
     code = re.sub(r"\bnew ([A-Za-z_]\w*)\(\)", r"\1()", code)
     return re.sub(r"\bpos\[(\d)\]", r"pos.At(\1)", code)
 
@@ -208,7 +226,7 @@ def _dispatched(target: _Object, *wants: str) -> SimpleNamespace:
     return result
 
 
-def _state(listed: list[_Man]) -> tuple[_State | None, list[tuple[object, object]]]:
+def _state(listed: list[_Man | None]) -> tuple[_State | None, list[tuple[object, object]]]:
     filled: list[tuple[object, object]] = []
 
     def fill(target: _Body, vitals: _Vitals) -> None:
@@ -262,7 +280,10 @@ class InspectQuantityTest(unittest.TestCase):
             ("not an item", _Object("Land_House")),
         ):
             with self.subTest(target=label):
-                inspect = _dispatched(target, "quantity").inspect
+                result = _dispatched(target, "quantity")
+                # An answer, not an error (Codex H7).
+                self.assertEqual((result.ok, result.error.text), (True, ""))
+                inspect = result.inspect
                 self.assertEqual((inspect.has_quantity, inspect.quantity, inspect.quantity_max), (False, 0.0, 0.0))
                 self.assertEqual((list(inspect.memory_points), target.points_asked), ([], []))
 
@@ -309,9 +330,36 @@ class PlayerStateVitalsTest(unittest.TestCase):
         self.assertEqual((state.water, state.energy), (0.0, 0.0))
         self.assertEqual(filled, [])
 
+    def test_no_player_answers_null(self) -> None:
+        # Codex H3: a null first player, which the `!player` guard catches.
+        for label, listed in (("none listed", []), ("a null one", [None])):
+            with self.subTest(players=label):
+                state, filled = _state(listed)
+
+                self.assertIsNone(state)
+                self.assertEqual(filled, [])
+
     def test_the_state_constructor_sets_only_pos(self) -> None:
         # _State is this constructor.
         self.assertEqual(_statements(method_body(MESSAGES, "void MCPPlayerState()")), ["pos = new array<float>()"])
+
+
+class AdaptationTest(unittest.TestCase):
+    """The translator's rewrites refuse a source that already reads their way (Codex H6)."""
+
+    def test_a_source_that_calls_at_or_builds_without_new_is_refused(self) -> None:
+        body = method_body(BRIDGE, BUILD_STATE)
+        built = ("MCPPlayerState", "MCPPlayerVitals")
+        for label, old, new in (
+            ("pos.At", "pos[0]", "pos.At(0)"),
+            ("no new", "new MCPPlayerState()", "MCPPlayerState()"),
+            ("no new", "new MCPPlayerVitals()", "MCPPlayerVitals()"),
+        ):
+            with self.subTest(source=label, call=new):
+                self.assertEqual(body.count(old), 1)
+                with self.assertRaises(AssertionError):
+                    _adapted(body.replace(old, new), built)
+        self.assertNotIn("pos[", _adapted(body, built))
 
 
 class PublicAnswerTest(unittest.IsolatedAsyncioTestCase):
