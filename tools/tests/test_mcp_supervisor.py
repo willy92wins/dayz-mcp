@@ -827,6 +827,38 @@ class _NoRecycleThreading:
         return thread
 
 
+class _WatchedLock:
+    """An RLock that names each thread that had to wait for it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.waited: queue.Queue[str] = queue.Queue()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            return True
+        self.waited.put(threading.current_thread().name)
+        return self._lock.acquire(blocking, timeout)
+
+    __enter__ = acquire
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+    # What threading.Condition takes from an RLock.
+    def _is_owned(self) -> bool:
+        return self._lock._is_owned()
+
+    def _release_save(self) -> object:
+        return self._lock._release_save()
+
+    def _acquire_restore(self, state: object) -> None:
+        self._lock._acquire_restore(state)
+
+
 class IdleRetirementTest(SupervisorTestBase):
     """A worker idle for the idle timeout is retired until the host speaks (inbox d345).
 
@@ -1134,6 +1166,25 @@ class IdleRetirementTest(SupervisorTestBase):
             parking.join(DEADLINE_S)
         self.assertTrue(worker.stdin_closed.is_set())
         self.assertNotIn("w-3", [m.get("id") for m in self.host.messages()])
+        self.assertTrue(any("not forwarded" in line for line in self.logs), self.logs)
+
+    def test_a_request_that_waits_out_the_decision_is_not_forwarded(self) -> None:
+        # Review F7 of #255, the other order: the pump has the line before the decision
+        # and the hold that counts it after, so a mark read before that hold lets it by.
+        watched = _WatchedLock()
+        self.supervisor._state = threading.Condition(watched)
+        worker = self.start()
+        self._handshake()
+        pump = self.supervisor._current.pump
+        self.ahead_s += 60.0
+        with self.supervisor._state:
+            worker.push_raw(b'{"jsonrpc":"2.0","id":"w-4","method":"ping"}\n')
+            while watched.waited.get(timeout=DEADLINE_S) != pump.name:
+                pass
+            self.assertTrue(self.supervisor.park_if_idle())
+        pump.join(DEADLINE_S)
+        self.assertFalse(pump.is_alive())
+        self.assertNotIn("w-4", [m.get("id") for m in self.host.messages()])
         self.assertTrue(any("not forwarded" in line for line in self.logs), self.logs)
 
     def test_a_reload_whose_thread_cannot_start_leaves_no_recycle_reserved(self) -> None:
