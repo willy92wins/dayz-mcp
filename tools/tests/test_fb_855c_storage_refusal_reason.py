@@ -476,6 +476,23 @@ class JointGateAssertionTest(unittest.TestCase):
         self.assertEqual(journal.read_text(encoding="utf-8"), "left by an earlier run\n")
         self.assertEqual(run.calls, [])
 
+    def test_a_journal_exists_cannot_see_is_named_and_kept(self) -> None:
+        # 127f: exists() answers False when the observation fails, and the plant then
+        # wrote over the journal it had asked about. It is made exclusively now.
+        planted = self._gate().PLANTED_NAME
+        exists = Path.exists
+
+        def blind(path: Path, *args, **kwargs) -> bool:
+            return False if path.name == planted else exists(path, *args, **kwargs)
+
+        with patch.object(Path, "exists", blind):
+            run = self._fake_run(existing="left by an earlier run\n")
+        journal = run.mission / run.gate.PLANTED_NAME
+        self.assertIsInstance(run.result, SystemExit)
+        self.assertIn(str(journal), str(run.result))
+        self.assertEqual(journal.read_text(encoding="utf-8"), "left by an earlier run\n")
+        self.assertNotIn("dayz_test_run", [name for name, _arguments in run.calls])
+
     def _one_operation(self, *, session: str = "S", run_id: str = "R") -> list[dict[str, object]]:
         return [
             {
