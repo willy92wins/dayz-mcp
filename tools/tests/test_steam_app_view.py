@@ -13,7 +13,6 @@ of #239).
 from __future__ import annotations
 
 import asyncio
-import base64
 import shutil
 import subprocess
 import sys
@@ -663,14 +662,23 @@ def _probe_scripts(scripts: dict[str, str]) -> dict[str, list[tuple[str, str]]] 
     with tempfile.TemporaryDirectory() as folder:
         for tag, text in scripts.items():
             Path(folder, tag + ".ps1").write_text(text, encoding="utf-8")
-        probe = _PREFERENCE_PROBE.replace("DIR", folder.replace("'", "''"))
+        # The probe runs from a file in a folder of its own, where it does not
+        # read itself: as -EncodedCommand it outgrew the 32767 characters of a
+        # Windows command line.
+        probe = Path(folder, "probe", "probe.ps1")
+        probe.parent.mkdir()
+        probe.write_text(
+            _PREFERENCE_PROBE.replace("DIR", folder.replace("'", "''")), encoding="utf-8"
+        )
         result = subprocess.run(
             [
                 shell,
                 "-NoProfile",
                 "-NonInteractive",
-                "-EncodedCommand",
-                base64.b64encode(probe.encode("utf-16-le")).decode("ascii"),
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(probe),
             ],
             capture_output=True,
             text=True,
