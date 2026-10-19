@@ -310,8 +310,10 @@ app's processes see it in its usual place. Processes outside the app see only
 the real folder. So does the daemon when dayz-mcp starts it through WMI, which
 it tries first; with `DAYZ_MCP_DAEMON_SPAWN_WMI=0`, or when WMI fails, the
 client starts it directly, inside the app, and that daemon sees the copy as
-well. The client's stderr names the way it took: `created through WMI` or
-`launching directly`.
+well. The client's stderr names the way it took, on a line that starts with
+`SPAWN:`: `created through WMI` for WMI; for a direct start,
+`created with CREATE_BREAKAWAY_FROM_JOB` or `launched job-bound`, after a line
+that ends in `launching directly` if WMI was tried and failed.
 
 A change to a file that only the real folder has goes to the real file:
 `runs.json` and `coordination.json` were updated in place on 2026-10-08. A
@@ -337,13 +339,26 @@ daemon makes are two files, and they do not exclude each other.
   lists the folders left in an app's copy. Do not delete them: they can also
   hold files that the app's own processes wrote and the real folder lacks,
   such as an `inbox`, a `launcher-policy.json` or a `capture-frame-state.json`.
-  With the app fully closed, run
-  `robocopy "<folder>" "$env:LOCALAPPDATA\<its name>" /E /L /XX /NJH /NJS /NDL /FP`
-  from outside for each one: `/L` copies nothing and lists every file of the
-  copy that the real folder lacks or holds with another size or time. Copy
-  into the real folder by hand what you keep, then move the copy to a folder
-  of your own, from where it can be moved back. If the move fails, or the
-  listing shows the folder again, something is still using it.
+  To bring what you need back into the real folder, from a PowerShell outside
+  the app:
+  1. Stop what writes to either folder. Close every Claude and Codex session
+     that uses dayz-mcp, then wait for the daemon, which can outlive the
+     session that started it: it exits by itself after its `--idle-timeout`
+     with no game polls and no client requests, and then
+     `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object CommandLine -Match 'dayz_mcp --daemon'`
+     prints nothing.
+  2. Compare each folder with its real one:
+     `robocopy "<folder>" "$env:LOCALAPPDATA\<its name>" /E /L /XX /NJH /NJS /NDL /FP`
+     copies nothing (`/L`) and lists every file of the copy that the real
+     folder lacks or holds with another size or time, older or newer.
+  3. Copy the real folder to a folder of your own before you change it, so
+     that a file you replace can be put back.
+  4. Copy into the real folder by hand what you keep. For a file that both
+     hold, compare the two first and keep the content you need: the real one
+     may be the newer.
+  5. Move the copy to a folder of your own, from where it can be moved back.
+     If the move fails, or the listing shows the folder again, something is
+     still using it.
 
 ## Security model
 
