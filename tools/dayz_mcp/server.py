@@ -39,6 +39,7 @@ from dayz_mcp import (
     registry_lock,
     tool_pack as tool_pack_mod,
     ui_dialog as ui_dialog_mod,
+    window_foreground,
 )
 from dayz_mcp.control_client import (
     ControlClient,
@@ -1855,7 +1856,7 @@ class ClientRuntime:
             await self._finish_carrier_io()
 
     def _lifecycle_held_token(self, method: object) -> tuple[bool, str | None]:
-        """Whether ``method`` is lifecycle close/reap, and the token it is about to use."""
+        """Whether ``method`` is lifecycle close/foreground/reap, and the token it is about to use."""
         control = getattr(self, "_control", None)
         if control is None:
             return False, None
@@ -1864,6 +1865,7 @@ class ClientRuntime:
         implemented = {
             getattr(getattr(control, "lifecycle_close", None), "__func__", None),
             getattr(getattr(control, "lifecycle_close_roles", None), "__func__", None),
+            getattr(getattr(control, "lifecycle_foreground", None), "__func__", None),
             getattr(getattr(control, "lifecycle_reap", None), "__func__", None),
         }
         if wanted is None or wanted not in implemented:
@@ -1879,7 +1881,7 @@ class ClientRuntime:
         error: ControlClientError,
         held_token: str | None,
     ) -> None:
-        """Same lease comparison as enqueue, for a close/reap that did not return.
+        """Same lease comparison as enqueue, for a close/foreground/reap that did not return.
 
         A verified ``lease_id`` refreshes only when it is the lease held now.
         ``lease_invalid`` / ``lease_expired`` then clear that token, so the
@@ -2055,6 +2057,17 @@ class ClientRuntime:
     ) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_close_roles, run_id, roles
+        )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
+
+    async def lifecycle_foreground(
+        self, run_id: str, hold_s: float
+    ) -> dict[str, Any]:
+        result = await self._control_with_lazy_spawn(
+            self._control.lifecycle_foreground, run_id, hold_s
         )
         await self._accept_command_renewal(result)
         if isinstance(result, dict):
@@ -5891,6 +5904,33 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             except Exception as exc:
                 _log_opaque_failure(client, "dayz_test_close", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} For the session that owns the run. Asks "
+            "Windows once, with SetForegroundWindow and nothing else, to bring "
+            "the window of the run's own DayZ client to the front, then reads "
+            "the foreground window for hold_s seconds (0 to "
+            f"{window_foreground.MAX_HOLD_S:g}). state is foreground when the "
+            "window held the front that long, lost when another window took "
+            "it back sooner (held_s says when), and denied when it did not "
+            "come to the front; granted is what SetForegroundWindow returned. "
+            "Windows grants the call only in the cases Microsoft documents, "
+            "for example once nobody has used the PC for a while; the tool "
+            "never asks twice. A minimized window is not asked for (state "
+            "minimized, granted null): the tool restores, moves and closes "
+            "nothing. client_process_gone means the run's client process is "
+            "gone, and window_not_found that it shows no DayZ window. "
+            "capture_screenshot stays passive."
+        )
+    )
+    async def dayz_test_foreground(
+        run_id: StrictStr,
+        hold_s: StrictFloat = 3,
+    ) -> dict[str, Any]:
+        client = _client_runtime()
+        async with client.tool_lock:
+            return await client.lifecycle_foreground(run_id, hold_s)
 
     # fb-20260823-130833-95d8: after vehicle_get_in_client and a 54.7 m client
     # drive, query_all_players still gave the player_teleport position and

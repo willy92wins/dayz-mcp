@@ -24,7 +24,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
-from dayz_mcp import dayz_test_storage, window_close
+from dayz_mcp import dayz_test_storage, window_close, window_foreground
 from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
@@ -5825,6 +5825,176 @@ class ProcessLifecycle:
         if not chosen or not chosen <= _CLOSE_ROLE_NAMES:
             return self._error("bad_args", 400)
         return self.close_run(client, token, run_id, only_roles=chosen)
+
+    def foreground_run(
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        hold_s: object,
+    ) -> dict[str, object]:
+        """Ask Windows once to bring the run's client window to the front (8b1c).
+
+        Authorizes like close_run: the caller holds the lease and owns the
+        RUNNING run. The window is the largest visible DayZ window of the
+        run's client process. Right before the one SetForegroundWindow the
+        process identity and the window's pid are read again, and this
+        daemon's foreground lock is let go. Nothing restores, raises or
+        attaches input, and a minimized window is not asked for. The
+        foreground is then read for ``hold_s`` seconds, outside the
+        operation lock.
+        """
+        if (
+            isinstance(hold_s, bool)
+            or not isinstance(hold_s, (int, float))
+            or not math.isfinite(hold_s)
+            or not 0.0 <= hold_s <= window_foreground.MAX_HOLD_S
+        ):
+            return self._error("bad_args", 400)
+        if isinstance(run_id, str) and run_id:
+            self.note_launcher_request(client, run_id)
+        legacy_error = self._legacy_identity_error()
+        if legacy_error is not None:
+            return legacy_error
+        command = "lifecycle_foreground"
+        decision, error = self._authorize(client, token, command)
+        if error is not None:
+            return error
+        authority = self._authority(decision)
+        if authority is None:
+            return self._error("lease_required", 403)
+        committed = False
+        try:
+            with self._operation_lock:
+                if not self._reservation_active(authority, command):
+                    return self._error("lease_invalid", 409)
+                if self._quarantined():
+                    return self._reject_reserved(authority, command, "retail_quarantine")
+                if not isinstance(run_id, str) or not run_id:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                refusal = self._refuse_unconfirmed_owner(client, run_id)
+                if refusal is not None:
+                    result = self._reject_reserved(
+                        authority, command, "run_protected"
+                    )
+                    result.update(refusal)
+                    return result
+                run = self.manifest.get(run_id)
+                if run is None:
+                    return self._reject_reserved(authority, command, "run_not_found", 404)
+                if (
+                    run.owner_session_id != client.session_id
+                    or run.owner_lease_id != authority[1]
+                    or run.state != "RUNNING"
+                ):
+                    return self._reject_reserved(authority, command, "run_not_adopted")
+                player: ProcessRecord | None = None
+                for record in run.processes:
+                    if record.role not in _PLAYER_ROLES:
+                        continue
+                    kind, reason = self._classify_registered_process(record)
+                    if kind == "owned":
+                        player = record
+                        break
+                    if kind == "unknown":
+                        return self._reject_reserved(
+                            authority,
+                            command,
+                            reason,
+                            503 if reason == "guard_unavailable" else 409,
+                        )
+                if player is None:
+                    return self._reject_reserved(authority, command, "client_process_gone")
+                windows = getattr(self, "window_fns", None)
+                fns = getattr(self, "foreground_fns", None)
+                hwnd = window_foreground.client_window(
+                    player.pid, windows=windows, fns=fns
+                )
+                if hwnd is None:
+                    return self._reject_reserved(authority, command, "window_not_found", 404)
+                if self._quarantined():
+                    return self._reject_reserved(authority, command, "retail_quarantine")
+                if not self._audit(
+                    "lifecycle_foreground",
+                    client,
+                    "identity_match",
+                    "allowed",
+                    run_id=run_id,
+                    pid=player.pid,
+                ):
+                    self.coordinator.reject_reservation(
+                        authority[0], authority[1], authority[2], "audit_failed"
+                    )
+                    return self._error("audit_failed", 503)
+                command_id = self._commit_reserved(authority, command)
+                if command_id is None:
+                    return self._error("lease_invalid", 409)
+                committed = True
+                try:
+                    kind, reason = self._classify_registered_process(player)
+                    if kind in {"gone", "foreign"}:
+                        return self._error("client_process_gone", 409)
+                    if kind != "owned":
+                        return self._error(
+                            reason, 503 if reason == "guard_unavailable" else 409
+                        )
+                    if window_foreground.is_minimized(hwnd, fns=fns):
+                        return {
+                            "run_id": run_id,
+                            "state": "minimized",
+                            "granted": None,
+                            "held_s": 0.0,
+                        }
+                    if self.foreground_lock is not None:
+                        self.foreground_lock.release()
+                    granted = window_foreground.set_foreground(
+                        hwnd, player.pid, windows=windows, fns=fns
+                    )
+                    if granted is None:
+                        return self._error("window_not_found", 404)
+                finally:
+                    self._finish_committed(authority, command_id)
+            state, held_s = window_foreground.watch(hwnd, float(hold_s), fns=fns)
+            return {
+                "run_id": run_id,
+                "state": state,
+                "granted": granted,
+                "held_s": held_s,
+            }
+        except Exception:
+            # Same collection as close_run: abort before commit; after commit
+            # the inner finally already finished the command.
+            result = self._error("foreground_failed", 503)
+            if not committed:
+                degraded: list[str] = []
+                try:
+                    degraded.extend(
+                        self.coordinator.abort_reservation(
+                            authority[0],
+                            authority[1],
+                            authority[2],
+                            "foreground_failed",
+                        )
+                    )
+                except Exception:
+                    try:
+                        rejected = self.coordinator.reject_reservation(
+                            authority[0],
+                            authority[1],
+                            authority[2],
+                            "foreground_failed",
+                        )
+                        extra = getattr(rejected, "cleanup_degraded", ())
+                        if extra:
+                            degraded.extend(extra)
+                    except Exception:
+                        degraded.append("reservation_abort_failed")
+                if degraded:
+                    result["cleanup_degraded"] = list(dict.fromkeys(degraded))
+            return result
 
     def note_launcher_request(
         self, client: ClientIdentity, run_id: str, *, when: float | None = None
