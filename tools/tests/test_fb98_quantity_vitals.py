@@ -275,9 +275,16 @@ def _state_namespace(listed: list[_Man | None], fill: Any) -> dict[str, Any]:
     }
 
 
-def _dispatched(target: _Object, *wants: str) -> SimpleNamespace:
+def _dispatch_namespace(target: _Object) -> dict[str, Any]:
+    """What DispatchObjectInspect reaches: its fakes and FillInspectQuantity, translated
+    into them first (Codex H16)."""
     namespace = _inspect_namespace(target)
     _translated(FILL_QUANTITY, namespace, ("ItemBase",))
+    return namespace
+
+
+def _dispatched(target: _Object, *wants: str) -> SimpleNamespace:
+    namespace = _dispatch_namespace(target)
     dispatch = _translated(
         DISPATCH_INSPECT, namespace, ("Object", "MCPObjectInspect", "MCPTelemetry", "MCPMemoryPoint", "vector")
     )
@@ -423,9 +430,10 @@ def _free_local(body: str, name: str) -> str:
 
 
 # The fakes each translated method runs against, for the checks that do not run it.
-# A name the run fakes as a function is a function here too (Codex H15).
+# A name the run fakes as a function is a function here too (Codex H15), and so is
+# one it translates first (Codex H16).
 _FAKES = {
-    DISPATCH_INSPECT: lambda: _inspect_namespace(_Object("Wall")),
+    DISPATCH_INSPECT: lambda: _dispatch_namespace(_Object("Wall")),
     FILL_QUANTITY: lambda: _inspect_namespace(_Object("Wall")),
     BUILD_STATE: lambda: _state_namespace([], lambda _target, _vitals: None),
 }
@@ -506,6 +514,21 @@ class AdaptationTest(unittest.TestCase):
                     seen, _filled = _state(listed)
                     want = expected[label]
                     self.assertEqual(vars(seen) if seen else seen, vars(want) if want else want)
+
+    def test_a_function_the_dispatch_translates_first_is_no_class(self) -> None:
+        # Codex H16: `class FillInspectQuantity {}` under a macro neither build defines
+        # enters the index, and DispatchObjectInspect, whose run translates
+        # FillInspectQuantity first, still reads, and refuses, as before.
+        index = _addon_classes() | {"FillInspectQuantity"}
+        with patch.object(sys.modules[__name__], "_addon_classes", return_value=index):
+            self.assertIn("FillInspectQuantity", _addon_classes())
+            self.assertNotIn("FillInspectQuantity", _classes(_FAKES[DISPATCH_INSPECT]()))
+            self.assertEqual(
+                self._refused(DISPATCH_INSPECT, method_body(BRIDGE, DISPATCH_INSPECT)),
+                (["MCPObjectInspect", "MCPTelemetry", "MCPMemoryPoint"], []),
+            )
+            inspect = _dispatched(_Item(True, 350.0, 1000), "quantity").inspect
+            self.assertEqual((inspect.has_quantity, inspect.quantity, inspect.quantity_max), (True, 350.0, 1000))
 
     def test_a_class_whose_statics_the_namespace_fakes_is_still_one(self) -> None:
         # Codex H14: a call of MCPGodmode or PlayerBase without new is refused, also in
