@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterator
 
 from dayz_mcp import accredited_daemon_transport as transport
-from dayz_mcp import daemon_credential
+from dayz_mcp import daemon_credential, window_foreground
 from dayz_mcp.daemon_policy_contract import AccreditedDaemonPolicy
 from dayz_mcp.session_coordination import public_audit_stage
 
@@ -32,9 +32,12 @@ _REGISTERED_AT_UTC = re.compile(
 # session_acquire_wait is never on these lists; owned dayz_test_stop may
 # lease internally through the kill-path set only.
 _H14_STALE_POLICY_PATHS = frozenset({"/lifecycle/status"})
-# Close and reap authorize before they can fail. Their error document is the
-# only one whose lease_id is proof of a renewal (fb-20260928-021456-3272).
-_LIFECYCLE_RESULT_PATHS = frozenset({"/lifecycle/close", "/lifecycle/reap"})
+# Close, foreground and reap authorize before they can fail. Their error
+# documents are the only ones whose lease_id is proof of a renewal
+# (fb-20260928-021456-3272).
+_LIFECYCLE_RESULT_PATHS = frozenset(
+    {"/lifecycle/close", "/lifecycle/foreground", "/lifecycle/reap"}
+)
 _H14_OWNED_STOP_LEASE_PATHS = frozenset(
     {
         "/lifecycle/status",
@@ -435,6 +438,22 @@ class ControlClient:
         if isinstance(token, str) and token:
             payload["lease_token"] = token
         return await self._session_call("/lifecycle/close", payload)
+
+    async def lifecycle_foreground(
+        self, run_id: str, hold_s: float
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"run_id": run_id, "hold_s": hold_s}
+        token = self.active_lease_token
+        if isinstance(token, str) and token:
+            payload["lease_token"] = token
+        # The daemon reads the foreground for up to MAX_HOLD_S before it answers.
+        return await self._session_call(
+            "/lifecycle/foreground",
+            payload,
+            timeout_s=self.timeout_s
+            + window_foreground.MAX_HOLD_S
+            + window_foreground.SETTLE_S,
+        )
 
     async def lifecycle_reap(self, run_id: str) -> dict[str, object]:
         payload: dict[str, object] = {"run_id": run_id}

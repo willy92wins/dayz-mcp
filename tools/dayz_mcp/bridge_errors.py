@@ -115,6 +115,13 @@ _REMOTE_ERROR_CODES = frozenset({
     "enqueue_cancelled",
     # lease-grant race surfaced by session_coordination._validate_token_locked on /enqueue.
     "session_granting",
+    # dayz_test_foreground refusals (process_lifecycle.foreground_run, 8b1c).
+    # run_not_found and run_not_adopted also reach the callers of close and
+    # reap by name now, where they read remote_error.
+    "run_not_found",
+    "run_not_adopted",
+    "window_not_found",
+    "foreground_failed",
 })
 _STALE_TICKET_ERRORS = frozenset({"ticket_expired", "ticket_invalid"})
 _STALE_LEASE_ERRORS = frozenset({"lease_expired", "lease_invalid"})

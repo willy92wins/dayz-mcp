@@ -337,7 +337,8 @@ class LaunchTakesTheLockTest(unittest.TestCase):
                     self.assertEqual([e["event"] for e in self.audit.events], without)
 
     def test_a_launch_that_took_the_lock_returns_with_nothing_held(self) -> None:
-        # Codex L12: its command, its operation and the box admission.
+        # Codex L12, L13: its command, its operation and the box admission,
+        # however the launch ends once the lock is taken.
         def operation_lock_taken() -> bool:
             taken: list[bool] = []
 
@@ -353,9 +354,11 @@ class LaunchTakesTheLockTest(unittest.TestCase):
             return taken != [False]
 
         for answer in (True, RuntimeError("can't start new thread")):
-            for identity in (True, False):
-                with self.subTest(answer=answer, identity=identity):
-                    self._start(answer, identity=identity)
+            for identity, fail in (
+                (True, None), (False, None), (True, "launcher"), (True, "manifest")
+            ):
+                with self.subTest(answer=answer, identity=identity, fail=fail):
+                    self._start(answer, identity=identity, fail=fail)
 
                     active = self.lifecycle.coordinator._active
                     self.assertEqual((active.committed_commands, active.operation_pins), ({}, {}))
