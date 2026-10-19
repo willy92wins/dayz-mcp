@@ -3602,10 +3602,13 @@ class ProcessLifecycle:
         run_id: str,
         state: str,
         terminated: int | None = None,
+        foreground_lock: str | None = None,
     ) -> dict[str, object]:
         fields: dict[str, object] = {"run_id": run_id, "state": state}
         if terminated is not None:
             fields["terminated"] = terminated
+        if foreground_lock is not None:
+            fields["foreground_lock"] = foreground_lock
         if not self._audit(event, client, reason, decision, **fields):
             self._add_degradation(result, "audit_failed")
         return result
@@ -3727,6 +3730,7 @@ class ProcessLifecycle:
         confirmed_error: str,
         manifest_failure: bool = False,
         attempt_started_at: float | None = None,
+        foreground_lock: str | None = None,
     ) -> dict[str, object]:
         """Leave every failed Popen attempt in a durable, reconcilable state."""
 
@@ -3779,6 +3783,7 @@ class ProcessLifecycle:
             decision=str(result["error"]),
             run_id=provisional.run_id,
             state=state,
+            foreground_lock=foreground_lock,
         )
 
     def start_run(self, client: ClientIdentity, token: str | None, request: object) -> dict[str, object]:
@@ -4134,7 +4139,6 @@ class ProcessLifecycle:
             record: ProcessRecord | None = None
             minted: str | None = None
             intent: dict[str, object] | None = None
-            lock_decision: str | None = None
             launch_role = str(parsed["role"])
             attempt_started_at = time.time()
             try:
@@ -4342,11 +4346,13 @@ class ProcessLifecycle:
                             confirmed_error="launch_intent_failed",
                             attempt_started_at=attempt_started_at,
                         )
+                lock_decision: str | None = None
                 if (
                     self.foreground_lock is not None
                     and parsed["window_style"] == "normal"
                 ):
-                    # The launch goes on whatever the lock does.
+                    # The launch goes on whatever the lock does, and its
+                    # outcome row says what Windows answered (fade, 75e7).
                     try:
                         locked = self.foreground_lock.hold()
                         lock_decision = (
@@ -4376,6 +4382,7 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="lifecycle_start_failed",
                         attempt_started_at=attempt_started_at,
+                        foreground_lock=lock_decision,
                     )
 
                 try:
@@ -4393,6 +4400,7 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="identity_unavailable",
                         attempt_started_at=attempt_started_at,
+                        foreground_lock=lock_decision,
                     )
                 self._confirm_instance(minted, record)
 
@@ -4412,6 +4420,7 @@ class ProcessLifecycle:
                         confirmed_error="lifecycle_start_failed",
                         manifest_failure=True,
                         attempt_started_at=attempt_started_at,
+                        foreground_lock=lock_decision,
                     )
                 if intent is not None:
                     # What recover_launch_intent would conclude about this very
@@ -4460,21 +4469,9 @@ class ProcessLifecycle:
                     decision="started",
                     run_id=run_id,
                     state="RUNNING",
+                    foreground_lock=lock_decision,
                 )
             finally:
-                # The lock's row is the launch's last: written after the
-                # outcome row, which waits for the same audit writer, it never
-                # stands between the lock and DayZ's start, nor keeps the run
-                # STARTING (fade, Codex L6).
-                if lock_decision is not None and not self._audit(
-                    "lifecycle_foreground_lock",
-                    client,
-                    "launch",
-                    lock_decision,
-                    run_id=run_id,
-                    role=launch_role,
-                ):
-                    self._note_audit_row_dropped()
                 self._finish_committed(authority, command_id)
                 if intent is not None:
                     self._settle_launch_intent(run_id)

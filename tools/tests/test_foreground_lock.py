@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 from typing import Callable
 from unittest.mock import patch
 
-from dayz_mcp import daemon, foreground_lock, loopback
+from dayz_mcp import box_admission, daemon, foreground_lock, loopback
 from dayz_mcp.foreground_lock import LSFW_LOCK, LSFW_UNLOCK, ForegroundLock
 from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore
 from dayz_mcp.runtime_state import RuntimePaths
@@ -196,19 +197,15 @@ class _HeldLock:
 
 
 class _Audit(AuditSink):
-    """An AuditSink that can also raise on an event, or look around first."""
+    """An AuditSink that can look around before each event."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.raise_events: set[str] = set()
         self.look: Callable[[str], None] | None = None
 
     def __call__(self, event: dict[str, object]) -> bool:
         if self.look is not None:
             self.look(str(event.get("event")))
-        if event.get("event") in self.raise_events:
-            self.events.append(event)
-            raise OSError("audit write failed")
         return super().__call__(event)
 
 
@@ -237,9 +234,11 @@ class LaunchTakesTheLockTest(unittest.TestCase):
         *,
         lock_for: Callable[[FakeLauncher], object] | None = None,
         identity: bool = True,
+        fail: str | None = None,
     ) -> object:
-        """Start a run. ``identity`` False leaves DayZ without one, so the
-        launch fails after the launcher."""
+        """Start a run. ``identity`` False leaves DayZ without one, and ``fail``
+        "launcher" or "manifest" fails the launcher's answer or the write of
+        RUNNING: each fails the launch after the launcher."""
 
         # A box of its own for each start, so a subtest finds no earlier run.
         self.starts += 1
@@ -254,13 +253,25 @@ class LaunchTakesTheLockTest(unittest.TestCase):
         _status, acquired = coordinator.acquire(IDENTITY_A, "lifecycle")
         guard = FakeGuard()
         launcher = FakeLauncher()
+        if fail == "launcher":
+            launcher.pid = 0
         if identity:
             guard.snapshots[launcher.pid] = snapshot(process(launcher.pid))
         held = lock_for(launcher) if lock_for is not None else _HeldLock(launcher, answer)
+        manifest = RunManifestStore(paths)
+        if fail == "manifest":
+            replace = manifest.replace
+
+            def failing(run: object) -> None:
+                if getattr(run, "state", None) == "RUNNING":
+                    raise OSError("manifest write failed")
+                replace(run)
+
+            manifest.replace = failing
         self.lifecycle = lifecycle = ProcessLifecycle(
             steam_gate=FakeSteamGate(),
             coordinator=coordinator,
-            manifest=RunManifestStore(paths),
+            manifest=manifest,
             audit=self.audit,
             guard=guard,
             retail_probe=lambda: {"known": True, "processes": []},
@@ -284,12 +295,13 @@ class LaunchTakesTheLockTest(unittest.TestCase):
                 "mission": "test",
             },
         )
-        self.assertIs(bool(result.get("ok")), identity, result)
+        self.assertIs(bool(result.get("ok")), identity and fail is None, result)
         self.assertEqual(len(launcher.calls), 1)
         return held
 
-    def _rows(self) -> list[dict[str, object]]:
-        return [e for e in self.audit.events if e["event"] == "lifecycle_foreground_lock"]
+    def _outcome_row(self) -> dict[str, object]:
+        (row,) = [e for e in self.audit.events if e["event"] == "lifecycle_start_outcome"]
+        return row
 
     def test_a_normal_launch_takes_the_lock_before_dayz_starts(self) -> None:
         for answer, decision in ((True, "locked"), (False, "refused")):
@@ -297,53 +309,82 @@ class LaunchTakesTheLockTest(unittest.TestCase):
                 held = self._start(answer)
 
                 self.assertEqual(held.launches_before, [0])
-                (row,) = self._rows()
+                row = self._outcome_row()
                 self.assertEqual(
-                    (row["reason"], row["decision"], row["run_id"], row["role"]),
-                    ("launch", decision, "run-1", "client"),
+                    (row["decision"], row["run_id"], row["foreground_lock"]),
+                    ("started", "run-1", decision),
                 )
-                self.assertEqual(self.lifecycle.public_status()["audit_rows_dropped"], 0)
 
     def test_a_lock_that_raises_leaves_the_launch_going(self) -> None:
         # _start checks that the run started and DayZ was launched once.
         held = self._start(RuntimeError("can't start new thread"))
 
         self.assertEqual(held.launches_before, [0])
-        (row,) = self._rows()
-        self.assertEqual((row["decision"], row["run_id"]), ("failed", "run-1"))
+        row = self._outcome_row()
+        self.assertEqual((row["decision"], row["foreground_lock"]), ("started", "failed"))
 
-    def test_a_lost_audit_row_is_counted_and_the_launch_goes_on(self) -> None:
-        for answer, decision in ((True, "locked"), (RuntimeError("can't start new thread"), "failed")):
-            for lost in ("returned false", "raised"):
-                with self.subTest(decision=decision, audit=lost):
-                    self.audit.fail_events = {"lifecycle_foreground_lock"} if lost == "returned false" else set()
-                    self.audit.raise_events = {"lifecycle_foreground_lock"} if lost == "raised" else set()
+    def test_the_lock_writes_no_row_of_its_own(self) -> None:
+        # Codex L6, L11: what Windows answered rides on the outcome row, so
+        # the lock adds no audit write a busy writer could keep waiting,
+        # before DayZ starts or once the launch is over.
+        for identity in (True, False):
+            self._start(None, identity=identity)
+            without = [e["event"] for e in self.audit.events]
+            self.assertEqual(without[-1], "lifecycle_start_outcome")
+            for answer in (True, False, RuntimeError("can't start new thread")):
+                with self.subTest(identity=identity, answer=answer):
+                    self._start(answer, identity=identity)
+                    self.assertEqual([e["event"] for e in self.audit.events], without)
 
-                    self._start(answer)
+    def test_a_launch_that_took_the_lock_returns_with_nothing_held(self) -> None:
+        # Codex L12: its command, its operation and the box admission.
+        def operation_lock_taken() -> bool:
+            taken: list[bool] = []
 
-                    (row,) = self._rows()
-                    self.assertEqual(row["decision"], decision)
-                    self.assertEqual(self.lifecycle.public_status()["audit_rows_dropped"], 1)
+            def probe() -> None:
+                got = self.lifecycle._operation_lock.acquire(blocking=False)
+                if got:
+                    self.lifecycle._operation_lock.release()
+                taken.append(not got)
 
-    def test_the_row_is_written_once_the_launch_has_settled(self) -> None:
-        # Codex L6: a wait for the audit writer must not stand between the
-        # lock and DayZ's start, nor keep the run STARTING.
-        for identity, state in ((True, "RUNNING"), (False, "EXITED")):
-            with self.subTest(launch="started" if identity else "failed"):
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(5)
+            return taken != [False]
+
+        for answer in (True, RuntimeError("can't start new thread")):
+            for identity in (True, False):
+                with self.subTest(answer=answer, identity=identity):
+                    self._start(answer, identity=identity)
+
+                    active = self.lifecycle.coordinator._active
+                    self.assertEqual((active.committed_commands, active.operation_pins), ({}, {}))
+                    self.assertFalse(operation_lock_taken())
+                    self.assertEqual(box_admission._holders, 0)
+
+    def test_the_answer_is_written_once_the_launch_has_settled(self) -> None:
+        # Codex L6: never before DayZ's start, nor while the run is STARTING;
+        # and on every outcome a launch can have once the lock is taken.
+        for launch, identity, fail, state in (
+            ("started", True, None, "RUNNING"),
+            ("no identity", False, None, "EXITED"),
+            ("launcher", True, "launcher", "EXITED"),
+            ("manifest", True, "manifest", "EXITED"),
+        ):
+            with self.subTest(launch=launch):
                 seen: list[tuple[int, str]] = []
 
                 def look(event: str) -> None:
-                    if event == "lifecycle_foreground_lock":
+                    if event == "lifecycle_start_outcome":
                         run = self.lifecycle.manifest.get("run-1")
                         seen.append((len(self.lifecycle.launcher.calls), run.state))
 
                 self.audit.look = look
 
-                self._start(True, identity=identity)
+                self._start(True, identity=identity, fail=fail)
 
                 self.assertEqual(seen, [(1, state)])
-                events = [e["event"] for e in self.audit.events]
-                self.assertEqual(events[-2:], ["lifecycle_start_outcome", "lifecycle_foreground_lock"])
+                self.assertEqual(self._outcome_row()["foreground_lock"], "locked")
 
     def test_the_lock_itself_under_a_launch(self) -> None:
         # Codex L8: ForegroundLock, its call and its timer faked, through a launch.
@@ -364,25 +405,24 @@ class LaunchTakesTheLockTest(unittest.TestCase):
 
                 self.assertEqual(lock.calls, calls)
                 self.assertEqual(lock.launches_before, [0] * len(calls))
-                (row,) = self._rows()
-                self.assertEqual(row["decision"], decision)
+                self.assertEqual(self._outcome_row()["foreground_lock"], decision)
                 if fail is None:
                     (timer,) = lock.timers
                     self.assertEqual(timer.interval, 30.0)
                     timer.fire()
                     self.assertEqual(lock.calls, [LSFW_LOCK, LSFW_UNLOCK])
 
-    def test_no_lock_to_take_leaves_no_row(self) -> None:
+    def test_no_lock_to_take_leaves_the_outcome_as_it_was(self) -> None:
         held = self._start(None)
 
         self.assertEqual(held.launches_before, [0])
-        self.assertEqual(self._rows(), [])
+        self.assertNotIn("foreground_lock", self._outcome_row())
 
     def test_a_hidden_launch_takes_no_lock(self) -> None:
         held = self._start(True, "hidden")
 
         self.assertEqual(held.launches_before, [])
-        self.assertEqual(self._rows(), [])
+        self.assertNotIn("foreground_lock", self._outcome_row())
 
 
 class DaemonWiringTest(unittest.TestCase):
