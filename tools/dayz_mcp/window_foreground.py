@@ -1,10 +1,10 @@
 """Bring a run's own DayZ client window to the front, once (inbox 8b1c).
 
 capture_screenshot reads pixels without asking for the foreground: once it was
-forced (AttachThreadInput, SW_RESTORE, BringWindowToTop, then
-SetForegroundWindow), the live client kept running and responding but showed
-no window and stopped polling, and no one call was found to cause it
-(fb-20260904-025027-8f76). A client left behind other windows can keep its
+forced, with AttachThreadInput, ShowWindow and SetForegroundWindow as
+fb-20260904-025027-8f76 records it, the live client kept running and
+responding but showed no window and stopped polling, and no one call was
+found to cause it. A client left behind other windows can keep its
 terrain grey until someone brings it forward (8b1c). So this asks Windows once,
 with SetForegroundWindow and nothing else, and reads GetForegroundWindow to say
 whether the window came to the front and whether it was there at each read
@@ -141,14 +141,18 @@ def watch(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[str, float]:
-    """Read the foreground window for ``hold_s`` seconds after the call.
+    """Read the foreground window until a read made ``hold_s`` seconds or more
+    after the first one that showed ``hwnd``.
 
-    It is read every SAMPLE_INTERVAL_S, the last time when ``hold_s`` is up:
-    ``foreground`` when every read showed ``hwnd``, ``lost`` when one showed
-    another window, and ``denied`` when ``hwnd`` did not show within
-    SETTLE_S. For the first two, the seconds are when the last read was made,
-    counted from the read that first showed ``hwnd``. A change between two
-    reads is not seen.
+    Between two reads it sleeps SAMPLE_INTERVAL_S, less before the last one. A
+    thread that wakes late reads late, so the last read can come after
+    ``hold_s``, never before it (Codex F1). ``foreground`` when every read
+    showed ``hwnd``, ``lost`` when one showed another window, and ``denied``
+    when ``hwnd`` did not show within SETTLE_S. For the first two, the seconds
+    run from the first to the last read that showed ``hwnd``. The clock is read
+    right after the first of those and right before each later read, so the
+    seconds never count more than passed between the two reads. A change
+    between two reads is not seen.
     """
 
     api = fns if fns is not None else real_win32()
@@ -157,11 +161,15 @@ def watch(
         if clock() - start >= SETTLE_S:
             return "denied", 0.0
         sleep(SAMPLE_INTERVAL_S)
-    shown = clock()
+    shown = last_seen = read_at = clock()
     deadline = shown + hold_s
-    while clock() < deadline:
-        # The last sleep ends when hold_s is up (Codex F1).
-        sleep(min(SAMPLE_INTERVAL_S, deadline - clock()))
+    while read_at < deadline:
+        # One clock reading sets the sleep, so it is never negative (Codex F6).
+        left = deadline - clock()
+        if left > 0:
+            sleep(min(SAMPLE_INTERVAL_S, left))
+        read_at = clock()
         if api.foreground() != hwnd:
-            return "lost", round(clock() - shown, 2)
-    return "foreground", round(clock() - shown, 2)
+            return "lost", round(last_seen - shown, 2)
+        last_seen = read_at
+    return "foreground", round(last_seen - shown, 2)

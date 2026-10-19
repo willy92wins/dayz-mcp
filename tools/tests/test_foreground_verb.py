@@ -173,17 +173,40 @@ def _fronts(*answers: int) -> window_foreground.Win32ForegroundFns:
     )
 
 
+def _slow_reads(
+    fns: window_foreground.Win32ForegroundFns, clock: _Clock, read_s: float
+) -> window_foreground.Win32ForegroundFns:
+    """``fns`` whose reads of the foreground window each take ``read_s``."""
+
+    def foreground() -> int:
+        answer = fns.foreground()
+        clock.now += read_s
+        return answer
+
+    return dataclasses.replace(fns, foreground=foreground)
+
+
 class _Clock:
-    def __init__(self) -> None:
+    """A clock whose sleeps end ``late_s`` late, and whose first readings are
+    ``times``, as a thread that stalls between them sees it."""
+
+    def __init__(self, late_s: float = 0.0, times: tuple[float, ...] = ()) -> None:
         self.now = 100.0
+        self.late_s = late_s
+        self.times = list(times)
         self.slept: list[float] = []
 
     def __call__(self) -> float:
+        if self.times:
+            self.now = self.times.pop(0)
         return self.now
 
     def sleep(self, seconds: float) -> None:
+        if seconds < 0:
+            # As time.sleep does (Codex F6).
+            raise ValueError("sleep length must be non-negative")
         self.slept.append(seconds)
-        self.now += seconds
+        self.now += seconds + self.late_s
 
 
 class WindowForegroundTest(unittest.TestCase):
@@ -227,8 +250,8 @@ class WindowForegroundTest(unittest.TestCase):
         self.assertIsNone(self.ask(11, 42))
         self.assertEqual(self.desktop.asks, [11, 11])
 
-    def watch(self, fns, hold_s: float) -> tuple[str, float]:
-        self.clock = _Clock()
+    def watch(self, fns, hold_s: float, clock: _Clock | None = None) -> tuple[str, float]:
+        self.clock = clock if clock is not None else _Clock()
         return window_foreground.watch(
             11, hold_s, fns=fns, clock=self.clock, sleep=self.clock.sleep
         )
@@ -254,8 +277,9 @@ class WindowForegroundTest(unittest.TestCase):
     def test_a_window_another_takes_back_reads_lost_with_how_long_it_held(
         self,
     ) -> None:
+        # Read at 0, 0.25 and 0.5 s, then another window at 0.75 s.
         self.assertEqual(
-            self.watch(_fronts(11, 11, 11, _OTHER), 3.0), ("lost", 0.75)
+            self.watch(_fronts(11, 11, 11, _OTHER), 3.0), ("lost", 0.5)
         )
         self.assertEqual(self.clock.slept, [0.25] * 3)
 
@@ -265,7 +289,37 @@ class WindowForegroundTest(unittest.TestCase):
             self.watch(_fronts(11, 11, 11, _OTHER), 0.3), ("foreground", 0.3)
         )
         self.assertEqual([round(s, 6) for s in self.clock.slept], [0.25, 0.05])
-        self.assertEqual(self.watch(_fronts(11, 11, _OTHER), 0.3), ("lost", 0.3))
+        self.assertEqual(self.watch(_fronts(11, 11, _OTHER), 0.3), ("lost", 0.25))
+
+    def test_a_late_thread_reads_late_and_counts_only_what_the_reads_saw(
+        self,
+    ) -> None:
+        # Codex F1: each sleep ends 20 ms late and each read takes 10 ms. The
+        # window shows at 100.01, and is read at 100.28 and at 100.33, after
+        # hold_s.
+        clock = _Clock(late_s=0.02)
+        fns = _slow_reads(_fronts(11), clock, 0.01)
+        self.assertEqual(self.watch(fns, 0.3, clock), ("foreground", 0.32))
+        clock = _Clock(late_s=0.02)
+        fns = _slow_reads(_fronts(11, 11, _OTHER), clock, 0.01)
+        self.assertEqual(self.watch(fns, 0.3, clock), ("lost", 0.27))
+
+    def test_a_stalled_thread_still_reads_once_hold_s_is_up(self) -> None:
+        # Codex F1: shown at 100.0, and the thread runs again at 100.31.
+        stalled = (100.0, 100.0, 100.31)
+        self.assertEqual(
+            self.watch(_fronts(11, _OTHER), 0.3, _Clock(times=stalled)), ("lost", 0.0)
+        )
+        self.assertEqual(self.clock.slept, [])
+        self.assertEqual(
+            self.watch(_fronts(11), 0.3, _Clock(times=stalled)), ("foreground", 0.31)
+        )
+
+    def test_the_sleep_is_never_negative_when_the_clock_passes_hold_s(self) -> None:
+        # Codex F6: read at 100.299, 1 ms before hold_s is up, and at 100.301.
+        clock = _Clock(times=(100.0, 100.0, 100.299, 100.301))
+        self.assertEqual(self.watch(_fronts(11), 0.3, clock), ("foreground", 0.3))
+        self.assertEqual([round(s, 6) for s in clock.slept], [0.001])
 
     def test_on_windows_it_binds_user32_with_handles_for_arguments(self) -> None:
         class _Call:
@@ -541,7 +595,7 @@ class ForegroundRunTest(unittest.TestCase):
 
     def test_a_window_another_takes_back_reads_lost(self) -> None:
         self.add_run()
-        self.desktop.taken_after = 1
+        self.desktop.taken_after = 2
         result = self.foreground(hold_s=3)
         self.assertEqual((result["state"], result["granted"]), ("lost", True))
         self.assertGreater(result["held_s"], 0.0)
@@ -829,6 +883,8 @@ class ForegroundToolTest(unittest.IsolatedAsyncioTestCase):
             "SetForegroundWindow and nothing else",
             "(0 to 10)",
             "every 0.25 s",
+            "later when the thread wakes late",
+            "held_s is the time from the first to the last read",
             "a change between two reads is not seen",
             "never asks twice",
             "state minimized, granted null",
