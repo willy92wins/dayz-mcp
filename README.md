@@ -300,6 +300,34 @@ outside the app (dayz-mcp starts it through WMI). `session_status`,
   `tools\clear-app-steam-shadow.ps1` from an elevated PowerShell. It backs up
   the app's hive and lists the Valve keys in it; `-Apply` deletes them.
 
+### Files created from the app's shells
+
+Claude Desktop also virtualizes `%LOCALAPPDATA%` for every process it starts
+(Codex was not checked). A new file or folder that such a process creates under
+it lands in the app's own copy,
+`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\`, and the
+app's processes see it in its usual place. The daemon, which dayz-mcp starts
+through WMI, and every process outside the app see only the real folder. A
+change to a file that already exists goes to the real file.
+
+So what the installers or the doctor create from the app's shells can be
+missing for the daemon. On 2026-10-08 the knowledge pack installed by
+`install_mcp.py --register --instance 130` from Claude's Bash was in the app's
+copy, and the doctor run there reported `PACK_SKILLS_UNREGISTERED` with a
+manifest path inside it. Lock files under `DayZ_MCP_shared\build-locks` had
+been created there as well: a lock file made inside the app and the one the
+daemon makes are two files, and they do not exclude each other.
+
+- Run `install-mcp.ps1`, `install_mcp.py`, `python -m dayz_mcp.doctor` and any
+  `python -m dayz_mcp` you start by hand from a PowerShell opened outside the
+  app, for example from the Start menu.
+- A path with `\Packages\` and `\LocalCache\` in their output means the
+  command ran inside the app: run it again from outside.
+- `Get-ChildItem "$env:LOCALAPPDATA\Packages\*\LocalCache\Local" -Filter 'DayZ_MCP*'`
+  lists what earlier runs left in an app's copy. Once the same command has
+  written the real files from outside, close the app fully and move those
+  folders to a folder of your own, so that one copy is left.
+
 ## Security model
 
 Fail-closed from the first line: the listener binds `127.0.0.1` only, every request
