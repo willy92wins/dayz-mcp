@@ -671,12 +671,15 @@ class ForegroundRunTest(unittest.TestCase):
         )
         self.assertEqual(self.in_flight(), [])
 
-    def test_a_hold_of_3_or_10_s_reaches_the_watch_whole(self) -> None:
+    def test_a_hold_and_the_window_reach_the_watch_whole(self) -> None:
         # Codex F12: a hold that foreground_run cut to 1 s on its way to the
         # watch left every test green, and 3 and 10 s answered held_s 1.0.
+        # F13 and F14: so did a hold cut to whole seconds, and a watch of
+        # window 420 whatever window was asked for.
+        self.desktop.windows[8420] = self.desktop.windows.pop(420)
         self.add_run()
         watch = window_foreground.watch
-        for hold_s in (3, 10):
+        for hold_s in (0.3, 2.5, 3, 10):
             with self.subTest(hold_s=hold_s):
                 clock = _Clock()
                 with patch.object(
