@@ -2142,6 +2142,9 @@ class ProcessLifecycle:
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
         steam_gate: object | None = None,
+        # fade, 75e7: the lock a normal launch takes so DayZ does not bring
+        # its window to the front (foreground_lock.py). None takes none.
+        foreground_lock: object | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -2158,6 +2161,7 @@ class ProcessLifecycle:
         self.argv_of = argv_of or _default_argv_of
         self.bindings = bindings
         self.bridge_probe = bridge_probe
+        self.foreground_lock = foreground_lock
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
@@ -4337,6 +4341,20 @@ class ProcessLifecycle:
                             confirmed_error="launch_intent_failed",
                             attempt_started_at=attempt_started_at,
                         )
+                if (
+                    self.foreground_lock is not None
+                    and parsed["window_style"] == "normal"
+                ):
+                    locked = self.foreground_lock.hold()
+                    if locked is not None and not self._audit(
+                        "lifecycle_foreground_lock",
+                        client,
+                        "launch",
+                        "locked" if locked else "refused",
+                        run_id=run_id,
+                        role=launch_role,
+                    ):
+                        self._note_audit_row_dropped()
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
