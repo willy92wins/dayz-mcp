@@ -671,6 +671,33 @@ class ForegroundRunTest(unittest.TestCase):
         )
         self.assertEqual(self.in_flight(), [])
 
+    def test_a_hold_of_3_or_10_s_reaches_the_watch_whole(self) -> None:
+        # Codex F12: a hold that foreground_run cut to 1 s on its way to the
+        # watch left every test green, and 3 and 10 s answered held_s 1.0.
+        self.add_run()
+        watch = window_foreground.watch
+        for hold_s in (3, 10):
+            with self.subTest(hold_s=hold_s):
+                clock = _Clock()
+                with patch.object(
+                    window_foreground,
+                    "watch",
+                    lambda hwnd, hold, *, fns: watch(
+                        hwnd, hold, fns=fns, clock=clock, sleep=clock.sleep
+                    ),
+                ):
+                    result = self.foreground(hold_s=hold_s)
+                self.assertEqual(
+                    result,
+                    {
+                        "run_id": RUN_ID,
+                        "state": "foreground",
+                        "granted": True,
+                        "held_s": float(hold_s),
+                    },
+                )
+                self.assertGreaterEqual(clock.now, 100.0 + hold_s)
+
     def test_a_window_another_takes_back_reads_lost(self) -> None:
         self.add_run()
         self.desktop.taken_after = 2
