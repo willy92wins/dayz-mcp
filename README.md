@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 87 typed
+game, put the world into a state, act, and read back what the engine did — 88 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -77,10 +77,10 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**87 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**88 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `key_press`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `key_press`,
 `lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `pipeline_feedback`, `pipeline_inbox`,
 `pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
@@ -220,7 +220,13 @@ refuse to run without a lease whatever the list shows.
 
 Both installers register the client with `--supervised`: it serves the host from a
 worker the supervisor can replace, so `server_reload` picks up edited sources without
-the host reconnecting, and the lease crosses each replacement. `--no-supervised` /
+the host reconnecting, and the lease crosses each replacement. With a positive
+`--idle-timeout`, 1800 seconds by default and never less than 125, the supervisor
+also retires its worker once that long has passed with no host line, no answer, no
+call in flight and no request of the worker's that the host has not answered, and
+starts a new one on the next host line, which waits for it to start: a host that
+leaves a finished thread's stdin open keeps only the supervisor. The lease has run
+out by then, so the next call that needs it reads `lease_required`. `--no-supervised` /
 `-NoSupervised` opts out. `python install_mcp.py --register` refuses to drop an
 option the current registrations carry (`registration_would_drop_options` names each
 one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` only

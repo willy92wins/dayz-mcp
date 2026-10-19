@@ -39,6 +39,7 @@ from dayz_mcp import (
     registry_lock,
     tool_pack as tool_pack_mod,
     ui_dialog as ui_dialog_mod,
+    window_foreground,
 )
 from dayz_mcp.control_client import (
     ControlClient,
@@ -380,6 +381,13 @@ LIVENESS_STATUS_TIMEOUT_S = 1.0
 # (ClientRuntime._refresh_lease_carrier). Heartbeats and commands the daemon
 # just renewed share it, so a burst does not fsync once per call.
 _CARRIER_REFRESH_S = 5.0
+# A supervised client worker is never retired for idleness sooner than this. Only a
+# call renews the lease (SESSION_TTL_S), so by then it has run out and none has to
+# cross the gap: the next worker finds the carrier older than the lease and refuses
+# it. The 5 s are for a renewal or a carrier write that lands after the answer idle
+# time counts from, as for a call the host cancelled while it ran (inbox d345,
+# reviews F1 and F6 of #255).
+MIN_IDLE_RETIREMENT_S = SESSION_TTL_S + 5.0
 POLL_INTERVAL_S = 0.05
 _BROKER_CLEANUP_BUDGET_S = 2.0
 _BROKER_ADMISSION_ERRORS = frozenset(
@@ -1855,7 +1863,7 @@ class ClientRuntime:
             await self._finish_carrier_io()
 
     def _lifecycle_held_token(self, method: object) -> tuple[bool, str | None]:
-        """Whether ``method`` is lifecycle close/reap, and the token it is about to use."""
+        """Whether ``method`` is lifecycle close/foreground/reap, and the token it is about to use."""
         control = getattr(self, "_control", None)
         if control is None:
             return False, None
@@ -1864,6 +1872,7 @@ class ClientRuntime:
         implemented = {
             getattr(getattr(control, "lifecycle_close", None), "__func__", None),
             getattr(getattr(control, "lifecycle_close_roles", None), "__func__", None),
+            getattr(getattr(control, "lifecycle_foreground", None), "__func__", None),
             getattr(getattr(control, "lifecycle_reap", None), "__func__", None),
         }
         if wanted is None or wanted not in implemented:
@@ -1879,7 +1888,7 @@ class ClientRuntime:
         error: ControlClientError,
         held_token: str | None,
     ) -> None:
-        """Same lease comparison as enqueue, for a close/reap that did not return.
+        """Same lease comparison as enqueue, for a close/foreground/reap that did not return.
 
         A verified ``lease_id`` refreshes only when it is the lease held now.
         ``lease_invalid`` / ``lease_expired`` then clear that token, so the
@@ -2055,6 +2064,17 @@ class ClientRuntime:
     ) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_close_roles, run_id, roles
+        )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
+
+    async def lifecycle_foreground(
+        self, run_id: str, hold_s: float
+    ) -> dict[str, Any]:
+        result = await self._control_with_lazy_spawn(
+            self._control.lifecycle_foreground, run_id, hold_s
         )
         await self._accept_command_renewal(result)
         if isinstance(result, dict):
@@ -5892,6 +5912,36 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 _log_opaque_failure(client, "dayz_test_close", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
 
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} For the session that owns the run. Asks "
+            "Windows once, with SetForegroundWindow and nothing else, to bring "
+            "the window of the run's own DayZ client to the front, then reads "
+            f"the foreground window every {window_foreground.SAMPLE_INTERVAL_S:g} s, "
+            "later when the thread wakes late, until a read made hold_s seconds "
+            f"(0 to {window_foreground.MAX_HOLD_S:g}) or more after the first that "
+            "showed the window. state is foreground when every read showed the "
+            "window, lost when one showed another window, and denied when it did "
+            "not come to the front. held_s is the time from the first to the last "
+            "read that showed the window; a change between two reads is not seen. "
+            "granted is what SetForegroundWindow returned. "
+            "Windows grants the call only in the cases Microsoft documents, "
+            "for example once nobody has used the PC for a while; the tool "
+            "never asks twice. A minimized window is not asked for (state "
+            "minimized, granted null): the tool restores, moves and closes "
+            "nothing. client_process_gone means the run's client process is "
+            "gone, and window_not_found that it shows no DayZ window. "
+            "capture_screenshot stays passive."
+        )
+    )
+    async def dayz_test_foreground(
+        run_id: StrictStr,
+        hold_s: StrictFloat = 3,
+    ) -> dict[str, Any]:
+        client = _client_runtime()
+        async with client.tool_lock:
+            return await client.lifecycle_foreground(run_id, hold_s)
+
     # fb-20260823-130833-95d8: after vehicle_get_in_client and a 54.7 m client
     # drive, query_all_players still gave the player_teleport position and
     # in_vehicle=0. The client-owned car moves on the client; the server-side
@@ -9413,12 +9463,14 @@ def _release_and_exit(runtime: Runtime) -> None:
     os._exit(0)
 
 
-def run_supervisor(argv: list[str]) -> int:
+def run_supervisor(argv: list[str], *, idle_timeout_s: float = 0.0) -> int:
     """Own stdio and serve the host from a worker this process can replace.
 
     The worker is this same module with --supervised removed, so it keeps the mode and
     every other flag the host registered. The lease crosses each replacement through a
     carrier file whose PATH -- never the token -- travels in the child's environment.
+    A worker idle for idle_timeout_s, and never less than MIN_IDLE_RETIREMENT_S, is
+    retired until the next host line (0 never).
     """
     import tempfile
 
@@ -9442,7 +9494,14 @@ def run_supervisor(argv: list[str]) -> int:
             env=child_env,
         )
 
-    supervisor = Supervisor(spawn=spawn, out_stream=sys.stdout.buffer, log=log)
+    supervisor = Supervisor(
+        spawn=spawn,
+        out_stream=sys.stdout.buffer,
+        log=log,
+        idle_timeout_s=(
+            max(idle_timeout_s, MIN_IDLE_RETIREMENT_S) if idle_timeout_s > 0 else 0.0
+        ),
+    )
     try:
         supervisor.run(sys.stdin.buffer)
     finally:
@@ -9460,7 +9519,11 @@ def run_supervisor(argv: list[str]) -> int:
 def run(argv: list[str] | None = None) -> int:
     config = parse_args(argv)
     if config.supervised:
-        return run_supervisor(list(sys.argv[1:] if argv is None else argv))
+        # Only a client worker: an embedded one owns the port and has its own watchdog.
+        return run_supervisor(
+            list(sys.argv[1:] if argv is None else argv),
+            idle_timeout_s=config.idle_timeout_s if config.mode == "client" else 0.0,
+        )
     if config.mode == "daemon":
         return daemon.run_daemon(config)
 
