@@ -5,6 +5,7 @@ LockSetForegroundWindow: the windows, the foreground and the lock are fakes.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import dataclasses
 import json
@@ -799,15 +800,20 @@ class ForegroundClientTest(unittest.IsolatedAsyncioTestCase):
         self.runtime = _fixture_client_runtime(self.config)
         self.control = self.runtime._control
 
+    @contextlib.contextmanager
     def answer(self, status: int, document: dict[str, object]):
         def transport(**_kwargs):
             return status, json.dumps(document).encode("utf-8")
 
-        return patch.object(
-            self.control._credential_provider,
-            "request_with_refresh",
-            side_effect=transport,
-        )
+        # The fixture's daemon is not this machine's: revalidating its policy
+        # would refuse before the request is sent, as in test_fb_00c4_audit_stage.
+        with patch.object(type(self.control.policy), "revalidate", return_value=None):
+            with patch.object(
+                self.control._credential_provider,
+                "request_with_refresh",
+                side_effect=transport,
+            ):
+                yield
 
     async def test_the_client_posts_the_run_hold_s_and_lease_and_waits_for_the_hold(
         self,
