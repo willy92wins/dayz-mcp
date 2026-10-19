@@ -848,7 +848,10 @@ class _WatchedLock:
     def __exit__(self, *exc_info: object) -> None:
         self._lock.release()
 
-    # What threading.Condition takes from an RLock.
+    # What threading.Condition takes from an RLock; locked() since Python 3.14.
+    def locked(self) -> bool:
+        return self._lock.locked()
+
     def _is_owned(self) -> bool:
         return self._lock._is_owned()
 
