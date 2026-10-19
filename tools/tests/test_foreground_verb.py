@@ -380,6 +380,25 @@ class WindowForegroundTest(unittest.TestCase):
                     )
                 self.assertEqual(len(clock.slept), window_foreground.read_limit(3.0))
 
+    def test_a_whole_hold_of_3_or_10_s_reads_to_its_end(self) -> None:
+        # Codex F11: whether the window shows at once, at the last read for the
+        # answer, or to a thread that wakes late, and on a clock whose sums land a
+        # hair before a deadline, which costs a read, the reads last the hold.
+        for hold_s in (3.0, 10.0):
+            for label, late_s, start, shows in (
+                ("at once", 0.0, 100.0, 100.0),
+                ("at 0.5 s", 0.0, 100.0, 100.5),
+                ("read late", 0.02, 100.0, 100.51),
+                ("float sums", 0.0, 1.473, 1.973),
+            ):
+                with self.subTest(hold_s=hold_s, shows=label):
+                    clock = _Clock(late_s=late_s)
+                    clock.now = start
+                    state, held_s = self.watch(_shows_at(clock, shows), hold_s, clock)
+                    self.assertEqual(state, "foreground")
+                    self.assertGreaterEqual(held_s, hold_s)
+                    self.assertGreaterEqual(clock.now, shows + hold_s)
+
     def test_on_windows_it_binds_user32_with_handles_for_arguments(self) -> None:
         class _Call:
             def __init__(self, answer) -> None:
