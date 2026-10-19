@@ -1,4 +1,4 @@
-"""A DayZ launch locks the foreground so DayZ does not take it (inbox fade, 75e7).
+"""A normal DayZ launch locks the foreground and unlocks it 30 s after the last one (inbox fade, 75e7).
 
 No test calls LockSetForegroundWindow: the lock and its timer are fakes.
 """
@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Callable
 from unittest.mock import patch
 
 from dayz_mcp import daemon, foreground_lock, loopback
@@ -58,9 +59,14 @@ class _Lock:
         self.timers: list[_Timer] = []
         # "timer" or "start": the next release cannot be scheduled.
         self.fail: str | None = None
+        # When set, how many launches each call came after.
+        self.launcher: FakeLauncher | None = None
+        self.launches_before: list[int] = []
 
     def __call__(self, code: int) -> bool:
         self.calls.append(code)
+        if self.launcher is not None:
+            self.launches_before.append(len(self.launcher.calls))
         return self.answer
 
     def timer(self, interval, function, args=()) -> _Timer:
@@ -103,7 +109,15 @@ class ForegroundLockTest(unittest.TestCase):
 
     def test_a_release_it_cannot_schedule_unlocks_at_once(self) -> None:
         for fail in ("timer", "start"):
-            with self.subTest(fail=fail):
+            with self.subTest(fail=fail, hold="first"):
+                lock = _Lock()
+                lock.fail = fail
+                held = ForegroundLock(lock, timer=lock.timer)
+
+                with self.assertRaisesRegex(RuntimeError, "can't start new thread"):
+                    held.hold()
+                self.assertEqual(lock.calls, [LSFW_LOCK, LSFW_UNLOCK])
+            with self.subTest(fail=fail, hold="later"):
                 lock = _Lock()
                 held = ForegroundLock(lock, timer=lock.timer)
                 held.hold()
@@ -133,10 +147,11 @@ class ForegroundLockTest(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.codes: list[int] = []
+                self.answer = 1
 
             def __call__(self, code: int) -> int:
                 self.codes.append(code)
-                return 1
+                return self.answer
 
         call = _Call()
         user32 = SimpleNamespace(LockSetForegroundWindow=call)
@@ -150,6 +165,11 @@ class ForegroundLockTest(unittest.TestCase):
         self.assertIs(bound(LSFW_UNLOCK), True)
         self.assertIs(bound(LSFW_LOCK), True)
         self.assertEqual(call.codes, [LSFW_UNLOCK, LSFW_LOCK])
+        # The BOOL: zero is a refusal, any other value a success.
+        for answer, expected in ((0, False), (7, True)):
+            with self.subTest(answer=answer):
+                call.answer = answer
+                self.assertIs(bound(LSFW_LOCK), expected)
         for label, windll_answer in (
             ("no user32", {"side_effect": OSError("no user32")}),
             ("no call", {"return_value": SimpleNamespace()}),
@@ -176,13 +196,16 @@ class _HeldLock:
 
 
 class _Audit(AuditSink):
-    """An AuditSink that can also raise on an event."""
+    """An AuditSink that can also raise on an event, or look around first."""
 
     def __init__(self) -> None:
         super().__init__()
         self.raise_events: set[str] = set()
+        self.look: Callable[[str], None] | None = None
 
     def __call__(self, event: dict[str, object]) -> bool:
+        if self.look is not None:
+            self.look(str(event.get("event")))
         if event.get("event") in self.raise_events:
             self.events.append(event)
             raise OSError("audit write failed")
@@ -207,7 +230,17 @@ class LaunchTakesTheLockTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _start(self, answer: bool | None | Exception, window_style: str = "normal") -> _HeldLock:
+    def _start(
+        self,
+        answer: bool | None | Exception,
+        window_style: str = "normal",
+        *,
+        lock_for: Callable[[FakeLauncher], object] | None = None,
+        identity: bool = True,
+    ) -> object:
+        """Start a run. ``identity`` False leaves DayZ without one, so the
+        launch fails after the launcher."""
+
         # A box of its own for each start, so a subtest finds no earlier run.
         self.starts += 1
         runtime = self.root / f"runtime-{self.starts}"
@@ -221,8 +254,9 @@ class LaunchTakesTheLockTest(unittest.TestCase):
         _status, acquired = coordinator.acquire(IDENTITY_A, "lifecycle")
         guard = FakeGuard()
         launcher = FakeLauncher()
-        guard.snapshots[launcher.pid] = snapshot(process(launcher.pid))
-        held = _HeldLock(launcher, answer)
+        if identity:
+            guard.snapshots[launcher.pid] = snapshot(process(launcher.pid))
+        held = lock_for(launcher) if lock_for is not None else _HeldLock(launcher, answer)
         self.lifecycle = lifecycle = ProcessLifecycle(
             steam_gate=FakeSteamGate(),
             coordinator=coordinator,
@@ -250,7 +284,7 @@ class LaunchTakesTheLockTest(unittest.TestCase):
                 "mission": "test",
             },
         )
-        self.assertTrue(result.get("ok"), result)
+        self.assertIs(bool(result.get("ok")), identity, result)
         self.assertEqual(len(launcher.calls), 1)
         return held
 
@@ -279,15 +313,64 @@ class LaunchTakesTheLockTest(unittest.TestCase):
         self.assertEqual((row["decision"], row["run_id"]), ("failed", "run-1"))
 
     def test_a_lost_audit_row_is_counted_and_the_launch_goes_on(self) -> None:
-        for lost in ("returned false", "raised"):
-            with self.subTest(audit=lost):
-                self.audit.fail_events = {"lifecycle_foreground_lock"} if lost == "returned false" else set()
-                self.audit.raise_events = {"lifecycle_foreground_lock"} if lost == "raised" else set()
+        for answer, decision in ((True, "locked"), (RuntimeError("can't start new thread"), "failed")):
+            for lost in ("returned false", "raised"):
+                with self.subTest(decision=decision, audit=lost):
+                    self.audit.fail_events = {"lifecycle_foreground_lock"} if lost == "returned false" else set()
+                    self.audit.raise_events = {"lifecycle_foreground_lock"} if lost == "raised" else set()
 
-                self._start(True)
+                    self._start(answer)
 
-                self.assertEqual(len(self._rows()), 1)
-                self.assertEqual(self.lifecycle.public_status()["audit_rows_dropped"], 1)
+                    (row,) = self._rows()
+                    self.assertEqual(row["decision"], decision)
+                    self.assertEqual(self.lifecycle.public_status()["audit_rows_dropped"], 1)
+
+    def test_the_row_is_written_once_the_launch_has_settled(self) -> None:
+        # Codex L6: a wait for the audit writer must not stand between the
+        # lock and DayZ's start, nor keep the run STARTING.
+        for identity, state in ((True, "RUNNING"), (False, "EXITED")):
+            with self.subTest(launch="started" if identity else "failed"):
+                seen: list[tuple[int, str]] = []
+
+                def look(event: str) -> None:
+                    if event == "lifecycle_foreground_lock":
+                        run = self.lifecycle.manifest.get("run-1")
+                        seen.append((len(self.lifecycle.launcher.calls), run.state))
+
+                self.audit.look = look
+
+                self._start(True, identity=identity)
+
+                self.assertEqual(seen, [(1, state)])
+                events = [e["event"] for e in self.audit.events]
+                self.assertEqual(events[-2:], ["lifecycle_start_outcome", "lifecycle_foreground_lock"])
+
+    def test_the_lock_itself_under_a_launch(self) -> None:
+        # Codex L8: ForegroundLock, its call and its timer faked, through a launch.
+        for fail, decision, calls in (
+            (None, "locked", [LSFW_LOCK]),
+            ("timer", "failed", [LSFW_LOCK, LSFW_UNLOCK]),
+            ("start", "failed", [LSFW_LOCK, LSFW_UNLOCK]),
+        ):
+            with self.subTest(fail=fail):
+                lock = _Lock()
+                lock.fail = fail
+
+                def lock_for(launcher: FakeLauncher) -> ForegroundLock:
+                    lock.launcher = launcher
+                    return ForegroundLock(lock, timer=lock.timer)
+
+                self._start(None, lock_for=lock_for)
+
+                self.assertEqual(lock.calls, calls)
+                self.assertEqual(lock.launches_before, [0] * len(calls))
+                (row,) = self._rows()
+                self.assertEqual(row["decision"], decision)
+                if fail is None:
+                    (timer,) = lock.timers
+                    self.assertEqual(timer.interval, 30.0)
+                    timer.fire()
+                    self.assertEqual(lock.calls, [LSFW_LOCK, LSFW_UNLOCK])
 
     def test_no_lock_to_take_leaves_no_row(self) -> None:
         held = self._start(None)

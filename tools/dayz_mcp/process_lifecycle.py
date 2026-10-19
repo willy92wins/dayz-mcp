@@ -4134,6 +4134,7 @@ class ProcessLifecycle:
             record: ProcessRecord | None = None
             minted: str | None = None
             intent: dict[str, object] | None = None
+            lock_decision: str | None = None
             launch_role = str(parsed["role"])
             attempt_started_at = time.time()
             try:
@@ -4348,22 +4349,13 @@ class ProcessLifecycle:
                     # The launch goes on whatever the lock does.
                     try:
                         locked = self.foreground_lock.hold()
-                        decision = (
+                        lock_decision = (
                             None
                             if locked is None
                             else "locked" if locked else "refused"
                         )
                     except Exception:
-                        decision = "failed"
-                    if decision is not None and not self._audit(
-                        "lifecycle_foreground_lock",
-                        client,
-                        "launch",
-                        decision,
-                        run_id=run_id,
-                        role=launch_role,
-                    ):
-                        self._note_audit_row_dropped()
+                        lock_decision = "failed"
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -4470,6 +4462,19 @@ class ProcessLifecycle:
                     state="RUNNING",
                 )
             finally:
+                # The lock's row is the launch's last: written after the
+                # outcome row, which waits for the same audit writer, it never
+                # stands between the lock and DayZ's start, nor keeps the run
+                # STARTING (fade, Codex L6).
+                if lock_decision is not None and not self._audit(
+                    "lifecycle_foreground_lock",
+                    client,
+                    "launch",
+                    lock_decision,
+                    run_id=run_id,
+                    role=launch_role,
+                ):
+                    self._note_audit_row_dropped()
                 self._finish_committed(authority, command_id)
                 if intent is not None:
                     self._settle_launch_intent(run_id)

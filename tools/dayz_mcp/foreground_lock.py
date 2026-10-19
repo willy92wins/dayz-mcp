@@ -1,19 +1,20 @@
 """Lock the foreground while DayZ starts (inbox fade, 75e7).
 
-DayZ brings its own window to the front after it starts, whatever its first
-show state: launched SW_SHOWNOACTIVATE (#59) and with the server window
-minimized (#168, reverted in #180), the server still held the foreground for
-2.26 s and the client for 2.5 s and then 5.0 s (2026-09-30). So each normal
-launch calls LockSetForegroundWindow(LSFW_LOCK), which disables calls to
+DayZ took the foreground after it started in both first show states tried:
+launched SW_SHOWNOACTIVATE (#59) and with the server window minimized (#168,
+reverted in #180), the server still held it for 2.26 s and the client for
+2.5 s and then 5.0 s (2026-09-30). So each normal launch calls
+LockSetForegroundWindow(LSFW_LOCK), which disables calls to
 SetForegroundWindow, and LSFW_UNLOCK HOLD_S after the last launch: the takes
 measured in fade came within 3 s of each start. Windows enables those calls
 again itself when the user presses ALT or does something that makes Windows
-change the foreground window, such as clicking a background window, so a
-person can always bring DayZ forward. Whether the lock keeps DayZ behind is
-not measured yet.
+change the foreground window, such as clicking a background window. Whether
+the lock keeps DayZ behind is not measured yet.
 
 Microsoft documents the call for the foreground process, so hold() reports
-what Windows answered. Nothing here reads a window: the lock is the only call.
+what Windows answered. Each unlock is one call: nothing checks what it
+answers or calls it again, and a daemon that exits before the release makes
+none. Nothing here reads a window: the lock is the only call.
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ class ForegroundLock:
         """Lock now and release HOLD_S from now.
 
         Returns what LockSetForegroundWindow answered, or None where there is
-        no lock to take. When the release cannot be scheduled, it unlocks at
-        once and raises, so no lock is left without a release.
+        no lock to take. When the release cannot be scheduled, it calls
+        LSFW_UNLOCK at once, whatever that answers, and raises.
         """
 
         if self._lock_fn is None:
