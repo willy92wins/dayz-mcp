@@ -1214,6 +1214,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 # E2: present on every envelope. null when this call is not a
                 # declared storage refusal (success, and every other failure).
                 "storage_recovery_reason",
+                "session_idle_s",
+                "display_timeout_s",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
@@ -1369,6 +1371,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_backup",
                 "storage_reset_notice",
                 "storage_recovery_reason",
+                "session_idle_s",
+                "display_timeout_s",
             },
         )
         self.assertIsNone(result["storage_recovery_reason"])
@@ -1455,6 +1459,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_backup",
                 "storage_reset_notice",
                 "storage_recovery_reason",
+                "session_idle_s",
+                "display_timeout_s",
             },
         )
 
@@ -1534,6 +1540,8 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "storage_backup",
                 "storage_reset_notice",
                 "storage_recovery_reason",
+                "session_idle_s",
+                "display_timeout_s",
             },
         )
 

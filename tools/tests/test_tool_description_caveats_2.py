@@ -7,7 +7,9 @@ bullet branch that ignores radius, and the floor-experiment caveat that the
 suggested sweep-centre offset is not promised for all surfaces. d490: the
 capture_screenshot description must say the pre-run desktop probe is a
 point-in-time check that neither keeps the display awake nor guarantees later
-client captures. Wording is read from the PUBLISHED schemas
+client captures, that it can pass with the display in power-save (a report,
+not a reproduced cause), and that dayz_test_run answers session_idle_s and
+display_timeout_s. Wording is read from the PUBLISHED schemas
 (resolve_effective_schemas), including the compact-catalog cut of the initial
 discovery list; behavioral checks live in their own test class and pin the
 behavior the wording describes (unchanged by this documentation batch).
@@ -81,8 +83,19 @@ class PublishedDescriptionCaveatsTest(unittest.TestCase):
         )
         # The display-sleep mechanism is a report, not an established cause.
         self.assertIn(
-            "a report links a display that entered power-save after the probe "
-            "to frame_client_all_black; that cause is not reproduced",
+            "it can pass with the display in power-save (a report, not "
+            "reproduced, had every capture read frame_client_all_black on a run "
+            "started 6 min after the last input under a 5 min display timeout)",
+            description,
+        )
+        self.assertIn(
+            "dayz_test_run's answer on a client-starting run, preflight included, "
+            "gives session_idle_s (seconds since the session's last input) and "
+            "display_timeout_s (the active power scheme's display-off timeout, 0 "
+            "never), read after that check, or null: when session_idle_s is past "
+            "a non-zero display_timeout_s the display may already be off (an "
+            "application can hold it on), and captures can read "
+            "frame_client_all_black until the display wakes.",
             description,
         )
         self.assertNotIn("can still produce frame_client_all_black", description)

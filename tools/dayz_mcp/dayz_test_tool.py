@@ -57,6 +57,17 @@ def evaluate_prerun_desktop(timeout_s: float | None = None):
     return mcp_capture.run_prerun_desktop_gate(timeout_s=timeout_s)
 
 
+def evaluate_display_idle():
+    """Session idle time and display-off timeout, read after the desktop gate.
+
+    fb-20261002-043444-d490: a display in power-save can pass that gate. A
+    report only: it refuses nothing and keeps nothing awake.
+    """
+    import mcp_capture
+
+    return mcp_capture.read_display_idle()
+
+
 _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 # fb-20260909-213257-49a9: the token stays the prefix so existing matchers
 # keep working; the suffix names the accepted extra_mods form.
@@ -1727,6 +1738,14 @@ def _compact_result(
         # null when this failure is not a declared storage refusal. The hint
         # is the remediation above; the token is the decision, not daemon text.
         "storage_recovery_reason": recovery_reason,
+        # fb-20261002-043444-d490: always present, and set only on the final
+        # answer of a client-starting run once the desktop gate passed. null
+        # means this call did not read them: a mode that starts no client, an
+        # answer before or without the desktop gate, a refusal after it, a
+        # host that is not Windows, or a read that failed. A report: they
+        # authorize or refuse nothing.
+        "session_idle_s": None,
+        "display_timeout_s": None,
     }
     if terminal.attestation is not None:
         result["attestation"] = terminal.attestation
@@ -2386,6 +2405,7 @@ async def _execute_preflight(
                     vpp_warnings=list(vpp.warnings),
                 )
                 return finish(refused, bridge_default)
+            display = None
             if _mode_starts_client(mode):
                 desktop = await asyncio.to_thread(evaluate_prerun_desktop)
                 if desktop.error_code is not None:
@@ -2407,6 +2427,9 @@ async def _execute_preflight(
                         vpp_warnings=list(vpp.warnings),
                     )
                     return finish(refused, bridge_default)
+                # d490: read once the gate passed; only the final answer
+                # below carries it.
+                display = await asyncio.to_thread(evaluate_display_idle)
                 try:
                     steam = evaluate_steam_session()
                 except Exception:
@@ -2601,6 +2624,9 @@ async def _execute_preflight(
                 vpp_missing=list(vpp.missing),
                 vpp_warnings=list(vpp.warnings),
             )
+            if display is not None:
+                succeeded["session_idle_s"] = display.session_idle_s
+                succeeded["display_timeout_s"] = display.display_timeout_s
             return finish(succeeded, bridge_default)
 
 
@@ -2736,6 +2762,7 @@ async def execute_dayz_test_run(
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
                 return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
+            display = None
             if _mode_starts_client(mode):
                 # Gate body uses time.sleep / ImageGrab join. Run it off the
                 # broker event loop so other MCP sessions keep heartbeating.
@@ -2761,6 +2788,9 @@ async def execute_dayz_test_run(
                     if preflight:
                         refused["preflight_skipped_checks"] = preflight_skipped_checks
                     return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
+                # d490: read once the gate passed; only the final answer
+                # below carries it.
+                display = await asyncio.to_thread(evaluate_display_idle)
             if not preflight and _mode_starts_client(mode):
                 try:
                     steam = evaluate_steam_session()
@@ -2957,6 +2987,9 @@ async def execute_dayz_test_run(
                 vpp=vpp,
                 client_dump_roots=client_dump_roots,
             )
+            if display is not None:
+                result["session_idle_s"] = display.session_idle_s
+                result["display_timeout_s"] = display.display_timeout_s
             if preflight:
                 result["preflight_skipped_checks"] = preflight_skipped_checks
             return _annotate_bridge_default(result, bridge_default, project_mod_replaced=project_mod_override)

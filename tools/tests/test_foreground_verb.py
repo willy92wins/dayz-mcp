@@ -675,28 +675,32 @@ class ForegroundRunTest(unittest.TestCase):
         # Codex F12: a hold that foreground_run cut to 1 s on its way to the
         # watch left every test green, and 3 and 10 s answered held_s 1.0.
         # F13 and F14: so did a hold cut to whole seconds, and a watch of
-        # window 420 whatever window was asked for.
+        # window 420 whatever window was asked for. F15: and a hold rounded to
+        # tenths; 0.34375 is exact in binary, and held_s is in hundredths.
         self.desktop.windows[8420] = self.desktop.windows.pop(420)
         self.add_run()
         watch = window_foreground.watch
-        for hold_s in (0.3, 2.5, 3, 10):
+        for hold_s in (0.3, 0.34375, 2.5, 3, 10):
             with self.subTest(hold_s=hold_s):
                 clock = _Clock()
-                with patch.object(
-                    window_foreground,
-                    "watch",
-                    lambda hwnd, hold, *, fns: watch(
+                calls: list[tuple[int, float]] = []
+
+                def recorded(hwnd, hold, *, fns):
+                    calls.append((hwnd, hold))
+                    return watch(
                         hwnd, hold, fns=fns, clock=clock, sleep=clock.sleep
-                    ),
-                ):
+                    )
+
+                with patch.object(window_foreground, "watch", recorded):
                     result = self.foreground(hold_s=hold_s)
+                self.assertEqual(calls, [(8420, float(hold_s))])
                 self.assertEqual(
                     result,
                     {
                         "run_id": RUN_ID,
                         "state": "foreground",
                         "granted": True,
-                        "held_s": float(hold_s),
+                        "held_s": round(float(hold_s), 2),
                     },
                 )
                 self.assertGreaterEqual(clock.now, 100.0 + hold_s)

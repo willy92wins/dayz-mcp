@@ -1263,6 +1263,134 @@ def run_prerun_desktop_gate(
         sleeper(min(max(0.0, float(poll_s)), remaining))
 
 
+# fb-20261002-043444-d490: a display in power-save passed the gate above and
+# every capture of that run read frame_client_all_black. Report only.
+GUID_VIDEO_SUBGROUP = "7516b95f-f776-4464-8c53-06167f40cc99"
+# powercfg VIDEOIDLE: seconds until the display turns off, 0 never.
+GUID_VIDEO_POWERDOWN_TIMEOUT = "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e"
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayIdle:
+    """Session idle and display-off timeout, as read_display_idle read them."""
+
+    session_idle_s: float | None
+    display_timeout_s: int | None
+
+
+def _idle_s(tick_ms: int, last_input_ms: int) -> float:
+    """Seconds between two 32-bit millisecond ticks, across the wrap."""
+    return round(((tick_ms - last_input_ms) & 0xFFFFFFFF) / 1000.0, 3)
+
+
+def _read_session_idle_s() -> float | None:
+    try:
+        import ctypes
+
+        class _LastInputInfo(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetLastInputInfo.argtypes = [ctypes.POINTER(_LastInputInfo)]
+        user32.GetLastInputInfo.restype = ctypes.c_int
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetTickCount.argtypes = []
+        kernel32.GetTickCount.restype = ctypes.c_uint
+        info = _LastInputInfo(cbSize=ctypes.sizeof(_LastInputInfo))
+        if not user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        return _idle_s(kernel32.GetTickCount(), info.dwTime)
+    except Exception:
+        return None
+
+
+def _read_display_timeout_s() -> int | None:
+    try:
+        import ctypes
+        import uuid
+
+        class _PowerStatus(ctypes.Structure):
+            _fields_ = [
+                ("ACLineStatus", ctypes.c_ubyte),
+                ("BatteryFlag", ctypes.c_ubyte),
+                ("BatteryLifePercent", ctypes.c_ubyte),
+                ("SystemStatusFlag", ctypes.c_ubyte),
+                ("BatteryLifeTime", ctypes.c_uint),
+                ("BatteryFullLifeTime", ctypes.c_uint),
+            ]
+
+        guid = ctypes.c_ubyte * 16
+        guid_p = ctypes.POINTER(guid)
+        read_argtypes = [
+            ctypes.c_void_p,
+            guid_p,
+            guid_p,
+            guid_p,
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetSystemPowerStatus.argtypes = [ctypes.POINTER(_PowerStatus)]
+        kernel32.GetSystemPowerStatus.restype = ctypes.c_int
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        powrprof = ctypes.WinDLL("powrprof", use_last_error=True)
+        powrprof.PowerGetActiveScheme.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(guid_p),
+        ]
+        powrprof.PowerGetActiveScheme.restype = ctypes.c_uint
+        powrprof.PowerReadACValueIndex.argtypes = read_argtypes
+        powrprof.PowerReadACValueIndex.restype = ctypes.c_uint
+        powrprof.PowerReadDCValueIndex.argtypes = read_argtypes
+        powrprof.PowerReadDCValueIndex.restype = ctypes.c_uint
+        status = _PowerStatus()
+        # ACLineStatus 0 is battery power; 1, 255 (unknown) and a failed call
+        # read the AC value.
+        if (
+            kernel32.GetSystemPowerStatus(ctypes.byref(status))
+            and status.ACLineStatus == 0
+        ):
+            read_value = powrprof.PowerReadDCValueIndex
+        else:
+            read_value = powrprof.PowerReadACValueIndex
+        subgroup = guid.from_buffer_copy(uuid.UUID(GUID_VIDEO_SUBGROUP).bytes_le)
+        setting = guid.from_buffer_copy(
+            uuid.UUID(GUID_VIDEO_POWERDOWN_TIMEOUT).bytes_le
+        )
+        scheme = guid_p()
+        if powrprof.PowerGetActiveScheme(None, ctypes.byref(scheme)) != 0:
+            return None
+        try:
+            value = ctypes.c_uint()
+            code = read_value(
+                None,
+                scheme,
+                ctypes.byref(subgroup),
+                ctypes.byref(setting),
+                ctypes.byref(value),
+            )
+        finally:
+            kernel32.LocalFree(scheme)
+        return value.value if code == 0 else None
+    except Exception:
+        return None
+
+
+def read_display_idle() -> DisplayIdle:
+    """Seconds since the last input of the session this process runs in, and
+    the display-off timeout of the active power scheme for the current power
+    source, in seconds, 0 never.
+
+    Each is read on its own and is None when its read fails; both are None
+    off Windows. Nothing raises. An application can hold the display on past
+    the timeout, so idle past a non-zero timeout says the display MAY be off.
+    Nothing here keeps the display awake (d490).
+    """
+    if sys.platform != "win32":
+        return DisplayIdle(None, None)
+    return DisplayIdle(_read_session_idle_s(), _read_display_timeout_s())
+
+
 def _grab_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for mcp-grab.ps1.
 
