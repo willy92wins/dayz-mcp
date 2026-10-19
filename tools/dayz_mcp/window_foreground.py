@@ -19,6 +19,7 @@ tests never touch the desktop.
 from __future__ import annotations
 
 import ctypes
+import math
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -133,42 +134,66 @@ def set_foreground(
     return bool(api.set_foreground(hwnd))
 
 
+def read_limit(hold_s: float) -> int:
+    """More reads than one watch makes while its clock runs (Codex F9): each
+    sleep lasts at least what it asks for, and 8 spare reads cover a reading
+    that lands a hair before a deadline."""
+
+    return math.ceil((SETTLE_S + hold_s) / SAMPLE_INTERVAL_S) + 8
+
+
 def watch(
     hwnd: int,
     hold_s: float,
     *,
     fns: Win32ForegroundFns | None = None,
-    clock: Callable[[], float] = time.monotonic,
+    clock: Callable[[], float] = time.perf_counter,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[str, float]:
     """Read the foreground window until a read made ``hold_s`` seconds or more
     after the first one that showed ``hwnd``.
 
-    Between two reads it sleeps SAMPLE_INTERVAL_S, less before the last one. A
-    thread that wakes late reads late, so the last read can come after
-    ``hold_s``, never before it (Codex F1). ``foreground`` when every read
-    showed ``hwnd``, ``lost`` when one showed another window, and ``denied``
-    when ``hwnd`` did not show within SETTLE_S. For the first two, the seconds
-    run from the first to the last read that showed ``hwnd``. The clock is read
-    right after the first of those and right before each later read, so the
-    seconds never count more than passed between the two reads. A change
-    between two reads is not seen.
+    The first read is made at once. Between two reads it sleeps
+    SAMPLE_INTERVAL_S, less before a read due at a deadline, and a thread that
+    wakes late reads late, so that read can come after its deadline, never
+    before it (Codex F1). ``denied`` when no read showed ``hwnd`` up to the
+    first one made SETTLE_S or more after the first, and a window that read
+    sees counts (Codex F10). After the first read that showed ``hwnd``,
+    ``foreground`` when every read showed it up to the first one made
+    ``hold_s`` or more after it, and ``lost`` when one showed another window.
+    held_s is the time from the first to the last read that showed ``hwnd``,
+    rounded to hundredths. A change between two reads is not seen. The clock
+    is perf_counter: time.monotonic of Python 3.11 on Windows ticks every
+    15.625 ms, which let a read come before its deadline and held_s count
+    more than passed (Codex F8). A clock that has not reached the deadlines
+    after read_limit(hold_s) reads is not running, and RuntimeError says so
+    (Codex F9).
     """
 
     api = fns if fns is not None else real_win32()
-    start = clock()
-    while api.foreground() != hwnd:
-        if clock() - start >= SETTLE_S:
-            return "denied", 0.0
-        sleep(SAMPLE_INTERVAL_S)
-    shown = last_seen = read_at = clock()
-    deadline = shown + hold_s
-    while read_at < deadline:
+    reads = read_limit(hold_s)
+
+    def next_read(deadline: float) -> float:
+        nonlocal reads
+        reads -= 1
+        if reads < 0:
+            raise RuntimeError("foreground_clock_stalled")
         # One clock reading sets the sleep, so it is never negative (Codex F6).
         left = deadline - clock()
         if left > 0:
             sleep(min(SAMPLE_INTERVAL_S, left))
-        read_at = clock()
+        return clock()
+
+    read_at = clock()
+    settle = read_at + SETTLE_S
+    while api.foreground() != hwnd:
+        if read_at >= settle:
+            return "denied", 0.0
+        read_at = next_read(settle)
+    shown = last_seen = read_at = clock()
+    deadline = shown + hold_s
+    while read_at < deadline:
+        read_at = next_read(deadline)
         if api.foreground() != hwnd:
             return "lost", round(last_seen - shown, 2)
         last_seen = read_at

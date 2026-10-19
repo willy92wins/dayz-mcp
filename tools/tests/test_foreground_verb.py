@@ -8,8 +8,10 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import dataclasses
+import inspect
 import json
 import threading
+import time
 import unittest
 from ctypes import wintypes
 from pathlib import Path
@@ -186,6 +188,31 @@ def _slow_reads(
     return dataclasses.replace(fns, foreground=foreground)
 
 
+def _shows_at(clock: _Clock, when: float) -> window_foreground.Win32ForegroundFns:
+    """GetForegroundWindow answers the window from ``when`` on ``clock``, another before."""
+
+    return dataclasses.replace(
+        _fronts(_OTHER), foreground=lambda: 11 if clock.now >= when else _OTHER
+    )
+
+
+class _StuckClock:
+    """A clock that never moves, which a mutant could read for ever."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        self.reads += 1
+        if self.reads > 10_000:
+            raise AssertionError("the watch did not stop")
+        return 100.0
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+
+
 class _Clock:
     """A clock whose sleeps end ``late_s`` late, and whose first readings are
     ``times``, as a thread that stalls between them sees it."""
@@ -320,6 +347,38 @@ class WindowForegroundTest(unittest.TestCase):
         clock = _Clock(times=(100.0, 100.0, 100.299, 100.301))
         self.assertEqual(self.watch(_fronts(11), 0.3, clock), ("foreground", 0.3))
         self.assertEqual([round(s, 6) for s in clock.slept], [0.001])
+
+    def test_a_late_thread_reads_for_the_answer_once_settle_s_is_up(self) -> None:
+        # Codex F10: each sleep ends late, and the last read for the answer is
+        # due at 100.5. Made at 100.52 it sees a window that showed at 100.51;
+        # made at 100.7 it does not see one that shows at 100.8, which a whole
+        # interval's sleep would have read at 100.9.
+        clock = _Clock(late_s=0.02)
+        self.assertEqual(
+            self.watch(_shows_at(clock, 100.51), 0.0, clock), ("foreground", 0.0)
+        )
+        self.assertEqual([round(s, 6) for s in clock.slept], [0.25, 0.23])
+        clock = _Clock(late_s=0.2)
+        self.assertEqual(
+            self.watch(_shows_at(clock, 100.8), 0.0, clock), ("denied", 0.0)
+        )
+        self.assertEqual([round(s, 6) for s in clock.slept], [0.25, 0.05])
+
+    def test_it_times_the_reads_with_perf_counter(self) -> None:
+        # Codex F8: time.monotonic of Python 3.11 on Windows ticks every 15.625 ms.
+        default = inspect.signature(window_foreground.watch).parameters["clock"].default
+        self.assertIs(default, time.perf_counter)
+
+    def test_a_clock_that_does_not_run_stops_the_watch(self) -> None:
+        # Codex F9: stuck before the deadline for the answer, and before hold_s.
+        for answers in ((_OTHER,), (11,)):
+            with self.subTest(answers=answers):
+                clock = _StuckClock()
+                with self.assertRaisesRegex(RuntimeError, "foreground_clock_stalled"):
+                    window_foreground.watch(
+                        11, 3.0, fns=_fronts(*answers), clock=clock, sleep=clock.sleep
+                    )
+                self.assertEqual(len(clock.slept), window_foreground.read_limit(3.0))
 
     def test_on_windows_it_binds_user32_with_handles_for_arguments(self) -> None:
         class _Call:
