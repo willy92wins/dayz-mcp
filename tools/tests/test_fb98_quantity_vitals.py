@@ -423,10 +423,11 @@ def _free_local(body: str, name: str) -> str:
 
 
 # The fakes each translated method runs against, for the checks that do not run it.
+# A name the run fakes as a function is a function here too (Codex H15).
 _FAKES = {
     DISPATCH_INSPECT: lambda: _inspect_namespace(_Object("Wall")),
     FILL_QUANTITY: lambda: _inspect_namespace(_Object("Wall")),
-    BUILD_STATE: lambda: _state_namespace([], None),
+    BUILD_STATE: lambda: _state_namespace([], lambda _target, _vitals: None),
 }
 
 
@@ -484,16 +485,18 @@ class AdaptationTest(unittest.TestCase):
         self.assertEqual(indexed, ["0", "1", "2"])
 
     def test_a_class_named_as_a_function_the_namespace_fakes_is_no_class(self) -> None:
-        # Codex H10: `class GetGame {}` under a macro neither build defines enters the
-        # index, and BuildPlayerState still reads, and refuses, as before.
-        index = _addon_classes() | {"GetGame"}
+        # Codex H10 and H15: `class GetGame {}` or `class FillPlayerVitals {}` under a
+        # macro neither build defines enters the index, and BuildPlayerState still
+        # reads, and refuses, as before.
+        index = _addon_classes() | {"GetGame", "FillPlayerVitals"}
         expected = {
             label: _state(listed)[0]
             for label, listed in (("body", [_Body(water=1234.5, energy=2345.5)]), ("man", [_Man()]), ("none", []))
         }
         with patch.object(sys.modules[__name__], "_addon_classes", return_value=index):
-            self.assertIn("GetGame", _addon_classes())
-            self.assertNotIn("GetGame", _classes(_FAKES[BUILD_STATE]()))
+            for name in ("GetGame", "FillPlayerVitals"):
+                self.assertIn(name, _addon_classes())
+                self.assertNotIn(name, _classes(_FAKES[BUILD_STATE]()))
             self.assertEqual(
                 self._refused(BUILD_STATE, method_body(BRIDGE, BUILD_STATE)),
                 (["MCPPlayerState", "MCPPlayerVitals"], ["0", "1", "2"]),
