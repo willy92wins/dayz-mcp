@@ -9402,12 +9402,13 @@ def _release_and_exit(runtime: Runtime) -> None:
     os._exit(0)
 
 
-def run_supervisor(argv: list[str]) -> int:
+def run_supervisor(argv: list[str], *, idle_timeout_s: float = 0.0) -> int:
     """Own stdio and serve the host from a worker this process can replace.
 
     The worker is this same module with --supervised removed, so it keeps the mode and
     every other flag the host registered. The lease crosses each replacement through a
     carrier file whose PATH -- never the token -- travels in the child's environment.
+    A worker idle for idle_timeout_s is retired until the next host line (0 never).
     """
     import tempfile
 
@@ -9431,7 +9432,12 @@ def run_supervisor(argv: list[str]) -> int:
             env=child_env,
         )
 
-    supervisor = Supervisor(spawn=spawn, out_stream=sys.stdout.buffer, log=log)
+    supervisor = Supervisor(
+        spawn=spawn,
+        out_stream=sys.stdout.buffer,
+        log=log,
+        idle_timeout_s=idle_timeout_s,
+    )
     try:
         supervisor.run(sys.stdin.buffer)
     finally:
@@ -9449,7 +9455,11 @@ def run_supervisor(argv: list[str]) -> int:
 def run(argv: list[str] | None = None) -> int:
     config = parse_args(argv)
     if config.supervised:
-        return run_supervisor(list(sys.argv[1:] if argv is None else argv))
+        # Only a client worker: an embedded one owns the port and has its own watchdog.
+        return run_supervisor(
+            list(sys.argv[1:] if argv is None else argv),
+            idle_timeout_s=config.idle_timeout_s if config.mode == "client" else 0.0,
+        )
     if config.mode == "daemon":
         return daemon.run_daemon(config)
 

@@ -220,7 +220,11 @@ refuse to run without a lease whatever the list shows.
 
 Both installers register the client with `--supervised`: it serves the host from a
 worker the supervisor can replace, so `server_reload` picks up edited sources without
-the host reconnecting, and the lease crosses each replacement. `--no-supervised` /
+the host reconnecting, and the lease crosses each replacement. With a positive
+`--idle-timeout`, 1800 seconds by default, the supervisor also retires its worker
+once that long has passed with no host line, no answer and no call in flight, and
+starts a new one on the next host line, which waits for it to start: a host that
+leaves a finished thread's stdin open keeps only the supervisor. `--no-supervised` /
 `-NoSupervised` opts out. `python install_mcp.py --register` refuses to drop an
 option the current registrations carry (`registration_would_drop_options` names each
 one) unless you add `--allow-option-removal`. `.\install-mcp.ps1 -Register` only

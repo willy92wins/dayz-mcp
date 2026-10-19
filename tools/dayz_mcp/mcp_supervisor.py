@@ -35,6 +35,13 @@ The lease is carried by dayz_mcp.session_handoff, whose contract the rehearsal o
 2026-09-10 fixed (REHEARSAL-LEASE.md, 34/34). This module never reads the token: it
 hands the carrier PATH to each worker generation and lets the worker write and consume
 it, which also covers a worker that dies unplanned.
+
+A worker that has had no host line, no answer and no call in flight for the idle
+timeout is retired, and the next host line starts a new one and replays the handshake
+into it, as a recycle does. A host that keeps the stdin of a finished thread open then
+holds this process alone, not the worker too (inbox d345). The lease and the session's
+identity cross that gap as they cross a recycle, and an idle worker would not have
+renewed the lease either: only a call does (SESSION_TTL_S).
 """
 
 from __future__ import annotations
@@ -171,6 +178,7 @@ class Supervisor:
         replay_timeout_s: float = REPLAY_TIMEOUT_S,
         heartbeat_timeout_s: float = HEARTBEAT_TIMEOUT_S,
         lease_status_timeout_s: float = LEASE_STATUS_TIMEOUT_S,
+        idle_timeout_s: float = 0.0,
     ) -> None:
         self._spawn = spawn
         self._out = out_stream
@@ -181,6 +189,8 @@ class Supervisor:
         self._replay_timeout_s = replay_timeout_s
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._lease_status_timeout_s = lease_status_timeout_s
+        # 0 keeps the worker for the life of the host, as before.
+        self._idle_timeout_s = idle_timeout_s
 
         self._out_lock = threading.Lock()
         self._state = threading.Condition()
@@ -191,6 +201,14 @@ class Supervisor:
         # believes its server is in without the host being told to do it again.
         self._initialize_line: bytes | None = None
         self._initialized_line: bytes | None = None
+        self._last_activity_s = self._monotonic()
+        # parked: the worker was retired for idleness and none runs. parking: that
+        # retirement is under way, and a host line waits for it before starting one.
+        # routing: host lines being routed, which keep the worker from being retired.
+        self._parked = False
+        self._parking = False
+        self._routing = 0
+        self._stopped = threading.Event()
 
     # -- wire ------------------------------------------------------------------
 
@@ -324,6 +342,8 @@ class Supervisor:
             is_response = ident is not None and "method" not in message
             if is_response:
                 with self._state:
+                    # An answer is activity too: idle time counts from the end of a call.
+                    self._last_activity_s = self._monotonic()
                     generation.inflight.pop(ident, None)
                     superseded = ident in generation.detached
                     observe = _is_observe_id(ident)
@@ -537,6 +557,63 @@ class Supervisor:
                 return False
         return True
 
+    def park_if_idle(self) -> bool:
+        """Retire the worker if it has had nothing to do for the idle timeout."""
+        with self._state:
+            generation = self._current
+            idle_s = self._monotonic() - self._last_activity_s
+            if (
+                self._idle_timeout_s <= 0
+                or generation is None
+                or self._parked
+                or self._draining
+                or self._routing
+                # Without a handshake to replay, a new worker could not be brought up.
+                or self._initialize_line is None
+                or generation.failed
+                or generation.retired
+                or generation.inflight
+                or idle_s < self._idle_timeout_s
+            ):
+                return False
+            self._parked = True
+            self._parking = True
+        self._log(
+            f"worker generation={generation.number} idle for {idle_s:.0f} s; "
+            "retired until the next host line"
+        )
+        try:
+            self._retire(generation)
+        finally:
+            with self._state:
+                self._parking = False
+                self._state.notify_all()
+        return True
+
+    def _wake(self) -> None:
+        """Start a worker for the host line that found the last one parked.
+
+        When none can be started, the line meets the retired worker, which answers
+        it as a dead one does, and the next line tries again.
+        """
+        try:
+            replacement = self.start_worker()
+        except OSError as exc:
+            self._log(f"no worker could be started after the idle retirement: {exc}")
+            return
+        replayed = self._replay_handshake(replacement)
+        with self._state:
+            self._parked = False
+        if not replayed:
+            self._log("the worker started after the idle retirement did not take the handshake")
+            return
+        # It serves the sources on disk now, as a recycle does.
+        self._send_host({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
+    def _watch_idle(self, poll_s: float) -> None:
+        while not self._stopped.wait(poll_s):
+            self.park_if_idle()
+
     def _observe_seq(self) -> str:
         self._observe_n = getattr(self, "_observe_n", 0) + 1
         return f"{_OBSERVE_PREFIX}{self._observe_n}"
@@ -667,7 +744,26 @@ class Supervisor:
     # -- host side -------------------------------------------------------------
 
     def handle_host_line(self, raw: bytes) -> None:
-        """Route one line from the host. Anything not understood is forwarded intact."""
+        """Route one line from the host. Anything not understood is forwarded intact.
+
+        A line that comes while the worker is retired for idleness waits for that
+        retirement and starts a worker, and no worker is retired while a line is routed.
+        """
+        with self._state:
+            self._last_activity_s = self._monotonic()
+            while self._parking:
+                self._state.wait()
+            parked = self._parked
+            self._routing += 1
+        try:
+            if parked:
+                self._wake()
+            self._route_host_line(raw)
+        finally:
+            with self._state:
+                self._routing -= 1
+
+    def _route_host_line(self, raw: bytes) -> None:
         with self._state:
             generation = self._current
         if generation is None:
@@ -726,10 +822,18 @@ class Supervisor:
 
     def run(self, in_stream: object) -> None:
         self.start_worker()
+        if self._idle_timeout_s > 0:
+            threading.Thread(
+                target=self._watch_idle,
+                args=(min(60.0, max(5.0, self._idle_timeout_s / 4.0)),),
+                daemon=True,
+                name="dayz-mcp-idle",
+            ).start()
         for raw in iter(in_stream.readline, b""):
             if not raw.strip():
                 continue
             self.handle_host_line(raw)
+        self._stopped.set()
         self._log("host stdin closed")
         with self._state:
             generation = self._current
