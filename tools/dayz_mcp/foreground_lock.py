@@ -1,18 +1,19 @@
-"""Keep the foreground where it is while DayZ starts (inbox fade, 75e7).
+"""Lock the foreground while DayZ starts (inbox fade, 75e7).
 
 DayZ brings its own window to the front after it starts, whatever its first
 show state: launched SW_SHOWNOACTIVATE (#59) and with the server window
 minimized (#168, reverted in #180), the server still held the foreground for
 2.26 s and the client for 2.5 s and then 5.0 s (2026-09-30). So each normal
-launch takes LockSetForegroundWindow(LSFW_LOCK), which refuses
-SetForegroundWindow to every process until it is unlocked, and unlocks it
-HOLD_S after the last launch: the takes measured in fade came within 3 s of
-each start. Windows drops the lock itself when the user presses ALT or clicks
-a window, so a person can always bring DayZ forward.
+launch calls LockSetForegroundWindow(LSFW_LOCK), which disables calls to
+SetForegroundWindow, and LSFW_UNLOCK HOLD_S after the last launch: the takes
+measured in fade came within 3 s of each start. Windows enables those calls
+again itself when the user presses ALT or does something that makes Windows
+change the foreground window, such as clicking a background window, so a
+person can always bring DayZ forward. Whether the lock keeps DayZ behind is
+not measured yet.
 
-Windows grants the lock only to a process that could take the foreground
-itself, so hold() reports what Windows answered. Nothing here reads a window:
-the lock is the only call.
+Microsoft documents the call for the foreground process, so hold() reports
+what Windows answered. Nothing here reads a window: the lock is the only call.
 """
 
 from __future__ import annotations
@@ -64,7 +65,8 @@ class ForegroundLock:
         """Lock now and release HOLD_S from now.
 
         Returns what LockSetForegroundWindow answered, or None where there is
-        no lock to take.
+        no lock to take. When the release cannot be scheduled, it unlocks at
+        once and raises, so no lock is left without a release.
         """
 
         if self._lock_fn is None:
@@ -76,11 +78,17 @@ class ForegroundLock:
             self._generation += 1
             if self._release_timer is not None:
                 self._release_timer.cancel()
-            self._release_timer = self._timer_factory(
-                self._hold_s, self._release, args=(self._generation,)
-            )
-            self._release_timer.daemon = True
-            self._release_timer.start()
+                self._release_timer = None
+            try:
+                timer = self._timer_factory(
+                    self._hold_s, self._release, args=(self._generation,)
+                )
+                timer.daemon = True
+                timer.start()
+            except Exception:
+                self._lock_fn(LSFW_UNLOCK)
+                raise
+            self._release_timer = timer
         return locked
 
     def _release(self, generation: int) -> None:

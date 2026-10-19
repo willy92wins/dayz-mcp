@@ -2142,8 +2142,8 @@ class ProcessLifecycle:
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
         steam_gate: object | None = None,
-        # fade, 75e7: the lock a normal launch takes so DayZ does not bring
-        # its window to the front (foreground_lock.py). None takes none.
+        # fade, 75e7: the foreground lock a normal launch takes
+        # (foreground_lock.py). None takes none.
         foreground_lock: object | None = None,
     ) -> None:
         self.coordinator = coordinator
@@ -4345,12 +4345,21 @@ class ProcessLifecycle:
                     self.foreground_lock is not None
                     and parsed["window_style"] == "normal"
                 ):
-                    locked = self.foreground_lock.hold()
-                    if locked is not None and not self._audit(
+                    # The launch goes on whatever the lock does.
+                    try:
+                        locked = self.foreground_lock.hold()
+                        decision = (
+                            None
+                            if locked is None
+                            else "locked" if locked else "refused"
+                        )
+                    except Exception:
+                        decision = "failed"
+                    if decision is not None and not self._audit(
                         "lifecycle_foreground_lock",
                         client,
                         "launch",
-                        "locked" if locked else "refused",
+                        decision,
                         run_id=run_id,
                         role=launch_role,
                     ):
