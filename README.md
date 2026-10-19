@@ -347,10 +347,10 @@ daemon makes are two files, and they do not exclude each other.
      by default, it exits by itself once that long has passed with no game
      polls and no client requests; with `--idle-timeout 0` it never does, and
      only stopping its process outside MCP ends it. Go on when
-     `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object CommandLine -Match '-m dayz_mcp --daemon'`
-     prints nothing. It matches text in the command line, which also shows
-     the `--idle-timeout`: read the line of a process it lists before you stop
-     that process.
+     `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object CommandLine -Match '-m dayz_mcp --daemon' | Format-List ProcessId, CommandLine`
+     prints nothing. It matches text in the command line, which it prints
+     with the `--idle-timeout`: read the line of a process it lists before you
+     stop that process.
   2. Compare each folder with its real one:
      `robocopy "<folder>" "$env:LOCALAPPDATA\<its name>" /E /L /XX /NJH /NJS /NDL /FP`
      copies nothing (`/L`) and lists every file of the copy that the real
