@@ -717,6 +717,16 @@ class MCPHoldControl
 
 modded class ActionManagerClient
 {
+	// 204e: DispatchActionUse compares it across PerformActionStart. A local
+	// instant action runs Start and then OnActionEnd inside ActionStart, so it
+	// leaves GetRunningAction() null, as a start SetupAction refused does.
+	protected int m_MCP_ActionEnds;
+
+	int MCP_ActionEnds()
+	{
+		return m_MCP_ActionEnds;
+	}
+
 	bool MCP_HoldBusy()
 	{
 		if (m_PendingActionData)
@@ -772,6 +782,7 @@ modded class ActionManagerClient
 
 	override void OnActionEnd()
 	{
+		m_MCP_ActionEnds++;
 		MCPHoldControl.BeforeActionEnd(this);
 		super.OnActionEnd();
 		MCPHoldControl.AfterActionEnd(this);
