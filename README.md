@@ -300,6 +300,70 @@ outside the app (dayz-mcp starts it through WMI). `session_status`,
   `tools\clear-app-steam-shadow.ps1` from an elevated PowerShell. It backs up
   the app's hive and lists the Valve keys in it; `-Apply` deletes them.
 
+### Files created from the app's shells
+
+Claude Desktop also virtualizes `%LOCALAPPDATA%` for every process it starts
+(Codex was not checked). A new file or folder that such a process creates under
+it lands in the app's own copy,
+`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\`, and the
+app's processes see it in its usual place. Processes outside the app see only
+the real folder. So does the daemon when dayz-mcp starts it through WMI, which
+it tries first; with `DAYZ_MCP_DAEMON_SPAWN_WMI=0`, or when WMI fails, the
+client starts it directly, inside the app, and that daemon sees the copy as
+well. The client's stderr names the way it took, on a line that starts with
+`SPAWN:`: `created through WMI` for WMI; for a direct start,
+`created with CREATE_BREAKAWAY_FROM_JOB` or `launched job-bound`, after a line
+that ends in `launching directly` if WMI was tried and failed.
+
+A change to a file that only the real folder has goes to the real file:
+`runs.json` and `coordination.json` were updated in place on 2026-10-08. A
+file that the copy already has opens in the copy for the app's processes, so
+their changes stay there. For one, an installer run again from the app updates
+the knowledge pack in the copy and leaves the real folder as it was.
+
+So what the installers or the doctor create from the app's shells can be
+missing for the daemon. On 2026-10-08 the knowledge pack installed by
+`install_mcp.py --register --instance 130` from Claude's Bash was in the app's
+copy, and the doctor run there reported `PACK_SKILLS_UNREGISTERED` with a
+manifest path inside it. Lock files under `DayZ_MCP_shared\build-locks` had
+been created there as well: a lock file made inside the app and the one the
+daemon makes are two files, and they do not exclude each other.
+
+- Run `install-mcp.ps1`, `install_mcp.py`, `python -m dayz_mcp.doctor` and any
+  `python -m dayz_mcp` you start by hand from a PowerShell opened outside the
+  app, for example from the Start menu.
+- A path with `\Packages\` and `\LocalCache\` in their output is a sign that
+  the command ran inside the app, unless a setting such as `DAYZ_MCP_PACK_DIR`
+  or `LOCALAPPDATA` points there: check those, then run it again from outside.
+- `Get-ChildItem "$env:LOCALAPPDATA\Packages\*\LocalCache\Local\*" -Directory -Filter 'DayZ_MCP*'`
+  lists the folders left in an app's copy. Do not delete them: they can also
+  hold files that the app's own processes wrote and the real folder lacks,
+  such as an `inbox`, a `launcher-policy.json` or a `capture-frame-state.json`.
+  To bring what you need back into the real folder, from a PowerShell outside
+  the app:
+  1. Stop what writes to either folder. Close every Claude and Codex session
+     that uses dayz-mcp, then wait for the daemon, which can outlive the
+     session that started it. With a positive `--idle-timeout`, 1800 seconds
+     by default, it exits by itself once that long has passed with no game
+     polls and no client requests; with `--idle-timeout 0` it never does, and
+     only stopping its process outside MCP ends it. Go on when
+     `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object CommandLine -Match '-m dayz_mcp --daemon' | Format-List ProcessId, CommandLine`
+     prints nothing. It matches text in the command line, which it prints
+     with the `--idle-timeout`: read the line of a process it lists before you
+     stop that process.
+  2. Compare each folder with its real one:
+     `robocopy "<folder>" "$env:LOCALAPPDATA\<its name>" /E /L /XX /NJH /NJS /NDL /FP`
+     copies nothing (`/L`) and lists every file of the copy that the real
+     folder lacks or holds with another size or time, older or newer.
+  3. Copy the real folder to a folder of your own before you change it, so
+     that a file you replace can be put back.
+  4. Copy into the real folder by hand what you keep. For a file that both
+     hold, compare the two first and keep the content you need: the real one
+     may be the newer.
+  5. Move the copy to a folder of your own, from where it can be moved back.
+     If the move fails, or the listing shows the folder again, something is
+     still using it.
+
 ## Security model
 
 Fail-closed from the first line: the listener binds `127.0.0.1` only, every request
