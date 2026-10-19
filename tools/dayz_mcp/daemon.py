@@ -32,6 +32,7 @@ from typing import Any, Callable
 
 from dayz_mcp import core, input_activity, orphan_guard, wmi_host
 from dayz_mcp.daemon_contract import build_daemon_argv, daemon_runtime_cwd
+from dayz_mcp.foreground_lock import ForegroundLock, real_lock_fn
 from dayz_mcp.identity_migration import (
     RunsBackupGateError,
     capture_launch_ancestor_identity,
@@ -633,6 +634,7 @@ def _activate_server_coordination(
         # client replacement against the bridge at the instant of the kill.
         bridge_probe=getattr(state, "status_snapshot", None),
         daemon_generation=daemon_generation,
+        foreground_lock=ForegroundLock(real_lock_fn()),
     )
     if recovered_lifecycle_fault is None:
         # fb-20260904-200821-dae1 part 2 (A1-F7): first, so a process the

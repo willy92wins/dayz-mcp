@@ -2142,6 +2142,9 @@ class ProcessLifecycle:
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
         steam_gate: object | None = None,
+        # fade, 75e7: the foreground lock a normal launch takes
+        # (foreground_lock.py). None takes none.
+        foreground_lock: object | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -2158,6 +2161,7 @@ class ProcessLifecycle:
         self.argv_of = argv_of or _default_argv_of
         self.bindings = bindings
         self.bridge_probe = bridge_probe
+        self.foreground_lock = foreground_lock
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
@@ -3598,10 +3602,13 @@ class ProcessLifecycle:
         run_id: str,
         state: str,
         terminated: int | None = None,
+        foreground_lock: str | None = None,
     ) -> dict[str, object]:
         fields: dict[str, object] = {"run_id": run_id, "state": state}
         if terminated is not None:
             fields["terminated"] = terminated
+        if foreground_lock is not None:
+            fields["foreground_lock"] = foreground_lock
         if not self._audit(event, client, reason, decision, **fields):
             self._add_degradation(result, "audit_failed")
         return result
@@ -3723,6 +3730,7 @@ class ProcessLifecycle:
         confirmed_error: str,
         manifest_failure: bool = False,
         attempt_started_at: float | None = None,
+        foreground_lock: str | None = None,
     ) -> dict[str, object]:
         """Leave every failed Popen attempt in a durable, reconcilable state."""
 
@@ -3775,6 +3783,7 @@ class ProcessLifecycle:
             decision=str(result["error"]),
             run_id=provisional.run_id,
             state=state,
+            foreground_lock=foreground_lock,
         )
 
     def start_run(self, client: ClientIdentity, token: str | None, request: object) -> dict[str, object]:
@@ -4337,6 +4346,22 @@ class ProcessLifecycle:
                             confirmed_error="launch_intent_failed",
                             attempt_started_at=attempt_started_at,
                         )
+                lock_decision: str | None = None
+                if (
+                    self.foreground_lock is not None
+                    and parsed["window_style"] == "normal"
+                ):
+                    # The launch goes on whatever the lock does, and its
+                    # outcome row says what Windows answered (fade, 75e7).
+                    try:
+                        locked = self.foreground_lock.hold()
+                        lock_decision = (
+                            None
+                            if locked is None
+                            else "locked" if locked else "refused"
+                        )
+                    except Exception:
+                        lock_decision = "failed"
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -4357,6 +4382,7 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="lifecycle_start_failed",
                         attempt_started_at=attempt_started_at,
+                        foreground_lock=lock_decision,
                     )
 
                 try:
@@ -4374,6 +4400,7 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="identity_unavailable",
                         attempt_started_at=attempt_started_at,
+                        foreground_lock=lock_decision,
                     )
                 self._confirm_instance(minted, record)
 
@@ -4393,6 +4420,7 @@ class ProcessLifecycle:
                         confirmed_error="lifecycle_start_failed",
                         manifest_failure=True,
                         attempt_started_at=attempt_started_at,
+                        foreground_lock=lock_decision,
                     )
                 if intent is not None:
                     # What recover_launch_intent would conclude about this very
@@ -4441,6 +4469,7 @@ class ProcessLifecycle:
                     decision="started",
                     run_id=run_id,
                     state="RUNNING",
+                    foreground_lock=lock_decision,
                 )
             finally:
                 self._finish_committed(authority, command_id)
