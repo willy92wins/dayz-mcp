@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from tests._addon_paths import addon_root
-from tests.enforce_subset_helpers import method_body
+from tests.enforce_subset_helpers import clean, method_body
 from dayz_mcp import loopback, server
 from dayz_mcp.session_coordination import command_requires_lease
 
@@ -13,11 +13,17 @@ from dayz_mcp.session_coordination import command_requires_lease
 COMMAND = "action_use"
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+HOLD_PATH = addon_root() / "scripts" / "4_World" / "MCP_ActionHold.c"
 DISPATCH = "protected bool DispatchActionUse(MCPCommand command, MCPResult result)"
+HOLD_OVERRIDE = (
+    "override void PerformActionStart(ActionBase action, ActionTarget target, "
+    "ItemBase item, Param extra_data = NULL)"
+)
 
-# The 1.30 guard, compared without whitespace once method_body() has blanked
-# the comments. Its words and their order let three mutants live (#249 K1) and
-# a brace count three more (K2); test_can_be_started_mutants_are_red has them.
+# The 1.30 guard, compared without the whitespace outside its string literal
+# once method_body() has blanked the comments. Its words and their order let
+# three mutants live (#249 K1), a brace count three more (K2) and spaces in
+# the error code one (K6); test_can_be_started_mutants_are_red has them.
 CAN_BE_STARTED_GUARD = """
 if (!action.CanBeStarted())
 {
@@ -30,10 +36,25 @@ _GUARD = re.compile(
     r"^[ \t]*#ifndef[ \t]+DAYZ_1_29[ \t]*\n(?P<block>.*?)^[ \t]*#endif\b", re.M | re.S
 )
 _STRING_OR_BRACE = re.compile(r'"(?:\\.|[^"\\])*"|[{}]')
+_STRING = re.compile(r'("(?:\\.|[^"\\])*")')
+# The calls that start an action without asking CanBeStarted()
+# (actionmanagerclient.c:792, 1055-1090 and 1172-1190; #249 K4).
+_START = re.compile(
+    r"\b(?:ActionStart|PerformActionStart|PerformActionFromQuickbar"
+    r"|PerformActionFromInventory|OnInstantAction)\b"
+)
 
 
 def _bare(text: str) -> str:
-    return re.sub(r"\s+", "", text)
+    parts = _STRING.split(text)
+    return "".join(
+        part if index % 2 else re.sub(r"\s+", "", part) for index, part in enumerate(parts)
+    )
+
+
+def _code(text: str) -> str:
+    # A name inside a string literal is not a call (#249 K7).
+    return _STRING.sub('""', text)
 
 
 def _one_guard(text: str) -> re.Match[str]:
@@ -45,7 +66,7 @@ def _one_guard(text: str) -> re.Match[str]:
 
 def verify_can_be_started_guard(source: str) -> None:
     body = method_body(source, DISPATCH)
-    if len(re.findall(r"\bCanBeStarted\b", body)) != 1:
+    if len(re.findall(r"\bCanBeStarted\b", _code(body))) != 1:
         raise AssertionError("one CanBeStarted() check")
     guard = _one_guard(body)
     before, block = body[: guard.start()], guard.group("block")
@@ -64,7 +85,10 @@ def verify_can_be_started_guard(source: str) -> None:
         raise AssertionError("the guard is the body of a statement without braces")
     if _bare("if (!action.Can(player, actionTarget, heldItem))") not in _bare(before):
         raise AssertionError("CanBeStarted() is asked before Can()")
-    if re.search(r"\b(?:Perform)?ActionStart\b", before + block):
+    # Every start in the file comes after the guard in this method, so neither
+    # a helper nor another start call runs first (#249 K4, K5).
+    after = body[guard.end() :]
+    if len(_START.findall(_code(clean(source)))) != len(_START.findall(_code(after))):
         raise AssertionError("an action starts before CanBeStarted() is asked")
 
 
@@ -127,6 +151,15 @@ class ActionUseCanBeStartedTest(unittest.TestCase):
     def test_can_be_started_mutants_are_red(self) -> None:
         source = self.source
         door = 'if (command.cmd == "action_use_door")\n'
+        helper = (
+            "protected bool StartDoor(ActionManagerClient amc, ActionBase action, "
+            "ActionTarget target, ItemBase item)\n{\n"
+            "amc.PerformActionStart(action, target, item, NULL);\nreturn true;\n}\n\n"
+        )
+
+        def door_first(base: str, call: str) -> str:
+            return _around_guard(base, door + "{\n" + call + "\nreturn true;\n}\n", "")
+
         mutants = {
             # The guard for action_use_door alone leaves the other four
             # commands starting what 1.30 would not.
@@ -136,8 +169,19 @@ class ActionUseCanBeStartedTest(unittest.TestCase):
             "door_only_string_brace": _around_guard(source, door + '{ string unused = "}";\n', "\n}"),
             "inside_another_if": _around_guard(source, "#ifdef DAYZ_MCP_NEVER\n", "\n#endif"),
             "ok_true": _in_guard(source, r"result\s*\.\s*ok\s*=\s*false\s*;", "result.ok = true;"),
+            "error_code_with_a_space": _in_guard(source, r'"condition_failed"', '"condition_ failed"'),
             # Also stops every allowed start.
-            "return_outside_if": _in_guard(source, r"return\s+true\s*;(\s*)\}", r"}\1return true;"),
+            "return_outside_if": _in_guard(
+                source, r"return\s+true\s*;((?:[ \t]*//[^\n]*)?\s*)\}", r"}\1return true;"
+            ),
+            # Starts that skip the guard for action_use_door (#249 K4, K5).
+            "door_quickbar": door_first(source, "amc.PerformActionFromQuickbar(heldItem, null);"),
+            "door_inventory": door_first(source, "amc.PerformActionFromInventory(heldItem, null);"),
+            "door_instant": door_first(source, "amc.OnInstantAction(ActionOpenDoors);"),
+            "door_helper": door_first(
+                source.replace(DISPATCH, helper + DISPATCH, 1),
+                "return StartDoor(amc, action, actionTarget, heldItem);",
+            ),
         }
         for label, mutant in mutants.items():
             with self.subTest(mutant=label):
@@ -145,21 +189,44 @@ class ActionUseCanBeStartedTest(unittest.TestCase):
                     verify_can_be_started_guard(mutant)
 
     def test_harmless_edits_keep_the_guard_green(self) -> None:
-        # #249 K3: layout, comments and braces in a comment or a string are not
-        # the guard's business.
+        # #249 K3, K7: layout, comments, and braces or names in a comment or a
+        # string are not the guard's business.
         source = self.source
         variants = {
-            "spaces_for_tabs": source.replace("\t", "    "),
+            "tabs_and_spaces_swapped": (
+                source.replace("\t", "    ") if "\t" in source else source.replace("    ", "\t")
+            ),
             "comment_in_the_if": _in_guard(source, r"(result\s*\.\s*ok\s*=)", r"// why\n\1"),
             "trailing_comment": _in_guard(source, r"(return\s+true\s*;)", r"\1 // done"),
             "braces_in_a_comment_and_a_string": _around_guard(
                 source, '// } {\nstring unused = "}";\n', ""
+            ),
+            "names_in_a_string": _around_guard(
+                source, 'string unused = "CanBeStarted() before PerformActionStart()";\n', ""
             ),
         }
         for label, variant in variants.items():
             with self.subTest(variant=label):
                 self.assertNotEqual(variant, source)
                 verify_can_be_started_guard(variant)
+
+    def test_no_other_addon_code_starts_an_action(self) -> None:
+        # #249 K5: a start anywhere else in the addon could run before the
+        # guard. MCP_ActionHold's override of PerformActionStart only passes
+        # the bridge's call on to super.
+        for path in sorted(addon_root().glob("scripts/**/*.c")):
+            if path == BRIDGE_PATH:
+                continue
+            source = path.read_text(encoding="utf-8")
+            starts = _START.findall(_code(clean(source)))
+            with self.subTest(file=path.name):
+                if path == HOLD_PATH:
+                    override = _code(method_body(source, HOLD_OVERRIDE))
+                    self.assertEqual(_START.findall(override), ["PerformActionStart"])
+                    self.assertIn("super.PerformActionStart(", _bare(override))
+                    self.assertEqual(len(starts), 2)  # its signature and that call
+                else:
+                    self.assertEqual(starts, [])
 
 
 class ActionUseAppToolTest(unittest.IsolatedAsyncioTestCase):

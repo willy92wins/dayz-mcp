@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -404,23 +406,51 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
 
 
 # Prints the script's parse errors, every assignment to the preference (with 1 when
-# it is a statement of the script's own body), every token outside a comment that
-# names it, and every call to reg however it is spelled, by offset.
+# it is a statement of the script's own body) and every call to reg however it is
+# spelled, by offset.
 _PREFERENCE_PROBE = r"""
 $tokens = $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile('SCRIPT', [ref]$tokens, [ref]$errors)
 'errors ' + $errors.Count
 $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -match 'PSNativeCommandUseErrorActionPreference$' }, $true) |
     ForEach-Object { 'set ' + [int]($_.Parent -eq $ast.EndBlock) + ' ' + $_.Extent.StartOffset + ' ' + $_.Extent.Text }
-$tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match 'PSNativeCommandUseErrorActionPreference' } |
-    ForEach-Object { 'name ' + $_.Extent.StartOffset }
 $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.CommandElements[0].Extent.Text -match '(^[''"]?|[\\/])reg(\.exe)?[''"]?$' }, $true) |
     ForEach-Object { 'reg ' + $_.Extent.StartOffset }
 """
 
 
+# Runs the script with a caller's $PSNativeCommandUseErrorActionPreference = $true
+# and its outside effects replaced by functions of the same names, which PowerShell
+# finds before a cmdlet or an application. The fake reg.exe prints the preference
+# each call sees past the script's Out-Null; load succeeds and unload fails, so the
+# retries run.
+_RUN_PROBE = r"""
+$PSNativeCommandUseErrorActionPreference = $true
+function global:reg.exe {
+    Write-Host ('call ' + $args[0] + ' ' + $PSNativeCommandUseErrorActionPreference)
+    $global:LASTEXITCODE = [int]($args[0] -ne 'load')
+}
+function global:reg { reg.exe @args }
+function global:New-Object { [pscustomobject]@{} | Add-Member -MemberType ScriptMethod -Name IsInRole -Value { $true } -PassThru }
+function global:Get-AppxPackage { }
+function global:Start-Sleep { }
+function global:Test-Path {
+    param([string]$LiteralPath)
+    if ($LiteralPath -like 'Registry::*') { $false } else { Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath }
+}
+function global:Get-ChildItem {
+    param([string]$LiteralPath, [string]$Filter, [switch]$Force, [switch]$Recurse)
+    if ($LiteralPath -notlike 'Registry::*') { Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $LiteralPath -Filter $Filter -Force:$Force }
+}
+# The real reg.exe must never run here.
+if ((Get-Command reg.exe).CommandType -ne 'Function') { 'reg.exe is not the fake'; exit 3 }
+& 'SCRIPT'
+exit 0
+"""
+
+
 class ClearAppSteamShadowScriptTest(unittest.TestCase):
-    """tools/clear-app-steam-shadow.ps1, read by PowerShell's own parser: nothing runs it."""
+    """tools/clear-app-steam-shadow.ps1: read by PowerShell's parser, and run with fakes."""
 
     def test_reg_exe_is_judged_by_its_exit_code_alone(self) -> None:
         # Fifth Codex review of #239 (T1): in PowerShell 7.3 and later, a caller's
@@ -430,7 +460,9 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
         # that never runs (under an if, in a function, a comment or a script block) and
         # a later one back to $true passed too (Codex review of #240, U1). So did a
         # later Set-Variable or ${...} assignment, and a reg call spelled other than
-        # reg.exe before the assignment (third Codex review of #240, V1 and V2).
+        # reg.exe before the assignment (third Codex review of #240, V1 and V2). A later
+        # change of the value is now the business of the run below, which reads it at
+        # each call.
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if shell is None:
             self.skipTest("PowerShell is not installed")
@@ -456,11 +488,46 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
             [(top, text) for top, _offset, text in assignments],
             [("1", "$PSNativeCommandUseErrorActionPreference = $false")],
         )
-        names = [int(line.split()[1]) for line in lines if line.startswith("name ")]
-        self.assertEqual(names, [int(assignments[0][1])])
         reg = [int(line.split()[1]) for line in lines if line.startswith("reg ")]
         self.assertTrue(reg)
         self.assertLess(int(assignments[0][1]), min(reg))
+
+    @unittest.skipUnless(os.name == "nt", "the script reads the Windows identity")
+    def test_every_reg_exe_call_runs_with_the_preference_off(self) -> None:
+        # Codex review of #241, W3 and W4: the text checks above missed a finally that
+        # puts a caller's $true back before reg unload (Get-Variable and Set-Variable
+        # over *Preference) and a reg.exe called through a variable before the
+        # assignment. This runs the script and reads the value at each call.
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if shell is None:
+            self.skipTest("PowerShell is not installed")
+        script = Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1"
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        helium = root / "Packages" / "Claude_pzs8sxrjxfjjc" / "SystemAppData" / "Helium"
+        helium.mkdir(parents=True)
+        (helium / "User.dat").write_bytes(b"hive")
+        probe = _RUN_PROBE.replace("SCRIPT", str(script).replace("'", "''"))
+        result = subprocess.run(
+            [
+                shell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                base64.b64encode(probe.encode("utf-16-le")).decode("ascii"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "LOCALAPPDATA": str(root), "USERPROFILE": str(root)},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        calls = [line[len("call ") :] for line in lines if line.startswith("call ")]
+        self.assertEqual(calls[:1], ["load False"], result.stdout)
+        self.assertGreater(len(calls), 2, result.stdout)  # the failed unload was retried
+        self.assertEqual(set(calls[1:]), {"unload False"}, result.stdout)
 
 
 if __name__ == "__main__":

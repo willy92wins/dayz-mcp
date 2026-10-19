@@ -423,11 +423,12 @@ async def _run_async(
     if conflict:
         raise SystemExit(f"mission already has rotation names: {conflict}")
     planted = mission / PLANTED_NAME
+    already_there = (
+        f"planted journal already exists, refusing to overwrite: {planted}. A run "
+        "that died, or whose cleanup failed, leaves it: remove it by hand and run again"
+    )
     if planted.exists():
-        raise SystemExit(
-            f"planted journal already exists, refusing to overwrite: {planted}. A run "
-            "that died, or whose cleanup failed, leaves it: remove it by hand and run again"
-        )
+        raise SystemExit(already_there)
     server = StdioServerParameters(command=parts[0], args=parts[1:])
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
@@ -442,6 +443,12 @@ async def _run_async(
             )
             caller_session = await _own_client_session(session)
             audit_before = _audit_lines(audit_file)
+            # Made exclusively: exists() above answers False when the observation
+            # fails, and the write would replace the journal it asked about (127f).
+            try:
+                planted.touch(exist_ok=False)
+            except FileExistsError:
+                raise SystemExit(already_there) from None
             try:
                 # Inside the try: a write that fails after making the file is removed too.
                 planted.write_text("{}\n", encoding="utf-8")
