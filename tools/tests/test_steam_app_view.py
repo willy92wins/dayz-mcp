@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 import shutil
 import subprocess
 import sys
@@ -405,52 +404,246 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["steam_app_view"], _ADVISORY)
 
 
-# Prints the script's parse errors, every assignment to the preference (with 1 when
-# it is a statement of the script's own body) and every call to reg however it is
-# spelled, by offset.
+# For each .ps1 in DIR, read by PowerShell's own parser: its parse errors; every
+# assignment to the preference (with 1 when it is a statement of the script's own
+# body); every token outside a comment that names it; what could run before that
+# assignment (a statement other than a variable set to a constant, a default or an
+# attribute argument that is not a constant, a begin, process, dynamicparam or clean
+# block, using, #requires that loads something); every way it offers to set a
+# variable without naming it (the *-Variable, Invoke-Expression, Invoke-Command, alias
+# and drive commands however spelled, a command named at run time or dot-sourced,
+# the Variable: drive, the session state, the -*Variable parameters, splatting,
+# $PSDefaultParameterValues, [scriptblock]); and every call to reg, by offset.
 _PREFERENCE_PROBE = r"""
-$tokens = $errors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile('SCRIPT', [ref]$tokens, [ref]$errors)
-'errors ' + $errors.Count
-$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -match 'PSNativeCommandUseErrorActionPreference$' }, $true) |
-    ForEach-Object { 'set ' + [int]($_.Parent -eq $ast.EndBlock) + ' ' + $_.Extent.StartOffset + ' ' + $_.Extent.Text }
-$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.CommandElements[0].Extent.Text -match '(^[''"]?|[\\/])reg(\.exe)?[''"]?$' }, $true) |
-    ForEach-Object { 'reg ' + $_.Extent.StartOffset }
+$alias = @{}
+Get-Alias | ForEach-Object { $alias[$_.Name] = $_.Definition }
+$refused = 'Get-Variable', 'Set-Variable', 'New-Variable', 'Clear-Variable', 'Remove-Variable',
+    'Invoke-Expression', 'Invoke-Command', 'New-Alias', 'Set-Alias', 'Import-Alias', 'New-PSDrive'
+$constant = {
+    param($e)
+    $null -eq $e -or $e -is [System.Management.Automation.Language.ConstantExpressionAst] -or
+        ($e -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $e.VariablePath.UserPath -in 'true', 'false', 'null')
+}
+foreach ($file in Get-ChildItem -LiteralPath 'DIR' -Filter '*.ps1' | Sort-Object Name) {
+    $tag = $file.BaseName
+    $tokens = $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+    "$tag errors $($errors.Count)"
+    if ($errors.Count) { continue }
+    $sets = @($ast.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and @($n.Left.FindAll({ param($v)
+            $v -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $v.VariablePath.UserPath -match '(^|:)PSNativeCommandUseErrorActionPreference$' }, $true)).Count }, $true))
+    $sets | ForEach-Object { "$tag set $([int]($_.Parent -eq $ast.EndBlock)) $($_.Extent.StartOffset) $($_.Extent.Text)" }
+    $tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match 'PSNativeCommandUseErrorActionPreference' } |
+        ForEach-Object { "$tag name $($_.Extent.StartOffset)" }
+    $first = if ($sets.Count) { $sets[0].Extent.StartOffset } else { [int]::MaxValue }
+    foreach ($statement in $ast.EndBlock.Statements) {
+        if ($statement.Extent.StartOffset -ge $first) { break }
+        if (-not ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $statement.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $statement.Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
+                (& $constant $statement.Right.Expression))) {
+            "$tag early $($statement.Extent.StartOffset) statement"
+        }
+    }
+    if ($ast.ParamBlock) {
+        foreach ($parameter in $ast.ParamBlock.Parameters) {
+            if (-not (& $constant $parameter.DefaultValue)) { "$tag early $($parameter.Extent.StartOffset) default" }
+        }
+        foreach ($attribute in $ast.ParamBlock.FindAll({ param($n) $n -is [System.Management.Automation.Language.AttributeAst] }, $true)) {
+            foreach ($argument in @($attribute.PositionalArguments) + @($attribute.NamedArguments | ForEach-Object { $_.Argument })) {
+                if (-not (& $constant $argument)) { "$tag early $($attribute.Extent.StartOffset) attribute" }
+            }
+        }
+    }
+    foreach ($block in 'DynamicParamBlock', 'BeginBlock', 'ProcessBlock', 'CleanBlock') {
+        if ($ast.PSObject.Properties[$block] -and $ast.$block) { "$tag early 0 $block" }
+    }
+    if ($ast.UsingStatements.Count) { "$tag early 0 using" }
+    $requires = $ast.ScriptRequirements
+    if ($requires -and ($requires.RequiredModules.Count -or $requires.RequiredAssemblies.Count -or $requires.RequiresPSSnapIns.Count)) {
+        "$tag early 0 requires"
+    }
+    foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $head = $command.CommandElements[0]
+        if ($command.InvocationOperator -eq 'Dot' -or $head -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            "$tag late $($command.Extent.StartOffset) dynamic"
+            continue
+        }
+        $name = $head.Value -replace '^.*[\\/]', ''
+        if ($alias.ContainsKey($name)) { $name = $alias[$name] }
+        if ($name -in $refused) { "$tag late $($command.Extent.StartOffset) $name" }
+        if ($name -match '^reg(\.exe)?$') { "$tag reg $($command.Extent.StartOffset)" }
+        foreach ($element in $command.CommandElements) {
+            if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $element.ParameterName -match '^(?:[oewip]v$|outv|errorv|warningv|informationv|pi|p$)') {
+                "$tag late $($element.Extent.StartOffset) -$($element.ParameterName)"
+            }
+        }
+    }
+    $tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match 'variable:' } |
+        ForEach-Object { "$tag late $($_.Extent.StartOffset) drive" }
+    foreach ($variable in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+        if ($variable.Splatted -or ($variable.VariablePath.UserPath -replace '^.*:', '') -in 'ExecutionContext', 'PSCmdlet', 'PSDefaultParameterValues') {
+            "$tag late $($variable.Extent.StartOffset) $($variable.Extent.Text)"
+        }
+    }
+    foreach ($member in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] }, $true)) {
+        if ($member.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                $member.Member.Value -in 'PSVariable', 'SessionState', 'InvokeCommand') {
+            "$tag late $($member.Extent.StartOffset) member"
+        }
+    }
+    foreach ($type in $ast.FindAll({ param($n)
+            $n -is [System.Management.Automation.Language.TypeExpressionAst] -or
+            $n -is [System.Management.Automation.Language.TypeConstraintAst] }, $true)) {
+        if ($type.TypeName.FullName -match '^(System\.Management\.Automation\.)?ScriptBlock$') {
+            "$tag late $($type.Extent.StartOffset) scriptblock"
+        }
+    }
+}
 """
 
+_ASSIGNMENT = "$PSNativeCommandUseErrorActionPreference = $false"
 
-# Runs the script with a caller's $PSNativeCommandUseErrorActionPreference = $true
-# and its outside effects replaced by functions of the same names, which PowerShell
-# finds before a cmdlet or an application. The fake reg.exe prints the preference
-# each call sees past the script's Out-Null; load succeeds and unload fails, so the
-# retries run.
-_RUN_PROBE = r"""
-$PSNativeCommandUseErrorActionPreference = $true
-function global:reg.exe {
-    Write-Host ('call ' + $args[0] + ' ' + $PSNativeCommandUseErrorActionPreference)
-    $global:LASTEXITCODE = [int]($args[0] -ne 'load')
-}
-function global:reg { reg.exe @args }
-function global:New-Object { [pscustomobject]@{} | Add-Member -MemberType ScriptMethod -Name IsInRole -Value { $true } -PassThru }
-function global:Get-AppxPackage { }
-function global:Start-Sleep { }
-function global:Test-Path {
-    param([string]$LiteralPath)
-    if ($LiteralPath -like 'Registry::*') { $false } else { Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath }
-}
-function global:Get-ChildItem {
-    param([string]$LiteralPath, [string]$Filter, [switch]$Force, [switch]$Recurse)
-    if ($LiteralPath -notlike 'Registry::*') { Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $LiteralPath -Filter $Filter -Force:$Force }
-}
-# The real reg.exe must never run here.
-if ((Get-Command reg.exe).CommandType -ne 'Function') { 'reg.exe is not the fake'; exit 3 }
-& 'SCRIPT'
-exit 0
-"""
+
+def _probe_scripts(scripts: dict[str, str]) -> dict[str, list[tuple[str, str]]] | None:
+    """(kind, rest) of each probe line, by script; None without PowerShell."""
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if shell is None:
+        return None
+    with tempfile.TemporaryDirectory() as folder:
+        for tag, text in scripts.items():
+            Path(folder, tag + ".ps1").write_text(text, encoding="utf-8")
+        probe = _PREFERENCE_PROBE.replace("DIR", folder.replace("'", "''"))
+        result = subprocess.run(
+            [
+                shell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                base64.b64encode(probe.encode("utf-16-le")).decode("ascii"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    facts: dict[str, list[tuple[str, str]]] = {tag: [] for tag in scripts}
+    for line in result.stdout.splitlines():
+        tag, kind, rest = (line.split(" ", 2) + [""])[:3]
+        facts[tag].append((kind, rest))
+    return facts
+
+
+def _preference_problems(facts: list[tuple[str, str]]) -> list[str]:
+    lines: dict[str, list[str]] = {}
+    for kind, rest in facts:
+        lines.setdefault(kind, []).append(rest)
+    if lines.get("errors") != ["0"]:
+        return [f"parse errors: {lines.get('errors')}"]
+    sets = [rest.split(" ", 2) for rest in lines.get("set", [])]
+    if [(top, text) for top, _offset, text in sets] != [("1", _ASSIGNMENT)]:
+        return [f"not one {_ASSIGNMENT} in the script's own body: {sets}"]
+    at = int(sets[0][1])
+    problems = []
+    names = [int(rest) for rest in lines.get("name", [])]
+    if names != [at]:
+        problems.append(f"the preference is named at {names}")
+    problems += [f"could run before the assignment: {rest}" for rest in lines.get("early", [])]
+    problems += [f"could set a variable without naming it: {rest}" for rest in lines.get("late", [])]
+    reg = [int(rest) for rest in lines.get("reg", [])]
+    if not reg or min(reg) < at:
+        problems.append(f"reg calls at {reg}")
+    return problems
+
+
+def _swap(script: str, old: str, new: str) -> str:
+    if script.count(old) != 1:
+        raise AssertionError(f"not found once in the script: {old!r}")
+    return script.replace(old, new)
+
+
+_SET = _ASSIGNMENT + "\n"
+_NAME_IN_PIECES = "('PSNative' + 'CommandUseErrorActionPreference')"
+_SAVE = "$callerPreferences = Get-Variable -Name '*Preference' -Scope 1\n"
+_RESTORE = (
+    "$callerPreferences | ForEach-Object { Set-Variable -Name $_.Name -Value $_.Value -Scope Script }\n"
+)
+
+
+def _preference_harmless_edits(script: str) -> dict[str, str]:
+    return {
+        "a_comment_before_it": _swap(script, _SET, "# Nothing above this line runs a command.\n" + _SET),
+        "a_constant_before_it": _swap(script, _SET, "$unloadAttempts = 5\n" + _SET),
+        "strict_mode_after_it": _swap(script, _SET, _SET + "Set-StrictMode -Version 2.0\n"),
+        "a_message_after_it": _swap(
+            script, _SET, _SET + "Write-Verbose 'reg.exe is judged by its exit code alone'\n"
+        ),
+    }
+
+
+def _preference_mutants(script: str) -> dict[str, str]:
+    def first(text: str) -> str:
+        return _swap(script, _SET, text + _SET)
+
+    def later(text: str) -> str:
+        return _swap(script, "finally {\n", "finally {\n    " + text + "\n")
+
+    valve = "        Write-Host 'Valve keys in the copy:'\n"
+    return {
+        # The assignment itself (Codex review of #240, U1).
+        "removed": _swap(script, _SET, ""),
+        "under_an_if": _swap(script, _SET, "if ($true) { " + _ASSIGNMENT + " }\n"),
+        # Something that runs before it (Codex reviews of #241, W4, and #251, Q1).
+        "reg_through_a_variable_first": first(
+            "$registryTool = 'reg.exe'\n& $registryTool query HKCU\\Software | Out-Null\n"
+        ),
+        "reg_by_its_full_path_first": first(
+            "$registryTool = Join-Path $env:SystemRoot 'System32\\reg.exe'\n"
+            "& $registryTool query HKCU\\Software | Out-Null\n"
+        ),
+        "a_default_that_runs_reg": _swap(
+            script, "'Claude_pzs8sxrjxfjjc'\n)", "(& reg.exe query HKCU\\Software | Out-String)\n)"
+        ),
+        "a_begin_block": _swap(
+            script,
+            "'Claude_pzs8sxrjxfjjc'\n)\n",
+            "'Claude_pzs8sxrjxfjjc'\n)\nbegin { & reg.exe query HKCU\\Software | Out-Null }\nend {\n",
+        )
+        + "}\n",
+        # Something that sets it back later, by name or not (Codex reviews of #240,
+        # V1, #241, W3, and #251, Q6).
+        "set_back": later("$PSNativeCommandUseErrorActionPreference = $true"),
+        "braced": later("${PSNativeCommandUseErrorActionPreference} = $true"),
+        "script_scope": later("$script:PSNativeCommandUseErrorActionPreference = $true"),
+        "incremented": later("$PSNativeCommandUseErrorActionPreference++"),
+        "restored_in_the_finally": _swap(later(_RESTORE), _SET, _SET + _SAVE),
+        "restored_in_the_valve_branch": _swap(
+            _swap(script, valve, valve + "        " + _RESTORE), _SET, _SET + _SAVE
+        ),
+        "an_alias": later(f"sv -Name {_NAME_IN_PIECES} -Value $true"),
+        "the_variable_drive": later(f"Set-Item -Path ('Variable:' + {_NAME_IN_PIECES}) -Value $true"),
+        "the_session_state": later(f"$ExecutionContext.SessionState.PSVariable.Set({_NAME_IN_PIECES}, $true)"),
+        "out_variable": later(f"Get-Date -OutVariable {_NAME_IN_PIECES} | Out-Null"),
+        "splatted": later(
+            f"$dateArguments = @{{ OutVariable = {_NAME_IN_PIECES} }}\n    Get-Date @dateArguments | Out-Null"
+        ),
+        "default_parameter_values": later(f"$PSDefaultParameterValues['Get-Date:OutVariable'] = {_NAME_IN_PIECES}"),
+        "invoke_expression": later(
+            "Invoke-Expression ('$script:PSNative' + 'CommandUseErrorActionPreference = $true')"
+        ),
+        "a_script_block_from_text": later(
+            ". ([scriptblock]::Create('$script:PSNative' + 'CommandUseErrorActionPreference = $true'))"
+        ),
+    }
 
 
 class ClearAppSteamShadowScriptTest(unittest.TestCase):
-    """tools/clear-app-steam-shadow.ps1: read by PowerShell's parser, and run with fakes."""
+    """tools/clear-app-steam-shadow.ps1, read by PowerShell's own parser: nothing runs it."""
 
     def test_reg_exe_is_judged_by_its_exit_code_alone(self) -> None:
         # Fifth Codex review of #239 (T1): in PowerShell 7.3 and later, a caller's
@@ -460,74 +653,33 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
         # that never runs (under an if, in a function, a comment or a script block) and
         # a later one back to $true passed too (Codex review of #240, U1). So did a
         # later Set-Variable or ${...} assignment, and a reg call spelled other than
-        # reg.exe before the assignment (third Codex review of #240, V1 and V2). A later
-        # change of the value is now the business of the run below, which reads it at
-        # each call.
-        shell = shutil.which("pwsh") or shutil.which("powershell")
-        if shell is None:
+        # reg.exe before the assignment (third Codex review of #240, V1 and V2), a
+        # finally that put a caller's value back through Get-Variable and Set-Variable,
+        # and a reg.exe called through a variable before the assignment (Codex review
+        # of #241, W3 and W4). Nothing may run before the assignment now, and nothing
+        # in the script may set a variable without naming it. A test that ran the
+        # script with fakes in place of its registry commands missed a reg.exe called
+        # by its full path, which would reach the real registry, and a restore in the
+        # branch its fakes never took (Codex review of #251, Q1 and Q6), so nothing
+        # runs it. A name built at run time and handed to none of these ways is beyond
+        # a parser, and no way is left to hand it to.
+        script = (Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1").read_text(
+            encoding="utf-8"
+        )
+        scripts = {"as_is": script}
+        scripts.update({"h_" + label: text for label, text in _preference_harmless_edits(script).items()})
+        scripts.update({"m_" + label: text for label, text in _preference_mutants(script).items()})
+        facts = _probe_scripts(scripts)
+        if facts is None:
             self.skipTest("PowerShell is not installed")
-        script = Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1"
-        probe = _PREFERENCE_PROBE.replace("SCRIPT", str(script).replace("'", "''"))
-        result = subprocess.run(
-            [
-                shell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                base64.b64encode(probe.encode("utf-16-le")).decode("ascii"),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        lines = result.stdout.splitlines()
-        self.assertIn("errors 0", lines)
-        assignments = [line.split(" ", 3)[1:] for line in lines if line.startswith("set ")]
-        self.assertEqual(
-            [(top, text) for top, _offset, text in assignments],
-            [("1", "$PSNativeCommandUseErrorActionPreference = $false")],
-        )
-        reg = [int(line.split()[1]) for line in lines if line.startswith("reg ")]
-        self.assertTrue(reg)
-        self.assertLess(int(assignments[0][1]), min(reg))
-
-    @unittest.skipUnless(os.name == "nt", "the script reads the Windows identity")
-    def test_every_reg_exe_call_runs_with_the_preference_off(self) -> None:
-        # Codex review of #241, W3 and W4: the text checks above missed a finally that
-        # puts a caller's $true back before reg unload (Get-Variable and Set-Variable
-        # over *Preference) and a reg.exe called through a variable before the
-        # assignment. This runs the script and reads the value at each call.
-        shell = shutil.which("pwsh") or shutil.which("powershell")
-        if shell is None:
-            self.skipTest("PowerShell is not installed")
-        script = Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1"
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        helium = root / "Packages" / "Claude_pzs8sxrjxfjjc" / "SystemAppData" / "Helium"
-        helium.mkdir(parents=True)
-        (helium / "User.dat").write_bytes(b"hive")
-        probe = _RUN_PROBE.replace("SCRIPT", str(script).replace("'", "''"))
-        result = subprocess.run(
-            [
-                shell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                base64.b64encode(probe.encode("utf-16-le")).decode("ascii"),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env={**os.environ, "LOCALAPPDATA": str(root), "USERPROFILE": str(root)},
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        lines = result.stdout.splitlines()
-        calls = [line[len("call ") :] for line in lines if line.startswith("call ")]
-        self.assertEqual(calls[:1], ["load False"], result.stdout)
-        self.assertGreater(len(calls), 2, result.stdout)  # the failed unload was retried
-        self.assertEqual(set(calls[1:]), {"unload False"}, result.stdout)
+        for tag, text in scripts.items():
+            with self.subTest(script=tag):
+                self.assertTrue(tag == "as_is" or text != script)
+                problems = _preference_problems(facts[tag])
+                if tag.startswith("m_"):
+                    self.assertNotEqual(problems, [])
+                else:
+                    self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":
