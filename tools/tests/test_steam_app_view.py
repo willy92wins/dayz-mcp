@@ -406,24 +406,70 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
 
 # For each .ps1 in DIR, read by PowerShell's own parser: its parse errors; every
 # assignment to the preference (with 1 when it is a statement of the script's own
-# body); every token outside a comment that names it; what could run before that
-# assignment (a statement other than a variable set to a constant, a default or an
-# attribute argument that is not a constant, a begin, process, dynamicparam or clean
-# block, using, #requires that loads something); every way it offers to set a
-# variable without naming it (the *-Variable, Invoke-Expression, Invoke-Command, alias
-# and drive commands however spelled, a command named at run time or dot-sourced,
-# the Variable: drive, the session state, the -*Variable parameters, splatting,
-# $PSDefaultParameterValues, [scriptblock]); and every call to reg, by offset.
+# body); every variable that names it; what could run before that assignment (a
+# statement other than a variable set to a constant or a message or Set-StrictMode
+# with plain arguments, a default or an attribute argument that is not a constant, a
+# begin, process, dynamicparam or clean block, using, #requires that loads
+# something); every call to reg, by offset; and whatever this reading does not show
+# to leave variables alone. The script may use what it uses today and nothing else:
+# the kinds of statement and expression in $syntax (the hashtable a splat takes
+# besides), the commands in $allowed (the cmdlets that only write a message and
+# Set-StrictMode besides), each named as written, and the members in $members. A
+# command named at run time or dot-sourced, a -*Variable parameter, a splat that is
+# not a hashtable of constant keys set once before it, ForEach-Object or
+# Where-Object given anything but script blocks, an assignment to a drive,
+# $ExecutionContext, $PSCmdlet, $PSDefaultParameterValues and [scriptblock] are
+# refused. The commands that write items take their paths from variables set once,
+# before them, to a path in the registry or under a folder of the environment, or
+# from Get-ChildItem given such a path.
 _PREFERENCE_PROBE = r"""
 $alias = @{}
 Get-Alias | ForEach-Object { $alias[$_.Name] = $_.Definition }
-$refused = 'Get-Variable', 'Set-Variable', 'New-Variable', 'Clear-Variable', 'Remove-Variable',
-    'Invoke-Expression', 'Invoke-Command', 'New-Alias', 'Set-Alias', 'Import-Alias', 'New-PSDrive'
+$allowed = 'Copy-Item', 'ForEach-Object', 'Get-AppxPackage', 'Get-ChildItem', 'Get-Date', 'Get-ItemProperty',
+    'Get-Process', 'Join-Path', 'New-Item', 'New-Object', 'Out-Null', 'Remove-Item', 'Set-StrictMode',
+    'Start-Sleep', 'Test-Path', 'Where-Object', 'Write-Debug', 'Write-Host', 'Write-Information',
+    'Write-Verbose', 'Write-Warning', 'reg'
+$early = 'Set-StrictMode', 'Write-Debug', 'Write-Host', 'Write-Information', 'Write-Verbose', 'Write-Warning'
+$writers = 'Copy-Item', 'New-Item', 'Remove-Item'
+$syntax = 'AssignmentStatementAst', 'BinaryExpressionAst', 'CommandAst', 'CommandExpressionAst',
+    'CommandParameterAst', 'ConstantExpressionAst', 'ExpandableStringExpressionAst', 'ForStatementAst',
+    'HashtableAst', 'IfStatementAst', 'InvokeMemberExpressionAst', 'MemberExpressionAst', 'NamedBlockAst',
+    'ParamBlockAst', 'ParameterAst', 'ParenExpressionAst', 'PipelineAst', 'ScriptBlockAst',
+    'ScriptBlockExpressionAst', 'StatementBlockAst', 'StringConstantExpressionAst', 'SubExpressionAst',
+    'ThrowStatementAst', 'TryStatementAst', 'TypeConstraintAst', 'TypeExpressionAst', 'UnaryExpressionAst',
+    'VariableExpressionAst'
+$members = 'ActiveUser', 'Administrator', 'Collect', 'GetCurrent', 'Id', 'InstallLocation', 'IsInRole', 'Name',
+    'OrdinalIgnoreCase', 'PackageFamilyName', 'Path', 'pid', 'PSChildName', 'StartsWith', 'WaitForPendingFinalizers'
+$variableParameter = '^(?:[oewip]v$|outv|errorv|warningv|informationv|pi|p$)'
 $constant = {
     param($e)
     $null -eq $e -or $e -is [System.Management.Automation.Language.ConstantExpressionAst] -or
         ($e -is [System.Management.Automation.Language.VariableExpressionAst] -and
             $e.VariablePath.UserPath -in 'true', 'false', 'null')
+}
+# A constant, or a string that only reads variables.
+$plain = {
+    param($e)
+    (& $constant $e) -or ($e -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -and
+        -not @($e.NestedExpressions | Where-Object { $_ -isnot [System.Management.Automation.Language.VariableExpressionAst] }).Count)
+}
+$nameOf = {
+    param($command)
+    $head = $command.CommandElements[0]
+    if ($command.InvocationOperator -eq 'Dot' -or $head -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return '' }
+    if (($head.Value -replace '^.*[\\/]', '') -match '^reg(\.exe)?$') { return 'reg' }
+    if ($alias.ContainsKey($head.Value)) { return $alias[$head.Value] }
+    $head.Value
+}
+$keyOf = { param($variable) $variable.VariablePath.UserPath -replace '^(?:script|local|private|global):', '' }
+# True when $assignment, a statement of a block that holds $node, ends before it.
+$dominates = {
+    param($assignment, $node)
+    if ($assignment.Extent.EndOffset -gt $node.Extent.StartOffset) { return $false }
+    for ($up = $node.Parent; $up; $up = $up.Parent) {
+        if ($up -eq $assignment.Parent) { return $true }
+    }
+    $false
 }
 foreach ($file in Get-ChildItem -LiteralPath 'DIR' -Filter '*.ps1' | Sort-Object Name) {
     $tag = $file.BaseName
@@ -431,16 +477,27 @@ foreach ($file in Get-ChildItem -LiteralPath 'DIR' -Filter '*.ps1' | Sort-Object
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
     "$tag errors $($errors.Count)"
     if ($errors.Count) { continue }
+    foreach ($node in $ast.FindAll({ $true }, $true)) {
+        if ($node.GetType().Name -notin $syntax) { "$tag late $($node.Extent.StartOffset) $($node.GetType().Name)" }
+    }
     $sets = @($ast.FindAll({ param($n)
         $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and @($n.Left.FindAll({ param($v)
             $v -is [System.Management.Automation.Language.VariableExpressionAst] -and
                 $v.VariablePath.UserPath -match '(^|:)PSNativeCommandUseErrorActionPreference$' }, $true)).Count }, $true))
     $sets | ForEach-Object { "$tag set $([int]($_.Parent -eq $ast.EndBlock)) $($_.Extent.StartOffset) $($_.Extent.Text)" }
-    $tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match 'PSNativeCommandUseErrorActionPreference' } |
+    $variables = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true))
+    $variables | Where-Object { $_.VariablePath.UserPath -match '(^|:)PSNativeCommandUseErrorActionPreference$' } |
         ForEach-Object { "$tag name $($_.Extent.StartOffset)" }
     $first = if ($sets.Count) { $sets[0].Extent.StartOffset } else { [int]::MaxValue }
     foreach ($statement in $ast.EndBlock.Statements) {
         if ($statement.Extent.StartOffset -ge $first) { break }
+        $command = if ($statement -is [System.Management.Automation.Language.PipelineAst] -and
+            $statement.PipelineElements.Count -eq 1) { $statement.PipelineElements[0] }
+        if ($command -is [System.Management.Automation.Language.CommandAst] -and (& $nameOf $command) -in $early -and
+                -not @($command.CommandElements | Select-Object -Skip 1 | Where-Object {
+                    -not (& $plain $(if ($_ -is [System.Management.Automation.Language.CommandParameterAst]) { $_.Argument } else { $_ })) }).Count) {
+            continue
+        }
         if (-not ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and
                 $statement.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
                 $statement.Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
@@ -466,33 +523,122 @@ foreach ($file in Get-ChildItem -LiteralPath 'DIR' -Filter '*.ps1' | Sort-Object
     if ($requires -and ($requires.RequiredModules.Count -or $requires.RequiredAssemblies.Count -or $requires.RequiresPSSnapIns.Count)) {
         "$tag early 0 requires"
     }
+    $assignments = @{}
+    foreach ($assignment in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+        foreach ($variable in $assignment.Left.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+            $assignments[(& $keyOf $variable)] += @($assignment)
+            if ($variable.VariablePath.IsDriveQualified) { "$tag late $($variable.Extent.StartOffset) drive" }
+        }
+    }
+    # The variables set once to a path in the registry or under a folder of the
+    # environment, by a statement that runs before each use they are shown to have.
+    $paths = @{}
+    do {
+        $grew = $false
+        foreach ($name in @($assignments.Keys)) {
+            $only = @($assignments[$name])
+            if ($paths.ContainsKey($name) -or $only.Count -ne 1 -or $only[0].Operator -ne 'Equals' -or
+                    $only[0].Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+            $right = $only[0].Right
+            $base = $null
+            if ($right -is [System.Management.Automation.Language.CommandExpressionAst] -and
+                    ($right.Expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                    $right.Expression -is [System.Management.Automation.Language.ExpandableStringExpressionAst])) {
+                $text = $right.Expression
+                if ($text.Value -like 'Registry::*') { $paths[$name] = $only[0]; $grew = $true; continue }
+                if ($text -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -and
+                        $text.NestedExpressions.Count -and
+                        $text.NestedExpressions[0].Extent.StartOffset -eq $text.Extent.StartOffset + 1) {
+                    $base = $text.NestedExpressions[0]
+                }
+            }
+            elseif ($right -is [System.Management.Automation.Language.PipelineAst] -and $right.PipelineElements.Count -eq 1 -and
+                    $right.PipelineElements[0] -is [System.Management.Automation.Language.CommandAst] -and
+                    (& $nameOf $right.PipelineElements[0]) -eq 'Join-Path') {
+                $base = $right.PipelineElements[0].CommandElements[1]
+            }
+            if ($base -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $base.Splatted -and (
+                    $base.VariablePath.DriveName -eq 'env' -or
+                    ($paths.ContainsKey(($key = & $keyOf $base)) -and (& $dominates $paths[$key] $only[0])))) {
+                $paths[$name] = $only[0]
+                $grew = $true
+            }
+        }
+    } while ($grew)
+    $isPath = {
+        param($part, $source)
+        $part -is [System.Management.Automation.Language.VariableExpressionAst] -and -not $part.Splatted -and
+            $paths.ContainsKey(($key = & $keyOf $part)) -and (& $dominates $paths[$key] $source)
+    }
     foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-        $head = $command.CommandElements[0]
-        if ($command.InvocationOperator -eq 'Dot' -or $head -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+        $name = & $nameOf $command
+        if (-not $name) {
             "$tag late $($command.Extent.StartOffset) dynamic"
             continue
         }
-        $name = $head.Value -replace '^.*[\\/]', ''
-        if ($alias.ContainsKey($name)) { $name = $alias[$name] }
-        if ($name -in $refused) { "$tag late $($command.Extent.StartOffset) $name" }
-        if ($name -match '^reg(\.exe)?$') { "$tag reg $($command.Extent.StartOffset)" }
+        if ($name -notin $allowed) { "$tag late $($command.Extent.StartOffset) $name" }
+        if ($name -eq 'reg') { "$tag reg $($command.Extent.StartOffset)" }
         foreach ($element in $command.CommandElements) {
             if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
-                    $element.ParameterName -match '^(?:[oewip]v$|outv|errorv|warningv|informationv|pi|p$)') {
+                    $element.ParameterName -match $variableParameter) {
                 "$tag late $($element.Extent.StartOffset) -$($element.ParameterName)"
             }
         }
+        if ($name -in 'ForEach-Object', 'Where-Object' -and @($command.CommandElements | Select-Object -Skip 1 | Where-Object {
+                $_ -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst] }).Count) {
+            "$tag late $($command.Extent.StartOffset) $name"
+        }
+        if ($name -notin $writers) { continue }
+        $sources = @($command)
+        $elements = @($command.Parent.PipelineElements)
+        $at = [array]::IndexOf($elements, $command)
+        if ($at -gt 0) {
+            if ($at -gt 1 -or $elements[0] -isnot [System.Management.Automation.Language.CommandAst] -or
+                    (& $nameOf $elements[0]) -ne 'Get-ChildItem') {
+                "$tag late $($command.Extent.StartOffset) input"
+            }
+            else { $sources += $elements[0] }
+        }
+        foreach ($source in $sources) {
+            $parts = $source.CommandElements
+            for ($i = 1; $i -lt $parts.Count; $i++) {
+                $part = $parts[$i]
+                $parameter = if ($part -is [System.Management.Automation.Language.CommandParameterAst]) { $part }
+                    elseif ($parts[$i - 1] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                        $null -eq $parts[$i - 1].Argument) { $parts[$i - 1] }
+                if ($part -is [System.Management.Automation.Language.CommandParameterAst]) {
+                    if ($null -eq $part.Argument) { continue }
+                    $part = $part.Argument
+                }
+                if ($parameter -and $parameter.ParameterName -in 'ItemType', 'Filter' -and
+                        $part -is [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+                if (-not (& $isPath $part $source)) { "$tag late $($part.Extent.StartOffset) path" }
+            }
+        }
     }
-    $tokens | Where-Object { $_.Kind -ne 'Comment' -and $_.Text -match 'variable:' } |
-        ForEach-Object { "$tag late $($_.Extent.StartOffset) drive" }
-    foreach ($variable in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
-        if ($variable.Splatted -or ($variable.VariablePath.UserPath -replace '^.*:', '') -in 'ExecutionContext', 'PSCmdlet', 'PSDefaultParameterValues') {
+    foreach ($variable in $variables) {
+        if (($variable.VariablePath.UserPath -replace '^.*:', '') -in 'ExecutionContext', 'PSCmdlet', 'PSDefaultParameterValues') {
+            "$tag late $($variable.Extent.StartOffset) $($variable.Extent.Text)"
+        }
+        if (-not $variable.Splatted) { continue }
+        $table = @($assignments[(& $keyOf $variable)])
+        $pairs = $null
+        if ($table.Count -eq 1 -and $table[0] -and $table[0].Operator -eq 'Equals' -and
+                $table[0].Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $table[0].Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
+                $table[0].Right.Expression -is [System.Management.Automation.Language.HashtableAst] -and
+                (& $dominates $table[0] $variable)) {
+            $pairs = @($table[0].Right.Expression.KeyValuePairs)
+        }
+        if ($null -eq $pairs -or @($pairs | Where-Object {
+                $_.Item1 -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                $_.Item1.Value -match $variableParameter }).Count) {
             "$tag late $($variable.Extent.StartOffset) $($variable.Extent.Text)"
         }
     }
     foreach ($member in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] }, $true)) {
         if ($member.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
-                $member.Member.Value -in 'PSVariable', 'SessionState', 'InvokeCommand') {
+                $member.Member.Value -notin $members) {
             "$tag late $($member.Extent.StartOffset) member"
         }
     }
@@ -554,7 +700,7 @@ def _preference_problems(facts: list[tuple[str, str]]) -> list[str]:
     if names != [at]:
         problems.append(f"the preference is named at {names}")
     problems += [f"could run before the assignment: {rest}" for rest in lines.get("early", [])]
-    problems += [f"could set a variable without naming it: {rest}" for rest in lines.get("late", [])]
+    problems += [f"not shown to leave the preference alone: {rest}" for rest in lines.get("late", [])]
     reg = [int(rest) for rest in lines.get("reg", [])]
     if not reg or min(reg) < at:
         problems.append(f"reg calls at {reg}")
@@ -583,6 +729,25 @@ def _preference_harmless_edits(script: str) -> dict[str, str]:
         "a_message_after_it": _swap(
             script, _SET, _SET + "Write-Verbose 'reg.exe is judged by its exit code alone'\n"
         ),
+        # Codex review of #251, Q7 and Q11: strings that name the preference or
+        # the Variable: drive are data, a hashtable of constant keys may be
+        # splatted, and Set-StrictMode may come first.
+        "messages_that_name_it": _swap(
+            script,
+            _SET,
+            _SET
+            + "Write-Verbose 'PSNativeCommandUseErrorActionPreference is disabled'\n"
+            + "$note = 'Nothing here reads the Variable: drive'\n"
+            + "Write-Verbose $note\n",
+        ),
+        "a_constant_splat": _swap(
+            script,
+            _SET,
+            _SET
+            + "$verboseArguments = @{ Message = 'reg.exe is judged by its exit code alone' }\n"
+            + "Write-Verbose @verboseArguments\n",
+        ),
+        "strict_mode_before_it": _swap(script, _SET, "Set-StrictMode -Version 2.0\n" + _SET),
     }
 
 
@@ -639,6 +804,50 @@ def _preference_mutants(script: str) -> dict[str, str]:
         "a_script_block_from_text": later(
             ". ([scriptblock]::Create('$script:PSNative' + 'CommandUseErrorActionPreference = $true'))"
         ),
+        # A command, member or path this reading does not follow (Codex review of
+        # #251, Q8).
+        "the_variable_drive_in_pieces": later(
+            f"Set-Item -LiteralPath ('Vari' + 'able:' + {_NAME_IN_PIECES}) -Value $true"
+        ),
+        "removed_from_the_variable_drive": later(f"Remove-Item -LiteralPath ('Vari' + 'able:' + {_NAME_IN_PIECES})"),
+        "new_item_on_the_variable_drive": later(
+            f"New-Item -Path ('Vari' + 'able:') -Name {_NAME_IN_PIECES} -Value $true -Force | Out-Null"
+        ),
+        "removed_through_the_pipeline": later(
+            f"Get-ChildItem -LiteralPath ('Vari' + 'able:' + {_NAME_IN_PIECES}) | Remove-Item"
+        ),
+        "a_path_set_twice": _swap(
+            script,
+            "            Remove-Item -LiteralPath $valve",
+            f"            $valve = 'Vari' + 'able:' + {_NAME_IN_PIECES}\n            Remove-Item -LiteralPath $valve",
+        ),
+        "a_path_used_before_it_is_set": _swap(
+            script, _SET, _SET + "Remove-Item -LiteralPath $valve -Recurse -Force\n"
+        ),
+        "the_environment_changed": _swap(script, _SET, _SET + "$env:USERPROFILE = 'C:\\Elsewhere'\n"),
+        "the_runspace": later(
+            f"[runspace]::DefaultRunspace.SessionStateProxy.SetVariable({_NAME_IN_PIECES}, $true)"
+        ),
+        "a_member_by_name": later(
+            f"Get-ChildItem -LiteralPath ('Vari' + 'able:' + {_NAME_IN_PIECES}) | ForEach-Object -MemberName set_Value -ArgumentList $true"
+        ),
+        "a_splat_changed_later": later(
+            "$verboseArguments = @{ Message = 'reg.exe is judged by its exit code alone' }\n"
+            f"    $verboseArguments['OutVariable'] = {_NAME_IN_PIECES}\n"
+            "    Write-Verbose @verboseArguments"
+        ),
+        "a_splat_before_its_table": later(
+            "Write-Verbose @verboseArguments\n"
+            "    $verboseArguments = @{ Message = 'reg.exe is judged by its exit code alone' }"
+        ),
+        # A statement that sets a variable without an assignment.
+        "a_data_section": later("data PSNativeCommandUseErrorActionPreference { $true }"),
+        "a_loop_over_a_path": _swap(
+            script,
+            "            Remove-Item -LiteralPath $valve",
+            f"            foreach ($valve in ('Vari' + 'able:' + {_NAME_IN_PIECES})) {{ }}\n"
+            "            Remove-Item -LiteralPath $valve",
+        ),
     }
 
 
@@ -661,8 +870,14 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
         # script with fakes in place of its registry commands missed a reg.exe called
         # by its full path, which would reach the real registry, and a restore in the
         # branch its fakes never took (Codex review of #251, Q1 and Q6), so nothing
-        # runs it. A name built at run time and handed to none of these ways is beyond
-        # a parser, and no way is left to hand it to.
+        # runs it. A list of the ways to set a variable without naming it missed one,
+        # a path to the Variable: drive built in pieces (Codex review of #251, Q8), so
+        # the script is now held to what it uses today: the kinds of statement, the
+        # commands and the members on the probe's lists, and for the commands that
+        # write items, paths in the registry or under a folder of the environment. An
+        # edit that needs more fails here until the lists grow, and whoever grows them
+        # shows that the new entry cannot set a variable. The folders of the
+        # environment and the commands PowerShell loads are trusted.
         script = (Path(__file__).resolve().parents[1] / "clear-app-steam-shadow.ps1").read_text(
             encoding="utf-8"
         )

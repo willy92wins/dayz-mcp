@@ -42,7 +42,9 @@ _START = re.compile(
     r"|PerformActionFromInventory|OnInstantAction)\b"
 )
 # Calls by name or through a queue: this reading cannot follow them (#251 Q5).
-_BY_NAME = re.compile(r"\b(?:CallFunction\w*|CallByName|CallLater\w*|Call|Invoke)\s*\(")
+# Timer.Run takes a method's name too (tools.c:595, which :608 hands to
+# CallFunctionParams; #251 Q10).
+_BY_NAME = re.compile(r"\b(?:CallFunction\w*|CallByName|CallLater\w*|Call|Invoke|Run)\s*\(")
 _METHOD = re.compile(
     r"\b(?P<name>[A-Za-z_]\w*)\s*\([^;{}()]*(?:\([^;{}()]*\)[^;{}()]*)*\)\s*\{"
 )
@@ -222,7 +224,7 @@ def _hold_override(code: str) -> tuple[int, int, int]:
         method
         for method in _methods(code)
         if method[0] == "PerformActionStart"
-        and re.search(r"\boverride\s+void\s+$", code[max(0, method[1] - 64) : method[1]])
+        and re.search(r"\boverride\s+void\s+$", code[: method[1]])
     ]
     if len(overrides) != 1:
         raise AssertionError("one override of PerformActionStart")
@@ -233,7 +235,8 @@ def verify_no_start_outside_the_bridge(path: Path, source: str) -> None:
     # #249 K5: a start anywhere else in the addon could run before the guard.
     # MCP_ActionHold's override of PerformActionStart only passes the bridge's
     # call on to super; it is found by its name, whatever the spacing of its
-    # parameters (#251 Q4).
+    # parameters (#251 Q4) and whatever blanks or comments come before its name
+    # or between super. and its call (Q9).
     code = _code(source)
     starts = [match.start() for match in _START.finditer(code)]
     if path != HOLD_PATH:
@@ -247,7 +250,7 @@ def verify_no_start_outside_the_bridge(path: Path, source: str) -> None:
     if (
         len(inside) != 1
         or not code.startswith("PerformActionStart", inside[0])
-        or not re.search(r"\bsuper\s*\.\s*$", code[max(0, inside[0] - 32) : inside[0]])
+        or not re.search(r"\bsuper\s*\.\s*$", code[: inside[0]])
     ):
         raise AssertionError("the override does more than call super.PerformActionStart")
 
@@ -345,7 +348,8 @@ def _mutants(source: str) -> dict[str, str]:
         "error_code_with_a_space": _in_guard(source, r'"condition_failed"', '"condition_ failed"'),
         # Also stops every allowed start.
         "return_outside_if": _in_guard(source, r"return\s+true\s*;(\s*)\}", r"}\1return true;"),
-        # Starts that skip the guard for action_use_door (#249 K4, K5; #251 Q5).
+        # Starts that skip the guard for action_use_door (#249 K4, K5; #251 Q5,
+        # Q10).
         "door_quickbar": _door_first(source, "amc.PerformActionFromQuickbar(heldItem, null);"),
         "door_inventory": _door_first(source, "amc.PerformActionFromInventory(heldItem, null);"),
         "door_instant": _door_first(source, "amc.OnInstantAction(ActionOpenDoors);"),
@@ -359,6 +363,12 @@ def _mutants(source: str) -> dict[str, str]:
             source,
             'g_Game.GameScript.CallFunctionParams(amc, "PerformActionStart", null, new '
             "Param4<ActionBase, ActionTarget, ItemBase, Param>(action, actionTarget, heldItem, NULL));",
+        ),
+        "door_timer": _door_first(
+            _before_dispatch(source, "ref Timer m_DoorTimer;\n\n"),
+            "m_DoorTimer = new Timer(CALL_CATEGORY_GUI);\n"
+            'm_DoorTimer.Run(0.01, amc, "PerformActionStart", new '
+            "Param4<ActionBase, ActionTarget, ItemBase, Param>(action, actionTarget, heldItem, NULL), false);",
         ),
         "door_helper_by_name": _door_first(
             _before_dispatch(
@@ -467,10 +477,24 @@ class ActionUseCanBeStartedTest(unittest.TestCase):
             mark = at + run.start(1)
             spread = spread[:mark] + "\n\t " + spread[mark:]
         self.assertNotEqual(spread, source)
-        for label, variant in (("squeezed", squeezed), ("spread", spread)):
+        # #251 Q9: a long comment between override and void, 64 spaces before
+        # the name, a comment between super. and the call.
+        keyword = re.search(r"\boverride\s+void\s+$", code[:at]).start() + len("override")
+        call = _START.search(code, start, end)
+        variants = {
+            "squeezed": squeezed,
+            "spread": spread,
+            "long_comment_before_void": (
+                source[:keyword] + " /* " + "passed on to super " * 4 + "*/" + source[keyword:]
+            ),
+            "spaces_before_the_name": source[:at] + " " * 64 + source[at:],
+            "comment_after_super": (
+                source[: call.start()] + "/* " + "passed on as it came " * 2 + "*/ " + source[call.start() :]
+            ),
+        }
+        for label, variant in variants.items():
             with self.subTest(variant=label):
                 verify_no_start_outside_the_bridge(HOLD_PATH, variant)
-        call = _START.search(code, start, end)
         head = start + re.search(r"\bsuper\s*\.\s*$", code[start : call.start()]).start()
         mutants = {
             "not_super": source[: call.start()] + "PerformActionFromQuickbar" + source[call.end() :],
