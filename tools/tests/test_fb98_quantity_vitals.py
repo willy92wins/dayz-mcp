@@ -15,8 +15,10 @@ import functools
 import json
 import os
 import re
+import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -36,6 +38,8 @@ FILL_QUANTITY = "protected void FillInspectQuantity(Object match, MCPObjectInspe
 DISPATCH_INSPECT = "protected bool DispatchObjectInspect(MCPCommand command, MCPResult result)"
 BUILD_STATE = "protected MCPPlayerState BuildPlayerState()"
 _ENFORCE_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+# A string literal, a line comment or a block comment, whichever starts first.
+_ENFORCE_NOT_CODE = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 _CLASS_DECLARATION = re.compile(r"(?m)^\s*(?:modded\s+)?class\s+([A-Za-z_]\w*)")
 _CONSTRUCTION = re.compile(r"\bnew\s+([A-Za-z_]\w*)\s*\(\s*\)")
 _CALL_NAME = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
@@ -186,11 +190,17 @@ def _translated(
 
 @functools.lru_cache(maxsize=1)
 def _addon_classes() -> frozenset[str]:
-    """The classes the addon's scripts declare."""
+    """The classes the addon's scripts declare in their code, not in a comment or a
+    string literal (Codex H10). A class under any #ifdef counts: the same scripts
+    build for 1.29 and for 1.30."""
     return frozenset(
         name
         for path in sorted((addon_root() / "scripts").rglob("*.c"))
-        for name in _CLASS_DECLARATION.findall(path.read_text(encoding="utf-8"))
+        for name in _CLASS_DECLARATION.findall(
+            _ENFORCE_NOT_CODE.sub(
+                lambda found: re.sub(r"[^\n]", " ", found.group()), path.read_text(encoding="utf-8")
+            )
+        )
     )
 
 
@@ -378,9 +388,16 @@ def _spliced(body: str, found: re.Match[str], text: str) -> str:
     return body[: found.start()] + text + body[found.end() :]
 
 
+def _left_over(adapted: str) -> list[str]:
+    """Each `new` or index the rewrites left in ``adapted``, outside its string literals
+    (Codex H11)."""
+    return re.findall(r"\bnew\b|\[", _ENFORCE_STRING.sub('""', adapted))
+
+
 class AdaptationTest(unittest.TestCase):
     """The translator's rewrites refuse a source that already reads their way (Codex H6,
-    H8) and read its equivalent forms the same way (Codex H9)."""
+    H8) and read its equivalent forms the same way (Codex H9), and neither the class
+    index nor the check reads a comment or a string literal as code (Codex H10, H11)."""
 
     def test_each_construction_and_vector_index_already_rewritten_is_refused(self) -> None:
         built: list[str] = []
@@ -399,7 +416,7 @@ class AdaptationTest(unittest.TestCase):
                 with self.subTest(signature=signature, source=found.group()):
                     with self.assertRaises(AssertionError):
                         _adapted(_spliced(body, found, f"{found.group(1)}.At({found.group(2)})"), _addon_classes())
-            self.assertNotRegex(_adapted(body, _addon_classes()), r"\bnew\b|\[")
+            self.assertEqual(_left_over(_adapted(body, _addon_classes())), [])
         self.assertEqual(
             sorted(built), ["MCPMemoryPoint", "MCPObjectInspect", "MCPPlayerState", "MCPPlayerVitals", "MCPTelemetry"]
         )
@@ -416,6 +433,40 @@ class AdaptationTest(unittest.TestCase):
             with self.subTest(players=label):
                 expected, _filled = _state(listed)
                 seen, _filled = _state(listed, equivalent)
+                self.assertEqual(vars(seen) if seen else seen, vars(expected) if expected else expected)
+
+    def test_only_code_declares_a_class(self) -> None:
+        # Codex H10: a class in a comment declares nothing, a literal opens no comment,
+        # code after a comment counts, and so does a class under any #ifdef.
+        with TemporaryDirectory() as temporary:
+            scripts = Path(temporary) / "scripts" / "5_Mission"
+            scripts.mkdir(parents=True)
+            (scripts / "Fake.c").write_text(
+                "/* an earlier draft\nclass GetGame\n*/\n"
+                'string open = "/*";\n'
+                "class AfterString\n"
+                "const int LIMIT = 3; /* a note\n */ class AfterComment\n"
+                "#ifdef DAYZ_1_29\nclass OnlyOn129\n#endif\n"
+                "modded class MissionServer /* the bridge */\n",
+                encoding="utf-8",
+            )
+            _addon_classes.cache_clear()
+            self.addCleanup(_addon_classes.cache_clear)
+            with patch.object(sys.modules[__name__], "addon_root", return_value=Path(temporary)):
+                self.assertEqual(
+                    sorted(_addon_classes()), ["AfterComment", "AfterString", "MissionServer", "OnlyOn129"]
+                )
+
+    def test_a_new_or_an_index_in_a_string_literal_is_left_as_it_is(self) -> None:
+        # Codex H11: the rewrites and what they leave are read outside the literals.
+        body = 'string note = "new pos[0]";\n' + method_body(BRIDGE, BUILD_STATE)
+        adapted = _adapted(body, _addon_classes())
+        self.assertIn('"new pos[0]"', adapted)
+        self.assertEqual(_left_over(adapted), [])
+        for label, listed in (("body", [_Body(water=1234.5, energy=2345.5)]), ("man", [_Man()]), ("none", [])):
+            with self.subTest(players=label):
+                expected, _filled = _state(listed)
+                seen, _filled = _state(listed, body)
                 self.assertEqual(vars(seen) if seen else seen, vars(expected) if expected else expected)
 
 
