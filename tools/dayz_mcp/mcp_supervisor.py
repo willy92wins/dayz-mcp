@@ -40,9 +40,12 @@ A worker that has had no host line, no answer, no call in flight and no request 
 own waiting on the host for the idle timeout is retired, and the next host line starts
 a new one and replays the handshake into it, as a recycle does. A host that keeps the
 stdin of a finished thread open then holds this process alone, not the worker too
-(inbox d345). The lease and the session's identity cross that gap as they cross a
-recycle: a worker that takes the lease over puts the carrier back as it found it. An
-idle worker would not have renewed the lease either: only a call does (SESSION_TTL_S).
+(inbox d345). A request of the worker's that the host never answers keeps it, as every
+worker was kept before: the SDK says nothing when its own wait for that answer times
+out (review F8 of #255). The session's identity crosses the gap as it crosses a
+recycle. The lease does not have to: only a call renews it (SESSION_TTL_S), and
+run_supervisor sets no idle timeout shorter than it lasts after the last one
+(server.MIN_IDLE_RETIREMENT_S), so it has run out before the worker is retired.
 """
 
 from __future__ import annotations
@@ -135,10 +138,12 @@ class _Generation:
     local_lease_id: str | None = None
     expired_observe_ids: set[object] = field(default_factory=set)
     # Set before a planned retirement closes stdin, so the pump reads the EOF that
-    # follows as the expected end and not as a transport failure.
+    # follows as the expected end and not as a transport failure, and forwards no
+    # request of the worker's from then on (review F7 of #255).
     retired: bool = False
     # Ids of the requests this worker sent the host that the host has not answered.
-    # The worker waits on them, so it is not retired for idleness.
+    # They keep it from being retired for idleness, also one the worker's SDK gave up
+    # waiting on, which it says nothing of (review F8 of #255).
     awaiting_host: set[object] = field(default_factory=set)
 
 
@@ -372,9 +377,19 @@ class Supervisor:
                     self._send_host(amended)
                     continue
             elif ident is not None:
-                # A request of the worker's own. Counted before the host can answer it.
+                # A request of the worker's own. Counted before the host can answer it,
+                # and not forwarded once the worker is being retired: the answer would
+                # reach the next one.
                 with self._state:
-                    generation.awaiting_host.add(ident)
+                    retiring = generation.retired
+                    if not retiring:
+                        generation.awaiting_host.add(ident)
+                if retiring:
+                    self._log(
+                        f"worker generation={generation.number} sent a request while "
+                        "being retired; not forwarded"
+                    )
+                    continue
             self._write_host(raw)
         with self._state:
             retired = generation.retired
@@ -603,6 +618,9 @@ class Supervisor:
                 return False
             self._parked = True
             self._parking = True
+            # In the same hold as the checks, so a request the worker sends from here is
+            # not forwarded (review F7 of #255).
+            generation.retired = True
         self._log(
             f"worker generation={generation.number} idle for {idle_s:.0f} s; "
             "retired until the next host line"
@@ -820,10 +838,16 @@ class Supervisor:
             and params.get("name") == RELOAD_TOOL_NAME
         ):
             if self._reserve_recycle(ident):
-                threading.Thread(
-                    target=self._recycle_reserved, args=(ident,), daemon=True,
-                    name="dayz-mcp-recycle",
-                ).start()
+                try:
+                    threading.Thread(
+                        target=self._recycle_reserved, args=(ident,), daemon=True,
+                        name="dayz-mcp-recycle",
+                    ).start()
+                except BaseException:
+                    # No thread runs the recycle to end its reservation (review F9 of #255).
+                    with self._state:
+                        self._draining = False
+                    raise
             return
 
         if ident is not None and method is not None:

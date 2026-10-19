@@ -45,15 +45,10 @@ HANDOFF_ENV = "DAYZ_MCP_SESSION_HANDOFF"
 
 HANDOFF_VERSION = 1
 
-# A worker rewrites the carrier after a renewal at most once per this many seconds
-# (server._CARRIER_REFRESH_S), so the last renewal can be this much newer than the stamp.
-CARRIER_REFRESH_S = 5.0
-
 # A carrier older than the lease it names cannot be describing a live lease, so refuse
-# it rather than hand a stale token to a fresh worker. That lease can outlive the stamp
-# by CARRIER_REFRESH_S (review F1 of #255). Defence in depth only: the coordinator is
-# what actually decides, and it does not consult this.
-MAX_HANDOFF_AGE_S = SESSION_TTL_S + CARRIER_REFRESH_S
+# it rather than hand a stale token to a fresh worker. Defence in depth only: the
+# coordinator is what actually decides, and it does not consult this.
+MAX_HANDOFF_AGE_S = SESSION_TTL_S
 
 # Wall clock, not monotonic: writer and reader are different processes. A carrier
 # stamped in the future is a clock that moved, so allow a little and refuse the rest.

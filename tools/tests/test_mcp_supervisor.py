@@ -810,6 +810,23 @@ class _LateRecycleThreading:
         return threading.Thread(target=late, daemon=daemon, name=name)
 
 
+class _NoRecycleThreading:
+    """threading as mcp_supervisor sees it, where the recycle's thread cannot start."""
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(threading, name)
+
+    def Thread(self, *, target, args=(), daemon=None, name=None) -> threading.Thread:  # noqa: N802
+        thread = threading.Thread(target=target, args=args, daemon=daemon, name=name)
+        if name == "dayz-mcp-recycle":
+
+            def refuse() -> None:
+                raise RuntimeError("can't start new thread")
+
+            thread.start = refuse  # type: ignore[method-assign]
+        return thread
+
+
 class IdleRetirementTest(SupervisorTestBase):
     """A worker idle for the idle timeout is retired until the host speaks (inbox d345).
 
@@ -1087,6 +1104,56 @@ class IdleRetirementTest(SupervisorTestBase):
         self.ahead_s += 60.0
         self.assertTrue(self.supervisor.park_if_idle())
 
+    def test_a_request_the_worker_sends_while_it_is_retired_is_not_forwarded(self) -> None:
+        # Review F7 of #255: sent between the decision and the close of its stdin, its
+        # answer would have reached the next worker.
+        worker = self.start()
+        self._handshake()
+        deciding = threading.Event()
+        release = threading.Event()
+
+        def held_log(line: str) -> None:
+            self.logs.append(line)
+            if "retired until the next host line" in line:
+                deciding.set()
+                release.wait(DEADLINE_S)
+
+        self.supervisor._log = held_log  # type: ignore[method-assign]
+        self.ahead_s += 60.0
+        parking = threading.Thread(target=self.supervisor.park_if_idle)
+        parking.start()
+        try:
+            self.assertTrue(deciding.wait(DEADLINE_S))
+            self.assertFalse(worker.stdin_closed.is_set())
+            worker.push_raw(b'{"jsonrpc":"2.0","id":"w-3","method":"ping"}\n')
+            # The pump relays in order: once this line is out, the ping's turn is over.
+            worker.push_raw(b'{"jsonrpc":"2.0","method":"notifications/message","params":{}}\n')
+            self.host.wait_for(lambda m: m.get("method") == "notifications/message")
+        finally:
+            release.set()
+            parking.join(DEADLINE_S)
+        self.assertTrue(worker.stdin_closed.is_set())
+        self.assertNotIn("w-3", [m.get("id") for m in self.host.messages()])
+        self.assertTrue(any("not forwarded" in line for line in self.logs), self.logs)
+
+    def test_a_reload_whose_thread_cannot_start_leaves_no_recycle_reserved(self) -> None:
+        # Review F9 of #255: the reservation turned every later call away and kept the
+        # worker from being retired.
+        import dayz_mcp.mcp_supervisor as module
+        from unittest.mock import patch
+
+        worker = self.start()
+        self._handshake()
+        with patch.object(module, "threading", _NoRecycleThreading()):
+            with self.assertRaisesRegex(RuntimeError, "can't start new thread"):
+                self.supervisor.handle_host_line(reload_call(7))
+        self.supervisor.handle_host_line(self._call(9))
+        worker.wait_for_sent(lambda m: m.get("id") == 9)
+        worker.answer(9, {"ok": True})
+        self.host.wait_for(lambda m: m.get("id") == 9)
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
     def test_no_worker_is_retired_between_a_reload_request_and_its_recycle(self) -> None:
         # Review F3 and F4 of #255: the recycle's thread can start after the timeout.
         import dayz_mcp.mcp_supervisor as module
@@ -1201,16 +1268,23 @@ class SupervisedEntryTest(unittest.TestCase):
                 supervise.assert_called_once_with(argv, idle_timeout_s=expected)
 
     def test_the_supervisor_gets_the_idle_timeout(self) -> None:
+        # Never less than the lease lasts after the last call: a worker retired sooner
+        # could leave one that still runs, and the next worker refuses the carrier it
+        # left (review F6 of #255).
         import io
         from unittest.mock import patch
 
-        from dayz_mcp import server
+        from dayz_mcp import server, session_handoff
 
-        # The runner's stdout can be a StringIO, which has no buffer (CI on #255).
-        stdio = {name: io.TextIOWrapper(io.BytesIO()) for name in ("stdin", "stdout")}
-        with patch.object(server, "Supervisor") as supervisor, patch.multiple(server.sys, **stdio):
-            self.assertEqual(server.run_supervisor(["--client"], idle_timeout_s=120.0), 0)
-        self.assertEqual(supervisor.call_args.kwargs["idle_timeout_s"], 120.0)
+        floor = server.SESSION_TTL_S + 5.0
+        self.assertGreaterEqual(floor - session_handoff.MAX_HANDOFF_AGE_S, 5.0)
+        for given, expected in ((60.0, floor), (floor, floor), (1800.0, 1800.0), (0.0, 0.0)):
+            with self.subTest(idle_timeout_s=given):
+                # The runner's stdout can be a StringIO, which has no buffer (CI on #255).
+                stdio = {name: io.TextIOWrapper(io.BytesIO()) for name in ("stdin", "stdout")}
+                with patch.object(server, "Supervisor") as supervisor, patch.multiple(server.sys, **stdio):
+                    self.assertEqual(server.run_supervisor(["--client"], idle_timeout_s=given), 0)
+                self.assertEqual(supervisor.call_args.kwargs["idle_timeout_s"], expected)
 
 
 if __name__ == "__main__":

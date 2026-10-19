@@ -387,13 +387,6 @@ class HandoffRefusalTest(unittest.TestCase):
         edge = 1000.0 + MAX_HANDOFF_AGE_S - 0.001
         self.assertIsNotNone(consume_handoff(self.path, now=lambda: edge))
 
-    def test_a_stamp_the_refresh_interval_left_behind_still_works(self) -> None:
-        # A renewal within _CARRIER_REFRESH_S of the last write does not rewrite the
-        # carrier, so the lease can outlive the stamp by that much (review F1 of #255).
-        self._put(self.good)
-        lagging = 1000.0 + SESSION_TTL_S + server._CARRIER_REFRESH_S - 0.001
-        self.assertIsNotNone(consume_handoff(self.path, now=lambda: lagging))
-
     def test_a_document_that_is_not_an_object(self) -> None:
         self._put(["not", "a", "mapping"])
         self.assertIsNone(consume_handoff(self.path))
@@ -546,17 +539,6 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.carrier, identity=self.identity, lease_token=self.lease["lease_token"],
             lease_id=self.lease["lease_id"], generation=1,
         )
-        runtime = self.client_runtime()
-        self.assertEqual(runtime.identity, self.identity)
-        self.assertEqual(runtime.active_lease_token, self.lease["lease_token"])
-        self.assertIsNone(runtime.active_operation_id)
-        # A heartbeat may re-mirror the carried token before reconciliation.
-        runtime._control._announce_lease()
-        await runtime._finish_carrier_io()
-        self.assertTrue(self.carrier.exists())
-        return runtime
-
-    def client_runtime(self):
         policy = _policy(self.keyfile)
         provenance = SimpleNamespace(
             port=policy.port, argv=policy.argv, keyfile=policy.keyfile,
@@ -570,10 +552,18 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(server.host_config, "_local_launch_executable", return_value=policy.native_executable),
             patch.object(server.host_config, "_local_native_executable", return_value=policy.native_executable),
         ):
-            return server.ClientRuntime(server.ServerConfig(
+            runtime = server.ClientRuntime(server.ServerConfig(
                 mode="client", port=policy.port, keyfile=str(self.keyfile),
                 auto_spawn_daemon=False, log_sink=lambda _: None,
             ))
+        self.assertEqual(runtime.identity, self.identity)
+        self.assertEqual(runtime.active_lease_token, self.lease["lease_token"])
+        self.assertIsNone(runtime.active_operation_id)
+        # A heartbeat may re-mirror the carried token before reconciliation.
+        runtime._control._announce_lease()
+        await runtime._finish_carrier_io()
+        self.assertTrue(self.carrier.exists())
+        return runtime
 
     async def remote(self, path, payload=None, **kwargs):
         payload = payload or {}
@@ -639,23 +629,6 @@ class ReloadLeaseRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.active_lease_token, self.lease["lease_token"])
         self.assertTrue(self.carrier.exists())
         self.assertTrue(self.coordinator.authorize(self.identity, runtime.active_lease_token, "world_spawn").allowed)
-
-    async def test_a_worker_retired_before_it_renews_still_hands_the_lease_on(self):
-        # Inbox d345, review F1 of #255: the idle retirement can retire a worker that
-        # took the lease over before any call renewed it. The next one gets it too,
-        # and the carrier keeps the stamp of the write that followed the renewal.
-        written_at = time.time() - 30.0
-        session_handoff.write_handoff(
-            self.carrier, identity=self.identity, lease_token=self.lease["lease_token"],
-            lease_id=self.lease["lease_id"], generation=1, now=lambda: written_at,
-        )
-        first = self.client_runtime()
-        self.assertEqual(first.active_lease_token, self.lease["lease_token"])
-        self.assertEqual(json.loads(self.carrier.read_text(encoding="utf-8"))["written_at"], written_at)
-        second = self.client_runtime()
-        self.assertEqual(second.identity, self.identity)
-        self.assertEqual(second.active_lease_token, self.lease["lease_token"])
-        self.assertTrue(self.coordinator.authorize(second.identity, second.active_lease_token, "world_spawn").allowed)
 
     async def test_foreign_owner_is_not_released_while_local_ghost_is_cleared(self):
         runtime = await self.replacement()
