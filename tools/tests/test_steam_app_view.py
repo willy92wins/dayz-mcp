@@ -420,8 +420,11 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
 # $ExecutionContext, $PSCmdlet, $PSDefaultParameterValues and [scriptblock] are
 # refused. The commands that write items take their paths from variables set once,
 # before them, to a path in the registry or under a folder of the environment, or
-# from Get-ChildItem given such a path.
+# from Get-ChildItem given such a path. Each script's lines end with done, and an
+# error stops the probe, so a script it did not read to the end has none (Codex
+# review of #251, Q12).
 _PREFERENCE_PROBE = r"""
+$ErrorActionPreference = 'Stop'
 $alias = @{}
 Get-Alias | ForEach-Object { $alias[$_.Name] = $_.Definition }
 $allowed = 'Copy-Item', 'ForEach-Object', 'Get-AppxPackage', 'Get-ChildItem', 'Get-Date', 'Get-ItemProperty',
@@ -475,7 +478,7 @@ foreach ($file in Get-ChildItem -LiteralPath 'DIR' -Filter '*.ps1' | Sort-Object
     $tokens = $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
     "$tag errors $($errors.Count)"
-    if ($errors.Count) { continue }
+    if ($errors.Count) { "$tag done"; continue }
     foreach ($node in $ast.FindAll({ $true }, $true)) {
         if ($node.GetType().Name -notin $syntax) { "$tag late $($node.Extent.StartOffset) $($node.GetType().Name)" }
     }
@@ -648,6 +651,7 @@ foreach ($file in Get-ChildItem -LiteralPath 'DIR' -Filter '*.ps1' | Sort-Object
             "$tag late $($type.Extent.StartOffset) scriptblock"
         }
     }
+    "$tag done"
 }
 """
 
@@ -690,6 +694,12 @@ def _probe_scripts(scripts: dict[str, str]) -> dict[str, list[tuple[str, str]]] 
     for line in result.stdout.splitlines():
         tag, kind, rest = (line.split(" ", 2) + [""])[:3]
         facts[tag].append((kind, rest))
+    # A script left out of the output, or cut short, read as refused (Codex review
+    # of #251, Q12): each must open with its parse errors and end with done.
+    for tag, lines in facts.items():
+        kinds = [kind for kind, _rest in lines]
+        if kinds[:1] != ["errors"] or kinds[-1:] != ["done"]:
+            raise AssertionError(f"the probe did not read {tag} to the end: {lines[-3:]}")
     return facts
 
 
@@ -721,6 +731,15 @@ def _swap(script: str, old: str, new: str) -> str:
     return script.replace(old, new)
 
 
+def _unused(script: str, name: str) -> str:
+    """name, or name and a number, where the script has neither (Codex review of #251, Q11)."""
+    candidate, number = name, 1
+    while candidate.lower() in script.lower():
+        number += 1
+        candidate = f"{name}{number}"
+    return candidate
+
+
 _SET = _ASSIGNMENT + "\n"
 _NAME_IN_PIECES = "('PSNative' + 'CommandUseErrorActionPreference')"
 _SAVE = "$callerPreferences = Get-Variable -Name '*Preference' -Scope 1\n"
@@ -730,6 +749,7 @@ _RESTORE = (
 
 
 def _preference_harmless_edits(script: str) -> dict[str, str]:
+    splat = _unused(script, "verboseArguments")
     return {
         "a_comment_before_it": _swap(script, _SET, "# Nothing above this line runs a command.\n" + _SET),
         "a_constant_before_it": _swap(script, _SET, "$unloadAttempts = 5\n" + _SET),
@@ -752,8 +772,8 @@ def _preference_harmless_edits(script: str) -> dict[str, str]:
             script,
             _SET,
             _SET
-            + "$verboseArguments = @{ Message = 'reg.exe is judged by its exit code alone' }\n"
-            + "Write-Verbose @verboseArguments\n",
+            + f"${splat} = @{{ Message = 'reg.exe is judged by its exit code alone' }}\n"
+            + f"Write-Verbose @{splat}\n",
         ),
         "strict_mode_before_it": _swap(script, _SET, "Set-StrictMode -Version 2.0\n" + _SET),
     }
@@ -767,6 +787,7 @@ def _preference_mutants(script: str) -> dict[str, str]:
         return _swap(script, "finally {\n", "finally {\n    " + text + "\n")
 
     valve = "        Write-Host 'Valve keys in the copy:'\n"
+    splat = _unused(script, "verboseArguments")
     return {
         # The assignment itself (Codex review of #240, U1).
         "removed": _swap(script, _SET, ""),
@@ -840,13 +861,13 @@ def _preference_mutants(script: str) -> dict[str, str]:
             f"Get-ChildItem -LiteralPath ('Vari' + 'able:' + {_NAME_IN_PIECES}) | ForEach-Object -MemberName set_Value -ArgumentList $true"
         ),
         "a_splat_changed_later": later(
-            "$verboseArguments = @{ Message = 'reg.exe is judged by its exit code alone' }\n"
-            f"    $verboseArguments['OutVariable'] = {_NAME_IN_PIECES}\n"
-            "    Write-Verbose @verboseArguments"
+            f"${splat} = @{{ Message = 'reg.exe is judged by its exit code alone' }}\n"
+            f"    ${splat}['OutVariable'] = {_NAME_IN_PIECES}\n"
+            f"    Write-Verbose @{splat}"
         ),
         "a_splat_before_its_table": later(
-            "Write-Verbose @verboseArguments\n"
-            "    $verboseArguments = @{ Message = 'reg.exe is judged by its exit code alone' }"
+            f"Write-Verbose @{splat}\n"
+            f"    ${splat} = @{{ Message = 'reg.exe is judged by its exit code alone' }}"
         ),
         # A statement that sets a variable without an assignment.
         "a_data_section": later("data PSNativeCommandUseErrorActionPreference { $true }"),
@@ -873,8 +894,9 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
         # reg.exe before the assignment (third Codex review of #240, V1 and V2), a
         # finally that put a caller's value back through Get-Variable and Set-Variable,
         # and a reg.exe called through a variable before the assignment (Codex review
-        # of #241, W3 and W4). Nothing may run before the assignment now, and nothing
-        # in the script may set a variable without naming it. A test that ran the
+        # of #241, W3 and W4). Only a variable set to a constant, a message or
+        # Set-StrictMode may run before the assignment now (Codex review of #251,
+        # Q13), and nothing may set a variable without naming it. A test that ran the
         # script with fakes in place of its registry commands missed a reg.exe called
         # by its full path, which would reach the real registry, and a restore in the
         # branch its fakes never took (Codex review of #251, Q1 and Q6), so nothing
@@ -898,11 +920,36 @@ class ClearAppSteamShadowScriptTest(unittest.TestCase):
         for tag, text in scripts.items():
             with self.subTest(script=tag):
                 self.assertTrue(tag == "as_is" or text != script)
+                # Each parses, so a mutant is refused by the reading, not the parser.
+                self.assertEqual(facts[tag][0], ("errors", "0"))
                 problems = _preference_problems(facts[tag])
                 if tag.startswith("m_"):
                     self.assertNotEqual(problems, [])
                 else:
                     self.assertEqual(problems, [])
+
+    def test_a_script_the_probe_did_not_read_to_the_end_is_not_refused(self) -> None:
+        # Codex review of #251, Q12: with no lines for a mutant, or only its parse
+        # errors, the reading looked like a refusal and the test passed.
+        scripts = {"as_is": "", "m_removed": ""}
+        whole = "as_is errors 0\nas_is done\nm_removed errors 0\nm_removed done\n"
+        for stdout in (
+            "as_is errors 0\nas_is done\n",
+            "as_is errors 0\nas_is done\nm_removed errors 0\n",
+            "as_is errors 0\nas_is done\nm_removed errors 0\nm_removed late 12 member\nm_removed do",
+        ):
+            with self.subTest(stdout=stdout), patch("shutil.which", return_value="pwsh"), patch(
+                "subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout, "")
+            ):
+                with self.assertRaisesRegex(AssertionError, "did not read m_removed to the end"):
+                    _probe_scripts(scripts)
+        with patch("shutil.which", return_value="pwsh"), patch(
+            "subprocess.run", return_value=subprocess.CompletedProcess([], 0, whole, "")
+        ):
+            self.assertEqual(
+                _probe_scripts(scripts),
+                {"as_is": [("errors", "0"), ("done", "")], "m_removed": [("errors", "0"), ("done", "")]},
+            )
 
 
 if __name__ == "__main__":
