@@ -1080,11 +1080,14 @@ class SupervisedEntryTest(unittest.TestCase):
                 supervise.assert_called_once_with(argv, idle_timeout_s=expected)
 
     def test_the_supervisor_gets_the_idle_timeout(self) -> None:
+        import io
         from unittest.mock import patch
 
         from dayz_mcp import server
 
-        with patch.object(server, "Supervisor") as supervisor:
+        # The runner's stdout can be a StringIO, which has no buffer (CI on #255).
+        stdio = {name: io.TextIOWrapper(io.BytesIO()) for name in ("stdin", "stdout")}
+        with patch.object(server, "Supervisor") as supervisor, patch.multiple(server.sys, **stdio):
             self.assertEqual(server.run_supervisor(["--client"], idle_timeout_s=120.0), 0)
         self.assertEqual(supervisor.call_args.kwargs["idle_timeout_s"], 120.0)
 
