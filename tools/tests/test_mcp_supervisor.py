@@ -802,6 +802,13 @@ class IdleRetirementTest(SupervisorTestBase):
         super().setUp()
         self.ahead_s = 0.0
         self.supervisor = self._supervisor(60.0)
+        # The fake workers' pids can be real processes: no test here may kill a tree.
+        import dayz_mcp.mcp_supervisor as module
+        from unittest.mock import patch
+
+        refuse = patch.object(module, "terminate_tree", side_effect=AssertionError("terminate_tree"))
+        refuse.start()
+        self.addCleanup(refuse.stop)
 
     def _supervisor(self, idle_timeout_s: float) -> Supervisor:
         return Supervisor(
