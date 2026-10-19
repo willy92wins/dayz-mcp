@@ -259,12 +259,15 @@ class MCPCommandBatch
 };
 
 // godmode, here and in MCPAllPlayer, is MCPGodmode.IsOn: GetAllowDamage() false
-// on the server's body (MCP_PlayerCare.c).
+// on the server's body (MCP_PlayerCare.c). water and energy are that body's
+// stats as player_heal reads them (MCPPlayerVitals), 0 to 5000 (inbox fb98).
 class MCPPlayerState
 {
 	string name;
 	ref array<float> pos;
 	bool godmode;
+	float water;
+	float energy;
 
 	void MCPPlayerState()
 	{
@@ -490,18 +493,25 @@ class MCPWeaponState
 };
 
 // F3.6 object_inspect payload. bounding_center is model-local (GetBoundingCenter).
+// With want quantity, has_quantity is true for an ItemBase whose HasQuantity() is
+// true, and quantity and quantity_max are its GetQuantity() and GetQuantityMax();
+// otherwise they stay false and 0 (inbox fb98).
 class MCPObjectInspect
 {
 	string type;
 	ref array<float> bounding_center;
 	bool has_bounding_center;
 	ref array<ref MCPMemoryPoint> memory_points;
+	bool has_quantity;
+	float quantity;
+	float quantity_max;
 
 	void MCPObjectInspect()
 	{
 		bounding_center = new array<float>();
 		memory_points = new array<ref MCPMemoryPoint>();
 		has_bounding_center = false;
+		has_quantity = false;
 	}
 };
 

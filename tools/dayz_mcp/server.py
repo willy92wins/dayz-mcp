@@ -5904,7 +5904,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "pos stays where the server last put the player (for example the "
             "player_teleport position). Read the car with vehicle_telemetry. "
             "godmode is true while the player is immune to damage "
-            "(GetAllowDamage() false on the server). "
+            "(GetAllowDamage() false on the server). water and energy are "
+            "the body's stats, 0 to 5000, as player_heal reads them; an older "
+            "PBO leaves them out. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
@@ -7300,11 +7302,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Inspect an object: memory points (exists+pos) and optional "
-            "bounding_center. Target by object_id (from world_spawn or from "
-            "inventory_attach.item_object_id; that id is the created item, "
-            "not the destination owner, and lasts this run only) or by "
-            "classname near pos. Absent memory points return exists:false "
-            "with ok:true."
+            "bounding_center and quantity. Target by object_id (from "
+            "world_spawn or from inventory_attach.item_object_id; that id is "
+            "the created item, not the destination owner, and lasts this run "
+            "only) or by classname near pos. Absent memory points return "
+            "exists:false with ok:true. want 'quantity' reads an item's "
+            "quantity without changing it: has_quantity true, with quantity "
+            "and quantity_max from GetQuantity() and GetQuantityMax(), for an "
+            "item that has one (the liquid in a bottle, a food), and false "
+            "with both 0 otherwise; an older PBO has no has_quantity."
         )
     )
     async def object_inspect(
@@ -8945,7 +8951,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "only when the client data is PlaceObjectActionData, false kept; "
             "flag_restored and cleanup_complete. ok true means the observation "
             "is valid. Only end_state finished is a local UA_FINISHED. "
-            "Placement and other effects need their own read. A transport "
+            "Placement and other effects need their own read. On 1.29 a "
+            "quantity action such as drink or eat counts a cycle only when the "
+            "item runs out, so completed_cycles stays 0 while it consumes; read "
+            "the item with object_inspect(want=['quantity']) and the player's "
+            "water and energy with query_player_state. A transport "
             "failure is hold_result_unknown, not end_state timeout, and is not "
             "retried. After the client is retired, an unreconciled hold stays "
             "fenced for that run (hold_unreconciled); a cancel acknowledgement "
