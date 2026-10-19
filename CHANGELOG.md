@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `docs/RELEASE.md` plays one game with the release PBO before the tag (new step 5). It swaps the PBO in with `swap_pbo.ps1` where test runs load it, plays without `-filePatching`, checks while the run is up that the server and the client with its profile folders and port run with the release's PBO, and keeps that check, `bridge_status`, `dayz_test_close`, the RPT logs and the server's script log as the release's evidence. Step 2 builds the PBO into a folder of its own: with no `-Destination`, `pack-addon.ps1` replaces the PBO test runs load and keeps no copy of it.
 
+### Fixed
+
+- `action_use` and `action_hold` ask the action's `CanBeStarted()` after `Can()`, whatever their target, door or component, as DayZ 1.30 does before it starts the action of an input (`actionmanagerclient.c:336`). When it is false they answer `condition_failed` and start nothing; on 1.30 only the construction part info action answers false. 1.29 has no `CanBeStarted()`, so the check is compiled only where `DAYZ_1_29` is not defined. Bridge version stays 12. Needs a PBO built from this release (known issue of 1.4).
+
 ## [1.4] - 2026-10-17
 
 The first release verified on DayZ 1.30. On the stable build 1.30.164.078, out on 2026-10-15, `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 12) passes its handshake, and `dayz_test_close` closes both in order. 12 new public tools, 87 in all.

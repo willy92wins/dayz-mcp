@@ -4069,6 +4069,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+#ifndef DAYZ_1_29
+		// 1.30 starts an input's action only when CanBeStarted() is true
+		// (actionmanagerclient.c:336); ActionStart and PerformActionStart do not
+		// ask. 1.29 has no CanBeStarted().
+		if (!action.CanBeStarted())
+		{
+			result.ok = false;
+			result.error = "condition_failed";
+			return true;
+		}
+#endif
+
 		if (command.cmd == "action_hold")
 		{
 			if (amc.MCP_HoldBusy() || MCPHoldControl.IsActive())
