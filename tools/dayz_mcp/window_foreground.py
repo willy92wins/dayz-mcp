@@ -1,17 +1,19 @@
 """Bring a run's own DayZ client window to the front, once (inbox 8b1c).
 
-capture_screenshot reads pixels without asking for the foreground, because
-forcing it (AttachThreadInput, SW_RESTORE, BringWindowToTop, then
-SetForegroundWindow) has killed the live client (fb-20260904-025027-8f76).
-A client left behind other windows can keep its terrain grey until someone
-brings it forward (8b1c). So this asks Windows once, with SetForegroundWindow
-and nothing else, and reads GetForegroundWindow to say whether the window came
-to the front and whether it stayed there. Windows grants that call only in the
-cases Microsoft documents for it, one of them once the foreground lock
-time-out after the user's last input has expired; a refusal is the answer, and
-nothing here asks again. A minimized window is not asked for: bringing it back
-takes SW_RESTORE. The windows of a process are the ones window_close lists.
-Win32 callables are injectable so tests never touch the desktop.
+capture_screenshot reads pixels without asking for the foreground: once it was
+forced (AttachThreadInput, SW_RESTORE, BringWindowToTop, then
+SetForegroundWindow), the live client kept running and responding but showed
+no window and stopped polling, and no one call was found to cause it
+(fb-20260904-025027-8f76). A client left behind other windows can keep its
+terrain grey until someone brings it forward (8b1c). So this asks Windows once,
+with SetForegroundWindow and nothing else, and reads GetForegroundWindow to say
+whether the window came to the front and whether it was there at each read
+after that. Windows grants that call only in the cases Microsoft documents for
+it, one of them once the foreground lock time-out after the user's last input
+has expired; a refusal is the answer, and nothing here asks again. A minimized
+window is not asked for: bringing it back takes SW_RESTORE. The windows of a
+process are the ones window_close lists. Win32 callables are injectable so
+tests never touch the desktop.
 """
 
 from __future__ import annotations
@@ -141,9 +143,12 @@ def watch(
 ) -> tuple[str, float]:
     """Read the foreground window for ``hold_s`` seconds after the call.
 
-    ``foreground`` when ``hwnd`` held it throughout, ``lost`` when another
-    window took it back first, and ``denied`` when it did not show within
-    SETTLE_S. The seconds are how long ``hwnd`` held it.
+    It is read every SAMPLE_INTERVAL_S, the last time when ``hold_s`` is up:
+    ``foreground`` when every read showed ``hwnd``, ``lost`` when one showed
+    another window, and ``denied`` when ``hwnd`` did not show within
+    SETTLE_S. For the first two, the seconds are when the last read was made,
+    counted from the read that first showed ``hwnd``. A change between two
+    reads is not seen.
     """
 
     api = fns if fns is not None else real_win32()
@@ -153,8 +158,10 @@ def watch(
             return "denied", 0.0
         sleep(SAMPLE_INTERVAL_S)
     shown = clock()
-    while clock() - shown < hold_s:
-        sleep(SAMPLE_INTERVAL_S)
+    deadline = shown + hold_s
+    while clock() < deadline:
+        # The last sleep ends when hold_s is up (Codex F1).
+        sleep(min(SAMPLE_INTERVAL_S, deadline - clock()))
         if api.foreground() != hwnd:
             return "lost", round(clock() - shown, 2)
     return "foreground", round(clock() - shown, 2)

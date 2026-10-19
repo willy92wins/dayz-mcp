@@ -259,6 +259,14 @@ class WindowForegroundTest(unittest.TestCase):
         )
         self.assertEqual(self.clock.slept, [0.25] * 3)
 
+    def test_the_last_read_is_made_when_hold_s_is_up(self) -> None:
+        # Codex F1: a window taken back after hold_s is not lost.
+        self.assertEqual(
+            self.watch(_fronts(11, 11, 11, _OTHER), 0.3), ("foreground", 0.3)
+        )
+        self.assertEqual([round(s, 6) for s in self.clock.slept], [0.25, 0.05])
+        self.assertEqual(self.watch(_fronts(11, 11, _OTHER), 0.3), ("lost", 0.3))
+
     def test_on_windows_it_binds_user32_with_handles_for_arguments(self) -> None:
         class _Call:
             def __init__(self, answer) -> None:
@@ -680,17 +688,43 @@ class ForegroundRunTest(unittest.TestCase):
         self.assertEqual(self.desktop.calls, ["iconic", "unlock"])
         self.assertEqual(self.in_flight(), [])
 
-    def test_a_client_gone_after_the_audit_row_is_not_asked_for(self) -> None:
+    def test_a_client_gone_or_unclear_after_the_audit_row_is_not_asked_for(
+        self,
+    ) -> None:
+        # The identity is read again once the command is committed (Codex F4).
         self.add_run()
+        incomplete = dict(
+            snapshot(self.client),
+            creation_time_utc="2099-01-01T00:00:00.0000000Z",
+            identity_complete=False,
+        )
 
-        def audit(event: dict[str, object]) -> bool:
-            if event.get("event") == "lifecycle_foreground":
-                self.guard.snapshots[42] = {"error": "process_not_found", "exit_code": 4}
-            return self.audit(event)
+        def guard_raises(_pid: int) -> dict[str, object]:
+            raise RuntimeError("guard")
 
-        self.lifecycle.audit = audit
-        self.assertRefused(self.foreground(), "client_process_gone", 409)
-        self.assertEqual(len(self.rows()), 1)
+        for label, seen, error, status in (
+            ("gone", {"error": "process_not_found", "exit_code": 4}, "client_process_gone", 409),
+            ("guard down", {"error": "guard", "exit_code": 3}, "guard_unavailable", 503),
+            ("incomplete", incomplete, "process_identity_mismatch", 409),
+            ("guard raises", None, "guard_unavailable", 503),
+        ):
+
+            def audit(event: dict[str, object], seen=seen) -> bool:
+                if event.get("event") == "lifecycle_foreground":
+                    if seen is None:
+                        self.guard.snapshot = guard_raises
+                    else:
+                        self.guard.snapshots[42] = seen
+                return self.audit(event)
+
+            with self.subTest(client=label):
+                self.guard.snapshots[42] = snapshot(self.client)
+                self.lifecycle.audit = audit
+                try:
+                    self.assertRefused(self.foreground(), error, status)
+                finally:
+                    vars(self.guard).pop("snapshot", None)
+        self.assertEqual(len(self.rows()), 4)
         self.assertEqual(self.desktop.calls, [])
         self.assertEqual(self.in_flight(), [])
 
@@ -714,14 +748,31 @@ class ForegroundRunTest(unittest.TestCase):
 
     def test_an_error_before_the_commit_drops_the_reservation(self) -> None:
         self.add_run()
-        with patch.object(
-            window_foreground, "client_window", side_effect=RuntimeError("enum")
-        ):
+
+        def enumeration_fails():
+            return patch.object(
+                window_foreground, "client_window", side_effect=RuntimeError("enum")
+            )
+
+        def fails(name: str):
+            return patch.object(self.coordinator, name, side_effect=RuntimeError(name))
+
+        with enumeration_fails():
             result = self.foreground()
         self.assertRefused(result, "foreground_failed", 503)
         self.assertNotIn("cleanup_degraded", result)
-        self.assertEqual(self.desktop.calls, [])
         self.assertEqual(self.in_flight(), [])
+        # Codex F5: when the abort fails too, rejecting the reservation drops it.
+        with enumeration_fails(), fails("abort_reservation"):
+            result = self.foreground()
+        self.assertRefused(result, "foreground_failed", 503)
+        self.assertNotIn("cleanup_degraded", result)
+        self.assertEqual(self.in_flight(), [])
+        with enumeration_fails(), fails("abort_reservation"), fails("reject_reservation"):
+            result = self.foreground()
+        self.assertRefused(result, "foreground_failed", 503)
+        self.assertEqual(result["cleanup_degraded"], ["reservation_abort_failed"])
+        self.assertEqual(self.desktop.calls, [])
 
     def test_an_error_after_the_commit_finishes_the_command(self) -> None:
         self.add_run()
@@ -777,6 +828,8 @@ class ForegroundToolTest(unittest.IsolatedAsyncioTestCase):
         for words in (
             "SetForegroundWindow and nothing else",
             "(0 to 10)",
+            "every 0.25 s",
+            "a change between two reads is not seen",
             "never asks twice",
             "state minimized, granted null",
             "capture_screenshot stays passive",
