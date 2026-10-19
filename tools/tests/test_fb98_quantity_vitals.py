@@ -189,10 +189,13 @@ def _translated(
 
 def _classes(namespace: dict[str, Any]) -> frozenset[str]:
     """The classes the adaptation reads `new X()` for: the namespace's fake classes, and
-    the addon's classes but a name the namespace fakes as anything else, a function above
-    all (Codex H10)."""
+    the addon's classes but a name the namespace fakes as a function (Codex H10). A class
+    whose statics the namespace fakes is still one (Codex H14)."""
     built = frozenset(name for name, fake in namespace.items() if isinstance(fake, type))
-    return (_addon_classes() - frozenset(namespace)) | built
+    functions = frozenset(
+        name for name, fake in namespace.items() if callable(fake) and not isinstance(fake, type)
+    )
+    return (_addon_classes() - functions) | built
 
 
 @functools.lru_cache(maxsize=1)
@@ -500,6 +503,19 @@ class AdaptationTest(unittest.TestCase):
                     seen, _filled = _state(listed)
                     want = expected[label]
                     self.assertEqual(vars(seen) if seen else seen, vars(want) if want else want)
+
+    def test_a_class_whose_statics_the_namespace_fakes_is_still_one(self) -> None:
+        # Codex H14: a call of MCPGodmode or PlayerBase without new is refused, also in
+        # the branch of a man with an identity, which no fake man reaches.
+        body = method_body(BRIDGE, BUILD_STATE)
+        branch = re.search(r"if \(identity\)\s*\{", body)
+        self.assertIsNotNone(branch)
+        classes = _classes(_FAKES[BUILD_STATE]())
+        for name in ("MCPGodmode", "PlayerBase"):
+            with self.subTest(name=name):
+                self.assertIn(name, classes)
+                with self.assertRaisesRegex(AssertionError, rf"calls {name}\(\) without new"):
+                    _adapted(_spliced(body, branch, f"{branch.group()}\n{name}();"), classes)
 
     def test_another_vector_name_and_more_spaces_read_the_same(self) -> None:
         body = method_body(BRIDGE, BUILD_STATE)
