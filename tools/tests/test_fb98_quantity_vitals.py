@@ -182,17 +182,25 @@ def _translated(
 ) -> Any:
     """One MCPBridge method, or ``body`` in its place, adapted for the translator.
     A class its run builds needs a fake in the namespace."""
-    built = frozenset(name for name, fake in namespace.items() if isinstance(fake, type))
     source = method_body(BRIDGE, signature) if body is None else body
-    adapted = _adapted(source, _addon_classes() | built)
+    adapted = _adapted(source, _classes(namespace))
     return translate(signature + "\n{" + adapted + "}\n", signature, namespace, class_types=class_types)
+
+
+def _classes(namespace: dict[str, Any]) -> frozenset[str]:
+    """The classes the adaptation reads `new X()` for: the namespace's fake classes, and
+    the addon's classes but a name the namespace fakes as anything else, a function above
+    all (Codex H10)."""
+    built = frozenset(name for name, fake in namespace.items() if isinstance(fake, type))
+    return (_addon_classes() - frozenset(namespace)) | built
 
 
 @functools.lru_cache(maxsize=1)
 def _addon_classes() -> frozenset[str]:
     """The classes the addon's scripts declare in their code, not in a comment or a
     string literal (Codex H10). A class under any #ifdef counts: the same scripts
-    build for 1.29 and for 1.30."""
+    build for 1.29 and for 1.30, a server and a client, and under other macros; a
+    name the namespace fakes as a function is still read as one (_classes)."""
     return frozenset(
         name
         for path in sorted((addon_root() / "scripts").rglob("*.c"))
@@ -240,14 +248,32 @@ def _rewrite(code: str, classes: frozenset[str], vectors: frozenset[str]) -> str
     )
 
 
-def _dispatched(target: _Object, *wants: str) -> SimpleNamespace:
-    namespace: dict[str, Any] = {
+def _inspect_namespace(target: _Object) -> dict[str, Any]:
+    """What DispatchObjectInspect and FillInspectQuantity reach, faked."""
+    return {
         "ItemBase": _ItemBase,
         "MCPObjectInspect": _Inspect,
         "MCPMemoryPoint": _Point,
         "ResolveCommandObject": lambda _args, _error: target,
         "VectorToArray": lambda vector, out: out.extend(vector),
     }
+
+
+def _state_namespace(listed: list[_Man | None], fill: Any) -> dict[str, Any]:
+    """What BuildPlayerState reaches, faked."""
+    return {
+        "m_Players": _Array(),
+        "GetGame": lambda: SimpleNamespace(GetPlayers=lambda out: out.extend(listed)),
+        "MCPGodmode": SimpleNamespace(IsOn=lambda _player: False),
+        "MCPPlayerState": _State,
+        "MCPPlayerVitals": _Vitals,
+        "PlayerBase": SimpleNamespace(Cast=lambda man: man if isinstance(man, _Body) else None),
+        "FillPlayerVitals": fill,
+    }
+
+
+def _dispatched(target: _Object, *wants: str) -> SimpleNamespace:
+    namespace = _inspect_namespace(target)
     _translated(FILL_QUANTITY, namespace, ("ItemBase",))
     dispatch = _translated(
         DISPATCH_INSPECT, namespace, ("Object", "MCPObjectInspect", "MCPTelemetry", "MCPMemoryPoint", "vector")
@@ -271,18 +297,9 @@ def _state(
         vitals.water = target.water
         vitals.energy = target.energy
 
-    namespace: dict[str, Any] = {
-        "m_Players": _Array(),
-        "GetGame": lambda: SimpleNamespace(GetPlayers=lambda out: out.extend(listed)),
-        "MCPGodmode": SimpleNamespace(IsOn=lambda _player: False),
-        "MCPPlayerState": _State,
-        "MCPPlayerVitals": _Vitals,
-        "PlayerBase": SimpleNamespace(Cast=lambda man: man if isinstance(man, _Body) else None),
-        "FillPlayerVitals": fill,
-    }
     build = _translated(
         BUILD_STATE,
-        namespace,
+        _state_namespace(listed, fill),
         ("Man", "vector", "PlayerIdentity", "PlayerBase", "MCPPlayerState", "MCPPlayerVitals"),
         body,
     )
@@ -388,6 +405,28 @@ def _spliced(body: str, found: re.Match[str], text: str) -> str:
     return body[: found.start()] + text + body[found.end() :]
 
 
+def _code(body: str) -> str:
+    """``body`` with the inside of each string literal blanked, at the same offsets
+    (Codex H12)."""
+    return _ENFORCE_STRING.sub(lambda found: '"' + " " * (len(found.group()) - 2) + '"', body)
+
+
+def _free_local(body: str, name: str) -> str:
+    """``name``, or ``name`` with underscores after it, so that ``body`` names it nowhere
+    (Codex H13)."""
+    while re.search(rf"\b{name}\b", body):
+        name += "_"
+    return name
+
+
+# The fakes each translated method runs against, for the checks that do not run it.
+_FAKES = {
+    DISPATCH_INSPECT: lambda: _inspect_namespace(_Object("Wall")),
+    FILL_QUANTITY: lambda: _inspect_namespace(_Object("Wall")),
+    BUILD_STATE: lambda: _state_namespace([], None),
+}
+
+
 def _left_over(adapted: str) -> list[str]:
     """Each `new` or index the rewrites left in ``adapted``, outside its string literals
     (Codex H11)."""
@@ -397,30 +436,70 @@ def _left_over(adapted: str) -> list[str]:
 class AdaptationTest(unittest.TestCase):
     """The translator's rewrites refuse a source that already reads their way (Codex H6,
     H8) and read its equivalent forms the same way (Codex H9), and neither the class
-    index nor the check reads a comment or a string literal as code (Codex H10, H11)."""
+    index nor the checks read a comment or a string literal as code (Codex H10 to H13)."""
+
+    def _refused(self, signature: str, body: str) -> tuple[list[str], list[str]]:
+        """Each construction and vector index of ``body``'s code, each refused once it
+        reads the rewritten way."""
+        classes = _classes(_FAKES[signature]())
+        built: list[str] = []
+        indexed: list[str] = []
+        code = _code(body)
+        vectors = _VECTOR_LOCAL.findall(code)
+        for found in _CONSTRUCTION.finditer(code):
+            built.append(found.group(1))
+            with self.subTest(signature=signature, source=found.group()):
+                with self.assertRaises(AssertionError):
+                    _adapted(_spliced(body, found, f"{found.group(1)}()"), classes)
+        for found in _INDEX.finditer(code):
+            self.assertIn(found.group(1), vectors)
+            indexed.append(found.group(2))
+            with self.subTest(signature=signature, source=found.group()):
+                with self.assertRaises(AssertionError):
+                    _adapted(_spliced(body, found, f"{found.group(1)}.At({found.group(2)})"), classes)
+        self.assertEqual(_left_over(_adapted(body, classes)), [])
+        return built, indexed
 
     def test_each_construction_and_vector_index_already_rewritten_is_refused(self) -> None:
         built: list[str] = []
         indexed: list[str] = []
         for signature in (DISPATCH_INSPECT, FILL_QUANTITY, BUILD_STATE):
             body = method_body(BRIDGE, signature)
-            vectors = _VECTOR_LOCAL.findall(body)
-            for found in _CONSTRUCTION.finditer(body):
-                built.append(found.group(1))
-                with self.subTest(signature=signature, source=found.group()):
-                    with self.assertRaises(AssertionError):
-                        _adapted(_spliced(body, found, f"{found.group(1)}()"), _addon_classes())
-            for found in _INDEX.finditer(body):
-                self.assertIn(found.group(1), vectors)
-                indexed.append(found.group(2))
-                with self.subTest(signature=signature, source=found.group()):
-                    with self.assertRaises(AssertionError):
-                        _adapted(_spliced(body, found, f"{found.group(1)}.At({found.group(2)})"), _addon_classes())
-            self.assertEqual(_left_over(_adapted(body, _addon_classes())), [])
+            found = self._refused(signature, body)
+            built += found[0]
+            indexed += found[1]
+            # Codex H12: a construction or an index in a string literal is none.
+            noted = (
+                f'string {_free_local(body, "auditNote")} = "new pos[0]";\n'
+                f'string {_free_local(body, "auditBuilt")} = "new MCPPlayerVitals()";\n'
+            )
+            with self.subTest(signature=signature, literals=noted):
+                self.assertEqual(self._refused(signature, noted + body), found)
         self.assertEqual(
             sorted(built), ["MCPMemoryPoint", "MCPObjectInspect", "MCPPlayerState", "MCPPlayerVitals", "MCPTelemetry"]
         )
         self.assertEqual(indexed, ["0", "1", "2"])
+
+    def test_a_class_named_as_a_function_the_namespace_fakes_is_no_class(self) -> None:
+        # Codex H10: `class GetGame {}` under a macro neither build defines enters the
+        # index, and BuildPlayerState still reads, and refuses, as before.
+        index = _addon_classes() | {"GetGame"}
+        expected = {
+            label: _state(listed)[0]
+            for label, listed in (("body", [_Body(water=1234.5, energy=2345.5)]), ("man", [_Man()]), ("none", []))
+        }
+        with patch.object(sys.modules[__name__], "_addon_classes", return_value=index):
+            self.assertIn("GetGame", _addon_classes())
+            self.assertNotIn("GetGame", _classes(_FAKES[BUILD_STATE]()))
+            self.assertEqual(
+                self._refused(BUILD_STATE, method_body(BRIDGE, BUILD_STATE)),
+                (["MCPPlayerState", "MCPPlayerVitals"], ["0", "1", "2"]),
+            )
+            for label, listed in (("body", [_Body(water=1234.5, energy=2345.5)]), ("man", [_Man()]), ("none", [])):
+                with self.subTest(players=label):
+                    seen, _filled = _state(listed)
+                    want = expected[label]
+                    self.assertEqual(vars(seen) if seen else seen, vars(want) if want else want)
 
     def test_another_vector_name_and_more_spaces_read_the_same(self) -> None:
         body = method_body(BRIDGE, BUILD_STATE)
@@ -458,16 +537,20 @@ class AdaptationTest(unittest.TestCase):
                 )
 
     def test_a_new_or_an_index_in_a_string_literal_is_left_as_it_is(self) -> None:
-        # Codex H11: the rewrites and what they leave are read outside the literals.
-        body = 'string note = "new pos[0]";\n' + method_body(BRIDGE, BUILD_STATE)
-        adapted = _adapted(body, _addon_classes())
-        self.assertIn('"new pos[0]"', adapted)
-        self.assertEqual(_left_over(adapted), [])
-        for label, listed in (("body", [_Body(water=1234.5, energy=2345.5)]), ("man", [_Man()]), ("none", [])):
-            with self.subTest(players=label):
-                expected, _filled = _state(listed)
-                seen, _filled = _state(listed, body)
-                self.assertEqual(vars(seen) if seen else seen, vars(expected) if expected else expected)
+        # Codex H11, H13: the rewrites and what they leave are read outside the literals,
+        # whatever the body already declares, `string note = "new";` among them.
+        source = method_body(BRIDGE, BUILD_STATE)
+        noted = source if re.search(r"\bnote\b", source) else 'string note = "new";\n' + source
+        for label, before in (("as it is", source), ("with a note", noted)):
+            body = f'string {_free_local(before, "note")} = "new pos[0]";\n' + before
+            adapted = _adapted(body, _classes(_FAKES[BUILD_STATE]()))
+            self.assertIn('"new pos[0]"', adapted)
+            self.assertEqual(_left_over(adapted), [])
+            for players, listed in (("body", [_Body(water=1234.5, energy=2345.5)]), ("man", [_Man()]), ("none", [])):
+                with self.subTest(body=label, players=players):
+                    expected, _filled = _state(listed)
+                    seen, _filled = _state(listed, body)
+                    self.assertEqual(vars(seen) if seen else seen, vars(expected) if expected else expected)
 
 
 class PublicAnswerTest(unittest.IsolatedAsyncioTestCase):
