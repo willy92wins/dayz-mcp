@@ -790,5 +790,556 @@ class WorkerDeathTest(SupervisorTestBase):
         self.assertEqual(answered["result"], {"ok": True})
 
 
+class _LateRecycleThreading:
+    """threading as mcp_supervisor sees it, with the recycle's thread held before it runs."""
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(threading, name)
+
+    def Thread(self, *, target, args=(), daemon=None, name=None) -> threading.Thread:  # noqa: N802
+        if name != "dayz-mcp-recycle":
+            return threading.Thread(target=target, args=args, daemon=daemon, name=name)
+
+        def late() -> None:
+            self._release.wait(DEADLINE_S)
+            target(*args)
+
+        return threading.Thread(target=late, daemon=daemon, name=name)
+
+
+class _NoRecycleThreading:
+    """threading as mcp_supervisor sees it, where the recycle's thread cannot start."""
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(threading, name)
+
+    def Thread(self, *, target, args=(), daemon=None, name=None) -> threading.Thread:  # noqa: N802
+        thread = threading.Thread(target=target, args=args, daemon=daemon, name=name)
+        if name == "dayz-mcp-recycle":
+
+            def refuse() -> None:
+                raise RuntimeError("can't start new thread")
+
+            thread.start = refuse  # type: ignore[method-assign]
+        return thread
+
+
+class _WatchedLock:
+    """An RLock that names each thread that had to wait for it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.waited: queue.Queue[str] = queue.Queue()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            return True
+        self.waited.put(threading.current_thread().name)
+        return self._lock.acquire(blocking, timeout)
+
+    __enter__ = acquire
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+    # What threading.Condition takes from an RLock; locked() since Python 3.14.
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def _is_owned(self) -> bool:
+        return self._lock._is_owned()
+
+    def _release_save(self) -> object:
+        return self._lock._release_save()
+
+    def _acquire_restore(self, state: object) -> None:
+        self._lock._acquire_restore(state)
+
+
+class IdleRetirementTest(SupervisorTestBase):
+    """A worker idle for the idle timeout is retired until the host speaks (inbox d345).
+
+    A host that keeps the stdin of a finished thread open kept the worker, and its
+    launcher, alive for the life of the host. The clock runs ahead of real time, so
+    the supervisor's own waits still end.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ahead_s = 0.0
+        self.supervisor = self._supervisor(60.0)
+        # The fake workers' pids can be real processes: no test here may kill a tree.
+        import dayz_mcp.mcp_supervisor as module
+        from unittest.mock import patch
+
+        refuse = patch.object(module, "terminate_tree", side_effect=AssertionError("terminate_tree"))
+        refuse.start()
+        self.addCleanup(refuse.stop)
+
+    def _supervisor(self, idle_timeout_s: float) -> Supervisor:
+        return Supervisor(
+            spawn=self._spawn,
+            out_stream=self.host,
+            log=self.logs.append,
+            monotonic=lambda: time.monotonic() + self.ahead_s,
+            drain_timeout_s=0.5,
+            stdin_close_grace_s=0.5,
+            replay_timeout_s=1.0,
+            heartbeat_timeout_s=0.5,
+            idle_timeout_s=idle_timeout_s,
+        )
+
+    def _handshake(self) -> None:
+        self.handshake()
+        # The initialize answer is activity: let it land before the clock moves.
+        self.host.wait_for(lambda m: m.get("id") == 1)
+
+    def _call(self, ident: object) -> bytes:
+        return (
+            json.dumps({"jsonrpc": "2.0", "id": ident, "method": "tools/call",
+                        "params": {"name": "ping"}}) + "\n"
+        ).encode("utf-8")
+
+    def test_an_idle_worker_is_retired_and_the_next_host_line_starts_one(self) -> None:
+        first = self.start()
+        self._handshake()
+
+        self.ahead_s += 59.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.assertFalse(first.stdin_closed.is_set())
+        self.ahead_s += 1.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        self.assertTrue(first.stdin_closed.is_set())
+        self.assertFalse(self.supervisor.park_if_idle())
+        # Nothing starts until the host speaks.
+        self.assertEqual(len(self.workers), 1)
+
+        self.supervisor.handle_host_line(self._call(9))
+        self.assertEqual(len(self.workers), 2)
+        second = self.workers[1]
+        second.wait_for_sent(lambda m: m.get("id") == 9)
+        self.assertEqual(
+            [(m.get("id"), m.get("method")) for m in second.sent],
+            [
+                (REPLAY_ID, "initialize"),
+                (None, "notifications/initialized"),
+                (9, "tools/call"),
+            ],
+        )
+        self.host.wait_for(lambda m: m.get("method") == "notifications/tools/list_changed")
+        second.answer(9, {"ok": True})
+        self.assertEqual(self.host.wait_for(lambda m: m.get("id") == 9)["result"], {"ok": True})
+        self.assertNotIn(9, [m.get("id") for m in first.sent])
+        self.assertTrue(any("idle for 60 s" in line for line in self.logs), self.logs)
+
+        # The new worker serves the next lines, and is retired in its turn.
+        self.supervisor.handle_host_line(self._call(10))
+        second.wait_for_sent(lambda m: m.get("id") == 10)
+        second.answer(10, {"ok": True})
+        self.host.wait_for(lambda m: m.get("id") == 10)
+        self.assertEqual(len(self.workers), 2)
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        self.assertTrue(second.stdin_closed.is_set())
+
+    def test_a_call_in_flight_keeps_the_worker_and_idle_counts_from_its_answer(self) -> None:
+        worker = self.start()
+        self._handshake()
+        self.supervisor.handle_host_line(self._call(9))
+        worker.wait_for_sent(lambda m: m.get("id") == 9)
+
+        self.ahead_s += 600.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        worker.answer(9, {"ok": True})
+        self.host.wait_for(lambda m: m.get("id") == 9)
+
+        self.ahead_s += 59.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.assertFalse(worker.stdin_closed.is_set())
+        self.ahead_s += 1.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+    def test_a_host_line_counts_as_activity(self) -> None:
+        worker = self.start()
+        self._handshake()
+        self.ahead_s += 50.0
+        self.supervisor.handle_host_line(
+            (json.dumps({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"})
+             + "\n").encode("utf-8")
+        )
+        worker.wait_for_sent(lambda m: m.get("method") == "notifications/roots/list_changed")
+
+        self.ahead_s += 59.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.ahead_s += 1.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+    def test_zero_keeps_the_worker_for_the_life_of_the_host(self) -> None:
+        self.supervisor = self._supervisor(0.0)
+        worker = self.start()
+        self._handshake()
+        self.ahead_s += 10 * 24 * 3600.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.assertFalse(worker.stdin_closed.is_set())
+
+    def test_a_worker_without_a_handshake_to_replay_is_kept(self) -> None:
+        worker = self.start()
+        self.ahead_s += 3600.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.assertFalse(worker.stdin_closed.is_set())
+
+    def test_a_dead_worker_is_left_for_the_reload(self) -> None:
+        # Its calls are answered worker_died until server_reload, as before.
+        worker = self.start()
+        self._handshake()
+        worker.stdout.close()
+        deadline = time.monotonic() + DEADLINE_S
+        while not any("transport failed" in line for line in self.logs):
+            self.assertLess(time.monotonic(), deadline, self.logs)
+            time.sleep(0.005)
+        self.ahead_s += 3600.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.assertEqual(len(self.workers), 1)
+
+    def test_a_host_line_during_the_retirement_waits_for_it(self) -> None:
+        events: list[str] = []
+        stubborn = FakeWorker(9999, exit_on_stdin_close=False)
+        self.workers.append(stubborn)
+        self.supervisor._spawn = lambda: stubborn  # type: ignore[method-assign]
+        self.supervisor.start_worker()
+        self._handshake()
+
+        def spawn() -> FakeWorker:
+            events.append("spawned")
+            return self._spawn()
+
+        release = threading.Event()
+
+        def slow_tree(process: object, log: object) -> None:
+            release.wait(DEADLINE_S)
+            events.append("killed")
+            stubborn.kill()
+
+        self.supervisor._spawn = spawn  # type: ignore[method-assign]
+        import dayz_mcp.mcp_supervisor as module
+
+        original = module.terminate_tree
+        module.terminate_tree = slow_tree
+        try:
+            self.ahead_s += 60.0
+            parking = threading.Thread(target=self.supervisor.park_if_idle)
+            parking.start()
+            self.assertTrue(stubborn.stdin_closed.wait(DEADLINE_S))
+            line = threading.Thread(
+                target=self.supervisor.handle_host_line, args=(self._call(9),)
+            )
+            line.start()
+            line.join(0.2)
+            # It waits for the old worker to go rather than start one beside it.
+            self.assertTrue(line.is_alive())
+            self.assertEqual(events, [])
+            release.set()
+            parking.join(DEADLINE_S)
+            line.join(DEADLINE_S)
+        finally:
+            release.set()
+            module.terminate_tree = original
+        self.assertEqual(events, ["killed", "spawned"])
+        self.workers[-1].wait_for_sent(lambda m: m.get("id") == 9)
+        self.assertNotIn(9, [m.get("id") for m in stubborn.sent])
+
+    def test_no_worker_is_retired_while_a_host_line_is_routed(self) -> None:
+        worker = self.start()
+        self._handshake()
+        routing = threading.Event()
+        release = threading.Event()
+        route = self.supervisor._route_host_line
+
+        def slow_route(raw: bytes) -> None:
+            routing.set()
+            release.wait(DEADLINE_S)
+            route(raw)
+
+        self.supervisor._route_host_line = slow_route  # type: ignore[method-assign]
+        line = threading.Thread(
+            target=self.supervisor.handle_host_line,
+            args=((json.dumps({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"})
+                   + "\n").encode("utf-8"),),
+        )
+        line.start()
+        try:
+            self.assertTrue(routing.wait(DEADLINE_S))
+            self.ahead_s += 60.0
+            self.assertFalse(self.supervisor.park_if_idle())
+        finally:
+            release.set()
+            line.join(DEADLINE_S)
+        self.assertFalse(worker.stdin_closed.is_set())
+        self.assertTrue(self.supervisor.park_if_idle())
+
+    def test_a_worker_that_cannot_start_answers_the_line_and_the_next_one_tries_again(self) -> None:
+        self.start()
+        self._handshake()
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+        def no_spawn() -> FakeWorker:
+            raise OSError("no interpreter")
+
+        self.supervisor._spawn = no_spawn  # type: ignore[method-assign]
+        self.supervisor.handle_host_line(self._call(9))
+        self.assertEqual(result_text(self.host.wait_for(lambda m: m.get("id") == 9))["error"], "worker_died")
+        self.assertTrue(any("no worker could be started" in line for line in self.logs), self.logs)
+
+        self.supervisor._spawn = self._spawn  # type: ignore[method-assign]
+        self.supervisor.handle_host_line(self._call(10))
+        self.assertEqual(len(self.workers), 2)
+        self.workers[1].wait_for_sent(lambda m: m.get("id") == 10)
+
+    def test_a_request_of_the_workers_keeps_it_until_the_host_answers(self) -> None:
+        # Review F2 of #255: the answer has to reach the worker that asked.
+        worker = self.start()
+        self._handshake()
+        worker.push_raw(b'{"jsonrpc":"2.0","id":"w-1","method":"ping"}\n')
+        self.host.wait_for(lambda m: m.get("id") == "w-1")
+        self.ahead_s += 600.0
+        self.assertFalse(self.supervisor.park_if_idle())
+        self.supervisor.handle_host_line(b'{"jsonrpc":"2.0","id":"w-1","result":{}}\n')
+        self.assertEqual(
+            worker.wait_for_sent(lambda m: m.get("id") == "w-1"),
+            {"jsonrpc": "2.0", "id": "w-1", "result": {}},
+        )
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        self.assertEqual(len(self.workers), 1)
+
+    def test_a_request_answered_before_its_relay_returns_does_not_keep_the_worker(self) -> None:
+        # The request is counted before it reaches the host, which can answer at once.
+        worker = self.start()
+        self._handshake()
+        write = self.host.write
+
+        def answer_at_once(raw: bytes) -> None:
+            write(raw)
+            if b'"method":"ping"' in raw:
+                self.supervisor.handle_host_line(b'{"jsonrpc":"2.0","id":"w-2","result":{}}\n')
+
+        self.host.write = answer_at_once  # type: ignore[method-assign]
+        worker.push_raw(b'{"jsonrpc":"2.0","id":"w-2","method":"ping"}\n')
+        # The pump relays in order: once this line is out, the ping's turn is over.
+        worker.push_raw(b'{"jsonrpc":"2.0","method":"notifications/message","params":{}}\n')
+        self.host.wait_for(lambda m: m.get("method") == "notifications/message")
+        self.assertEqual(worker.wait_for_sent(lambda m: m.get("id") == "w-2")["result"], {})
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+    def test_a_request_the_worker_sends_while_it_is_retired_is_not_forwarded(self) -> None:
+        # Review F7 of #255: sent between the decision and the close of its stdin, its
+        # answer would have reached the next worker.
+        worker = self.start()
+        self._handshake()
+        deciding = threading.Event()
+        release = threading.Event()
+
+        def held_log(line: str) -> None:
+            self.logs.append(line)
+            if "retired until the next host line" in line:
+                deciding.set()
+                release.wait(DEADLINE_S)
+
+        self.supervisor._log = held_log  # type: ignore[method-assign]
+        self.ahead_s += 60.0
+        parking = threading.Thread(target=self.supervisor.park_if_idle)
+        parking.start()
+        try:
+            self.assertTrue(deciding.wait(DEADLINE_S))
+            self.assertFalse(worker.stdin_closed.is_set())
+            worker.push_raw(b'{"jsonrpc":"2.0","id":"w-3","method":"ping"}\n')
+            # The pump relays in order: once this line is out, the ping's turn is over.
+            worker.push_raw(b'{"jsonrpc":"2.0","method":"notifications/message","params":{}}\n')
+            self.host.wait_for(lambda m: m.get("method") == "notifications/message")
+        finally:
+            release.set()
+            parking.join(DEADLINE_S)
+        self.assertTrue(worker.stdin_closed.is_set())
+        self.assertNotIn("w-3", [m.get("id") for m in self.host.messages()])
+        self.assertTrue(any("not forwarded" in line for line in self.logs), self.logs)
+
+    def test_a_request_that_waits_out_the_decision_is_not_forwarded(self) -> None:
+        # Review F7 of #255, the other order: the pump has the line before the decision
+        # and the hold that counts it after, so a mark read before that hold lets it by.
+        watched = _WatchedLock()
+        self.supervisor._state = threading.Condition(watched)
+        worker = self.start()
+        self._handshake()
+        pump = self.supervisor._current.pump
+        self.ahead_s += 60.0
+        with self.supervisor._state:
+            worker.push_raw(b'{"jsonrpc":"2.0","id":"w-4","method":"ping"}\n')
+            while watched.waited.get(timeout=DEADLINE_S) != pump.name:
+                pass
+            self.assertTrue(self.supervisor.park_if_idle())
+        pump.join(DEADLINE_S)
+        self.assertFalse(pump.is_alive())
+        self.assertNotIn("w-4", [m.get("id") for m in self.host.messages()])
+        self.assertTrue(any("not forwarded" in line for line in self.logs), self.logs)
+
+    def test_a_reload_whose_thread_cannot_start_leaves_no_recycle_reserved(self) -> None:
+        # Review F9 of #255: the reservation turned every later call away and kept the
+        # worker from being retired.
+        import dayz_mcp.mcp_supervisor as module
+        from unittest.mock import patch
+
+        worker = self.start()
+        self._handshake()
+        with patch.object(module, "threading", _NoRecycleThreading()):
+            with self.assertRaisesRegex(RuntimeError, "can't start new thread"):
+                self.supervisor.handle_host_line(reload_call(7))
+        self.supervisor.handle_host_line(self._call(9))
+        worker.wait_for_sent(lambda m: m.get("id") == 9)
+        worker.answer(9, {"ok": True})
+        self.host.wait_for(lambda m: m.get("id") == 9)
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+    def test_no_worker_is_retired_between_a_reload_request_and_its_recycle(self) -> None:
+        # Review F3 and F4 of #255: the recycle's thread can start after the timeout.
+        import dayz_mcp.mcp_supervisor as module
+        from unittest.mock import patch
+
+        first = self.start()
+        self._handshake()
+        release = threading.Event()
+        with patch.object(module, "threading", _LateRecycleThreading(release)):
+            self.supervisor.handle_host_line(reload_call(7))
+            self.ahead_s += 60.0
+            self.assertFalse(self.supervisor.park_if_idle())
+            self.assertFalse(first.stdin_closed.is_set())
+            release.set()
+            reply = self.host.wait_for(lambda m: m.get("id") == 7)
+        self.assertEqual(result_text(reply)["status"], "recycled")
+        self.supervisor.handle_host_line(self._call(9))
+        self.workers[1].wait_for_sent(lambda m: m.get("id") == 9)
+        self.assertEqual(len(self.workers), 2)
+
+    def test_a_reload_after_a_failed_wake_leaves_one_worker(self) -> None:
+        # The line could start no worker, its reload starts one, and the next line
+        # must not start another beside it (review F3 of #255).
+        self.start()
+        self._handshake()
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+        failures = [OSError("no interpreter")]
+
+        def second_spawn_works() -> FakeWorker:
+            if failures:
+                raise failures.pop()
+            return self._spawn()
+
+        self.supervisor._spawn = second_spawn_works  # type: ignore[method-assign]
+        self.supervisor.handle_host_line(reload_call(10))
+        self.assertEqual(result_text(self.host.wait_for(lambda m: m.get("id") == 10))["status"], "recycled")
+        self.supervisor.handle_host_line(self._call(11))
+        self.workers[1].wait_for_sent(lambda m: m.get("id") == 11)
+        self.assertEqual(len(self.workers), 2)
+
+    def test_a_wake_whose_worker_dies_in_the_replay_announces_nothing(self) -> None:
+        # Review F5 of #255: the line gets the dead worker's answer, and the host is
+        # not told of a catalogue that no worker serves.
+        self.start()
+        self._handshake()
+        self.ahead_s += 60.0
+        self.assertTrue(self.supervisor.park_if_idle())
+
+        def dying_spawn() -> FakeWorker:
+            replacement = FakeWorker(2000, auto_answer=self.auto_answer)
+            replacement.stdout.close()
+            self.workers.append(replacement)
+            return replacement
+
+        self.supervisor._spawn = dying_spawn  # type: ignore[method-assign]
+        self.supervisor.handle_host_line(self._call(9))
+        answer = result_text(self.host.wait_for(lambda m: m.get("id") == 9))
+        self.assertEqual((answer["error"], answer["generation"]), ("worker_died", 2))
+        self.assertNotIn(
+            "notifications/tools/list_changed", [m.get("method") for m in self.host.messages()]
+        )
+        self.assertFalse(any(m.get("id") == 9 for m in self.workers[-1].sent))
+
+    def test_run_watches_for_idleness_only_with_a_timeout(self) -> None:
+        for idle_timeout_s, polls in ((0.0, []), (8.0, [5.0]), (60.0, [15.0]), (3600.0, [60.0])):
+            with self.subTest(idle_timeout_s=idle_timeout_s):
+                self.supervisor = self._supervisor(idle_timeout_s)
+                watched: list[float] = []
+                started = threading.Event()
+
+                def watch(poll_s: float) -> None:
+                    watched.append(poll_s)
+                    started.set()
+
+                self.supervisor._watch_idle = watch  # type: ignore[method-assign]
+                host_stdin = _BlockingLines()
+                host_stdin.close()
+                self.supervisor.run(host_stdin)
+                self.assertEqual(started.wait(DEADLINE_S if polls else 0.1), bool(polls))
+                self.assertEqual(watched, polls)
+
+    def test_the_watch_ends_with_the_host(self) -> None:
+        checks: list[bool] = []
+        self.supervisor.park_if_idle = lambda: checks.append(True) or False  # type: ignore[method-assign]
+        watch = threading.Thread(target=self.supervisor._watch_idle, args=(0.01,))
+        watch.start()
+        deadline = time.monotonic() + DEADLINE_S
+        # It keeps looking until the host goes.
+        while len(checks) < 2:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.005)
+        host_stdin = _BlockingLines()
+        host_stdin.close()
+        self.supervisor.run(host_stdin)
+        watch.join(DEADLINE_S)
+        self.assertFalse(watch.is_alive())
+
+
+class SupervisedEntryTest(unittest.TestCase):
+    def test_only_a_supervised_client_retires_its_worker_for_idleness(self) -> None:
+        # An embedded worker owns the port and has its own idle watchdog.
+        from unittest.mock import patch
+
+        from dayz_mcp import server
+
+        for mode, expected in (("--client", 120.0), ("--embedded", 0.0)):
+            with self.subTest(mode=mode):
+                argv = ["--keyfile", "dummy.key", mode, "--supervised", "--idle-timeout", "120"]
+                with patch.object(server, "run_supervisor", return_value=0) as supervise:
+                    self.assertEqual(server.run(argv), 0)
+                supervise.assert_called_once_with(argv, idle_timeout_s=expected)
+
+    def test_the_supervisor_gets_the_idle_timeout(self) -> None:
+        # Never less than the lease lasts after the last call: a worker retired sooner
+        # could leave one that still runs, and the next worker refuses the carrier it
+        # left (review F6 of #255).
+        import io
+        from unittest.mock import patch
+
+        from dayz_mcp import server, session_handoff
+
+        floor = server.SESSION_TTL_S + 5.0
+        self.assertGreaterEqual(floor - session_handoff.MAX_HANDOFF_AGE_S, 5.0)
+        for given, expected in ((60.0, floor), (floor, floor), (1800.0, 1800.0), (0.0, 0.0)):
+            with self.subTest(idle_timeout_s=given):
+                # The runner's stdout can be a StringIO, which has no buffer (CI on #255).
+                stdio = {name: io.TextIOWrapper(io.BytesIO()) for name in ("stdin", "stdout")}
+                with patch.object(server, "Supervisor") as supervisor, patch.multiple(server.sys, **stdio):
+                    self.assertEqual(server.run_supervisor(["--client"], idle_timeout_s=given), 0)
+                self.assertEqual(supervisor.call_args.kwargs["idle_timeout_s"], expected)
+
+
 if __name__ == "__main__":
     unittest.main()
