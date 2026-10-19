@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import sys
 import threading
@@ -887,13 +888,21 @@ class IdleRetirementTest(SupervisorTestBase):
             spawn=self._spawn,
             out_stream=self.host,
             log=self.logs.append,
-            monotonic=lambda: time.monotonic() + self.ahead_s,
+            monotonic=self._clock,
             drain_timeout_s=0.5,
             stdin_close_grace_s=0.5,
             replay_timeout_s=1.0,
             heartbeat_timeout_s=0.5,
             idle_timeout_s=idle_timeout_s,
         )
+
+    def _clock(self) -> float:
+        # Real time in whole 1/1024 s, so adding ahead_s is exact: with no tick
+        # between two reads, the idle time read is the time added. On Windows
+        # before Python 3.13 time.monotonic() ticks every 15.6 ms, and
+        # (t + 110.0) - (t + 50.0) could read just under 60.0: a test that stepped
+        # exactly to the timeout saw the worker kept (CI of #256, Python 3.11).
+        return math.floor(time.monotonic() * 1024) / 1024 + self.ahead_s
 
     def _handshake(self) -> None:
         self.handshake()
