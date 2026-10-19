@@ -81,6 +81,7 @@ class WeakAgentCatalogTest(unittest.IsolatedAsyncioTestCase):
             "playbook_run",
             "vehicle_trace",
             "dayz_test_close",
+            "dayz_test_foreground",
         ):
             first = (tools[name].description or "").splitlines()[0]
             self.assertTrue(

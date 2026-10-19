@@ -46,7 +46,10 @@ def real_lock_fn() -> Callable[[int], bool] | None:
 
 
 class ForegroundLock:
-    """The lock DayZ launches take, released HOLD_S after the last of them."""
+    """The lock DayZ launches take, released HOLD_S after the last of them.
+
+    dayz_test_foreground releases it sooner, before it asks for the front.
+    """
 
     def __init__(
         self,
@@ -91,6 +94,23 @@ class ForegroundLock:
                 raise
             self._release_timer = timer
         return locked
+
+    def release(self) -> None:
+        """Unlock now and drop the pending release (inbox 8b1c).
+
+        dayz_test_foreground calls it before its one SetForegroundWindow:
+        Microsoft documents no exception to the lock for the process that
+        took it.
+        """
+
+        if self._lock_fn is None:
+            return
+        with self._mutex:
+            self._generation += 1
+            if self._release_timer is not None:
+                self._release_timer.cancel()
+                self._release_timer = None
+            self._lock_fn(LSFW_UNLOCK)
 
     def _release(self, generation: int) -> None:
         with self._mutex:
