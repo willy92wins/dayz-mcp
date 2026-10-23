@@ -17,11 +17,13 @@ DispatchActionUse from its action_in_progress check to its end (without the
 action_hold branch, as built for 1.29 and for 1.30), the addon's
 PerformActionStart and Start, and IsWatched run as Python
 (enforce_subset_helpers) against a manager that does what vanilla's
-ActionStart does, with other mods' Starts loaded before or after the addon's.
-Begin, End and NoteStart are read as text, with comments blanked and the
-whitespace outside string literals removed, and Watch below does what they
-say, so a layout change keeps these tests green and a change of what the code
-does turns them red. The addon declares no other method of the start path.
+ActionStart does, with other mods' Starts loaded before or after the addon's,
+and with empty hands or an item in them, which must reach vanilla's
+PerformActionStart. Begin, End and NoteStart are read as text, with comments
+blanked and the whitespace outside string literals removed, and Watch below
+does what they say, so a layout change keeps these tests green and a change of
+what the code does turns them red. The addon declares no other method of the
+start path.
 """
 from __future__ import annotations
 
@@ -218,6 +220,8 @@ def retarget(*, before: bool):
 
 # The addon's Start among the `mods` of an Action.
 ADDON = "addon"
+# An item in hands, as the ticket's FenceKit (Codex review of #257, K1).
+KIT = SimpleNamespace(name="FenceKit")
 
 
 class Action:
@@ -273,6 +277,7 @@ class Manager:
         self.current: Data | None = None
         self.perform = self.ActionStart
         self.performed = 0
+        self.item = None
         namespace = {
             "super": SimpleNamespace(PerformActionStart=self._vanilla),
             "this": self,
@@ -284,6 +289,7 @@ class Manager:
 
     def _vanilla(self, action: Action, target: Target, item: object, extra: object) -> None:
         self.performed += 1
+        self.item = item
         self.perform(action, target)
 
     def ActionStart(
@@ -316,11 +322,14 @@ class Manager:
 
 
 class Player:
+    def __init__(self, item: object) -> None:
+        self.item = item
+
     def GetCurrentCommandID(self) -> int:
         return 0
 
     def GetItemInHands(self) -> object:
-        return None
+        return self.item
 
 
 class Result:
@@ -364,13 +373,15 @@ def dispatch(source: str, watch: Watch, version: str):
     return translate(f"{TAIL}\n{{{region}}}\n", TAIL, namespace, class_types=("ItemBase",))
 
 
-def answer(tail, manager: Manager, action: Action, target: Target) -> str:
+def answer(tail, manager: Manager, action: Action, target: Target, item: object = None) -> str:
     result = Result()
     performed = manager.performed
-    if tail(action, target, manager, Player(), result) is not True:
+    if tail(action, target, manager, Player(item), result) is not True:
         raise AssertionError("the tail does not return true")
     if manager.performed != performed + 1:
         raise AssertionError(f"vanilla's PerformActionStart ran {manager.performed - performed} times")
+    if manager.item is not item:
+        raise AssertionError("vanilla's PerformActionStart had another item than the one in hands")
     if result.started and result.ok:
         return "started"
     if not result.started and not result.ok and result.error is not None:
@@ -459,12 +470,14 @@ def verify_flows(bridge: str, hold: str) -> None:
             ),
         }
         for name, (kind, perform, expected) in flows.items():
-            # The bridge refuses a call while an action is running.
-            manager.current = None
-            manager.perform = perform
-            got = answer(tail, manager, Action(watch, hold, **kind), Target())
-            if got != expected:
-                wrong.append(f"{version}, {name}: {got}, expected {expected}")
+            for item in (None, KIT):
+                # The bridge refuses a call while an action is running.
+                manager.current = None
+                manager.perform = perform
+                got = answer(tail, manager, Action(watch, hold, **kind), Target(), item)
+                if got != expected:
+                    hands = "empty hands" if item is None else "an item in hands"
+                    wrong.append(f"{version}, {name}, {hands}: {got}, expected {expected}")
     if wrong:
         raise AssertionError("; ".join(wrong))
 
@@ -511,14 +524,15 @@ class InstantActionStartTest(unittest.TestCase):
 
     def test_a_second_toggle_answers_started_again(self) -> None:
         for version in VERSIONS:
-            watch = Watch(self.hold)
-            tail = dispatch(self.bridge, watch, version)
-            manager = Manager(self.hold)
-            toggle = Action(watch, self.hold)
-            for attempt in (1, 2):
-                with self.subTest(version=version, attempt=attempt):
-                    self.assertEqual(answer(tail, manager, toggle, Target()), "started")
-                    self.assertIsNone(watch.statics["s_WatchedTarget"])
+            for item in (None, KIT):
+                watch = Watch(self.hold)
+                tail = dispatch(self.bridge, watch, version)
+                manager = Manager(self.hold)
+                toggle = Action(watch, self.hold)
+                for attempt in (1, 2):
+                    with self.subTest(version=version, item=item, attempt=attempt):
+                        self.assertEqual(answer(tail, manager, toggle, Target(), item), "started")
+                        self.assertIsNone(watch.statics["s_WatchedTarget"])
 
     def test_a_start_after_the_call_counts_for_no_command(self) -> None:
         for version in VERSIONS:
@@ -571,6 +585,17 @@ class InstantActionStartTest(unittest.TestCase):
             ),
             "instants_rejected_before_the_action_hold_branch": (
                 verify_flows, BRIDGE_PATH, hold_branch, hold_branch.replace("#endif ", f"#endif\n{reject}\n")
+            ),
+            # Codex review of #257, K1: an item in hands rejected, or not
+            # passed to the start.
+            "an_item_in_hands_rejected_before_the_start": (
+                verify_flows, BRIDGE_PATH, begin,
+                f'if (heldItem != null) {{ result.ok = false; result.error = "setup_failed"; '
+                f"return true; }} {begin}",
+            ),
+            "the_start_without_the_item": (
+                verify_flows, BRIDGE_PATH, f"{begin} {start}",
+                f"{begin} amc.PerformActionStart(action, actionTarget, null, NULL);",
             ),
             "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
             "every_start_counted": (
