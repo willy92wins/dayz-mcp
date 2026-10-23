@@ -1344,15 +1344,16 @@ def _read_display_timeout_s() -> int | None:
         powrprof.PowerReadDCValueIndex.argtypes = read_argtypes
         powrprof.PowerReadDCValueIndex.restype = ctypes.c_uint
         status = _PowerStatus()
-        # ACLineStatus 0 is battery power; 1, 255 (unknown) and a failed call
-        # read the AC value.
-        if (
-            kernel32.GetSystemPowerStatus(ctypes.byref(status))
-            and status.ACLineStatus == 0
-        ):
+        # ACLineStatus 0 is battery power and 1 AC power. 255 (unknown) and a
+        # failed call name no source, so no timeout is read.
+        if not kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+            return None
+        if status.ACLineStatus == 0:
             read_value = powrprof.PowerReadDCValueIndex
-        else:
+        elif status.ACLineStatus == 1:
             read_value = powrprof.PowerReadACValueIndex
+        else:
+            return None
         subgroup = guid.from_buffer_copy(uuid.UUID(GUID_VIDEO_SUBGROUP).bytes_le)
         setting = guid.from_buffer_copy(
             uuid.UUID(GUID_VIDEO_POWERDOWN_TIMEOUT).bytes_le
@@ -1381,10 +1382,11 @@ def read_display_idle() -> DisplayIdle:
     the display-off timeout of the active power scheme for the current power
     source, in seconds, 0 never.
 
-    Each is read on its own and is None when its read fails; both are None
-    off Windows. Nothing raises. An application can hold the display on past
-    the timeout, so idle past a non-zero timeout says the display MAY be off.
-    Nothing here keeps the display awake (d490).
+    Each is read on its own and is None when its read fails; the timeout is
+    also None when Windows reports neither AC nor battery power, and both are
+    None off Windows. Nothing raises. An application can hold the display on
+    past the timeout, so idle past a non-zero timeout says the display MAY be
+    off. Nothing here keeps the display awake (d490).
     """
     if sys.platform != "win32":
         return DisplayIdle(None, None)

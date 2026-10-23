@@ -1738,12 +1738,12 @@ def _compact_result(
         # null when this failure is not a declared storage refusal. The hint
         # is the remediation above; the token is the decision, not daemon text.
         "storage_recovery_reason": recovery_reason,
-        # fb-20261002-043444-d490: always present, and set only on the final
-        # answer of a client-starting run once the desktop gate passed. null
-        # means this call did not read them: a mode that starts no client, an
-        # answer before or without the desktop gate, a refusal after it, a
-        # host that is not Windows, or a read that failed. A report: they
-        # authorize or refuse nothing.
+        # fb-20261002-043444-d490: always present, and set only on the
+        # succeeded final answer of a client-starting run, read once the
+        # desktop gate passed. null means this answer gives no reading: a mode
+        # that starts no client, an answer before or without the desktop gate,
+        # a refusal or failure after it, a host that is not Windows, or a read
+        # that failed. A report: they authorize or refuse nothing.
         "session_idle_s": None,
         "display_timeout_s": None,
     }
@@ -2987,7 +2987,7 @@ async def execute_dayz_test_run(
                 vpp=vpp,
                 client_dump_roots=client_dump_roots,
             )
-            if display is not None:
+            if display is not None and result.get("status") == "succeeded":
                 result["session_idle_s"] = display.session_idle_s
                 result["display_timeout_s"] = display.display_timeout_s
             if preflight:

@@ -176,19 +176,15 @@ class ReadDisplayIdleTest(unittest.TestCase):
         self.assertEqual(mcp_capture._idle_s(1000, 0xFFFFFF00), 1.256)
         self.assertEqual(mcp_capture._idle_s(1_234_567, 1), 1234.566)
 
-    def test_on_ac_or_unknown_power_it_reads_the_ac_timeout(self) -> None:
-        for line_status in (1, 255):
-            with self.subTest(ACLineStatus=line_status):
-                host = _Host(line_status)
-                self.assertEqual(
-                    self.read(host), mcp_capture.DisplayIdle(1.256, AC_TIMEOUT_S)
-                )
-                self.assert_timeout_read_with(
-                    host, host.powrprof.PowerReadACValueIndex
-                )
-                self.assertEqual(host.powrprof.PowerReadDCValueIndex.args, [])
-                # A LASTINPUTINFO whose cbSize is set.
-                self.assertEqual(host.sizes, [(8, 8)])
+    def test_on_ac_power_it_reads_the_ac_timeout(self) -> None:
+        host = _Host(line_status=1)
+        self.assertEqual(
+            self.read(host), mcp_capture.DisplayIdle(1.256, AC_TIMEOUT_S)
+        )
+        self.assert_timeout_read_with(host, host.powrprof.PowerReadACValueIndex)
+        self.assertEqual(host.powrprof.PowerReadDCValueIndex.args, [])
+        # A LASTINPUTINFO whose cbSize is set.
+        self.assertEqual(host.sizes, [(8, 8)])
 
     def test_on_battery_it_reads_the_dc_timeout(self) -> None:
         host = _Host(line_status=0)
@@ -198,14 +194,25 @@ class ReadDisplayIdleTest(unittest.TestCase):
         self.assert_timeout_read_with(host, host.powrprof.PowerReadDCValueIndex)
         self.assertEqual(host.powrprof.PowerReadACValueIndex.args, [])
 
-    def test_a_failed_power_status_call_reads_the_ac_timeout(self) -> None:
-        # The structure a failed call leaves behind reads ACLineStatus 0.
-        host = _Host(line_status=0)
-        host.kernel32.GetSystemPowerStatus.answer = 0
-        self.assertEqual(
-            self.read(host), mcp_capture.DisplayIdle(1.256, AC_TIMEOUT_S)
-        )
-        self.assert_timeout_read_with(host, host.powrprof.PowerReadACValueIndex)
+    def test_a_source_windows_does_not_name_reads_no_timeout(self) -> None:
+        # 255 is unknown, 2 is no value Microsoft documents, and the structure
+        # a failed call leaves behind reads ACLineStatus 0, battery power.
+        for label, line_status, answer in (
+            ("unknown", 255, None),
+            ("undocumented", 2, None),
+            ("failed call", 0, 0),
+        ):
+            with self.subTest(label):
+                host = _Host(line_status)
+                if answer is not None:
+                    host.kernel32.GetSystemPowerStatus.answer = answer
+                self.assertEqual(
+                    self.read(host), mcp_capture.DisplayIdle(1.256, None)
+                )
+                self.assertEqual(
+                    host.log,
+                    ["GetLastInputInfo", "GetTickCount", "GetSystemPowerStatus"],
+                )
 
     def test_a_timeout_of_zero_is_never_not_unread(self) -> None:
         host = _Host()
@@ -321,6 +328,13 @@ def _steam(error_code: str | None = None) -> steam_preflight.SteamSessionResult:
 
 class DisplayIdleWiringTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.terminal = {
+            "cleanup_degraded": False,
+            "error_code": None,
+            "exit_code": 0,
+            "ok": True,
+            "run_id": RUN_ID,
+        }
         self.launch = AsyncMock(side_effect=self._launch)
         self.desktop = Mock(return_value=_desktop())
         self.display = Mock(return_value=_IDLE)
@@ -355,19 +369,8 @@ class DisplayIdleWiringTest(unittest.IsolatedAsyncioTestCase):
 
     async def _launch(self, _raw_request: bytes, **kwargs: object) -> int:
         await kwargs["execution_started_cb"]()
-        kwargs["output_sink"](
-            "stdout",
-            _terminal(
-                {
-                    "cleanup_degraded": False,
-                    "error_code": None,
-                    "exit_code": 0,
-                    "ok": True,
-                    "run_id": RUN_ID,
-                }
-            ),
-        )
-        return 0
+        kwargs["output_sink"]("stdout", _terminal(self.terminal))
+        return self.terminal["exit_code"]
 
     async def run_tool(self, mode: str, **kwargs: object) -> dict[str, object]:
         return await dayz_test_tool.execute_dayz_test_run(
@@ -437,6 +440,23 @@ class DisplayIdleWiringTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIdle(result, (None, None))
         self.assertEqual(self.display.call_count, 2)
         self.launch.assert_not_awaited()
+
+    async def test_a_failure_after_the_gate_answers_null(self) -> None:
+        self.terminal = {
+            "cleanup_degraded": False,
+            "error_code": "readiness_timeout",
+            "exit_code": 1,
+            "ok": False,
+            "run_id": None,
+        }
+        result = await self.run_tool("all")
+        self.assertEqual(
+            (result["status"], result["error_code"]),
+            ("failed", "readiness_timeout"),
+        )
+        self.assertIdle(result, (None, None))
+        self.display.assert_called_once_with()
+        self.launch.assert_awaited_once()
 
     def test_every_compact_result_has_both_keys(self) -> None:
         for ok in (True, False):
