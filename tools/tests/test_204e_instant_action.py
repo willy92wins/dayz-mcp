@@ -22,12 +22,12 @@ and with empty hands or an item in them, which must reach the action's Can
 and vanilla's PerformActionStart; an action that needs an item, as the toggle
 does, answers condition_failed with empty hands, without a start, and the
 start gets the item Can was asked with also when Can takes it out of the
-hands. Begin, End and NoteStart are read as text, with comments blanked and
-the whitespace outside string literals removed, and Watch below does what
-they say, so a layout change keeps these tests green and a change of what
-they do turns them red. The addon declares no other ActionStart, SetupAction,
-Start or PerformActionStart of the start path, and no Can or CanBeStarted,
-which the flows run as the Python Action's.
+hands or puts another item there. Begin, End and NoteStart are read as text,
+with comments blanked and the whitespace outside string literals removed, and
+Watch below does what they say, so a layout change keeps these tests green and
+a change of what they do turns them red. The addon declares no other
+ActionStart, SetupAction, Start or PerformActionStart of the start path, and
+no Can or CanBeStarted, which the flows run as the Python Action's.
 """
 from __future__ import annotations
 
@@ -230,6 +230,8 @@ def retarget(*, before: bool):
 ADDON = "addon"
 # An item in hands, as the ticket's FenceKit (Codex review of #257, K1).
 KIT = SimpleNamespace(name="FenceKit")
+# Another item, which a Can may put in the hands instead (U1).
+RAG = SimpleNamespace(name="Rag")
 
 
 class Action:
@@ -248,11 +250,13 @@ class Action:
         mods: tuple = (ADDON,),
         needs_item: bool = False,
         empties_hands: bool = False,
+        swaps_hands_for: object = None,
     ) -> None:
         self.instant = instant
         self.calls_super = calls_super
         self.needs_item = needs_item
         self.empties_hands = empties_hands
+        self.swaps_hands_for = swaps_hands_for
         self.asked: list = []
         self.chain = Link(lambda data: None)
         for mod in reversed(mods):
@@ -273,6 +277,10 @@ class Action:
             # A Can that takes the item out of the hands (Codex review of
             # #257, Q3).
             player.item = None
+        if self.swaps_hands_for is not None:
+            # A Can that puts another item in the hands (Codex review of
+            # #257, U1).
+            player.item = self.swaps_hands_for
         return item is not None or not self.needs_item
 
     def CanBeStarted(self) -> bool:
@@ -509,8 +517,8 @@ def verify_flows(bridge: str, hold: str) -> None:
 def verify_condition(bridge: str, hold: str) -> None:
     """An action that needs an item starts with the item in hands and answers
     condition_failed with empty hands, without a start (Codex review of #257,
-    L2); when its Can takes the item out of the hands, the start gets the item
-    Can was asked with (Q3)."""
+    L2); when its Can takes the item out of the hands or puts another one
+    there, the start gets the item Can was asked with (Q3, U1)."""
     for version in VERSIONS:
         watch = Watch(hold)
         tail = dispatch(bridge, watch, version)
@@ -531,6 +539,9 @@ def verify_condition(bridge: str, hold: str) -> None:
         emptying = Action(watch, hold, needs_item=True, empties_hands=True)
         if answer(tail, manager, emptying, Target(), KIT) != "started":
             raise AssertionError(f"{version}: an action whose Can empties the hands did not start")
+        swapping = Action(watch, hold, needs_item=True, swaps_hands_for=RAG)
+        if answer(tail, manager, swapping, Target(), KIT) != "started":
+            raise AssertionError(f"{version}: an action whose Can swaps the item in hands did not start")
 
 
 def verify_is_watched(source: str) -> None:
@@ -664,6 +675,13 @@ class InstantActionStartTest(unittest.TestCase):
             # Codex review of #257, Q3: the hands read again after Can.
             "the_item_read_again_after_the_condition": (
                 verify_condition, BRIDGE_PATH, refused, f"{refused} heldItem = player.GetItemInHands();"
+            ),
+            # Codex review of #257, U1: the hands read again after Can, and
+            # what they hold given to the start unless they are empty.
+            "the_item_read_again_when_held": (
+                verify_condition, BRIDGE_PATH, refused,
+                f"{refused} ItemBase inHands = player.GetItemInHands(); "
+                "if (inHands != null) { heldItem = inHands; }",
             ),
             "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
             "every_start_counted": (
