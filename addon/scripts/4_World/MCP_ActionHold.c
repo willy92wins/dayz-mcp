@@ -715,45 +715,64 @@ class MCPHoldControl
 	}
 };
 
+// 204e: action_use watches the action it starts and the ActionTarget it made
+// for that start, a new one for each command. A local instant action runs its
+// Start and then OnActionEnd inside the start call (actionmanagerclient.c:719-721
+// in 1.30, :677-679 in 1.29), so no running action is left when
+// PerformActionStart returns, as after a start that SetupAction refused. A
+// Start of that action with that target during the call means it ran:
+// SetupAction keeps the target it is given in m_Target (actionbase.c:174 in
+// 1.30, :167 in 1.29). An action whose own code puts another ActionTarget in
+// m_Target before Start, or whose Start does not call super.Start (in vanilla
+// only ActionDebug's), is not seen.
+class MCPActionUseWatch
+{
+	protected static ActionBase s_Watched;
+	protected static ref ActionTarget s_WatchedTarget;
+	protected static int s_Starts;
+
+	static void Begin(ActionBase action, ActionTarget target)
+	{
+		s_Watched = action;
+		s_WatchedTarget = target;
+		s_Starts = 0;
+	}
+
+	// The watched Starts since Begin. Nothing is watched after it.
+	static int End()
+	{
+		int starts = s_Starts;
+		s_Watched = null;
+		s_WatchedTarget = null;
+		s_Starts = 0;
+		return starts;
+	}
+
+	static void NoteStart(ActionBase action, ActionData action_data)
+	{
+		if (IsWatched(action, action_data))
+		{
+			s_Starts++;
+		}
+	}
+
+	protected static bool IsWatched(ActionBase action, ActionData action_data)
+	{
+		return action == s_Watched && action_data.m_Target == s_WatchedTarget;
+	}
+};
+
+modded class ActionBase
+{
+	override void Start(ActionData action_data)
+	{
+		super.Start(action_data);
+		MCPActionUseWatch.NoteStart(this, action_data);
+	}
+};
+
 modded class ActionManagerClient
 {
-	// 204e: DispatchActionUse watches the action it starts and counts its ends
-	// during PerformActionStart. A local instant action runs Start and then
-	// OnActionEnd inside ActionStart, so it leaves GetRunningAction() null, as
-	// a start SetupAction refused does.
-	protected ActionBase m_MCP_Watched;
-	protected int m_MCP_WatchedEnds;
-
-	void MCP_Watch(ActionBase action)
-	{
-		m_MCP_Watched = action;
-		m_MCP_WatchedEnds = 0;
-	}
-
-	int MCP_WatchedEnds()
-	{
-		return m_MCP_WatchedEnds;
-	}
-
-	// True when OnActionEnd ends the watched action after its Start. Vanilla's
-	// OnActionEnd ends nothing without a current action
-	// (actionmanagerclient.c:830 in 1.30, :775 in 1.29), and an action still
-	// waiting for the server's acknowledgment (UA_AM_PENDING) has not run Start.
-	protected bool MCP_EndingWatched()
-	{
-		if (!m_CurrentActionData)
-		{
-			return false;
-		}
-
-		if (m_CurrentActionData.m_Action != m_MCP_Watched)
-		{
-			return false;
-		}
-
-		return m_CurrentActionData.m_State != UA_AM_PENDING;
-	}
-
 	bool MCP_HoldBusy()
 	{
 		if (m_PendingActionData)
@@ -809,11 +828,6 @@ modded class ActionManagerClient
 
 	override void OnActionEnd()
 	{
-		if (MCP_EndingWatched())
-		{
-			m_MCP_WatchedEnds++;
-		}
-
 		MCPHoldControl.BeforeActionEnd(this);
 		super.OnActionEnd();
 		MCPHoldControl.AfterActionEnd(this);

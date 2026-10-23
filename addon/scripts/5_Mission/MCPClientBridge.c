@@ -4115,19 +4115,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
-		amc.MCP_Watch(action);
+		MCPActionUseWatch.Begin(action, actionTarget);
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
+		int starts = MCPActionUseWatch.End();
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
 		// 204e: it is null too after a local instant action such as
 		// ActionTogglePlaceObject, whose Start and OnActionEnd run inside
 		// ActionStart (actionmanagerclient.c:719-721 in 1.30, :677-679 in
-		// 1.29). An end of this action after its Start during the call means
-		// it ran.
+		// 1.29). A Start of this action with this target during the call
+		// means it ran.
 		if (amc.GetRunningAction() == null)
 		{
-			if (amc.MCP_WatchedEnds() > 0)
+			if (starts > 0)
 			{
 				result.started = true;
 				result.ok = true;

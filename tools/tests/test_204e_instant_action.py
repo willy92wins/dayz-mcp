@@ -5,17 +5,19 @@ setup_failed every time. The action is local and instant: ActionStart runs its
 Start and then OnActionEnd at once (actionmanagerclient.c:719-721 in 1.30,
 :677-679 in 1.29), so GetRunningAction() is null when PerformActionStart
 returns, as after a start that SetupAction refused. DispatchActionUse watches
-the action it starts, and the modded ActionManagerClient counts an OnActionEnd
-only with that action current and not waiting for the server (UA_AM_PENDING):
-vanilla's OnActionEnd does nothing without a current action
-(actionmanagerclient.c:830 in 1.30, :775 in 1.29), so another mod can call it
-to clean up after a refused start.
+the action it starts and the ActionTarget it made for that start
+(MCPActionUseWatch), and the addon's ActionBase.Start, after super.Start,
+counts a Start of that action whose m_Target is that target. Ends are not
+counted: an end can follow no Start, as another mod's cleanup after a refused
+start, and the ActionBase is one instance another mod can run for another
+target.
 
-MCP_EndingWatched runs as Python against fakes (enforce_subset_helpers). The
-other bodies are read as text, with comments blanked and the whitespace outside
-string literals removed, and Manager and dispatch() below do what they say, so
-a layout change keeps these tests green and a change of what the code does
-turns them red.
+The end of DispatchActionUse, after the action_hold branch, and IsWatched run
+as Python (enforce_subset_helpers) against a manager that does what vanilla's
+ActionStart does. Begin, End, NoteStart and the Start override are read as
+text, with comments blanked and the whitespace outside string literals
+removed, and Watch below does what they say, so a layout change keeps these
+tests green and a change of what the code does turns them red.
 """
 from __future__ import annotations
 
@@ -28,61 +30,58 @@ from tests.enforce_subset_helpers import clean, method_body, translate
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 HOLD_PATH = addon_root() / "scripts" / "4_World" / "MCP_ActionHold.c"
 DISPATCH = "protected bool DispatchActionUse(MCPCommand command, MCPResult result)"
-ENDING_WATCHED = re.compile(r"\bprotected\s+bool\s+MCP_EndingWatched\s*\(\s*\)")
-
-# The end of DispatchActionUse, after the action_hold branch has returned.
-DISPATCH_TAIL = """
-amc.MCP_Watch(action);
-amc.PerformActionStart(action, actionTarget, heldItem, NULL);
-if (amc.GetRunningAction() == null)
-{
-    if (amc.MCP_WatchedEnds() > 0)
-    {
-        result.started = true;
-        result.ok = true;
-        return true;
-    }
-
-    result.started = false;
-    result.ok = false;
-    result.error = "setup_failed";
-    return true;
-}
-
-result.started = true;
-result.ok = true;
-return true;
-"""
-HOLD_BODIES = {
-    "override void OnActionEnd()": """
-        if (MCP_EndingWatched())
+HOLD_BRANCH = re.compile(r'\bif\s*\(\s*command\s*\.\s*cmd\s*==\s*"action_hold"\s*\)')
+# The end of DispatchActionUse runs as the body of this method.
+TAIL = (
+    "bool DispatchTail(ActionBase action, ActionTarget actionTarget, "
+    "ItemBase heldItem, ActionManagerClient amc, MCPResult result)"
+)
+IS_WATCHED = "protected static bool IsWatched(ActionBase action, ActionData action_data)"
+WATCH_BODIES = {
+    "static void Begin(ActionBase action, ActionTarget target)": """
+        s_Watched = action;
+        s_WatchedTarget = target;
+        s_Starts = 0;
+    """,
+    "static int End()": """
+        int starts = s_Starts;
+        s_Watched = null;
+        s_WatchedTarget = null;
+        s_Starts = 0;
+        return starts;
+    """,
+    "static void NoteStart(ActionBase action, ActionData action_data)": """
+        if (IsWatched(action, action_data))
         {
-            m_MCP_WatchedEnds++;
+            s_Starts++;
         }
-
-        MCPHoldControl.BeforeActionEnd(this);
-        super.OnActionEnd();
-        MCPHoldControl.AfterActionEnd(this);
     """,
-    "void MCP_Watch(ActionBase action)": """
-        m_MCP_Watched = action;
-        m_MCP_WatchedEnds = 0;
-    """,
-    "int MCP_WatchedEnds()": "return m_MCP_WatchedEnds;",
 }
-HOLD_FIELDS = ("protected ActionBase m_MCP_Watched;", "protected int m_MCP_WatchedEnds;")
+WATCH_DECLARATIONS = (
+    "protected static ActionBase s_Watched;",
+    "protected static ref ActionTarget s_WatchedTarget;",
+    "protected static int s_Starts;",
+    """
+    modded class ActionBase
+    {
+        override void Start(ActionData action_data)
+        {
+            super.Start(action_data);
+            MCPActionUseWatch.NoteStart(this, action_data);
+        }
+    };
+    """,
+)
 # How often each name occurs in each addon file, declarations included, so
-# any other read or write of the count, by &= or an out parameter too, is red.
+# any other read or write of the watch, by &= or an out parameter too, is red.
 NAMES = {
-    "m_MCP_Watched": {HOLD_PATH: 3},
-    "m_MCP_WatchedEnds": {HOLD_PATH: 4},
-    "MCP_Watch": {HOLD_PATH: 1, BRIDGE_PATH: 1},
-    "MCP_WatchedEnds": {HOLD_PATH: 1, BRIDGE_PATH: 1},
-    "MCP_EndingWatched": {HOLD_PATH: 2},
+    "MCPActionUseWatch": {HOLD_PATH: 2, BRIDGE_PATH: 2},
+    "s_Watched": {HOLD_PATH: 4},
+    "s_WatchedTarget": {HOLD_PATH: 4},
+    "s_Starts": {HOLD_PATH: 5},
+    "NoteStart": {HOLD_PATH: 2},
+    "IsWatched": {HOLD_PATH: 2},
 }
-# m_State values: only UA_AM_PENDING is compared with.
-PENDING = 7
-STARTED = 1
 
 _STRING = re.compile(r'("(?:\\.|[^"\\])*")')
 
@@ -112,55 +111,14 @@ def _mutant(source: str, old: str, new: str) -> str:
     return pattern.sub(lambda _match: new, text)
 
 
-def verify_dispatch(source: str) -> None:
-    if not _body(source, DISPATCH).endswith(_bare(DISPATCH_TAIL)):
-        raise AssertionError("DispatchActionUse does not end with the 204e start check")
-
-
-def verify_counter(source: str) -> None:
-    for signature, body in HOLD_BODIES.items():
+def verify_watch(source: str) -> None:
+    for signature, body in WATCH_BODIES.items():
         if _body(source, signature) != _bare(body):
             raise AssertionError(f"{signature} does not do what 204e needs")
     code = _bare(clean(source))
-    for field in HOLD_FIELDS:
-        if code.count(_bare(field)) != 1:
-            raise AssertionError(f"not declared once: {field}")
-
-
-class Data:
-    def __init__(self, action: object, state: int) -> None:
-        self.m_Action = action
-        self.m_State = state
-
-
-def ending_watched(source: str) -> tuple:
-    """(MCP_EndingWatched as Python, the namespace its members are read from)."""
-    signatures = ENDING_WATCHED.findall(clean(source))
-    if len(signatures) != 1:
-        raise AssertionError("MCP_EndingWatched not declared exactly once")
-    namespace: dict = {"UA_AM_PENDING": PENDING}
-    return translate(source, signatures[0], namespace), namespace
-
-
-def verify_ending_watched(source: str) -> None:
-    function, namespace = ending_watched(source)
-    watched, other = object(), object()
-    cases = (
-        ("no current action", None, watched, False),
-        ("another action", Data(other, STARTED), watched, False),
-        ("the watched action waiting for the server", Data(watched, PENDING), watched, False),
-        ("the watched action after its Start", Data(watched, STARTED), watched, True),
-        ("nothing watched", Data(watched, STARTED), None, False),
-    )
-    for name, current, watching, expected in cases:
-        namespace["m_CurrentActionData"] = current
-        namespace["m_MCP_Watched"] = watching
-        try:
-            got = function()
-        except Exception as error:
-            raise AssertionError(f"{name}: {error!r}") from error
-        if got is not expected:
-            raise AssertionError(f"{name}: {got!r}, expected {expected!r}")
+    for declaration in WATCH_DECLARATIONS:
+        if code.count(_bare(declaration)) != 1:
+            raise AssertionError(f"not declared once: {declaration.strip()}")
 
 
 def verify_names(sources: dict) -> None:
@@ -171,68 +129,216 @@ def verify_names(sources: dict) -> None:
                 raise AssertionError(f"{name} occurs {count} times in {path.name}")
 
 
-class Manager:
-    """ActionManagerClient in multiplayer, with the addon's override.
+class Target:
+    """An ActionTarget; Enforce compares objects by identity, as Python does here."""
 
-    ActionStart does what vanilla does (1.30 actionmanagerclient.c:628-721,
-    1.29 :600-679): no data when SetupAction refuses, a non-local action that
-    uses an acknowledgment stays pending without Start, and an instant action
-    ends right after its Start. MCP_Watch, MCP_WatchedEnds and OnActionEnd do
-    what the bodies verify_counter reads do; MCP_EndingWatched is that body.
-    """
+
+class Data:
+    def __init__(self, action: "Action", target: Target) -> None:
+        self.m_Action = action
+        self.m_Target = target
+
+
+class Watch:
+    """MCPActionUseWatch: Begin, End and NoteStart do what verify_watch reads;
+    IsWatched is the addon's, translated, reading the watch's statics."""
 
     def __init__(self, source: str) -> None:
-        self._ending_watched, self._namespace = ending_watched(source)
+        self.statics: dict = {"s_Watched": None, "s_WatchedTarget": None}
+        self.is_watched = translate(source, IS_WATCHED, self.statics)
+        self.starts = 0
+
+    def Begin(self, action: object, target: object) -> None:
+        self.statics["s_Watched"] = action
+        self.statics["s_WatchedTarget"] = target
+        self.starts = 0
+
+    def End(self) -> int:
+        starts = self.starts
+        self.statics["s_Watched"] = None
+        self.statics["s_WatchedTarget"] = None
+        self.starts = 0
+        return starts
+
+    def NoteStart(self, action: object, data: Data) -> None:
+        if self.is_watched(action, data):
+            self.starts += 1
+
+
+class Action:
+    """An ActionBase. Its Start reaches the addon's override unless it does
+    not call super.Start, as vanilla's ActionDebug (actiondebug.c:98)."""
+
+    def __init__(self, watch: Watch, *, instant: bool = True, calls_super: bool = True) -> None:
+        self.watch = watch
+        self.instant = instant
+        self.calls_super = calls_super
+
+    def IsInstant(self) -> bool:
+        return self.instant
+
+    def Start(self, data: Data) -> None:
+        if self.calls_super:
+            self.watch.NoteStart(self, data)
+
+
+class Manager:
+    """ActionManagerClient in multiplayer, as vanilla's ActionStart runs
+    (1.30 actionmanagerclient.c:628-721, 1.29 :600-679): no data when
+    SetupAction refuses; SetupAction keeps the target in m_Target, unless the
+    action puts another one there (retarget); a non-local action that uses an
+    acknowledgment stays pending without Start; otherwise Start runs, and
+    OnActionEnd right after it for an instant action. perform is what happens
+    inside PerformActionStart."""
+
+    def __init__(self) -> None:
         self.current: Data | None = None
-        self.watched: object = None
-        self.ends = 0
-
-    def MCP_Watch(self, action: object) -> None:
-        self.watched = action
-        self.ends = 0
-
-    def MCP_WatchedEnds(self) -> int:
-        return self.ends
-
-    def OnActionEnd(self) -> None:
-        self._namespace["m_CurrentActionData"] = self.current
-        self._namespace["m_MCP_Watched"] = self.watched
-        if self._ending_watched():
-            self.ends += 1
-        self.current = None
+        self.perform = self.ActionStart
 
     def ActionStart(
         self,
-        action: object,
+        action: Action,
+        target: Target,
         *,
         setup: bool = True,
         local: bool = True,
         acknowledged: bool = False,
-        instant: bool = True,
+        retarget: bool = False,
     ) -> None:
         if not setup:
             return
-        self.current = Data(action, 0)
+        self.current = Data(action, Target() if retarget else target)
         if not local and acknowledged:
-            self.current.m_State = PENDING
             return
-        self.current.m_State = STARTED
-        if instant:
+        action.Start(self.current)
+        if action.IsInstant():
             self.OnActionEnd()
+
+    def OnActionEnd(self) -> None:
+        self.current = None
+
+    def PerformActionStart(self, action: Action, target: Target, item: object, extra: object) -> None:
+        self.perform(action, target)
 
     def GetRunningAction(self) -> object:
         return None if self.current is None else self.current.m_Action
 
 
-def dispatch(manager: Manager, action: object, perform) -> str:
-    """DISPATCH_TAIL, with perform() as the PerformActionStart call."""
-    manager.MCP_Watch(action)
-    perform()
-    if manager.GetRunningAction() is None:
-        if manager.MCP_WatchedEnds() > 0:
-            return "started"
-        return "setup_failed"
-    return "started"
+class Result:
+    def __init__(self) -> None:
+        self.started = False
+        self.ok = True
+        self.error = None
+
+
+def dispatch_tail(source: str, watch: Watch):
+    """The end of DispatchActionUse, after the action_hold branch, as Python."""
+    body = method_body(source, DISPATCH)
+    branches = list(HOLD_BRANCH.finditer(body))
+    if len(branches) != 1:
+        raise AssertionError(f"{len(branches)} action_hold branches in DispatchActionUse")
+    depth = 0
+    for match in re.finditer(r'"(?:\\.|[^"\\])*"|[{}]', body[branches[0].end() :]):
+        if match.group() == "{":
+            depth += 1
+        elif match.group() == "}":
+            depth -= 1
+            if depth == 0:
+                rest = body[branches[0].end() + match.end() :]
+                break
+    else:
+        raise AssertionError("the action_hold branch does not close")
+    namespace = {"MCPActionUseWatch": watch, "NULL": None}
+    return translate(f"{TAIL}\n{{{rest}}}\n", TAIL, namespace)
+
+
+def answer(tail, manager: Manager, action: Action, target: Target) -> str:
+    result = Result()
+    if tail(action, target, None, manager, result) is not True:
+        raise AssertionError("the tail does not return true")
+    if result.started and result.ok:
+        return "started"
+    if not result.started and not result.ok and result.error is not None:
+        return result.error.text
+    raise AssertionError(f"started {result.started!r}, ok {result.ok!r}, error {result.error!r}")
+
+
+def verify_flows(bridge: str, hold: str) -> None:
+    watch = Watch(hold)
+    tail = dispatch_tail(bridge, watch)
+    manager = Manager()
+    other = Action(watch)
+
+    def refused_then(after):
+        def perform(action: Action, target: Target) -> None:
+            manager.ActionStart(action, target, setup=False)
+            after(action, target)
+
+        return perform
+
+    def pending_then_ended(action: Action, target: Target) -> None:
+        manager.ActionStart(action, target, local=False, acknowledged=True)
+        manager.OnActionEnd()
+
+    flows = {
+        "a local instant action": ({}, manager.ActionStart, "started"),
+        "a non-local instant action without acknowledgment": (
+            {}, lambda a, t: manager.ActionStart(a, t, local=False), "started"
+        ),
+        "a continuous action": ({"instant": False}, manager.ActionStart, "started"),
+        "an action waiting for the server": (
+            {}, lambda a, t: manager.ActionStart(a, t, local=False, acknowledged=True), "started"
+        ),
+        "a start SetupAction refused": (
+            {}, lambda a, t: manager.ActionStart(a, t, setup=False), "setup_failed"
+        ),
+        "another mod's cleanup after a refused start": (
+            {}, refused_then(lambda a, t: manager.OnActionEnd()), "setup_failed"
+        ),
+        "another mod starting this action for another target": (
+            {}, refused_then(lambda a, t: manager.ActionStart(a, Target())), "setup_failed"
+        ),
+        "another mod starting another action for this target": (
+            {}, refused_then(lambda a, t: manager.ActionStart(other, t)), "setup_failed"
+        ),
+        "a pending action another mod ends without its Start": (
+            {}, pending_then_ended, "setup_failed"
+        ),
+        # Not seen, as the CHANGELOG says.
+        "an action that puts another target in m_Target before Start": (
+            {}, lambda a, t: manager.ActionStart(a, t, retarget=True), "setup_failed"
+        ),
+        "an instant action whose Start does not call super.Start": (
+            {"calls_super": False}, manager.ActionStart, "setup_failed"
+        ),
+    }
+    wrong = []
+    for name, (kind, perform, expected) in flows.items():
+        # The bridge refuses a call while an action is running.
+        manager.current = None
+        manager.perform = perform
+        got = answer(tail, manager, Action(watch, **kind), Target())
+        if got != expected:
+            wrong.append(f"{name}: {got}, expected {expected}")
+    if wrong:
+        raise AssertionError("; ".join(wrong))
+
+
+def verify_is_watched(source: str) -> None:
+    watch = Watch(source)
+    action, other, target = object(), object(), Target()
+    cases = (
+        ("nothing watched", None, None, Data(action, target), False),
+        ("the watched action and target", action, target, Data(action, target), True),
+        ("another action", action, target, Data(other, target), False),
+        ("another target", action, target, Data(action, Target()), False),
+    )
+    for name, watched, watched_target, data, expected in cases:
+        watch.statics["s_Watched"] = watched
+        watch.statics["s_WatchedTarget"] = watched_target
+        got = watch.is_watched(data.m_Action, data)
+        if got is not expected:
+            raise AssertionError(f"{name}: {got!r}, expected {expected!r}")
 
 
 class InstantActionStartTest(unittest.TestCase):
@@ -244,131 +350,97 @@ class InstantActionStartTest(unittest.TestCase):
             for path in sorted(addon_root().glob("scripts/**/*.c"))
         }
 
-    def test_dispatch_watches_the_action_it_starts(self) -> None:
-        verify_dispatch(self.bridge)
+    def test_the_watch_does_what_204e_needs(self) -> None:
+        verify_watch(self.hold)
 
-    def test_on_action_end_counts_the_ends_of_the_watched_action(self) -> None:
-        verify_counter(self.hold)
-
-    def test_an_end_counts_only_after_the_start_of_the_watched_action(self) -> None:
-        verify_ending_watched(self.hold)
+    def test_a_start_counts_only_for_the_watched_action_and_target(self) -> None:
+        verify_is_watched(self.hold)
 
     def test_the_names_occur_only_where_they_are_read(self) -> None:
         self.assertIn(HOLD_PATH, self.sources)
         self.assertIn(BRIDGE_PATH, self.sources)
         verify_names(self.sources)
 
-    def test_only_a_start_that_ran_answers_started(self) -> None:
-        manager = Manager(self.hold)
-        toggle, other = object(), object()
-
-        def refused_then(after) -> None:
-            manager.ActionStart(toggle, setup=False)
-            after()
-
-        def pending_then_ended() -> None:
-            manager.ActionStart(toggle, local=False, acknowledged=True)
-            manager.OnActionEnd()
-
-        flows = {
-            "a local instant action": (lambda: manager.ActionStart(toggle), "started"),
-            "a non-local instant action without acknowledgment": (
-                lambda: manager.ActionStart(toggle, local=False), "started"
-            ),
-            "a continuous action": (lambda: manager.ActionStart(toggle, instant=False), "started"),
-            "an action waiting for the server": (
-                lambda: manager.ActionStart(toggle, local=False, acknowledged=True), "started"
-            ),
-            "a start SetupAction refused": (
-                lambda: manager.ActionStart(toggle, setup=False), "setup_failed"
-            ),
-            "another mod's cleanup after a refused start": (
-                lambda: refused_then(manager.OnActionEnd), "setup_failed"
-            ),
-            "another mod's instant action after a refused start": (
-                lambda: refused_then(lambda: manager.ActionStart(other)), "setup_failed"
-            ),
-            "another mod ending an action waiting for the server": (
-                pending_then_ended, "setup_failed"
-            ),
-        }
-        for name, (perform, expected) in flows.items():
-            with self.subTest(flow=name):
-                # The bridge refuses a call while an action is running.
-                manager.current = None
-                self.assertEqual(dispatch(manager, toggle, perform), expected)
+    def test_only_a_start_of_this_command_answers_started(self) -> None:
+        verify_flows(self.bridge, self.hold)
 
     def test_a_second_toggle_answers_started_again(self) -> None:
-        manager = Manager(self.hold)
-        toggle = object()
+        watch = Watch(self.hold)
+        tail = dispatch_tail(self.bridge, watch)
+        manager = Manager()
+        toggle = Action(watch)
         for attempt in (1, 2):
             with self.subTest(attempt=attempt):
-                answer = dispatch(manager, toggle, lambda: manager.ActionStart(toggle))
-                self.assertEqual(answer, "started")
-                self.assertEqual(manager.ends, 1)
+                self.assertEqual(answer(tail, manager, toggle, Target()), "started")
+                self.assertIsNone(watch.statics["s_WatchedTarget"])
+
+    def test_a_start_after_the_call_counts_for_no_command(self) -> None:
+        watch = Watch(self.hold)
+        tail = dispatch_tail(self.bridge, watch)
+        manager = Manager()
+        action, first = Action(watch), Target()
+        manager.perform = lambda a, t: manager.ActionStart(a, t, local=False, acknowledged=True)
+        self.assertEqual(answer(tail, manager, action, first), "started")
+        # The server accepts later, in Update: Start with the first target.
+        action.Start(manager.current)
+        manager.OnActionEnd()
+        manager.perform = lambda a, t: manager.ActionStart(a, t, setup=False)
+        self.assertEqual(answer(tail, manager, action, Target()), "setup_failed")
 
     def test_mutants_are_red(self) -> None:
+        begin = "MCPActionUseWatch.Begin(action, actionTarget);"
         start = "amc.PerformActionStart(action, actionTarget, heldItem, NULL);"
-        ran = "if (amc.MCP_WatchedEnds() > 0) { result.started = true; result.ok = true;"
+        end = "int starts = MCPActionUseWatch.End();"
+        ran = "if (starts > 0) { result.started = true; result.ok = true;"
+        noted = "MCPActionUseWatch.NoteStart(this, action_data);"
         hold_start = "super.PerformActionStart(action, target, item, extra_data);"
-        counted = "if (MCP_EndingWatched()) { m_MCP_WatchedEnds++; }"
         mutants = {
-            "watch_after_the_start": (
-                verify_dispatch, BRIDGE_PATH,
-                f"amc.MCP_Watch(action); {start}", f"{start} amc.MCP_Watch(action);",
+            "begin_after_the_start": (
+                verify_flows, BRIDGE_PATH, f"{begin} {start}", f"{start} {begin}"
             ),
-            "watch_nothing": (
-                verify_dispatch, BRIDGE_PATH, "amc.MCP_Watch(action);", "amc.MCP_Watch(null);"
+            "end_before_the_start": (
+                verify_flows, BRIDGE_PATH, f"{start} {end}", f"{end} {start}"
             ),
-            "no_end_reads_as_ran": (
-                verify_dispatch, BRIDGE_PATH,
-                "amc.MCP_WatchedEnds() > 0", "amc.MCP_WatchedEnds() >= 0",
+            "watch_no_target": (
+                verify_flows, BRIDGE_PATH, begin, "MCPActionUseWatch.Begin(action, null);"
             ),
+            "no_start_reads_as_ran": (verify_flows, BRIDGE_PATH, "starts > 0", "starts >= 0"),
             "ran_answers_not_started": (
-                verify_dispatch, BRIDGE_PATH, ran, ran.replace("started = true", "started = false")
+                verify_flows, BRIDGE_PATH, ran, ran.replace("started = true", "started = false")
             ),
             "ran_answers_not_ok": (
-                verify_dispatch, BRIDGE_PATH, ran, ran.replace("ok = true", "ok = false")
+                verify_flows, BRIDGE_PATH, ran, ran.replace("ok = true", "ok = false")
             ),
-            "end_not_counted": (
-                verify_counter, HOLD_PATH, "m_MCP_WatchedEnds++;", ""
+            # Codex review of #257, A2: a rejection of instant actions before
+            # the start.
+            "instants_rejected_before_the_start": (
+                verify_flows, BRIDGE_PATH, begin,
+                'if (action.IsInstant()) { result.ok = false; result.error = "setup_failed";'
+                f" return true; }} {begin}",
             ),
-            "every_end_counted": (
-                verify_counter, HOLD_PATH, "if (MCP_EndingWatched())", "if (true)"
+            "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
+            "every_start_counted": (
+                verify_watch, HOLD_PATH, "if (IsWatched(action, action_data))", "if (true)"
             ),
-            "count_after_super": (
-                verify_counter, HOLD_PATH,
-                f"{counted} MCPHoldControl.BeforeActionEnd(this); super.OnActionEnd();",
-                f"MCPHoldControl.BeforeActionEnd(this); super.OnActionEnd(); {counted}",
+            "count_before_super": (
+                verify_watch, HOLD_PATH,
+                f"super.Start(action_data); {noted}", f"{noted} super.Start(action_data);",
             ),
-            "watch_keeps_the_count": (
-                verify_counter, HOLD_PATH, "m_MCP_WatchedEnds = 0;", ""
+            "begin_keeps_the_count": (
+                verify_watch, HOLD_PATH,
+                "s_WatchedTarget = target; s_Starts = 0;", "s_WatchedTarget = target;",
             ),
-            "accessor_returns_zero": (
-                verify_counter, HOLD_PATH, "return m_MCP_WatchedEnds;", "return 0;"
+            "end_returns_zero": (verify_watch, HOLD_PATH, "return starts;", "return 0;"),
+            "any_action_counts": (verify_is_watched, HOLD_PATH, "action == s_Watched &&", ""),
+            "any_target_counts": (
+                verify_is_watched, HOLD_PATH, "&& action_data.m_Target == s_WatchedTarget", ""
             ),
-            "an_end_without_action_counts": (
-                verify_ending_watched, HOLD_PATH,
-                "if (!m_CurrentActionData) { return false; }", "",
+            "only_another_target_counts": (
+                verify_is_watched, HOLD_PATH,
+                "action_data.m_Target == s_WatchedTarget", "action_data.m_Target != s_WatchedTarget",
             ),
-            "the_end_of_another_action_counts": (
-                verify_ending_watched, HOLD_PATH,
-                "if (m_CurrentActionData.m_Action != m_MCP_Watched) { return false; }", "",
-            ),
-            "a_pending_action_counts": (
-                verify_ending_watched, HOLD_PATH,
-                "return m_CurrentActionData.m_State != UA_AM_PENDING;", "return true;",
-            ),
-            "only_another_action_counts": (
-                verify_ending_watched, HOLD_PATH,
-                "m_CurrentActionData.m_Action != m_MCP_Watched",
-                "m_CurrentActionData.m_Action == m_MCP_Watched",
-            ),
-            "count_reset_by_and_before_the_start": (
-                verify_names, HOLD_PATH, hold_start, f"m_MCP_WatchedEnds &= 0; {hold_start}"
-            ),
-            "watch_cleared_in_the_start": (
-                verify_names, HOLD_PATH, hold_start, f"{hold_start} MCP_Watch(null);"
+            "watch_cleared_in_the_hold_start": (
+                verify_names, HOLD_PATH, hold_start, f"{hold_start} MCPActionUseWatch.End();"
             ),
         }
         for name, (verify, path, old, new) in mutants.items():
@@ -377,6 +449,8 @@ class InstantActionStartTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     if verify is verify_names:
                         verify_names({**self.sources, path: mutated})
+                    elif verify is verify_flows:
+                        verify_flows(mutated, self.hold)
                     else:
                         verify(mutated)
 
@@ -385,16 +459,17 @@ class InstantActionStartTest(unittest.TestCase):
             return text.replace(";", " ;\n\t ")
 
         bridge = self.bridge.replace(
-            "amc.MCP_Watch(action);", "amc.MCP_Watch(action); // before the start"
-        ).replace("if (amc.MCP_WatchedEnds() > 0)", "if (amc.MCP_WatchedEnds() > 0) // it ran")
-        hold = self.hold.replace("int MCP_WatchedEnds()", "int MCP_WatchedEnds ()").replace(
-            "protected bool MCP_EndingWatched()", "protected bool MCP_EndingWatched ( )"
+            "MCPActionUseWatch.Begin(action, actionTarget);",
+            "MCPActionUseWatch.Begin(action, actionTarget); // before the start",
+        ).replace("if (starts > 0)", "if (starts > 0) // it ran")
+        hold = self.hold.replace("static int End()", "static int End ()").replace(
+            "super.Start(action_data);", "super.Start(action_data); // vanilla first"
         )
         self.assertNotEqual(bridge, self.bridge)
         self.assertNotEqual(hold, self.hold)
-        verify_dispatch(spread(bridge))
-        verify_counter(spread(hold))
-        verify_ending_watched(spread(hold))
+        verify_watch(spread(hold))
+        verify_is_watched(spread(hold))
+        verify_flows(spread(bridge), spread(hold))
         verify_names({**self.sources, BRIDGE_PATH: spread(bridge), HOLD_PATH: spread(hold)})
 
 
