@@ -717,14 +717,41 @@ class MCPHoldControl
 
 modded class ActionManagerClient
 {
-	// 204e: DispatchActionUse compares it across PerformActionStart. A local
-	// instant action runs Start and then OnActionEnd inside ActionStart, so it
-	// leaves GetRunningAction() null, as a start SetupAction refused does.
-	protected int m_MCP_ActionEnds;
+	// 204e: DispatchActionUse watches the action it starts and counts its ends
+	// during PerformActionStart. A local instant action runs Start and then
+	// OnActionEnd inside ActionStart, so it leaves GetRunningAction() null, as
+	// a start SetupAction refused does.
+	protected ActionBase m_MCP_Watched;
+	protected int m_MCP_WatchedEnds;
 
-	int MCP_ActionEnds()
+	void MCP_Watch(ActionBase action)
 	{
-		return m_MCP_ActionEnds;
+		m_MCP_Watched = action;
+		m_MCP_WatchedEnds = 0;
+	}
+
+	int MCP_WatchedEnds()
+	{
+		return m_MCP_WatchedEnds;
+	}
+
+	// True when OnActionEnd ends the watched action after its Start. Vanilla's
+	// OnActionEnd ends nothing without a current action
+	// (actionmanagerclient.c:830 in 1.30, :775 in 1.29), and an action still
+	// waiting for the server's acknowledgment (UA_AM_PENDING) has not run Start.
+	protected bool MCP_EndingWatched()
+	{
+		if (!m_CurrentActionData)
+		{
+			return false;
+		}
+
+		if (m_CurrentActionData.m_Action != m_MCP_Watched)
+		{
+			return false;
+		}
+
+		return m_CurrentActionData.m_State != UA_AM_PENDING;
 	}
 
 	bool MCP_HoldBusy()
@@ -782,7 +809,11 @@ modded class ActionManagerClient
 
 	override void OnActionEnd()
 	{
-		m_MCP_ActionEnds++;
+		if (MCP_EndingWatched())
+		{
+			m_MCP_WatchedEnds++;
+		}
+
 		MCPHoldControl.BeforeActionEnd(this);
 		super.OnActionEnd();
 		MCPHoldControl.AfterActionEnd(this);
