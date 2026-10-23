@@ -18,12 +18,13 @@ action_hold branch, as built for 1.29 and for 1.30), the addon's
 PerformActionStart and Start, and IsWatched run as Python
 (enforce_subset_helpers) against a manager that does what vanilla's
 ActionStart does, with other mods' Starts loaded before or after the addon's,
-and with empty hands or an item in them, which must reach vanilla's
-PerformActionStart. Begin, End and NoteStart are read as text, with comments
-blanked and the whitespace outside string literals removed, and Watch below
-does what they say, so a layout change keeps these tests green and a change of
-what the code does turns them red. The addon declares no other method of the
-start path.
+and with empty hands or an item in them, which must reach the action's Can
+and vanilla's PerformActionStart; an action that needs an item, as the toggle
+does, answers condition_failed with empty hands, without a start. Begin, End
+and NoteStart are read as text, with comments blanked and the whitespace
+outside string literals removed, and Watch below does what they say, so a
+layout change keeps these tests green and a change of what they do turns them
+red. The addon declares no other method of the start path.
 """
 from __future__ import annotations
 
@@ -238,9 +239,12 @@ class Action:
         instant: bool = True,
         calls_super: bool = True,
         mods: tuple = (ADDON,),
+        needs_item: bool = False,
     ) -> None:
         self.instant = instant
         self.calls_super = calls_super
+        self.needs_item = needs_item
+        self.asked: list = []
         self.chain = Link(lambda data: None)
         for mod in reversed(mods):
             if mod == ADDON:
@@ -253,7 +257,10 @@ class Action:
         return self.instant
 
     def Can(self, player: object, target: Target, item: object) -> bool:
-        return True
+        # An action that needs an item refuses empty hands, as the toggle's
+        # item condition, CCINonRuined, does (Codex review of #257, L2).
+        self.asked.append(item)
+        return item is not None or not self.needs_item
 
     def CanBeStarted(self) -> bool:
         return True
@@ -375,9 +382,11 @@ def dispatch(source: str, watch: Watch, version: str):
 
 def answer(tail, manager: Manager, action: Action, target: Target, item: object = None) -> str:
     result = Result()
-    performed = manager.performed
+    performed, asked = manager.performed, len(action.asked)
     if tail(action, target, manager, Player(item), result) is not True:
         raise AssertionError("the tail does not return true")
+    if len(action.asked) != asked + 1 or action.asked[-1] is not item:
+        raise AssertionError("the action's Can did not run once with the item in hands")
     if manager.performed != performed + 1:
         raise AssertionError(f"vanilla's PerformActionStart ran {manager.performed - performed} times")
     if manager.item is not item:
@@ -482,6 +491,29 @@ def verify_flows(bridge: str, hold: str) -> None:
         raise AssertionError("; ".join(wrong))
 
 
+def verify_condition(bridge: str, hold: str) -> None:
+    """An action that needs an item starts with the item in hands and answers
+    condition_failed with empty hands, without a start (Codex review of #257,
+    L2)."""
+    for version in VERSIONS:
+        watch = Watch(hold)
+        tail = dispatch(bridge, watch, version)
+        manager = Manager(hold)
+        toggle = Action(watch, hold, needs_item=True)
+        if answer(tail, manager, toggle, Target(), KIT) != "started":
+            raise AssertionError(f"{version}: an action that needs an item did not start with one")
+        result = Result()
+        if tail(toggle, Target(), manager, Player(None), result) is not True:
+            raise AssertionError("the tail does not return true")
+        error = None if result.error is None else result.error.text
+        if (result.started, result.ok, error) != (False, False, "condition_failed"):
+            raise AssertionError(
+                f"{version}, empty hands: started {result.started!r}, ok {result.ok!r}, error {error!r}"
+            )
+        if manager.performed != 1 or toggle.asked != [KIT, None]:
+            raise AssertionError(f"{version}, empty hands: a start, or Can had another item")
+
+
 def verify_is_watched(source: str) -> None:
     watch = Watch(source)
     action, other, target = object(), object(), Target()
@@ -534,6 +566,9 @@ class InstantActionStartTest(unittest.TestCase):
                         self.assertEqual(answer(tail, manager, toggle, Target(), item), "started")
                         self.assertIsNone(watch.statics["s_WatchedTarget"])
 
+    def test_an_action_that_needs_an_item_reads_the_one_in_hands(self) -> None:
+        verify_condition(self.bridge, self.hold)
+
     def test_a_start_after_the_call_counts_for_no_command(self) -> None:
         for version in VERSIONS:
             with self.subTest(version=version):
@@ -561,6 +596,9 @@ class InstantActionStartTest(unittest.TestCase):
         noted = "MCPActionUseWatch.NoteStart(this, action_data);"
         vanilla = "super.Start(action_data);"
         hold_start = "super.PerformActionStart(action, target, item, extra_data);"
+        held = "ItemBase heldItem = player.GetItemInHands();"
+        condition = "if (!action.Can(player, actionTarget, heldItem))"
+        refused = f'{condition} {{ result.ok = false; result.error = "condition_failed"; return true; }}'
         mutants = {
             "begin_after_the_start": (
                 verify_flows, BRIDGE_PATH, f"{begin} {start}", f"{start} {begin}"
@@ -597,6 +635,13 @@ class InstantActionStartTest(unittest.TestCase):
                 verify_flows, BRIDGE_PATH, f"{begin} {start}",
                 f"{begin} amc.PerformActionStart(action, actionTarget, null, NULL);",
             ),
+            # Codex review of #257, L2: Can asked with empty hands, the item
+            # read for the start only, or Can not asked.
+            "the_item_read_after_the_condition": (
+                verify_flows, BRIDGE_PATH, f"{held} {refused}",
+                f"ItemBase heldItem = null; {refused} heldItem = player.GetItemInHands();",
+            ),
+            "the_condition_not_asked": (verify_condition, BRIDGE_PATH, condition, "if (false)"),
             "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
             "every_start_counted": (
                 verify_watch, HOLD_PATH, "if (IsWatched(action, action_data))", "if (true)"
@@ -658,10 +703,10 @@ class InstantActionStartTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     if verify is verify_names:
                         verify_names({**self.sources, path: mutated})
-                    elif verify is verify_flows and path == BRIDGE_PATH:
-                        verify_flows(mutated, self.hold)
-                    elif verify is verify_flows:
-                        verify_flows(self.bridge, mutated)
+                    elif verify in (verify_flows, verify_condition) and path == BRIDGE_PATH:
+                        verify(mutated, self.hold)
+                    elif verify in (verify_flows, verify_condition):
+                        verify(self.bridge, mutated)
                     else:
                         verify(mutated)
 
@@ -686,6 +731,7 @@ class InstantActionStartTest(unittest.TestCase):
         verify_watch(spread(hold))
         verify_is_watched(spread(hold))
         verify_flows(spread(bridge), spread(hold))
+        verify_condition(spread(bridge), spread(hold))
         verify_names({**self.sources, BRIDGE_PATH: spread(bridge), HOLD_PATH: spread(hold)})
 
 
