@@ -20,11 +20,14 @@ PerformActionStart and Start, and IsWatched run as Python
 ActionStart does, with other mods' Starts loaded before or after the addon's,
 and with empty hands or an item in them, which must reach the action's Can
 and vanilla's PerformActionStart; an action that needs an item, as the toggle
-does, answers condition_failed with empty hands, without a start. Begin, End
-and NoteStart are read as text, with comments blanked and the whitespace
-outside string literals removed, and Watch below does what they say, so a
-layout change keeps these tests green and a change of what they do turns them
-red. The addon declares no other method of the start path.
+does, answers condition_failed with empty hands, without a start, and the
+start gets the item Can was asked with also when Can takes it out of the
+hands. Begin, End and NoteStart are read as text, with comments blanked and
+the whitespace outside string literals removed, and Watch below does what
+they say, so a layout change keeps these tests green and a change of what
+they do turns them red. The addon declares no other ActionStart, SetupAction,
+Start or PerformActionStart of the start path, and no Can or CanBeStarted,
+which the flows run as the Python Action's.
 """
 from __future__ import annotations
 
@@ -100,12 +103,16 @@ NAMES = {
 # How often each addon file declares a method of the start path, which the
 # flows run only as the addon's Start and PerformActionStart, so that another
 # override there, such as a Start of the toggle's own class, is red (Codex
-# review of #257, R3).
+# review of #257, R3). Can and CanBeStarted, which the tail asks of the
+# action, run as the Python Action's, so an override of them in the addon is
+# red too (Q2).
 DECLARED = {
     r"\bPerformActionStart\s*\(\s*ActionBase\b": {HOLD_PATH: 1},
     r"\bActionStart\s*\(\s*ActionBase\b": {},
     r"\bSetupAction\s*\(\s*PlayerBase\b": {},
     r"\bStart\s*\(\s*ActionData\b": {HOLD_PATH: 1},
+    r"\bCan\s*\(\s*PlayerBase\b": {},
+    r"\bbool\s+CanBeStarted\s*\(": {},
 }
 
 _STRING = re.compile(r'("(?:\\.|[^"\\])*")')
@@ -240,10 +247,12 @@ class Action:
         calls_super: bool = True,
         mods: tuple = (ADDON,),
         needs_item: bool = False,
+        empties_hands: bool = False,
     ) -> None:
         self.instant = instant
         self.calls_super = calls_super
         self.needs_item = needs_item
+        self.empties_hands = empties_hands
         self.asked: list = []
         self.chain = Link(lambda data: None)
         for mod in reversed(mods):
@@ -260,6 +269,10 @@ class Action:
         # An action that needs an item refuses empty hands, as the toggle's
         # item condition, CCINonRuined, does (Codex review of #257, L2).
         self.asked.append(item)
+        if self.empties_hands:
+            # A Can that takes the item out of the hands (Codex review of
+            # #257, Q3).
+            player.item = None
         return item is not None or not self.needs_item
 
     def CanBeStarted(self) -> bool:
@@ -390,7 +403,9 @@ def answer(tail, manager: Manager, action: Action, target: Target, item: object 
     if manager.performed != performed + 1:
         raise AssertionError(f"vanilla's PerformActionStart ran {manager.performed - performed} times")
     if manager.item is not item:
-        raise AssertionError("vanilla's PerformActionStart had another item than the one in hands")
+        raise AssertionError(
+            "vanilla's PerformActionStart had another item than the one the action's Can was asked with"
+        )
     if result.started and result.ok:
         return "started"
     if not result.started and not result.ok and result.error is not None:
@@ -494,7 +509,8 @@ def verify_flows(bridge: str, hold: str) -> None:
 def verify_condition(bridge: str, hold: str) -> None:
     """An action that needs an item starts with the item in hands and answers
     condition_failed with empty hands, without a start (Codex review of #257,
-    L2)."""
+    L2); when its Can takes the item out of the hands, the start gets the item
+    Can was asked with (Q3)."""
     for version in VERSIONS:
         watch = Watch(hold)
         tail = dispatch(bridge, watch, version)
@@ -512,6 +528,9 @@ def verify_condition(bridge: str, hold: str) -> None:
             )
         if manager.performed != 1 or toggle.asked != [KIT, None]:
             raise AssertionError(f"{version}, empty hands: a start, or Can had another item")
+        emptying = Action(watch, hold, needs_item=True, empties_hands=True)
+        if answer(tail, manager, emptying, Target(), KIT) != "started":
+            raise AssertionError(f"{version}: an action whose Can empties the hands did not start")
 
 
 def verify_is_watched(source: str) -> None:
@@ -642,6 +661,10 @@ class InstantActionStartTest(unittest.TestCase):
                 f"ItemBase heldItem = null; {refused} heldItem = player.GetItemInHands();",
             ),
             "the_condition_not_asked": (verify_condition, BRIDGE_PATH, condition, "if (false)"),
+            # Codex review of #257, Q3: the hands read again after Can.
+            "the_item_read_again_after_the_condition": (
+                verify_condition, BRIDGE_PATH, refused, f"{refused} heldItem = player.GetItemInHands();"
+            ),
             "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
             "every_start_counted": (
                 verify_watch, HOLD_PATH, "if (IsWatched(action, action_data))", "if (true)"
@@ -688,6 +711,16 @@ class InstantActionStartTest(unittest.TestCase):
                 "modded class ActionBase { override bool SetupAction(PlayerBase player, "
                 "ActionTarget target, ItemBase item, out ActionData action_data, "
                 "Param extra_data = NULL) { return false; }",
+            ),
+            # Codex review of #257, Q2: a Can or CanBeStarted of the addon.
+            "a_can_of_the_addon": (
+                verify_names, HOLD_PATH, "modded class ActionBase {",
+                "modded class ActionBase { override bool Can(PlayerBase player, ActionTarget target, "
+                "ItemBase item) { return super.Can(player, target, null); }",
+            ),
+            "a_can_be_started_of_the_addon": (
+                verify_names, HOLD_PATH, "modded class ActionBase {",
+                "modded class ActionBase { override bool CanBeStarted() { return false; }",
             ),
             "a_second_start_call_of_the_addon": (
                 verify_names, HOLD_PATH, "bool MCP_HoldBusy()",
