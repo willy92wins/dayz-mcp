@@ -518,7 +518,9 @@ def verify_condition(bridge: str, hold: str) -> None:
     """An action that needs an item starts with the item in hands and answers
     condition_failed with empty hands, without a start (Codex review of #257,
     L2); when its Can takes the item out of the hands or puts another one
-    there, the start gets the item Can was asked with (Q3, U1)."""
+    there, the start gets the item Can was asked with (Q3, U1), for an
+    instant and a continuous action alike when Can swaps it (Codex review of
+    #259, V1)."""
     for version in VERSIONS:
         watch = Watch(hold)
         tail = dispatch(bridge, watch, version)
@@ -539,9 +541,13 @@ def verify_condition(bridge: str, hold: str) -> None:
         emptying = Action(watch, hold, needs_item=True, empties_hands=True)
         if answer(tail, manager, emptying, Target(), KIT) != "started":
             raise AssertionError(f"{version}: an action whose Can empties the hands did not start")
-        swapping = Action(watch, hold, needs_item=True, swaps_hands_for=RAG)
-        if answer(tail, manager, swapping, Target(), KIT) != "started":
-            raise AssertionError(f"{version}: an action whose Can swaps the item in hands did not start")
+        for instant in (True, False):
+            swapping = Action(watch, hold, needs_item=True, swaps_hands_for=RAG, instant=instant)
+            if answer(tail, manager, swapping, Target(), KIT) != "started":
+                kind = "an instant" if instant else "a continuous"
+                raise AssertionError(
+                    f"{version}: {kind} action whose Can swaps the item in hands did not start"
+                )
 
 
 def verify_is_watched(source: str) -> None:
@@ -682,6 +688,12 @@ class InstantActionStartTest(unittest.TestCase):
                 verify_condition, BRIDGE_PATH, refused,
                 f"{refused} ItemBase inHands = player.GetItemInHands(); "
                 "if (inHands != null) { heldItem = inHands; }",
+            ),
+            # Codex review of #259, V1: the same, for a continuous action only.
+            "the_item_read_again_when_held_by_a_continuous_action": (
+                verify_condition, BRIDGE_PATH, refused,
+                f"{refused} if (!action.IsInstant()) {{ ItemBase inHands = player.GetItemInHands(); "
+                "if (inHands != null) { heldItem = inHands; } }",
             ),
             "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
             "every_start_counted": (
