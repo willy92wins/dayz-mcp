@@ -722,9 +722,12 @@ class MCPHoldControl
 // PerformActionStart returns, as after a start that SetupAction refused. A
 // Start of that action with that target during the call means it ran:
 // SetupAction keeps the target it is given in m_Target (actionbase.c:174 in
-// 1.30, :167 in 1.29). An action whose own code puts another ActionTarget in
-// m_Target before Start, or whose Start does not call super.Start (in vanilla
-// only ActionDebug's), is not seen.
+// 1.30, :167 in 1.29). The target is read when the addon's Start is entered,
+// before super.Start, so what a Start puts in m_Target after that does not
+// change what is counted. An action or mod whose code puts another
+// ActionTarget in m_Target before that, or whose Start does not reach the
+// addon's (in vanilla only ActionDebug's, which skips super.Start), is not
+// seen.
 class MCPActionUseWatch
 {
 	protected static ActionBase s_Watched;
@@ -766,8 +769,8 @@ modded class ActionBase
 {
 	override void Start(ActionData action_data)
 	{
-		super.Start(action_data);
 		MCPActionUseWatch.NoteStart(this, action_data);
+		super.Start(action_data);
 	}
 };
 
