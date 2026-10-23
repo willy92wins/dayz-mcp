@@ -307,7 +307,10 @@ class SessionToolsCarryTheAdvisoryTest(unittest.IsolatedAsyncioTestCase):
         with self.observed(return_value=dict(_ADVISORY)) as observe:
             await self.call("session_status")
             ttl = server._steam_app_view_cache["expires"] - time.monotonic()
-            self.assertTrue(25.0 < ttl <= 30.0, ttl)
+            # With no tick between the two reads (on Windows before Python 3.13
+            # time.monotonic() ticks every 15.6 ms), (t + 30.0) - t can read a hair
+            # over 30.0 (CI of #258, Python 3.11).
+            self.assertTrue(25.0 < ttl <= 30.0 + 1e-6, ttl)
             second = await self.call("session_status")
             self.assertEqual(second["steam_app_view"], _ADVISORY)
             observe.assert_called_once_with()
