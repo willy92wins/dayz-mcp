@@ -186,8 +186,10 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     }),
     "confirmed": frozenset({"hands_attach", "hands_take", "weapon_state"}),
     "sent": frozenset({"exec_enforce", "notify_players"}),
-    # loadout_clear answers how many objects it deleted (220f).
+    # loadout_clear answers how many objects it deleted (220f), and the uid of
+    # the player it acted on, "" for a survivor by object_id (#261 review Y11).
     "deleted": frozenset({"object_delete", "loadout_clear"}),
+    "uid": frozenset({"loadout_clear"}),
     "y": frozenset({"surface_query"}),
     "phase": frozenset({"object_anim"}),
     "source": frozenset({"object_anim"}),
@@ -210,7 +212,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     # action_hold observation. The flat MCPResult sends the defaults on every
     # verb; only the hold commands write them, and 0 / false are answers.
     # loadout_clear writes cleanup_complete too: whether what it deleted was
-    # all gone before its job's deadline (220f).
+    # all gone at its job's last check (220f).
     "hold_protocol": frozenset({"action_hold", "action_hold_cancel"}),
     "hold_id": frozenset({"action_hold", "action_hold_cancel"}),
     "end_state": frozenset({"action_hold"}),

@@ -31,8 +31,12 @@ the copies equal.
 
 clear_first is a separate bridge verb, loadout_clear, which the tool sends
 and waits for before loadout_apply. It answers deleted, how many objects it
-deleted, and cleanup_complete, whether they were all gone before its job's
-deadline (MCPResult scalars); clear_reply reads them.
+deleted, cleanup_complete, whether they were all gone at its job's last
+check, which can come one bridge tick after the 5 s deadline, and uid, the
+player it acted on (MCPResult scalars); clear_reply and cleared_uid read
+them. With neither object_id nor uid given, the tool sends loadout_apply to
+that uid, so the creates go to the player the clear acted on even when the
+first human has changed in between (#261 review Y11).
 """
 from __future__ import annotations
 
@@ -274,6 +278,22 @@ def nest_rows(rows: object) -> dict[str, Any] | None:
     return tree
 
 
+def _read_tree(rows: object) -> dict[str, Any] | None:
+    """The tree of a bridge read, or None unless it is one loadout_apply takes.
+
+    None when the rows do not nest (nest_rows) or when the tree they nest into
+    is one flatten_request refuses (an attachment with no slot name, say).
+    """
+    tree = nest_rows(rows)
+    if tree is None:
+        return None
+    try:
+        flatten_request(tree)
+    except ValueError:
+        return None
+    return tree
+
+
 def _incomplete(result: dict[str, Any]) -> dict[str, Any]:
     response = dict(result)
     response["ok"] = 0
@@ -294,12 +314,8 @@ def get_reply(result: dict[str, Any]) -> dict[str, Any]:
     wire = result.get("loadout")
     if not isinstance(wire, dict) or _wire_bool(wire.get("too_large", False)) is not False:
         return _incomplete(result)
-    tree = nest_rows(wire.get("items"))
+    tree = _read_tree(wire.get("items"))
     if tree is None:
-        return _incomplete(result)
-    try:
-        flatten_request(tree)
-    except ValueError:
         return _incomplete(result)
     response = dict(result)
     response["loadout"] = tree
@@ -317,7 +333,8 @@ def apply_reply(
     after the apply, null with loadout_too_large true when that read went past
     the caps. An answer that is not ok passes through untouched. An ok answer
     that cannot be read is ok=0 with warnings [loadout_incomplete]: the apply
-    ran, so nothing here raises.
+    ran, so nothing here raises. That includes a read after whose rows do not
+    form a tree loadout_apply takes, as get_reply checks it (#261 review Y16).
     """
     if not isinstance(result, dict) or not result.get("ok"):
         return result
@@ -341,7 +358,7 @@ def apply_reply(
         )
     tree = None
     if not too_large:
-        tree = nest_rows(wire.get("items"))
+        tree = _read_tree(wire.get("items"))
         if tree is None:
             return _incomplete(result)
     response = dict(result)
@@ -356,9 +373,9 @@ def clear_reply(result: object) -> dict[str, Any]:
     """loadout_clear's answer as loadout_apply reports it: {deleted, cleanup_complete}.
 
     deleted is how many objects the clear deleted; cleanup_complete is True
-    when they were all gone before the bridge job's deadline. An answer
-    without both raises ValueError (loadout_incomplete): the tool then sends
-    nothing more.
+    when they were all gone at the bridge job's last check, which can come one
+    bridge tick after the 5 s deadline. An answer without both raises
+    ValueError (loadout_incomplete): the tool then sends nothing more.
     """
     deleted = result.get("deleted") if isinstance(result, dict) else None
     complete = _wire_bool(result.get("cleanup_complete")) if isinstance(result, dict) else None
@@ -369,6 +386,22 @@ def clear_reply(result: object) -> dict[str, Any]:
             "loadout_get"
         )
     return {"deleted": deleted, "cleanup_complete": complete}
+
+
+def cleared_uid(result: object) -> str:
+    """The uid of the player loadout_clear acted on, for the creates to target.
+
+    An answer without one, or with "", raises ValueError (loadout_incomplete):
+    the tool then sends nothing more.
+    """
+    uid = result.get("uid") if isinstance(result, dict) else None
+    if not isinstance(uid, str) or uid == "":
+        raise ValueError(
+            f"{INCOMPLETE}: loadout_clear answered without the uid of the "
+            "player it cleared, so nothing was applied; read the target with "
+            "loadout_get"
+        )
+    return uid
 
 
 def refusal_after_clear(message: str, clear: dict[str, Any]) -> str:

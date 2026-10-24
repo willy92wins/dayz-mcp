@@ -2600,16 +2600,24 @@ class MCPBridge : Managed
 	// clear_first. In this tick it deletes what the target wears and holds
 	// (ClearLoadout). With nothing to delete it answers now: deleted 0,
 	// cleanup_complete true. Otherwise a "loadout_clear" job only watches the
-	// deleted objects, changing nothing, until each reads null or its deadline
-	// passes, then posts deleted (how many) and cleanup_complete (true when all
-	// were gone before the deadline): Object.Delete defers ObjectDelete to the
-	// next frame (object.c:82-85), and whether ObjectDelete frees a slot within
-	// its own frame is not measured. A clear on a target with a job pending is
-	// busy.
+	// deleted objects, changing nothing: the runner checks them each tick
+	// until all read null or the deadline has passed, then the job posts
+	// deleted (how many) and cleanup_complete (true when all read null at that
+	// last check, which can come one tick after the deadline). Object.Delete
+	// defers ObjectDelete to the next frame (object.c:82-85), and whether
+	// ObjectDelete frees a slot within its own frame is not measured. uid is
+	// the PlainId of the player the clear acted on, by uid or as the first
+	// human, and "" for a survivor by object_id: the tool sends the creates to
+	// that uid, so whoever is first human by then is never dressed in that
+	// player's place (#261 review Y11). A first human with no identity is
+	// player_not_found, and a target with a job pending is busy, both before
+	// anything is deleted.
 	protected bool DispatchLoadoutClear(MCPCommand command, MCPResult result)
 	{
 		string targetError = "";
+		string clearedUid = "";
 		PlayerBase target = null;
+		PlayerIdentity identity = null;
 		array<EntityAI> cleared = null;
 		MCPJob job = null;
 
@@ -2619,6 +2627,17 @@ class MCPBridge : Managed
 			result.ok = false;
 			result.error = targetError;
 			return true;
+		}
+		if (command.args.object_id == 0)
+		{
+			identity = target.GetIdentity();
+			if (!identity)
+			{
+				result.ok = false;
+				result.error = "player_not_found";
+				return true;
+			}
+			clearedUid = identity.GetPlainId();
 		}
 		if (HasActiveJobFor(null, target))
 		{
@@ -2634,6 +2653,7 @@ class MCPBridge : Managed
 			result.ok = true;
 			result.deleted = 0;
 			result.cleanup_complete = true;
+			result.uid = clearedUid;
 			return true;
 		}
 
@@ -2643,6 +2663,7 @@ class MCPBridge : Managed
 		job.args = command.args;
 		job.subject = target;
 		job.loadout_cleared = cleared;
+		job.loadout_uid = clearedUid;
 		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
@@ -3138,8 +3159,9 @@ class MCPBridge : Managed
 
 	// The "loadout_clear" job's reply: what it saw, and nothing else. deleted is
 	// how many objects the clear deleted; cleanup_complete is true when each
-	// read null before the deadline (PostJobSuccess) and false when the
-	// deadline came first (PostJobTimeout).
+	// read null at the job's last check (PostJobSuccess), which can come one
+	// tick after the deadline, and false when that check found one still there
+	// past the deadline (PostJobTimeout). uid is the dispatch's, unchanged.
 	protected void PostLoadoutClearJob(MCPJob job, bool complete)
 	{
 		MCPResult result = new MCPResult();
@@ -3151,6 +3173,7 @@ class MCPBridge : Managed
 		result.ok = true;
 		result.deleted = job.loadout_cleared.Count();
 		result.cleanup_complete = complete;
+		result.uid = job.loadout_uid;
 		PostResult(result);
 	}
 

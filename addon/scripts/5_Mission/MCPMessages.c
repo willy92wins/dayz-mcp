@@ -1102,6 +1102,10 @@ class MCPResult
 	int object_id;
 	// object_delete, and loadout_clear: how many objects it deleted.
 	int deleted;
+	// loadout_clear: the PlayerIdentity.GetPlainId() of the player it
+	// cleared, whom the loadout_apply tool then targets by uid; "" for a
+	// survivor named by object_id.
+	string uid;
 	int tick_poll_sent;
 	int tick_poll_callback;
 	int tick_dispatch;
@@ -1210,8 +1214,8 @@ class MCPResult
 	bool placed_known;
 	bool already_placed;
 	bool flag_restored;
-	// Also loadout_clear's: true when every object it deleted was gone before
-	// its deadline.
+	// Also loadout_clear's: true when every object it deleted read null at
+	// its job's last check, which can come one tick after the deadline.
 	bool cleanup_complete;
 	bool matched;
 };
@@ -1257,6 +1261,8 @@ class MCPJob
 	// loadout_clear: the objects it deleted. The engine nulls each reference
 	// once its object is gone.
 	ref array<EntityAI> loadout_cleared;
+	// loadout_clear: the uid its reply carries (MCPResult.uid).
+	string loadout_uid;
 };
 
 class MCPSpawnValidation

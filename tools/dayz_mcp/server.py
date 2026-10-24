@@ -7402,7 +7402,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "loadout is checked before anything is sent: bad_args names the "
             "path (loadout.attachments[2].slot). clear_first=true first deletes "
             "what the target wears and holds, with everything inside, and waits "
-            "up to 5 s for the game to remove it. Then each attachment is "
+            "while the game removes it: the game checks once per tick until all "
+            "of it is gone or 5 s have passed. Then each attachment is "
             "created in its slot, in list order, with its own attachments and "
             "then its cargo, and then the item in hands. A slot or hands "
             "already in use is slot_occupied and keeps what is there. items "
@@ -7414,17 +7415,22 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "after, as loadout_get answers it; it is null, with "
             "loadout_too_large true, when that read is past the caps. clear is "
             "null without clear_first, else {deleted, cleanup_complete}: how "
-            "many objects the clear deleted, and whether all were gone within "
-            "the 5 s (when not, a slot one still holds answers slot_occupied). "
-            "A clear that is refused, times out or is cancelled sends nothing "
-            "more; when the creates are refused after a clear, the error ends "
-            "with clear=deleted=N cleanup_complete=0 or 1. timeout_s is the wait "
-            "for each of these game calls. Created items get no registry ids. "
-            "The target is chosen as loadout_get chooses it: uid or object_id, "
-            "not both. Quantity, health and other item state are not set. ok is "
-            "0 and warnings includes loadout_incomplete when the answer cannot "
-            "be read: the apply may have run, so read the target with "
-            "loadout_get before applying again. Errors: bad_args, not_found, "
+            "many objects the clear deleted, and whether all were gone at its "
+            "last check, which can come one tick after the 5 s (when not, a "
+            "slot one still holds answers slot_occupied). A clear that is "
+            "refused, times out or is cancelled sends nothing more; when the "
+            "creates are refused after a clear, the error ends with "
+            "clear=deleted=N cleanup_complete=0 or 1. A command the game was "
+            "already handed still runs after the tool gave up on it: that is "
+            "the transport's behavior. timeout_s is the wait for each of these "
+            "game calls. Created items get no registry ids. The target is "
+            "chosen as loadout_get chooses it: uid or object_id, not both. With "
+            "clear_first and neither, the creates go by uid to the player the "
+            "clear acted on, so a first human who left in between answers "
+            "player_not_found. Quantity, health and other item state are not "
+            "set. ok is 0 and warnings includes loadout_incomplete when the "
+            "answer cannot be read: the apply may have run, so read the target "
+            "with loadout_get before applying again. Errors: bad_args, not_found, "
             "bad_target, no_players, player_not_found, busy (a clear_first on "
             "this target is still waiting for what it deleted to go), "
             "loadout_incomplete (the clear's answer cannot be read, and nothing "
@@ -7463,6 +7469,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
                 try:
                     clear = loadout_contract.clear_reply(cleared)
+                    if not target:
+                        # The first human can change between the two commands:
+                        # the creates go by uid to the player the clear acted
+                        # on, and are refused if that player has left (#261
+                        # review Y11).
+                        args = {
+                            "uid": loadout_contract.cleared_uid(cleared),
+                            "loadout_items": args["loadout_items"],
+                        }
                 except ValueError as exc:
                     raise ToolError(str(exc)) from exc
             try:
