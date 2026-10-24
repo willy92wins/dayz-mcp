@@ -457,6 +457,27 @@ def _player_move_detail(result: dict[str, Any]) -> str:
     return ""
 
 
+# player_view_set fills person_view and camera_class before view_not_applied
+# (MCPClientBridge.c PostPlayerViewSetJob). Only first or third and a plain
+# class-name token cross; anything else is omitted, not leaked.
+_PLAYER_VIEW_CAMERA_CLASS_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+def _player_view_set_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") != "view_not_applied":
+        return ""
+    pairs: list[str] = []
+    person_view = result.get("person_view")
+    if person_view in ("first", "third"):
+        pairs.append(f"person_view={person_view}")
+    camera_class = result.get("camera_class")
+    if isinstance(camera_class, str) and _PLAYER_VIEW_CAMERA_CLASS_RE.fullmatch(camera_class):
+        pairs.append(f"camera_class={camera_class}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -484,6 +505,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     player_move is the fifth: not_held and aborted carry observed=released_by=
     with a known release cause, and nothing else crosses.
 
+    player_view_set is the sixth: view_not_applied carries observed= with the
+    person_view and camera_class it read back, so the caller sees which view
+    and camera the engine kept.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -504,6 +529,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _input_trigger_detail(result)
     if cmd == "player_move":
         return _player_move_detail(result)
+    if cmd == "player_view_set":
+        return _player_view_set_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -541,8 +568,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
     # observed= telemetry allowlist the bridge already filled,
     # vehicle_door/door_missing, which carries the empty slot,
-    # input_trigger, whose refusals carry reason= and observed=, and
-    # player_move, whose not_held and aborted carry observed=released_by=.
+    # input_trigger, whose refusals carry reason= and observed=,
+    # player_move, whose not_held and aborted carry observed=released_by=, and
+    # player_view_set, whose view_not_applied carries observed= with its read-back.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

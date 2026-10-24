@@ -206,6 +206,9 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// player_view_set: first or third. An absent key reads "", which the
+	// bridge refuses (bad_args). Empty on every other command.
+	string view;
 
 	void MCPArgs()
 	{
@@ -1162,6 +1165,12 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	bool matched;
+	// player_view_set read-back after its settle: person_view is third when
+	// IsInThirdPerson, else first; camera_class is the ClassName of the
+	// player's GetCurrentCamera, empty when it returns null. Unassigned on its
+	// refusals and on other commands.
+	string person_view;
+	string camera_class;
 };
 
 class MCPJob

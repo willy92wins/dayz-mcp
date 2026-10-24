@@ -450,6 +450,9 @@ GENERIC_SCALAR_OWNERS = {
     "deferred": ({"inventory_give"}, 0),
     "count_total": ({"entities_query"}, 0),
     "component_index": ({"action_use_door", "action_use_component", "action_hold"}, 0),
+    # 854c: the player_view_set read-back.
+    "person_view": ({"player_view_set"}, ""),
+    "camera_class": ({"player_view_set"}, ""),
 }
 
 # Deliberately not owned. A stale 0 here is still not dropped.

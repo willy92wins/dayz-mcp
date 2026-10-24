@@ -349,6 +349,7 @@ VehicleDoorMode = Literal["read", "open", "close"]
 InputTriggerKind = Literal["key", "input"]
 InputTriggerEntry = Literal["game", "mission"]
 InputTriggerPhase = Literal["click", "hold", "press", "release"]
+PlayerViewMode = Literal["first", "third"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -7887,6 +7888,37 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await execute_player_look_at(runtime, pos, timeout_s)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Set the local player's view to first or third "
+            "person (DayZPlayerImplement.SetIsInThirdPerson) and read it back "
+            "after a short settle: person_view is third when IsInThirdPerson, "
+            "else first, and camera_class is the class of the player's current "
+            "camera (GetCurrentCamera), for example DayZPlayerCamera1stPerson or "
+            "DayZPlayerCamera3rdPersonErc standing. It sets the client's view "
+            "only: the flag is not networked, so the server's copy of the player "
+            "is not changed. The player's view key still toggles it as before. "
+            "With a raised weapon aimed down the sights in third person the "
+            "camera is still first person, and camera_class shows it. A view the "
+            "engine does not keep, as when the server disables third person, is "
+            "view_not_applied with observed= person_view and camera_class. "
+            "Refused with script_camera while camera_set's camera is mounted "
+            "(restore_gameplay first), busy while another client job such as "
+            "camera_set or player_look_at runs and no_player without a local "
+            "player."
+        )
+    )
+    async def player_view_set(
+        view: PlayerViewMode,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if view not in ("first", "third"):
+            raise ToolError(_bad_args("view", view, "be 'first' or 'third'"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "player_view_set", {"view": view}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "

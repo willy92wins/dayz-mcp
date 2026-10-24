@@ -245,6 +245,9 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_sights", {"mode": "ironsights"}, "weapon_sights"),
     ("weapon_sights", {"mode": "optics"}, "weapon_sights"),
     ("weapon_sights", {"mode": "none"}, "weapon_sights"),
+    # Both views player_view_set sends (854c).
+    ("player_view_set", {"view": "first"}, "player_view_set"),
+    ("player_view_set", {"view": "third"}, "player_view_set"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and
