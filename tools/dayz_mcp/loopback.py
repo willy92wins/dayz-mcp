@@ -1046,8 +1046,11 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "hands_attach",
 })
 # Client verbs an older PBO must not be handed, each with the error it is
-# refused with. Checked on the client census (no server arg-contract hash) at
-# enqueue and again at delivery.
+# refused with. Checked on the census of the client bound to the run (no
+# server arg-contract hash) at enqueue, after the binding fence, and again at
+# delivery. With no client bound the fence answers first (legacy_unbound in
+# the plain case), so these codes mean a bound client whose census does not
+# name the verb, is stale or comes from another instance.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
     "camera_path_play": "bridge_capability_missing",

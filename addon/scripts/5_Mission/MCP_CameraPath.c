@@ -6,7 +6,8 @@
 // time is the client's frame time accumulated since play.
 //
 // Bounds mirror tools/dayz_mcp/camera_path.py; the bridge refuses with
-// bad_args before the camera moves.
+// bad_args before the camera moves. The keys arrive as floats, so the
+// times are compared as this float holds them.
 
 class MCPCameraPath
 {
@@ -18,6 +19,9 @@ class MCPCameraPath
 	// LookAt toward the camera's own position has no direction: below this
 	// squared distance the frame keeps the orientation it had.
 	static const float LOOK_AT_MIN_DISTANCE_SQ = 0.000001;
+	// No number of a key is further from 0: the bound entity_wait puts on
+	// world positions (tools/dayz_mcp/server.py), which a float holds exactly.
+	static const float MAGNITUDE_MAX = 1000000000.0;
 
 	protected ref array<float> m_Times;
 	protected ref array<float> m_PosX;
@@ -58,23 +62,16 @@ class MCPCameraPath
 		m_T = 0.0;
 	}
 
-	// NaN fails every comparison, so it is the one value that needs the
-	// self-test; float.MAX stands for an infinity, as the server's IsFiniteFloat does.
-	static bool IsFiniteValue(float value)
+	// A number no further from 0 than MAGNITUDE_MAX. NaN fails every
+	// comparison, so it is the one value that needs the self-test; an
+	// infinity is past the bound.
+	static bool IsBoundedValue(float value)
 	{
 		if (value != value)
 		{
 			return false;
 		}
-		if (value >= float.MAX)
-		{
-			return false;
-		}
-		if (value <= -float.MAX)
-		{
-			return false;
-		}
-		return true;
+		return value >= -MAGNITUDE_MAX && value <= MAGNITUDE_MAX;
 	}
 
 	// Up to PATH_ID_MAX characters from A-Z a-z 0-9 _ -; empty is no label.
@@ -102,18 +99,18 @@ class MCPCameraPath
 		return true;
 	}
 
-	// Exactly three finite numbers. An absent JSON array arrives null or empty.
-	protected static bool IsFiniteTriple(array<float> values)
+	// Exactly three bounded numbers. An absent JSON array arrives null or empty.
+	protected static bool IsBoundedTriple(array<float> values)
 	{
 		if (!values || values.Count() != 3)
 		{
 			return false;
 		}
-		if (!IsFiniteValue(values.Get(0)) || !IsFiniteValue(values.Get(1)))
+		if (!IsBoundedValue(values.Get(0)) || !IsBoundedValue(values.Get(1)))
 		{
 			return false;
 		}
-		return IsFiniteValue(values.Get(2));
+		return IsBoundedValue(values.Get(2));
 	}
 
 	protected static bool IsPresent(array<float> values)
@@ -182,7 +179,7 @@ class MCPCameraPath
 			{
 				return "bad_args";
 			}
-			if (!IsFiniteValue(key.t))
+			if (!IsBoundedValue(key.t))
 			{
 				return "bad_args";
 			}
@@ -198,26 +195,26 @@ class MCPCameraPath
 			{
 				return "bad_args";
 			}
-			if (!IsFiniteTriple(key.cam_pos))
+			if (!IsBoundedTriple(key.cam_pos))
 			{
 				return "bad_args";
 			}
 			if (lookAt)
 			{
-				if (IsPresent(key.cam_orientation) || !IsFiniteTriple(key.look_at))
+				if (IsPresent(key.cam_orientation) || !IsBoundedTriple(key.look_at))
 				{
 					return "bad_args";
 				}
 			}
 			else
 			{
-				if (IsPresent(key.look_at) || !IsFiniteTriple(key.cam_orientation))
+				if (IsPresent(key.look_at) || !IsBoundedTriple(key.cam_orientation))
 				{
 					return "bad_args";
 				}
 			}
 			// An absent fov arrives as 0, which is no FOV.
-			if (!IsFiniteValue(key.fov) || key.fov < 0.0)
+			if (!IsBoundedValue(key.fov) || key.fov < 0.0)
 			{
 				return "bad_args";
 			}
@@ -423,7 +420,7 @@ class MCPCameraPath
 
 	// One component at fraction s of segment (h seconds long). linear: the
 	// straight line between the two keys. smooth: Catmull-Rom by time, the
-	// cubic Hermite through both keys with the tangents of Tangent.
+	// cubic Hermite through both keys with the tangents of ScaledTangent.
 	protected float Sample(array<float> values, int segment, float s, float h)
 	{
 		float p0;
@@ -439,16 +436,19 @@ class MCPCameraPath
 			return p0 + (p1 - p0) * s;
 		}
 
-		m0 = Tangent(values, segment);
-		m1 = Tangent(values, segment + 1);
+		m0 = ScaledTangent(values, segment, h);
+		m1 = ScaledTangent(values, segment + 1, h);
 		s2 = s * s;
 		s3 = s2 * s;
-		return (2.0 * s3 - 3.0 * s2 + 1.0) * p0 + (s3 - 2.0 * s2 + s) * h * m0 + (3.0 * s2 - 2.0 * s3) * p1 + (s3 - s2) * h * m1;
+		return (2.0 * s3 - 3.0 * s2 + 1.0) * p0 + (s3 - 2.0 * s2 + s) * m0 + (3.0 * s2 - 2.0 * s3) * p1 + (s3 - s2) * m1;
 	}
 
-	// Rate per second at key index: (next - previous) / (t of next - t of
-	// previous) between two keys, the slope of the end segment at either end.
-	protected float Tangent(array<float> values, int index)
+	// h times the rate per second at key index, the tangent the Hermite
+	// takes: the change from the previous to the next key times h over their
+	// time apart, the end segment's at either end. Those two keys are at
+	// least as far apart as the segment's own, so the ratio is at most 1 and
+	// a short segment cannot overflow the rate.
+	protected float ScaledTangent(array<float> values, int index, float h)
 	{
 		int before;
 		int after;
@@ -462,6 +462,6 @@ class MCPCameraPath
 		{
 			after = values.Count() - 1;
 		}
-		return (values.Get(after) - values.Get(before)) / (m_Times.Get(after) - m_Times.Get(before));
+		return (values.Get(after) - values.Get(before)) * (h / (m_Times.Get(after) - m_Times.Get(before)));
 	}
 };

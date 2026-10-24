@@ -225,14 +225,18 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
 
     def test_only_the_final_tick_turns_the_simulation_back_on_during_a_handoff(self) -> None:
         source = _source()
-        # Two statements turn the simulation back on: RestoreGameplay's, which a
-        # pending handoff skips, and FinishCameraHandoff's.
-        self.assertEqual(source.count("DisableSimulation(false)"), 2)
+        # Three statements turn the simulation back on: RestoreGameplay's, which a
+        # pending handoff skips, FinishCameraHandoff's, and a camera_path_play
+        # start's (d026), which comes after that start has finished any handoff.
+        self.assertEqual(source.count("DisableSimulation(false)"), 3)
         self.assertIn("player.DisableSimulation(false);", _body(_body(source, RESTORE_GAMEPLAY), SIM_ON_OUTSIDE_HANDOFF))
         self.assertIn("player.DisableSimulation(false);", _body(source, FINISH))
-        # The flag is cleared at birth and by those two statements only.
-        self.assertEqual(len(re.findall(r"\bm_PlayerSimulationDisabled\s*=\s*false;", source)), 3)
+        play = _body(source, PATH_PLAY)
+        self.assertLess(play.index("FinishCameraHandoff();"), play.index("player.DisableSimulation(false);"))
+        # The flag is cleared at birth and by those three statements only.
+        self.assertEqual(len(re.findall(r"\bm_PlayerSimulationDisabled\s*=\s*false;", source)), 4)
         self.assertIn("m_PlayerSimulationDisabled = false;", _body(source, CONSTRUCTOR))
+        self.assertIn("m_PlayerSimulationDisabled = false;", play)
         # Before the final tick, TickCameraHandoff only counts; FinishCameraHandoff
         # runs at CAMERA_HANDOFF_TICKS (or earlier from a camera_set apply or shutdown).
         tick = _body(source, TICK)

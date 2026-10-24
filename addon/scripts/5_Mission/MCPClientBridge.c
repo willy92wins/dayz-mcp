@@ -5125,16 +5125,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
-	// d026: a play enters the scripted camera the way a camera_set apply does
-	// (FinishCameraHandoff, SuppressGameplay, a new owned staticcamera) and
-	// puts the path's first key on it; TickCameraPath moves it from the next
-	// frame on. The args were checked at dispatch and are loaded again here,
-	// so a path is only ever built from args that pass.
+	// d026: a play makes its staticcamera first, then enters it the way a
+	// camera_set apply does (FinishCameraHandoff, SuppressGameplay, the old
+	// owned camera deleted) and puts the path's first key on it;
+	// TickCameraPath moves it from the next frame on. The args were checked
+	// at dispatch and are loaded again here, so a path is only ever built from
+	// args that pass.
 	protected bool ProcessCameraPathPlayJob(MCPJob job)
 	{
 		MCPCameraPath path;
 		Object cameraObject;
 		Camera cam;
+		FreeDebugCamera freeCam;
+		PlayerBase player;
 		string error;
 		path = new MCPCameraPath();
 		error = path.Load(job.args);
@@ -5149,23 +5152,39 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		FinishCameraHandoff();
-		SuppressGameplay();
-		DeleteOwnedCamera();
-
+		// The camera is made and checked before anything is torn down, so a
+		// play that fails here leaves everything as it was: the camera on
+		// screen, the controls, the HUD, the player simulation and the last
+		// path's state. Only the object it made, if any, is deleted.
 		cameraObject = g_Game.CreateObject("staticcamera", path.StartPosition(), true);
 		cam = Camera.Cast(cameraObject);
 		if (!cam)
 		{
-			// Nothing of a failed play stays: the object goes and gameplay comes back.
 			if (cameraObject)
 			{
 				g_Game.ObjectDelete(cameraObject);
 			}
 			job.error = "camera_create_failed";
-			RestoreGameplay();
 			return true;
 		}
+
+		FinishCameraHandoff();
+		SuppressGameplay();
+		// After a camera_set free the free camera is still on and the player
+		// simulation off (ApplyFreeCamera): both go back as the end of a
+		// handoff puts them, so the path's camera is the only one on.
+		freeCam = FreeDebugCamera.GetInstance();
+		if (freeCam && freeCam.IsActive())
+		{
+			freeCam.SetActive(false);
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player && m_PlayerSimulationDisabled)
+		{
+			player.DisableSimulation(false);
+			m_PlayerSimulationDisabled = false;
+		}
+		DeleteOwnedCamera();
 
 		path.Begin();
 		path.Apply(cam);
@@ -5180,15 +5199,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// One frame of the playing path: its clock moves by this frame's
 	// timeslice and the camera takes the pose at that time. A path whose
-	// camera is no longer the active one (a camera_set, a restore, a release)
-	// is aborted, not moved.
+	// camera is no longer the bridge's (a camera_set, a restore, a release)
+	// or no longer active in the engine (another camera turned on from
+	// outside the bridge, such as vanilla's developer free camera, which
+	// leaves m_ActiveCam as it is) is aborted, not moved. camera_get makes
+	// the same IsActive check.
 	protected void TickCameraPath(float timeslice)
 	{
 		if (!m_CameraPath || !m_CameraPath.IsPlaying())
 		{
 			return;
 		}
-		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam)
+		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam || !m_CameraPathCam.IsActive())
 		{
 			StopCameraPath();
 			return;
