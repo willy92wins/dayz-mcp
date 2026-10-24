@@ -73,26 +73,28 @@ def _run_start_epoch(runs: list[dict[str, Any]]) -> float | None:
 
 
 def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
-    """Newest .rpt and newest .log by suffix, independent of mtime gap."""
-    newest_rpt: str | None = None
-    newest_script: str | None = None
-    rpt_mtime = script_mtime = None
+    """Newest .rpt, newest .log and newest .adm, independent of mtime gap.
+
+    The admin log's stem is not assumed. A profile with no .adm contributes
+    none, which is the no-``-adminlog`` case.
+    """
+    newest: dict[str, tuple[float, str]] = {}
     for mtime, path in dated:
         suffix = Path(path).suffix.casefold()
-        if suffix == ".rpt":
-            if rpt_mtime is None or mtime >= rpt_mtime:
-                newest_rpt, rpt_mtime = path, mtime
-        elif suffix == ".log":
-            if script_mtime is None or mtime >= script_mtime:
-                newest_script, script_mtime = path, mtime
-    return [path for path in (newest_rpt, newest_script) if path]
+        if suffix not in {".rpt", ".log", ".adm"}:
+            continue
+        current = newest.get(suffix)
+        if current is None or mtime >= current[0]:
+            newest[suffix] = (mtime, path)
+    return [newest[suffix][1] for suffix in (".rpt", ".log", ".adm") if suffix in newest]
 
 
 def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[str]:
-    """Return RPT/script files from the current launch, never historic dumps.
+    """Return RPT, script and .adm files from the current launch.
 
-    Without a launch timestamp, keep the newest .rpt and the newest .log by
-    name suffix (not a time cluster), so a quiet current file is not dropped.
+    Without a launch timestamp, keep the newest file of each suffix, so a
+    quiet current file is not dropped. A .adm is included only when one is
+    in the directory and passes the same mtime floor as the other two.
     """
     paths = log_tail.resolve_log_files(profiles_dir)
     dated: list[tuple[float, str]] = []

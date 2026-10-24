@@ -38,6 +38,7 @@ _REQUEST_KEYS_V1 = frozenset(
         "replace_if_not_polling_since",
         "auto_remediate_steam",
         "navmesh_data_server",
+        "server_adminlog",
         "shared_lock_root",
         "instance_token",
         "build_lock_wait_s",
@@ -88,9 +89,13 @@ _CANONICAL_KEYSETS = frozenset(
         frozenset(),
         frozenset({"build_lock_wait_s"}),
     )
+    for adminlog in (
+        frozenset(),
+        frozenset({"server_adminlog"}),
+    )
     for variant in (
-        keys - omitted - extra,
-        (keys - omitted - extra) | {"project_mod_override"},
+        keys - omitted - extra - adminlog,
+        (keys - omitted - extra - adminlog) | {"project_mod_override"},
     )
 )
 
@@ -108,6 +113,7 @@ REQUEST_REJECTION_REASONS = frozenset(
         "mode_authority_unreadable",
         "mode_unknown",
         "navmesh_data_server_requires_server_launch",
+        "server_adminlog_requires_server",
         "no_base_mods_conflict",
         "pack_only_requires_build",
         "payload_not_encodable",
@@ -442,6 +448,7 @@ def parse_dayz_test_request(
     kill = value.get("kill", False)
     auto_remediate_steam = value.get("auto_remediate_steam", False)
     navmesh_data_server = value.get("navmesh_data_server", False)
+    server_adminlog = value.get("server_adminlog", False)
     if version == 2:
         project_mod_override = value.get("project_mod_override")
         if type(project_mod_override) is not bool:
@@ -507,6 +514,7 @@ def parse_dayz_test_request(
             kill,
             auto_remediate_steam,
             navmesh_data_server,
+            server_adminlog,
         )
     ):
         _invalid("flag_not_boolean")
@@ -530,6 +538,10 @@ def parse_dayz_test_request(
     effective_build = build or clean
     if navmesh_data_server and (mode != "server" or kill or pack_only):
         _invalid("navmesh_data_server_requires_server_launch")
+    # -adminlog is a server process flag. mode=all starts that process;
+    # mode=client and mode=offline do not.
+    if server_adminlog and mode not in {"server", "all"}:
+        _invalid("server_adminlog_requires_server")
     if pack_only and not effective_build:
         _invalid("pack_only_requires_build")
     canonical_default_source = (
@@ -592,6 +604,7 @@ def parse_dayz_test_request(
         "mod": policy.mod,
         "mode": mode,
         "navmesh_data_server": navmesh_data_server,
+        "server_adminlog": server_adminlog,
         "no_base_mods": no_base_mods,
         "no_file_patching": no_file_patching,
         "pack_only": pack_only,
