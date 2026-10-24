@@ -88,6 +88,7 @@ SERVER_COMMANDS = {
     "vehicle_door",
     "inventory_attach",
     "inventory_give",
+    "inventory_move",
     "object_inspect",
     "object_resolve",
     "object_doors",
@@ -1421,6 +1422,30 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # hands_attach is predictive like hands_take: the held item into one
     # attachment slot of a registered world entity (9608).
+    # inventory_move is predictive on authority=client: accepted is not the
+    # server read. The result waits until that read matches, or times out.
+    "inventory_move": _command_schema(
+        _schema_variant(
+            required=("item_object_id", "op"),
+            optional=("target_object_id", "slot", "authority", "uid"),
+            validators={
+                "item_object_id": _integer_in_range(minimum=1),
+                "op": _one_of(
+                    "to_cargo",
+                    "to_attachment",
+                    "to_hands",
+                    "to_inventory",
+                    "combine",
+                    "split_half",
+                    "split_to_hands",
+                ),
+                "target_object_id": _integer_in_range(minimum=0),
+                "slot": _is_string,
+                "authority": _one_of("client", "server"),
+                "uid": _is_string,
+            },
+        )
+    ),
     "hands_attach": _command_schema(
         _schema_variant(
             required=("object_id", "slot"),

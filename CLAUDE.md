@@ -11,7 +11,7 @@ ni OCR**. Control + datos son **engine-native** (CreateObjectEx, StartCommand_Ve
 Car setters, RestApi async, RaycastRVProxy, SetTimeMultiplier). La captura visual es la
 única pieza no-native: `MakeScreenshot` está roto (T165276) → se hace por **window-grab**
 externo del cliente renderizado (pasivo, solo lee píxeles). Arquitectura cerrada y **en
-producción**: 87 tools registradas (lista en `README.md:80`, contada el 2026-10-13) y puente en `MCP_BRIDGE_VERSION = "12"`
+producción**: 89 tools registradas (lista en `README.md:80`, contada el 2026-10-24) y puente en `MCP_BRIDGE_VERSION = "12"`
 (`addon/scripts/5_Mission/MCPMessages.c:1`). Las 5 fases del plan original están cerradas.
 
 ## Definición de Producto Final

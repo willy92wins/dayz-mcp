@@ -826,6 +826,19 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
         ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
     ),
+    "inventory_move": (
+        ("valid_hands", {"item_object_id": 1, "op": "to_hands"}, (True, None)),
+        (
+            "valid_cargo",
+            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "server"},
+            (True, None),
+        ),
+        ("unknown_op", {"item_object_id": 1, "op": "drop"}, (False, "bad_args")),
+        ("missing_op", {"item_object_id": 1}, (False, "bad_args")),
+        ("zero_item", {"item_object_id": 0, "op": "to_hands"}, (False, "bad_args")),
+        ("bad_authority", {"item_object_id": 1, "op": "to_hands", "authority": "both"}, (False, "bad_args")),
+        ("extra_key", {"item_object_id": 1, "op": "to_hands", "extra": None}, (False, "bad_args")),
+    ),
     "hands_attach": (
         ("valid", {"object_id": 1, "slot": "LargeBattery"}, (True, None)),
         (
