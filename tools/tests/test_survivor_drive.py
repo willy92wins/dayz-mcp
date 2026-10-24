@@ -252,9 +252,12 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
             "The end of the lease that sent the drive ends it too: the broker queues its release "
             "(survivor_drive_release), which stops the drive only while that call's drive is the one set.",
             "A call that times out or is cancelled after the server received it still runs, and its "
-            "release is queued.",
+            "release is queued only if its result is not stored yet and the queue admits the release: "
+            "once the result is stored, nothing is queued and the drive keeps going until a "
+            "mode='release' or the end of the lease.",
         ):
             self.assertIn(part, self.tool.description)
+        self.assertNotIn("still runs, and its release is queued.", self.tool.description)
 
     async def test_each_gait_and_release_reach_the_server_as_the_ingress_takes_them(self) -> None:
         for arguments, wire in (
@@ -528,6 +531,49 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         self.assertEqual(status, 200, queued)
         self.assertEqual(state.abandon_command(queued["id"], "cancelled"), {"status": "dropped"})
         self.assertEqual(_delivered(state), [])
+
+    def test_a_drive_abandoned_after_its_result_is_stored_goes_on_until_the_lease_ends(self) -> None:
+        # The result is stored before the caller takes it: the abandon of a
+        # timeout or a cancel, in process or over HTTP, finds nothing running
+        # and queues nothing; the end of the lease still releases the drive.
+        state, coordinator = _leased_state()
+        token = _acquire(coordinator, OWNER_A)
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([command["id"] for command in _delivered(state)], [drive])
+        state.store_result({"id": drive, "ok": 1, "pos_real": [1.0, 2.0, 3.0]}, instance=INST_SERVER)
+        self.assertEqual(state.abandon_command(drive, "tool_timeout"), {"status": "noop"})
+        self.assertEqual(
+            state.request_abandon(
+                identity_payload=OWNER_A,
+                generation=state.daemon_generation,
+                command_id=drive,
+                reason="cancelled",
+                lease_token=token,
+                lease_token_supplied=True,
+            ),
+            (200, {"status": "noop"}),
+        )
+        self.assertEqual(_delivered(state), [])
+        released = _release(coordinator, OWNER_A, token)
+        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
+        self.assertEqual(
+            [(command["cmd"], command["args"]) for command in _delivered(state)],
+            [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
+        )
+
+    def test_a_running_drive_abandoned_under_quarantine_queues_no_release(self) -> None:
+        # Still running, but the queue does not admit the release: nothing is
+        # queued, and the abandon says so.
+        state = _bound_state()
+        _announce(state, _full_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        status, drive = state.enqueue_command(COMMAND, dict(DRIVE_WIRE), peer="server")
+        self.assertEqual(status, 200, drive)
+        self.assertEqual([command["id"] for command in _delivered(state)], [drive["id"]])
+        state.retail_probe = lambda: {"known": False}
+        self.assertEqual(
+            state.abandon_command(drive["id"], "cancelled"), {"status": "cleanup_degraded", "cause": "quarantine"}
+        )
+        self.assertEqual(bound_queue(state, "server"), [])
 
     def test_the_end_of_a_lease_queues_the_release_of_its_latest_drive_of_each_survivor(self) -> None:
         state, coordinator = _leased_state()
@@ -1057,17 +1103,29 @@ HANDLER_METHODS = (
     "protected bool DispatchSurvivorDriveRelease(MCPCommand command, MCPResult result)",
     "Object RuntimeObjectById(int objectId)",
 )
-# No `new` and no [] either: the array becomes a factory call, and a vector
-# component a Coordinate read or a SetCoordinate write; nothing else changes.
+# The bridge methods that hold the drive's three hooks: OnTick ticks every
+# drive, DispatchObjectDelete drops a deleted survivor's drive and Shutdown
+# ends them all.
+HOOK_METHODS = (
+    "void OnTick(float timeslice)",
+    "protected bool DispatchObjectDelete(MCPCommand command, MCPResult result)",
+    "void Shutdown()",
+)
+# No `new`, no [], no bare member and no / either: the array becomes a factory
+# call, a vector component a Coordinate read or a SetCoordinate write, a member
+# m_X this.m_X (a field of the bridge double) and a / FloatQuotient; nothing
+# else changes.
 _HANDLER_REWRITES = (
     (re.compile(r"new array<float>\(\)"), "NewFloats()"),
     (re.compile(r"\bcurrent\[([012])\]\s*=\s*([^;]+);"), r"current.SetCoordinate(\1, \2);"),
     (re.compile(r"\bcurrent\[([012])\]"), r"current.Coordinate(\1)"),
+    (re.compile(r"(?<![\w.])(m_\w+)"), r"this.\1"),
+    (re.compile(r"([\w.]+) / ([\w.]+)"), r"FloatQuotient(\1, \2)"),
 )
 # Enforce's float.MAX (FLT_MAX), which IsFiniteFloat compares with.
 _FLT_MAX = 3.4028234663852886e38
-# The MCPArgs keys these handlers read, with the value an absent JSON key
-# leaves: 0, 0.0, false or "".
+# The MCPArgs keys these handlers read, each with its type's zero: 0, 0.0,
+# false or "". An absent JSON key leaves what MCPArgs() set (_arg_defaults).
 _ARG_ZEROES: dict[str, object] = {
     "object_id": 0,
     "heading": 0.0,
@@ -1079,9 +1137,35 @@ _ARG_ZEROES: dict[str, object] = {
 }
 
 
+def _arg_defaults(messages: str) -> dict[str, object]:
+    """What a key absent from the JSON leaves in MCPArgs: the value its
+    constructor, MCPArgs() in MCPMessages.c, gives the field, else the zero of
+    _ARG_ZEROES. It gives heading and speed MCP_ARG_FLOAT_UNSET, float.MAX;
+    any other value it gives one of these keys fails instead of being
+    guessed."""
+    if re.search(r"(?m)^const float MCP_ARG_FLOAT_UNSET = float\.MAX;$", messages) is None:
+        raise AssertionError("MCP_ARG_FLOAT_UNSET is not float.MAX")
+    values = dict(_ARG_ZEROES)
+    for name, value in re.findall(r"(\w+) = ([^;]+);", method_body(messages, "void MCPArgs()")):
+        if name in values:
+            if value != "MCP_ARG_FLOAT_UNSET":
+                raise AssertionError(f"MCPArgs() sets {name} to {value}")
+            values[name] = _FLT_MAX
+    return values
+
+
+def _float_quotient(dividend: float, divisor: float) -> float:
+    """Enforce's / of two floats. An int division truncates, which is why the
+    translator refuses /: an int here fails too."""
+    if type(dividend) is not float or type(divisor) is not float:
+        raise AssertionError(f"{dividend!r} / {divisor!r} is not a division of two floats")
+    return dividend / divisor
+
+
 class _Registry:
     """The bridge's m_RuntimeObjects: an id the test spawned, mapped to its
-    object, or to None once the object is gone (object_id_stale)."""
+    object, or to None once the object is gone (object_id_stale). Remove
+    forgets the id, as object_delete does."""
 
     def __init__(self, objects: dict[int, object]) -> None:
         self.objects = objects
@@ -1093,6 +1177,9 @@ class _Registry:
         if object_id not in self.objects:
             raise AssertionError(f"Get of unregistered id {object_id}")
         return self.objects[object_id]
+
+    def Remove(self, object_id: int) -> None:
+        self.objects.pop(object_id, None)
 
 
 class _Result(SimpleNamespace):
@@ -1106,27 +1193,49 @@ class _Result(SimpleNamespace):
 
 
 class _HandlerModel(_DriveModel):
-    """_DriveModel with MCPBridge.c's handlers on top (HANDLER_METHODS), run
-    on the drive's own registry: m_RuntimeObjects holds what the test spawns,
-    MCPBotControl.IsRunning answers for the ids in `bots`, and `this`, the
-    bridge the drive resolves survivors through, has the real
-    RuntimeObjectById."""
+    """_DriveModel with MCPBridge.c's handlers (HANDLER_METHODS) and the
+    methods that hold the drive's hooks (HOOK_METHODS) on top, run on the
+    drive's own registry. `this`, the bridge the drive resolves survivors
+    through, has the real RuntimeObjectById, m_RuntimeObjects holding what the
+    test spawns, and the members OnTick and Shutdown read, as TryInit leaves
+    them before the first poll. MCPBotControl.IsRunning answers for the ids in
+    `bots`, and GetGame().ObjectDelete puts what it deletes in `deleted`."""
 
     def __init__(self) -> None:
         super().__init__()
         bridge = BRIDGE.read_text(encoding="utf-8")
+        messages = MESSAGES.read_text(encoding="utf-8")
         bound = re.search(r"protected const float SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = ([0-9.]+);", bridge)
         if bound is None:
             raise AssertionError("SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG not found")
-        self.result_fields = declared_fields(MESSAGES.read_text(encoding="utf-8"), "MCPResult")
+        threshold = re.search(r"protected const int PENDING_POLL_THRESHOLD = ([0-9]+);", bridge)
+        if threshold is None:
+            raise AssertionError("PENDING_POLL_THRESHOLD not found")
+        self.result_fields = declared_fields(messages, "MCPResult")
+        self.arg_defaults = _arg_defaults(messages)
         self.bots: set[int] = set()
+        self.deleted: list[object] = []
+        game = SimpleNamespace(ObjectDelete=self.deleted.append)
         self.handlers: dict[str, object] = {
-            "m_RuntimeObjects": _Registry(self.objects),
             "float": SimpleNamespace(MAX=_FLT_MAX),
             "SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG": float(bound.group(1)),
+            "PENDING_POLL_THRESHOLD": int(threshold.group(1)),
             "NewFloats": _Array,
+            "FloatQuotient": _float_quotient,
+            "GetGame": lambda: game,
             "PlayerBase": self.namespace["PlayerBase"],
-            "MCPBotControl": SimpleNamespace(IsRunning=lambda object_id: object_id in self.bots),
+            # The bot's own hooks are called too; no bot moves here.
+            "MCPBotControl": SimpleNamespace(
+                IsRunning=lambda object_id: object_id in self.bots,
+                Tick=lambda _bridge, _now_s: None,
+                OnObjectGone=lambda _bridge, _object_id: None,
+                ShutdownAll=lambda _bridge: None,
+            ),
+            # The rest of OnTick: the bridge's init, jobs, pending commands and poll.
+            "TryInit": lambda: None,
+            "ProcessJobs": lambda: None,
+            "DrainPending": lambda: None,
+            "StartPoll": lambda: None,
             "MCPSurvivorDrive": SimpleNamespace(
                 **{
                     _method_name(signature): self.namespace[_method_name(signature)]
@@ -1135,7 +1244,7 @@ class _HandlerModel(_DriveModel):
                 }
             ),
         }
-        for signature in HANDLER_METHODS:
+        for signature in (*HANDLER_METHODS, *HOOK_METHODS):
             body = method_body(bridge, signature)
             for pattern, replacement in _HANDLER_REWRITES:
                 body = pattern.sub(replacement, body)
@@ -1143,9 +1252,33 @@ class _HandlerModel(_DriveModel):
                 signature + "\n{" + body + "}\n",
                 signature,
                 self.handlers,
-                class_types=("Object", "PlayerBase", "vector"),
+                class_types=("Object", "PlayerBase", "vector", "MCPResultCallback"),
             )
-        self.bridge = SimpleNamespace(RuntimeObjectById=self.handlers["RuntimeObjectById"])
+        self.bridge = SimpleNamespace(
+            RuntimeObjectById=self.handlers["RuntimeObjectById"],
+            m_RuntimeObjects=_Registry(self.objects),
+            m_Tick=0,
+            m_ElapsedS=0.0,
+            m_Configured=True,
+            m_PollInFlight=False,
+            m_Accum=0.0,
+            m_PollHz=5.0,
+            m_Backoff=0.0,
+            m_PollCallback=None,
+            m_Ctx=SimpleNamespace(reset=lambda: None),
+            **{
+                name: _Array()
+                for name in (
+                    "m_Pending",
+                    "m_CallbackRefs",
+                    "m_ResultCallbackPool",
+                    "m_Jobs",
+                    "m_ReadyObjects",
+                    "m_ReadyProxyCargos",
+                    "m_TelemetryFixtureLinePool",
+                )
+            },
+        )
         self.handlers["this"] = self.bridge
 
     def dispatch(self, command_id: int, cmd: str, wire: dict | None) -> tuple[_Result, object]:
@@ -1154,17 +1287,29 @@ class _HandlerModel(_DriveModel):
         if wire is None:
             args = None
         else:
-            unknown = set(wire) - set(_ARG_ZEROES)
+            unknown = set(wire) - set(self.arg_defaults)
             if unknown:
                 raise AssertionError(f"keys these handlers do not read: {sorted(unknown)}")
-            values = {**_ARG_ZEROES, **wire}
+            values = {**self.arg_defaults, **wire}
             values["mode"] = EnforceString.of(str(values["mode"]))
             args = SimpleNamespace(**values)
         command = SimpleNamespace(id=command_id, cmd=EnforceString.of(cmd), args=args)
         result = _Result(**self.result_fields)
-        handler = {COMMAND: "DispatchSurvivorDrive", DRIVE_RELEASE: "DispatchSurvivorDriveRelease"}[cmd]
+        handler = {
+            COMMAND: "DispatchSurvivorDrive",
+            DRIVE_RELEASE: "DispatchSurvivorDriveRelease",
+            "object_delete": "DispatchObjectDelete",
+        }[cmd]
         post_now = self.handlers[handler](command, result)
         return result, post_now
+
+    def tick(self, timeslice: float = 0.1) -> None:
+        """One server bridge tick, MCPBridge.OnTick."""
+        self.handlers["OnTick"](timeslice)
+
+    def shutdown(self) -> None:
+        """MCPBridge.Shutdown."""
+        self.handlers["Shutdown"]()
 
 
 class SurvivorDriveModelTest(unittest.TestCase):
@@ -1357,6 +1502,8 @@ class SurvivorDriveModelTest(unittest.TestCase):
                 {**DRIVE_WIRE, "heading": -361.0},
                 {**DRIVE_WIRE, "heading_set": False},
                 {**DRIVE_WIRE, "speed_set": False},
+                # The flag without its heading: MCPArgs() left float.MAX there.
+                {"object_id": 7, "heading_set": True, "speed": 1.0, "speed_set": True},
                 {**DRIVE_WIRE, "mode": "stop"},
                 {**RELEASE_WIRE, "heading": 90.0, "heading_set": True},
                 {**RELEASE_WIRE, "speed": 1.0, "speed_set": True},
@@ -1536,6 +1683,56 @@ class SurvivorDriveModelTest(unittest.TestCase):
         for speed, expected in ((1.0, True), (2.0, True), (3.0, True), (0.0, False), (1.5, False), (4.0, False)):
             with self.subTest(speed=speed):
                 self.assertIs(self.model.call("IsDriveSpeed", speed), expected)
+
+
+class SurvivorDriveBridgeHookTest(unittest.TestCase):
+    """MCPBridge.c's own OnTick, DispatchObjectDelete and Shutdown
+    (HOOK_METHODS), run on the registry and the controllers of two drives the
+    real handler set: the effect of each hook, where
+    test_the_bridge_ticks_deletes_and_shuts_the_drive_down reads its text."""
+
+    def setUp(self) -> None:
+        self.model = _HandlerModel()
+        self.first = self.model.spawn(7)
+        self.second = self.model.spawn(9)
+        self.model.dispatch(41, COMMAND, DRIVE_WIRE)
+        self.model.dispatch(42, COMMAND, {**DRIVE_WIRE, "object_id": 9, "heading": 0.0, "speed": 3.0})
+        self.assertEqual(self.model.command_ids(), {7: 41, 9: 42})
+        self.assertEqual(self.first.controller.driving(), (1.0, 90.0))
+        self.assertEqual(self.second.controller.driving(), (3.0, 0.0))
+
+    def test_the_bridge_tick_steers_each_drive_and_drops_a_dead_one(self) -> None:
+        self.first.controller.face(45.0)
+        self.second.alive = False
+        self.model.tick()
+        self.assertEqual(self.first.controller.driving(), (1.0, 45.0))
+        self.assertIsNone(self.second.controller.driving())
+        self.assertEqual(self.model.command_ids(), {7: 41})
+
+    def test_object_delete_drops_the_drive_while_the_id_still_resolves(self) -> None:
+        calls = len(self.first.controller.calls)
+        result, post_now = self.model.dispatch(50, "object_delete", {"object_id": 7})
+        self.assertIs(post_now, True)
+        self.assertEqual((result.ok, result.object_id, result.deleted), (True, 7, 1))
+        self.assertEqual(self.model.deleted, [self.first])
+        self.assertNotIn(7, self.model.objects)
+        self.assertEqual(self.model.command_ids(), {9: 42})
+        self.assertIs(self.model.call("IsDriven", 7), False)
+        # The deleted survivor's own controller: DISABLED reached it before
+        # the registry forgot the id.
+        self.assertEqual(
+            self.first.controller.calls[calls:],
+            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+        )
+        self.assertEqual(self.second.controller.driving(), (3.0, 0.0))
+
+    def test_the_bridge_shutdown_ends_every_drive(self) -> None:
+        self.model.shutdown()
+        self.assertEqual(self.model.registry(), [])
+        self.assertIsNone(self.first.controller.driving())
+        self.assertIsNone(self.second.controller.driving())
+        self.assertIs(self.model.call("IsDriven", 7), False)
+        self.assertIs(self.model.call("IsDriven", 9), False)
 
 
 if __name__ == "__main__":
