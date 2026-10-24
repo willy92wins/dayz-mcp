@@ -7,14 +7,21 @@
 // GetHeadingAngle, wrapped to -180..180, recomputed on every server bridge
 // tick (Tick, the MCPBotControl.Tick pattern). A driven id is dropped, with
 // DISABLED, on release, on the survivor's death or deletion (Tick,
-// OnObjectGone) and at bridge shutdown (ShutdownAll). A new drive on a driven
-// id replaces its heading and speed. Nothing else ends a drive: the survivor
-// keeps walking until one of those. MCPBridge.DispatchSurvivorDrive checks its
-// arguments (IsDriveSpeed) and the target before it calls Drive or Release,
-// and MCPBridge.DispatchBotStart refuses a driven id (IsDriven, drive_busy).
+// OnObjectGone), at bridge shutdown (ShutdownAll) and on
+// survivor_drive_release (ReleaseCommand), which the broker sends with the id
+// of a drive command when the lease that sent it ends or abandons it: that
+// drops the drive only while the command's own drive is the one set. A new
+// drive on a driven id replaces its heading, speed and command id. Nothing
+// else ends a drive: the survivor keeps walking until one of those.
+// MCPBridge.DispatchSurvivorDrive checks its arguments (IsDriveSpeed) and the
+// target before it calls Drive or Release, and MCPBridge.DispatchBotStart
+// refuses a driven id (IsDriven, drive_busy).
 class MCPSurvivorDriveEntry
 {
 	int object_id;
+	// The survivor_drive command that set the drive: the first one, or the
+	// latest that replaced it. survivor_drive_release names it.
+	int command_id;
 	float heading_deg;
 	float speed;
 };
@@ -39,9 +46,10 @@ class MCPSurvivorDrive
 		return Find(objectId) >= 0;
 	}
 
-	// Starts the drive, or replaces the heading and speed of a driven id, and
-	// applies it at once.
-	static void Drive(PlayerBase survivor, int objectId, float headingDeg, float speed)
+	// Starts the drive, or replaces the heading, speed and command id of a
+	// driven id, and applies it at once. commandId is the id of the
+	// survivor_drive command, the one survivor_drive_release names.
+	static void Drive(PlayerBase survivor, int objectId, float headingDeg, float speed, int commandId)
 	{
 		int index;
 		MCPSurvivorDriveEntry entry;
@@ -60,6 +68,7 @@ class MCPSurvivorDrive
 			entry.object_id = objectId;
 			s_Driven.Insert(entry);
 		}
+		entry.command_id = commandId;
 		entry.heading_deg = headingDeg;
 		entry.speed = speed;
 		Apply(survivor, entry);
@@ -83,6 +92,31 @@ class MCPSurvivorDrive
 			target = bridge.RuntimeObjectById(objectId);
 		}
 		Disable(PlayerBase.Cast(target));
+	}
+
+	// survivor_drive_release: drops, with DISABLED as Release does, the drive
+	// that commandId set, and answers true. Any other id, such as that of a
+	// drive a later one replaced, changes nothing and answers false.
+	static bool ReleaseCommand(MCPBridge bridge, int commandId)
+	{
+		int index;
+		MCPSurvivorDriveEntry entry;
+		if (!s_Driven)
+		{
+			return false;
+		}
+		index = 0;
+		while (index < s_Driven.Count())
+		{
+			entry = s_Driven.Get(index);
+			if (entry && entry.command_id == commandId)
+			{
+				Release(bridge, entry.object_id);
+				return true;
+			}
+			index = index + 1;
+		}
+		return false;
 	}
 
 	// object_delete, before the object goes.

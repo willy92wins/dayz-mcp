@@ -38,12 +38,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query,survivor_drive," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "cebd56fbb1d0c6bb";
+	protected const string SERVER_ARG_CONTRACT_HASH = "8cb9634b9b691ecf";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -578,6 +578,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "survivor_drive")
 		{
 			postNow = DispatchSurvivorDrive(command, result);
+		}
+		else if (command.cmd == "survivor_drive_release")
+		{
+			postNow = DispatchSurvivorDriveRelease(command, result);
 		}
 		else if (command.cmd == "inventory_give")
 		{
@@ -2286,7 +2290,8 @@ class MCPBridge : Managed
 	// object_id_unknown and object_id_stale (as hands_take), bad_target for
 	// anything but a PlayerBase, refused_player_controlled for one with a
 	// PlayerIdentity, player_dead, bot_busy while bot_start runs on it, and
-	// no_input_controller. pos_real is the survivor's position read back.
+	// no_input_controller. pos_real is the survivor's position read back. A
+	// drive keeps the command's id, which survivor_drive_release names.
 	// DispatchBotStart refuses a driven survivor the same way (drive_busy).
 	protected bool DispatchSurvivorDrive(MCPCommand command, MCPResult result)
 	{
@@ -2351,7 +2356,7 @@ class MCPBridge : Managed
 		}
 		else
 		{
-			MCPSurvivorDrive.Drive(survivor, objectId, command.args.heading, command.args.speed);
+			MCPSurvivorDrive.Drive(survivor, objectId, command.args.heading, command.args.speed, command.id);
 		}
 		current = survivor.GetPosition();
 		result.pos_real = new array<float>();
@@ -2401,6 +2406,25 @@ class MCPBridge : Managed
 			return false;
 		}
 		return MCPSurvivorDrive.IsDriveSpeed(command.args.speed);
+	}
+
+	// survivor_drive_release (c801), internal: the broker sends it with the id
+	// of a survivor_drive command when the lease that sent the command ends
+	// (cleanup_owner) or abandons it after delivery (RELEASE_REGISTRY). It
+	// drops the drive only if that command set it
+	// (MCPSurvivorDrive.ReleaseCommand) and answers whether it did in matched;
+	// any other id changes nothing.
+	protected bool DispatchSurvivorDriveRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		result.matched = MCPSurvivorDrive.ReleaseCommand(this, command.args.command_id);
+		result.ok = true;
+		return true;
 	}
 
 	// Spawn classname into hands or inventory. Empty uid targets the first human.

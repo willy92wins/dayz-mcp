@@ -6994,9 +6994,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "A drive needs both; a new drive on a driven survivor replaces its "
             "heading and speed. mode='release', with neither heading nor speed, "
             "sets the overrides DISABLED and ends the drive; on a survivor that "
-            "is not driven it changes nothing. Nothing else ends a drive but "
-            "the survivor's death, its object_delete and the bridge shutting "
-            "down: until one of those the survivor keeps walking. A probe like "
+            "is not driven it changes nothing. The end of the lease that sent "
+            "the drive ends it too: the broker queues its release "
+            "(survivor_drive_release), which stops the drive only while that "
+            "call's drive is the one set. A call that times out or is "
+            "cancelled after the server received it still runs, and its "
+            "release is queued. Nothing else ends a drive but the survivor's "
+            "death, its object_delete and the bridge shutting down: until one "
+            "of those the survivor keeps walking. A probe like "
             "infected_drive: if the survivor does not move, that is the "
             "finding. The answer is pos_real, the survivor's position read "
             "back on the call. Refused before anything changes: bad_args, "
@@ -8001,19 +8006,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "which a request still pending does not set; the tool waits at "
             f"least wait_s + {ACTOR_EMOTE_WAIT_SLACK_S:g} s for the answer. "
             "The answer is emote_state: finished (it started and stopped within "
-            "wait_s; for end, the playing emote stopped) or started (it started "
-            "and still plays at wait_s, as a looping emote does until end), "
-            "with started_after_s and finished_after_s, client GetTickTime "
-            "seconds from the request, each absent when not reached (end has "
-            "no started_after_s). A looping emote (greeting, sita, salute...) "
+            "wait_s; for end, the playing emote stopped within wait_s), sent on "
+            "the tick that sees the stop, or started (it started within wait_s "
+            "and had not stopped by then, as a looping emote does until end), "
+            "sent at the first client tick past wait_s, with started_after_s "
+            "and finished_after_s, client GetTickTime seconds from the "
+            "request, each absent when not reached (end has no "
+            "started_after_s). What the client sees after wait_s changes "
+            "nothing. A looping emote (greeting, sita, salute...) "
             "answers started and plays until emote='end'; a one-time one (nod, "
             "clap, shrug...) answers finished when it ends within wait_s. "
             "emote_timed_out, "
-            "observed=emote_state=timed_out: it did not start within wait_s "
-            "(the request was sent, so a later start is possible), or for end "
-            "the emote still plays (the end may not have been sent: "
-            "SendEmoteRequestSync also asks CanStoreInputUserData and whether "
-            "the playing emote can be canceled normally). Refused before "
+            "observed=emote_state=timed_out, also at the first client tick "
+            "past wait_s: it did not start within wait_s (the request was "
+            "sent, so a later start is possible), or for end the emote still "
+            "plays (the end may not have been sent: SendEmoteRequestSync also "
+            "asks CanStoreInputUserData and whether the playing emote can be "
+            "canceled normally). A call that times out or is cancelled after "
+            "the client received it still runs: the emote is not stopped. "
+            "Refused before "
             "anything is sent, observed=emote_state=rejected: emote_rejected "
             "when an emote is already playing, still requested or the player "
             "surrendered (IsEmotePlaying(); end a playing one first), when "
@@ -8050,8 +8061,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         wait = _finite_float(wait_s, wait_error)
         if wait < ACTOR_EMOTE_WAIT_MIN_S or wait > ACTOR_EMOTE_WAIT_MAX_S:
             raise ToolError(wait_error)
-        # The client answers wait_s after the request at the latest; the
-        # transport waits that long plus the slack, as player_move does for
+        # The client answers at the first tick past wait_s at the latest; the
+        # transport waits wait_s plus the slack, as player_move does for
         # hold_s.
         timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
         args = {"emote": emote, "wait_s": wait}

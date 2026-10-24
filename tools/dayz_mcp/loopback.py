@@ -93,6 +93,8 @@ SERVER_COMMANDS = {
     "object_doors",
     "infected_drive",
     "survivor_drive",
+    # Internal: the broker's release of one drive (c801), never a public tool.
+    "survivor_drive_release",
     "entities_query",
     "hands_take",
     "hands_attach",
@@ -156,6 +158,11 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "action_hold",
         "action_hold_cancel",
         lambda command_id, args: {"hold_id": args["hold_id"]},
+    ),
+    (
+        "survivor_drive",
+        "survivor_drive_release",
+        lambda command_id, args: {"command_id": command_id},
     ),
 )
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
@@ -1095,6 +1102,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "action_cursor_ids",
     "hands_attach",
     "survivor_drive",
+    "survivor_drive_release",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
 # (no server arg-contract hash) at enqueue and again at delivery.
@@ -1102,7 +1110,13 @@ _CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold", "actor_emote"})
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
-    {"vehicle_release", "bot_stop", "player_look_at_release", "action_hold_cancel"}
+    {
+        "vehicle_release",
+        "bot_stop",
+        "player_look_at_release",
+        "action_hold_cancel",
+        "survivor_drive_release",
+    }
 )
 
 
@@ -1944,6 +1958,14 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
+    # survivor_drive_release (c801), internal: the id of the drive command
+    # whose drive the bridge drops, and only that one.
+    "survivor_drive_release": _command_schema(
+        _schema_variant(
+            required=("command_id",),
+            validators={"command_id": _integer_in_range(minimum=1)},
+        )
+    ),
     # actor_emote (36fa): a catalog name or end, and the seconds the client
     # job watches m_bEmoteIsPlaying. The tool always sends both.
     "actor_emote": _command_schema(
@@ -2138,6 +2160,9 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
+        # lease -> survivor object_id -> id of the latest survivor_drive of that
+        # lease delivered to drive it (c801). cleanup_owner releases each one.
+        self._drive_by_lease: dict[str, dict[int, int]] = {}
         self._holds: dict[str, dict[str, object]] = {}
         self._hold_by_command: dict[int, str] = {}
         self._hold_blocked_runs: set[str] = set()
@@ -3491,6 +3516,59 @@ class ServerState:
                     failed += 1
         return {"enqueued": enqueued, "failed": failed}
 
+    def _record_delivered_drive_locked(self, command_id: int, command: dict) -> None:
+        """At delivery, a drive becomes its lease's latest for that survivor
+        (c801); a mode release is not recorded. Not at enqueue: a drive the
+        queue drops before delivery never runs, and naming it at cleanup would
+        leave on the drive delivered before it. Caller holds self._lock.
+        """
+        owner = self._command_owner.get(command_id)
+        args = command.get("args")
+        if owner is None or not isinstance(args, dict):
+            return
+        lease_id = owner[1]
+        driven_id = args.get("object_id")
+        if (
+            isinstance(lease_id, str)
+            and lease_id
+            and args.get("mode") != "release"
+            and isinstance(driven_id, int)
+            and not isinstance(driven_id, bool)
+            and driven_id > 0
+        ):
+            self._drive_by_lease.setdefault(lease_id, {})[driven_id] = command_id
+
+    def enqueue_survivor_drive_releases_for_lease(
+        self, lease_id: str
+    ) -> dict[str, int]:
+        """survivor_drive_release for the latest delivered drive of each
+        survivor that lease drove (c801). The bridge drops a drive only if
+        that id set it.
+
+        Same rules as enqueue_bot_stops_for_lease: the caller holds the queue
+        lock, and the releases are fire-and-forget owner cleanup.
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            drives = self._drive_by_lease.pop(lease_id, {})
+            enqueued = 0
+            failed = 0
+            for object_id in sorted(drives):
+                status, payload = self.enqueue_command(
+                    "survivor_drive_release",
+                    {"command_id": drives[object_id]},
+                    peer="server",
+                    internal=True,
+                )
+                command_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(command_id, int):
+                    self._fire_and_forget_ids.add(command_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
     def _enqueue_command(
         self,
         cmd: str,
@@ -4777,6 +4855,8 @@ class ServerState:
                             record = self._holds.get(delivered_hold)
                             if record is not None:
                                 record["delivered"] = True
+                    if command_name == "survivor_drive" and isinstance(command_id, int):
+                        self._record_delivered_drive_locked(command_id, command)
                     commands.append(wire_command)
                 queue[:] = remaining + queue[len(snapshot) :]
                 if commands and self._poll_delay_ms > 0:
@@ -5407,7 +5487,8 @@ class ServerState:
                 cleanup["hold_cancel_enqueued"] = enqueued
         with self._lock:
             pending_bots = bool(self._bot_by_lease.get(lease_id))
-        if not vehicle_active and not pending_bots:
+            pending_drives = bool(self._drive_by_lease.get(lease_id))
+        if not vehicle_active and not pending_bots and not pending_drives:
             return cleanup
 
         if self._retail_quarantined():
@@ -5415,6 +5496,8 @@ class ServerState:
             values = list(existing) if isinstance(existing, list) else []
             if "retail_quarantine" not in values:
                 values.append("retail_quarantine")
+            if pending_drives:
+                values.append("survivor_drive_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
             return cleanup
 
@@ -5439,12 +5522,26 @@ class ServerState:
                 else:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
             report = self.enqueue_bot_stops_for_lease(lease_id)
+            drive_report = self.enqueue_survivor_drive_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
             cleanup["bot_stop_enqueued"] = report["enqueued"]
         if report["failed"]:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("bot_stop_failed")
+            cleanup["cleanup_degraded"] = values
+        if drive_report["enqueued"] or drive_report["failed"]:
+            cleanup["survivor_drive_release_enqueued"] = drive_report["enqueued"]
+        # Fire-and-forget, as a hold's cancel: no answer confirms the stop.
+        if drive_report["enqueued"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("survivor_drive_release_unconfirmed")
+            cleanup["cleanup_degraded"] = values
+        if drive_report["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("survivor_drive_release_failed")
             cleanup["cleanup_degraded"] = values
         return cleanup
 

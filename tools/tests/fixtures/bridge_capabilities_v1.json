@@ -32,6 +32,7 @@
       "scene_raycast": "scene_raycast",
       "surface_query": "surface_query",
       "survivor_drive": "survivor_drive",
+      "survivor_drive_release": null,
       "telemetry_read": "telemetry_read",
       "vehicle_door": "vehicle_door",
       "vehicle_enter": "vehicle_enter",

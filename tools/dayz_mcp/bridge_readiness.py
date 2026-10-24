@@ -237,6 +237,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
     "survivor_drive": ("heading", "heading_set", "mode", "object_id", "speed", "speed_set"),
+    "survivor_drive_release": ("command_id",),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
 }
 
@@ -299,6 +300,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "scene_raycast": "scene_raycast",
         "surface_query": "surface_query",
         "survivor_drive": "survivor_drive",
+        "survivor_drive_release": None,  # internal: the broker's drive cleanup
         "telemetry_read": "telemetry_read",
         "vehicle_door": "vehicle_door",
         "vehicle_enter": "vehicle_enter",

@@ -6855,6 +6855,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		job.kind = "actor_emote";
 		job.emote_end = isEnd;
 		job.emote_request_s = GetGame().GetTickTime();
+		job.wait_s = waitS;
 		job.deadline_s = m_JobRunner.GetElapsedS() + waitS;
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
@@ -7043,14 +7044,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// request answers emote_timed_out. end starts nothing: it is finished
 	// once m_bEmoteIsPlaying reads false. No local player or emote manager
 	// reads as not playing.
-	// Times are GetTickTime seconds. The job's deadline, wait_s after the
-	// request, ends the watch (MCP_PostJobTimeout).
+	// Times are GetTickTime seconds. A tick more than wait_s after the request
+	// records nothing and the watch goes on, so the job's deadline, wait_s
+	// after the request (MCP_PostJobTimeout, at the first runner tick past
+	// it), answers what was reached within wait_s; a tick at exactly wait_s
+	// still counts.
 	protected bool ProcessActorEmoteJob(MCPJob job)
 	{
 		PlayerBase player;
 		EmoteManager emotes;
 		bool playing;
 		float nowS;
+		nowS = GetGame().GetTickTime();
+		if (nowS - job.emote_request_s > job.wait_s)
+		{
+			return false;
+		}
 		playing = false;
 		player = PlayerBase.Cast(GetGame().GetPlayer());
 		if (player)
@@ -7061,7 +7070,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			playing = emotes.m_bEmoteIsPlaying;
 		}
-		nowS = GetGame().GetTickTime();
 		if (job.emote_end)
 		{
 			if (playing)
@@ -7089,11 +7097,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	}
 
 	// actor_emote's answer. finished: the job saw the emote start and stop
-	// (for end, the playing emote stop) within wait_s. At wait_s: started when
-	// it started and still plays, else emote_timed_out with emote_state
-	// timed_out. A new emote's request was sent, so it may still start
-	// later; for end the emote still plays, and the end may never have been
-	// sent (SendEmoteRequestSync's own checks, MCP_Emote.c).
+	// (for end, the playing emote stop) within wait_s. At the first tick past
+	// wait_s: started when it started within wait_s and did not stop within
+	// it, else emote_timed_out with emote_state timed_out. A new emote's
+	// request was sent, so it may still start later; for end the emote still
+	// plays, and the end may never have been sent (SendEmoteRequestSync's own
+	// checks, MCP_Emote.c).
 	// started_after_s and finished_after_s are GetTickTime seconds from the
 	// request; a time not reached stays 0 and the tool drops it.
 	protected void PostActorEmoteJob(MCPJob job, bool finished)

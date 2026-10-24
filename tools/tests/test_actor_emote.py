@@ -34,6 +34,7 @@ COMMAND = "actor_emote"
 CLIENT_BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 EMOTE_HELPER = addon_root() / "scripts" / "4_World" / "MCP_Emote.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+RUNNER = addon_root() / "scripts" / "5_Mission" / "MCPJobRunner.c"
 OLDER_CLIENT_CAPS = "camera_get,key_press,player_respawn,ui_dialog"
 WIRE = {"emote": "greeting", "wait_s": 10.0}
 
@@ -122,6 +123,10 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
             "or for end the emote still plays (the end may not have been sent:",
             "no_emote_playing for end while no emote plays",
             "rps_s, nod, shake, shrug, or end,",
+            "sent at the first client tick past wait_s",
+            "What the client sees after wait_s changes nothing.",
+            "A call that times out or is cancelled after the client received it still runs: "
+            "the emote is not stopped.",
         ):
             self.assertIn(part, self.tool.description)
         for name in ("surrender", "vomit"):
@@ -341,6 +346,7 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
             "emotes.CreateEmoteCBFromMenu(emoteId);",
             'job.kind = "actor_emote";',
             "job.emote_request_s = GetGame().GetTickTime();",
+            "job.wait_s = waitS;",
             "job.deadline_s = m_JobRunner.GetElapsedS() + waitS;",
             "m_JobRunner.AddJob(job);",
         )
@@ -382,7 +388,15 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
         watch = _method_body(self.code, "protected bool ProcessActorEmoteJob(MCPJob job)")
         self.assertIn("playing = emotes.m_bEmoteIsPlaying;", watch)
         self.assertNotIn("IsEmotePlaying", watch)
-        self.assertIn("nowS = GetGame().GetTickTime();", watch)
+        # Past wait_s nothing is recorded (#266 Y11), before anything is read.
+        _in_order(
+            self,
+            watch,
+            "nowS = GetGame().GetTickTime();",
+            "if (nowS - job.emote_request_s > job.wait_s)\n\t\t{\n\t\t\treturn false;\n\t\t}",
+            "playing = false;",
+        )
+        self.assertEqual(watch.count("nowS = GetGame().GetTickTime();"), 1)
         self.assertIn("job.emote_started_s = nowS;", watch)
         self.assertEqual(watch.count("job.emote_finished_s = nowS;"), 2)
         success = _method_body(self.code, "override void MCP_PostJobSuccess(MCPJob job)")
@@ -431,8 +445,31 @@ CATALOG = "protected int ActorEmoteId(string emote)"
 WATCH = "protected bool ProcessActorEmoteJob(MCPJob job)"
 ANSWER = "protected void PostActorEmoteJob(MCPJob job, bool finished)"
 END_HELPER = "bool MCP_RequestEmoteEnd()"
+# The client's own job overrides (MCPClientBridge.c), which the runner calls.
+OWNER_METHODS = (
+    "override bool MCP_ProcessJob(MCPJob job)",
+    "override bool MCP_IsJobReady(MCPJob job)",
+    "override void MCP_PostJobSuccess(MCPJob job)",
+    "override void MCP_PostJobFailure(MCPJob job)",
+    "override void MCP_PostJobTimeout(MCPJob job)",
+    "override void MCP_ClearJobRefs(MCPJob job)",
+)
+# MCPJobRunner.c, the runner the client bridge ticks.
+RUNNER_METHODS = (
+    "float GetElapsedS()",
+    "int CountOfKind(string kind)",
+    "void AddJob(MCPJob job)",
+    "void Tick(float timeslice, MCPJobRunnerOwner owner)",
+    "protected void ProcessJobs(MCPJobRunnerOwner owner)",
+)
 # The translator has no `new`: these two become factory calls, nothing else changes.
 _NEW = (("new MCPJob()", "NewJob()"), ("new MCPResult()", "NewResult()"))
+# Nor does it assign a bare member: the runner's two members and the client's
+# m_DialogJob become fields of R and B.
+_MEMBERS = (
+    (re.compile(r"(?<![\w.])(m_Jobs|m_ElapsedS)\b"), r"R.\1"),
+    (re.compile(r"(?<![\w.])m_DialogJob\b"), "B.m_DialogJob"),
+)
 _TICK_S = 0.1
 # The id the end helper asks both checks about and sends. Its value does not
 # matter here: the model checks that it is the one id asked about and sent.
@@ -470,7 +507,9 @@ class _Emotes:
     (emotemanager.c:1328-1331); the model's timeline sets the two flags.
     MCP_RequestEmoteEnd is MCP_Emote.c's own, translated and run on the two
     checks below; SendEmoteRequestSync and CreateEmoteCBFromMenu record the id
-    they are given in `sent`, and each check what it was asked in `asked`."""
+    they are given in `sent`, and each check what it was asked in `asked`.
+    The three that ask for something log each call in `requests` and fail
+    while `job_running` is set: the job only watches."""
 
     def __init__(
         self,
@@ -488,16 +527,31 @@ class _Emotes:
         self.client_check = client_check
         self.sent: list[int] = []
         self.asked: list[tuple[str, int]] = []
-        self.MCP_RequestEmoteEnd = translate(
+        self.requests: list[str] = []
+        self.job_running = False
+        self._request_end = translate(
             _end_helper_source(),
             END_HELPER,
             {
                 "CanPlayEmote": self.CanPlayEmote,
                 "CanPlayEmoteClientCheck": self.CanPlayEmoteClientCheck,
-                "SendEmoteRequestSync": self.sent.append,
+                "SendEmoteRequestSync": self.SendEmoteRequestSync,
                 "CALLBACK_CMD_END": CALLBACK_CMD_END,
             },
         )
+
+    def _request(self, name: str) -> None:
+        if self.job_running:
+            raise AssertionError(f"{name} called while the job runs: the job only watches")
+        self.requests.append(name)
+
+    def MCP_RequestEmoteEnd(self) -> bool:
+        self._request("MCP_RequestEmoteEnd")
+        return self._request_end()
+
+    def SendEmoteRequestSync(self, emote_id: int) -> None:
+        self._request("SendEmoteRequestSync")
+        self.sent.append(emote_id)
 
     def IsEmotePlaying(self) -> bool:
         return self.m_bEmoteIsPlaying or self.surrendered or self.m_bEmoteIsRequestPending
@@ -511,26 +565,75 @@ class _Emotes:
         return self.client_check
 
     def CreateEmoteCBFromMenu(self, emote_id: int) -> None:
+        self._request("CreateEmoteCBFromMenu")
         self.sent.append(emote_id)
+
+
+class _JobMap:
+    """MCPJobRunner's map<int, ref MCPJob>, in insertion order. An index or a
+    key outside it fails."""
+
+    def __init__(self) -> None:
+        self.items: dict[int, object] = {}
+
+    def Count(self) -> int:
+        return len(self.items)
+
+    def GetKey(self, index: int) -> int:
+        return list(self.items)[self._check(index)]
+
+    def GetElement(self, index: int) -> object:
+        return list(self.items.values())[self._check(index)]
+
+    def Insert(self, key: int, value: object) -> bool:
+        self.items[key] = value
+        return True
+
+    def Remove(self, key: int) -> None:
+        if key not in self.items:
+            raise AssertionError(f"key {key!r} is not in the map")
+        del self.items[key]
+
+    def _check(self, index: int) -> int:
+        if type(index) is not int or not 0 <= index < len(self.items):
+            raise AssertionError(f"index {index!r} outside a map of {len(self.items)}")
+        return index
 
 
 class _ClientModel:
     """DispatchActorEmote, ActorEmoteId, ProcessActorEmoteJob and
-    PostActorEmoteJob translated from MCPClientBridge.c and run as the job
-    runner runs them (MCPJobRunner.c ProcessJobs): each tick the job's own
-    check first (true: MCP_PostJobSuccess, PostActorEmoteJob(job, true)), then
-    its deadline (MCP_PostJobTimeout, PostActorEmoteJob(job, false)). The job
-    and the results are MCPMessages.c's MCPJob and MCPResult as declared, and
-    a job's answer must be exactly one PostResult, on either path."""
+    PostActorEmoteJob, with the client's job overrides (MCP_ProcessJob,
+    MCP_PostJobSuccess, MCP_PostJobTimeout...), translated from
+    MCPClientBridge.c and run by MCPJobRunner.c's own Tick and ProcessJobs,
+    translated too: each tick the job's own check first (true:
+    MCP_PostJobSuccess, PostActorEmoteJob(job, true)), then its deadline
+    (MCP_PostJobTimeout, PostActorEmoteJob(job, false)). The job and the
+    results are MCPMessages.c's MCPJob and MCPResult as declared, and a job's
+    answer must be exactly one PostResult, on either path."""
 
     def __init__(self, source: str, emotes: _Emotes, *, watching: int = 0) -> None:
         self.emotes = emotes
-        self.watching = watching
         self.now = 100.0
-        self.elapsed = 40.0
-        self.jobs: list[_Instance] = []
         self.posted: list[_Instance] = []
         self.answers: list[str] = []
+        self.R = SimpleNamespace(m_Jobs=_JobMap(), m_ElapsedS=40.0)
+        runner_source = RUNNER.read_text(encoding="utf-8")
+        runner: dict[str, object] = {"R": self.R}
+        for signature in RUNNER_METHODS:
+            body = method_body(runner_source, signature)
+            for pattern, replacement in _MEMBERS:
+                body = pattern.sub(replacement, body)
+            translate(signature + "\n{" + body + "}\n", signature, runner, class_types=("MCPJob",))
+        self.runner = SimpleNamespace(**{_name(signature): runner[_name(signature)] for signature in RUNNER_METHODS})
+        # Another actor_emote's job, still watching.
+        self._placeholders = set()
+        for index in range(watching):
+            placeholder = _new("MCPJob")
+            placeholder.id = 1000 + index
+            placeholder.kind = EnforceString.of(COMMAND)
+            placeholder.deadline_s = 1.0e9
+            self.R.m_Jobs.Insert(placeholder.id, placeholder)
+            self._placeholders.add(placeholder.id)
         player = SimpleNamespace(GetEmoteManager=lambda: emotes)
         game = SimpleNamespace(GetPlayer=lambda: player, GetTickTime=lambda: self.now)
         names = (*loopback.ACTOR_EMOTES, "surrender", "vomit", "suicide")
@@ -540,11 +643,9 @@ class _ClientModel:
             "EmoteConstants": SimpleNamespace(
                 **{f"ID_EMOTE_{name.upper()}": index + 1 for index, name in enumerate(names)}
             ),
-            "m_JobRunner": SimpleNamespace(
-                CountOfKind=self._count_of_kind,
-                GetElapsedS=lambda: self.elapsed,
-                AddJob=self.jobs.append,
-            ),
+            "m_JobRunner": self.runner,
+            "B": SimpleNamespace(m_DialogJob=None),
+            "m_Dialog": None,
             "IsStrictFinite": math.isfinite,
             "ACTOR_EMOTE_WAIT_MIN_S": loopback.ACTOR_EMOTE_WAIT_MIN_S,
             "ACTOR_EMOTE_WAIT_MAX_S": loopback.ACTOR_EMOTE_WAIT_MAX_S,
@@ -552,19 +653,49 @@ class _ClientModel:
             "NewResult": lambda: _new("MCPResult"),
             "PostResult": self.posted.append,
         }
-        for signature in (CATALOG, DISPATCH, WATCH, ANSWER):
+        for signature in (CATALOG, DISPATCH, WATCH, ANSWER, *OWNER_METHODS):
             body = method_body(source, signature)
             for old, new in _NEW:
                 body = body.replace(old, new)
+            for pattern, replacement in _MEMBERS:
+                body = pattern.sub(replacement, body)
             translate(
                 signature + "\n{" + body + "}\n",
                 signature,
                 self.namespace,
-                class_types=("PlayerBase", "EmoteManager", "MCPJob", "MCPResult"),
+                class_types=(
+                    "PlayerBase",
+                    "EmoteManager",
+                    "MCPJob",
+                    "MCPResult",
+                    "HumanCommandVehicle",
+                    "Transport",
+                ),
             )
+        # The runner's owner is the client bridge. The answer's path is noted
+        # before the client's own override runs.
+        self.owner = SimpleNamespace(
+            MCP_ProcessJob=self.namespace["MCP_ProcessJob"],
+            MCP_IsJobReady=self.namespace["MCP_IsJobReady"],
+            MCP_PostJobSuccess=self._noting("success", "MCP_PostJobSuccess"),
+            MCP_PostJobFailure=self._noting("failure", "MCP_PostJobFailure"),
+            MCP_PostJobTimeout=self._noting("timeout", "MCP_PostJobTimeout"),
+            MCP_ClearJobRefs=self.namespace["MCP_ClearJobRefs"],
+        )
 
-    def _count_of_kind(self, kind: EnforceString) -> int:
-        return self.watching + len(self.jobs) if kind == EnforceString.of("actor_emote") else 0
+    def _noting(self, path: str, name: str):
+        override = self.namespace[name]
+
+        def post(job: _Instance) -> None:
+            self.answers.append(path)
+            override(job)
+
+        return post
+
+    @property
+    def jobs(self) -> list[_Instance]:
+        """The jobs in the runner, the placeholders of `watching` aside."""
+        return [job for key, job in self.R.m_Jobs.items.items() if key not in self._placeholders]
 
     def dispatch(self, emote: str, wait_s: float = 2.0) -> _Instance | None:
         """The immediate answer, or None when the watch was queued. The
@@ -576,37 +707,44 @@ class _ClientModel:
             raise AssertionError("DispatchActorEmote posted a result itself")
         return result if answered else None
 
-    def run(self, timeline) -> _Instance:
-        """Ticks until the job answers; timeline(seconds) -> (playing, pending).
-        `answers` gets the path, success or timeout."""
+    def run(self, timeline, times=None) -> _Instance:
+        """Ticks the runner until the job answers. timeline(seconds) ->
+        (playing, pending) at each tick; `times` are the ticks' seconds after
+        the request, every _TICK_S by default; GetTickTime and the runner's
+        clock advance together. `answers` gets the path: success, failure or
+        timeout. While it runs, the emote manager refuses every request."""
         start = self.now
-        for _tick in range(1000):
-            self.now += _TICK_S
-            self.elapsed += _TICK_S
-            self.emotes.m_bEmoteIsPlaying, self.emotes.m_bEmoteIsRequestPending = timeline(self.now - start)
-            job = self.jobs[0]
-            if self.namespace["ProcessActorEmoteJob"](job):
-                if job.error:
-                    raise AssertionError("the watch set job.error: the runner would post a failure")
-                path = "success"
-                self.namespace["PostActorEmoteJob"](job, True)
-            elif self.elapsed > job.deadline_s:
-                path = "timeout"
-                self.namespace["PostActorEmoteJob"](job, False)
-            else:
-                if self.posted:
-                    raise AssertionError("a result was posted while the job still watched")
-                continue
-            self.jobs.remove(job)
-            self.answers.append(path)
-            if len(self.posted) != 1:
-                raise AssertionError(f"the {path} answer posted {len(self.posted)} results, not one")
-            return self.posted[0]
+        previous = 0.0
+        ticks = times if times is not None else [index * _TICK_S for index in range(1, 1001)]
+        self.emotes.job_running = True
+        try:
+            for seconds in ticks:
+                self.now = start + seconds
+                self.emotes.m_bEmoteIsPlaying, self.emotes.m_bEmoteIsRequestPending = timeline(seconds)
+                self.runner.Tick(seconds - previous, self.owner)
+                previous = seconds
+                if not self.answers:
+                    if self.posted:
+                        raise AssertionError("a result was posted while the job still watched")
+                    continue
+                if self.jobs:
+                    raise AssertionError("the job answered and stayed in the runner")
+                if len(self.answers) != 1 or len(self.posted) != 1:
+                    raise AssertionError(
+                        f"the {self.answers} answer posted {len(self.posted)} results, not one"
+                    )
+                return self.posted[0]
+        finally:
+            self.emotes.job_running = False
         raise AssertionError("the job never answered")
 
 
 def _state(result: _Instance) -> tuple[bool, str, str]:
     return bool(result.ok), result.error.text, result.emote_state.text
+
+
+def _name(signature: str) -> str:
+    return signature[: signature.index("(")].split()[-1]
 
 
 class ActorEmoteWatchModelTest(unittest.TestCase):
@@ -706,6 +844,99 @@ class ActorEmoteWatchModelTest(unittest.TestCase):
         result = model.run(lambda _s: (True, False))
         self.assertEqual(model.answers, ["timeout"])
         self.assertEqual(_state(result), (False, "emote_timed_out", "timed_out"))
+
+    def test_what_the_watch_sees_after_wait_s_changes_nothing(self) -> None:
+        # With wait_s 0.5, a start seen at 0.4 and a stop seen at 0.55 answer
+        # started with no finished_after_s, and a first start seen at 0.55
+        # answers timed_out (#266 Y11). Both answer at 0.55, the first runner
+        # tick past wait_s, through the deadline.
+        model = self._model(_Emotes())
+        self.assertIsNone(model.dispatch("nod", wait_s=0.5))
+        result = model.run(lambda s: (0.4 <= s < 0.55, s < 0.4), times=(0.2, 0.4, 0.55))
+        self.assertEqual(model.answers, ["timeout"])
+        self.assertEqual(_state(result), (True, "", "started"))
+        self.assertAlmostEqual(result.started_after_s, 0.4)
+        self.assertEqual(result.finished_after_s, 0.0)
+        model = self._model(_Emotes())
+        self.assertIsNone(model.dispatch("nod", wait_s=0.5))
+        result = model.run(lambda s: (s >= 0.55, s < 0.55), times=(0.2, 0.4, 0.55))
+        self.assertEqual(model.answers, ["timeout"])
+        self.assertEqual(_state(result), (False, "emote_timed_out", "timed_out"))
+        self.assertEqual((result.started_after_s, result.finished_after_s), (0.0, 0.0))
+
+    def test_a_tick_at_exactly_wait_s_still_counts(self) -> None:
+        # Seconds exact in binary, so the tick at 0.5 is wait_s itself.
+        model = self._model(_Emotes())
+        self.assertIsNone(model.dispatch("nod", wait_s=0.5))
+        result = model.run(lambda s: (s == 0.25, s < 0.25), times=(0.125, 0.25, 0.5, 0.625))
+        self.assertEqual(model.answers, ["success"])
+        self.assertEqual(_state(result), (True, "", "finished"))
+        self.assertEqual((result.started_after_s, result.finished_after_s), (0.25, 0.5))
+        model = self._model(_Emotes())
+        self.assertIsNone(model.dispatch("greeting", wait_s=0.5))
+        result = model.run(lambda s: (s >= 0.5, s < 0.5), times=(0.25, 0.5, 0.625))
+        self.assertEqual(model.answers, ["timeout"])
+        self.assertEqual(_state(result), (True, "", "started"))
+        self.assertEqual(result.started_after_s, 0.5)
+
+    def test_for_end_a_stop_after_wait_s_changes_nothing(self) -> None:
+        model = self._model(_Emotes(playing=True))
+        self.assertIsNone(model.dispatch("end", wait_s=0.5))
+        result = model.run(lambda s: (s < 0.55, False), times=(0.2, 0.4, 0.55))
+        self.assertEqual(model.answers, ["timeout"])
+        self.assertEqual(_state(result), (False, "emote_timed_out", "timed_out"))
+        self.assertEqual(result.finished_after_s, 0.0)
+        # At exactly wait_s the stop still counts.
+        model = self._model(_Emotes(playing=True))
+        self.assertIsNone(model.dispatch("end", wait_s=0.5))
+        result = model.run(lambda s: (s < 0.5, False), times=(0.25, 0.5, 0.625))
+        self.assertEqual(model.answers, ["success"])
+        self.assertEqual(_state(result), (True, "", "finished"))
+        self.assertEqual(result.finished_after_s, 0.5)
+
+    def test_after_the_dispatch_the_job_asks_for_nothing(self) -> None:
+        # The job only watches (#266 Y13): every request comes from the
+        # dispatch, and while the job runs the doubles of
+        # CreateEmoteCBFromMenu, SendEmoteRequestSync and MCP_RequestEmoteEnd
+        # fail.
+        gesture = ["CreateEmoteCBFromMenu"]
+        end = ["MCP_RequestEmoteEnd", "SendEmoteRequestSync"]
+        for emote, emotes, timeline, requests in (
+            ("nod", _Emotes(), lambda s: (0.35 < s < 1.25, s <= 0.35), gesture),
+            ("greeting", _Emotes(), lambda s: (s > 0.35, s <= 0.35), gesture),
+            ("nod", _Emotes(), lambda _s: (False, True), gesture),
+            ("end", _Emotes(playing=True), lambda s: (s < 0.55, False), end),
+            ("end", _Emotes(playing=True), lambda _s: (True, False), end),
+        ):
+            with self.subTest(emote=emote, requests=requests):
+                model = self._model(emotes)
+                self.assertIsNone(model.dispatch(emote, wait_s=2.0))
+                self.assertEqual(emotes.requests, requests)
+                logged = (list(emotes.requests), list(emotes.sent), list(emotes.asked))
+                model.run(timeline)
+                self.assertEqual((emotes.requests, emotes.sent, emotes.asked), logged)
+        emotes = _Emotes(playing=True)
+        emotes.job_running = True
+        for request in (
+            lambda: emotes.CreateEmoteCBFromMenu(1),
+            lambda: emotes.SendEmoteRequestSync(CALLBACK_CMD_END),
+            emotes.MCP_RequestEmoteEnd,
+        ):
+            with self.assertRaisesRegex(AssertionError, "while the job runs"):
+                request()
+        self.assertEqual((emotes.requests, emotes.sent, emotes.asked), ([], [], []))
+
+    def test_declared_fields_reads_one_string_literal_and_refuses_a_concatenation(self) -> None:
+        # #266 Y14: one literal, with no quote and no escape inside. A
+        # concatenation is refused, never read as some other string.
+        for literal, expected in (('""', b""), ('"ok"', b"ok")):
+            with self.subTest(literal=literal):
+                fields = declared_fields(f"class Probe\n{{\n\tstring s = {literal};\n}};\n", "Probe")
+                self.assertEqual(fields, {"s": EnforceString(expected)})
+        for initializer in ('"" + ""', '"a" + "b"'):
+            with self.subTest(initializer=initializer):
+                with self.assertRaisesRegex(AssertionError, "unsupported initializer"):
+                    declared_fields(f"class Probe\n{{\n\tstring s = {initializer};\n}};\n", "Probe")
 
     def test_end_the_helper_checks_refuse_is_rejected_and_sends_nothing(self) -> None:
         for can_play, client_check in ((False, True), (True, False)):

@@ -159,11 +159,13 @@ _FIELD_ZEROES: dict[str, Any] = {"int": 0, "float": 0.0, "bool": False}
 
 def declared_fields(source: str, class_name: str) -> dict[str, Any]:
     """Each field of `class <class_name>` in `source`, in order, with the value
-    a new instance holds: its initializer (true, false, a number or a plain
-    string literal) when it has one, else Enforce's zero: 0, 0.0, false, "",
-    (0.0, 0.0, 0.0) for a vector and None for a ref, an array or a class. The
-    class must hold plain field declarations only: a constructor, a method, a
-    modifier or any other initializer fails instead of being guessed."""
+    a new instance holds: its initializer (true, false, a number or one string
+    literal with no quote and no backslash inside) when it has one, else
+    Enforce's zero: 0, 0.0, false, "", (0.0, 0.0, 0.0) for a vector and None
+    for a ref, an array or a class. The class must hold plain field
+    declarations only: a constructor, a method, a modifier or any other
+    initializer, such as a concatenation of literals, fails instead of being
+    guessed."""
     text = clean(source)
     heads = list(re.finditer(rf"(?m)^class {re.escape(class_name)}\b[^{{;]*\{{", text))
     if len(heads) != 1:
@@ -217,7 +219,8 @@ def _field_value(class_name: str, match: re.Match[str], statement: str) -> Any:
         return int(init)
     if type_name == "float" and re.fullmatch(r"-?\d+(?:\.\d+)?", init):
         return float(init)
-    if type_name == "string" and re.fullmatch(r'"[ -~]*"', init) and "\\" not in init:
+    # One literal: no quote inside, so "a" + "b" is not read as one string.
+    if type_name == "string" and re.fullmatch(r'"[ !#-~]*"', init) and "\\" not in init:
         return EnforceString(init[1:-1].encode("ascii"))
     raise AssertionError(f"class {class_name}: unsupported initializer in {statement!r}")
 
