@@ -2234,7 +2234,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     "actor_emote": (
         ("valid", {"emote": "greeting", "wait_s": 10.0}, (True, None)),
         ("valid_end", {"emote": "end", "wait_s": 10.0}, (True, None)),
-        ("valid_last_catalog_name", {"emote": "vomit", "wait_s": 10.0}, (True, None)),
+        ("valid_last_catalog_name", {"emote": "shrug", "wait_s": 10.0}, (True, None)),
         ("wait_at_minimum", {"emote": "sita", "wait_s": 0.5}, (True, None)),
         ("wait_at_maximum", {"emote": "sita", "wait_s": 30.0}, (True, None)),
         ("wait_int", {"emote": "sita", "wait_s": 5}, (True, None)),
@@ -2243,6 +2243,9 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("upper_case", {"emote": "Greeting", "wait_s": 10.0}, (False, "bad_args")),
         ("suicide", {"emote": "suicide", "wait_s": 10.0}, (False, "bad_args")),
         ("debug", {"emote": "debug", "wait_s": 10.0}, (False, "bad_args")),
+        # No gesture callback (emoteclasses.c EmoteStartOverride): not in the catalog.
+        ("surrender", {"emote": "surrender", "wait_s": 10.0}, (False, "bad_args")),
+        ("vomit", {"emote": "vomit", "wait_s": 10.0}, (False, "bad_args")),
         ("emote_id", {"emote": 1, "wait_s": 10.0}, (False, "bad_args")),
         ("empty_emote", {"emote": "", "wait_s": 10.0}, (False, "bad_args")),
         ("wait_below", {"emote": "sita", "wait_s": 0.49}, (False, "bad_args")),

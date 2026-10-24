@@ -207,7 +207,7 @@ class MCPArgs
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
 	// actor_emote (36fa): a catalog name or end, and the seconds its job watches
-	// IsEmotePlaying(). The tool always sends both; an absent wait_s reads 0,
+	// m_bEmoteIsPlaying. The tool always sends both; an absent wait_s reads 0,
 	// which the bridge refuses. survivor_drive (c801) reuses object_id, heading,
 	// speed, their _set flags and mode above.
 	string emote;

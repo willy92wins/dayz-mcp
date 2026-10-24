@@ -1027,9 +1027,12 @@ BOT_START_ACTIONS = (
 )
 # actor_emote's closed catalog (36fa): each name is an EmoteConstants id of the
 # same name, lowercase, that exists in 1.29 and 1.30 (constants.c:366-409), in
-# id order. Not the suicide emote (it kills the player) nor the debug id. The
-# bridge refuses any other name too (MCPClientBridge.c ActorEmoteId). end is
-# not an id: it ends the playing emote.
+# id order. Not the suicide emote (it kills the player) nor the debug id, and
+# not surrender or vomit, which create no gesture callback (emoteclasses.c
+# EmoteStartOverride): vomit is a symptom, and surrender toggles a state that
+# IsEmotePlaying() reads, which end cannot end. The bridge refuses any other
+# name too (MCPClientBridge.c ActorEmoteId). end is not an id: it ends the
+# playing emote.
 ACTOR_EMOTES = (
     "greeting",
     "sos",
@@ -1068,11 +1071,9 @@ ACTOR_EMOTES = (
     "nod",
     "shake",
     "shrug",
-    "surrender",
-    "vomit",
 )
 ACTOR_EMOTE_END = "end"
-# wait_s, the seconds the client job watches IsEmotePlaying(). Mirrored by
+# wait_s, the seconds the client job watches m_bEmoteIsPlaying. Mirrored by
 # ACTOR_EMOTE_WAIT_MIN_S and ACTOR_EMOTE_WAIT_MAX_S in MCPClientBridge.c.
 ACTOR_EMOTE_WAIT_MIN_S = 0.5
 ACTOR_EMOTE_WAIT_MAX_S = 30.0
@@ -1943,7 +1944,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     # actor_emote (36fa): a catalog name or end, and the seconds the client
-    # job watches IsEmotePlaying(). The tool always sends both.
+    # job watches m_bEmoteIsPlaying. The tool always sends both.
     "actor_emote": _command_schema(
         _schema_variant(
             required=("emote", "wait_s"),

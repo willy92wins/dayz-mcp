@@ -464,7 +464,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// the job releases the move itself and answers aborted. The tool waits
 	// hold_s plus the same 5 s.
 	protected const float PLAYER_MOVE_JOB_SLACK_S = 5.0;
-	// actor_emote's wait_s, the seconds its job watches IsEmotePlaying(). Mirrored
+	// actor_emote's wait_s, the seconds its job watches m_bEmoteIsPlaying. Mirrored
 	// by ACTOR_EMOTE_WAIT_MIN_S and ACTOR_EMOTE_WAIT_MAX_S in loopback.py; a value
 	// outside is refused, never clamped.
 	protected const float ACTOR_EMOTE_WAIT_MIN_S = 0.5;
@@ -1074,7 +1074,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
 		// Nor does an input_trigger click or hold, which waits on a key release,
 		// a player_move hold, which waits on its release, or an actor_emote,
-		// which only watches IsEmotePlaying().
+		// which only watches m_bEmoteIsPlaying.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
@@ -6757,15 +6757,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// (EmoteManager.MCP_RequestEmoteEnd, MCP_Emote.c). Refused before anything
 	// is sent: a name outside the catalog or a wait_s outside 0.5..30
 	// (bad_args), no local player (no_player) or emote manager
-	// (no_emote_manager); an emote while one is already playing, or one that
-	// CanPlayEmote and CanPlayEmoteClientCheck refuse, the check
-	// SendEmoteRequestSync makes (:899), is emote_rejected; end with nothing
-	// playing is no_emote_playing. The job then watches IsEmotePlaying() for
-	// wait_s (ProcessActorEmoteJob). An emote that is already playing is
-	// refused because the watch could not tell it from the new one. So is any
-	// actor_emote, end included, while another one's job still watches: that
-	// emote may not read as playing yet, and two jobs would watch the same
-	// IsEmotePlaying().
+	// (no_emote_manager); a new emote while IsEmotePlaying() reads true (an
+	// emote playing, a request pending or the player surrendered,
+	// emotemanager.c:1328-1331), or one that CanPlayEmote and
+	// CanPlayEmoteClientCheck refuse (two of the checks SendEmoteRequestSync
+	// makes, :899), is emote_rejected; end while no emote plays
+	// (m_bEmoteIsPlaying false, a pending request included) is
+	// no_emote_playing. The job then watches m_bEmoteIsPlaying for wait_s
+	// (ProcessActorEmoteJob). An emote that is already playing is refused
+	// because the watch could not tell it from the new one; a pending request
+	// or a surrender the player made stays a refusal too (a request the server
+	// refused while surrendered would end in ClearSurrenderState, :314-315).
+	// So is any actor_emote, end included, while another one's job still
+	// watches: that emote may not play yet, and two jobs would watch the same
+	// flag.
 	protected bool DispatchActorEmote(MCPCommand command, MCPResult result)
 	{
 		PlayerBase player;
@@ -6818,7 +6823,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		if (isEnd)
 		{
-			if (!emotes.IsEmotePlaying())
+			if (!emotes.m_bEmoteIsPlaying)
 			{
 				result.ok = false;
 				result.error = "no_emote_playing";
@@ -6859,9 +6864,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// actor_emote's closed catalog: each name is the EmoteConstants id of the
 	// same name, lowercase (constants.c:366-409), one that exists in 1.29 and
-	// 1.30. Not the suicide emote (it kills the player) nor the debug id. The
-	// same names are ACTOR_EMOTES in loopback.py, plus end, which is not an
-	// id. 0 for any other name.
+	// 1.30. Not the suicide emote (it kills the player) nor the debug id, and
+	// not surrender or vomit, which create no gesture callback
+	// (emoteclasses.c:449-453, :753-768; emotemanager.c:667-671): vomit is a
+	// symptom with gameplay effects, and surrender toggles a state that
+	// IsEmotePlaying() reads, so every later actor_emote would be
+	// emote_rejected and end would have no callback to end. The same names
+	// are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0 for
+	// any other name.
 	protected int ActorEmoteId(string emote)
 	{
 		if (emote == "greeting")
@@ -7012,23 +7022,23 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return EmoteConstants.ID_EMOTE_SHRUG;
 		}
-		if (emote == "surrender")
-		{
-			return EmoteConstants.ID_EMOTE_SURRENDER;
-		}
-		if (emote == "vomit")
-		{
-			return EmoteConstants.ID_EMOTE_VOMIT;
-		}
 		return 0;
 	}
 
-	// actor_emote: the first tick IsEmotePlaying() reads true is the start,
-	// and a started emote that reads false again is finished. end starts
-	// nothing: it is finished once the playing emote reads false. No local
-	// player or emote manager reads as not playing. Times are GetTickTime
-	// seconds. The job's deadline, wait_s after the request, ends the watch
-	// (MCP_PostJobTimeout).
+	// actor_emote: the first tick m_bEmoteIsPlaying (emotemanager.c:127)
+	// reads true is the start, and a started emote that reads false again is
+	// finished. Its only writes are true once CreateEmoteCallback has the
+	// callback (:709-711) and false in OnEmoteEnd (:501-502), on this client
+	// too. A request still pending is not a start: IsEmotePlaying() also
+	// counts it (and the surrender state, :1330), and a request the server
+	// refuses comes back as an INSTACANCEL (:537-552) that clears the pending
+	// flag with no callback (:304-312), which would read as started then
+	// finished. So the watch reads m_bEmoteIsPlaying alone, and such a
+	// request answers emote_timed_out. end starts nothing: it is finished
+	// once m_bEmoteIsPlaying reads false. No local player or emote manager
+	// reads as not playing.
+	// Times are GetTickTime seconds. The job's deadline, wait_s after the
+	// request, ends the watch (MCP_PostJobTimeout).
 	protected bool ProcessActorEmoteJob(MCPJob job)
 	{
 		PlayerBase player;
@@ -7043,7 +7053,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		if (emotes)
 		{
-			playing = emotes.IsEmotePlaying();
+			playing = emotes.m_bEmoteIsPlaying;
 		}
 		nowS = GetGame().GetTickTime();
 		if (job.emote_end)
@@ -7075,7 +7085,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// actor_emote's answer. finished: the job saw the emote start and stop
 	// (for end, the playing emote stop) within wait_s. At wait_s: started when
 	// it started and still plays, else emote_timed_out with emote_state
-	// timed_out; the request was sent, so a later start is possible.
+	// timed_out. A new emote's request was sent, so it may still start
+	// later; for end the emote still plays, and the end may never have been
+	// sent (SendEmoteRequestSync's own checks, MCP_Emote.c).
 	// started_after_s and finished_after_s are GetTickTime seconds from the
 	// request; a time not reached stays 0 and the tool drops it.
 	protected void PostActorEmoteJob(MCPJob job, bool finished)
