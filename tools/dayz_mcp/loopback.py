@@ -1740,8 +1740,9 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # world_time_get reads the clock and takes no argument.
     "world_time_get": _command_schema(_schema_variant()),
     # The bounds mirror server.py and MCPBridge.c (SERVER_PERF_WINDOW_MIN_S and
-    # _MAX_S, NAV_SNAP_RADIUS_MAX, VISIBILITY_RADIUS_MAX); a test keeps the
-    # copies equal. Every key travels: the bridge reads an absent one as 0.
+    # _MAX_S, NAV_SNAP_RADIUS_MAX, VISIBILITY_RADIUS_MAX); a test tries each
+    # edge here with server.py's values. Every key travels: the bridge reads an
+    # absent one as 0.
     "server_perf": _command_schema(
         _schema_variant(
             required=("window_s",),

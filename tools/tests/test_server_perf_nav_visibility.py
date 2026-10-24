@@ -8,16 +8,20 @@ and a view ray from the head.
 
 These tests pin the wire contract, the lease partition, the admission of an
 older PBO, the compact catalog, the prune contract and the Enforce source the
-game will compile. They do not launch DayZ, so nothing here measures the
-engine calls themselves.
+game will compile. Two bridge methods, IsServerPerfReady and IsInApproxFov,
+also run here, translated line by line from their own Enforce text. They do
+not launch DayZ or compile the addon, so nothing here measures the engine
+calls themselves; compiling is the final round's own gate.
 """
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import math
 import re
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -87,6 +91,18 @@ _LOCAL_DECLARATION = re.compile(
     r"^\s*(?:int|bool|float|vector|World|AIWorld|PGFilter|TVectorArray|PlayerBase|"
     r"PlayerIdentity|MCPPlayerVisibility)\s+(\w+)\s*;\s*$"
 )
+_ENFORCE_LOCAL = re.compile(r"(?:int|float|bool|vector|HumanInputController)\s+(\w+)(?:\s*=\s*(.+))?;")
+_ENFORCE_HEADER = re.compile(r"(if|while) \((.+)\)")
+
+
+class _EnforceMath:
+    """The Math members the translated bridge methods call (enmath.c)."""
+
+    RAD2DEG = 180.0 / math.pi
+    Floor = staticmethod(math.floor)
+    Sqrt = staticmethod(math.sqrt)
+    Asin = staticmethod(math.asin)
+    Atan2 = staticmethod(math.atan2)
 
 
 def _block_after(source: str, start: int) -> str:
@@ -167,6 +183,57 @@ def _locals_on_top(body: str) -> list[str]:
             raise AssertionError(f"declaration after a statement: {line}")
         names.append(match.group(1))
     return names
+
+
+def _python_expression(text: str) -> str:
+    text = text.replace("&&", " and ").replace("||", " or ")
+    text = re.sub(r"!(?!=)", " not ", text)
+    return re.sub(r"\btrue\b", "True", re.sub(r"\bfalse\b", "False", text))
+
+
+def _bridge_method(source: str, name: str, **names: object):
+    """One bridge method as a Python function, translated from its Enforce text.
+
+    It covers what IsServerPerfReady and IsInApproxFov are written in: locals,
+    assignments, if and while blocks with their braces on their own lines, and
+    returns. Any other line fails the translation instead of being guessed. The
+    bridge's float constants come from the source; Python floats are doubles,
+    so this checks the logic, not float32 rounding.
+    """
+    clean = _without_comments(source)
+    found = list(re.finditer(rf"\bprotected\s+\w+\s+{re.escape(name)}\(([^)]*)\)", clean))
+    if len(found) != 1:
+        raise AssertionError(f"{name} is declared {len(found)} times")
+    params = [part.split()[-1] for part in found[0].group(1).split(",") if part.strip()]
+    lines = [f"def {name}({', '.join(params)}):"]
+    depth = 1
+    for raw in _block_after(clean, found[0].end()).splitlines():
+        line = raw.strip()
+        if line in ("", "{"):
+            continue
+        if line == "}":
+            depth -= 1
+            continue
+        indent = "    " * depth
+        header = _ENFORCE_HEADER.fullmatch(line)
+        local = _ENFORCE_LOCAL.fullmatch(line)
+        if header:
+            lines.append(f"{indent}{header.group(1)} {_python_expression(header.group(2))}:")
+            depth += 1
+        elif local:
+            value = local.group(2)
+            lines.append(f"{indent}{local.group(1)} = {_python_expression(value) if value else 0}")
+        elif line.startswith("return ") and line.endswith(";"):
+            lines.append(f"{indent}return {_python_expression(line[len('return '):-1])}")
+        elif re.fullmatch(r"[\w.]+ = .+;", line):
+            target, value = line[:-1].split(" = ", 1)
+            lines.append(f"{indent}{target} = {_python_expression(value)}")
+        else:
+            raise AssertionError(f"{name}: no translation for {line!r}")
+    namespace: dict[str, object] = {"Math": _EnforceMath, **names}
+    namespace.update((constant, float(value)) for constant, value in _FLOAT_CONST.findall(source))
+    exec("\n".join(lines), namespace)
+    return namespace[name]
 
 
 def _announce_server(
@@ -387,13 +454,17 @@ class ReadsCensusTest(unittest.TestCase):
         radius_max = server.VISIBILITY_RADIUS_MAX_M
         nav = WIRE_ARGS["nav_path_query"]
         vis = WIRE_ARGS["players_visibility"]
+        # The ingress compares doubles. The bridge reads these floats as
+        # float32, where a double one step past an edge can round onto it and
+        # the smallest double above 0 is 0: the low edge of snap_radius is one
+        # float32 holds, and the steps past the other edges are the ingress's.
         cases = (
             ("server_perf", {"window_s": window_min}, True),
             ("server_perf", {"window_s": window_max}, True),
             ("server_perf", {"window_s": math.nextafter(window_min, 0.0)}, False),
             ("server_perf", {"window_s": math.nextafter(window_max, math.inf)}, False),
             ("nav_path_query", {**nav, "snap_radius": snap_max}, True),
-            ("nav_path_query", {**nav, "snap_radius": math.nextafter(0.0, 1.0)}, True),
+            ("nav_path_query", {**nav, "snap_radius": 1e-6}, True),
             ("nav_path_query", {**nav, "snap_radius": 0.0}, False),
             ("nav_path_query", {**nav, "snap_radius": math.nextafter(snap_max, math.inf)}, False),
             ("players_visibility", {**vis, "radius": 0.0}, True),
@@ -467,6 +538,50 @@ class ServerPerfEnforceTest(unittest.TestCase):
         for code_text in (code, _method_code(self.source, "PostServerPerfSuccess")):
             self.assertNotRegex(code_text, r"(?i)\bget\w*fps\b")
 
+    def test_min_fps_is_the_fewest_frame_ends_in_a_whole_second(self) -> None:
+        # 10 frame ends in [0, 1), the first opening the window, then 2 in
+        # [1, 2), and the window closing at 2: the fewest is 2, not 10.
+        clock = types.SimpleNamespace(now=0.0)
+        game = types.SimpleNamespace(GetTickTime=lambda: clock.now)
+        ready = _bridge_method(self.source, "IsServerPerfReady", GetGame=lambda: game)
+        job = types.SimpleNamespace(
+            phase=0,
+            sample_s_target=2.0,
+            sample_start_s=0.0,
+            perf_frames=0,
+            perf_second=0,
+            perf_second_frames=0,
+            perf_whole_seconds=0,
+            perf_min_frames=0,
+            perf_measured_s=0.0,
+        )
+        answers = []
+        for now in [tenth / 10 for tenth in range(10)] + [1.0, 1.5, 2.0]:
+            clock.now = now
+            answers.append(ready(job))
+        self.assertEqual(answers, [False] * 12 + [True])
+        self.assertEqual((job.perf_whole_seconds, job.perf_min_frames), (2, 2))
+        self.assertEqual((job.perf_frames, job.perf_measured_s), (12, 2.0))
+
+    def test_every_job_member_the_server_perf_path_uses_is_declared(self) -> None:
+        # Not a compile: that is the final round's gate. It keeps out one
+        # error it would find, a job member MCPJob does not declare.
+        messages = MESSAGES_PATH.read_text(encoding="utf-8")
+        declared = {name for _type, name in _class_members(messages, "MCPJob")}
+        used: set[str] = set()
+        for method in ("DispatchServerPerf", "IsServerPerfReady", "PostServerPerfSuccess"):
+            used |= set(re.findall(r"\bjob\.(\w+)", _method_code(self.source, method)))
+        counters = {
+            "perf_frames",
+            "perf_second",
+            "perf_second_frames",
+            "perf_whole_seconds",
+            "perf_min_frames",
+            "perf_measured_s",
+        }
+        self.assertLessEqual(counters, used)
+        self.assertEqual(sorted(used - declared), [])
+
     def test_the_reply_drops_the_rates_on_insufficient_samples(self) -> None:
         success = _method_code(self.source, "PostJobSuccess")
         branch = _if_body(success, 'job.kind == "server_perf"')
@@ -507,10 +622,15 @@ class ServerPerfEnforceTest(unittest.TestCase):
             code[code.index("result.ok = true;") :].split(), ["result.ok", "=", "true;", "PostResult(result);"]
         )
 
-    def test_one_scene_pass_counts_each_entity_in_its_first_class(self) -> None:
+    def test_one_scene_pass_over_the_map_counts_each_entry_in_its_first_class(self) -> None:
         code = _method_code(self.source, "CountServerPerfEntities")
         self.assertEqual(code.count("SceneGetEntitiesInBox("), 1)
-        self.assertIn("QueryFlags.DYNAMIC", code)
+        # x and z from 0 to the world size, y from minus to plus it.
+        self.assertIn(
+            "DayZPlayerUtils.SceneGetEntitiesInBox(Vector(0.0, -worldSize, 0.0), "
+            "Vector(worldSize, worldSize, worldSize), entities, QueryFlags.DYNAMIC);",
+            code,
+        )
         _in_order(
             self,
             code,
@@ -679,8 +799,10 @@ class VisibilityEnforceTest(unittest.TestCase):
                 "identity = player.GetIdentity();",
                 "if (identity)",
                 "head = PlayerHeadPosition(player);",
+                "distance = vector.Distance(head, target);",
                 "row.uid = identity.GetPlainId();",
-                "row.in_fov = IsInApproxFov(player, head, target, radius, distance);",
+                "row.distance = distance;",
+                "row.in_fov = IsInApproxFov(player, head, target, radius);",
                 "row.line_of_sight = HasLineOfSight(player, head, target, radius);",
                 "row.visible = row.in_fov && row.line_of_sight;",
                 "result.players_visibility.Insert(row);",
@@ -714,18 +836,47 @@ class VisibilityEnforceTest(unittest.TestCase):
             self,
             code,
             (
-                "if (distance <= radius)",
-                "if (target[0] == head[0] && target[2] == head[2])",
+                "horizontal = Math.Sqrt(dx * dx + dz * dz);",
+                "if (horizontal <= radius)",
                 "hic = player.GetInputController();",
                 "if (!hic)",
                 "hic.GetHeadingAngle()",
-                "allowedDeg = VISIBILITY_HALF_FOV_DEG + Math.Atan2(radius, distance) * Math.RAD2DEG;",
+                "allowedDeg = VISIBILITY_HALF_FOV_DEG + Math.Asin(radius / horizontal) * Math.RAD2DEG;",
                 "return offDeg <= allowedDeg;",
             ),
         )
-        for condition in ("distance <= radius", "target[0] == head[0] && target[2] == head[2]", "!hic"):
+        for condition in ("horizontal <= radius", "!hic"):
             with self.subTest(condition=condition):
                 self.assertEqual(_if_body(code, condition).strip(), "return true;")
+
+    def test_the_fov_holds_a_sphere_any_part_of_which_is_inside_the_cone(self) -> None:
+        heading = types.SimpleNamespace(rad=0.0)
+        controller = types.SimpleNamespace(GetHeadingAngle=lambda: heading.rad)
+        player = types.SimpleNamespace(GetInputController=lambda: controller)
+        in_fov = _bridge_method(self.source, "IsInApproxFov")
+        head = (0.0, 0.0, 0.0)
+
+        def at(bearing_deg: float, horizontal: float) -> tuple[float, float, float]:
+            bearing = math.radians(bearing_deg)
+            return (horizontal * math.sin(bearing), 0.0, horizontal * math.cos(bearing))
+
+        # The review's witness: a 9.9 m sphere 10 m away at bearing 115 reaches the
+        # 60-degree cone of heading 0. asin(0.99) is 81.9 degrees, so 142 is out.
+        self.assertTrue(in_fov(player, head, at(115.0, 10.0), 9.9))
+        self.assertFalse(in_fov(player, head, at(142.0, 10.0), 9.9))
+        # A point is in view within 60 degrees either side.
+        self.assertTrue(in_fov(player, head, at(-59.0, 10.0), 0.0))
+        self.assertFalse(in_fov(player, head, at(61.0, 10.0), 0.0))
+        # The heading h faces the compass heading -h: h = -pi/2 faces +X.
+        heading.rad = -math.pi / 2
+        self.assertTrue(in_fov(player, head, (10.0, 0.0, 0.0), 0.0))
+        self.assertFalse(in_fov(player, head, (-10.0, 0.0, 0.0), 0.0))
+        # Behind the player but within radius in x and z, straight above
+        # included, or with no input controller: in view.
+        self.assertTrue(in_fov(player, head, (-3.0, 10.0, 0.0), 3.0))
+        self.assertTrue(in_fov(player, head, (0.0, 30.0, 0.0), 0.0))
+        blind = types.SimpleNamespace(GetInputController=lambda: None)
+        self.assertTrue(in_fov(blind, head, (-10.0, 0.0, 0.0), 0.0))
 
     def test_the_head_falls_back_above_the_position(self) -> None:
         code = _method_code(self.source, "PlayerHeadPosition")
@@ -736,6 +887,8 @@ class VisibilityEnforceTest(unittest.TestCase):
         )
         self.assertIn("return player.GetBonePositionWS(bone);", code)
         self.assertIn('protected const string VISIBILITY_HEAD_BONE = "Head";', self.source)
+        constants = {name: float(value) for name, value in _FLOAT_CONST.findall(self.source)}
+        self.assertEqual(constants["VISIBILITY_HEAD_FALLBACK_M"], 1.6)
 
     def test_the_row_class_holds_primitives_only(self) -> None:
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
@@ -861,23 +1014,58 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
             "insufficient_samples": 1,
             "counts": dict(counts),
         }
+        handed = copy.deepcopy(bridge_answer)
         result, _call = await self._call("server_perf", bridge_answer, window_s=1.0)
         self.assertNotIn("avg_fps", result)
         self.assertNotIn("min_fps", result)
         self.assertEqual(result["insufficient_samples"], 1)
         self.assertEqual(result["counts"], counts)
         # The answer the tool was handed is not rewritten.
-        self.assertIn("avg_fps", bridge_answer)
+        self.assertEqual(bridge_answer, handed)
 
     async def test_a_bad_window_never_reaches_the_bridge(self) -> None:
+        # The handler: a number out of range or not finite is bad_args.
         for window in (0, 0.5, 60.5, 61, -1.0, math.nan, math.inf):
             with self.subTest(window=window):
                 text = await self._refused("server_perf", {"window_s": window})
                 self.assertIn("bad_args", text)
                 self.assertIn("window_s", text)
-        for window in (True, "10"):
+        # The typed schema (StrictFloat): a bool, a string or a null fails
+        # FastMCP's validation before the handler runs, without bad_args.
+        for window in (True, "10", None):
             with self.subTest(window=window):
-                await self._refused("server_perf", {"window_s": window})
+                text = await self._refused("server_perf", {"window_s": window})
+                self.assertIn("validation error for server_perfArguments", text)
+                self.assertIn("window_s", text)
+                self.assertNotIn("bad_args", text)
+
+    async def test_an_extra_key_is_dropped_by_the_tool_and_refused_by_the_ingress(self) -> None:
+        public = {
+            "server_perf": {"window_s": 10.0},
+            "nav_path_query": {"from": [10.0, 5.0, 20.0], "to": [60.0, 5.0, 20.0]},
+            "players_visibility": {"pos": [10.0, 5.0, 20.0]},
+        }
+        float_key = {
+            "server_perf": "window_s",
+            "nav_path_query": "snap_radius",
+            "players_visibility": "radius",
+        }
+        for command, arguments in public.items():
+            with self.subTest(command=command):
+                _result, call = await self._call(command, {"ok": 1}, **arguments, extra=1)
+                self.assertEqual(call.await_args.args[:2], (command, WIRE_ARGS[command]))
+                self.assertEqual(
+                    loopback.validate_command_args(command, {**WIRE_ARGS[command], "extra": 1}),
+                    (False, "bad_args"),
+                )
+                # The ingress refuses a wrong type as bad_args too.
+                for wrong in (True, "1", None):
+                    self.assertEqual(
+                        loopback.validate_command_args(
+                            command, {**WIRE_ARGS[command], float_key[command]: wrong}
+                        ),
+                        (False, "bad_args"),
+                    )
 
     async def test_nav_path_query_sends_from_and_regroups_the_points(self) -> None:
         bridge_answer = {
@@ -962,6 +1150,12 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
             "players_visibility", {"ok": 1, "players_visibility": []}, pos=[1.0, 2.0, 3.0], radius=100
         )
         self.assertEqual(empty["players_visibility"], [])
+        _timed, call = await self._call(
+            "players_visibility", {"ok": 1, "players_visibility": []}, pos=[1.0, 2.0, 3.0], timeout_s=1.0
+        )
+        call.assert_awaited_once_with(
+            "players_visibility", {"pos": [1.0, 2.0, 3.0], "radius": 0.0}, "server", 1.0
+        )
 
     async def test_players_visibility_bad_arguments_never_reach_the_bridge(self) -> None:
         cases = (
@@ -986,8 +1180,9 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
                 "a partial last second is dropped",
                 "insufficient_samples is 1",
                 "carries no avg_fps and no min_fps",
-                "SceneGetEntitiesInBox",
-                "is not checked",
+                "SceneGetEntitiesInBox, which takes what touches or overlaps the box",
+                "each entry it returns counted once",
+                "are not checked",
                 "window_s + 10 s",
                 "bridge_capability_missing",
                 "arg_contract_mismatch",
@@ -1000,14 +1195,19 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
                 "both ends included",
                 "not measured in game yet",
                 "no_navmesh_at_to",
+                "no navmesh the filter admits within snap_radius",
                 "no_path",
             ),
             "players_visibility": (
                 "It changes nothing and needs no lease",
                 "{uid (as query_all_players names it), distance",
                 "in_fov is an approximation",
+                "any part of a sphere of radius around pos",
+                "asin(radius / the horizontal distance)",
                 "GetHeadingAngle, not measured in game yet",
                 "scene_raycast's default ray",
+                "from the head to pos only",
+                "visible false is no guarantee that nobody sees part of a volume",
                 "visible is in_fov and line_of_sight both",
                 "No player connected is ok with an empty list.",
             ),

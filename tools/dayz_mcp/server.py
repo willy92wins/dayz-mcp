@@ -455,10 +455,11 @@ WORLD_SPAWN_LIFETIME_MAX_S = 3888000.0
 # server_perf window_s bounds in seconds, nav_path_query's snap_radius cap and
 # players_visibility's radius cap in metres. Mirror SERVER_PERF_WINDOW_MIN_S,
 # SERVER_PERF_WINDOW_MAX_S, NAV_SNAP_RADIUS_MAX and VISIBILITY_RADIUS_MAX in
-# addon/scripts/5_Mission/MCPBridge.c and the loopback schemas; a test keeps the
-# copies equal. A server_perf call answers window_s after its job starts: the
-# tool waits at least window_s plus SERVER_PERF_SLACK_S, which covers the job's
-# JOB_TIMEOUT_S (5 s) past the window and the poll and the reply around it.
+# addon/scripts/5_Mission/MCPBridge.c and the loopback schemas; a test pins the
+# bridge's values and comparisons and tries the loopback's edges with these. A
+# server_perf call answers window_s after its job starts: the tool waits at
+# least window_s plus SERVER_PERF_SLACK_S, which covers the job's JOB_TIMEOUT_S
+# (5 s) past the window and the poll and the reply around it.
 SERVER_PERF_WINDOW_MIN_S = 1.0
 SERVER_PERF_WINDOW_MAX_S = 60.0
 SERVER_PERF_SLACK_S = 10.0
@@ -7659,13 +7660,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "held no whole second or fewer than 2 frames, and the answer then "
             "carries no avg_fps and no min_fps. counts is read once, after the "
             "window has closed, in one pass over the dynamic entities of the "
-            "whole map (SceneGetEntitiesInBox), each entity counted once in "
-            "the first class it matches: players (a PlayerBase with a player "
+            "whole map (SceneGetEntitiesInBox, which takes what touches or "
+            "overlaps the box), each entry it returns counted once, in the "
+            "first class it matches: players (a PlayerBase with a player "
             "identity), ai (any other PlayerBase, such as a spawned survivor), "
             "infected (DayZInfected), animals (DayZAnimal), vehicles "
-            "(Transport), items (InventoryItem). Whether an "
-            "item held in an inventory, worn or attached is in that pass, and "
-            "so in items, is not checked. The call answers after the window "
+            "(Transport), items (InventoryItem). Whether it can return one "
+            "entity twice, and whether an item held in an inventory, worn or "
+            "attached is in that pass, and so in items, are not checked. The "
+            "call answers after the window "
             "and holds this session's tool calls until then; the tool waits at "
             f"least window_s + {SERVER_PERF_SLACK_S:g} s. Errors: bad_args, "
             "timeout, world_unavailable, and bridge_capability_missing or "
@@ -7710,8 +7713,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "leaves out the disabled and swimming ones; its flag values are "
             "not measured in game yet. A terrain without a navmesh (a custom "
             "map that ships none) answers no_navmesh, or no_navmesh_at_from / "
-            "no_navmesh_at_to, as does an end with no navmesh within "
-            "snap_radius (a point in the sea). Errors carry only the error: "
+            "no_navmesh_at_to, as does an end with no navmesh the filter "
+            "admits within snap_radius (expected of open sea farther than "
+            "snap_radius from the shore; not measured in game yet). Errors "
+            "carry only the error: "
             "bad_args, no_navmesh, no_navmesh_at_from, no_navmesh_at_to, "
             "no_path, and bridge_capability_missing or arg_contract_mismatch "
             "from a PBO built before this verb."
@@ -7759,16 +7764,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "1.6 m without one. The server does not know a client's exact "
             "camera, so in_fov is an approximation, generous on purpose (a "
             "hidden edit fails safe when it over-reports): horizontal only, "
-            "true when pos lies within 60 degrees, plus the angle radius "
-            "covers at that distance, of the heading the server reads for the "
-            "player (GetHeadingAngle, not measured in game yet), and also when "
-            "the head is within radius of pos, pos is straight above or below "
-            "it, or the heading cannot be read. line_of_sight is "
-            "scene_raycast's default ray (rvproxy, view geometry) from the "
-            "head to pos, ignoring the player's own entity (whether it also "
-            "skips what the player wears is not checked): true when nothing is "
-            "hit or the nearest hit is within radius of pos. visible is in_fov "
-            "and line_of_sight both. No player connected is ok with an empty "
+            "true when any part of a sphere of radius around pos lies within "
+            "60 degrees of the heading the server reads for the player "
+            "(GetHeadingAngle, not measured in game yet), that is when the "
+            "bearing to pos is within 60 degrees plus asin(radius / the "
+            "horizontal distance); also true when that horizontal distance is "
+            "at most radius (pos straight above or below included) or the "
+            "heading cannot be read. line_of_sight is scene_raycast's default "
+            "ray (rvproxy, view geometry) from the head to pos only, ignoring "
+            "the player's own entity (whether it also skips what the player "
+            "wears is not checked): true when nothing is hit or the nearest "
+            "hit is within radius of pos. visible is in_fov and line_of_sight "
+            "both. Since the ray goes to pos only, visible false is no "
+            "guarantee that nobody sees part of a volume of that radius: only "
+            "in_fov covers the volume. No player connected is ok with an empty "
             "list. Errors: bad_args, and bridge_capability_missing or "
             "arg_contract_mismatch from a PBO built before this verb."
         )

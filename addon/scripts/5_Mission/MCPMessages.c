@@ -1032,10 +1032,10 @@ class MCPCursorIds
 };
 
 // server_perf counts, read once after the window closes: one
-// SceneGetEntitiesInBox pass over the map (dayzplayerutils.c:75), each entity
-// counted once, in the first class it matches in this order: players (a
-// PlayerBase with a PlayerIdentity), ai (any other PlayerBase), infected
-// (DayZInfected), animals (DayZAnimal), vehicles (Transport), items
+// SceneGetEntitiesInBox pass over the map (dayzplayerutils.c:75), each entry
+// it returns counted once, in the first class it matches in this order:
+// players (a PlayerBase with a PlayerIdentity), ai (any other PlayerBase),
+// infected (DayZInfected), animals (DayZAnimal), vehicles (Transport), items
 // (InventoryItem). Primitives only: no entity reference.
 class MCPServerPerfCounts
 {

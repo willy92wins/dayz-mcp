@@ -31,7 +31,7 @@ class MCPBridge : Managed
 	protected const int VEHICLE_DOOR_LIGHTS_PULSE_MS = 1000;
 	// server_perf window_s bounds in seconds, and nav_path_query's snap_radius
 	// and players_visibility's radius caps in metres. Mirrored by server.py and
-	// loopback.py; a test keeps the copies equal.
+	// loopback.py; a test pins the values in all three and the comparisons here.
 	protected const float SERVER_PERF_WINDOW_MIN_S = 1.0;
 	protected const float SERVER_PERF_WINDOW_MAX_S = 60.0;
 	protected const float NAV_SNAP_RADIUS_MAX = 50.0;
@@ -3097,7 +3097,8 @@ class MCPBridge : Managed
 	// inside buildings) included, the disabled and swimming ones excluded.
 	// PGPolyFlags declares no values although PGFilter takes bitmasks
 	// (aiworld.c:1-26 and :61), and vanilla never builds a PGFilter: these
-	// masks are not measured, and the final in-game round checks them.
+	// masks are not measured. The final in-game round's street, door and
+	// water paths test what they admit, not their values.
 	protected PGFilter BuildNavWalkFilter()
 	{
 		PGFilter filter = new PGFilter();
@@ -3157,7 +3158,7 @@ class MCPBridge : Managed
 				row = new MCPPlayerVisibility();
 				row.uid = identity.GetPlainId();
 				row.distance = distance;
-				row.in_fov = IsInApproxFov(player, head, target, radius, distance);
+				row.in_fov = IsInApproxFov(player, head, target, radius);
 				row.line_of_sight = HasLineOfSight(player, head, target, radius);
 				row.visible = row.in_fov && row.line_of_sight;
 				result.players_visibility.Insert(row);
@@ -3188,28 +3189,32 @@ class MCPBridge : Managed
 		return player.GetBonePositionWS(bone);
 	}
 
-	// Horizontal only: in view within VISIBILITY_HALF_FOV_DEG, plus the angle
-	// radius subtends at distance, of the heading GetHeadingAngle gives
-	// (human.c:27-28: the world Y angle of the camera, in radians). Compass
-	// degrees, 0 = +Z and 90 = +X, as MCP_PlayerMove.c computes them: the
-	// heading h is -h, and the bearing is Math.Atan2(dx, dz) (enmath.c:388-399).
-	// Nothing says that heading is valid on the server. Also in view when it
-	// cannot be read, when the head is within radius of pos, and when pos is
-	// straight above or below it.
-	protected bool IsInApproxFov(PlayerBase player, vector head, vector target, float radius, float distance)
+	// Horizontal only, generous on purpose: in view when any part of the
+	// sphere of radius around pos lies within VISIBILITY_HALF_FOV_DEG of the
+	// heading GetHeadingAngle gives (human.c:27-28: the world Y angle of the
+	// camera, in radians). horizontal is the head-to-pos distance in x and z.
+	// Within radius the sphere's footprint holds the head, so pos is in view
+	// whatever the heading, straight above or below included. Beyond it the
+	// footprint spans Math.Asin(radius / horizontal) either side of the
+	// bearing, and the cone widens by exactly that. Compass degrees, 0 = +Z
+	// and 90 = +X, as MCP_PlayerMove.c computes them: the heading h is -h,
+	// and the bearing is Math.Atan2(dx, dz) (enmath.c:388-399). Nothing says
+	// that heading is valid on the server. Also in view when it cannot be read.
+	protected bool IsInApproxFov(PlayerBase player, vector head, vector target, float radius)
 	{
 		HumanInputController hic;
+		float dx;
+		float dz;
+		float horizontal;
 		float bearingDeg;
 		float headingDeg;
 		float offDeg;
 		float allowedDeg;
 
-		if (distance <= radius)
-		{
-			return true;
-		}
-
-		if (target[0] == head[0] && target[2] == head[2])
+		dx = target[0] - head[0];
+		dz = target[2] - head[2];
+		horizontal = Math.Sqrt(dx * dx + dz * dz);
+		if (horizontal <= radius)
 		{
 			return true;
 		}
@@ -3220,7 +3225,7 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		bearingDeg = Math.Atan2(target[0] - head[0], target[2] - head[2]) * Math.RAD2DEG;
+		bearingDeg = Math.Atan2(dx, dz) * Math.RAD2DEG;
 		headingDeg = hic.GetHeadingAngle();
 		headingDeg = -headingDeg * Math.RAD2DEG;
 		// Both are -180..180, so one turn either way brings the difference there.
@@ -3240,13 +3245,16 @@ class MCPBridge : Managed
 			offDeg = -offDeg;
 		}
 
-		allowedDeg = VISIBILITY_HALF_FOV_DEG + Math.Atan2(radius, distance) * Math.RAD2DEG;
+		// Past the early return, horizontal > radius >= 0: Asin (enmath.c:367) gets [0, 1).
+		allowedDeg = VISIBILITY_HALF_FOV_DEG + Math.Asin(radius / horizontal) * Math.RAD2DEG;
 		return offDeg <= allowedDeg;
 	}
 
 	// scene_raycast's default ray (rvproxy, view geometry, VISIBILITY_RAY_RADIUS)
 	// from the head to pos, ignoring the player's own entity. Clear when
-	// nothing is hit or the nearest hit is within radius of pos.
+	// nothing is hit or the nearest hit is within radius of pos. The ray goes
+	// to pos only, so a volume of radius around pos can be partly seen while
+	// this is false: only IsInApproxFov covers the whole volume.
 	protected bool HasLineOfSight(PlayerBase player, vector head, vector target, float radius)
 	{
 		MCPRaycastValidation ray = new MCPRaycastValidation();
@@ -4870,8 +4878,10 @@ class MCPBridge : Managed
 	}
 
 	// One SceneGetEntitiesInBox pass (dayzplayerutils.c:75, QueryFlags.DYNAMIC)
-	// over the whole map, each entity counted in the first class it matches
-	// (MCPServerPerfCounts).
+	// over the whole map. The query takes what touches or overlaps the box,
+	// not what has its origin in it. Each entry it returns is counted once, in
+	// the first class it matches (MCPServerPerfCounts); whether it can return
+	// one entity twice is not measured.
 	protected void CountServerPerfEntities(float worldSize, MCPServerPerfCounts counts)
 	{
 		array<EntityAI> entities = new array<EntityAI>();
