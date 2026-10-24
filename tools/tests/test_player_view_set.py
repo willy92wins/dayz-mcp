@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -219,8 +220,6 @@ B2_NO_UNDERSCORE = re.compile(r"[A-Za-z0-9]{1,64}")
 H1_FAILURE_OK = (FAILURE_HOOK, "\t\tresult.ok = false;\n", "\t\tresult.ok = true;\n")
 H2_TIMEOUT_OK = (TIMEOUT_HOOK, "\t\tresult.ok = false;\n", "\t\tresult.ok = true;\n")
 N1_INITIALIZED_VIEW = ("class MCPArgs", "\tstring view;\n", "\tstring view;\n\tint view = 0;\n")
-# Not one of Codex's: a declaration the parser cannot read must fail, not be skipped.
-N1_UNKNOWN_FORM = ("class MCPArgs", "\tstring view;\n", "\tstring view;\n\tint view, spare;\n")
 N2_CLASS_FROM_FLAG = (
     POST,
     "\t\t\tresult.camera_class = playerCamera.ClassName();\n",
@@ -232,15 +231,65 @@ N2_CLASS_FROM_FLAG = (
     "\t\t\t}\n",
 )
 S3_COUNTS = ("does not count", "does count")
+# Codex r3's surviving mutants of a280190 (N3, N5, N6) and N7, N5 in
+# constructor form: red controls as well.
+N3_SECOND_DECLARATOR = (
+    "class MCPArgs",
+    "\tstring view;\n",
+    "\tstring view;\n\tint review_spare = 0, view = 0;\n",
+)
+N5_JOB_ERROR_INITIALIZED = ("class MCPJob", "\tstring error;\n", '\tstring error = "review_error";\n')
+N6_CLASS_FROM_FIRST = (
+    POST,
+    "\t\t\tresult.camera_class = playerCamera.ClassName();\n",
+    "\t\t\tresult.camera_class = playerCamera.ClassName();\n"
+    '\t\t\tif (result.person_view == "first")\n'
+    "\t\t\t{\n"
+    '\t\t\t\tresult.camera_class = "DayZPlayerCamera1stPerson";\n'
+    "\t\t\t}\n",
+)
+N7_JOB_ERROR_CONSTRUCTED = (
+    "class MCPJob",
+    "\tstring error;\n",
+    '\tstring error;\n\n\tvoid MCPJob()\n\t{\n\t\terror = "review_error";\n\t}\n',
+)
+# Not Codex's: the plain form of N3, two declarators without an initializer.
+TWO_DECLARATORS = ("class MCPArgs", "\tstring view;\n", "\tstring view;\n\tint view, spare;\n")
+# Initializers the model cannot evaluate: Codex's N4 and a call. In MCPJob,
+# since MCPArgs already declares an x.
+N4_UNREAD_INITIALIZER = ("class MCPJob", "\tstring error;\n", "\tstring error;\n\tint x = @@@;\n")
+CALL_INITIALIZER = ("class MCPJob", "\tstring error;\n", "\tstring error;\n\tint x = Foo();\n")
 
 _MEMBER_NAME = re.compile(r"(?<![\w.])(m_[A-Za-z0-9_]+)\b")
 _NEW_CALL = re.compile(r"\bnew\s+([A-Za-z_]\w*)\s*\(")
 _ENFORCE_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"')
+# One declarator per member statement: an initializer holds no comma, so a
+# second declarator, initialized or not, leaves the statement unrecognised.
 _MEMBER_STATEMENT = re.compile(
-    r"(?P<type>(?:ref\s+)?[A-Za-z_]\w*(?:\s*<[^;{}()=]+>)?)\s+(?P<name>[A-Za-z_]\w*)(?:\s*=\s*[^;{}]+)?"
+    r"(?P<type>(?:ref\s+)?[A-Za-z_]\w*(?:\s*<[^;{}()=]+>)?)\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?:\s*=\s*(?P<init>[^;{},]+))?"
 )
-_METHOD_STATEMENT = re.compile(r"[A-Za-z_]\w*(?:\s*<[^;{}()=]+>)?\s+~?[A-Za-z_]\w*\s*\([^;{}()]*\)")
-_ENFORCE_DEFAULTS: dict[str, object] = {"int": 0, "float": 0.0, "bool": False}
+_METHOD_STATEMENT = re.compile(
+    r"(?P<returns>[A-Za-z_]\w*(?:\s*<[^;{}()=]+>)?)\s+(?P<name>~?[A-Za-z_]\w*)\s*\((?P<params>[^;{}()]*)\)"
+)
+_ASSIGNMENT = re.compile(r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>[^=].*)")
+_BODY_TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|[^"{};]+|[{};"]')
+_STRING_OR_SPACE = re.compile(r'"(?:\\.|[^"\\])*"|\s+')
+_TOP_LEVEL_CONST = re.compile(
+    r"(?m)^const\s+(?P<type>int|float|bool|string)\s+(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>[^;]+);"
+)
+_INT_LITERAL = re.compile(r"-?[0-9]+")
+_FLOAT_LITERAL = re.compile(r"-?[0-9]+\.[0-9]+")
+# Printable ASCII without a quote or a backslash: like the subset helper, the
+# model reads no escape.
+_STRING_LITERAL = re.compile(r'"[ !#-\[\]-~]*"')
+_NEW_CONTAINER = re.compile(r"new\s+(?P<type>(?:array|map|set)\s*<[^;{}()=]+>)\s*\(\s*\)")
+# Enforce's float.MAX, the largest float32, as a Python float.
+FLT_MAX = 3.4028234663852886e38
+# A member's value before its initializer: the default of its type. A ref, a
+# container and the engine classes MCPJob holds without ref start null.
+_ENFORCE_DEFAULTS: dict[str, object] = {"int": 0, "float": 0.0, "bool": False, "vector": (0.0, 0.0, 0.0)}
+_HANDLE_TYPES = frozenset({"Object", "Human"})
 
 
 def _free_method(source: str, signature: str) -> str:
@@ -260,13 +309,20 @@ def _free_method(source: str, signature: str) -> str:
     return signature + "\n{" + "".join(pieces) + "}\n"
 
 
-def _class_statements(class_body: str) -> list[tuple[str, str]]:
+def _squashed(text: str) -> str:
+    """`text` with each run of whitespace outside its string literals made one space."""
+    return _STRING_OR_SPACE.sub(lambda match: match.group() if match.group()[0] == '"' else " ", text).strip()
+
+
+def _class_statements(class_body: str) -> list[tuple[str, str, str]]:
     """The top-level statements of a comment-free class body, in order: ("member",
-    text) for each one a `;` ends, ("method", signature) for each one a `{...}`
-    body follows, and ("trailing", text) for anything after the last of them."""
-    statements: list[tuple[str, str]] = []
+    text, "") for each one a `;` ends, ("method", signature, body) for each one a
+    `{...}` body follows, and ("trailing", text, "") for anything after the last."""
+    statements: list[tuple[str, str, str]] = []
     current: list[str] = []
+    signature = ""
     depth = 0
+    start = 0
     index = 0
     while index < len(class_body):
         char = class_body[index]
@@ -280,49 +336,198 @@ def _class_statements(class_body: str) -> list[tuple[str, str]]:
             continue
         if char == "{":
             if depth == 0:
-                statements.append(("method", "".join(current)))
-                current = []
+                signature, current, start = "".join(current), [], index + 1
             depth += 1
         elif char == "}":
             depth -= 1
+            if depth < 0:
+                raise AssertionError(f"a }} closes no block at offset {index} of a class body")
+            if depth == 0:
+                statements.append(("method", signature, class_body[start:index]))
         elif depth == 0 and char == ";":
-            statements.append(("member", "".join(current)))
+            statements.append(("member", "".join(current), ""))
             current = []
         elif depth == 0:
             current.append(char)
         index += 1
+    if depth:
+        raise AssertionError(f"the method {_squashed(signature)!r} is not closed in its class body")
     if "".join(current).strip():
-        statements.append(("trailing", "".join(current)))
+        statements.append(("trailing", "".join(current), ""))
     return statements
+
+
+def _message_declarations(
+    messages: str, name: str
+) -> tuple[list[tuple[str, str, str | None]], list[tuple[str, str]]]:
+    """`class name`'s members as (type, name, initializer or None) and its methods
+    as (signature, body), each in source order. A member statement declares one
+    name: one with a second declarator, initialized or not, fails, and so does
+    any other top-level statement than a member or a method signature. What the
+    parser cannot read is never skipped."""
+    members: list[tuple[str, str, str | None]] = []
+    methods: list[tuple[str, str]] = []
+    for kind, text, body in _class_statements(_class_body(_without_comments(messages), name)):
+        statement = _squashed(text)
+        member = _MEMBER_STATEMENT.fullmatch(statement) if kind == "member" else None
+        if member is not None:
+            members.append((member.group("type"), member.group("name"), member.group("init")))
+        elif kind == "method" and _METHOD_STATEMENT.fullmatch(statement) is not None:
+            methods.append((statement, body))
+        else:
+            raise AssertionError(f"{name}: unrecognised {kind} statement {statement!r}")
+    return members, methods
 
 
 def _message_members(messages: str, name: str) -> list[tuple[str, str]]:
     """(type, name) of each member `class name` declares, an initialized one
-    included. Any other top-level statement than a member declaration or a
-    method signature fails: what the parser cannot read is never skipped."""
-    members: list[tuple[str, str]] = []
-    for kind, text in _class_statements(_class_body(_without_comments(messages), name)):
-        statement = " ".join(text.split())
-        member = _MEMBER_STATEMENT.fullmatch(statement) if kind == "member" else None
-        if member is not None:
-            members.append((member.group("type"), member.group("name")))
-        elif kind != "method" or _METHOD_STATEMENT.fullmatch(statement) is None:
-            raise AssertionError(f"{name}: unrecognised {kind} statement {statement!r}")
-    return members
+    included, as _message_declarations reads them."""
+    return [(type_name, member) for type_name, member, _init in _message_declarations(messages, name)[0]]
+
+
+class _EnforceContainer:
+    """What `new array<T>()`, `new map<K, V>()` or `new set<T>()` gives a member: a
+    fresh, empty container of that type. Its elements are not modeled."""
+
+    def __init__(self, type_name: str) -> None:
+        self.type_name = type_name
+        self.items: list[object] = []
+
+
+def _type_key(type_name: str) -> str:
+    """A type's text without its `ref` and without spaces around <, > and commas."""
+    return re.sub(r"\s*([<>,])\s*", r"\1", _squashed(type_name).removeprefix("ref "))
+
+
+def _top_level_consts(messages: str) -> dict[str, tuple[str, str]]:
+    """name: (type, value text) of each int, float, bool or string const declared
+    at the top level of `messages`. A name declared twice fails."""
+    found = [
+        (const.group("name"), (const.group("type"), _squashed(const.group("value"))))
+        for const in _TOP_LEVEL_CONST.finditer(_without_comments(messages))
+    ]
+    names = [name for name, _const in found]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise AssertionError(f"consts {twice} declared more than once")
+    return dict(found)
+
+
+def _constant(consts: dict[str, tuple[str, str]], type_name: str, text: str, via_const: bool = True) -> object:
+    """The value `text` gives a member of `type_name` when it is a literal of that
+    type (an int literal does for a float too), float.MAX, or the name of a
+    top-level const of such a literal; None when it is none of these."""
+    if type_name == "bool" and text in ("true", "false"):
+        return text == "true"
+    if type_name in ("int", "float") and _INT_LITERAL.fullmatch(text):
+        return int(text) if type_name == "int" else float(text)
+    if type_name == "float" and (_FLOAT_LITERAL.fullmatch(text) or text == "float.MAX"):
+        return FLT_MAX if text == "float.MAX" else float(text)
+    if type_name == "string" and _STRING_LITERAL.fullmatch(text):
+        return EnforceString.of(text[1:-1])
+    const_type, const_text = consts.get(text, ("", ""))
+    if via_const and (const_type == type_name or (const_type, type_name) == ("int", "float")):
+        value = _constant(consts, const_type, const_text, via_const=False)
+        if value is not None:
+            return float(value) if type_name == "float" else value
+    return None
+
+
+def _initial_value(
+    consts: dict[str, tuple[str, str]], class_name: str, type_name: str, text: str, statement: str
+) -> Callable[[], object]:
+    """A factory for the value `text` gives a member of `type_name` at
+    construction: a _constant, or a fresh _EnforceContainer for `new
+    array<T>()`, `new map<K, V>()` or `new set<T>()` of the member's own type.
+    Anything else fails, naming the class and the statement."""
+    value = _constant(consts, type_name, text)
+    if isinstance(value, EnforceString):
+        return lambda: EnforceString(value.data)
+    if value is not None:
+        return lambda: value
+    container = _NEW_CONTAINER.fullmatch(text)
+    if container is not None and _type_key(container.group("type")) == _type_key(type_name):
+        return lambda: _EnforceContainer(_type_key(type_name))
+    raise AssertionError(f"{class_name}: the model cannot evaluate {statement!r}")
+
+
+def _type_default(class_name: str, type_name: str, member: str) -> Callable[[], object]:
+    """A factory for the default of `type_name`; a type without one the model knows fails."""
+    if type_name == "string":
+        return lambda: EnforceString(b"")
+    if type_name in _ENFORCE_DEFAULTS:
+        value = _ENFORCE_DEFAULTS[type_name]
+        return lambda: value
+    if type_name.startswith("ref ") or "<" in type_name or type_name in _HANDLE_TYPES:
+        return lambda: None
+    raise AssertionError(f"{class_name}: the model has no default for {type_name} {member}")
+
+
+def _constructor_statements(class_name: str, body: str) -> list[str]:
+    """The statements of a comment-free constructor body, each one a `;` ends. A
+    block, a stray quote or text after the last `;` fails."""
+    statements: list[str] = []
+    current = ""
+    for token in _BODY_TOKENS.findall(body):
+        if token == ";":
+            statements.append(_squashed(current))
+            current = ""
+        elif token in ("{", "}", '"'):
+            raise AssertionError(f"{class_name}: the model cannot evaluate a constructor with {token!r} in it")
+        else:
+            current += token
+    if current.strip():
+        raise AssertionError(f"{class_name}: the model cannot evaluate {_squashed(current)!r}")
+    return statements
 
 
 def _message_class(messages: str, name: str) -> type:
-    """A Python stand-in for `class name`: only its declared members, at Enforce's defaults."""
-    members = _message_members(messages, name)
-    names = [member for _type, member in members]
+    """A Python stand-in for `class name` with exactly the members it declares,
+    each starting at the value Enforce gives it at construction: the default of
+    its type (0, 0.0, false, "", "0 0 0", or null for a ref, a container and the
+    engine classes in _HANDLE_TYPES), then its own initializer, then each
+    assignment of the constructor `void name()`, in source order. Only the
+    forms _initial_value names are evaluated. Any other initializer,
+    constructor statement or member type, an assignment to a name that is not a
+    member, a constructor with parameters and a base class fail, naming the
+    class and the statement: what the model cannot evaluate is never skipped.
+    The other methods stay unmodeled."""
+    members, methods = _message_declarations(messages, name)
+    names = [member for _type, member, _init in members]
     twice = sorted({member for member in names if names.count(member) > 1})
     if twice:
         raise AssertionError(f"{name} declares {twice} more than once")
+    base = re.search(rf"(?m)^class {re.escape(name)}\b([^{{]*)\{{", _without_comments(messages)).group(1).strip()
+    if base:
+        raise AssertionError(f"{name}: the model cannot construct a class with a base, {base!r}")
+    consts = _top_level_consts(messages)
+    types = {member: type_name for type_name, member, _init in members}
+    steps = [(member, _type_default(name, type_name, member)) for type_name, member, _init in members]
+    for type_name, member, init in members:
+        if init is not None:
+            steps.append((member, _initial_value(consts, name, type_name, init, f"{type_name} {member} = {init}")))
+    constructors = [
+        (_METHOD_STATEMENT.fullmatch(signature), body)
+        for signature, body in methods
+        if _METHOD_STATEMENT.fullmatch(signature).group("name") == name
+    ]
+    for method, body in constructors:
+        if len(constructors) > 1 or method.group("returns") != "void" or method.group("params").strip():
+            raise AssertionError(f"{name}: the model cannot run the constructor {method.group()!r}")
+        for statement in _constructor_statements(name, body):
+            assignment = _ASSIGNMENT.fullmatch(statement)
+            if assignment is None:
+                raise AssertionError(f"{name}: the model cannot evaluate {statement!r}")
+            member = assignment.group("name")
+            if member not in types:
+                raise AssertionError(f"{name}: {statement!r} assigns {member}, which is not a member")
+            steps.append(
+                (member, _initial_value(consts, name, types[member], assignment.group("value"), statement))
+            )
 
     def __init__(self: object) -> None:
-        for type_name, member in members:
-            value = EnforceString(b"") if type_name == "string" else _ENFORCE_DEFAULTS.get(type_name)
-            setattr(self, member, value)
+        for member, value in steps:
+            setattr(self, member, value())
 
     return type(name, (), {"__slots__": tuple(names), "__init__": __init__})
 
@@ -397,7 +602,8 @@ class _ClientModel:
     three methods and the six job-runner owner hooks, with six MCPJobRunner
     methods, all translated from the .c sources and run on fake engine objects.
     Only the engine (player, camera, game) and PostResult are fakes; the message
-    classes carry exactly the members MCPMessages.c declares. hook_calls logs
+    classes carry exactly the members MCPMessages.c declares, each starting at
+    the value Enforce gives it at construction (_message_class). hook_calls logs
     every hook the runner calls, in order.
 
     On each tick the runner calls MCP_ProcessJob for each job and MCP_IsJobReady
@@ -409,11 +615,14 @@ class _ClientModel:
     ends before the settle (test_the_reply_waits_for_the_settle_and_e3_is_caught,
     test_third_then_first_are_read_back_after_the_settle) and in the timeout test.
     A dispatched view job never reaches MCP_PostJobFailure or MCP_PostJobTimeout:
-    nothing sets its job.error, and the runner checks completion before the
-    deadline, which is 5 s past the settle. Only the two tests that build such a
-    job by hand and tick it through the runner run those two hooks:
-    test_a_job_error_ends_through_the_failure_hook_and_h1_is_caught and
-    test_a_deadline_before_the_settle_ends_through_the_timeout_hook_and_h2_is_caught."""
+    nothing in the sources sets its job.error, and the runner checks completion
+    before the deadline, which is 5 s past the settle. On the real sources only
+    the two tests that build such a job by hand and tick it through the runner
+    run those two hooks: test_a_job_error_ends_through_the_failure_hook_and_h1_is_caught
+    and test_a_deadline_before_the_settle_ends_through_the_timeout_hook_and_h2_is_caught.
+    test_n5_n7_a_job_error_set_at_construction_ends_the_job_through_the_failure_hook
+    reaches MCP_PostJobFailure too, with the error an MCPJob initializer (N5) or
+    constructor (N7) sets."""
 
     def __init__(self, client: str | None = None, runner: str | None = None, messages: str | None = None) -> None:
         client = _source(CLIENT_PATH) if client is None else client
@@ -862,11 +1071,11 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         model.tick(0.2)
         return model.replies(), model.player.set_calls
 
-    def _read_back(self, camera: str | None, client: str | None = None):
-        """Third requested while the engine picks `camera`, whatever the flag."""
+    def _read_back(self, camera: str | None, client: str | None = None, view: str = "third"):
+        """`view` requested while the engine picks `camera`, whatever the flag."""
         model = _ClientModel(client)
         model.player.camera = camera
-        model.dispatch("third", 7)
+        model.dispatch(view, 7)
         model.tick(0.2)
         return model.replies()
 
@@ -971,20 +1180,31 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         mutant = self._not_kept(_mutate(_source(CLIENT_PATH), *E4_MISMATCH_OK))
         self.assertEqual(mutant, ([(7, True, "view_not_applied", "first", "DayZPlayerCamera1stPerson")], [True]))
 
-    def test_camera_class_is_the_cameras_own_whatever_the_flag_and_n2_is_caught(self) -> None:
-        # With the flag third the engine can still pick a first-person camera
-        # (ADS), a vehicle's or a mod's: camera_class is the camera's own class.
-        cameras = ("DayZPlayerCamera1stPerson", "DayZPlayerCamera3rdPersonVehicle", "LF_Camera3rdPerson")
-        for camera in cameras:
-            with self.subTest(camera=camera):
-                self.assertEqual(self._read_back(camera), [(7, True, "", "third", camera)])
-        # N2 deduces the class from person_view instead of reading it.
-        mutant = _mutate(_source(CLIENT_PATH), *N2_CLASS_FROM_FLAG)
-        for camera in cameras:
-            with self.subTest(camera=camera, mutant="N2"):
-                self.assertEqual(
-                    self._read_back(camera, mutant), [(7, True, "", "third", "DayZPlayerCamera3rdPersonErc")]
-                )
+    def test_camera_class_is_the_cameras_own_whatever_the_flag_and_n2_n6_are_caught(self) -> None:
+        # Whatever the flag, the engine can pick another camera than the one it
+        # names on foot: with third a first-person one (ADS), a vehicle's or a
+        # mod's; with first a vehicle's, a mod's or a third-person one. Each set
+        # independently of the flag, camera_class is the camera's own class.
+        cameras = {
+            "third": ("DayZPlayerCamera1stPerson", "DayZPlayerCamera3rdPersonVehicle", "LF_Camera3rdPerson"),
+            "first": ("DayZPlayerCamera1stPersonVehicle", "LF_Camera1stPerson", "DayZPlayerCamera3rdPersonErc"),
+        }
+        for view, classes in cameras.items():
+            for camera in classes:
+                with self.subTest(view=view, camera=camera):
+                    self.assertEqual(self._read_back(camera, view=view), [(7, True, "", view, camera)])
+        # N2 deduces the class from person_view instead of reading it; N6 makes
+        # it up only when the flag is first.
+        n2 = _mutate(_source(CLIENT_PATH), *N2_CLASS_FROM_FLAG)
+        n6 = _mutate(_source(CLIENT_PATH), *N6_CLASS_FROM_FIRST)
+        for name, mutant, view, made_up in (
+            ("N2", n2, "third", "DayZPlayerCamera3rdPersonErc"),
+            ("N2", n2, "first", "DayZPlayerCamera1stPerson"),
+            ("N6", n6, "first", "DayZPlayerCamera1stPerson"),
+        ):
+            for camera in cameras[view]:
+                with self.subTest(view=view, camera=camera, mutant=name):
+                    self.assertEqual(self._read_back(camera, mutant, view), [(7, True, "", view, made_up)])
 
     def test_a_job_error_ends_through_the_failure_hook_and_h1_is_caught(self) -> None:
         # Nothing sets job.error on a dispatched view job, so this one is built
@@ -1050,7 +1270,9 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
 
 
 class PlayerViewSetMessageMembersTest(unittest.TestCase):
-    """Member names are unique per message class, whatever their type (M2)."""
+    """The message classes as the model reads and builds them: one declarator per
+    member statement (N3), each member name once whatever its type (M2, N1), and
+    each member at the value Enforce gives it at construction (N5, N7)."""
 
     def _twice(self, messages: str) -> dict[str, list[str]]:
         found: dict[str, list[str]] = {}
@@ -1077,18 +1299,98 @@ class PlayerViewSetMessageMembersTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, r"MCPArgs declares \['view'\] more than once"):
             _ClientModel(messages=mutant)
 
-    def test_n1_an_initialized_second_view_and_an_unread_form_are_caught(self) -> None:
+    def test_n1_an_initialized_second_view_is_caught(self) -> None:
         mutant = _mutate(_source(MESSAGES_PATH), *N1_INITIALIZED_VIEW)
         self.assertIn(("int", "view"), _message_members(mutant, "MCPArgs"))
         self.assertEqual(self._twice(mutant), {"MCPArgs": ["view"]})
         with self.assertRaisesRegex(AssertionError, r"MCPArgs declares \['view'\] more than once"):
             _ClientModel(messages=mutant)
-        # A form the parser does not read fails instead of being skipped.
-        unread = _mutate(_source(MESSAGES_PATH), *N1_UNKNOWN_FORM)
-        with self.assertRaisesRegex(AssertionError, r"MCPArgs: unrecognised member statement 'int view, spare'"):
-            _message_members(unread, "MCPArgs")
-        with self.assertRaisesRegex(AssertionError, r"unrecognised member statement"):
-            _ClientModel(messages=unread)
+
+    def test_n3_a_statement_with_two_declarators_fails_initialized_or_not(self) -> None:
+        # A form the parser does not read fails instead of being skipped: N3's
+        # second declarator, `view`, would otherwise go uncounted.
+        for mutant, statement in (
+            (TWO_DECLARATORS, "int view, spare"),
+            (N3_SECOND_DECLARATOR, "int review_spare = 0, view = 0"),
+        ):
+            with self.subTest(statement=statement):
+                messages = _mutate(_source(MESSAGES_PATH), *mutant)
+                unread = re.escape(f"MCPArgs: unrecognised member statement {statement!r}")
+                with self.assertRaisesRegex(AssertionError, unread):
+                    _message_members(messages, "MCPArgs")
+                with self.assertRaisesRegex(AssertionError, unread):
+                    _ClientModel(messages=messages)
+
+    def test_a_class_body_whose_braces_do_not_pair_fails(self) -> None:
+        # A brace inside a string literal can throw the class extraction off;
+        # the statement walk then fails instead of dropping what it cannot place.
+        with self.assertRaisesRegex(AssertionError, "closes no block"):
+            _class_statements("\tint a;\n};\nclass MCPOther\n{\n\tint b;\n")
+        with self.assertRaisesRegex(AssertionError, re.escape("'void MCPArgs()' is not closed")):
+            _class_statements("\tvoid MCPArgs()\n\t{\n\t\tlimit = 64;\n")
+
+    def test_mcpargs_starts_at_its_constructor_values(self) -> None:
+        build = _message_class(_source(MESSAGES_PATH), "MCPArgs")
+        args = build()
+        self.assertEqual((args.component, args.limit, args.time_multiplier), (-1, 64, FLT_MAX))
+        self.assertEqual(args.view.text, "")
+        self.assertIsInstance(args.pos, _EnforceContainer)
+        self.assertEqual((args.pos.type_name, args.pos.items), ("array<float>", []))
+        # A fresh container each time; an array the constructor leaves alone stays null.
+        self.assertIsNot(build().pos, args.pos)
+        self.assertIsNone(args.cursor_pos)
+
+    def test_n5_n7_a_job_error_set_at_construction_ends_the_job_through_the_failure_hook(self) -> None:
+        def run(messages: str | None) -> tuple[list[tuple[int, bool, str, str, str]], list[str]]:
+            model = _ClientModel(messages=messages)
+            model.dispatch("third", 7)
+            model.tick(0.2)
+            return model.replies(), model.hook_calls
+
+        succeeded = (
+            [(7, True, "", "third", "DayZPlayerCamera3rdPersonErc")],
+            ["MCP_ProcessJob", "MCP_PostJobSuccess", "MCP_ClearJobRefs"],
+        )
+        self.assertEqual(run(None), succeeded)
+        # N5 initializes MCPJob.error and N7 sets it in an MCPJob constructor:
+        # with the value Enforce would give it, the dispatched job fails.
+        failed = (
+            [(7, False, "review_error", "", "")],
+            ["MCP_ProcessJob", "MCP_PostJobFailure", "MCP_ClearJobRefs"],
+        )
+        for name, mutant in (("N5", N5_JOB_ERROR_INITIALIZED), ("N7", N7_JOB_ERROR_CONSTRUCTED)):
+            with self.subTest(mutant=name):
+                self.assertEqual(run(_mutate(_source(MESSAGES_PATH), *mutant)), failed)
+
+    def test_what_the_model_cannot_evaluate_fails(self) -> None:
+        messages = _source(MESSAGES_PATH)
+        constructor = "void MCPArgs()"
+        for case, mutant, message in (
+            ("a call", CALL_INITIALIZER, "MCPJob: the model cannot evaluate 'int x = Foo()'"),
+            ("N4", N4_UNREAD_INITIALIZER, "MCPJob: the model cannot evaluate 'int x = @@@'"),
+            (
+                "a constructor call",
+                (constructor, "\t\tlimit = 64;\n", "\t\tlimit = 64;\n\t\tPrint(limit);\n"),
+                "MCPArgs: the model cannot evaluate 'Print(limit)'",
+            ),
+            (
+                "not a member",
+                (constructor, "\t\tlimit = 64;\n", "\t\tlimit = 64;\n\t\tlimits = 64;\n"),
+                "MCPArgs: 'limits = 64' assigns limits, which is not a member",
+            ),
+            (
+                "a float for an int",
+                (constructor, "\t\tlimit = 64;\n", "\t\tlimit = 64.5;\n"),
+                "MCPArgs: the model cannot evaluate 'limit = 64.5'",
+            ),
+        ):
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(AssertionError, re.escape(message)):
+                    _ClientModel(messages=_mutate(messages, *mutant))
+        based = messages.replace("class MCPJob\n{", "class MCPJob : Managed\n{")
+        self.assertEqual(based.count("class MCPJob : Managed\n{"), 1)
+        with self.assertRaisesRegex(AssertionError, "MCPJob: the model cannot construct a class with a base"):
+            _ClientModel(messages=based)
 
 
 class PlayerViewSetPayloadTest(unittest.TestCase):

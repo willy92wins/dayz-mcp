@@ -6739,8 +6739,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// :744-756 in 1.29), which flips the flag back to undo the view key. The flag
 	// is not networked, so the server's copy of the player keeps its own. The
 	// input system is not touched: the view key still toggles the flag
-	// (HandleView). CameraHandler reads it every frame (dayzplayerimplement.c:2845
-	// in 1.30, :2811 in 1.29), so the reply waits one fixed settle
+	// (HandleView). CameraHandler (dayzplayerimplement.c:2845 in 1.30, :2811 in
+	// 1.29) reads the flag only when its optics and iron-sights branches have not
+	// returned first (1.30: returns at :2860 and :2864, flag read at :2872; 1.29:
+	// :2826, :2830, read at :2838), so with optics or sights up the flag does not
+	// pick the camera. The reply still waits one fixed settle
 	// (ProcessPlayerViewSetJob) and reads once. Dispatch answers
 	// client_not_in_game before this when GetPlayer() is null, so no_player here
 	// is a local player that is not a PlayerBase.
@@ -6815,11 +6818,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// the class of the camera the engine picked: DayZPlayer.GetCurrentCamera
 	// (dayzplayer.c:1234 in 1.30, :1216 in 1.29), not the static
 	// Camera.GetCurrentCamera of the SUB_BRZ crash. A view the engine did not
-	// keep, as when the server disables third person (HandleView sets the flag
-	// false every frame, dayzplayerimplement.c:2043-2046 in 1.30, :2026-2028 in
-	// 1.29, and in 1.30 CameraHandler does too on foot, :2918-2919), is
-	// view_not_applied with both fields filled. The view was already set when
-	// no_player (the player is gone) or script_camera answers here.
+	// keep is view_not_applied with both fields filled, as when the server
+	// disables third person: while it is disabled, HandleView resets the flag,
+	// past its dead-player guard (1.30: guard :2020, return :2026, reset :2045;
+	// 1.29: :2004, :2010, :2028), and in 1.30 CameraHandler does too on foot
+	// (:2918-2919). The view was already set when no_player (the player is
+	// gone) or script_camera answers here.
 	protected void PostPlayerViewSetJob(MCPJob job)
 	{
 		MCPResult result;
