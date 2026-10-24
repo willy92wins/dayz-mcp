@@ -471,7 +471,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press," + "player_look_at,player_look_at_release,player_move,player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press," + "player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1235,6 +1235,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "player_look_at_release")
 		{
 			postNow = DispatchPlayerLookAtRelease(command, result);
+		}
+		else if (command.cmd == "player_view_set")
+		{
+			postNow = DispatchPlayerViewSet(command, result);
 		}
 		else if (command.cmd == "action_hold")
 		{
@@ -4914,6 +4918,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessPlayerLookAtJob(job);
 		}
+		else if (job.kind == "player_view_set")
+		{
+			return ProcessPlayerViewSetJob(job);
+		}
 		else if (job.kind == "action_hold")
 		{
 			MCPHoldControl.Maintain();
@@ -5887,6 +5895,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostPlayerLookAtJob(job);
 		}
 
+		if (job.kind == "player_view_set")
+		{
+			PostPlayerViewSetJob(job);
+		}
+
 		if (job.kind == "action_hold")
 		{
 			PostActionHoldJob(job);
@@ -6715,6 +6728,147 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = job.error;
+		}
+		PostResult(result);
+	}
+
+	// player_view_set (854c): first or third person for the local player through
+	// DayZPlayerImplement.SetIsInThirdPerson (dayzplayerimplement.c:307-310 in
+	// 1.30, :304-307 in 1.29). Vanilla's only call is in
+	// PluginDeveloper.SpawnFromClipboard (plugindeveloper.c:793-805 in 1.30,
+	// :744-756 in 1.29), which flips the flag back to undo the view key. The flag
+	// is not networked, so the server's copy of the player keeps its own. The
+	// input system is not touched: the view key still toggles the flag
+	// (HandleView). CameraHandler (dayzplayerimplement.c:2845 in 1.30, :2811 in
+	// 1.29) reads the flag only when its optics and iron-sights branches have not
+	// returned first (1.30: returns at :2860 and :2864, flag read at :2872; 1.29:
+	// :2826, :2830, read at :2838), so with optics or sights up the flag does not
+	// pick the camera. The reply still waits one fixed settle
+	// (ProcessPlayerViewSetJob) and reads once. Dispatch answers
+	// client_not_in_game before this when GetPlayer() is null, so no_player here
+	// is a local player that is not a PlayerBase.
+	protected bool DispatchPlayerViewSet(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		bool third;
+		MCPJob job;
+		if (!command.args || (command.args.view != "first" && command.args.view != "third"))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "no_player";
+			return true;
+		}
+		// Under camera_set's camera the player camera is not what renders;
+		// refused with the code player_look_at uses for it.
+		if (m_ActiveCam || m_CameraHandoffPending)
+		{
+			result.ok = false;
+			result.error = "script_camera";
+			return true;
+		}
+		// Exclusive client jobs only: HasExclusiveJob leaves out ui_dialog,
+		// weapon_action, input_trigger and player_move.
+		if (HasExclusiveJob())
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+		third = command.args.view == "third";
+		player.SetIsInThirdPerson(third);
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "player_view_set";
+		job.args = command.args;
+		job.sample_start_s = m_JobRunner.GetElapsedS();
+		// camera_set's default settle: three steps of CAMERA_SETTLE_STEP_S.
+		job.sample_s_target = CAMERA_SETTLE_STEP_S * CAMERA_DEFAULT_SETTLE_TICKS;
+		job.deadline_s = job.sample_start_s + job.sample_s_target + CAMERA_JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	// Done once the time the runner accumulates from its timeslices reaches the
+	// settle: not a wall-clock bound, and not proof the camera finished moving.
+	// The job counts as exclusive (HasExclusiveJob), so camera_set answers busy
+	// until the reply is posted.
+	protected bool ProcessPlayerViewSetJob(MCPJob job)
+	{
+		float elapsed;
+		if (!job)
+		{
+			return false;
+		}
+		elapsed = m_JobRunner.GetElapsedS() - job.sample_start_s;
+		return elapsed >= job.sample_s_target;
+	}
+
+	// person_view is the flag CameraHandler reads (IsInThirdPerson,
+	// dayzplayerimplement.c:302-305 in 1.30, :299-302 in 1.29). camera_class is
+	// the class of the camera the engine picked: DayZPlayer.GetCurrentCamera
+	// (dayzplayer.c:1234 in 1.30, :1216 in 1.29), not the static
+	// Camera.GetCurrentCamera of the SUB_BRZ crash. A view the engine did not
+	// keep is view_not_applied with both fields filled, as when the server
+	// disables third person: while it is disabled, HandleView resets the flag,
+	// past its dead-player guard (1.30: guard :2020, return :2026, reset :2045;
+	// 1.29: :2004, :2010, :2028), and in 1.30 CameraHandler does too on foot
+	// (:2918-2919). The view was already set when no_player (the player is
+	// gone) or script_camera answers here.
+	protected void PostPlayerViewSetJob(MCPJob job)
+	{
+		MCPResult result;
+		PlayerBase player;
+		DayZPlayerCamera playerCamera;
+		if (!job)
+		{
+			return;
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "no_player";
+			PostResult(result);
+			return;
+		}
+		// Second guard: camera_set is refused busy while this job runs.
+		if (m_ActiveCam || m_CameraHandoffPending)
+		{
+			result.ok = false;
+			result.error = "script_camera";
+			PostResult(result);
+			return;
+		}
+		result.person_view = "first";
+		if (player.IsInThirdPerson())
+		{
+			result.person_view = "third";
+		}
+		playerCamera = player.GetCurrentCamera();
+		if (playerCamera)
+		{
+			result.camera_class = playerCamera.ClassName();
+		}
+		result.ok = true;
+		if (!job.args || result.person_view != job.args.view)
+		{
+			result.ok = false;
+			result.error = "view_not_applied";
 		}
 		PostResult(result);
 	}

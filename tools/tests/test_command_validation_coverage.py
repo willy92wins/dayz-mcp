@@ -209,6 +209,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"pos": [0.0, 0.0, 0.0], "timeout_s": 0.1}
     if cmd == "player_look_at_release":
         return {"command_id": 1}
+    if cmd == "player_view_set":
+        return {"view": "third"}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
     if cmd == "exec_enforce":
