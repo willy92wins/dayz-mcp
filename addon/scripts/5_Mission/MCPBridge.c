@@ -1834,7 +1834,10 @@ class MCPBridge : Managed
 
 	// bot_start (inbox 120f). Wire shape is checked before any dummy init.
 	// On a build without the 1.30 bot macros, Available() is false and the
-	// answer is bot_unavailable with no mutation.
+	// answer is bot_unavailable with no mutation. A survivor that
+	// survivor_drive walks is drive_busy, also with no mutation (c801): the
+	// drive's Tick would keep re-applying its overrides under the bot, so the
+	// drive is released first.
 	protected bool DispatchBotStart(MCPCommand command, MCPResult result)
 	{
 		string botError;
@@ -1850,6 +1853,12 @@ class MCPBridge : Managed
 		{
 			result.ok = false;
 			result.error = "bot_unavailable";
+			return true;
+		}
+		if (MCPSurvivorDrive.IsDriven(command.args.object_id))
+		{
+			result.ok = false;
+			result.error = "drive_busy";
 			return true;
 		}
 		botStarted = false;
@@ -2278,6 +2287,7 @@ class MCPBridge : Managed
 	// anything but a PlayerBase, refused_player_controlled for one with a
 	// PlayerIdentity, player_dead, bot_busy while bot_start runs on it, and
 	// no_input_controller. pos_real is the survivor's position read back.
+	// DispatchBotStart refuses a driven survivor the same way (drive_busy).
 	protected bool DispatchSurvivorDrive(MCPCommand command, MCPResult result)
 	{
 		int objectId;

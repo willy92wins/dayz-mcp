@@ -6762,7 +6762,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// SendEmoteRequestSync makes (:899), is emote_rejected; end with nothing
 	// playing is no_emote_playing. The job then watches IsEmotePlaying() for
 	// wait_s (ProcessActorEmoteJob). An emote that is already playing is
-	// refused because the watch could not tell it from the new one.
+	// refused because the watch could not tell it from the new one. So is any
+	// actor_emote, end included, while another one's job still watches: that
+	// emote may not read as playing yet, and two jobs would watch the same
+	// IsEmotePlaying().
 	protected bool DispatchActorEmote(MCPCommand command, MCPResult result)
 	{
 		PlayerBase player;
@@ -6790,6 +6793,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "bad_args";
+			return true;
+		}
+		if (m_JobRunner.CountOfKind("actor_emote") > 0)
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
 			return true;
 		}
 		player = PlayerBase.Cast(GetGame().GetPlayer());

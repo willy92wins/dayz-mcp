@@ -153,6 +153,20 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(code, self.tool.description)
 
+    def test_both_descriptions_say_a_driven_survivor_refuses_bot_start(self) -> None:
+        self.assertIn(
+            "While driven, the survivor refuses bot_start the same way (drive_busy) until mode='release'.",
+            self.tool.description,
+        )
+        bot_start = self.app._tool_manager.get_tool("bot_start")
+        self.assertIsNotNone(bot_start)
+        for part in (
+            "A survivor that survivor_drive walks is drive_busy and nothing changes: release "
+            "the drive first with survivor_drive(mode='release').",
+            "Errors: bad_args, bot_unavailable, drive_busy, object_not_found,",
+        ):
+            self.assertIn(part, bot_start.description)
+
     async def test_each_gait_and_release_reach_the_server_as_the_ingress_takes_them(self) -> None:
         for arguments, wire in (
             (
@@ -482,6 +496,29 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
         )
         shutdown = _method_body(self.bridge, "void Shutdown()")
         self.assertIn("MCPSurvivorDrive.ShutdownAll(this);", shutdown)
+
+    def test_bot_start_refuses_a_driven_survivor_before_it_starts(self) -> None:
+        body = _method_body(self.bridge, "protected bool DispatchBotStart(MCPCommand command, MCPResult result)")
+        guard = "if (MCPSurvivorDrive.IsDriven(command.args.object_id))"
+        _in_order(
+            self,
+            body,
+            "if (!BotStartArgsOk(command))",
+            'result.error = "bad_args";',
+            "if (!MCPBotControl.Available())",
+            'result.error = "bot_unavailable";',
+            guard,
+            'result.error = "drive_busy";',
+            "botStarted = false;",
+            "botError = MCPBotControl.Start(",
+        )
+        self.assertEqual(body.count(guard), 1)
+        self.assertEqual(body.count("MCPSurvivorDrive."), 1)
+        block = body[body.index(guard) :]
+        block = block[: block.index("}") + 1]
+        _in_order(self, block, "result.ok = false;", 'result.error = "drive_busy";', "return true;")
+        driven = _method_body(self.drive, "static bool IsDriven(int objectId)")
+        self.assertEqual(driven.strip(), "return Find(objectId) >= 0;")
 
 
 if __name__ == "__main__":

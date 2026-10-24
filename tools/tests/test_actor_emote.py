@@ -106,6 +106,11 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
             "bridge_capability_missing",
         ):
             self.assertIn(code, self.tool.description)
+        self.assertIn(
+            "emote_rejected when an emote is already playing (end it first), "
+            "when another actor_emote is still watching its own, end included",
+            self.tool.description,
+        )
 
     async def test_wire_goes_to_the_client_with_wait_s(self) -> None:
         args, _result = await self._call({"emote": "greeting"})
@@ -305,6 +310,7 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
             "emoteId = ActorEmoteId(command.args.emote);",
             "if (!isEnd && emoteId <= 0)",
             "if (!IsStrictFinite(waitS) || waitS < ACTOR_EMOTE_WAIT_MIN_S || waitS > ACTOR_EMOTE_WAIT_MAX_S)",
+            'if (m_JobRunner.CountOfKind("actor_emote") > 0)',
             "player = PlayerBase.Cast(GetGame().GetPlayer());",
             'result.error = "no_player";',
             "emotes = player.GetEmoteManager();",
@@ -319,10 +325,33 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
             "job.deadline_s = m_JobRunner.GetElapsedS() + waitS;",
             "m_JobRunner.AddJob(job);",
         )
-        self.assertEqual(body.count('result.error = "emote_rejected";'), 2)
-        self.assertEqual(body.count('result.emote_state = "rejected";'), 3)
+        self.assertEqual(body.count('result.error = "emote_rejected";'), 3)
+        self.assertEqual(body.count('result.emote_state = "rejected";'), 4)
         self.assertEqual(body.count("CreateEmoteCBFromMenu("), 1)
         self.assertNotIn("PlayEmote(", body.replace("CanPlayEmote(", ""))
+
+    def test_a_second_actor_emote_while_one_is_watched_is_rejected(self) -> None:
+        # The first emote may still be on its way (IsEmotePlaying() false), so
+        # only the job count tells; end is refused too, and nothing is sent.
+        body = _method_body(self.code, "protected bool DispatchActorEmote(MCPCommand command, MCPResult result)")
+        guard = 'if (m_JobRunner.CountOfKind("actor_emote") > 0)'
+        self.assertEqual(body.count(guard), 1)
+        block = body[body.index(guard) :]
+        block = block[: block.index("}") + 1]
+        for line in (
+            "result.ok = false;",
+            'result.error = "emote_rejected";',
+            'result.emote_state = "rejected";',
+            "return true;",
+        ):
+            self.assertIn(line, block)
+        for later in (
+            "if (isEnd)",
+            "emotes.MCP_RequestEmoteEnd()",
+            "emotes.CreateEmoteCBFromMenu(emoteId);",
+            "m_JobRunner.AddJob(job);",
+        ):
+            self.assertLess(body.index(guard), body.index(later), later)
 
     def test_the_job_watches_is_emote_playing_and_answers_once(self) -> None:
         process = _method_body(self.code, "override bool MCP_ProcessJob(MCPJob job)")

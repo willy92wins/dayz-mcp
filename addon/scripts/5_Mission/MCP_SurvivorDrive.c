@@ -10,7 +10,8 @@
 // OnObjectGone) and at bridge shutdown (ShutdownAll). A new drive on a driven
 // id replaces its heading and speed. Nothing else ends a drive: the survivor
 // keeps walking until one of those. MCPBridge.DispatchSurvivorDrive checks its
-// arguments (IsDriveSpeed) and the target before it calls Drive or Release.
+// arguments (IsDriveSpeed) and the target before it calls Drive or Release,
+// and MCPBridge.DispatchBotStart refuses a driven id (IsDriven, drive_busy).
 class MCPSurvivorDriveEntry
 {
 	int object_id;
@@ -28,6 +29,14 @@ class MCPSurvivorDrive
 	static bool IsDriveSpeed(float speed)
 	{
 		return MCPPlayerMoveControl.SpeedName(speed) != "";
+	}
+
+	// True while the id is driven. MCPBridge.DispatchBotStart refuses such an id
+	// with drive_busy, as DispatchSurvivorDrive refuses one a bot runs on with
+	// bot_busy: Tick would keep re-applying the overrides under the bot.
+	static bool IsDriven(int objectId)
+	{
+		return Find(objectId) >= 0;
 	}
 
 	// Starts the drive, or replaces the heading and speed of a driven id, and
