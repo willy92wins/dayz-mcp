@@ -73,28 +73,28 @@ def _run_start_epoch(runs: list[dict[str, Any]]) -> float | None:
 
 
 def _newest_rpt_and_script(dated: list[tuple[float, str]]) -> list[str]:
-    """Newest .rpt, newest .log and newest .adm, independent of mtime gap.
+    """Newest .rpt and newest .log, independent of mtime gap.
 
-    The admin log's stem is not assumed. A profile with no .adm contributes
-    none, which is the no-``-adminlog`` case.
+    A .adm is never chosen here. Without a launch timestamp it cannot be
+    told from a previous run that shared the profile.
     """
     newest: dict[str, tuple[float, str]] = {}
     for mtime, path in dated:
         suffix = Path(path).suffix.casefold()
-        if suffix not in {".rpt", ".log", ".adm"}:
+        if suffix not in {".rpt", ".log"}:
             continue
         current = newest.get(suffix)
         if current is None or mtime >= current[0]:
             newest[suffix] = (mtime, path)
-    return [newest[suffix][1] for suffix in (".rpt", ".log", ".adm") if suffix in newest]
+    return [newest[suffix][1] for suffix in (".rpt", ".log") if suffix in newest]
 
 
 def _current_launch_logs(profiles_dir: str, start_epoch: float | None) -> list[str]:
-    """Return RPT, script and .adm files from the current launch.
+    """Return RPT, script and, when the launch time is known, .adm files.
 
-    Without a launch timestamp, keep the newest file of each suffix, so a
-    quiet current file is not dropped. A .adm is included only when one is
-    in the directory and passes the same mtime floor as the other two.
+    Without a launch timestamp, keep the newest .rpt and the newest .log.
+    A .adm is included only when start_epoch is set and the file's mtime is
+    at or after that floor, so a leftover from another run is not read.
     """
     paths = log_tail.resolve_log_files(profiles_dir)
     dated: list[tuple[float, str]] = []

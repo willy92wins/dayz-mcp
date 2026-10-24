@@ -809,6 +809,17 @@ class MCPBridge : Managed
 				return true;
 			}
 		}
+		string foreignError = MCPInventoryMoveForeign(player, item);
+		if (foreignError == "")
+		{
+			foreignError = MCPInventoryMoveForeign(player, target);
+		}
+		if (foreignError != "")
+		{
+			result.ok = false;
+			result.error = foreignError;
+			return true;
+		}
 		if (authority == "client")
 		{
 			string reachError = MCPInventoryMoveReach(player, item, target);
@@ -819,7 +830,7 @@ class MCPBridge : Managed
 				return true;
 			}
 		}
-		string roomError = MCPInventoryMoveRoom(item, target, op, command.args.slot);
+		string roomError = MCPInventoryMoveRoom(player, item, target, op, command.args.slot);
 		if (roomError != "")
 		{
 			result.ok = false;
@@ -969,6 +980,25 @@ class MCPBridge : Managed
 		return entity;
 	}
 
+	// Worn or carried by a player who is not the selected one: never moved.
+	protected string MCPInventoryMoveForeign(PlayerBase player, EntityAI entity)
+	{
+		if (!entity)
+		{
+			return "";
+		}
+		Man root = entity.GetHierarchyRootPlayer();
+		if (!root)
+		{
+			return "";
+		}
+		if (player && root == player)
+		{
+			return "";
+		}
+		return "not_reachable";
+	}
+
 	protected bool MCPInventoryMoveNear(PlayerBase player, EntityAI entity)
 	{
 		if (!player || !entity)
@@ -1009,7 +1039,7 @@ class MCPBridge : Managed
 		return "";
 	}
 
-	protected string MCPInventoryMoveRoom(EntityAI item, EntityAI target, string op, string slotName)
+	protected string MCPInventoryMoveRoom(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName)
 	{
 		if (op == "to_cargo")
 		{
@@ -1072,6 +1102,20 @@ class MCPBridge : Managed
 				return "no_room";
 			}
 		}
+		// Same flags as PredictiveTakeEntityToInventory and ServerTakeEntityToInventory.
+		// ANY includes HANDS. The confirmation accepts that when the parent is the player.
+		if (op == "to_inventory")
+		{
+			if (!player || !player.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			InventoryLocation invLoc = new InventoryLocation;
+			if (!player.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY, invLoc))
+			{
+				return "no_room";
+			}
+		}
 		return "";
 	}
 
@@ -1081,6 +1125,11 @@ class MCPBridge : Managed
 		if (!item)
 		{
 			return 0;
+		}
+		Magazine mag = Magazine.Cast(entity);
+		if (mag)
+		{
+			return mag.GetAmmoCount();
 		}
 		return item.GetQuantity();
 	}
@@ -1305,8 +1354,13 @@ class MCPBridge : Managed
 		}
 		if (op == "to_inventory")
 		{
+			// ANY includes HANDS, so a move into this player's hands is confirmed.
 			if (locType == InventoryLocationType.HANDS)
 			{
+				if (parent == job.actor)
+				{
+					return true;
+				}
 				return false;
 			}
 			if (locType == InventoryLocationType.GROUND)

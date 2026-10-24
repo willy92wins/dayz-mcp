@@ -99,3 +99,58 @@ Warnings: 1 `ES-EMPTY-IFDEF-UNSUPPORTED-PATTERN` en `MCP_ActionCursor.c:65` y 6 
 ## LO QUE NO PUDE VERIFICAR
 
 Todo lo que necesita el juego. En concreto: que `-adminlog` cree un `.ADM` en `-profiles`; que `wait_for` case una línea AdminLog y una línea vanilla de conexión; que cada `Predictive*` , `CombineItemsClient`, `OnRightClick` y `SplitIntoStackMaxHandsClient` muevan de verdad; que `LocationSyncMoveEntity` mueva entre cajas sin jugador; que `not_reachable` y `no_room` dejen el ítem quieto; que `typename.EnumToString(InventoryLocationType, loc.GetType())` compile; que `FindFreeLocationFor` no devuelva `no_room` cuando el ítem ya está en ese cargo; el PBO y el bridge en una sesión real. El linter no compila Enforce.
+
+## Ronda 2
+
+La disputa de la ronda 1 sobre listar un `.adm` sin `start_epoch` queda cerrada: sin timestamp no entra ningún `.adm`.
+
+1. P2 daemon. `validate_command_args` llama a `_inventory_move_op_rules` (`tools/dayz_mcp/loopback.py:1902` y `:1925`). `to_cargo`, `to_attachment` y `combine` exigen `target_object_id` entero positivo. `to_attachment` exige `slot` no vacío. La tool pública ya lo hacía (`server.py` junto a `inventory_move`). Tests: `tools/tests/test_inventory_move_contract.py` (daemon y `call_tool`, aceptados y rechazados, el bridge no se espera en el rechazo) y filas nuevas en `test_validate_command_args_table.py`.
+
+2. P2 inventario ajeno. `MCPInventoryMoveForeign` (`MCPBridge.c:984`) corre en el dispatch antes del RPC (`:812`), para el ítem y el destino, en los dos authority. El cliente lo repite en `MCPInventoryMoveOwnedByOther` (`MCP_InventoryMove.c:73`) antes de la llamada predictiva (`:119`). Otro `GetHierarchyRootPlayer` es `not_reachable`. Solo Enforce: sin test de ejecución.
+
+3. P1 munición. `MCPItemQuantity` (`MCPBridge.c:1132`) usa `Magazine.GetAmmoCount()` y `GetQuantity()` en el resto. Esa función alimenta el antes/después de combine y split y la cantidad de la respuesta. No hay contraparte Python: el censo de cantidad vive en Enforce. No añadí un doble en Python.
+
+4. P1 `to_inventory` y HANDS. Decisión: no quito HANDS de los flags. `FindInventoryLocationType.ANY` sigue en el servidor (`ServerTakeEntityToInventory`), en el cliente (`PredictiveTakeEntityToInventory`) y en la prevalidación (`MCPBridge.c:1114`). La confirmación (`MCPBridge.c:1355`) acepta `HANDS` cuando el padre es el jugador del job. `GROUND` sigue sin confirmar. Documentado en la descripción de la tool (`server.py`) y en `README.md`.
+
+5. P1 `no_room` de `to_inventory`. El servidor prevalidaba cargo y attachment, no inventario. Ahora `FindFreeLocationFor` con `ANY` va antes del RPC (`MCPBridge.c:1114`) y devuelve `no_room` sin `accepted`. El RPC `MCP_RPC_INVENTORY_MOVE` es solo servidor→cliente (`rpc.Send` hacia la identidad; `OnRPC` solo en cliente). Un rechazo del cliente se imprime y no vuelve correlacionado: no hay canal de vuelta en ese RPC. No abrí uno nuevo.
+
+6. P1 `.adm` de otra run. `_newest_rpt_and_script` (`launch_logs.py:75`) ya no mira `.adm`. `_current_launch_logs` (`:113`) sin `start_epoch` devuelve solo el `.rpt` y el `.log` más nuevos. Con `start_epoch`, el `.adm` entra si su mtime pasa el suelo `start_epoch - 2`, igual que el resto, y `crash*` sigue fuera. `logs_since` usa esa función (`server.py:6076`). Tests en `test_server_adminlog.py`: sin epoch no hay `.adm` aunque sea el más nuevo; con epoch entra el de la run y no el anterior; `crash_*.adm` y `crash_*.log` fuera; el `.rpt` viejo no sustituye al actual.
+
+### Gates ronda 2
+
+Módulos tocados, 11 tests, 0.283 s, OK:
+
+```
+cmd /c 'cd /d C:\Users\guill\AppData\Local\Temp\dzmcp-c817-17fa\tools && "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m unittest tests.test_inventory_move_contract tests.test_server_adminlog tests.test_validate_command_args_table.ValidateCommandArgsTableTest.test_inventory_move tests.test_docs_truth.ProjectMapSizesDocsTest -v'
+----------------------------------------------------------------------
+Ran 11 tests in 0.283s
+
+OK
+```
+
+Suite completa:
+
+```
+cmd /c 'cd /d C:\Users\guill\AppData\Local\Temp\dzmcp-c817-17fa\tools && "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m unittest discover -s tests -t .'
+======================================================================
+FAIL: test_a_daemon_started_by_another_venv_exits_with_one_line (tests.test_fb_acf3_88c2_8575_4fdf_named_causes.DaemonPythonNotApprovedTest.test_a_daemon_started_by_another_venv_exits_with_one_line)
+AssertionError: 'c:\\users\\guill\\appdata\\local\\temp\\dzmcp-c817-17fa\\tools\\.venv-mcp\\scripts\\python.exe' not found in 'daemon: daemon_python_not_approved: ... dayz_mcp_dev\\tools\\.venv-mcp\\scripts\\python.exe ...'
+----------------------------------------------------------------------
+Ran 6363 tests in 807.044s
+
+FAILED (failures=1, skipped=46)
+```
+
+Ese fallo es el único. Es el del intérprete del árbol vivo, no de este diff.
+
+Linter (exit 1, 23 ficheros, 4 errors, 7 warnings). Los 4 errors son los de la base, mismas líneas: `MCP_ActionCursor.c` 163 y 234, `MCPDialogController.c` 39 y 40. Ningún error nuevo. Warnings: `MCP_ActionCursor.c:65` y `ES-GETTYPE-EXACT-MATCH` en `MCPBridge.c` 2189, 3575, 4268 y `MCPClientBridge.c` 3940, 4239, 5245.
+
+### DISPUTAS ronda 2
+
+- El rechazo del cliente no vuelve. El canal existente no lo permite. Queda la prevalidación del servidor.
+- `to_inventory` confirma manos del jugador seleccionado porque `ANY` las incluye. No excluí HANDS de los flags.
+
+### LO QUE NO PUDE VERIFICAR ronda 2
+
+En juego: que `GetAmmoCount` confirme un combine o un split de munición; que `FindFreeLocationFor(..., ANY)` rechace un inventario lleno antes del RPC; que el ítem de otro jugador no se mueva; que un `to_inventory` que cae en manos confirme; que un `.adm` real aparezca solo con `start_epoch`.
+

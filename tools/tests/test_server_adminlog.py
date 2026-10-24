@@ -117,12 +117,18 @@ class AdminLogDiscoveryTest(unittest.TestCase):
                 [".log", ".rpt"],
             )
             adm.write_bytes(b"AdminLog: [X] probe\n")
-            # Touch order: adm is newest.
+            # Touch order: adm is newest. Without a launch time it stays out.
             now = adm.stat().st_mtime
             os.utime(rpt, (now - 5, now - 5))
             os.utime(script, (now - 4, now - 4))
             kept = launch_logs._current_launch_logs(str(directory), None)
-            self.assertIn(str(adm), kept)
+            self.assertNotIn(str(adm), kept)
+            self.assertEqual(
+                sorted(Path(item).name for item in kept),
+                sorted((rpt.name, script.name)),
+            )
+            attributed = launch_logs._current_launch_logs(str(directory), now - 1)
+            self.assertIn(str(adm), attributed)
             resolved = log_tail.resolve_log_files(str(directory))
             self.assertIn(str(adm), resolved)
             read = log_tail.read_since(str(adm), None)
@@ -137,3 +143,29 @@ class AdminLogDiscoveryTest(unittest.TestCase):
             os.utime(old, (start - 3600.0, start - 3600.0))
             kept = launch_logs._current_launch_logs(str(directory), start)
             self.assertNotIn(str(old), kept)
+            fresh = directory / "this_run.adm"
+            fresh.write_bytes(b"new\n")
+            os.utime(fresh, (start, start))
+            rpt = directory / "current.RPT"
+            script = directory / "script_current.log"
+            crash_log = directory / "crash_current.log"
+            crash_adm = directory / "crash_current.adm"
+            for path in (rpt, script, crash_log, crash_adm):
+                path.write_bytes(b"x\n")
+                os.utime(path, (start + 1, start + 1))
+            # An older rpt must not replace the current one.
+            older_rpt = directory / "older.RPT"
+            older_rpt.write_bytes(b"old rpt\n")
+            os.utime(older_rpt, (start - 10, start - 10))
+            named = launch_logs._current_launch_logs(str(directory), start)
+            names = {Path(item).name for item in named}
+            self.assertIn(fresh.name, names)
+            self.assertIn(rpt.name, names)
+            self.assertIn(script.name, names)
+            self.assertNotIn(crash_log.name, names)
+            self.assertNotIn(crash_adm.name, names)
+            self.assertNotIn(old.name, names)
+            self.assertNotIn(older_rpt.name, names)
+            without = launch_logs._current_launch_logs(str(directory), None)
+            without_names = {Path(item).name for item in without}
+            self.assertEqual(without_names, {rpt.name, script.name})

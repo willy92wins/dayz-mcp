@@ -70,6 +70,24 @@ modded class PlayerBase
 		return true;
 	}
 
+	protected bool MCPInventoryMoveOwnedByOther(EntityAI entity)
+	{
+		if (!entity)
+		{
+			return false;
+		}
+		Man root = entity.GetHierarchyRootPlayer();
+		if (!root)
+		{
+			return false;
+		}
+		if (root == this)
+		{
+			return false;
+		}
+		return true;
+	}
+
 	protected void MCPDropInventoryMove(string reason)
 	{
 		Print("[DayZ_MCP] inventory_move dropped reason=" + reason);
@@ -94,6 +112,17 @@ modded class PlayerBase
 		if (!ScriptInputUserData.CanStoreInputUserData())
 		{
 			return "input_busy";
+		}
+		// Another player's worn or carried item is never moved. The server
+		// applies the same check before the RPC. This RPC is server-to-client
+		// only: a refusal here is printed and does not travel back.
+		if (MCPInventoryMoveOwnedByOther(item))
+		{
+			return "not_reachable";
+		}
+		if (MCPInventoryMoveOwnedByOther(target))
+		{
+			return "not_reachable";
 		}
 		ItemBase itemBase = ItemBase.Cast(item);
 		if (op == "to_cargo")
