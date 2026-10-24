@@ -50,8 +50,9 @@ def _body(source: str, signature: str) -> str:
 
 # Both 2026-09-08 RPTs map deployed BuildCameraResult:3664 to the static
 # Camera.GetCurrentCamera() (fdb6d73). DayZPlayer.GetCurrentCamera
-# (dayzplayer.c:1234) is a different native, which player_view_set (854c) reads
-# once, on the local PlayerBase. Every other GetCurrentCamera call stays out.
+# (dayzplayer.c:1234 in 1.30, :1216 in 1.29) is a different native, which
+# player_view_set (854c) reads once, on the local PlayerBase. Every other
+# GetCurrentCamera call stays out.
 VIEW_POST = "protected void PostPlayerViewSetJob(MCPJob job)"
 CAMERA_GETTER_CALL = re.compile(r"[\w.]*\bGetCurrentCamera\s*\(")
 PLAYER_CAMERA_CALL = "player.GetCurrentCamera("

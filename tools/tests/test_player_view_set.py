@@ -4,11 +4,12 @@ The client bridge sets the view with DayZPlayerImplement.SetIsInThirdPerson,
 waits camera_set's default settle and reads IsInThirdPerson and the class of
 the player's GetCurrentCamera back. These tests pin the wire contract, the
 census, the older-PBO admission, the prune and error contracts and the Enforce
-wiring. The client's Dispatch, its readiness gate, HasExclusiveJob, the verb's
-three methods, the job runner hooks and MCPJobRunner itself also run here,
-translated from the .c sources by tests/enforce_subset_helpers.py and played
-against fake engine objects. That is not a compiler and not the game: the
-final round checks both.
+wiring. PlayerViewSetEnforceRunTest also runs the Enforce: the client's
+Dispatch, IsClientInGame, HasExclusiveJob, the verb's three methods, the six
+job-runner owner hooks and six MCPJobRunner methods, translated from the .c
+sources by tests/enforce_subset_helpers.py and played against fake engine
+objects (_ClientModel says which tests reach which hook). That is not a
+compiler and not the game: the final round checks both.
 """
 from __future__ import annotations
 
@@ -61,12 +62,14 @@ SUCCESS_HOOK = "override void MCP_PostJobSuccess(MCPJob job)"
 EXCLUSIVE = "protected bool HasExclusiveJob()"
 CAMERA_SET = "protected bool DispatchCameraSet(MCPCommand command, MCPResult result)"
 IN_GAME = "protected bool IsClientInGame()"
+FAILURE_HOOK = "override void MCP_PostJobFailure(MCPJob job)"
+TIMEOUT_HOOK = "override void MCP_PostJobTimeout(MCPJob job)"
 OWNER_HOOKS = (
     "override bool MCP_ProcessJob(MCPJob job)",
     "override bool MCP_IsJobReady(MCPJob job)",
     "override void MCP_PostJobSuccess(MCPJob job)",
-    "override void MCP_PostJobFailure(MCPJob job)",
-    "override void MCP_PostJobTimeout(MCPJob job)",
+    FAILURE_HOOK,
+    TIMEOUT_HOOK,
     "override void MCP_ClearJobRefs(MCPJob job)",
 )
 RUNNER_METHODS = (
@@ -79,6 +82,11 @@ RUNNER_METHODS = (
 )
 # The job kinds HasExclusiveJob leaves out; the tool description names them.
 NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move")
+EXCLUSION_CLAUSE = (
+    "busy while an exclusive client job runs, such as camera_set or player_look_at (a "
+    + ", ".join(NON_EXCLUSIVE_KINDS[:-1])
+    + f" or {NON_EXCLUSIVE_KINDS[-1]} job does not count)."
+)
 LOCAL_CLASS_TYPES = frozenset(
     {
         "DayZPlayerCamera", "HumanCommandVehicle", "MCPCommand", "MCPJob",
@@ -207,13 +215,31 @@ E4_MISMATCH_OK = (
 )
 M2_SECOND_VIEW = ("class MCPArgs", "\tstring view;\n", "\tstring view;\n\tint view;\n")
 B2_NO_UNDERSCORE = re.compile(r"[A-Za-z0-9]{1,64}")
+# Codex r2's surviving mutants of 6650fb8, kept as red controls too.
+H1_FAILURE_OK = (FAILURE_HOOK, "\t\tresult.ok = false;\n", "\t\tresult.ok = true;\n")
+H2_TIMEOUT_OK = (TIMEOUT_HOOK, "\t\tresult.ok = false;\n", "\t\tresult.ok = true;\n")
+N1_INITIALIZED_VIEW = ("class MCPArgs", "\tstring view;\n", "\tstring view;\n\tint view = 0;\n")
+# Not one of Codex's: a declaration the parser cannot read must fail, not be skipped.
+N1_UNKNOWN_FORM = ("class MCPArgs", "\tstring view;\n", "\tstring view;\n\tint view, spare;\n")
+N2_CLASS_FROM_FLAG = (
+    POST,
+    "\t\t\tresult.camera_class = playerCamera.ClassName();\n",
+    "\t\t\tresult.camera_class = playerCamera.ClassName();\n"
+    '\t\t\tresult.camera_class = "DayZPlayerCamera1stPerson";\n'
+    '\t\t\tif (result.person_view == "third")\n'
+    "\t\t\t{\n"
+    '\t\t\t\tresult.camera_class = "DayZPlayerCamera3rdPersonErc";\n'
+    "\t\t\t}\n",
+)
+S3_COUNTS = ("does not count", "does count")
 
 _MEMBER_NAME = re.compile(r"(?<![\w.])(m_[A-Za-z0-9_]+)\b")
 _NEW_CALL = re.compile(r"\bnew\s+([A-Za-z_]\w*)\s*\(")
 _ENFORCE_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"')
-_MESSAGE_MEMBER = re.compile(
-    r"(?<![\w<>])(?P<type>(?:ref\s+)?[A-Za-z_]\w*(?:\s*<[^;{}]+>)?)\s+(?P<name>[A-Za-z_]\w*)\s*;"
+_MEMBER_STATEMENT = re.compile(
+    r"(?P<type>(?:ref\s+)?[A-Za-z_]\w*(?:\s*<[^;{}()=]+>)?)\s+(?P<name>[A-Za-z_]\w*)(?:\s*=\s*[^;{}]+)?"
 )
+_METHOD_STATEMENT = re.compile(r"[A-Za-z_]\w*(?:\s*<[^;{}()=]+>)?\s+~?[A-Za-z_]\w*\s*\([^;{}()]*\)")
 _ENFORCE_DEFAULTS: dict[str, object] = {"int": 0, "float": 0.0, "bool": False}
 
 
@@ -234,24 +260,55 @@ def _free_method(source: str, signature: str) -> str:
     return signature + "\n{" + "".join(pieces) + "}\n"
 
 
-def _top_level(class_body: str) -> str:
-    """A class body without the bodies of its methods."""
-    kept: list[str] = []
+def _class_statements(class_body: str) -> list[tuple[str, str]]:
+    """The top-level statements of a comment-free class body, in order: ("member",
+    text) for each one a `;` ends, ("method", signature) for each one a `{...}`
+    body follows, and ("trailing", text) for anything after the last of them."""
+    statements: list[tuple[str, str]] = []
+    current: list[str] = []
     depth = 0
-    for char in class_body:
+    index = 0
+    while index < len(class_body):
+        char = class_body[index]
+        if char == '"':
+            end = index + 1
+            while class_body[end] != '"':
+                end += 2 if class_body[end] == "\\" else 1
+            if depth == 0:
+                current.append(class_body[index : end + 1])
+            index = end + 1
+            continue
         if char == "{":
+            if depth == 0:
+                statements.append(("method", "".join(current)))
+                current = []
             depth += 1
         elif char == "}":
             depth -= 1
+        elif depth == 0 and char == ";":
+            statements.append(("member", "".join(current)))
+            current = []
         elif depth == 0:
-            kept.append(char)
-    return "".join(kept)
+            current.append(char)
+        index += 1
+    if "".join(current).strip():
+        statements.append(("trailing", "".join(current)))
+    return statements
 
 
 def _message_members(messages: str, name: str) -> list[tuple[str, str]]:
-    """(type, name) of each member `class name` declares, whatever its indentation."""
-    body = _top_level(_class_body(_without_comments(messages), name))
-    return [(match.group("type"), match.group("name")) for match in _MESSAGE_MEMBER.finditer(body)]
+    """(type, name) of each member `class name` declares, an initialized one
+    included. Any other top-level statement than a member declaration or a
+    method signature fails: what the parser cannot read is never skipped."""
+    members: list[tuple[str, str]] = []
+    for kind, text in _class_statements(_class_body(_without_comments(messages), name)):
+        statement = " ".join(text.split())
+        member = _MEMBER_STATEMENT.fullmatch(statement) if kind == "member" else None
+        if member is not None:
+            members.append((member.group("type"), member.group("name")))
+        elif kind != "method" or _METHOD_STATEMENT.fullmatch(statement) is None:
+            raise AssertionError(f"{name}: unrecognised {kind} statement {statement!r}")
+    return members
 
 
 def _message_class(messages: str, name: str) -> type:
@@ -337,10 +394,26 @@ class _JobMap:
 
 class _ClientModel:
     """The client bridge's Dispatch, IsClientInGame, HasExclusiveJob, this verb's
-    three methods and the six runner hooks, with MCPJobRunner's own methods,
-    translated from the .c sources and run on fake engine objects. Only the
-    engine (player, camera, game) and PostResult are fakes; the message
-    classes carry exactly the members MCPMessages.c declares."""
+    three methods and the six job-runner owner hooks, with six MCPJobRunner
+    methods, all translated from the .c sources and run on fake engine objects.
+    Only the engine (player, camera, game) and PostResult are fakes; the message
+    classes carry exactly the members MCPMessages.c declares. hook_calls logs
+    every hook the runner calls, in order.
+
+    On each tick the runner calls MCP_ProcessJob for each job and MCP_IsJobReady
+    when that answers false; a job that is done ends with MCP_PostJobSuccess, or
+    MCP_PostJobFailure when job.error is set, then MCP_ClearJobRefs, and one past
+    its deadline with MCP_PostJobTimeout then MCP_ClearJobRefs. Every test that
+    ticks a dispatched job past its settle runs MCP_ProcessJob,
+    MCP_PostJobSuccess and MCP_ClearJobRefs. MCP_IsJobReady runs where a tick
+    ends before the settle (test_the_reply_waits_for_the_settle_and_e3_is_caught,
+    test_third_then_first_are_read_back_after_the_settle) and in the timeout test.
+    A dispatched view job never reaches MCP_PostJobFailure or MCP_PostJobTimeout:
+    nothing sets its job.error, and the runner checks completion before the
+    deadline, which is 5 s past the settle. Only the two tests that build such a
+    job by hand and tick it through the runner run those two hooks:
+    test_a_job_error_ends_through_the_failure_hook_and_h1_is_caught and
+    test_a_deadline_before_the_settle_ends_through_the_timeout_hook_and_h2_is_caught."""
 
     def __init__(self, client: str | None = None, runner: str | None = None, messages: str | None = None) -> None:
         client = _source(CLIENT_PATH) if client is None else client
@@ -394,7 +467,18 @@ class _ClientModel:
 
         self.ns["DispatchPlayerViewSet"] = handled
         hooks = [signature[: signature.index("(")].split()[-1] for signature in OWNER_HOOKS]
-        self.owner = SimpleNamespace(**{name: self.ns[name] for name in hooks})
+        self.hook_calls: list[str] = []
+
+        def logged(name: str):
+            hook = self.ns[name]
+
+            def call(job: object) -> object:
+                self.hook_calls.append(name)
+                return hook(job)
+
+            return call
+
+        self.owner = SimpleNamespace(**{name: logged(name) for name in hooks})
 
     def dispatch(self, view: str | None = "third", command_id: int = 7) -> None:
         command = self.classes["MCPCommand"]()
@@ -778,6 +862,25 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         model.tick(0.2)
         return model.replies(), model.player.set_calls
 
+    def _read_back(self, camera: str | None, client: str | None = None):
+        """Third requested while the engine picks `camera`, whatever the flag."""
+        model = _ClientModel(client)
+        model.player.camera = camera
+        model.dispatch("third", 7)
+        model.tick(0.2)
+        return model.replies()
+
+    def _ended_by_hand(self, error: str, target: float, deadline: float, client: str | None = None):
+        """A view job built by hand, not by the dispatch, ticked once through the
+        runner at 1.0 s: (replies, hooks the runner called, jobs left)."""
+        model = _ClientModel(client)
+        job = model.add_job(COMMAND, job_id=70)
+        job.error = EnforceString.of(error)
+        job.sample_s_target = target
+        job.deadline_s = deadline
+        model.tick(1.0)
+        return model.replies(), model.hook_calls, model.kinds()
+
     def test_third_then_first_are_read_back_after_the_settle(self) -> None:
         model = _ClientModel()
         player = model.player
@@ -785,9 +888,13 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         self.assertEqual((model.replies(), player.set_calls, model.kinds()), ([], [True], [COMMAND]))
         model.tick(0.1)
         self.assertEqual(model.replies(), [])
+        self.assertEqual(model.hook_calls, ["MCP_ProcessJob", "MCP_IsJobReady"])
         model.tick(0.1)
         self.assertEqual(model.replies(), [(7, True, "", "third", "DayZPlayerCamera3rdPersonErc")])
         self.assertEqual(model.kinds(), [])
+        self.assertEqual(
+            model.hook_calls[2:], ["MCP_ProcessJob", "MCP_PostJobSuccess", "MCP_ClearJobRefs"]
+        )
         reply = model.posted[0]
         self.assertEqual((reply.tick_poll_sent, reply.tick_poll_callback, reply.tick_dispatch), (11, 12, 13))
         model.dispatch("first", 8)
@@ -864,6 +971,60 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         mutant = self._not_kept(_mutate(_source(CLIENT_PATH), *E4_MISMATCH_OK))
         self.assertEqual(mutant, ([(7, True, "view_not_applied", "first", "DayZPlayerCamera1stPerson")], [True]))
 
+    def test_camera_class_is_the_cameras_own_whatever_the_flag_and_n2_is_caught(self) -> None:
+        # With the flag third the engine can still pick a first-person camera
+        # (ADS), a vehicle's or a mod's: camera_class is the camera's own class.
+        cameras = ("DayZPlayerCamera1stPerson", "DayZPlayerCamera3rdPersonVehicle", "LF_Camera3rdPerson")
+        for camera in cameras:
+            with self.subTest(camera=camera):
+                self.assertEqual(self._read_back(camera), [(7, True, "", "third", camera)])
+        # N2 deduces the class from person_view instead of reading it.
+        mutant = _mutate(_source(CLIENT_PATH), *N2_CLASS_FROM_FLAG)
+        for camera in cameras:
+            with self.subTest(camera=camera, mutant="N2"):
+                self.assertEqual(
+                    self._read_back(camera, mutant), [(7, True, "", "third", "DayZPlayerCamera3rdPersonErc")]
+                )
+
+    def test_a_job_error_ends_through_the_failure_hook_and_h1_is_caught(self) -> None:
+        # Nothing sets job.error on a dispatched view job, so this one is built
+        # by hand, its settle reached, and the runner takes its failure branch
+        # to the client's generic MCP_PostJobFailure.
+        model = _ClientModel()
+        model.dispatch("third", 7)
+        ((_key, dispatched),) = model.jobs.items
+        model.tick(0.2)
+        self.assertEqual(dispatched.error.text, "")
+        self.assertEqual(model.hook_calls, ["MCP_ProcessJob", "MCP_PostJobSuccess", "MCP_ClearJobRefs"])
+        failed = (
+            [(70, False, "review_error", "", "")],
+            ["MCP_ProcessJob", "MCP_PostJobFailure", "MCP_ClearJobRefs"],
+            [],
+        )
+        self.assertEqual(self._ended_by_hand("review_error", 0.15, 600.0), failed)
+        # H1 posts the failure with ok true.
+        mutant = self._ended_by_hand("review_error", 0.15, 600.0, _mutate(_source(CLIENT_PATH), *H1_FAILURE_OK))
+        self.assertEqual(mutant[0], [(70, True, "review_error", "", "")])
+
+    def test_a_deadline_before_the_settle_ends_through_the_timeout_hook_and_h2_is_caught(self) -> None:
+        # A dispatched view job ends through the success hook even when one tick
+        # carries it past its deadline: the runner checks completion first.
+        model = _ClientModel()
+        model.dispatch("third", 7)
+        model.tick(10.0)
+        self.assertEqual(model.replies(), [(7, True, "", "third", "DayZPlayerCamera3rdPersonErc")])
+        self.assertEqual(model.hook_calls, ["MCP_ProcessJob", "MCP_PostJobSuccess", "MCP_ClearJobRefs"])
+        # So this job is built by hand with its deadline before its settle.
+        timed_out = (
+            [(70, False, "timeout", "", "")],
+            ["MCP_ProcessJob", "MCP_IsJobReady", "MCP_PostJobTimeout", "MCP_ClearJobRefs"],
+            [],
+        )
+        self.assertEqual(self._ended_by_hand("", 10.0, 0.5), timed_out)
+        # H2 posts the timeout with ok true.
+        mutant = self._ended_by_hand("", 10.0, 0.5, _mutate(_source(CLIENT_PATH), *H2_TIMEOUT_OK))
+        self.assertEqual(mutant[0], [(70, True, "timeout", "", "")])
+
     def test_a_null_camera_reads_back_an_empty_class(self) -> None:
         model = _ClientModel()
         model.player.camera = None
@@ -915,6 +1076,19 @@ class PlayerViewSetMessageMembersTest(unittest.TestCase):
         self.assertEqual(self._twice(mutant), {"MCPArgs": ["view"]})
         with self.assertRaisesRegex(AssertionError, r"MCPArgs declares \['view'\] more than once"):
             _ClientModel(messages=mutant)
+
+    def test_n1_an_initialized_second_view_and_an_unread_form_are_caught(self) -> None:
+        mutant = _mutate(_source(MESSAGES_PATH), *N1_INITIALIZED_VIEW)
+        self.assertIn(("int", "view"), _message_members(mutant, "MCPArgs"))
+        self.assertEqual(self._twice(mutant), {"MCPArgs": ["view"]})
+        with self.assertRaisesRegex(AssertionError, r"MCPArgs declares \['view'\] more than once"):
+            _ClientModel(messages=mutant)
+        # A form the parser does not read fails instead of being skipped.
+        unread = _mutate(_source(MESSAGES_PATH), *N1_UNKNOWN_FORM)
+        with self.assertRaisesRegex(AssertionError, r"MCPArgs: unrecognised member statement 'int view, spare'"):
+            _message_members(unread, "MCPArgs")
+        with self.assertRaisesRegex(AssertionError, r"unrecognised member statement"):
+            _ClientModel(messages=unread)
 
 
 class PlayerViewSetPayloadTest(unittest.TestCase):
@@ -1036,7 +1210,7 @@ class PlayerViewSetToolTest(unittest.IsolatedAsyncioTestCase):
             "client_not_in_game without a local player",
             "no_player when the local player is not a PlayerBase",
             "script_camera while camera_set's camera is mounted",
-            "busy while an exclusive client job runs",
+            EXCLUSION_CLAUSE,
             "After the settle the view is already set",
         ):
             with self.subTest(fragment=fragment):
@@ -1045,9 +1219,8 @@ class PlayerViewSetToolTest(unittest.IsolatedAsyncioTestCase):
         for code in sorted(_bridge_codes() - {"bad_args"}) + ["client_not_in_game"]:
             with self.subTest(code=code):
                 self.assertIn(code, description)
-        for kind in NON_EXCLUSIVE_KINDS:
-            with self.subTest(kind=kind):
-                self.assertIn(kind, description)
+        # S3 turns the exclusion around; the clause pinned above no longer holds.
+        self.assertNotIn(EXCLUSION_CLAUSE, description.replace(*S3_COUNTS))
         # Round 1's claims: Dispatch answers client_not_in_game without a player,
         # and four kinds of client job do not make busy.
         for claim in ("no_player without a local player", "busy while another client job"):
