@@ -3174,6 +3174,9 @@ class MCPBridge : Managed
 	// object.c:238). Without that bone, the position plus
 	// VISIBILITY_HEAD_FALLBACK_M, a standing survivor's head: a crouched or
 	// prone one is then read high.
+	// Vanilla's MiscGameplayFunctions.GetHeadBonePos uses the same bone and
+	// fallback, but its fallback assigns a float to the vector
+	// (miscgameplayfunctions.c:751), so the bridge keeps its own.
 	protected vector PlayerHeadPosition(PlayerBase player)
 	{
 		int bone = player.GetBoneIndexByName(VISIBILITY_HEAD_BONE);
