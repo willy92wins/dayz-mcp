@@ -817,14 +817,21 @@ def is_scene_id(value: object) -> bool:
     return isinstance(value, str) and _SCENE_ID_PATTERN.fullmatch(value) is not None
 
 
-# 7f5d: world_spawn_batch takes 1 to SPAWN_BATCH_ITEMS_MAX items and creates 1
-# to SPAWN_BATCH_PER_TICK_MAX of them per server tick. Mirrors the constants of
-# the same names in MCPBridge.c; a test keeps them equal.
+# 7f5d: the world_spawn_batch tool takes 1 to SPAWN_BATCH_ITEMS_MAX items and
+# sends them as commands of 1 to SPAWN_BATCH_PER_TICK_MAX items each, every one
+# created in the server tick that dispatches it. Only the per-command bound
+# reaches the wire; it mirrors SPAWN_BATCH_PER_TICK_MAX in MCPBridge.c, and a
+# test keeps the two equal.
 SPAWN_BATCH_ITEMS_MAX = 200
 SPAWN_BATCH_PER_TICK_MAX = 50
+# A batch item's rotation is an Enforce int (CreateObjectEx's RF_* flags).
+SPAWN_ROTATION_MIN = -2147483648
+SPAWN_ROTATION_MAX = 2147483647
 _SPAWN_BATCH_ITEM_REQUIRED = frozenset({"type", "pos", "flags", "rotation"})
 _SPAWN_BATCH_ITEM_OPTIONAL = frozenset({"ground", "ypr", "ypr_set"})
-_IS_SPAWN_ROTATION = _integer_in_range()
+_IS_SPAWN_ROTATION = _integer_in_range(
+    minimum=SPAWN_ROTATION_MIN, maximum=SPAWN_ROTATION_MAX
+)
 
 
 def _is_spawn_batch_item(value: object) -> bool:
@@ -856,9 +863,10 @@ def _is_spawn_batch_item(value: object) -> bool:
 
 
 def _is_spawn_batch_items(value: object) -> bool:
+    # One command's items: the tool sends a longer list as several commands.
     return (
         isinstance(value, list)
-        and 1 <= len(value) <= SPAWN_BATCH_ITEMS_MAX
+        and 1 <= len(value) <= SPAWN_BATCH_PER_TICK_MAX
         and all(_is_spawn_batch_item(item) for item in value)
     )
 
@@ -1761,15 +1769,14 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         ),
     ),
-    # 7f5d: the items the world_spawn_batch tool has checked one by one, and how
-    # many of them the bridge creates per server tick.
+    # 7f5d: one group of the items the world_spawn_batch tool has checked one by
+    # one, all created in the server tick that dispatches it.
     "world_spawn_batch": _command_schema(
         _schema_variant(
-            required=("items", "per_tick"),
+            required=("items",),
             optional=("scene_id",),
             validators={
                 "items": _is_spawn_batch_items,
-                "per_tick": _integer_in_range(minimum=1, maximum=SPAWN_BATCH_PER_TICK_MAX),
                 "scene_id": is_scene_id,
             },
         )

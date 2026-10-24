@@ -250,7 +250,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
         "scene_id",
         "type",
     ),
-    "world_spawn_batch": ("items", "per_tick", "scene_id"),
+    "world_spawn_batch": ("items", "scene_id"),
 }
 
 

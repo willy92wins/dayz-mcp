@@ -22,6 +22,8 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
+    SPAWN_ROTATION_MAX,
+    SPAWN_ROTATION_MIN,
     is_printable_input_name,
 )
 
@@ -178,9 +180,17 @@ def _spawn_batch_item_args(index: int, item: object) -> dict[str, Any]:
     if "rotation" in item and "ypr" in item:
         raise ToolError(f"bad_args: {field} takes rotation or ypr, not both")
     rotation = item.get("rotation", 0)
-    if isinstance(rotation, bool) or not isinstance(rotation, int):
+    if (
+        isinstance(rotation, bool)
+        or not isinstance(rotation, int)
+        or not SPAWN_ROTATION_MIN <= rotation <= SPAWN_ROTATION_MAX
+    ):
         raise ToolError(
-            _bad_args(f"{field}.rotation", rotation, "be an RF_* int as in world_spawn")
+            _bad_args(
+                f"{field}.rotation",
+                rotation,
+                f"be an RF_* int from {SPAWN_ROTATION_MIN} to {SPAWN_ROTATION_MAX}",
+            )
         )
     wire: dict[str, Any] = {
         "type": item_type,

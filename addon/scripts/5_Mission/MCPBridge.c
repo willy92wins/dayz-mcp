@@ -32,13 +32,16 @@ class MCPBridge : Managed
 	// 165a scene registry. scene_id is 1 to SCENE_ID_MAX_CHARS characters (loopback.py
 	// SCENE_ID_MAX_CHARS). A spawn that would take a scene past SCENE_ENTRIES_MAX
 	// entries is refused, so one scene_entities reply stays far below the daemon's
-	// 1 MiB result cap (server.py SCENE_ENTRIES_MAX).
+	// 1 MiB result cap (server.py SCENE_ENTRIES_MAX). Entries are never dropped, so
+	// a deleted object still counts and scene_clear frees no room.
 	protected const int SCENE_ID_MAX_CHARS = 64;
 	protected const int SCENE_ENTRIES_MAX = 2048;
-	// 7f5d world_spawn_batch bounds (loopback.py SPAWN_BATCH_ITEMS_MAX and
-	// SPAWN_BATCH_PER_TICK_MAX). Item object_ids count up from BATCH_OBJECT_ID_BASE,
-	// above any daemon command id, so they never take a world_spawn object_id.
-	protected const int SPAWN_BATCH_ITEMS_MAX = 200;
+	// 7f5d: one world_spawn_batch command holds 1 to SPAWN_BATCH_PER_TICK_MAX items
+	// (loopback.py SPAWN_BATCH_PER_TICK_MAX), all created in the tick that
+	// dispatches it; the tool sends a longer list as several commands. Item
+	// object_ids count up from BATCH_OBJECT_ID_BASE. A world_spawn object_id is
+	// its command id, which the daemon counts from 1 in each of its runs, so the
+	// two ranges meet only after a billion commands in one daemon run.
 	protected const int SPAWN_BATCH_PER_TICK_MAX = 50;
 	protected const int BATCH_OBJECT_ID_BASE = 1000000000;
 	// Capability census announced on every poll (caps=). Sorted ascending,
@@ -52,7 +55,7 @@ class MCPBridge : Managed
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "022d61fa7bd8c1e3";
+	protected const string SERVER_ARG_CONTRACT_HASH = "13cdad911fe3ed1b";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -805,8 +808,9 @@ class MCPBridge : Managed
 	}
 
 	// 165a: the refusal for a spawn of count objects under args.scene_id, or ""
-	// when it may go ahead. An empty scene_id is no scene. It runs before anything
-	// is created, and it is the only place the size of a scene is checked.
+	// when it may go ahead. An empty scene_id is no scene. It runs in the dispatch
+	// that creates, before anything is created, and it is the only place the size
+	// of a scene is checked: two commands cannot both pass it.
 	protected string SceneSpawnRefusal(MCPArgs args, int count)
 	{
 		array<ref MCPSceneEntry> entries;
@@ -871,16 +875,20 @@ class MCPBridge : Managed
 		entries.Insert(entry);
 	}
 
-	// 7f5d: checks the batch as a whole, then queues a job that creates per_tick
-	// items each server tick (StepSpawnBatch) and answers once, after the last.
-	// Nothing is created here, so a refusal leaves the world as it was. The tool
-	// and the daemon check the same shape first; per item, the job reports what
-	// only the game can tell (unknown_type, bad_pos, spawn_failed).
+	// 7f5d: one world_spawn_batch command, 1 to SPAWN_BATCH_PER_TICK_MAX items. The
+	// whole command is checked first (shape, ypr, scene_id and the scene cap), so
+	// a refusal creates nothing. Then every item is created in this dispatch tick,
+	// one row each in input order, and the command answers in the same tick: no
+	// job outlives it. The tool sends a longer list as several commands, each
+	// once the one before it has answered. Per item, the row reports what only
+	// the game can tell (unknown_type, bad_pos, spawn_failed).
 	protected bool DispatchWorldSpawnBatch(MCPCommand command, MCPResult result)
 	{
 		MCPArgs args = command.args;
+		MCPArgs itemArgs;
 		MCPSpawnBatchItem item;
-		MCPJob job;
+		MCPSpawnBatch batch;
+		MCPSpawnBatchRow row;
 		int count = 0;
 		int index = 0;
 
@@ -892,7 +900,7 @@ class MCPBridge : Managed
 		}
 
 		count = args.items.Count();
-		if (count < 1 || count > SPAWN_BATCH_ITEMS_MAX || args.per_tick < 1 || args.per_tick > SPAWN_BATCH_PER_TICK_MAX)
+		if (count < 1 || count > SPAWN_BATCH_PER_TICK_MAX)
 		{
 			result.ok = false;
 			result.error = "bad_args";
@@ -937,53 +945,44 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		job = new MCPJob();
-		job.id = command.id;
-		job.kind = "spawn_batch";
-		job.args = args;
-		job.spawn_batch = new MCPSpawnBatch();
-		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
-		job.tick_poll_sent = result.tick_poll_sent;
-		job.tick_poll_callback = result.tick_poll_callback;
-		job.tick_dispatch = result.tick_dispatch;
-		m_Jobs.Insert(job.id, job);
-
-		Log("job queued id=" + job.id + " kind=spawn_batch items=" + count + " per_tick=" + args.per_tick);
-		return false;
-	}
-
-	// 7f5d: creates the next per_tick items of a world_spawn_batch job, one row
-	// each, in input order. True once every item has its row. Every tick creates
-	// items, so the job cannot stall: its deadline moves with it, and the call's
-	// own budget is the tool's timeout_s.
-	protected bool StepSpawnBatch(MCPJob job)
-	{
-		MCPArgs itemArgs = new MCPArgs();
-		int total = job.args.items.Count();
-		int done = job.spawn_batch.items.Count();
-		int stop = done + job.args.per_tick;
-
-		if (stop > total)
+		batch = new MCPSpawnBatch();
+		itemArgs = new MCPArgs();
+		index = 0;
+		while (index < count)
 		{
-			stop = total;
+			row = SpawnBatchItem(args, index, itemArgs);
+			batch.items.Insert(row);
+			if (row.ok)
+			{
+				batch.created = batch.created + 1;
+			}
+			else
+			{
+				batch.failed = batch.failed + 1;
+			}
+
+			index = index + 1;
 		}
 
-		while (done < stop)
+		// ok when every item was created, partial otherwise.
+		batch.status = "ok";
+		if (batch.failed > 0)
 		{
-			job.spawn_batch.items.Insert(SpawnBatchItem(job, done, itemArgs));
-			done = done + 1;
+			batch.status = "partial";
 		}
 
-		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
-		return done >= total;
+		result.ok = true;
+		result.world_spawn_batch = batch;
+		Log("spawn batch id=" + command.id + " items=" + count + " created=" + batch.created + " failed=" + batch.failed);
+		return true;
 	}
 
 	// 7f5d: one batch item through world_spawn's own checks (ValidateSpawnArgs),
 	// then CreateObjectEx. A ground item takes the y DispatchSurfaceQuery reads.
 	// A refused item creates nothing; its row carries the error.
-	protected MCPSpawnBatchRow SpawnBatchItem(MCPJob job, int index, MCPArgs itemArgs)
+	protected MCPSpawnBatchRow SpawnBatchItem(MCPArgs args, int index, MCPArgs itemArgs)
 	{
-		MCPSpawnBatchItem item = job.args.items.Get(index);
+		MCPSpawnBatchItem item = args.items.Get(index);
 		MCPSpawnBatchRow row = new MCPSpawnBatchRow();
 		MCPSpawnValidation validation;
 		Object spawned;
@@ -1035,53 +1034,13 @@ class MCPBridge : Managed
 		row.object_id = m_NextBatchObjectId;
 		m_NextBatchObjectId = m_NextBatchObjectId + 1;
 		m_RuntimeObjects.Insert(row.object_id, spawned);
-		if (job.args.scene_id != "")
+		if (args.scene_id != "")
 		{
-			AddSceneEntry(job.args.scene_id, row.object_id, spawned);
+			AddSceneEntry(args.scene_id, row.object_id, spawned);
 		}
 
 		row.ok = true;
 		return row;
-	}
-
-	// 7f5d: the one reply of a world_spawn_batch, after its last item. status is
-	// ok when every item was created, partial otherwise.
-	protected void PostSpawnBatch(MCPJob job)
-	{
-		MCPResult result = new MCPResult();
-		MCPSpawnBatch batch = job.spawn_batch;
-		MCPSpawnBatchRow row;
-		int index = 0;
-
-		while (index < batch.items.Count())
-		{
-			row = batch.items.Get(index);
-			if (row.ok)
-			{
-				batch.created = batch.created + 1;
-			}
-			else
-			{
-				batch.failed = batch.failed + 1;
-			}
-
-			index = index + 1;
-		}
-
-		batch.status = "ok";
-		if (batch.failed > 0)
-		{
-			batch.status = "partial";
-		}
-
-		result.id = job.id;
-		result.ok = true;
-		result.world_spawn_batch = batch;
-		result.tick_poll_sent = job.tick_poll_sent;
-		result.tick_poll_callback = job.tick_poll_callback;
-		result.tick_dispatch = job.tick_dispatch;
-		Log("spawn batch done id=" + job.id + " created=" + batch.created + " failed=" + batch.failed);
-		PostResult(result);
 	}
 
 	// 165a: every object registered under scene_id, in registration order. An
@@ -1131,18 +1090,42 @@ class MCPBridge : Managed
 	}
 
 	// 5a21: deletes every object registered under scene_id that still exists, the
-	// way DispatchObjectDelete deletes one, and nothing else: each object is
-	// reached through its own entry, never by type or position, and its registry
-	// id is released only while that id still names it. Entries stay, so
+	// way DispatchObjectDelete deletes one: each object is reached through its own
+	// entry, never by type or position, and its registry id is released only while
+	// that id still names it. A delete reaches past its object: the engine deletes
+	// what the object holds with it (vanilla object.c, IsPendingDeletion: "a parent
+	// is being deleted, since the children will be deleted first", :212-215 in
+	// 1.30, :218-221 in 1.29), and deleting a vehicle ejects its crew
+	// (docs/VEHICLE_TESTING.md, OK_FORCED_DELETE). So before anything is deleted
+	// the call is refused whole with scene_shared when a live object of this scene
+	// and a live object of another scene are in one hierarchy, one carrying the
+	// other at any depth (SceneCarrier); the reply names the first pair found. An
+	// object registered under no scene follows its carrier, as with object_delete:
+	// what an object of this scene holds is deleted with it and a seated one is
+	// ejected, and an object of this scene that an unregistered one holds (a
+	// player's hands) is deleted out of it. An object of this scene that another
+	// object of this scene holds is not deleted by itself: it goes with its holder
+	// (SceneHolderIndex) and is read back like the others. A seated one is not
+	// held, so it is deleted through its own entry. Entries stay, so
 	// scene_entities reads them deleted. already_deleted counts the objects gone
 	// before this call; the job reads the others back (IsSceneClearDone).
 	protected bool DispatchSceneClear(MCPCommand command, MCPResult result)
 	{
 		array<ref MCPSceneEntry> entries;
+		array<ref MCPSceneEntry> sceneEntries;
+		array<Object> mine;
+		array<int> mineIds;
+		array<Object> others;
+		array<int> otherIds;
+		array<string> otherScenes;
+		array<Object> deleteNow;
 		MCPSceneEntry entry;
 		MCPSceneClear report;
 		MCPJob job;
+		string sceneKey;
+		int sceneIndex = 0;
 		int index = 0;
+		int found = -1;
 
 		if (!command.args || !IsValidSceneId(command.args.scene_id))
 		{
@@ -1151,15 +1134,80 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		// The live objects of every scene, split into this one and the others.
+		mine = new array<Object>();
+		mineIds = new array<int>();
+		others = new array<Object>();
+		otherIds = new array<int>();
+		otherScenes = new array<string>();
+		while (sceneIndex < m_Scenes.Count())
+		{
+			sceneKey = m_Scenes.GetKey(sceneIndex);
+			sceneEntries = m_Scenes.GetElement(sceneIndex);
+			index = 0;
+			while (index < sceneEntries.Count())
+			{
+				entry = sceneEntries.Get(index);
+				if (entry.obj)
+				{
+					if (sceneKey == command.args.scene_id)
+					{
+						mine.Insert(entry.obj);
+						mineIds.Insert(entry.object_id);
+					}
+					else
+					{
+						others.Insert(entry.obj);
+						otherIds.Insert(entry.object_id);
+						otherScenes.Insert(sceneKey);
+					}
+				}
+
+				index = index + 1;
+			}
+
+			sceneIndex = sceneIndex + 1;
+		}
+
+		// Up-walks only: an object of another scene that this scene carries, then
+		// an object of this scene that another scene carries.
+		index = 0;
+		while (index < others.Count())
+		{
+			found = SceneCarrierIndex(others.Get(index), mine);
+			if (found >= 0)
+			{
+				return RefuseSceneShared(result, mineIds.Get(found), command.args.scene_id, otherIds.Get(index), otherScenes.Get(index));
+			}
+
+			index = index + 1;
+		}
+
+		index = 0;
+		while (index < mine.Count())
+		{
+			found = SceneCarrierIndex(mine.Get(index), others);
+			if (found >= 0)
+			{
+				return RefuseSceneShared(result, otherIds.Get(found), otherScenes.Get(found), mineIds.Get(index), command.args.scene_id);
+			}
+
+			index = index + 1;
+		}
+
+		// Every choice is made before the first delete, so no count depends on
+		// how soon the engine removes what a delete takes with it.
 		report = new MCPSceneClear();
 		job = new MCPJob();
 		job.id = command.id;
 		job.kind = "scene_clear";
 		job.scene_clear = report;
 		job.scene_pending = new array<ref MCPSceneEntry>();
+		deleteNow = new array<Object>();
 		entries = m_Scenes.Get(command.args.scene_id);
 		if (entries)
 		{
+			index = 0;
 			while (index < entries.Count())
 			{
 				entry = entries.Get(index);
@@ -1175,12 +1223,23 @@ class MCPBridge : Managed
 						m_RuntimeObjects.Remove(entry.object_id);
 					}
 
-					GetGame().ObjectDelete(entry.obj);
+					if (SceneHolderIndex(entry.obj, mine) < 0)
+					{
+						deleteNow.Insert(entry.obj);
+					}
+
 					job.scene_pending.Insert(entry);
 				}
 
 				index = index + 1;
 			}
+		}
+
+		index = 0;
+		while (index < deleteNow.Count())
+		{
+			GetGame().ObjectDelete(deleteNow.Get(index));
+			index = index + 1;
 		}
 
 		if (job.scene_pending.Count() == 0)
@@ -1196,8 +1255,103 @@ class MCPBridge : Managed
 		job.tick_dispatch = result.tick_dispatch;
 		m_Jobs.Insert(job.id, job);
 
-		Log("job queued id=" + job.id + " kind=scene_clear pending=" + job.scene_pending.Count());
+		Log("job queued id=" + job.id + " kind=scene_clear pending=" + job.scene_pending.Count() + " delete=" + deleteNow.Count());
 		return false;
+	}
+
+	// 5a21: what carries obj one level up, or null. An EntityAI's inventory parent
+	// comes first: the entity it is attached to, in the cargo of or in the hands
+	// of (EntityAI.GetHierarchyParent, entityai.c:885 in 1.30, :880 in 1.29). Only
+	// an EntityAI has an inventory, so any other object, and an EntityAI in no
+	// inventory, is read through the entity tree every object is in: the entity
+	// it is a child of, a vehicle seat or what AddChild linked (IEntity.GetParent,
+	// 1_core/proto/enentity.c:571 in both). CreateObjectEx can return any Object.
+	protected Object SceneCarrier(Object obj)
+	{
+		EntityAI entity = EntityAI.Cast(obj);
+		EntityAI holder;
+
+		if (entity)
+		{
+			holder = entity.GetHierarchyParent();
+			if (holder)
+			{
+				return holder;
+			}
+		}
+
+		return Object.Cast(obj.GetParent());
+	}
+
+	// 5a21: the index in carriers of the nearest object that carries obj at any
+	// depth (SceneCarrier, one level at a time), or -1.
+	protected int SceneCarrierIndex(Object obj, array<Object> carriers)
+	{
+		Object parent = SceneCarrier(obj);
+		int found = -1;
+
+		while (parent)
+		{
+			found = carriers.Find(parent);
+			if (found >= 0)
+			{
+				return found;
+			}
+
+			parent = SceneCarrier(parent);
+		}
+
+		return -1;
+	}
+
+	// 5a21: the index in holders of the nearest object that holds obj in its
+	// inventory at any depth (EntityAI.GetHierarchyParent, one level at a time),
+	// or -1. The engine deletes what an object holds with it. A vehicle's crew is
+	// not in its inventory, and deleting the vehicle ejects it rather than
+	// deleting it (docs/VEHICLE_TESTING.md, OK_FORCED_DELETE), so a seated object
+	// is not held.
+	protected int SceneHolderIndex(Object obj, array<Object> holders)
+	{
+		EntityAI entity = EntityAI.Cast(obj);
+		EntityAI holder;
+		int found = -1;
+
+		if (!entity)
+		{
+			return -1;
+		}
+
+		holder = entity.GetHierarchyParent();
+		while (holder)
+		{
+			found = holders.Find(holder);
+			if (found >= 0)
+			{
+				return found;
+			}
+
+			holder = holder.GetHierarchyParent();
+		}
+
+		return -1;
+	}
+
+	// 5a21: refuses a scene_clear before it deletes anything: carrierId, of
+	// carrierScene, carries carriedId, of carriedScene, and one of the two scenes
+	// is not the one being cleared.
+	protected bool RefuseSceneShared(MCPResult result, int carrierId, string carrierScene, int carriedId, string carriedScene)
+	{
+		MCPSceneClear report = new MCPSceneClear();
+
+		report.carrier_id = carrierId;
+		report.carrier_scene_id = carrierScene;
+		report.carried_id = carriedId;
+		report.carried_scene_id = carriedScene;
+		result.ok = false;
+		result.error = "scene_shared";
+		result.scene_clear = report;
+		Log("scene clear refused scene_shared carrier_id=" + carrierId + " carried_id=" + carriedId);
+		return true;
 	}
 
 	// 5a21: true once every object this scene_clear deleted is gone.
@@ -4829,11 +4983,6 @@ class MCPBridge : Managed
 		{
 			return IsSeatReady(job);
 		}
-		else if (job.kind == "spawn_batch")
-		{
-			// 7f5d: each tick creates the next items; ready once the last has its row.
-			return StepSpawnBatch(job);
-		}
 		else if (job.kind == "scene_clear")
 		{
 			return IsSceneClearDone(job);
@@ -4950,12 +5099,6 @@ class MCPBridge : Managed
 		if (job.kind == "seat")
 		{
 			PostSeatSuccess(job);
-			return;
-		}
-
-		if (job.kind == "spawn_batch")
-		{
-			PostSpawnBatch(job);
 			return;
 		}
 

@@ -231,10 +231,9 @@ class MCPArgs
 	// under scene_id, and empty (what an absent key reads) is no scene.
 	// scene_entities and scene_clear name the scene they read or clear.
 	string scene_id;
-	// world_spawn_batch: its items, and how many of them one server tick creates.
-	// An absent per_tick reads 0, which the bridge refuses.
+	// world_spawn_batch: the items of one command, all created in the tick that
+	// dispatches it. The tool sends a longer list as several commands.
 	ref array<ref MCPSpawnBatchItem> items;
-	int per_tick;
 
 	void MCPArgs()
 	{
@@ -1092,13 +1091,19 @@ class MCPSceneEntity
 	}
 };
 
-// scene_clear counts (5a21). error_ids are the objects counted in errors.
+// scene_clear counts (5a21). error_ids are the objects counted in errors. On a
+// scene_shared refusal only the pair that blocked it is set: carrier_id, of
+// carrier_scene_id, carries carried_id, of carried_scene_id, at some depth.
 class MCPSceneClear
 {
 	int deleted;
 	int already_deleted;
 	int errors;
 	ref array<int> error_ids;
+	int carrier_id;
+	string carrier_scene_id;
+	int carried_id;
+	string carried_scene_id;
 
 	void MCPSceneClear()
 	{
@@ -1260,7 +1265,8 @@ class MCPResult
 	// scene_entities rows, [] for a scene nothing was registered under.
 	// Unassigned on its refusals and on other commands.
 	ref array<ref MCPSceneEntity> scene_entities;
-	// scene_clear counts. Unassigned on its refusals and on other commands.
+	// scene_clear counts, or on scene_shared the pair that blocked it.
+	// Unassigned on its other refusals and on other commands.
 	ref MCPSceneClear scene_clear;
 };
 
@@ -1302,8 +1308,6 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
-	// world_spawn_batch: the reply, one row per item created or refused so far.
-	ref MCPSpawnBatch spawn_batch;
 	// scene_clear: the counts so far and the entries whose delete is read back.
 	ref MCPSceneClear scene_clear;
 	ref array<ref MCPSceneEntry> scene_pending;

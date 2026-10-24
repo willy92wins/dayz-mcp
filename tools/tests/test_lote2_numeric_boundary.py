@@ -108,7 +108,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from 8b1c (dayz_test_foreground hold_s; run_id is a string).
         # + 4 from 165a/5a21/7f5d (world_spawn_batch per_tick/timeout_s,
         # scene_entities timeout_s, scene_clear timeout_s; scene_id is a string
-        # and items a list of objects, not in this census).
+        # and items a list, not in this census).
         # 177 before either batch, plus both additions.
         self.assertEqual(len(rows), 194)
         self.assertIn(("world_spawn_batch", "per_tick", "int"), rows)

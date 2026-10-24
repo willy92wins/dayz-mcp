@@ -212,7 +212,7 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
         anim = _method_body(source, "protected bool DispatchObjectAnim(")
         self.assertNotIn("IsDoorOpen", anim)
         self.assertNotIn("GetDoorCount", anim)
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "022d61fa7bd8c1e3"', source)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "13cdad911fe3ed1b"', source)
 
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn("class MCPDoorState", messages)
@@ -240,7 +240,7 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
         )
         self.assertEqual(result["reason"], "census_disagrees_with_registered_tools")
         self.assertEqual(result["registered_without_announced_command"], [COMMAND])
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "022d61fa7bd8c1e3")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "13cdad911fe3ed1b")
         self.assertEqual(
             server.server_arg_contract_canonical(),
             "bot_start=action,bot_ttl_s,object_id\n"
@@ -252,7 +252,7 @@ class ObjectDoorsEnforceContractTest(unittest.TestCase):
             "scene_entities=scene_id\n"
             "vehicle_prepare_fixture=mode,pos,radius,type\n"
             "world_spawn=flags,lifetime_s,lifetime_s_set,pos,rotation,scene_id,type\n"
-            "world_spawn_batch=items,per_tick,scene_id",
+            "world_spawn_batch=items,scene_id",
         )
 
 

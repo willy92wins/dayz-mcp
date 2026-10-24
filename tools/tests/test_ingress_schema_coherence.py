@@ -155,6 +155,17 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         {"items": [{"type": "Barrel_Green", "pos": _POS}] * 200, "per_tick": 50},
         "world_spawn_batch",
     ),
+    (
+        "world_spawn_batch",
+        {
+            "items": [
+                {"type": "Barrel_Green", "pos": _POS, "rotation": -2147483648},
+                {"type": "Barrel_Green", "pos": _POS, "rotation": 2147483647},
+            ],
+            "per_tick": 1,
+        },
+        "world_spawn_batch",
+    ),
     ("scene_entities", {"scene_id": "a"}, "scene_entities"),
     ("scene_clear", {"scene_id": "Z" * 64}, "scene_clear"),
     (
