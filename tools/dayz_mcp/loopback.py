@@ -97,6 +97,11 @@ SERVER_COMMANDS = {
     "hands_attach",
     "weapon_state",
     "action_cursor_ids",
+    # Server reads: frame rate and entity counts, a navmesh path, and which
+    # players could see a point. None of them writes the world.
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -1033,6 +1038,9 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "object_resolve",
     "action_cursor_ids",
     "hands_attach",
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
 # (no server arg-contract hash) at enqueue and again at delivery.
@@ -1731,6 +1739,42 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # world_time_get reads the clock and takes no argument.
     "world_time_get": _command_schema(_schema_variant()),
+    # The bounds mirror server.py and MCPBridge.c (SERVER_PERF_WINDOW_MIN_S and
+    # _MAX_S, NAV_SNAP_RADIUS_MAX, VISIBILITY_RADIUS_MAX); a test keeps the
+    # copies equal. Every key travels: the bridge reads an absent one as 0.
+    "server_perf": _command_schema(
+        _schema_variant(
+            required=("window_s",),
+            validators={
+                "window_s": _reject_numeric_errors(
+                    _real_in_range(minimum=1.0, maximum=60.0)
+                ),
+            },
+        )
+    ),
+    "nav_path_query": _command_schema(
+        _schema_variant(
+            required=("from", "to", "snap_radius"),
+            validators={
+                "from": _is_real_vector3,
+                "to": _is_real_vector3,
+                "snap_radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
+                ),
+            },
+        )
+    ),
+    "players_visibility": _command_schema(
+        _schema_variant(
+            required=("pos", "radius"),
+            validators={
+                "pos": _is_real_vector3,
+                "radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=100.0)
+                ),
+            },
+        )
+    ),
     # time_multiplier travels with time_multiplier_set true, or neither travels:
     # the bridge reads an absent key as 0 or false (fb-20260930-065425-8779).
     "world_time_set": _command_schema(

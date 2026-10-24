@@ -267,7 +267,9 @@ from dayz_mcp.world_results import (
     _is_int_clock_part,
     _normalize_applied_clock,
     _normalize_entities_cargo,
+    _nav_path_reply,
     _overflow_clock_parts,
+    _server_perf_reply,
     _world_time_reply,
 )
 from dayz_mcp.launch_logs import (
@@ -450,6 +452,18 @@ WORLD_SPAWN_FLAGS_LINE = (
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
 # <lifetime> in the dayzOffline.chernarusplus db/types.xml.
 WORLD_SPAWN_LIFETIME_MAX_S = 3888000.0
+# server_perf window_s bounds in seconds, nav_path_query's snap_radius cap and
+# players_visibility's radius cap in metres. Mirror SERVER_PERF_WINDOW_MIN_S,
+# SERVER_PERF_WINDOW_MAX_S, NAV_SNAP_RADIUS_MAX and VISIBILITY_RADIUS_MAX in
+# addon/scripts/5_Mission/MCPBridge.c and the loopback schemas; a test keeps the
+# copies equal. A server_perf call answers window_s after its job starts: the
+# tool waits at least window_s plus SERVER_PERF_SLACK_S, which covers the job's
+# JOB_TIMEOUT_S (5 s) past the window and the poll and the reply around it.
+SERVER_PERF_WINDOW_MIN_S = 1.0
+SERVER_PERF_WINDOW_MAX_S = 60.0
+SERVER_PERF_SLACK_S = 10.0
+NAV_SNAP_RADIUS_MAX_M = 50.0
+VISIBILITY_RADIUS_MAX_M = 100.0
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
     "--no-daemon-autospawn"
@@ -7634,6 +7648,156 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
+            "Measure the server's frame rate over window_s seconds "
+            f"({SERVER_PERF_WINDOW_MIN_S:g} to {SERVER_PERF_WINDOW_MAX_S:g}, "
+            "default 10) and count its entities. It changes nothing and needs "
+            "no lease. The bridge counts the frames the server runs during the "
+            "window and times them with GetTickTime; no FPS API is asked. "
+            "avg_fps is the frames over the measured seconds and min_fps the "
+            "fewest frames in any whole second of the window (a partial last "
+            "second is dropped). insufficient_samples is 1 when the window "
+            "held no whole second or fewer than 2 frames, and the answer then "
+            "carries no avg_fps and no min_fps. counts is read once, after the "
+            "window has closed, in one pass over the dynamic entities of the "
+            "whole map (SceneGetEntitiesInBox), each entity counted once in "
+            "the first class it matches: players (a PlayerBase with a player "
+            "identity), ai (any other PlayerBase, such as a spawned survivor), "
+            "infected (DayZInfected), animals (DayZAnimal), vehicles "
+            "(Transport), items (InventoryItem). Whether an "
+            "item held in an inventory, worn or attached is in that pass, and "
+            "so in items, is not checked. The call answers after the window "
+            "and holds this session's tool calls until then; the tool waits at "
+            f"least window_s + {SERVER_PERF_SLACK_S:g} s. Errors: bad_args, "
+            "timeout, world_unavailable, and bridge_capability_missing or "
+            "arg_contract_mismatch from a PBO built before this verb."
+        )
+    )
+    async def server_perf(
+        window_s: StrictFloat = 10.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        window_value = _require_range(
+            window_s,
+            SERVER_PERF_WINDOW_MIN_S,
+            SERVER_PERF_WINDOW_MAX_S,
+            _bad_args(
+                "window_s",
+                window_s,
+                f"be a finite number from {SERVER_PERF_WINDOW_MIN_S:g} to "
+                f"{SERVER_PERF_WINDOW_MAX_S:g}",
+            ),
+        )
+        timeout = max(_timeout(timeout_s), window_value + SERVER_PERF_SLACK_S)
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "server_perf", {"window_s": window_value}, "server", timeout
+            )
+        return _server_perf_reply(result)
+
+    @app.tool(
+        description=(
+            "Find the engine's navmesh path for a walking survivor between two "
+            "world points. It changes nothing and needs no lease. Public arg is "
+            "from (alias of from_pos); from and to are [x, y, z]. Each end is "
+            "first snapped to the navmesh within snap_radius metres (above 0 "
+            f"and at most {NAV_SNAP_RADIUS_MAX_M:g}, default 2) with "
+            "SampleNavmeshPosition, then FindPath runs between the snapped "
+            "ends, the whole query inside one server frame, so a long path "
+            "costs that frame. The answer is points (FindPath's own waypoints, "
+            "both ends included, each [x, y, z]), length_m (the sum of their 3D "
+            "segment lengths), from_snapped and to_snapped. The path filter "
+            "takes the walking flags (ground, doors, inside buildings) and "
+            "leaves out the disabled and swimming ones; its flag values are "
+            "not measured in game yet. A terrain without a navmesh (a custom "
+            "map that ships none) answers no_navmesh, or no_navmesh_at_from / "
+            "no_navmesh_at_to, as does an end with no navmesh within "
+            "snap_radius (a point in the sea). Errors carry only the error: "
+            "bad_args, no_navmesh, no_navmesh_at_from, no_navmesh_at_to, "
+            "no_path, and bridge_capability_missing or arg_contract_mismatch "
+            "from a PBO built before this verb."
+        )
+    )
+    async def nav_path_query(
+        from_pos: list[StrictFloat],
+        to: list[StrictFloat],
+        snap_radius: StrictFloat = 2.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        snap_error = _bad_args(
+            "snap_radius",
+            snap_radius,
+            f"be a finite number above 0 and at most {NAV_SNAP_RADIUS_MAX_M:g}",
+        )
+        args = {
+            "from": _require_vec3(from_pos, "from"),
+            "to": _require_vec3(to, "to"),
+            "snap_radius": _finite_float(snap_radius, snap_error),
+        }
+        if args["snap_radius"] <= 0.0 or args["snap_radius"] > NAV_SNAP_RADIUS_MAX_M:
+            raise ToolError(snap_error)
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "nav_path_query", args, "server", _timeout(timeout_s)
+            )
+        return _nav_path_reply(result)
+
+    @app.tool(
+        description=(
+            "Read which connected players could see a world point. It changes "
+            "nothing and needs no lease: check before editing or spawning where "
+            "nobody should see it. The answer, players_visibility, has one "
+            "entry per player with a player identity: {uid (as "
+            "query_all_players names it), distance (metres from the head to "
+            "pos), in_fov, line_of_sight, visible}. radius is the size of what "
+            "is hidden, 0 (default, "
+            f"a point) to {VISIBILITY_RADIUS_MAX_M:g} metres; for an object, "
+            "pass its size, so that the ray meeting the object itself counts "
+            "as seen; for a point on a surface, the ground included, pass a "
+            "radius above 0 too, since the ray (0.05 m in radius) can meet that "
+            "surface at or just before pos. The head is the player's Head bone, "
+            "or its position plus "
+            "1.6 m without one. The server does not know a client's exact "
+            "camera, so in_fov is an approximation, generous on purpose (a "
+            "hidden edit fails safe when it over-reports): horizontal only, "
+            "true when pos lies within 60 degrees, plus the angle radius "
+            "covers at that distance, of the heading the server reads for the "
+            "player (GetHeadingAngle, not measured in game yet), and also when "
+            "the head is within radius of pos, pos is straight above or below "
+            "it, or the heading cannot be read. line_of_sight is "
+            "scene_raycast's default ray (rvproxy, view geometry) from the "
+            "head to pos, ignoring the player's own entity (whether it also "
+            "skips what the player wears is not checked): true when nothing is "
+            "hit or the nearest hit is within radius of pos. visible is in_fov "
+            "and line_of_sight both. No player connected is ok with an empty "
+            "list. Errors: bad_args, and bridge_capability_missing or "
+            "arg_contract_mismatch from a PBO built before this verb."
+        )
+    )
+    async def players_visibility(
+        pos: list[StrictFloat],
+        radius: StrictFloat = 0.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args = {
+            "pos": _require_float_list(pos, 3, "pos"),
+            "radius": _require_range(
+                radius,
+                0.0,
+                VISIBILITY_RADIUS_MAX_M,
+                _bad_args(
+                    "radius",
+                    radius,
+                    f"be a finite number from 0 to {VISIBILITY_RADIUS_MAX_M:g}",
+                ),
+            ),
+        }
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "players_visibility", args, "server", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
             "Requires a lease (session_acquire_wait). Set server weather "
             "overcast, rain, or fog forecast values. time is the transition "
             "duration in seconds; min_duration is the minimum hold duration "
@@ -9341,6 +9505,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
+    _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 

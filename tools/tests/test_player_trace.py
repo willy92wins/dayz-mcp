@@ -583,7 +583,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "e72320ee432246c5")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1217,8 +1217,19 @@ class PlayerTraceMessagesTest(unittest.TestCase):
 
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-5:],
-            (FIELD, "direction", "action_cursor", "look_at", "cursor_ids"),
+            result_prune.PRUNABLE_FIELDS[-10:],
+            (
+                FIELD,
+                "direction",
+                "action_cursor",
+                "look_at",
+                "cursor_ids",
+                "counts",
+                "points",
+                "from_snapped",
+                "to_snapped",
+                "players_visibility",
+            ),
         )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("vehicle_trace", {"ok": 1, FIELD: {}})

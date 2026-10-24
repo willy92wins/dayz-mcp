@@ -29,18 +29,33 @@ class MCPBridge : Managed
 	// ends the pulse in OnEndServer (actioncardoorsoutside.c:109-118); 1000 ms spans
 	// the door's animPeriod of 0.5 s (config.cpp CarScript AnimationSources).
 	protected const int VEHICLE_DOOR_LIGHTS_PULSE_MS = 1000;
+	// server_perf window_s bounds in seconds, and nav_path_query's snap_radius
+	// and players_visibility's radius caps in metres. Mirrored by server.py and
+	// loopback.py; a test keeps the copies equal.
+	protected const float SERVER_PERF_WINDOW_MIN_S = 1.0;
+	protected const float SERVER_PERF_WINDOW_MAX_S = 60.0;
+	protected const float NAV_SNAP_RADIUS_MAX = 50.0;
+	protected const float VISIBILITY_RADIUS_MAX = 100.0;
+	// players_visibility: the field of view either side of the heading, in
+	// degrees; the head bone; the head height over the position used when that
+	// bone is missing; and the rvproxy radius scene_raycast runs by default
+	// (ValidateRaycastArgs).
+	protected const float VISIBILITY_HALF_FOV_DEG = 60.0;
+	protected const string VISIBILITY_HEAD_BONE = "Head";
+	protected const float VISIBILITY_HEAD_FALLBACK_M = 1.6;
+	protected const float VISIBILITY_RAY_RADIUS = 0.05;
 	// Capability census announced on every poll (caps=). Sorted ascending,
 	// comma separated; one entry per branch of Dispatch() before unknown_command.
 	// The daemon crosses this list against its registered tools; keep it in
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,nav_path_query," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport,players_visibility," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "4f90284258023d98";
+	protected const string SERVER_ARG_CONTRACT_HASH = "e72320ee432246c5";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -626,6 +641,18 @@ class MCPBridge : Managed
 		else if (command.cmd == "action_cursor_ids")
 		{
 			postNow = DispatchActionCursorIds(command, result);
+		}
+		else if (command.cmd == "server_perf")
+		{
+			postNow = DispatchServerPerf(command, result);
+		}
+		else if (command.cmd == "nav_path_query")
+		{
+			postNow = DispatchNavPathQuery(command, result);
+		}
+		else if (command.cmd == "players_visibility")
+		{
+			postNow = DispatchPlayersVisibility(command, result);
 		}
 		else if (command.cmd == "entities_query")
 		{
@@ -2938,6 +2965,315 @@ class MCPBridge : Managed
 		return true;
 	}
 
+	// server_perf (2427): the frame rate is measured, not asked of an FPS API.
+	// The job counts the server frames of the window in IsServerPerfReady, and
+	// PostServerPerfSuccess counts the entities once the window has closed.
+	protected bool DispatchServerPerf(MCPCommand command, MCPResult result)
+	{
+		MCPJob job;
+		if (!command.args || !IsFiniteFloat(command.args.window_s) || command.args.window_s < SERVER_PERF_WINDOW_MIN_S || command.args.window_s > SERVER_PERF_WINDOW_MAX_S)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "server_perf";
+		job.args = command.args;
+		job.sample_s_target = command.args.window_s;
+		job.deadline_s = m_ElapsedS + command.args.window_s + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Jobs.Insert(job.id, job);
+
+		Log("job queued id=" + job.id + " kind=server_perf window_s=" + job.sample_s_target + " deadline_s=" + job.deadline_s);
+		return false;
+	}
+
+	// nav_path_query (0131): the engine's navmesh path for a walking survivor,
+	// found inside this one server frame. Vanilla declares these AIWorld calls
+	// and never makes them (aiworld.c:98 and :122, world.c:116).
+	protected bool DispatchNavPathQuery(MCPCommand command, MCPResult result)
+	{
+		World world;
+		AIWorld aiWorld;
+		PGFilter filter;
+		vector fromPos;
+		vector toPos;
+		vector fromSnapped;
+		vector toSnapped;
+		vector waypoint;
+		TVectorArray waypoints;
+		bool found;
+		float length;
+		int i;
+
+		if (!command.args || !IsFiniteVec3(command.args.from) || !IsFiniteVec3(command.args.to))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		if (!IsFiniteFloat(command.args.snap_radius) || command.args.snap_radius <= 0.0 || command.args.snap_radius > NAV_SNAP_RADIUS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		world = GetGame().GetWorld();
+		if (world)
+		{
+			aiWorld = world.GetAIWorld();
+		}
+
+		if (!aiWorld)
+		{
+			result.ok = false;
+			result.error = "no_navmesh";
+			return true;
+		}
+
+		fromPos = Vector(command.args.from.Get(0), command.args.from.Get(1), command.args.from.Get(2));
+		toPos = Vector(command.args.to.Get(0), command.args.to.Get(1), command.args.to.Get(2));
+		filter = BuildNavWalkFilter();
+		// On false SampleNavmeshPosition leaves its output as it was
+		// (aiworld.c:112-121), so that output is never read after a false.
+		if (!aiWorld.SampleNavmeshPosition(fromPos, command.args.snap_radius, filter, fromSnapped))
+		{
+			result.ok = false;
+			result.error = "no_navmesh_at_from";
+			return true;
+		}
+
+		if (!aiWorld.SampleNavmeshPosition(toPos, command.args.snap_radius, filter, toSnapped))
+		{
+			result.ok = false;
+			result.error = "no_navmesh_at_to";
+			return true;
+		}
+
+		// The waypoints include both ends (aiworld.c:89-97).
+		waypoints = new TVectorArray();
+		found = aiWorld.FindPath(fromSnapped, toSnapped, filter, waypoints);
+		if (!found || !waypoints || waypoints.Count() == 0)
+		{
+			result.ok = false;
+			result.error = "no_path";
+			return true;
+		}
+
+		result.points = new array<float>();
+		length = 0.0;
+		i = 0;
+		while (i < waypoints.Count())
+		{
+			waypoint = waypoints.Get(i);
+			result.points.Insert(waypoint[0]);
+			result.points.Insert(waypoint[1]);
+			result.points.Insert(waypoint[2]);
+			if (i > 0)
+			{
+				length = length + vector.Distance(waypoints.Get(i - 1), waypoint);
+			}
+
+			i = i + 1;
+		}
+
+		result.length_m = length;
+		result.from_snapped = new array<float>();
+		VectorToArray(fromSnapped, result.from_snapped);
+		result.to_snapped = new array<float>();
+		VectorToArray(toSnapped, result.to_snapped);
+		result.ok = true;
+		return true;
+	}
+
+	// The filter nav_path_query walks with: the walking flags (ground, doors,
+	// inside buildings) included, the disabled and swimming ones excluded.
+	// PGPolyFlags declares no values although PGFilter takes bitmasks
+	// (aiworld.c:1-26 and :61), and vanilla never builds a PGFilter: these
+	// masks are not measured, and the final in-game round checks them.
+	protected PGFilter BuildNavWalkFilter()
+	{
+		PGFilter filter = new PGFilter();
+		int includeFlags = PGPolyFlags.WALK | PGPolyFlags.DOOR | PGPolyFlags.INSIDE;
+		int excludeFlags = PGPolyFlags.DISABLED | PGPolyFlags.SWIM | PGPolyFlags.SWIM_SEA;
+		filter.SetFlags(includeFlags, excludeFlags, 0);
+		return filter;
+	}
+
+	// players_visibility (33c5): which players could see pos. The server does
+	// not know a client's camera, so in_fov approximates it, generous on
+	// purpose: a hidden edit fails safe when it over-reports.
+	protected bool DispatchPlayersVisibility(MCPCommand command, MCPResult result)
+	{
+		vector target;
+		vector head;
+		float radius;
+		float distance;
+		PlayerBase player;
+		PlayerIdentity identity;
+		MCPPlayerVisibility row;
+		int i;
+
+		if (!command.args || !IsFiniteVec3(command.args.pos))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		radius = command.args.radius;
+		if (!IsFiniteFloat(radius) || radius < 0.0 || radius > VISIBILITY_RADIUS_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		target = Vector(command.args.pos.Get(0), command.args.pos.Get(1), command.args.pos.Get(2));
+		result.players_visibility = new array<ref MCPPlayerVisibility>();
+		m_Players.Clear();
+		GetGame().GetPlayers(m_Players);
+		i = 0;
+		while (i < m_Players.Count())
+		{
+			player = PlayerBase.Cast(m_Players.Get(i));
+			identity = null;
+			if (player)
+			{
+				identity = player.GetIdentity();
+			}
+
+			if (identity)
+			{
+				head = PlayerHeadPosition(player);
+				distance = vector.Distance(head, target);
+				row = new MCPPlayerVisibility();
+				row.uid = identity.GetPlainId();
+				row.distance = distance;
+				row.in_fov = IsInApproxFov(player, head, target, radius, distance);
+				row.line_of_sight = HasLineOfSight(player, head, target, radius);
+				row.visible = row.in_fov && row.line_of_sight;
+				result.players_visibility.Insert(row);
+			}
+
+			i = i + 1;
+		}
+
+		result.ok = true;
+		return true;
+	}
+
+	// The head bone (GetBoneIndexByName, human.c:1417; GetBonePositionWS,
+	// object.c:238). Without that bone, the position plus
+	// VISIBILITY_HEAD_FALLBACK_M, a standing survivor's head: a crouched or
+	// prone one is then read high.
+	protected vector PlayerHeadPosition(PlayerBase player)
+	{
+		int bone = player.GetBoneIndexByName(VISIBILITY_HEAD_BONE);
+		if (bone < 0)
+		{
+			return player.GetPosition() + Vector(0.0, VISIBILITY_HEAD_FALLBACK_M, 0.0);
+		}
+
+		return player.GetBonePositionWS(bone);
+	}
+
+	// Horizontal only: in view within VISIBILITY_HALF_FOV_DEG, plus the angle
+	// radius subtends at distance, of the heading GetHeadingAngle gives
+	// (human.c:27-28: the world Y angle of the camera, in radians). Compass
+	// degrees, 0 = +Z and 90 = +X, as MCP_PlayerMove.c computes them: the
+	// heading h is -h, and the bearing is Math.Atan2(dx, dz) (enmath.c:388-399).
+	// Nothing says that heading is valid on the server. Also in view when it
+	// cannot be read, when the head is within radius of pos, and when pos is
+	// straight above or below it.
+	protected bool IsInApproxFov(PlayerBase player, vector head, vector target, float radius, float distance)
+	{
+		HumanInputController hic;
+		float bearingDeg;
+		float headingDeg;
+		float offDeg;
+		float allowedDeg;
+
+		if (distance <= radius)
+		{
+			return true;
+		}
+
+		if (target[0] == head[0] && target[2] == head[2])
+		{
+			return true;
+		}
+
+		hic = player.GetInputController();
+		if (!hic)
+		{
+			return true;
+		}
+
+		bearingDeg = Math.Atan2(target[0] - head[0], target[2] - head[2]) * Math.RAD2DEG;
+		headingDeg = hic.GetHeadingAngle();
+		headingDeg = -headingDeg * Math.RAD2DEG;
+		// Both are -180..180, so one turn either way brings the difference there.
+		offDeg = bearingDeg - headingDeg;
+		if (offDeg > 180.0)
+		{
+			offDeg = offDeg - 360.0;
+		}
+
+		if (offDeg < -180.0)
+		{
+			offDeg = offDeg + 360.0;
+		}
+
+		if (offDeg < 0.0)
+		{
+			offDeg = -offDeg;
+		}
+
+		allowedDeg = VISIBILITY_HALF_FOV_DEG + Math.Atan2(radius, distance) * Math.RAD2DEG;
+		return offDeg <= allowedDeg;
+	}
+
+	// scene_raycast's default ray (rvproxy, view geometry, VISIBILITY_RAY_RADIUS)
+	// from the head to pos, ignoring the player's own entity. Clear when
+	// nothing is hit or the nearest hit is within radius of pos.
+	protected bool HasLineOfSight(PlayerBase player, vector head, vector target, float radius)
+	{
+		MCPRaycastValidation ray = new MCPRaycastValidation();
+		MCPRaycastHit hit = new MCPRaycastHit();
+		vector hitPos;
+
+		ray.from = head;
+		ray.to = target;
+		ray.radius = VISIBILITY_RAY_RADIUS;
+		ray.intersect_type = ObjIntersectView;
+		PopulateRaycastRVProxy(ray, player, hit);
+		if (!hit.hit)
+		{
+			return true;
+		}
+
+		hitPos = Vector(hit.pos.Get(0), hit.pos.Get(1), hit.pos.Get(2));
+		return vector.Distance(hitPos, target) <= radius;
+	}
+
+	protected bool IsFiniteVec3(array<float> values)
+	{
+		if (!values || values.Count() != 3)
+		{
+			return false;
+		}
+
+		return IsFiniteFloat(values.Get(0)) && IsFiniteFloat(values.Get(1)) && IsFiniteFloat(values.Get(2));
+	}
+
 	protected bool DispatchWorldWeatherSet(MCPCommand command, MCPResult result)
 	{
 		if (!ValidateWorldWeatherArgs(command.args, result))
@@ -4286,6 +4622,10 @@ class MCPBridge : Managed
 		{
 			return IsSeatReady(job);
 		}
+		else if (job.kind == "server_perf")
+		{
+			return IsServerPerfReady(job);
+		}
 
 		return false;
 	}
@@ -4356,6 +4696,47 @@ class MCPBridge : Managed
 		return false;
 	}
 
+	// One call per server frame: ProcessJobs runs from OnTick before the poll
+	// gate, so the poll rate does not thin it out. The first call starts the
+	// window at GetTickTime (game.c:914, seconds since start); each later call
+	// counts one frame, filed under the whole second of the window it ends in.
+	// The frame end that opens the window is the first of second 0, so each
+	// whole second [s, s + 1) holds the frame ends inside it. A second counts
+	// only when it ends inside the window, so a partial last second is dropped.
+	protected bool IsServerPerfReady(MCPJob job)
+	{
+		float now = GetGame().GetTickTime();
+		float elapsed;
+		int second;
+
+		if (job.phase == 0)
+		{
+			job.sample_start_s = now;
+			job.perf_second_frames = 1;
+			job.phase = 1;
+			return false;
+		}
+
+		elapsed = now - job.sample_start_s;
+		second = Math.Floor(elapsed);
+		while (job.perf_second < second && job.perf_second + 1 <= job.sample_s_target)
+		{
+			if (job.perf_whole_seconds == 0 || job.perf_second_frames < job.perf_min_frames)
+			{
+				job.perf_min_frames = job.perf_second_frames;
+			}
+
+			job.perf_whole_seconds = job.perf_whole_seconds + 1;
+			job.perf_second = job.perf_second + 1;
+			job.perf_second_frames = 0;
+		}
+
+		job.perf_frames = job.perf_frames + 1;
+		job.perf_second_frames = job.perf_second_frames + 1;
+		job.perf_measured_s = elapsed;
+		return elapsed >= job.sample_s_target;
+	}
+
 	protected bool IsVehicleFixtureReady(CarScript car)
 	{
 		if (!car)
@@ -4401,6 +4782,12 @@ class MCPBridge : Managed
 			return;
 		}
 
+		if (job.kind == "server_perf")
+		{
+			PostServerPerfSuccess(job);
+			return;
+		}
+
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = true;
@@ -4443,6 +4830,87 @@ class MCPBridge : Managed
 		result.tick_poll_callback = job.tick_poll_callback;
 		result.tick_dispatch = job.tick_dispatch;
 		PostResult(result);
+	}
+
+	// After the window. insufficient_samples when it closed no whole second
+	// or counted fewer than 2 frames; avg_fps and min_fps are then not written
+	// and the tool drops them. The counts run after the last measured frame,
+	// so their cost stays out of the window.
+	protected void PostServerPerfSuccess(MCPJob job)
+	{
+		MCPResult result = new MCPResult();
+		World world = GetGame().GetWorld();
+		float frames = job.perf_frames;
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		if (!world)
+		{
+			result.ok = false;
+			result.error = "world_unavailable";
+			PostResult(result);
+			return;
+		}
+
+		result.insufficient_samples = (job.perf_whole_seconds == 0 || job.perf_frames < 2);
+		if (!result.insufficient_samples)
+		{
+			result.avg_fps = frames / job.perf_measured_s;
+			result.min_fps = job.perf_min_frames;
+		}
+
+		result.counts = new MCPServerPerfCounts();
+		CountServerPerfEntities(world.GetWorldSize(), result.counts);
+		result.ok = true;
+		PostResult(result);
+	}
+
+	// One SceneGetEntitiesInBox pass (dayzplayerutils.c:75, QueryFlags.DYNAMIC)
+	// over the whole map, each entity counted in the first class it matches
+	// (MCPServerPerfCounts).
+	protected void CountServerPerfEntities(float worldSize, MCPServerPerfCounts counts)
+	{
+		array<EntityAI> entities = new array<EntityAI>();
+		EntityAI entity;
+		PlayerBase player;
+		int i = 0;
+
+		DayZPlayerUtils.SceneGetEntitiesInBox(Vector(0.0, -worldSize, 0.0), Vector(worldSize, worldSize, worldSize), entities, QueryFlags.DYNAMIC);
+		while (i < entities.Count())
+		{
+			entity = entities.Get(i);
+			player = PlayerBase.Cast(entity);
+			if (player)
+			{
+				if (player.GetIdentity())
+				{
+					counts.players = counts.players + 1;
+				}
+				else
+				{
+					counts.ai = counts.ai + 1;
+				}
+			}
+			else if (DayZInfected.Cast(entity))
+			{
+				counts.infected = counts.infected + 1;
+			}
+			else if (DayZAnimal.Cast(entity))
+			{
+				counts.animals = counts.animals + 1;
+			}
+			else if (Transport.Cast(entity))
+			{
+				counts.vehicles = counts.vehicles + 1;
+			}
+			else if (InventoryItem.Cast(entity))
+			{
+				counts.items = counts.items + 1;
+			}
+
+			i = i + 1;
+		}
 	}
 
 	protected void PostJobFailure(MCPJob job)

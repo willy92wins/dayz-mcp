@@ -647,7 +647,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only, and a
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "e72320ee432246c5")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1726,8 +1726,20 @@ class PlayerMovePayloadTest(unittest.TestCase):
     def test_the_reply_is_prunable_and_a_refusal_keeps_its_zero_facts(self) -> None:
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-6:],
-            (FIELD, "player_trace", "direction", "action_cursor", "look_at", "cursor_ids"),
+            result_prune.PRUNABLE_FIELDS[-11:],
+            (
+                FIELD,
+                "player_trace",
+                "direction",
+                "action_cursor",
+                "look_at",
+                "cursor_ids",
+                "counts",
+                "points",
+                "from_snapped",
+                "to_snapped",
+                "players_visibility",
+            ),
         )
         self.assertEqual(
             result_prune.PRUNABLE_FIELDS[
