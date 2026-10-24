@@ -519,8 +519,8 @@ def verify_condition(bridge: str, hold: str) -> None:
     condition_failed with empty hands, without a start (Codex review of #257,
     L2); when its Can takes the item out of the hands or puts another one
     there, the start gets the item Can was asked with (Q3, U1), for an
-    instant and a continuous action alike when Can swaps it (Codex review of
-    #259, V1)."""
+    instant and a continuous action alike (Codex reviews of #259, V1 and
+    W1)."""
     for version in VERSIONS:
         watch = Watch(hold)
         tail = dispatch(bridge, watch, version)
@@ -538,9 +538,15 @@ def verify_condition(bridge: str, hold: str) -> None:
             )
         if manager.performed != 1 or toggle.asked != [KIT, None]:
             raise AssertionError(f"{version}, empty hands: a start, or Can had another item")
-        emptying = Action(watch, hold, needs_item=True, empties_hands=True)
-        if answer(tail, manager, emptying, Target(), KIT) != "started":
-            raise AssertionError(f"{version}: an action whose Can empties the hands did not start")
+        for instant in (True, False):
+            # A continuous action stays running, so each start here has its
+            # own manager.
+            emptying = Action(watch, hold, needs_item=True, empties_hands=True, instant=instant)
+            if answer(tail, Manager(hold), emptying, Target(), KIT) != "started":
+                kind = "an instant" if instant else "a continuous"
+                raise AssertionError(
+                    f"{version}: {kind} action whose Can empties the hands did not start"
+                )
         for instant in (True, False):
             swapping = Action(watch, hold, needs_item=True, swaps_hands_for=RAG, instant=instant)
             if answer(tail, manager, swapping, Target(), KIT) != "started":
@@ -689,11 +695,29 @@ class InstantActionStartTest(unittest.TestCase):
                 f"{refused} ItemBase inHands = player.GetItemInHands(); "
                 "if (inHands != null) { heldItem = inHands; }",
             ),
-            # Codex review of #259, V1: the same, for a continuous action only.
+            # Codex reviews of #259, V1 and W2: the same, for a continuous or
+            # an instant action only.
             "the_item_read_again_when_held_by_a_continuous_action": (
                 verify_condition, BRIDGE_PATH, refused,
                 f"{refused} if (!action.IsInstant()) {{ ItemBase inHands = player.GetItemInHands(); "
                 "if (inHands != null) { heldItem = inHands; } }",
+            ),
+            "the_item_read_again_when_held_by_an_instant_action": (
+                verify_condition, BRIDGE_PATH, refused,
+                f"{refused} if (action.IsInstant()) {{ ItemBase inHands = player.GetItemInHands(); "
+                "if (inHands != null) { heldItem = inHands; } }",
+            ),
+            # Codex review of #259, W1: no item for the start when Can empties
+            # the hands, for a continuous or an instant action only.
+            "the_item_dropped_when_a_continuous_action_empties_the_hands": (
+                verify_condition, BRIDGE_PATH, refused,
+                f"{refused} if (!action.IsInstant()) {{ if (player.GetItemInHands() == null) "
+                "{ heldItem = null; } }",
+            ),
+            "the_item_dropped_when_an_instant_action_empties_the_hands": (
+                verify_condition, BRIDGE_PATH, refused,
+                f"{refused} if (action.IsInstant()) {{ if (player.GetItemInHands() == null) "
+                "{ heldItem = null; } }",
             ),
             "start_not_counted": (verify_watch, HOLD_PATH, "s_Starts++;", ""),
             "every_start_counted": (
