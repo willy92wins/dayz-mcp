@@ -459,7 +459,8 @@ def _player_move_detail(result: dict[str, Any]) -> str:
 
 # player_view_set fills person_view and camera_class before view_not_applied
 # (MCPClientBridge.c PostPlayerViewSetJob). Only first or third and a plain
-# class-name token cross; anything else is omitted, not leaked.
+# class-name token cross; anything else is omitted, not leaked. A null camera
+# reads back as camera_class "", which is omitted too, as the tool says.
 _PLAYER_VIEW_CAMERA_CLASS_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
 
 
@@ -507,7 +508,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
 
     player_view_set is the sixth: view_not_applied carries observed= with the
     person_view and camera_class it read back, so the caller sees which view
-    and camera the engine kept.
+    and camera the engine kept. An empty camera_class (a null camera) is left
+    out.
 
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and

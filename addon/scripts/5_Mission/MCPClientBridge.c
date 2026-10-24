@@ -6733,12 +6733,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	}
 
 	// player_view_set (854c): first or third person for the local player through
-	// DayZPlayerImplement.SetIsInThirdPerson (dayzplayerimplement.c:307-310),
-	// which vanilla calls only from the diag free camera. The flag is not
-	// networked, so the server's copy of the player keeps its own. The input
-	// system is not touched: the view key still toggles the flag (HandleView).
-	// CameraHandler reads it every frame (dayzplayerimplement.c:2845), so the
-	// reply waits one fixed settle (ProcessPlayerViewSetJob) and reads once.
+	// DayZPlayerImplement.SetIsInThirdPerson (dayzplayerimplement.c:307-310).
+	// Vanilla's only call is in PluginDeveloper.SpawnFromClipboard
+	// (plugindeveloper.c:793-805 in 1.30, :744-756 in 1.29), which flips the
+	// flag back to undo the view key. The flag is not networked, so the server's
+	// copy of the player keeps its own. The input system is not touched: the
+	// view key still toggles the flag (HandleView). CameraHandler reads it every
+	// frame (dayzplayerimplement.c:2845), so the reply waits one fixed settle
+	// (ProcessPlayerViewSetJob) and reads once. Dispatch answers
+	// client_not_in_game before this when GetPlayer() is null, so no_player here
+	// is a local player that is not a PlayerBase.
 	protected bool DispatchPlayerViewSet(MCPCommand command, MCPResult result)
 	{
 		PlayerBase player;
@@ -6765,6 +6769,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.error = "script_camera";
 			return true;
 		}
+		// Exclusive client jobs only: HasExclusiveJob leaves out ui_dialog,
+		// weapon_action, input_trigger and player_move.
 		if (HasExclusiveJob())
 		{
 			result.ok = false;
@@ -6788,8 +6794,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
-	// Done once the settle has passed. The job counts as exclusive
-	// (HasExclusiveJob), so camera_set answers busy until the reply is posted.
+	// Done once the time the runner accumulates from its timeslices reaches the
+	// settle: not a wall-clock bound, and not proof the camera finished moving.
+	// The job counts as exclusive (HasExclusiveJob), so camera_set answers busy
+	// until the reply is posted.
 	protected bool ProcessPlayerViewSetJob(MCPJob job)
 	{
 		float elapsed;
@@ -6806,9 +6814,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// the engine picked: DayZPlayer.GetCurrentCamera (dayzplayer.c:1234), not
 	// the static Camera.GetCurrentCamera of the SUB_BRZ crash. A view the engine
 	// did not keep, as when the server disables third person (HandleView sets
-	// the flag false every frame, dayzplayerimplement.c:2043-2046, and so does
-	// CameraHandler on foot, :2918-2919), is view_not_applied with both fields
-	// filled.
+	// the flag false every frame, dayzplayerimplement.c:2043-2046, and in 1.30
+	// CameraHandler does too on foot, :2918-2919), is view_not_applied with both
+	// fields filled. The view was already set when no_player (the player is gone)
+	// or script_camera answers here.
 	protected void PostPlayerViewSetJob(MCPJob job)
 	{
 		MCPResult result;
