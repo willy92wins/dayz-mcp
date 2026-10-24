@@ -1,11 +1,12 @@
 """camera_path_play (d026), camera_set focus (702f) and hud_set (f427).
 
 Contract, tool, admission and census checks run here. MCP_CameraPath.c and the
-play and frame methods of MCPClientBridge.c also run here, translated from the
-.c source by tests.enforce_subset_helpers (see _ExecutedCameraPath below);
-that runs their branching and arithmetic, not the engine. The other asserts on
-Enforce text are wiring only. Neither credits in-game behavior, which the PR
-lists for the final round.
+camera_path_play, camera_path_release and camera_set dispatch, the camera_set
+job and the frame method of MCPClientBridge.c also run here, translated from
+the .c source by tests.enforce_subset_helpers (see _executed_camera_path
+below); that runs their branching and arithmetic, not the engine. The other
+asserts on Enforce text are wiring only. Neither credits in-game behavior,
+which the PR lists for the final round.
 """
 from __future__ import annotations
 
@@ -23,7 +24,12 @@ from unittest.mock import AsyncMock, patch
 from dayz_mcp import camera_path, loopback, result_prune, server
 from dayz_mcp.bridge_errors import _public_enqueue_error
 from dayz_mcp.server import ServerConfig, ToolError, build_app
-from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
+from dayz_mcp.session_coordination import (
+    READ_ONLY_COMMANDS,
+    ClientIdentity,
+    SessionCoordinator,
+    command_requires_lease,
+)
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import (
     _method_body,
@@ -312,9 +318,13 @@ def _constants(source: str) -> dict[str, Any]:
     return found
 
 
-def _round_half_away(value: float) -> float:
-    """Math.Round: to the nearest whole number, a half away from 0."""
-    return math.copysign(math.floor(abs(value) + 0.5), value)
+def _round_half_away(value: float) -> "_F32":
+    """Math.Round: to the nearest whole number, a half away from 0, as a float.
+
+    Enforce's Math.Round returns a float, so what it returns is a 32-bit float
+    too: 360.0 times it then rounds as the bridge's float does.
+    """
+    return _F32(math.copysign(math.floor(abs(value) + 0.5), value))
 
 
 _PATH_STATICS = (
@@ -356,10 +366,13 @@ def _executed_camera_path(source: str) -> type:
         "FloatArray": _Array,
         **_constants(source),
     }
+    statics: dict[str, Any] = {}
     for signature in _PATH_STATICS:
         head, code = _function(source, signature)
-        translate(code, head, namespace, class_types=_PATH_LOCALS)
-    path_class = type("ExecutedCameraPath", (), {})
+        function = translate(code, head, namespace, class_types=_PATH_LOCALS)
+        statics[function.__name__] = staticmethod(function)
+    # Also on the class, for a bridge that calls MCPCameraPath.IsValidPathId.
+    path_class = type("ExecutedCameraPath", (), statics)
     head, code = _function(source, "void MCPCameraPath()", this_type="MCPCameraPath", name="Construct")
     path_class.__init__ = translate(code, head, namespace)  # type: ignore[misc]
     for signature in _PATH_METHODS:
@@ -398,16 +411,26 @@ def _enforce_args(wire: dict[str, Any]) -> SimpleNamespace:
     )
 
 
-def _report(path: object) -> dict[str, Any]:
-    """What Fill puts in the camera_path block."""
-    report = SimpleNamespace(state=None, t_s=None, duration_s=None, path_id=None)
-    path.Fill(report)  # type: ignore[attr-defined]
+def _state_block() -> SimpleNamespace:
+    """An empty MCPCameraPathState."""
+    return SimpleNamespace(state=None, t_s=None, duration_s=None, path_id=None)
+
+
+def _block(report: SimpleNamespace) -> dict[str, Any]:
+    """A filled MCPCameraPathState as the wire carries it."""
     return {
         "state": report.state.text,
         "t_s": float(report.t_s),
         "duration_s": float(report.duration_s),
         "path_id": report.path_id.text,
     }
+
+
+def _report(path: object) -> dict[str, Any]:
+    """What Fill puts in the camera_path block."""
+    report = _state_block()
+    path.Fill(report)  # type: ignore[attr-defined]
+    return _block(report)
 
 
 class _Camera:
@@ -438,6 +461,9 @@ class _Camera:
         self.fov = float(fov)
         self.log.append((self.name, "SetFOV", self.fov))
 
+    def SetFocus(self, distance: float, blur: float) -> None:
+        self.log.append((self.name, "SetFocus", float(distance), float(blur)))
+
     def SetActive(self, active: bool) -> None:
         self.active = active
         self.log.append((self.name, "SetActive", active))
@@ -447,40 +473,47 @@ class _Camera:
 
 
 _BRIDGE_METHODS = (
-    "protected bool ProcessCameraPathPlayJob(MCPJob job)",
+    "protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)",
+    "protected bool DispatchCameraPathRelease(MCPCommand command, MCPResult result)",
     "protected void TickCameraPath(float timeslice)",
     "protected void StopCameraPath()",
     "protected void DeleteOwnedCamera()",
 )
 _BRIDGE_SIBLINGS = (
-    "FinishCameraHandoff|SuppressGameplay|DeleteOwnedCamera|RestoreGameplay|StopCameraPath|Log"
+    "FinishCameraHandoff|SuppressGameplay|DeleteOwnedCamera|RestoreGameplay|StopCameraPath|"
+    "HasExclusiveJob|Log"
 )
 
 
 class _ClientBridge:
-    """The members the play and frame methods use; the rest of the bridge is a log.
+    """The members the path methods use; the rest of the bridge is a log.
 
-    ProcessCameraPathPlayJob, TickCameraPath, StopCameraPath and
-    DeleteOwnedCamera are the translated ones. FinishCameraHandoff,
+    DispatchCameraPathPlay, DispatchCameraPathRelease, TickCameraPath,
+    StopCameraPath and DeleteOwnedCamera are the translated ones.
+    HasExclusiveJob answers `exclusive`; it, FinishCameraHandoff,
     SuppressGameplay and RestoreGameplay only log their call, here with no
-    handoff pending. The engine is a log of calls on fake objects.
+    handoff pending. The engine is a log of calls on fake objects. There is no
+    job runner: a dispatch that queued a job would raise.
     """
 
     def __init__(self, bridge_source: str, path_class: type) -> None:
         self.log: list[tuple[Any, ...]] = []
         self.free_cam = _Camera(self.log, "free")
         self.next_object: object = None
+        self.exclusive = False
         self.player = SimpleNamespace(
             DisableSimulation=lambda off: self.log.append(("player", "DisableSimulation", off))
         )
         self.m_CameraPath = path_class()
         self.m_CameraPathCam: _Camera | None = None
+        self.m_CameraPathCommandId = 0
         self.m_ActiveCam: _Camera | None = None
         self.m_ActiveCamOwned = False
         self.m_PlayerSimulationDisabled = False
         namespace: dict[str, Any] = {
             "_S": _Text,
             "MCPCameraPath": path_class,
+            "MCPCameraPathState": _state_block,
             "g_Game": SimpleNamespace(CreateObject=self._create, ObjectDelete=self._delete),
             "Camera": SimpleNamespace(Cast=lambda thing: thing if isinstance(thing, _Camera) else None),
             "FreeDebugCamera": SimpleNamespace(GetInstance=lambda: self.free_cam),
@@ -515,16 +548,145 @@ class _ClientBridge:
     def RestoreGameplay(self) -> None:
         self.log.append(("bridge", "RestoreGameplay"))
 
+    def HasExclusiveJob(self) -> bool:
+        self.log.append(("bridge", "HasExclusiveJob"))
+        return self.exclusive
+
     def Log(self, line: _Text) -> None:
         self.log.append(("bridge", "Log", line.text))
 
-    def play(self, wire: dict[str, Any], job_id: int = 7) -> SimpleNamespace:
-        job = SimpleNamespace(id=job_id, args=_enforce_args(wire), error=_Text.of(""))
-        job.done = self.ProcessCameraPathPlayJob(job)  # type: ignore[attr-defined]
-        return job
+    def play(self, wire: dict[str, Any], command_id: int = 7) -> SimpleNamespace:
+        """One camera_path_play through DispatchCameraPathPlay, and its answer."""
+        return self._dispatch("DispatchCameraPathPlay", command_id, _enforce_args(wire))
+
+    def release(self, play_id: int, command_id: int = 50) -> SimpleNamespace:
+        """One camera_path_release naming play_id, and its answer."""
+        return self._dispatch("DispatchCameraPathRelease", command_id, SimpleNamespace(command_id=play_id))
+
+    def _dispatch(self, method: str, command_id: int, args: SimpleNamespace) -> SimpleNamespace:
+        command = SimpleNamespace(id=command_id, args=args)
+        result = SimpleNamespace(ok=False, error=_Text.of(""), camera_path=None, matched=False)
+        post_now = getattr(self, method)(command, result)
+        # done is the dispatch's postNow: true when the answer leaves with it.
+        return SimpleNamespace(
+            done=post_now, ok=result.ok, error=result.error, camera_path=result.camera_path, matched=result.matched
+        )
 
     def index(self, entry: tuple[Any, ...]) -> int:
         return self.log.index(entry)
+
+
+_CAMERA_SET_METHODS = (
+    "protected bool DispatchCameraSet(MCPCommand command, MCPResult result)",
+    "protected bool ProcessCameraSetJob(MCPJob job)",
+)
+_CAMERA_SET_SIBLINGS = (
+    "ValidateCameraArgs|IsValidCameraFocus|HasExclusiveJob|ApplyCameraSet|RestoreGameplay|"
+    "ResolveSettleSeconds|CameraReadError|ResolveLiveSeatedTransport|Log"
+)
+_BRIDGE_CONSTANT = re.compile(r"protected const (int|float) (CAMERA_\w+) = ([^;]+);")
+
+
+def _bridge_constants(source: str) -> dict[str, Any]:
+    found: dict[str, Any] = {}
+    for kind, name, value in _BRIDGE_CONSTANT.findall(_code(source)):
+        found[name] = int(value) if kind == "int" else _F32(float(value))
+    return found
+
+
+def _new_job() -> SimpleNamespace:
+    """An MCPJob with the fields camera_set reads and writes, at their defaults."""
+    return SimpleNamespace(
+        id=0,
+        kind=_Text.of(""),
+        args=None,
+        camera_focus=False,
+        phase=0,
+        sample_s_target=_F32(0.0),
+        sample_start_s=_F32(0.0),
+        deadline_s=_F32(0.0),
+        error=_Text.of(""),
+        tick_poll_sent=0,
+        tick_poll_callback=0,
+        tick_dispatch=0,
+    )
+
+
+class _CameraSetBridge:
+    """DispatchCameraSet and ProcessCameraSetJob translated; what they call is a log.
+
+    ApplyCameraSet stands for the whole apply (path stop, SuppressGameplay, the
+    camera, SetFOV, SetFocus) and logs whether it was asked for focus; it
+    answers `apply_ok`. m_ActiveCam is a fake camera on the same log, so a
+    camera call from the job would show. The job runner keeps the queued jobs
+    and answers `elapsed`.
+    """
+
+    def __init__(self, bridge_source: str) -> None:
+        self.log: list[tuple[Any, ...]] = []
+        self.apply_ok = True
+        self.exclusive = False
+        self.elapsed = _F32(10.0)
+        self.jobs: list[SimpleNamespace] = []
+        self.m_ActiveCam = _Camera(self.log, "scripted")
+        self.m_JobRunner = SimpleNamespace(GetElapsedS=lambda: self.elapsed, AddJob=self._add_job)
+        self.constants = _bridge_constants(bridge_source)
+        namespace: dict[str, Any] = {
+            "_S": _Text,
+            "MCPJob": _new_job,
+            "PlayerBase": SimpleNamespace(Cast=lambda thing: thing),
+            "GetGame": lambda: SimpleNamespace(GetPlayer=lambda: None),
+            **self.constants,
+        }
+        for signature in _CAMERA_SET_METHODS:
+            head, code = _function(
+                bridge_source, signature, this_type="MCPClientBridge", methods=_CAMERA_SET_SIBLINGS
+            )
+            method = translate(
+                code, head, namespace, class_types={"MCPCameraValidation", "MCPJob", "PlayerBase"}
+            )
+            setattr(self, method.__name__, MethodType(method, self))
+
+    def _add_job(self, job: SimpleNamespace) -> None:
+        self.log.append(("runner", "AddJob", job.phase))
+        self.jobs.append(job)
+
+    def ValidateCameraArgs(self, args: object) -> SimpleNamespace:
+        return SimpleNamespace(ok=True, error=_Text.of(""))
+
+    def IsValidCameraFocus(self, args: object) -> bool:
+        return True
+
+    def HasExclusiveJob(self) -> bool:
+        self.log.append(("bridge", "HasExclusiveJob"))
+        return self.exclusive
+
+    def ApplyCameraSet(self, job: SimpleNamespace) -> bool:
+        self.log.append(("bridge", "ApplyCameraSet", job.camera_focus))
+        if not self.apply_ok:
+            job.error = _Text.of("camera_create_failed")
+        return self.apply_ok
+
+    def RestoreGameplay(self) -> None:
+        self.log.append(("bridge", "RestoreGameplay"))
+
+    def ResolveSettleSeconds(self, args: object) -> _F32:
+        return _F32(0.15)
+
+    def CameraReadError(self) -> _Text:
+        return _Text.of("")
+
+    def ResolveLiveSeatedTransport(self, player: object) -> None:
+        return None
+
+    def Log(self, line: _Text) -> None:
+        self.log.append(("bridge", "Log", line.text))
+
+    def dispatch(self, cmd: str, command_id: int = 21) -> tuple[bool, SimpleNamespace]:
+        args = SimpleNamespace(focus_distance=_F32(2.0), focus_blur=_F32(1.0))
+        command = SimpleNamespace(id=command_id, cmd=_Text.of(cmd), args=args)
+        result = SimpleNamespace(ok=False, error=_Text.of(""), tick_poll_sent=1, tick_poll_callback=2, tick_dispatch=3)
+        return self.DispatchCameraSet(command, result), result  # type: ignore[attr-defined]
 
 
 class CameraPathContractTest(unittest.TestCase):
@@ -783,7 +945,10 @@ class CameraPathToolTest(_ToolCase):
             "fov in radians above 0 (also as a 32-bit float)",
             "every cam_pos, cam_orientation, look_at and fov number from -1e9 to 1e9",
             "camera_create_failed (the staticcamera could not be made; nothing changed)",
-            "and so do stop and another camera turned on in the engine",
+            "and so do stop, the end of the lease that played it, the engine reporting the path's camera "
+            "inactive and vanilla's developer free camera turned on",
+            "another camera turned on from outside the bridge ends it only if the engine then reports the "
+            "path's camera inactive",
             "the client bridge bound to the run does not announce camera_path_play",
             "With no client bound, the loopback's binding fence refuses the call first (legacy_unbound",
             "there is no Camera.InterpolateTo",
@@ -850,17 +1015,68 @@ class CameraSetFocusTest(_ToolCase):
         for extra, expected in (
             ({"focus_distance": 2.0}, "bad_args: focus_distance and focus_blur go together"),
             ({"focus_blur": 1.0}, "bad_args: focus_distance and focus_blur go together"),
-            ({"focus_distance": 0.0, "focus_blur": 1.0}, "bad_args: focus_distance 0.0 must be a finite number of metres above 0"),
+            (
+                {"focus_distance": 0.0, "focus_blur": 1.0},
+                "bad_args: focus_distance 0.0 must be a number of metres above 0, also as a 32-bit float, "
+                "and at most 1e9",
+            ),
             ({"focus_distance": -2.0, "focus_blur": 1.0}, "bad_args: focus_distance -2.0"),
             ({"focus_distance": math.inf, "focus_blur": 1.0}, "bad_args: focus_distance inf"),
             ({"focus_distance": math.nan, "focus_blur": 1.0}, "bad_args: focus_distance nan"),
-            ({"focus_distance": 2.0, "focus_blur": -0.5}, "bad_args: focus_blur -0.5 must be a finite number of 0 or more"),
+            # Finite here, but infinite and 0 as the bridge's 32-bit float.
+            ({"focus_distance": 1e100, "focus_blur": 1.0}, "bad_args: focus_distance 1e+100"),
+            ({"focus_distance": 1e-46, "focus_blur": 1.0}, "bad_args: focus_distance 1e-46"),
+            ({"focus_distance": 1.5e9, "focus_blur": 1.0}, "bad_args: focus_distance 1500000000.0"),
+            (
+                {"focus_distance": 2.0, "focus_blur": -0.5},
+                "bad_args: focus_blur -0.5 must be 0, or above 0 also as a 32-bit float, and at most 1e9",
+            ),
             ({"focus_distance": 2.0, "focus_blur": math.inf}, "bad_args: focus_blur inf"),
+            ({"focus_distance": 2.0, "focus_blur": 1e100}, "bad_args: focus_blur 1e+100"),
+            ({"focus_distance": 2.0, "focus_blur": 1e-46}, "bad_args: focus_blur 1e-46"),
             ({"focus_distance": True, "focus_blur": 1.0}, "valid number"),
             ({"focus_distance": 2.0, "focus_blur": "1"}, "valid number"),
         ):
             with self.subTest(extra=extra):
                 self.assertIn(expected, await self._refused("camera_set", dict(_ORIENT, **extra)))
+
+    async def test_focus_at_the_float_bounds_goes_out_as_given(self) -> None:
+        for distance, blur in ((1e9, 1e9), (1e-45, 0.0), (2.0, 1e-45)):
+            with self.subTest(distance=distance, blur=blur):
+                args, _result = await self._forwarded(
+                    "camera_set", dict(_ORIENT, focus_distance=distance, focus_blur=blur), _camera_answer()
+                )
+                self.assertEqual((args[1]["focus_distance"], args[1]["focus_blur"]), (distance, blur))
+                self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
+
+    def test_the_ingress_checks_focus_as_the_tool_does(self) -> None:
+        wire = dict(VALID_WIRE_ARGS["camera_set_focus"])
+        for field, value in (
+            ("focus_distance", 1e100),
+            ("focus_distance", 1e-46),
+            ("focus_distance", 0.0),
+            ("focus_distance", 1.5e9),
+            ("focus_distance", 10**400),
+            ("focus_blur", 1e100),
+            ("focus_blur", 1e-46),
+            ("focus_blur", -0.5),
+            ("focus_blur", 10**400),
+        ):
+            with self.subTest(field=field, value=value):
+                self.assertEqual(
+                    loopback.validate_command_args("camera_set_focus", dict(wire, **{field: value})),
+                    (False, "bad_args"),
+                )
+                checker = camera_path.focus_distance if field == "focus_distance" else camera_path.focus_blur
+                self.assertIsNone(checker(value))
+        for field, value in (("focus_distance", 1e9), ("focus_distance", 1e-45), ("focus_blur", 0.0), ("focus_blur", 1e-45)):
+            with self.subTest(field=field, value=value):
+                self.assertEqual(
+                    loopback.validate_command_args("camera_set_focus", dict(wire, **{field: value})), (True, None)
+                )
+        # The values the bridge's IsValidCameraFocus would refuse, as Codex measured.
+        self.assertEqual(camera_path.float32(1e-46), 0.0)
+        self.assertGreater(camera_path.float32(1e-45), 0.0)
 
     async def test_a_failed_or_illegible_apply_claims_no_focus(self) -> None:
         bridge = AsyncMock(side_effect=ToolError("camera_create_failed"))
@@ -878,7 +1094,10 @@ class CameraSetFocusTest(_ToolCase):
     def test_the_description_names_the_echo(self) -> None:
         description = self.tools["camera_set"].description or ""
         for phrase in (
-            "focus_distance (metres, finite, above 0) and focus_blur (finite, 0 or more) go together",
+            "focus_distance (metres, above 0, also as the 32-bit float the bridge reads) and focus_blur "
+            "(0, or above 0 also as that float), each at most 1e9, go together",
+            "A timeout does not prove the camera was not applied: the bridge applies it when the command "
+            "arrives, before the settle.",
             "Camera.SetFocus(focus_distance, focus_blur)",
             "focus_applied {distance, blur}",
             "focus_applied is null",
@@ -1069,8 +1288,36 @@ class CensusTest(unittest.TestCase):
                 self.assertEqual(fixture[command], tool)
                 self.assertEqual(server._BRIDGE_COMMAND_TOOLS["client"][command], tool)
 
+    def test_the_release_is_an_internal_client_command(self) -> None:
+        source = _source(BRIDGE)
+        self.assertIn("camera_path_release", announced_caps(source))
+        self.assertIn("camera_path_release", dispatch_census(source))
+        self.assertIn("camera_path_release", loopback.CLIENT_COMMANDS)
+        self.assertNotIn("camera_path_release", loopback.SERVER_COMMANDS)
+        self.assertIn("camera_path_release", loopback._OWNER_CLEANUP_COMMANDS)
+        self.assertNotIn("camera_path_release", loopback._CLIENT_ANNOUNCED_COMMANDS)
+        self.assertTrue(command_requires_lease("camera_path_release"))
+        # Not a tool: the readiness map and its fixture name none.
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))["peers"]["client"]
+        self.assertIn("camera_path_release", fixture)
+        self.assertIsNone(fixture["camera_path_release"])
+        self.assertIsNone(server._BRIDGE_COMMAND_TOOLS["client"]["camera_path_release"])
+        registry = {source: (target, build) for source, target, build in loopback.RELEASE_REGISTRY}
+        target, build = registry["camera_path_play"]
+        self.assertEqual(target, "camera_path_release")
+        self.assertEqual(build(42, {"mode": "play"}), {"command_id": 42})
+        self.assertEqual(loopback.validate_command_args("camera_path_release", {"command_id": 42}), (True, None))
+        for refused in ({}, {"command_id": 0}, {"command_id": True}, {"command_id": 1.0}, {"command_id": 1, "x": 1}):
+            with self.subTest(args=refused):
+                self.assertEqual(loopback.validate_command_args("camera_path_release", refused), (False, "bad_args"))
+        self.assertEqual(
+            result_prune.OWNED_SCALAR_FIELDS["matched"], frozenset({"action_hold_cancel", "camera_path_release"})
+        )
+        answer = result_prune.prune_unfilled_fields("camera_path_release", {"ok": 1, "matched": 0, "camera_path": {}})
+        self.assertEqual(answer, {"ok": 1, "matched": 0})
+
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
-        for command in NEW_COMMANDS:
+        for command in (*NEW_COMMANDS, "camera_path_release"):
             self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES))
@@ -1169,6 +1416,39 @@ class ExecutedCameraPathTest(unittest.TestCase):
         self.assertEqual(self._pose(path).fov, 0.75)
         self.assertIsNone(self._pose(self._playing(_three_keys())).fov)
 
+    def test_fov_stays_linear_under_smooth_easing(self) -> None:
+        # Three keys at uneven times, smooth easing. Between two keys that both
+        # hold 0.5 a linear FOV is 0.5; a Catmull-Rom FOV would overshoot to
+        # 0.453125 at t = 2.5 (the tangent at t = 1 sees the 1.0 before it).
+        keys = [_key(0, fov=1.0), _key(1.0, fov=0.5), _key(4.0, fov=0.5)]
+        path = self._playing(keys, easing="smooth")
+        path.Advance(_F32(0.5))
+        self.assertEqual(self._pose(path).fov, 0.75)
+        path.Advance(_F32(2.0))
+        self.assertEqual(_report(path)["t_s"], 2.5)
+        self.assertEqual(self._pose(path).fov, 0.5)
+
+    def test_a_far_angle_unwraps_in_the_bridge_float(self) -> None:
+        # yaw 0 to 1e9 over 2 s. Independent oracle, each step a 32-bit float:
+        # delta / 360 = 2777777.75, Math.Round of it 2777778 (a float), 360 times
+        # that 1000000080 rounded to 1000000064, so the stored yaw is
+        # 1e9 - 1000000064 = -64 and the middle of the segment -32.
+        f32 = camera_path.float32
+        quotient = f32(f32(1e9) / 360.0)
+        self.assertEqual(quotient, 2777777.75)
+        rounded = f32(math.floor(quotient + 0.5))
+        self.assertEqual(rounded, 2777778.0)
+        product = f32(360.0 * rounded)
+        self.assertEqual(product, 1000000064.0)
+        stored = f32(f32(1e9) - product)
+        self.assertEqual(stored, -64.0)
+        keys = [_key(0), _key(2.0, cam_orientation=[1e9, 0.0, 0.0])]
+        camera_path.normalize_request("play", keys, "linear", "")
+        path = self._playing(keys)
+        self.assertEqual(float(path.m_AimX.Get(1)), stored)
+        path.Advance(_F32(1.0))
+        self.assertEqual(self._pose(path).orientation, (stored / 2, 0.0, 0.0))
+
     def test_a_short_segment_cannot_overflow_the_smooth_curve(self) -> None:
         # 1e-45 s is the smallest gap a 32-bit float keeps above 0, and both
         # sides accept it. A rate across it is past the float range; h times it is not.
@@ -1239,8 +1519,21 @@ class ExecutedCameraPathTest(unittest.TestCase):
         )
 
 
-class ExecutedPlayJobTest(unittest.TestCase):
-    """ProcessCameraPathPlayJob and TickCameraPath of MCPClientBridge.c run on fakes."""
+# The owner of the lease in the release probes below.
+_PATH_OWNER = {
+    "platform": "codex",
+    "pid": 4343,
+    "ppid": 10,
+    "started_at_utc": "2026-07-14T20:00:01Z",
+    "session_id": "session-path",
+    "task_label": "path",
+}
+
+
+class ExecutedDispatchTest(unittest.TestCase):
+    """The camera_path_play, camera_path_release and camera_set dispatch, the
+    camera_set job and TickCameraPath of MCPClientBridge.c run on fakes. Every
+    change is made in a dispatch; a job only waits and reports (d026)."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1273,6 +1566,24 @@ class ExecutedPlayJobTest(unittest.TestCase):
         self.assertEqual((job.done, job.error.text), (True, ""))
         return camera
 
+    def _in_order(self, entries: list[tuple[Any, ...]]) -> None:
+        positions = [self.client.index(entry) for entry in entries]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_a_play_answers_at_its_dispatch_with_the_path_playing(self) -> None:
+        # postNow: the answer leaves with the dispatch, and no job is queued
+        # (this fake bridge has no job runner, so a queued job would raise).
+        camera = self._new_camera()
+        answer = self.client.play(self._wire(), command_id=11)
+        self.assertEqual((answer.done, answer.ok, answer.error.text), (True, True, ""))
+        self.assertEqual(
+            _block(answer.camera_path), {"state": "playing", "t_s": 0.0, "duration_s": 6.0, "path_id": "line6"}
+        )
+        self.assertEqual(self.client.m_CameraPathCommandId, 11)
+        self.assertTrue(camera.active)
+        # Its pose is on the camera before the dispatch returns; the frame moves it next.
+        self.assertEqual(camera.position, (0.0, 2.0, 0.0))
+
     def test_a_play_installs_the_loaded_path_on_a_new_camera(self) -> None:
         camera = self._new_camera()
         job = self.client.play(self._wire())
@@ -1287,8 +1598,16 @@ class ExecutedPlayJobTest(unittest.TestCase):
         self.assertTrue(camera.active)
         self.assertEqual((camera.position, camera.orientation), ((0.0, 2.0, 0.0), (0.0, 0.0, 0.0)))
         create = ("engine", "CreateObject", "staticcamera", (0.0, 2.0, 0.0), True)
-        order = [create, ("bridge", "FinishCameraHandoff"), ("bridge", "SuppressGameplay"), ("path", "SetActive", True)]
-        self.assertEqual([self.client.index(entry) for entry in order], sorted(self.client.index(entry) for entry in order))
+        self._in_order(
+            [
+                ("bridge", "HasExclusiveJob"),
+                create,
+                ("bridge", "FinishCameraHandoff"),
+                ("bridge", "SuppressGameplay"),
+                ("path", "SetPosition", (0.0, 2.0, 0.0)),
+                ("path", "SetActive", True),
+            ]
+        )
         # From the player view nothing touches the free camera or the simulation.
         for entry in self.client.log:
             self.assertNotIn(entry[0], ("free", "player"))
@@ -1299,7 +1618,17 @@ class ExecutedPlayJobTest(unittest.TestCase):
         camera = self._played()
         self.assertFalse(self.client.free_cam.active)
         self.assertTrue(camera.active)
-        self.assertLess(self.client.index(("free", "SetActive", False)), self.client.index(("path", "SetActive", True)))
+        self._in_order(
+            [
+                ("engine", "CreateObject", "staticcamera", (0.0, 2.0, 0.0), True),
+                ("bridge", "FinishCameraHandoff"),
+                ("bridge", "SuppressGameplay"),
+                ("free", "SetActive", False),
+                ("player", "DisableSimulation", False),
+                ("path", "SetPosition", (0.0, 2.0, 0.0)),
+                ("path", "SetActive", True),
+            ]
+        )
         self.assertIn(("player", "DisableSimulation", False), self.client.log)
         self.assertFalse(self.client.m_PlayerSimulationDisabled)
         self.assertIs(self.client.m_ActiveCam, camera)
@@ -1328,9 +1657,13 @@ class ExecutedPlayJobTest(unittest.TestCase):
                     self.client.m_CameraPath = old
                     self.client.next_object = made
                     job = self.client.play(self._wire())
-                    self.assertEqual((job.done, job.error.text), (True, "camera_create_failed"))
+                    self.assertEqual((job.done, job.ok, job.error.text), (True, False, "camera_create_failed"))
+                    self.assertIsNone(job.camera_path)
                     # Only the made object goes; nothing else is called.
-                    expected = [("engine", "CreateObject", "staticcamera", (0.0, 2.0, 0.0), True)]
+                    expected = [
+                        ("bridge", "HasExclusiveJob"),
+                        ("engine", "CreateObject", "staticcamera", (0.0, 2.0, 0.0), True),
+                    ]
                     if made is not None:
                         expected.append(("engine", "ObjectDelete", made))
                     self.assertEqual(self.client.log, expected)
@@ -1347,10 +1680,22 @@ class ExecutedPlayJobTest(unittest.TestCase):
         self.assertEqual((job.done, job.error.text), (True, "bad_args"))
         self._played()
         self.client.log.clear()
-        job = self.client.play(self._wire("second"))
+        job = self.client.play(self._wire("second"), command_id=8)
         self.assertEqual((job.done, job.error.text), (True, "path_busy"))
         self.assertEqual(self.client.log, [])
         self.assertEqual(_report(self.client.m_CameraPath)["path_id"], "line6")
+        # The playing path keeps the id of the play that started it.
+        self.assertEqual(self.client.m_CameraPathCommandId, 7)
+
+    def test_a_busy_play_changes_nothing(self) -> None:
+        self.client.exclusive = True
+        self._new_camera()
+        job = self.client.play(self._wire())
+        self.assertEqual((job.done, job.ok, job.error.text), (True, False, "busy"))
+        self.assertEqual(self.client.log, [("bridge", "HasExclusiveJob")])
+        self.assertIsNone(self.client.m_CameraPathCam)
+        self.assertEqual(self.client.m_CameraPathCommandId, 0)
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "idle")
 
     def test_each_frame_moves_the_path_while_its_camera_is_on(self) -> None:
         camera = self._played()
@@ -1375,6 +1720,201 @@ class ExecutedPlayJobTest(unittest.TestCase):
         self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
         self.assertEqual(_report(self.client.m_CameraPath)["t_s"], 1.0)
         self.assertIsNone(self.client.m_CameraPathCam)
+
+    def test_the_developer_free_camera_turned_on_aborts_the_path(self) -> None:
+        camera = self._played()
+        self.client.TickCameraPath(_F32(1.0))
+        self.assertEqual(camera.position, (1.0, 2.0, 0.0))
+        # Vanilla's developer free camera turns the FreeDebugCamera singleton on
+        # from outside the bridge (developerfreecamera.c:36-40). Nothing promises
+        # that the path's camera then reads inactive (camera.c:45, :61), so here
+        # it stays active and stays m_ActiveCam.
+        self.client.free_cam.active = True
+        self.assertTrue(camera.active)
+        self.assertIs(self.client.m_ActiveCam, camera)
+        frames = len(self.client.log)
+        for _ in range(2):
+            self.client.TickCameraPath(_F32(1.0))
+        self.assertEqual(self.client.log[frames:], [])
+        self.assertEqual(
+            _report(self.client.m_CameraPath), {"state": "aborted", "t_s": 1.0, "duration_s": 6.0, "path_id": "line6"}
+        )
+        self.assertIsNone(self.client.m_CameraPathCam)
+
+    def test_a_release_stops_only_the_play_it_names(self) -> None:
+        camera = self._played()
+        self.client.TickCameraPath(_F32(1.0))
+        other = self.client.release(8)
+        self.assertEqual((other.done, other.ok, other.matched), (True, True, False))
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "playing")
+        self.client.TickCameraPath(_F32(1.0))
+        self.assertEqual(camera.position, (2.0, 2.0, 0.0))
+        named = self.client.release(7)
+        self.assertEqual((named.done, named.ok, named.matched), (True, True, True))
+        self.assertEqual(
+            _report(self.client.m_CameraPath), {"state": "aborted", "t_s": 2.0, "duration_s": 6.0, "path_id": "line6"}
+        )
+        frames = len(self.client.log)
+        self.client.TickCameraPath(_F32(1.0))
+        self.assertEqual(self.client.log[frames:], [])
+        self.assertEqual(camera.position, (2.0, 2.0, 0.0))
+        # A late release of a path that already ended matches nothing.
+        again = self.client.release(7)
+        self.assertEqual((again.ok, again.matched), (True, False))
+        refused = self.client.release(0)
+        self.assertEqual((refused.done, refused.ok, refused.error.text), (True, False, "bad_args"))
+
+    @staticmethod
+    def _poll(state: loopback.ServerState) -> dict[str, Any]:
+        status, body = state.record_poll(
+            "client",
+            "12~1.29",
+            instance=INST_CLIENT,
+            source_pid=PID_CLIENT,
+            caps=",".join(sorted(server._BRIDGE_COMMAND_TOOLS["client"])),
+        )
+        if status != 200:
+            raise AssertionError(body)
+        return body
+
+    def _leased(self) -> tuple[loopback.ServerState, SessionCoordinator, ClientIdentity, str]:
+        """A bound client and a held lease. Releasing it runs the loopback's own
+        cleanup_owner and then raises the owner fence on the run, the order the
+        daemon's cleanup_begin and begin_release_owner run them in; nothing else
+        of the lifecycle and no process."""
+        state = loopback.ServerState("test-key")
+        bind_both_peers(state)
+
+        def cleanup(session_id: str, lease_id: str, reason: str, vehicle_active: bool) -> dict[str, object]:
+            result = state.cleanup_owner(session_id, lease_id, reason, vehicle_active)
+            state.fence_runs(["test-run"])
+            return result
+
+        coordinator = SessionCoordinator(
+            token_fn=lambda: "path-token",
+            id_fn=lambda: "path-lease",
+            audit=lambda _event: True,
+            cleanup=cleanup,
+        )
+        state.coordination = coordinator
+        state.retail_probe = lambda: {"known": True, "processes": []}
+        self._poll(state)
+        client = ClientIdentity.from_payload(_PATH_OWNER)
+        status, active = coordinator.acquire(client, "path")
+        self.assertEqual(status, 200, active)
+        return state, coordinator, client, str(active["lease_token"])
+
+    def _deliver_play(self, state: loopback.ServerState, token: str, path_id: str) -> dict[str, Any]:
+        wire = {"mode": "play", "keys": _three_keys(), "easing": "linear", "path_id": path_id}
+        status, queued = state.enqueue_command(
+            "camera_path_play",
+            wire,
+            peer="client",
+            identity_payload=_PATH_OWNER,
+            lease_token=token,
+            operation_timeout_s=30.0,
+        )
+        self.assertEqual(status, 200, queued)
+        delivered = self._poll(state)["commands"]
+        self.assertEqual(delivered, [{"id": queued["id"], "cmd": "camera_path_play", "args": wire}])
+        return delivered[0]
+
+    def test_releasing_the_lease_stops_the_path_it_played(self) -> None:
+        state, coordinator, client, token = self._leased()
+        play = self._deliver_play(state, token, "lease_case")
+        camera = self._new_camera()
+        answer = self.client.play(play["args"], command_id=play["id"])
+        self.assertTrue(answer.ok)
+        state.store_result({"id": play["id"], "ok": 1, "camera_path": _block(answer.camera_path)}, instance=INST_CLIENT)
+        self.client.TickCameraPath(_F32(0.5))
+        self.assertEqual(camera.position, (0.5, 2.0, 0.0))
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertTrue(released["released"])
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
+        self.assertFalse(released.get("cleanup_degraded"))
+        # The lease is gone and the run fenced; the release still goes out.
+        self.assertTrue(state._run_is_fenced("test-run"))
+        [release] = self._poll(state)["commands"]
+        self.assertEqual((release["cmd"], release["args"]), ("camera_path_release", {"command_id": play["id"]}))
+        answer = self.client.release(release["args"]["command_id"], command_id=release["id"])
+        self.assertEqual((answer.ok, answer.matched), (True, True))
+        frames = len(self.client.log)
+        for _ in range(2):
+            self.client.TickCameraPath(_F32(0.5))
+        self.assertEqual(self.client.log[frames:], [])
+        self.assertEqual(camera.position, (0.5, 2.0, 0.0))
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+        self.assertEqual(self._poll(state)["commands"], [])
+
+    def test_abandoning_a_delivered_play_queues_its_release(self) -> None:
+        state, _coordinator, _client, token = self._leased()
+        play = self._deliver_play(state, token, "abandoned")
+        abandoned = state.abandon_command(play["id"], "cancelled")
+        self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
+        self.assertEqual(
+            self._poll(state)["commands"],
+            [{"id": abandoned["release_id"], "cmd": "camera_path_release", "args": {"command_id": play["id"]}}],
+        )
+
+    def test_a_lease_released_under_quarantine_leaves_the_path_unconfirmed(self) -> None:
+        state, coordinator, client, token = self._leased()
+        self._deliver_play(state, token, "quarantined")
+        state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        degraded = released.get("cleanup_degraded") or []
+        self.assertIn("retail_quarantine", degraded)
+        self.assertIn("camera_path_release_unconfirmed", degraded)
+        self.assertNotIn("camera_path_release_enqueued", released["cleanup"])
+        self.assertEqual(state._camera_path_play_by_lease, {})
+        state.retail_probe = lambda: {"known": True, "processes": []}
+        self.assertEqual(self._poll(state)["commands"], [])
+
+    def test_camera_set_applies_at_its_dispatch_and_its_job_only_settles(self) -> None:
+        bridge = _CameraSetBridge(self.bridge_source)
+        post_now, result = bridge.dispatch("camera_set_focus")
+        # The answer waits for the settle, so the dispatch posts nothing yet.
+        self.assertFalse(post_now)
+        self.assertEqual(
+            bridge.log[:3],
+            [("bridge", "HasExclusiveJob"), ("bridge", "ApplyCameraSet", True), ("runner", "AddJob", 1)],
+        )
+        [job] = bridge.jobs
+        settle = bridge.constants["CAMERA_PHASE_SETTLE"]
+        report = bridge.constants["CAMERA_PHASE_REPORT"]
+        self.assertEqual(job.phase, settle)
+        self.assertEqual((job.id, job.kind.text, job.camera_focus), (21, "camera_set", True))
+        self.assertEqual(float(job.sample_start_s), 10.0)
+        self.assertEqual(job.sample_s_target, _F32(0.15))
+        self.assertEqual(job.deadline_s, _F32(10.0) + _F32(0.15) + bridge.constants["CAMERA_JOB_TIMEOUT_S"])
+        self.assertEqual((job.tick_poll_sent, job.tick_poll_callback, job.tick_dispatch), (1, 2, 3))
+        # The job only waits out the settle: no apply, no camera call, no restore.
+        frames = len(bridge.log)
+        bridge.elapsed = _F32(10.1)
+        self.assertFalse(bridge.ProcessCameraSetJob(job))
+        self.assertEqual(job.phase, settle)
+        bridge.elapsed = _F32(10.25)
+        self.assertTrue(bridge.ProcessCameraSetJob(job))
+        self.assertEqual(job.phase, report)
+        self.assertEqual(bridge.log[frames:], [])
+
+    def test_a_failed_camera_set_apply_answers_at_once(self) -> None:
+        bridge = _CameraSetBridge(self.bridge_source)
+        bridge.apply_ok = False
+        post_now, result = bridge.dispatch("camera_set", command_id=22)
+        self.assertTrue(post_now)
+        self.assertEqual((result.ok, result.error.text), (False, "camera_create_failed"))
+        self.assertEqual(bridge.jobs, [])
+        self.assertEqual(
+            bridge.log,
+            [("bridge", "HasExclusiveJob"), ("bridge", "ApplyCameraSet", False), ("bridge", "RestoreGameplay")],
+        )
+        bridge = _CameraSetBridge(self.bridge_source)
+        bridge.exclusive = True
+        post_now, result = bridge.dispatch("camera_set")
+        self.assertEqual((post_now, result.ok, result.error.text), (True, False, "busy"))
+        self.assertEqual(bridge.log, [("bridge", "HasExclusiveJob")])
 
     def test_a_camera_set_or_a_release_aborts_the_path(self) -> None:
         for replaced_by in ("camera_set", "release"):
@@ -1445,29 +1985,50 @@ class EnforceWiringTest(unittest.TestCase):
             "error = candidate.Load(command.args);",
             'result.error = "path_busy";',
             'result.error = "busy";',
-            "m_JobRunner.AddJob(job);",
+            'cameraObject = g_Game.CreateObject("staticcamera", candidate.StartPosition(), true);',
+            "cam = Camera.Cast(cameraObject);",
+            "FinishCameraHandoff();",
+            "SuppressGameplay();",
+            "freeCam.SetActive(false);",
+            "player.DisableSimulation(false);",
+            "DeleteOwnedCamera();",
+            "candidate.Begin();",
+            "candidate.Apply(cam);",
+            "cam.SetActive(true);",
+            "m_ActiveCam = cam;",
+            "m_CameraPath = candidate;",
+            "m_CameraPathCam = cam;",
+            "m_CameraPathCommandId = command.id;",
+            "m_CameraPath.Fill(result.camera_path);",
         ]
         positions = [body.index(step) for step in order]
         self.assertEqual(positions, sorted(positions))
+        # Applied here: no job is queued for any mode.
+        self.assertNotIn("AddJob", body)
+        self.assertNotIn("MCPJob", body)
         query = [
             "if (!MCPCameraPath.IsValidPathId(command.args.path_id))",
             'result.error = "path_not_found";',
             "StopCameraPath();",
             "m_CameraPath.Fill(result.camera_path);",
         ]
-        positions = [body.index(step) for step in query]
+        # The play answers with its own Fill: the query's checks start after it.
+        tail = body[body.index('if (mode != "state" && mode != "stop")') :]
+        positions = [tail.index(step) for step in query]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn('if (mode != "state" && mode != "stop")', body)
 
     def test_the_path_moves_per_frame_on_the_scripted_camera(self) -> None:
-        # What the frame and the play do runs in ExecutedPlayJobTest; here, that
+        # What the frame and the play do runs in ExecutedDispatchTest; here, that
         # OnTick moves the path before the job runner and that nothing
         # interpolates in the engine or blocks the tick.
         tick = _flat(_method_body(self.bridge, "void OnTick(float timeslice)"))
         self.assertLess(tick.index("TickCameraPath(timeslice);"), tick.index("m_JobRunner.Tick(timeslice, this);"))
         frame = _flat(_method_body(self.bridge, "protected void TickCameraPath(float timeslice)"))
-        play = _flat(_method_body(self.bridge, "protected bool ProcessCameraPathPlayJob(MCPJob job)"))
-        self.assertIn('else if (job.kind == "camera_path_play") { return ProcessCameraPathPlayJob(job); }', _flat(self.bridge))
+        play = _flat(_method_body(self.bridge, "protected bool DispatchCameraPathPlay("))
+        # No job runs a play (d026): nothing routes, processes or posts one.
+        self.assertNotIn("ProcessCameraPathPlayJob", self.bridge)
+        self.assertNotIn('job.kind == "camera_path_play"', _flat(self.bridge))
+        self.assertNotIn('kind = "camera_path_play"', _flat(self.bridge))
         for text in (_code(self.path), play, frame):
             self.assertNotIn("InterpolateTo", text)
             self.assertNotIn("_now(", text)
@@ -1475,8 +2036,30 @@ class EnforceWiringTest(unittest.TestCase):
     def test_camera_set_and_restore_end_a_playing_path(self) -> None:
         apply = _flat(_method_body(self.bridge, "protected bool ApplyCameraSet(MCPJob job)"))
         self.assertLess(apply.index("StopCameraPath();"), apply.index("SuppressGameplay();"))
+        # RestoreGameplay does not stop a path: the vehicle jobs call it, and no
+        # job changes anything (d026). Its callers outside a job stop it first.
         restore = _flat(_method_body(self.bridge, "protected void RestoreGameplay()"))
-        self.assertLess(restore.index("StopCameraPath();"), restore.index("if (!GetGame())"))
+        self.assertNotIn("StopCameraPath", restore)
+        dispatch = _flat(_method_body(self.bridge, "protected void Dispatch(MCPCommand command)"))
+        branch = dispatch[dispatch.index('else if (command.cmd == "restore_gameplay")') :]
+        self.assertLess(branch.index("StopCameraPath();"), branch.index("RestoreGameplay();"))
+        shutdown = _flat(_method_body(self.bridge, "void Shutdown()"))
+        self.assertLess(shutdown.index("StopCameraPath();"), shutdown.index("RestoreGameplay();"))
+        # ApplyCameraSet takes the job's fields but runs from DispatchCameraSet
+        # only, its one caller: the jobs are the Process methods.
+        self.assertEqual(_code(self.bridge).count("ApplyCameraSet("), 2)
+        self.assertIn("ApplyCameraSet(", _code(_method_body(self.bridge, "protected bool DispatchCameraSet(")))
+        jobs = re.findall(r"protected bool (Process\w+)\(MCPJob job\)", _code(self.bridge))
+        restoring = []
+        for name in jobs:
+            body = _code(_method_body(self.bridge, f"protected bool {name}(MCPJob job)"))
+            with self.subTest(job=name):
+                self.assertNotIn("StopCameraPath", body)
+            if "RestoreGameplay();" in body:
+                restoring.append(name)
+        # The vehicle get-in, and the drive probe twice, its fixture included.
+        self.assertIn("ProcessVehicleGetInClientPrep", restoring)
+        self.assertIn("ProcessDriveProbeClientPrep", restoring)
         stop = _flat(_method_body(self.bridge, "protected void StopCameraPath()"))
         self.assertEqual(stop, "if (m_CameraPath) { m_CameraPath.Abort(); } m_CameraPathCam = null;")
         abort = _flat(_method_body(self.path, "void Abort()"))
@@ -1487,6 +2070,11 @@ class EnforceWiringTest(unittest.TestCase):
         self.assertIn('bool focus = command.cmd == "camera_set_focus";', dispatch)
         self.assertLess(dispatch.index("!IsValidCameraFocus(command.args)"), dispatch.index("HasExclusiveJob()"))
         self.assertIn("job.camera_focus = focus;", dispatch)
+        # The apply, focus included, runs in the dispatch; the job only settles.
+        steps = ["job.camera_focus = focus;", "bool applied = ApplyCameraSet(job);", "m_JobRunner.AddJob(job);"]
+        positions = [dispatch.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("ApplyCameraSet", _code(_method_body(self.bridge, "protected bool ProcessCameraSetJob(MCPJob job)")))
         for signature, camera in (
             ("protected bool ApplyCameraSet(MCPJob job)", "cam"),
             ("protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)", "freeCam"),

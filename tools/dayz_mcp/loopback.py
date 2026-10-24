@@ -104,6 +104,7 @@ CLIENT_COMMANDS = {
     "camera_set_focus",
     "camera_get",
     "camera_path_play",
+    "camera_path_release",
     "hud_set",
     "restore_gameplay",
     "key_press",
@@ -158,6 +159,12 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "action_hold",
         "action_hold_cancel",
         lambda command_id, args: {"hold_id": args["hold_id"]},
+    ),
+    # d026: the client stops the path only while this play is the one playing.
+    (
+        "camera_path_play",
+        "camera_path_release",
+        lambda command_id, args: {"command_id": command_id},
     ),
 )
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
@@ -885,6 +892,14 @@ def _validate_world_weather_set_args(args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+def _is_focus_distance(value: object) -> bool:
+    return camera_path.focus_distance(value) is not None
+
+
+def _is_focus_blur(value: object) -> bool:
+    return camera_path.focus_blur(value) is not None
+
+
 def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVariant:
     # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
     # travel with every one of them. focus is the camera_set_focus shape
@@ -899,9 +914,11 @@ def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVar
         validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3
     required: tuple[str, ...] = ("cam_mode", *vectors, "fov", "settle_ticks")
     if focus:
+        # The tool's check, camera_path.focus_distance and focus_blur: at most
+        # 1e9 and kept by the bridge's 32-bit float, not just finite here.
         required = (*required, "focus_distance", "focus_blur")
-        validators["focus_distance"] = _SAFE_POSITIVE_REAL
-        validators["focus_blur"] = _SAFE_NON_NEGATIVE_REAL
+        validators["focus_distance"] = _is_focus_distance
+        validators["focus_blur"] = _is_focus_blur
     return _schema_variant(required=required, validators=validators)
 
 
@@ -1060,7 +1077,13 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
-    {"vehicle_release", "bot_stop", "player_look_at_release", "action_hold_cancel"}
+    {
+        "vehicle_release",
+        "bot_stop",
+        "player_look_at_release",
+        "action_hold_cancel",
+        "camera_path_release",
+    }
 )
 
 
@@ -1891,6 +1914,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
+    # d026, internal: the id of the camera_path_play whose path to stop.
+    "camera_path_release": _command_schema(
+        _schema_variant(
+            required=("command_id",),
+            validators={"command_id": _integer_in_range(minimum=1)},
+        )
+    ),
     "action_cursor_ids": _command_schema(delegated=_validate_action_cursor_ids),
 }
 
@@ -2070,6 +2100,9 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
+        # d026: lease -> ids of camera_path_play plays delivered under it. A
+        # path plays on after its play answers; cleanup_owner stops it.
+        self._camera_path_play_by_lease: dict[str, set[int]] = {}
         self._holds: dict[str, dict[str, object]] = {}
         self._hold_by_command: dict[int, str] = {}
         self._hold_blocked_runs: set[str] = set()
@@ -3421,6 +3454,48 @@ class ServerState:
                     failed += 1
         return {"enqueued": enqueued, "failed": failed}
 
+    def _note_camera_path_play_locked(self, command_id: int, args: object) -> None:
+        """Remember a delivered play under its owner's lease (d026). Caller holds the lock."""
+
+        if not isinstance(args, dict) or args.get("mode") != "play":
+            return
+        owner = self._command_owner.get(command_id)
+        if owner is None or not isinstance(owner[1], str) or not owner[1]:
+            return
+        self._camera_path_play_by_lease.setdefault(owner[1], set()).add(command_id)
+
+    def enqueue_camera_path_releases_for_lease(self, lease_id: str) -> dict[str, int]:
+        """camera_path_release for each play delivered under that lease (d026).
+
+        A path moves the camera every frame after its play has answered, so it
+        must not outlive the lease that started it. The client stops a path
+        only while the named play is the one playing, so a release for a play
+        that finished, failed or was followed by another changes nothing. As
+        for enqueue_bot_stops_for_lease, the caller should hold the queue lock;
+        each release is internal and fire-and-forget, so it is delivered
+        without a live lease (_cleanup_dispatch_locked).
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            command_ids = sorted(self._camera_path_play_by_lease.pop(lease_id, set()))
+            enqueued = 0
+            failed = 0
+            for command_id in command_ids:
+                status, payload = self.enqueue_command(
+                    "camera_path_release",
+                    {"command_id": command_id},
+                    peer="client",
+                    internal=True,
+                )
+                release_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(release_id, int):
+                    self._fire_and_forget_ids.add(release_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
     def _enqueue_command(
         self,
         cmd: str,
@@ -4701,6 +4776,8 @@ class ServerState:
                     tracked = self._broker_rows.get(command_id)
                     if isinstance(tracked, dict) and tracked.get("state") == "queued":
                         tracked["state"] = "delivered"
+                    if command_name == "camera_path_play" and isinstance(command_id, int):
+                        self._note_camera_path_play_locked(command_id, command.get("args"))
                     if command_name == "action_hold" and isinstance(command_id, int):
                         delivered_hold = self._hold_by_command.get(command_id)
                         if delivered_hold is not None:
@@ -5337,7 +5414,8 @@ class ServerState:
                 cleanup["hold_cancel_enqueued"] = enqueued
         with self._lock:
             pending_bots = bool(self._bot_by_lease.get(lease_id))
-        if not vehicle_active and not pending_bots:
+            pending_paths = bool(self._camera_path_play_by_lease.get(lease_id))
+        if not vehicle_active and not pending_bots and not pending_paths:
             return cleanup
 
         if self._retail_quarantined():
@@ -5345,6 +5423,11 @@ class ServerState:
             values = list(existing) if isinstance(existing, list) else []
             if "retail_quarantine" not in values:
                 values.append("retail_quarantine")
+            if pending_paths:
+                # No release goes out, so a path may play on until it ends.
+                with self._lock:
+                    self._camera_path_play_by_lease.pop(lease_id, None)
+                values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
             return cleanup
 
@@ -5369,12 +5452,20 @@ class ServerState:
                 else:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
             report = self.enqueue_bot_stops_for_lease(lease_id)
+            paths = self.enqueue_camera_path_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
             cleanup["bot_stop_enqueued"] = report["enqueued"]
         if report["failed"]:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("bot_stop_failed")
+            cleanup["cleanup_degraded"] = values
+        if paths["enqueued"] or paths["failed"]:
+            cleanup["camera_path_release_enqueued"] = paths["enqueued"]
+        if paths["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
         return cleanup
 

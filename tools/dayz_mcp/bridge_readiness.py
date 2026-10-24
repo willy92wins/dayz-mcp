@@ -319,6 +319,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "anim_timeline": "anim_timeline",
         "camera_get": "camera_get",
         "camera_path_play": "camera_path_play",
+        "camera_path_release": None,
         "camera_set": "camera_set",
         "camera_set_focus": "camera_set",
         "engine_set": "engine_set",

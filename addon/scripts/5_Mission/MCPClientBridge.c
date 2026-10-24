@@ -422,7 +422,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int CAMERA_MODE_LOOKAT = 2;
 	protected const int CAMERA_MODE_MATRIX = 3;
 	protected const int CAMERA_MODE_FREE = 4;
-	protected const int CAMERA_PHASE_APPLY = 0;
 	protected const int CAMERA_PHASE_SETTLE = 1;
 	protected const int CAMERA_PHASE_REPORT = 2;
 	// f47b: OnTick calls a staticcamera release spends on FreeDebugCamera before
@@ -471,7 +470,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get," + "camera_path_play,camera_set,camera_set_focus,engine_set,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release," + "player_move,player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control," + "vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get," + "camera_path_play,camera_path_release,camera_set,camera_set_focus,engine_set,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release," + "player_move,player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control," + "vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -513,6 +512,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! world owns; m_ActiveCam holds it as an owned camera).
 	protected ref MCPCameraPath m_CameraPath;
 	protected Camera m_CameraPathCam;
+	//! The command id of the play that started m_CameraPath, the one
+	//! camera_path_release must name to stop it; 0 before the first play.
+	protected int m_CameraPathCommandId;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -552,6 +554,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_CameraHandoffPending = false;
 		m_CameraHandoffTicks = 0;
 		m_CameraPath = new MCPCameraPath();
+		m_CameraPathCommandId = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_Pending = new array<ref MCPCommand>();
@@ -1122,6 +1125,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		else if (command.cmd == "restore_gameplay")
 		{
+			// A playing camera_path_play ends aborted where its camera stands:
+			// RestoreGameplay leaves the camera, and its path, to the caller (d026).
+			StopCameraPath();
 			RestoreGameplay();
 			ReleaseCamera();
 			result.ok = true;
@@ -1260,6 +1266,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "camera_path_play")
 		{
 			postNow = DispatchCameraPathPlay(command, result);
+		}
+		else if (command.cmd == "camera_path_release")
+		{
+			postNow = DispatchCameraPathRelease(command, result);
 		}
 		else if (command.cmd == "hud_set")
 		{
@@ -1848,13 +1858,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		// The camera is applied here, at dispatch, and the job only settles and
+		// reports: no job changes anything (d026). A failed apply hands
+		// gameplay back and answers at once with its error.
 		MCPJob job = new MCPJob();
 		job.id = command.id;
 		job.kind = "camera_set";
 		job.args = command.args;
 		job.camera_focus = focus;
-		job.phase = CAMERA_PHASE_APPLY;
+		bool applied = ApplyCameraSet(job);
+		if (!applied)
+		{
+			RestoreGameplay();
+			result.ok = false;
+			result.error = job.error;
+			return true;
+		}
+
+		job.phase = CAMERA_PHASE_SETTLE;
 		job.sample_s_target = ResolveSettleSeconds(command.args);
+		job.sample_start_s = m_JobRunner.GetElapsedS();
 		// Settle plus the same five seconds of apply/report slack. A fixed
 		// five-second deadline cancelled a 200-tick settle (10 s) unfinished.
 		job.deadline_s = m_JobRunner.GetElapsedS() + job.sample_s_target + CAMERA_JOB_TIMEOUT_S;
@@ -1897,15 +1920,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
-	// camera_path_play (d026). play queues a job that enters the scripted
-	// camera the way a camera_set apply does and starts the path there; state
-	// and stop answer at once. A play while a path plays is path_busy and that
-	// path goes on. A path_id given to state or stop must name the current or
-	// last path (path_not_found). Every refusal comes before anything changes.
+	// camera_path_play (d026). Every mode answers here, at dispatch, and no
+	// job runs for any of them. play enters the scripted camera the way a
+	// camera_set apply does and puts the path's first key on it;
+	// TickCameraPath moves it from the next frame on. A play while a path
+	// plays is path_busy and that path goes on. A path_id given to state or
+	// stop must name the current or last path (path_not_found). Every refusal
+	// comes before anything changes.
 	protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)
 	{
 		MCPCameraPath candidate;
-		MCPJob job;
+		Object cameraObject;
+		Camera cam;
+		FreeDebugCamera freeCam;
+		PlayerBase player;
 		string error;
 		string mode;
 		if (!command.args)
@@ -1939,18 +1967,55 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return true;
 			}
 
-			job = new MCPJob();
-			job.id = command.id;
-			job.kind = "camera_path_play";
-			job.args = command.args;
-			job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;
-			job.tick_poll_sent = result.tick_poll_sent;
-			job.tick_poll_callback = result.tick_poll_callback;
-			job.tick_dispatch = result.tick_dispatch;
-			m_JobRunner.AddJob(job);
+			// The camera is made and checked before anything is torn down, so a
+			// play that fails here leaves everything as it was: the camera on
+			// screen, the controls, the HUD, the player simulation and the last
+			// path's state. Only the object it made, if any, is deleted.
+			cameraObject = g_Game.CreateObject("staticcamera", candidate.StartPosition(), true);
+			cam = Camera.Cast(cameraObject);
+			if (!cam)
+			{
+				if (cameraObject)
+				{
+					g_Game.ObjectDelete(cameraObject);
+				}
+				result.ok = false;
+				result.error = "camera_create_failed";
+				return true;
+			}
 
-			Log("client job queued id=" + job.id + " kind=camera_path_play deadline_s=" + job.deadline_s);
-			return false;
+			FinishCameraHandoff();
+			SuppressGameplay();
+			// After a camera_set free the free camera is still on and the player
+			// simulation off (ApplyFreeCamera): both go back as the end of a
+			// handoff puts them, so the path's camera is the only one on.
+			freeCam = FreeDebugCamera.GetInstance();
+			if (freeCam && freeCam.IsActive())
+			{
+				freeCam.SetActive(false);
+			}
+			player = PlayerBase.Cast(GetGame().GetPlayer());
+			if (player && m_PlayerSimulationDisabled)
+			{
+				player.DisableSimulation(false);
+				m_PlayerSimulationDisabled = false;
+			}
+			DeleteOwnedCamera();
+
+			candidate.Begin();
+			candidate.Apply(cam);
+			cam.SetActive(true);
+			m_ActiveCam = cam;
+			m_ActiveCamOwned = true;
+			m_CameraPath = candidate;
+			m_CameraPathCam = cam;
+			m_CameraPathCommandId = command.id;
+			Log("camera path playing id=" + command.id + " path_id=" + command.args.path_id + " duration_s=" + candidate.Duration());
+
+			result.camera_path = new MCPCameraPathState();
+			m_CameraPath.Fill(result.camera_path);
+			result.ok = true;
+			return true;
 		}
 
 		if (mode != "state" && mode != "stop")
@@ -1980,6 +2045,30 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		result.camera_path = new MCPCameraPathState();
 		m_CameraPath.Fill(result.camera_path);
+		result.ok = true;
+		return true;
+	}
+
+	// camera_path_release (d026), an internal command and not a tool: the
+	// loopback sends it when the lease that played a path ends, and when a
+	// play it delivered is abandoned. It stops the playing path, as stop
+	// does, only while the play with command_id is the one playing, so a late
+	// release cannot end a later play, and answers whether it matched.
+	protected bool DispatchCameraPathRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		result.matched = false;
+		if (m_CameraPath.IsPlaying() && m_CameraPathCommandId == command.args.command_id)
+		{
+			StopCameraPath();
+			result.matched = true;
+		}
 		result.ok = true;
 		return true;
 	}
@@ -5117,100 +5206,36 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			MCPHoldControl.Maintain();
 			return MCPHoldControl.Ready();
 		}
-		else if (job.kind == "camera_path_play")
-		{
-			return ProcessCameraPathPlayJob(job);
-		}
 
 		return false;
 	}
 
-	// d026: a play makes its staticcamera first, then enters it the way a
-	// camera_set apply does (FinishCameraHandoff, SuppressGameplay, the old
-	// owned camera deleted) and puts the path's first key on it;
-	// TickCameraPath moves it from the next frame on. The args were checked
-	// at dispatch and are loaded again here, so a path is only ever built from
-	// args that pass.
-	protected bool ProcessCameraPathPlayJob(MCPJob job)
-	{
-		MCPCameraPath path;
-		Object cameraObject;
-		Camera cam;
-		FreeDebugCamera freeCam;
-		PlayerBase player;
-		string error;
-		path = new MCPCameraPath();
-		error = path.Load(job.args);
-		if (error != "")
-		{
-			job.error = error;
-			return true;
-		}
-		if (m_CameraPath.IsPlaying())
-		{
-			job.error = "path_busy";
-			return true;
-		}
-
-		// The camera is made and checked before anything is torn down, so a
-		// play that fails here leaves everything as it was: the camera on
-		// screen, the controls, the HUD, the player simulation and the last
-		// path's state. Only the object it made, if any, is deleted.
-		cameraObject = g_Game.CreateObject("staticcamera", path.StartPosition(), true);
-		cam = Camera.Cast(cameraObject);
-		if (!cam)
-		{
-			if (cameraObject)
-			{
-				g_Game.ObjectDelete(cameraObject);
-			}
-			job.error = "camera_create_failed";
-			return true;
-		}
-
-		FinishCameraHandoff();
-		SuppressGameplay();
-		// After a camera_set free the free camera is still on and the player
-		// simulation off (ApplyFreeCamera): both go back as the end of a
-		// handoff puts them, so the path's camera is the only one on.
-		freeCam = FreeDebugCamera.GetInstance();
-		if (freeCam && freeCam.IsActive())
-		{
-			freeCam.SetActive(false);
-		}
-		player = PlayerBase.Cast(GetGame().GetPlayer());
-		if (player && m_PlayerSimulationDisabled)
-		{
-			player.DisableSimulation(false);
-			m_PlayerSimulationDisabled = false;
-		}
-		DeleteOwnedCamera();
-
-		path.Begin();
-		path.Apply(cam);
-		cam.SetActive(true);
-		m_ActiveCam = cam;
-		m_ActiveCamOwned = true;
-		m_CameraPath = path;
-		m_CameraPathCam = cam;
-		Log("camera path playing id=" + job.id + " path_id=" + job.args.path_id + " duration_s=" + path.Duration());
-		return true;
-	}
-
 	// One frame of the playing path: its clock moves by this frame's
-	// timeslice and the camera takes the pose at that time. A path whose
-	// camera is no longer the bridge's (a camera_set, a restore, a release)
-	// or no longer active in the engine (another camera turned on from
-	// outside the bridge, such as vanilla's developer free camera, which
-	// leaves m_ActiveCam as it is) is aborted, not moved. camera_get makes
-	// the same IsActive check.
+	// timeslice and the camera takes the pose at that time. A path is
+	// aborted, not moved, when its camera is no longer the bridge's (a
+	// camera_set, a restore, a release), when the engine no longer reports
+	// that camera active (camera_get makes the same IsActive check), or when
+	// the FreeDebugCamera singleton reports active: vanilla's developer free
+	// camera turns that singleton on from outside the bridge and leaves
+	// m_ActiveCam as it is (developerfreecamera.c:36-40, GetInstance at
+	// camera.c:84-90), and Camera.SetActive and IsActive (camera.c:45, :61)
+	// promise no exclusivity, so the path's camera may still read active.
+	// The same lines in 1.29 and 1.30. The bridge's own free camera is never
+	// on while a path plays: a camera_set and a restore stop the path first.
 	protected void TickCameraPath(float timeslice)
 	{
+		FreeDebugCamera freeCam;
 		if (!m_CameraPath || !m_CameraPath.IsPlaying())
 		{
 			return;
 		}
 		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam || !m_CameraPathCam.IsActive())
+		{
+			StopCameraPath();
+			return;
+		}
+		freeCam = FreeDebugCamera.GetInstance();
+		if (freeCam && freeCam.IsActive())
 		{
 			StopCameraPath();
 			return;
@@ -5373,22 +5398,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
+	// DispatchCameraSet applied the camera and queued this job in SETTLE; the
+	// job only waits out the settle and hands the report to MCP_PostJobSuccess.
 	protected bool ProcessCameraSetJob(MCPJob job)
 	{
-		if (job.phase == CAMERA_PHASE_APPLY)
-		{
-			bool applied = ApplyCameraSet(job);
-			if (!applied)
-			{
-				RestoreGameplay();
-				return true;
-			}
-
-			job.sample_start_s = m_JobRunner.GetElapsedS();
-			job.phase = CAMERA_PHASE_SETTLE;
-			return false;
-		}
-
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
 			// Time-only settle. Camera.IsInterpolationComplete / GetCurrentFOV
@@ -6211,20 +6224,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "action_hold")
 		{
 			PostActionHoldJob(job);
-		}
-
-		// The state of the path the play just started (d026).
-		if (job.kind == "camera_path_play")
-		{
-			MCPResult resultPath = new MCPResult();
-			resultPath.id = job.id;
-			resultPath.ok = true;
-			resultPath.tick_poll_sent = job.tick_poll_sent;
-			resultPath.tick_poll_callback = job.tick_poll_callback;
-			resultPath.tick_dispatch = job.tick_dispatch;
-			resultPath.camera_path = new MCPCameraPathState();
-			m_CameraPath.Fill(resultPath.camera_path);
-			PostResult(resultPath);
 		}
 	}
 
@@ -7343,16 +7342,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void RestoreGameplay()
 	{
-		// Drops every override this bridge armed. Same method for the
-		// restore_gameplay command, vehicle get-in cleanup and shutdown.
+		// Drops every override this bridge armed on gameplay. Same method for the
+		// restore_gameplay command, vehicle get-in cleanup and shutdown. The
+		// camera is not gameplay: ReleaseCamera drops it, and a playing
+		// camera_path_play is stopped by the callers that run outside a job (the
+		// restore_gameplay dispatch and Shutdown), never from a job (d026).
 		MCPWeaponControl.ReleaseAll("cleared");
 		MCPLookAtControl.Release("restore");
 		// A held input_trigger key too. Shutdown releases first, as shutdown.
 		MCPInputTriggerControl.ReleaseAll("restore");
 		// And an active player_move, the same way.
 		MCPPlayerMoveControl.ReleaseAll("restore");
-		// And a playing camera_path_play, aborted where its camera stands (d026).
-		StopCameraPath();
 		// Destructor cleanup can outlive CGame, whose destructor nulls g_Game.
 		// Latched: this method has eight call sites and must not log per call.
 		// Log reaches only Print, which needs no CGame, so the line survives the
@@ -7725,6 +7725,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Likewise for an active player_move, with one last best-effort send of
 		// its server release before the mission goes.
 		MCPPlayerMoveControl.ShutdownRelease();
+		// A playing camera_path_play ends with the mission (d026).
+		StopCameraPath();
 		RestoreGameplay();
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).

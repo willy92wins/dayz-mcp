@@ -7,6 +7,8 @@ Every bound below mirrors theirs, so a request this module builds is one the
 bridge accepts, and the loopback ingress checks the same wire shape with
 validate_command_args. The bridge reads every number as a 32-bit float, so
 the times are compared, and fov is checked above 0, as that float holds them.
+camera_set_focus's focus_distance and focus_blur (inbox 702f) are checked here
+too, with the same bound and the same float, by the tool and by the ingress.
 """
 from __future__ import annotations
 
@@ -165,6 +167,28 @@ def normalize_keys(keys: object) -> list[dict[str, Any]]:
         normalized.append(entry)
         previous_t = t
     return normalized
+
+
+def focus_distance(value: object) -> float | None:
+    """focus_distance in metres, or None: a number above 0, also as the
+    32-bit float the bridge reads, and at most MAGNITUDE_MAX, as a key's fov.
+    """
+
+    number = _bounded(value)
+    if number is None or number <= 0.0 or float32(number) <= 0.0:
+        return None
+    return number
+
+
+def focus_blur(value: object) -> float | None:
+    """focus_blur, or None: 0, or a number above 0 that stays above 0 as the
+    32-bit float the bridge reads, and at most MAGNITUDE_MAX.
+    """
+
+    number = _bounded(value)
+    if number is None or number < 0.0 or (number > 0.0 and float32(number) <= 0.0):
+        return None
+    return number
 
 
 def normalize_request(

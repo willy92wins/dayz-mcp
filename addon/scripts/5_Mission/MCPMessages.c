@@ -217,7 +217,8 @@ class MCPArgs
 	ref array<int> net_low;
 	ref array<int> net_high;
 	string run_token;
-	// player_look_at_release. The command id that owns the aim overrides.
+	// player_look_at_release: the command id that owns the aim overrides.
+	// camera_path_release (d026): the command id of the play to stop.
 	int command_id;
 	// camera_path_play (d026). mode is play, state or stop; keys and easing
 	// (linear or smooth) travel with play only. path_id is an optional label of

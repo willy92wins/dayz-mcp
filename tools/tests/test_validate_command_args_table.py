@@ -2121,6 +2121,15 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("blur_negative", _focus_args(focus_blur=-0.1), (False, "bad_args")),
         ("blur_inf", _focus_args(focus_blur=float("inf")), (False, "bad_args")),
         ("blur_bool", _focus_args(focus_blur=False), (False, "bad_args")),
+        # The tool's bounds (camera_path.focus_distance and focus_blur): at most
+        # 1e9, and above 0 still as the bridge's 32-bit float.
+        ("valid_distance_at_the_bound", _focus_args(focus_distance=1e9), (True, None)),
+        ("valid_distance_least_float", _focus_args(focus_distance=1e-45), (True, None)),
+        ("valid_blur_least_float", _focus_args(focus_blur=1e-45), (True, None)),
+        ("distance_1e100", _focus_args(focus_distance=1e100), (False, "bad_args")),
+        ("distance_1e-46", _focus_args(focus_distance=1e-46), (False, "bad_args")),
+        ("blur_1e100", _focus_args(focus_blur=1e100), (False, "bad_args")),
+        ("blur_1e-46", _focus_args(focus_blur=1e-46), (False, "bad_args")),
         ("alias_never_on_the_wire", _focus_args("look_at", "look_at"), (False, "bad_args")),
         ("extra_key", _focus_args(extra=None), (False, "bad_args")),
     ),
@@ -2406,6 +2415,14 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ),
     ),
     "player_look_at_release": (
+        ("valid", {"command_id": 1}, (True, None)),
+        ("zero", {"command_id": 0}, (False, "bad_args")),
+        ("bool", {"command_id": True}, (False, "bad_args")),
+        ("missing", {}, (False, "bad_args")),
+        ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
+    ),
+    # d026, internal: the loopback's release of the path a play started.
+    "camera_path_release": (
         ("valid", {"command_id": 1}, (True, None)),
         ("zero", {"command_id": 0}, (False, "bad_args")),
         ("bool", {"command_id": True}, (False, "bad_args")),

@@ -7710,8 +7710,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "run 8834df0e, 2026-10-04); fov=0 keeps the current FOV and does not "
         "guarantee resetting to that measured default, the singleton free "
         "camera included. "
-        "focus_distance (metres, finite, above 0) and focus_blur (finite, 0 or "
-        "more) go together or not at all; one without the other is bad_args. "
+        "focus_distance (metres, above 0, also as the 32-bit float the bridge "
+        "reads) and focus_blur (0, or above 0 also as that float), each at most "
+        "1e9, go together or not at all; one without the other is bad_args. "
         "Given, the applied camera also gets Camera.SetFocus(focus_distance, "
         "focus_blur), its depth of field, and a successful apply echoes them as "
         "top-level focus_applied {distance, blur}; omitted, the focus is left "
@@ -7729,7 +7730,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "settle_ticks * 0.05 seconds, and 0 keeps the default of three ticks (0.15 s). "
         "settle_ticks must be an integer from 0 to 600. timeout_s has to cover that "
         "settle plus bridge processing and transport. A timeout does not prove the "
-        "camera was not applied; the job may already have moved it. "
+        "camera was not applied: the bridge applies it when the command arrives, "
+        "before the settle. "
         "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
     ))
     async def camera_set(
@@ -7801,18 +7803,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "bad_args: focus_distance and focus_blur go together; give both or neither"
             )
         if focus_distance is not None and focus_blur is not None:
-            distance_error = _bad_args(
-                "focus_distance", focus_distance, "be a finite number of metres above 0"
-            )
-            distance = _finite_float(focus_distance, distance_error)
-            if distance <= 0.0:
-                raise ToolError(distance_error)
-            blur_error = _bad_args(
-                "focus_blur", focus_blur, "be a finite number of 0 or more"
-            )
-            blur = _finite_float(focus_blur, blur_error)
-            if blur < 0.0:
-                raise ToolError(blur_error)
+            # The ingress makes the same check (camera_path.py): a finite
+            # Python float can still be infinite or 0 as the bridge's float.
+            distance = camera_path_contract.focus_distance(focus_distance)
+            if distance is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_distance",
+                        focus_distance,
+                        "be a number of metres above 0, also as a 32-bit float, "
+                        "and at most 1e9",
+                    )
+                )
+            blur = camera_path_contract.focus_blur(focus_blur)
+            if blur is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_blur",
+                        focus_blur,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
             args["focus_distance"] = distance
             args["focus_blur"] = blur
             command = "camera_set_focus"
@@ -7923,8 +7934,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "finished or aborted, and t_s is the path time, at most duration_s. "
             "A finished path holds the last key's pose until camera_set, "
             "another play or restore_gameplay; camera_set or restore_gameplay "
-            "during a path ends it aborted, and so do stop and another camera "
-            "turned on in the engine. path_id is an "
+            "during a path ends it aborted, and so do stop, the end of the lease "
+            "that played it, the engine reporting the path's camera inactive and "
+            "vanilla's developer free camera turned on; another camera turned on "
+            "from outside the bridge ends it only if the engine then reports the "
+            "path's camera inactive. path_id is an "
             "optional label of up to "
             f"{camera_path_contract.PATH_ID_MAX_CHARS} characters from A-Z a-z "
             "0-9 _ -; given to state or stop it must name the current or last "

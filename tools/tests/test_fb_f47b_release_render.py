@@ -36,7 +36,7 @@ FINISH = "protected void FinishCameraHandoff()"
 QUEUE = "protected bool QueueRestoreGameplayJob(MCPCommand command, MCPResult result)"
 APPLY_STATIC = "protected bool ApplyCameraSet(MCPJob job)"
 APPLY_FREE = "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)"
-PATH_PLAY = "protected bool ProcessCameraPathPlayJob(MCPJob job)"
+PATH_PLAY = "protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)"
 ON_TICK = "void OnTick(float timeslice)"
 CONSTRUCTOR = "void MCPClientBridge()"
 SHUTDOWN = "void Shutdown()"
@@ -254,8 +254,8 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
         self.assertIn('m_JobRunner.CountExcluding("ui_dialog")', exclusive)
         self.assertNotIn("restore_gameplay", exclusive)
         self.assertIn("if (HasExclusiveJob())", _body(source, DISPATCH_SET))
-        # A camera_set that reaches apply anyway (the job timed out, or it was queued
-        # first) finishes the handoff before it touches a camera or the simulation.
+        # A camera_set that reaches apply anyway (the restore job timed out) finishes
+        # the handoff before it touches a camera or the simulation.
         apply = _body(source, APPLY_STATIC)
         finish = apply.index("FinishCameraHandoff();")
         self.assertLess(apply.index("ValidateCameraArgs(job.args)"), finish)
