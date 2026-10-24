@@ -1027,12 +1027,13 @@ BOT_START_ACTIONS = (
 )
 # actor_emote's closed catalog (36fa): each name is an EmoteConstants id of the
 # same name, lowercase, that exists in 1.29 and 1.30 (constants.c:366-409), in
-# id order. Not the suicide emote (it kills the player) nor the debug id, and
-# not surrender or vomit, which create no gesture callback (emoteclasses.c
-# EmoteStartOverride): vomit is a symptom, and surrender toggles a state that
-# IsEmotePlaying() reads, which end cannot end. The bridge refuses any other
-# name too (MCPClientBridge.c ActorEmoteId). end is not an id: it ends the
-# playing emote.
+# id order. Not the suicide emote (it kills the player) nor the debug id, nor
+# vomit (its EmoteStartOverride queues the vomit symptom, in both versions) or
+# surrender (in 1.30 it only changes the surrender state, so no callback; in
+# 1.29 it plays its own in and out callbacks and changes the state and the
+# hands; in both IsEmotePlaying() then reads the state, so every later emote
+# would be refused). MCPClientBridge.c ActorEmoteId has the cites and refuses
+# any other name too. end is not an id: it ends the playing emote.
 ACTOR_EMOTES = (
     "greeting",
     "sos",

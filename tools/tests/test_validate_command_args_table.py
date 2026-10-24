@@ -2243,7 +2243,9 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("upper_case", {"emote": "Greeting", "wait_s": 10.0}, (False, "bad_args")),
         ("suicide", {"emote": "suicide", "wait_s": 10.0}, (False, "bad_args")),
         ("debug", {"emote": "debug", "wait_s": 10.0}, (False, "bad_args")),
-        # No gesture callback (emoteclasses.c EmoteStartOverride): not in the catalog.
+        # Not in the catalog: vomit queues a symptom, and surrender changes a state
+        # IsEmotePlaying() reads (in 1.29 with its own callbacks; MCPClientBridge.c
+        # ActorEmoteId).
         ("surrender", {"emote": "surrender", "wait_s": 10.0}, (False, "bad_args")),
         ("vomit", {"emote": "vomit", "wait_s": 10.0}, (False, "bad_args")),
         ("emote_id", {"emote": 1, "wait_s": 10.0}, (False, "bad_args")),

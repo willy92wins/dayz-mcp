@@ -7,6 +7,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -24,12 +25,14 @@ from dayz_mcp.session_coordination import (
 )
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import _method_body
+from tests.enforce_subset_helpers import declared_fields, method_body, translate
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 
 
 COMMAND = "survivor_drive"
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 DRIVE = addon_root() / "scripts" / "5_Mission" / "MCP_SurvivorDrive.c"
+MOVE = addon_root() / "scripts" / "4_World" / "MCP_PlayerMove.c"
 # The arg-contract hash of main before this verb: the PBO a user may still run.
 PREVIOUS_ARG_CONTRACT_HASH = "4f90284258023d98"
 DRIVE_WIRE = {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": True}
@@ -519,6 +522,305 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
         _in_order(self, block, "result.ok = false;", 'result.error = "drive_busy";', "return true;")
         driven = _method_body(self.drive, "static bool IsDriven(int objectId)")
         self.assertEqual(driven.strip(), "return Find(objectId) >= 0;")
+
+
+DRIVE_METHODS = (
+    "static bool IsDriveSpeed(float speed)",
+    "static bool IsDriven(int objectId)",
+    "static void Drive(PlayerBase survivor, int objectId, float headingDeg, float speed)",
+    "static void Release(MCPBridge bridge, int objectId)",
+    "static void OnObjectGone(MCPBridge bridge, int objectId)",
+    "static void Tick(MCPBridge bridge)",
+    "static void ShutdownAll(MCPBridge bridge)",
+    "protected static void Apply(PlayerBase survivor, MCPSurvivorDriveEntry entry)",
+    "protected static void Disable(PlayerBase survivor)",
+    "protected static int Find(int objectId)",
+)
+MOVE_HELPERS = (
+    "static string SpeedName(float speed)",
+    "static float CompassFromHeading(float headingRad)",
+    "static float WrapDeg180(float angle)",
+    "static void Enable(HumanInputController hic, float speed, float angleDeg)",
+    "static void Disable(HumanInputController hic)",
+)
+# The translator has no statics and no `new`: the registry becomes G.s_Driven
+# and the two constructors factory calls; nothing else changes.
+_DRIVE_REWRITES = (
+    (re.compile(r"(?<![\w.])s_Driven\b"), "G.s_Driven"),
+    (re.compile(r"new array<ref MCPSurvivorDriveEntry>\(\)"), "NewArray()"),
+    (re.compile(r"new MCPSurvivorDriveEntry\(\)"), "NewEntry()"),
+)
+_OVERRIDE = SimpleNamespace(DISABLED="DISABLED", ENABLED="ENABLED")
+
+
+def _method_name(signature: str) -> str:
+    return signature[: signature.index("(")].split()[-1]
+
+
+class _Controller:
+    """A survivor's server HumanInputController: GetHeadingAngle in radians
+    and the two movement overrides, each the last (type, value) it was given,
+    with every call in `calls`."""
+
+    def __init__(self) -> None:
+        self.heading_rad = 0.0
+        self.speed: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
+        self.angle: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
+        self.calls: list[tuple[str, str, float]] = []
+
+    def face(self, compass_deg: float) -> None:
+        # CompassFromHeading is -heading * RAD2DEG.
+        self.heading_rad = -math.radians(compass_deg)
+
+    def GetHeadingAngle(self) -> float:
+        return self.heading_rad
+
+    def OverrideMovementSpeed(self, kind: str, value: float) -> None:
+        self.calls.append(("speed", kind, value))
+        self.speed = (kind, value)
+
+    def OverrideMovementAngle(self, kind: str, value: float) -> None:
+        self.calls.append(("angle", kind, value))
+        self.angle = (kind, value)
+
+    def driving(self) -> tuple[float, float] | None:
+        """(speed, angle) while both overrides are ENABLED, None while both
+        are DISABLED; one of each fails."""
+        kinds = (self.speed[0], self.angle[0])
+        if kinds == (_OVERRIDE.ENABLED, _OVERRIDE.ENABLED):
+            return (self.speed[1], round(self.angle[1], 9))
+        if kinds == (_OVERRIDE.DISABLED, _OVERRIDE.DISABLED):
+            return None
+        raise AssertionError(f"the overrides disagree: {self.speed} {self.angle}")
+
+
+class _Survivor:
+    """A world_spawn survivor as the drive reads it, facing north."""
+
+    def __init__(self) -> None:
+        self.controller = _Controller()
+        self.alive = True
+
+    def GetInputController(self) -> _Controller:
+        return self.controller
+
+    def IsAlive(self) -> bool:
+        return self.alive
+
+
+class _Array:
+    """Enforce's array as the registry uses it: Remove(index) puts the last
+    element in the hole (the order is not kept, as Tick's comment says), and
+    an index outside the array fails."""
+
+    def __init__(self) -> None:
+        self.items: list[object] = []
+
+    def Count(self) -> int:
+        return len(self.items)
+
+    def Get(self, index: int) -> object:
+        self._check(index)
+        return self.items[index]
+
+    def Insert(self, item: object) -> int:
+        self.items.append(item)
+        return len(self.items) - 1
+
+    def Remove(self, index: int) -> None:
+        self._check(index)
+        self.items[index] = self.items[-1]
+        self.items.pop()
+
+    def Clear(self) -> None:
+        self.items.clear()
+
+    def _check(self, index: int) -> None:
+        if type(index) is not int or not 0 <= index < len(self.items):
+            raise AssertionError(f"index {index!r} outside an array of {len(self.items)}")
+
+
+class _DriveModel:
+    """MCPSurvivorDrive's methods (MCP_SurvivorDrive.c) and the
+    MCPPlayerMoveControl helpers they call (MCP_PlayerMove.c), translated and
+    run on one registry (s_Driven, here G.s_Driven) and a bridge whose
+    RuntimeObjectById resolves the survivors the test spawns."""
+
+    def __init__(self) -> None:
+        drive = DRIVE.read_text(encoding="utf-8")
+        move = MOVE.read_text(encoding="utf-8")
+        self.G = SimpleNamespace(s_Driven=None)
+        self.objects: dict[int, _Survivor] = {}
+        self.bridge = SimpleNamespace(RuntimeObjectById=self.objects.get)
+        helpers: dict[str, object] = {
+            "Math": SimpleNamespace(RAD2DEG=180.0 / math.pi),
+            "HumanInputControllerOverrideType": _OVERRIDE,
+        }
+        for signature in MOVE_HELPERS:
+            translate(move, signature, helpers)
+        entry = declared_fields(drive, "MCPSurvivorDriveEntry")
+        self.namespace: dict[str, object] = {
+            "G": self.G,
+            "NewArray": _Array,
+            "NewEntry": lambda: SimpleNamespace(**entry),
+            "PlayerBase": SimpleNamespace(Cast=lambda item: item if isinstance(item, _Survivor) else None),
+            "MCPPlayerMoveControl": SimpleNamespace(
+                **{_method_name(signature): helpers[_method_name(signature)] for signature in MOVE_HELPERS}
+            ),
+        }
+        for signature in DRIVE_METHODS:
+            body = method_body(drive, signature)
+            for pattern, replacement in _DRIVE_REWRITES:
+                body = pattern.sub(replacement, body)
+            translate(
+                signature + "\n{" + body + "}\n",
+                signature,
+                self.namespace,
+                class_types=("MCPSurvivorDriveEntry", "Object", "PlayerBase", "HumanInputController"),
+            )
+
+    def spawn(self, object_id: int) -> _Survivor:
+        self.objects[object_id] = _Survivor()
+        return self.objects[object_id]
+
+    def call(self, name: str, *args: object) -> object:
+        return self.namespace[name](*args)
+
+    def drive(self, object_id: int, heading: float, speed: float) -> None:
+        self.call("Drive", self.objects[object_id], object_id, heading, speed)
+
+    def registry(self) -> list[tuple[int, float, float]]:
+        if self.G.s_Driven is None:
+            return []
+        return [(entry.object_id, entry.heading_deg, entry.speed) for entry in self.G.s_Driven.items]
+
+
+class SurvivorDriveModelTest(unittest.TestCase):
+    """The real Drive, Release, OnObjectGone, Tick and ShutdownAll and the
+    player_move helpers they steer through, on recording controllers: after
+    each step, the registry and both overrides."""
+
+    def setUp(self) -> None:
+        self.model = _DriveModel()
+
+    def test_a_drive_applies_at_once_and_a_new_drive_replaces_it(self) -> None:
+        survivor = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        self.assertEqual(self.model.registry(), [(7, 90.0, 1.0)])
+        self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
+        self.assertIs(self.model.call("IsDriven", 7), True)
+        self.model.drive(7, 180.0, 3.0)
+        self.assertEqual(self.model.registry(), [(7, 180.0, 3.0)])
+        self.assertEqual(survivor.controller.driving(), (3.0, 180.0))
+
+    def test_the_tick_steers_from_the_survivor_own_heading(self) -> None:
+        survivor = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        survivor.controller.face(90.0)
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual(self.model.registry(), [(7, 90.0, 1.0)])
+        self.assertEqual(survivor.controller.driving(), (1.0, 0.0))
+        # -170 wanted from compass 170 is -340, wrapped to 20.
+        survivor.controller.face(170.0)
+        self.model.drive(7, -170.0, 2.0)
+        self.assertEqual(survivor.controller.driving(), (2.0, 20.0))
+        survivor.controller.face(-100.0)
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual(self.model.registry(), [(7, -170.0, 2.0)])
+        self.assertEqual(survivor.controller.driving(), (2.0, -70.0))
+
+    def test_release_disables_the_overrides_and_the_next_tick_drives_nothing(self) -> None:
+        survivor = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertEqual(self.model.registry(), [])
+        self.assertIs(self.model.call("IsDriven", 7), False)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(
+            survivor.controller.calls[-2:],
+            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+        )
+        calls = len(survivor.controller.calls)
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual(self.model.registry(), [])
+        self.assertIsNone(survivor.controller.driving())
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertEqual(len(survivor.controller.calls), calls)
+
+    def test_a_release_of_a_survivor_that_is_not_driven_touches_no_controller(self) -> None:
+        idle = self.model.spawn(8)
+        walking = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        calls = list(walking.controller.calls)
+        self.model.call("Release", self.model.bridge, 8)
+        self.assertEqual(idle.controller.calls, [])
+        self.assertEqual(walking.controller.calls, calls)
+        self.assertEqual(self.model.registry(), [(7, 90.0, 1.0)])
+
+    def test_death_and_object_delete_end_the_drive_with_the_overrides_disabled(self) -> None:
+        dying = self.model.spawn(7)
+        deleted = self.model.spawn(8)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.drive(8, 0.0, 2.0)
+        dying.alive = False
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual(self.model.registry(), [(8, 0.0, 2.0)])
+        self.assertIsNone(dying.controller.driving())
+        self.assertEqual(deleted.controller.driving(), (2.0, 0.0))
+        # object_delete calls OnObjectGone while the id still resolves, then
+        # deletes the object (DispatchObjectDelete).
+        self.model.call("OnObjectGone", self.model.bridge, 8)
+        self.assertEqual(self.model.registry(), [])
+        self.assertIsNone(deleted.controller.driving())
+
+    def test_a_driven_id_that_no_longer_resolves_leaves_the_registry(self) -> None:
+        self.model.spawn(9)
+        self.model.drive(9, 90.0, 1.0)
+        del self.model.objects[9]
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual(self.model.registry(), [])
+        self.assertIs(self.model.call("IsDriven", 9), False)
+
+    def test_the_tick_walks_backwards_so_two_removals_skip_no_entry(self) -> None:
+        survivors = {object_id: self.model.spawn(object_id) for object_id in (7, 8, 9)}
+        for object_id in survivors:
+            self.model.drive(object_id, 90.0, 1.0)
+        survivors[7].alive = False
+        survivors[9].alive = False
+        survivors[8].controller.face(90.0)
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual(self.model.registry(), [(8, 90.0, 1.0)])
+        self.assertIsNone(survivors[7].controller.driving())
+        self.assertIsNone(survivors[9].controller.driving())
+        self.assertEqual(survivors[8].controller.driving(), (1.0, 0.0))
+
+    def test_shutdown_disables_every_driven_survivor_and_empties_the_registry(self) -> None:
+        first = self.model.spawn(7)
+        second = self.model.spawn(8)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.drive(8, 180.0, 3.0)
+        self.model.call("ShutdownAll", self.model.bridge)
+        self.assertEqual(self.model.registry(), [])
+        self.assertIs(self.model.call("IsDriven", 7), False)
+        self.assertIsNone(first.controller.driving())
+        self.assertIsNone(second.controller.driving())
+        calls = (len(first.controller.calls), len(second.controller.calls))
+        self.model.call("Tick", self.model.bridge)
+        self.assertEqual((len(first.controller.calls), len(second.controller.calls)), calls)
+
+    def test_with_nothing_driven_the_hooks_change_nothing(self) -> None:
+        idle = self.model.spawn(7)
+        self.model.call("Tick", self.model.bridge)
+        self.model.call("Release", self.model.bridge, 7)
+        self.model.call("OnObjectGone", self.model.bridge, 7)
+        self.model.call("ShutdownAll", self.model.bridge)
+        self.assertEqual(idle.controller.calls, [])
+        self.assertIsNone(self.model.G.s_Driven)
+
+    def test_only_walk_jog_and_sprint_are_drive_speeds(self) -> None:
+        for speed, expected in ((1.0, True), (2.0, True), (3.0, True), (0.0, False), (1.5, False), (4.0, False)):
+            with self.subTest(speed=speed):
+                self.assertIs(self.model.call("IsDriveSpeed", speed), expected)
 
 
 if __name__ == "__main__":

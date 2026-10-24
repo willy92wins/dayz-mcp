@@ -6756,13 +6756,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// :538, :551). end asks the server to end the playing emote
 	// (EmoteManager.MCP_RequestEmoteEnd, MCP_Emote.c). Refused before anything
 	// is sent: a name outside the catalog or a wait_s outside 0.5..30
-	// (bad_args), no local player (no_player) or emote manager
-	// (no_emote_manager); a new emote while IsEmotePlaying() reads true (an
-	// emote playing, a request pending or the player surrendered,
-	// emotemanager.c:1328-1331), or one that CanPlayEmote and
-	// CanPlayEmoteClientCheck refuse (two of the checks SendEmoteRequestSync
-	// makes, :899), is emote_rejected; end while no emote plays
-	// (m_bEmoteIsPlaying false, a pending request included) is
+	// (bad_args), a local player that is not a PlayerBase (no_player; with no
+	// local player Dispatch answers client_not_in_game before this handler)
+	// or no emote manager (no_emote_manager); a new emote while
+	// IsEmotePlaying() reads true (an emote playing, a request pending or the
+	// player surrendered, emotemanager.c:1328-1331), or one that CanPlayEmote
+	// and CanPlayEmoteClientCheck refuse (two of the checks
+	// SendEmoteRequestSync makes, :899), is emote_rejected; end while no emote
+	// plays (m_bEmoteIsPlaying false, a pending request included) is
 	// no_emote_playing. The job then watches m_bEmoteIsPlaying for wait_s
 	// (ProcessActorEmoteJob). An emote that is already playing is refused
 	// because the watch could not tell it from the new one; a pending request
@@ -6864,14 +6865,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// actor_emote's closed catalog: each name is the EmoteConstants id of the
 	// same name, lowercase (constants.c:366-409), one that exists in 1.29 and
-	// 1.30. Not the suicide emote (it kills the player) nor the debug id, and
-	// not surrender or vomit, which create no gesture callback
-	// (emoteclasses.c:449-453, :753-768; emotemanager.c:667-671): vomit is a
-	// symptom with gameplay effects, and surrender toggles a state that
-	// IsEmotePlaying() reads, so every later actor_emote would be
-	// emote_rejected and end would have no callback to end. The same names
-	// are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0 for
-	// any other name.
+	// 1.30. Not the suicide emote (it kills the player) nor the debug id, nor
+	// vomit or surrender. vomit's EmoteStartOverride queues the vomit symptom,
+	// which has gameplay effects, in both versions (emoteclasses.c:753-768;
+	// 1.29 :760-775). surrender's differs by version: in 1.30 it only changes
+	// the surrender state and returns true (:449-453), so PlayEmote creates no
+	// callback (emotemanager.c:667-671); in 1.29 it plays its own surrender in
+	// and out callbacks (PlaySurrenderInOut, 1.29 emotemanager.c:1156, :1183,
+	// :1194) and changes the surrender state and the hands (1.29
+	// emoteclasses.c:449-460). In both the surrender state is one that
+	// IsEmotePlaying() reads, so every later emote, surrender included, would
+	// be emote_rejected: a surrender verb needs its own way out. The same
+	// names are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0
+	// for any other name.
 	protected int ActorEmoteId(string emote)
 	{
 		if (emote == "greeting")
