@@ -524,6 +524,37 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
                 await self.app.call_tool("world_spawn_batch", {"items": [ITEM] * 3, "per_tick": 1})
         self.assertEqual(len(calls), 2)
 
+    async def test_two_calls_reach_the_bridge_one_at_a_time(self) -> None:
+        # The tool lock holds for every group of a call: the second call's
+        # groups go once the first call has answered.
+        order: list[str] = []
+        inside = 0
+        peak = 0
+
+        async def call_bridge(cmd: str, args: dict, peer: str, timeout_s: float) -> dict:
+            nonlocal inside, peak
+            inside += 1
+            peak = max(peak, inside)
+            order.append(args["scene_id"])
+            try:
+                await asyncio.sleep(0)
+                return _created_answer(args, 1000000000)
+            finally:
+                inside -= 1
+
+        with patch.object(self.runtime, "call_bridge", new=call_bridge):
+            replies = await asyncio.gather(
+                *(
+                    self.app.call_tool(
+                        "world_spawn_batch", {"items": [ITEM] * 2, "per_tick": 1, "scene_id": scene_id}
+                    )
+                    for scene_id in ("A", "B")
+                )
+            )
+        self.assertEqual((peak, order), (1, ["A", "A", "B", "B"]))
+        for reply in replies:
+            self.assertEqual(_content_json(reply)["world_spawn_batch"]["status"], "ok")
+
     async def test_item_count_and_per_tick_bounds_refuse_before_anything_is_sent(self) -> None:
         for arguments, part in (
             ({"items": []}, "bad_args: items holds 0 items"),
@@ -913,6 +944,7 @@ _SCENE_METHODS = (
     "protected bool DispatchWorldSpawnBatch(MCPCommand command, MCPResult result)",
     "protected MCPSpawnBatchRow SpawnBatchItem(MCPArgs args, int index, MCPArgs itemArgs)",
     "protected string SceneSpawnRefusal(MCPArgs args, int count)",
+    "protected void RegisterSpawnScene(MCPCommand command)",
     "protected void AddSceneEntry(string sceneId, int objectId, Object obj)",
     "protected bool DispatchSceneEntities(MCPCommand command, MCPResult result)",
     "protected bool DispatchSceneClear(MCPCommand command, MCPResult result)",
@@ -923,9 +955,12 @@ _SCENE_METHODS = (
     "protected bool IsSceneClearDone(MCPJob job)",
     "protected void PostSceneClear(MCPJob job)",
 )
-# What they call, run as well: world_spawn's checks and the job runner.
+# What they call or follow, run as well: world_spawn's dispatch and checks, and
+# the job runner.
 _SUPPORT_METHODS = (
     "protected bool IsValidSceneId(string sceneId)",
+    "protected bool DispatchWorldSpawn(MCPCommand command, MCPResult result)",
+    "protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)",
     "protected MCPSpawnValidation ValidateSpawnArgs(MCPArgs args)",
     "protected bool IsFiniteFloat(float value)",
     "protected bool IsFiniteWorldCoord(float value, float worldSize)",
@@ -953,15 +988,16 @@ _MESSAGE_FAKES = (
 
 
 class _LogString(EnforceString):
-    """A string literal of the bodies: `+` appends a string or an int, as the
-    Log lines do."""
+    """A string literal of the bodies: `+` appends a string, an int or a float,
+    as the Log lines do. A float is written the way Python writes it, which is
+    not Enforce's form: no test reads a line that holds one."""
 
     __slots__ = ()
 
     def __add__(self, other: object) -> "_LogString":
         if isinstance(other, EnforceString):
             return _LogString(self.data + other.data)
-        if isinstance(other, int) and not isinstance(other, bool):
+        if isinstance(other, (int, float)) and not isinstance(other, bool):
             return _LogString(self.data + str(other).encode("ascii"))
         raise AssertionError(f"string + {other!r}")
 
@@ -1145,6 +1181,20 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         post_now = self.ns["DispatchWorldSpawnBatch"](self._command(command_id, scene_id, items), result)
         return post_now, result
 
+    def _world_spawn(self, command_id: int, scene_id: str, type_name: str = "Barrel_Green") -> Any:
+        """Dispatch's world_spawn branch, in the order
+        test_a_spawn_is_refused_before_create_and_registered_after pins."""
+        command = self._command(command_id, scene_id)
+        command.args.type = EnforceString.of(type_name)
+        command.args.pos = EnforceArray([10.0, 2.0, 20.0])
+        result = self.ns["MCPResult"]()
+        result.error = self.ns["SceneSpawnRefusal"](command.args, 1)
+        if result.error.text == "":
+            if not self.ns["DispatchWorldSpawn"](command, result):
+                self.ns["ApplySpawnLifetime"](command, result)
+            self.ns["RegisterSpawnScene"](command)
+        return result
+
     def _clear(self, scene_id: str, command_id: int = 50) -> tuple[bool, Any]:
         result = self.ns["MCPResult"]()
         post_now = self.ns["DispatchSceneClear"](self._command(command_id, scene_id), result)
@@ -1263,6 +1313,60 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         _post_now, result = self._batch([self._item()], scene_id="full")
         self.assertEqual(result.error.text, "scene_full")
         self.assertEqual(len(self.game.created), 3)
+
+    def test_a_group_registers_every_object_it_creates(self) -> None:
+        # More than four valid items: each created object is registered under
+        # its row's id and type.
+        names = ["Barrel_Green", "CarBattery", "ZmbM_CitizenASkinny", "CivilianSedan", "Barrel_Green", "CarBattery"]
+        _post_now, result = self._batch(
+            [self._item(name, (10.0 + index, 2.0, 20.0)) for index, name in enumerate(names)], scene_id="a"
+        )
+        rows = list(result.world_spawn_batch.items)
+        self.assertEqual([(row.index, row.ok) for row in rows], [(index, True) for index in range(len(names))])
+        objects = [obj for *_rest, obj in self.game.created]
+        self.assertEqual([obj.type_name for obj in objects], names)
+        self.assertEqual(
+            [(entry.object_id, entry.type.text, entry.obj) for entry in self._entries("a")],
+            [(row.object_id, row.type.text, obj) for row, obj in zip(rows, objects)],
+        )
+        runtime = self.ns["m_RuntimeObjects"]
+        self.assertEqual([runtime.Get(row.object_id) for row in rows], objects)
+
+    # world_spawn with a scene
+    def test_world_spawn_registers_its_own_object_under_its_scene(self) -> None:
+        result = self._world_spawn(5, "a")
+        self.assertEqual(result.error.text, "")
+        ((_type_name, _pos, _flags, _rotation, spawned),) = self.game.created
+        self.assertEqual(
+            [(entry.object_id, entry.type.text, entry.obj) for entry in self._entries("a")],
+            [(5, "Barrel_Green", spawned)],
+        )
+        self.assertIs(self.ns["m_Jobs"].Get(5).subject, spawned)
+        # The next one is appended; one with no scene_id registers nothing.
+        self._world_spawn(6, "a", "CarBattery")
+        self._world_spawn(7, "")
+        self.assertEqual(
+            [(entry.object_id, entry.obj) for entry in self._entries("a")],
+            [(5, spawned), (6, self.game.created[1][4])],
+        )
+        self.assertEqual(self.ns["m_Scenes"].Count(), 1)
+        self.assertEqual(len(self.game.created), 3)
+
+    def test_world_spawn_registers_nothing_without_its_own_spawn_job(self) -> None:
+        # No job for the id: the class is unknown, so nothing was created.
+        result = self._world_spawn(8, "a", "NoSuchClass")
+        self.assertEqual(result.error.text, "unknown_type")
+        self.assertEqual(self.ns["m_Jobs"].Count(), 0)
+        self.assertIsNone(self._entries("a"))
+        # A job for other args: an older command's, under an id the daemon
+        # reused. Its object is not this command's.
+        self._world_spawn(9, "")
+        older = self.ns["m_Jobs"].Get(9)
+        result = self._world_spawn(9, "a", "NoSuchClass")
+        self.assertEqual(result.error.text, "unknown_type")
+        self.assertIs(self.ns["m_Jobs"].Get(9), older)
+        self.assertIsNone(self._entries("a"))
+        self.assertEqual(len(self.game.created), 1)
 
     # scene_clear
     def test_scene_clear_refuses_a_hierarchy_shared_with_another_scene(self) -> None:
@@ -1435,11 +1539,13 @@ _SCENE_MEMBER_TYPES: dict[tuple[str, str], str] = {
     ("MCPArgs", "type"): "string",
     ("MCPCommand", "args"): "ref MCPArgs",
     ("MCPCommand", "id"): "int",
+    ("MCPJob", "args"): "ref MCPArgs",
     ("MCPJob", "deadline_s"): "float",
     ("MCPJob", "id"): "int",
     ("MCPJob", "kind"): "string",
     ("MCPJob", "scene_clear"): "ref MCPSceneClear",
     ("MCPJob", "scene_pending"): "ref array<ref MCPSceneEntry>",
+    ("MCPJob", "subject"): "Object",
     ("MCPJob", "tick_dispatch"): "int",
     ("MCPJob", "tick_poll_callback"): "int",
     ("MCPJob", "tick_poll_sent"): "int",
