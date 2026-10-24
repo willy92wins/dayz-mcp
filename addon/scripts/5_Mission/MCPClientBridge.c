@@ -422,7 +422,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int CAMERA_MODE_LOOKAT = 2;
 	protected const int CAMERA_MODE_MATRIX = 3;
 	protected const int CAMERA_MODE_FREE = 4;
-	protected const int CAMERA_PHASE_APPLY = 0;
 	protected const int CAMERA_PHASE_SETTLE = 1;
 	protected const int CAMERA_PHASE_REPORT = 2;
 	// f47b: OnTick calls a staticcamera release spends on FreeDebugCamera before
@@ -471,7 +470,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press," + "player_look_at,player_look_at_release,player_move,player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get," + "camera_path_play,camera_path_release,camera_set,camera_set_focus,engine_set,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release," + "player_move,player_respawn,player_trace,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control," + "vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -508,6 +507,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected Camera m_CameraHandoffCam;
 	protected bool m_CameraHandoffPending;
 	protected int m_CameraHandoffTicks;
+	//! camera_path_play (d026): the current or last path, idle until the first
+	//! play, and the staticcamera a playing path moves (not ref, an entity the
+	//! world owns; m_ActiveCam holds it as an owned camera).
+	protected ref MCPCameraPath m_CameraPath;
+	protected Camera m_CameraPathCam;
+	//! The command id of the play that started m_CameraPath, the one
+	//! camera_path_release must name to stop it; 0 before the first play.
+	protected int m_CameraPathCommandId;
+	//! m_Tick when that play turned the path's camera on (TickCameraPath).
+	protected int m_CameraPathPlayTick;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -546,6 +555,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCamOwned = false;
 		m_CameraHandoffPending = false;
 		m_CameraHandoffTicks = 0;
+		m_CameraPath = new MCPCameraPath();
+		m_CameraPathCommandId = 0;
+		m_CameraPathPlayTick = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_Pending = new array<ref MCPCommand>();
@@ -620,6 +632,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Ahead of the job runner, so a restore_gameplay job posts in the very
 		// tick the camera handoff finishes (f47b). Returns at once when none runs.
 		TickCameraHandoff();
+		// camera_path_play moves its camera here on every frame, never from a
+		// job, by this frame's timeslice. Returns at once while no path plays.
+		TickCameraPath(timeslice);
 
 		if (m_JobRunner)
 		{
@@ -1113,6 +1128,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		else if (command.cmd == "restore_gameplay")
 		{
+			// A playing camera_path_play ends aborted where its camera stands:
+			// RestoreGameplay leaves the camera, and its path, to the caller (d026).
+			StopCameraPath();
 			RestoreGameplay();
 			ReleaseCamera();
 			result.ok = true;
@@ -1243,6 +1261,22 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "action_hold_cancel")
 		{
 			postNow = DispatchActionHoldCancel(command, result);
+		}
+		else if (command.cmd == "camera_set_focus")
+		{
+			postNow = DispatchCameraSet(command, result);
+		}
+		else if (command.cmd == "camera_path_play")
+		{
+			postNow = DispatchCameraPathPlay(command, result);
+		}
+		else if (command.cmd == "camera_path_release")
+		{
+			postNow = DispatchCameraPathRelease(command, result);
+		}
+		else if (command.cmd == "hud_set")
+		{
+			postNow = DispatchHudSet(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -1808,6 +1842,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		// camera_set_focus is camera_set plus SetFocus on the camera it applies
+		// (702f). The command name turns focus on, so camera_set never reads the
+		// focus fields and an older bridge answers unknown_command instead of
+		// dropping them.
+		bool focus = command.cmd == "camera_set_focus";
+		if (focus && !IsValidCameraFocus(command.args))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
 		if (HasExclusiveJob())
 		{
 			result.ok = false;
@@ -1815,12 +1861,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		// The camera is applied here, at dispatch, and the job only settles and
+		// reports: no job changes anything (d026). A failed apply hands
+		// gameplay back and answers at once with its error.
 		MCPJob job = new MCPJob();
 		job.id = command.id;
 		job.kind = "camera_set";
 		job.args = command.args;
-		job.phase = CAMERA_PHASE_APPLY;
+		job.camera_focus = focus;
+		bool applied = ApplyCameraSet(job);
+		if (!applied)
+		{
+			RestoreGameplay();
+			result.ok = false;
+			result.error = job.error;
+			return true;
+		}
+
+		job.phase = CAMERA_PHASE_SETTLE;
 		job.sample_s_target = ResolveSettleSeconds(command.args);
+		job.sample_start_s = m_JobRunner.GetElapsedS();
 		// Settle plus the same five seconds of apply/report slack. A fixed
 		// five-second deadline cancelled a 200-tick settle (10 s) unfinished.
 		job.deadline_s = m_JobRunner.GetElapsedS() + job.sample_s_target + CAMERA_JOB_TIMEOUT_S;
@@ -1831,6 +1891,237 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		Log("client job queued id=" + job.id + " kind=camera_set deadline_s=" + job.deadline_s);
 		return false;
+	}
+
+	// 702f: focus_distance in metres, finite and above 0, and focus_blur finite
+	// and 0 or more, the two arguments of Camera.SetFocus (camera.c:70-74).
+	// NaN fails every comparison, so it is tested first; float.MAX stands for
+	// an infinity, as the server's IsFiniteFloat does.
+	protected bool IsValidCameraFocus(MCPArgs args)
+	{
+		float distance;
+		float blur;
+		if (!args)
+		{
+			return false;
+		}
+
+		distance = args.focus_distance;
+		blur = args.focus_blur;
+		if (distance != distance || blur != blur)
+		{
+			return false;
+		}
+		if (distance <= 0.0 || distance >= float.MAX)
+		{
+			return false;
+		}
+		if (blur < 0.0 || blur >= float.MAX)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// camera_path_play (d026). Every mode answers here, at dispatch, and no
+	// job runs for any of them. play enters the scripted camera the way a
+	// camera_set apply does and puts the path's first key on it;
+	// TickCameraPath moves it from the next frame on. A play while a path
+	// plays is path_busy and that path goes on. A path_id given to state or
+	// stop must name the current or last path (path_not_found). Every refusal
+	// comes before anything changes.
+	protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)
+	{
+		MCPCameraPath candidate;
+		Object cameraObject;
+		Camera cam;
+		FreeDebugCamera freeCam;
+		PlayerBase player;
+		string error;
+		string mode;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		mode = command.args.mode;
+		if (mode == "play")
+		{
+			candidate = new MCPCameraPath();
+			error = candidate.Load(command.args);
+			if (error != "")
+			{
+				result.ok = false;
+				result.error = error;
+				return true;
+			}
+			if (m_CameraPath.IsPlaying())
+			{
+				result.ok = false;
+				result.error = "path_busy";
+				return true;
+			}
+			if (HasExclusiveJob())
+			{
+				result.ok = false;
+				result.error = "busy";
+				return true;
+			}
+
+			// The camera is made and checked before anything is torn down, so a
+			// play that fails here leaves everything as it was: the camera on
+			// screen, the controls, the HUD, the player simulation and the last
+			// path's state. Only the object it made, if any, is deleted.
+			cameraObject = g_Game.CreateObject("staticcamera", candidate.StartPosition(), true);
+			cam = Camera.Cast(cameraObject);
+			if (!cam)
+			{
+				if (cameraObject)
+				{
+					g_Game.ObjectDelete(cameraObject);
+				}
+				result.ok = false;
+				result.error = "camera_create_failed";
+				return true;
+			}
+
+			FinishCameraHandoff();
+			SuppressGameplay();
+			// After a camera_set free the free camera is still on and the player
+			// simulation off (ApplyFreeCamera): both go back as the end of a
+			// handoff puts them, so the path's camera is the only one on.
+			freeCam = FreeDebugCamera.GetInstance();
+			if (freeCam && freeCam.IsActive())
+			{
+				freeCam.SetActive(false);
+			}
+			player = PlayerBase.Cast(GetGame().GetPlayer());
+			if (player && m_PlayerSimulationDisabled)
+			{
+				player.DisableSimulation(false);
+				m_PlayerSimulationDisabled = false;
+			}
+			DeleteOwnedCamera();
+
+			candidate.Begin();
+			candidate.Apply(cam);
+			cam.SetActive(true);
+			m_ActiveCam = cam;
+			m_ActiveCamOwned = true;
+			m_CameraPath = candidate;
+			m_CameraPathCam = cam;
+			m_CameraPathCommandId = command.id;
+			m_CameraPathPlayTick = m_Tick;
+			Log("camera path playing id=" + command.id + " path_id=" + command.args.path_id + " duration_s=" + candidate.Duration());
+
+			result.camera_path = new MCPCameraPathState();
+			m_CameraPath.Fill(result.camera_path);
+			result.ok = true;
+			return true;
+		}
+
+		if (mode != "state" && mode != "stop")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPCameraPath.IsValidPathId(command.args.path_id))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (command.args.path_id != "" && !m_CameraPath.HasPathId(command.args.path_id))
+		{
+			result.ok = false;
+			result.error = "path_not_found";
+			return true;
+		}
+
+		if (mode == "stop")
+		{
+			// The camera keeps the pose of the last frame the path applied.
+			StopCameraPath();
+		}
+
+		result.camera_path = new MCPCameraPathState();
+		m_CameraPath.Fill(result.camera_path);
+		result.ok = true;
+		return true;
+	}
+
+	// camera_path_release (d026), an internal command and not a tool: the
+	// loopback sends it when the lease that played a path ends, and when a
+	// play it delivered is abandoned. It stops the playing path, as stop
+	// does, only while the play with command_id is the one playing, so a late
+	// release cannot end a later play, and answers whether it matched.
+	protected bool DispatchCameraPathRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		result.matched = false;
+		if (m_CameraPath.IsPlaying() && m_CameraPathCommandId == command.args.command_id)
+		{
+			StopCameraPath();
+			result.matched = true;
+		}
+		result.ok = true;
+		return true;
+	}
+
+	// hud_set (f427): the in-game HUD's player hide flags, the ones vanilla's
+	// UAUIQuickbarToggle key toggles (missiongameplay.c:542-557).
+	// ShowHudPlayer and ShowQuickbarPlayer set HUD_HIDE and QUICKBAR_HIDE to
+	// !visible (ingamehud.c:897-906). HUD_DISABLE, the options menu's flag, and
+	// the Hud.Show that camera_set's SuppressGameplay uses are not touched. The
+	// answer reads both flags back (ingamehudvisibility.c:120-126).
+	protected bool DispatchHudSet(MCPCommand command, MCPResult result)
+	{
+		Mission mission;
+		IngameHud hud;
+		IngameHudVisibility visibility;
+		MCPHudState state;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		mission = GetGame().GetMission();
+		if (mission)
+		{
+			hud = IngameHud.Cast(mission.GetHud());
+		}
+		if (hud)
+		{
+			visibility = hud.GetHudVisibility();
+		}
+		if (!visibility)
+		{
+			result.ok = false;
+			result.error = "hud_unavailable";
+			return true;
+		}
+
+		hud.ShowHudPlayer(command.args.visible);
+		hud.ShowQuickbarPlayer(command.args.visible);
+
+		state = new MCPHudState();
+		state.hud_hide = visibility.IsContextFlagActive(EHudContextFlags.HUD_HIDE);
+		state.quickbar_hide = visibility.IsContextFlagActive(EHudContextFlags.QUICKBAR_HIDE);
+		state.visible = !state.hud_hide && !state.quickbar_hide;
+		result.hud = state;
+		result.ok = true;
+		return true;
 	}
 
 	protected bool DispatchCameraGet(MCPCommand command, MCPResult result)
@@ -4923,6 +5214,68 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
+	// One frame of the playing path: its clock moves by this frame's
+	// timeslice and the camera takes the pose at that time. A path is
+	// aborted, not moved, when its camera is no longer the bridge's (a
+	// camera_set, a restore, a release), when the engine no longer reports
+	// that camera active (camera_get makes the same IsActive check), or when
+	// the FreeDebugCamera singleton reports active: vanilla's developer free
+	// camera turns that singleton on from outside the bridge and leaves
+	// m_ActiveCam as it is (developerfreecamera.c:36-40, GetInstance at
+	// camera.c:84-90), and Camera.SetActive and IsActive (camera.c:45, :61)
+	// promise no exclusivity, so the path's camera may still read active.
+	// The same lines in 1.29 and 1.30. The bridge's own free camera is never
+	// on while a path plays: a camera_set and a restore stop the path first.
+	// Neither IsActive is read before the second OnTick after the play's
+	// dispatch (m_Tick counts OnTick calls, made once a frame from
+	// MissionGameplay.OnUpdate): those lines do not say when a SetActive shows
+	// in IsActive, here the play's SetActive(true) on its camera and
+	// SetActive(false) on a free camera left on, and a play dispatched from the
+	// poll callback ahead of OnTick shares the first OnTick's frame with them.
+	// The second OnTick comes a full frame later. The first still moves the path.
+	protected void TickCameraPath(float timeslice)
+	{
+		FreeDebugCamera freeCam;
+		if (!m_CameraPath || !m_CameraPath.IsPlaying())
+		{
+			return;
+		}
+		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam)
+		{
+			StopCameraPath();
+			return;
+		}
+		if (m_Tick > m_CameraPathPlayTick + 1)
+		{
+			if (!m_CameraPathCam.IsActive())
+			{
+				StopCameraPath();
+				return;
+			}
+			freeCam = FreeDebugCamera.GetInstance();
+			if (freeCam && freeCam.IsActive())
+			{
+				StopCameraPath();
+				return;
+			}
+		}
+
+		m_CameraPath.Advance(timeslice);
+		m_CameraPath.Apply(m_CameraPathCam);
+	}
+
+	// Ends a playing path as aborted where its camera stands now; a finished,
+	// aborted or idle path keeps its state. The camera stays as it is: it is
+	// m_ActiveCam, which camera_set and restore_gameplay release as usual.
+	protected void StopCameraPath()
+	{
+		if (m_CameraPath)
+		{
+			m_CameraPath.Abort();
+		}
+		m_CameraPathCam = null;
+	}
+
 	// A hold answers once its move is released. MaintainFromTick runs before
 	// the job runner in OnTick, so the answer leaves on the release tick. Only
 	// hold_s or the arrival completes a hold; anything else is aborted.
@@ -5064,24 +5417,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
+	// DispatchCameraSet applied the camera and queued this job in SETTLE; the
+	// job only waits out the settle and hands the report to MCP_PostJobSuccess.
+	// It reads nothing and does not end before the second OnTick after the
+	// dispatch (job.tick_dispatch is the dispatch's m_Tick), a full frame after
+	// the apply's SetActive, as TickCameraPath waits for a play's: an earlier
+	// CameraReadError could read the camera inactive and report the player view.
 	protected bool ProcessCameraSetJob(MCPJob job)
 	{
-		if (job.phase == CAMERA_PHASE_APPLY)
-		{
-			bool applied = ApplyCameraSet(job);
-			if (!applied)
-			{
-				RestoreGameplay();
-				return true;
-			}
-
-			job.sample_start_s = m_JobRunner.GetElapsedS();
-			job.phase = CAMERA_PHASE_SETTLE;
-			return false;
-		}
-
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
+			if (m_Tick <= job.tick_dispatch + 1)
+			{
+				return false;
+			}
 			// Time-only settle. Camera.IsInterpolationComplete / GetCurrentFOV
 			// walk the same native camera object as GetCurrentCamera (SUB_BRZ
 			// 2026-09-08) and have frozen the client render after camera_set
@@ -5679,6 +6028,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		// A camera_set during a camera_path_play ends the path as aborted (d026).
+		StopCameraPath();
 		// A release still handing off would share the free camera and the player
 		// simulation with this apply: finish it first (f47b). No-op otherwise.
 		FinishCameraHandoff();
@@ -5728,6 +6079,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			cam.SetFOV(validation.fov);
 		}
+		// camera_set_focus only, with the arguments its dispatch checked (702f).
+		if (job.camera_focus)
+		{
+			cam.SetFocus(job.args.focus_distance, job.args.focus_blur);
+		}
 
 		cam.SetActive(true);
 		m_ActiveCam = cam;
@@ -5771,6 +6127,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (validation.fov > 0.0)
 		{
 			freeCam.SetFOV(validation.fov);
+		}
+		// The free camera is a singleton: the focus set here stays on it.
+		if (job.camera_focus)
+		{
+			freeCam.SetFocus(job.args.focus_distance, job.args.focus_blur);
 		}
 
 		freeCam.SetActive(true);
@@ -7008,8 +7369,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void RestoreGameplay()
 	{
-		// Drops every override this bridge armed. Same method for the
-		// restore_gameplay command, vehicle get-in cleanup and shutdown.
+		// Drops every override this bridge armed on gameplay. Same method for the
+		// restore_gameplay command, vehicle get-in cleanup and shutdown. The
+		// camera is not gameplay: ReleaseCamera drops it, and a playing
+		// camera_path_play is stopped by the callers that run outside a job (the
+		// restore_gameplay dispatch and Shutdown), never from a job (d026).
 		MCPWeaponControl.ReleaseAll("cleared");
 		MCPLookAtControl.Release("restore");
 		// A held input_trigger key too. Shutdown releases first, as shutdown.
@@ -7388,6 +7752,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Likewise for an active player_move, with one last best-effort send of
 		// its server release before the mission goes.
 		MCPPlayerMoveControl.ShutdownRelease();
+		// A playing camera_path_play ends with the mission (d026).
+		StopCameraPath();
 		RestoreGameplay();
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).

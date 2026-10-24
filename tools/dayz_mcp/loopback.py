@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import (
     anim_timeline,
+    camera_path,
     daemon_credential,
     orphan_guard,
     pinned_keyfile,
@@ -100,7 +101,11 @@ SERVER_COMMANDS = {
 }
 CLIENT_COMMANDS = {
     "camera_set",
+    "camera_set_focus",
     "camera_get",
+    "camera_path_play",
+    "camera_path_release",
+    "hud_set",
     "restore_gameplay",
     "key_press",
     "input_describe",
@@ -154,6 +159,12 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "action_hold",
         "action_hold_cancel",
         lambda command_id, args: {"hold_id": args["hold_id"]},
+    ),
+    # d026: the client stops the path only while this play is the one playing.
+    (
+        "camera_path_play",
+        "camera_path_release",
+        lambda command_id, args: {"command_id": command_id},
     ),
 )
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
@@ -771,6 +782,10 @@ def _validate_ui_dialog_args(args: dict) -> tuple[bool, str | None]:
     return ui_dialog.validate_command_args(args)
 
 
+def _validate_camera_path_play_args(args: dict) -> tuple[bool, str | None]:
+    return camera_path.validate_command_args(args)
+
+
 _SAFE_FINITE_REAL = _reject_numeric_errors(_real_in_range())
 _SAFE_POSITIVE_REAL = _reject_numeric_errors(
     _real_in_range(minimum=0.0, minimum_inclusive=False)
@@ -877,9 +892,18 @@ def _validate_world_weather_set_args(args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
+def _is_focus_distance(value: object) -> bool:
+    return camera_path.focus_distance(value) is not None
+
+
+def _is_focus_blur(value: object) -> bool:
+    return camera_path.focus_blur(value) is not None
+
+
+def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVariant:
     # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
-    # travel with every one of them.
+    # travel with every one of them. focus is the camera_set_focus shape
+    # (702f): the same plus both Camera.SetFocus arguments, always together.
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
@@ -888,10 +912,14 @@ def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
     }
     for field in vectors:
         validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3
-    return _schema_variant(
-        required=("cam_mode", *vectors, "fov", "settle_ticks"),
-        validators=validators,
-    )
+    required: tuple[str, ...] = ("cam_mode", *vectors, "fov", "settle_ticks")
+    if focus:
+        # The tool's check, camera_path.focus_distance and focus_blur: at most
+        # 1e9 and kept by the bridge's 32-bit float, not just finite here.
+        required = (*required, "focus_distance", "focus_blur")
+        validators["focus_distance"] = _is_focus_distance
+        validators["focus_blur"] = _is_focus_blur
+    return _schema_variant(required=required, validators=validators)
 
 
 _SAFE_INPUT_TRIGGER_HOLD = _reject_numeric_errors(
@@ -1034,13 +1062,35 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "action_cursor_ids",
     "hands_attach",
 })
-# Client verbs an older PBO must not be handed. Checked on the client census
-# (no server arg-contract hash) at enqueue and again at delivery.
-_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
+# Client verbs an older PBO must not be handed, each with the error it is
+# refused with. Checked on the census of the client bound to the run (no
+# server arg-contract hash) at enqueue, after the binding fence, and again at
+# delivery. With no client bound the fence answers first (legacy_unbound in
+# the plain case), so these codes mean a bound client whose census does not
+# name the verb, is stale or comes from another instance. camera_path_release
+# is internal: that spares it a live lease at owner cleanup, not this check.
+_CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
+    "action_hold": "hold_not_supported",
+    "camera_path_play": "bridge_capability_missing",
+    "camera_path_release": "bridge_capability_missing",
+    "camera_set_focus": "bridge_capability_missing",
+    "hud_set": "bridge_capability_missing",
+}
+# A verb whose census must also name the command that stops it: a client that
+# could not be sent camera_path_release is not handed a play (d026).
+_CLIENT_ANNOUNCED_WITH: dict[str, str] = {
+    "camera_path_play": "camera_path_release",
+}
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
-    {"vehicle_release", "bot_stop", "player_look_at_release", "action_hold_cancel"}
+    {
+        "vehicle_release",
+        "bot_stop",
+        "player_look_at_release",
+        "action_hold_cancel",
+        "camera_path_release",
+    }
 )
 
 
@@ -1774,6 +1824,23 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _camera_variant("free", "cam_pos", "look_at"),
         _camera_variant("free", "cam_pos", "cam_orientation"),
     ),
+    # camera_set with focus_distance and focus_blur (702f): the same five
+    # shapes, each with both focus arguments.
+    "camera_set_focus": _command_schema(
+        _camera_variant("orient", "cam_pos", "cam_orientation", focus=True),
+        _camera_variant("lookat", "cam_pos", "look_at", focus=True),
+        _camera_variant("matrix", "cam_matrix", focus=True),
+        _camera_variant("free", "cam_pos", "look_at", focus=True),
+        _camera_variant("free", "cam_pos", "cam_orientation", focus=True),
+    ),
+    # play carries mode, keys, easing and path_id; state and stop carry mode
+    # and path_id. The bounds mirror MCPCameraPath
+    # (addon/scripts/5_Mission/MCP_CameraPath.c) through camera_path.py.
+    "camera_path_play": _command_schema(delegated=_validate_camera_path_play_args),
+    # hud_set (f427): the tool always sends visible.
+    "hud_set": _command_schema(
+        _schema_variant(required=("visible",), validators={"visible": _is_strict_bool})
+    ),
     # camera_get sends {} when cam_mode is empty.
     "camera_get": _command_schema(
         _schema_variant(
@@ -1849,6 +1916,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     "player_look_at_release": _command_schema(
+        _schema_variant(
+            required=("command_id",),
+            validators={"command_id": _integer_in_range(minimum=1)},
+        )
+    ),
+    # d026, internal: the id of the camera_path_play whose path to stop.
+    "camera_path_release": _command_schema(
         _schema_variant(
             required=("command_id",),
             validators={"command_id": _integer_in_range(minimum=1)},
@@ -2033,6 +2107,10 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
+        # d026: lease -> the last camera_path_play play that started under it
+        # and any delivered since without an answer (store_result prunes the
+        # rest). A path plays on after its play answers; cleanup_owner stops it.
+        self._camera_path_play_by_lease: dict[str, set[int]] = {}
         self._holds: dict[str, dict[str, object]] = {}
         self._hold_by_command: dict[int, str] = {}
         self._hold_blocked_runs: set[str] = set()
@@ -3321,31 +3399,37 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, is hold_not_supported. Re-checked at
-        delivery so a destination change after enqueue cannot hand the verb
-        to an older PBO.
+        does not name the command (or the command _CLIENT_ANNOUNCED_WITH
+        pairs it with), refuses it with the command's code in
+        _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold).
+        Internal commands are checked too. Re-checked at delivery so a
+        destination change after enqueue cannot hand the verb to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
             return None
+        refusal = _CLIENT_ANNOUNCED_COMMANDS[cmd]
         view = self._capabilities_view_locked(peer)
         if view.get("state") != "announced":
-            return "hold_not_supported"
+            return refusal
         entry = self._peer_caps.get(peer)
         if not isinstance(entry, dict):
-            return "hold_not_supported"
+            return refusal
         announced_at = entry.get("announced_at")
         if (
             not isinstance(announced_at, (int, float))
             or isinstance(announced_at, bool)
             or (self._now() - float(announced_at)) >= PEER_STALE_S
         ):
-            return "hold_not_supported"
+            return refusal
         if not isinstance(instance, str) or instance != entry.get("instance"):
-            return "hold_not_supported"
+            return refusal
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
-            return "hold_not_supported"
+            return refusal
+        paired = _CLIENT_ANNOUNCED_WITH.get(cmd)
+        if paired is not None and paired not in announced:
+            return refusal
         return None
 
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:
@@ -3377,6 +3461,84 @@ class ServerState:
                 command_id = payload.get("id") if isinstance(payload, dict) else None
                 if status == 200 and isinstance(command_id, int):
                     self._fire_and_forget_ids.add(command_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
+    def _note_camera_path_play_locked(self, command_id: int, args: object) -> None:
+        """Remember a delivered play under its owner's lease (d026). Caller holds the lock."""
+
+        if not isinstance(args, dict) or args.get("mode") != "play":
+            return
+        owner = self._command_owner.get(command_id)
+        if owner is None or not isinstance(owner[1], str) or not owner[1]:
+            return
+        self._camera_path_play_by_lease.setdefault(owner[1], set()).add(command_id)
+
+    def _note_camera_path_result_locked(self, command_id: int, stored: dict) -> None:
+        """One play's answer prunes the plays its lease would release (d026).
+
+        A play that started replaced every path before it, so the plays below
+        it need no release; a play that answered otherwise never started. A
+        discarded late answer counts the same way; one that store_result turns
+        away earlier (binding_retired, late_result_fenced) leaves the play
+        held. Caller holds the lock.
+        """
+
+        for lease_id, command_ids in self._camera_path_play_by_lease.items():
+            if command_id in command_ids:
+                break
+        else:
+            return
+        ok_value = stored.get("ok")
+        if ok_value is True or (
+            isinstance(ok_value, int)
+            and not isinstance(ok_value, bool)
+            and ok_value == 1
+        ):
+            command_ids.difference_update(
+                [held for held in command_ids if held < command_id]
+            )
+        else:
+            command_ids.discard(command_id)
+        if not command_ids:
+            del self._camera_path_play_by_lease[lease_id]
+
+    def enqueue_camera_path_releases_for_lease(self, lease_id: str) -> dict[str, int]:
+        """camera_path_release for each play that lease still holds (d026).
+
+        That is the last play that started under it and any delivered since
+        without an answer: store_result drops a play that answered without
+        starting and every play below one that started.
+
+        A path moves the camera every frame after its play has answered, so it
+        must not outlive the lease that started it. The client stops a path
+        only while the named play is the one playing, so a release for a play
+        that finished, failed or was followed by another changes nothing. As
+        for enqueue_bot_stops_for_lease, the caller should hold the queue lock;
+        each release is internal and fire-and-forget, so it is delivered
+        without a live lease (_cleanup_dispatch_locked). A client whose census
+        does not announce camera_path_release is refused it here and at
+        delivery (_client_announce_refusal_locked), and a refusal here counts
+        as failed.
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            command_ids = sorted(self._camera_path_play_by_lease.pop(lease_id, set()))
+            enqueued = 0
+            failed = 0
+            for command_id in command_ids:
+                status, payload = self.enqueue_command(
+                    "camera_path_release",
+                    {"command_id": command_id},
+                    peer="client",
+                    internal=True,
+                )
+                release_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(release_id, int):
+                    self._fire_and_forget_ids.add(release_id)
                     enqueued += 1
                 else:
                     failed += 1
@@ -3557,12 +3719,11 @@ class ServerState:
         refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
-        if not internal:
-            client_refusal = self._client_announce_refusal_locked(
-                peer, cmd, fence_instance
-            )
-            if client_refusal is not None:
-                return (409, {"error": client_refusal}), None, None, None
+        client_refusal = self._client_announce_refusal_locked(
+            peer, cmd, fence_instance
+        )
+        if client_refusal is not None:
+            return (409, {"error": client_refusal}), None, None, None
         pin = None
         if peer == "client" and not internal:
             pin = self._client_gate_pin_locked(fence_instance)
@@ -4255,6 +4416,13 @@ class ServerState:
             or self._peer_queue_len(release_peer) >= MAX_QUEUE
         ):
             return False, "queue_full", None
+        # The same census check as an enqueue: camera_path_release goes only
+        # to a client that announces it.
+        refusal = self._client_announce_refusal_locked(
+            release_peer, target, pin.get("instance")
+        )
+        if refusal is not None:
+            return False, refusal, None
         if pin.get("legacy") is True:
             queue = self._legacy_queues.get(pin.get("peer"))
         else:
@@ -4662,6 +4830,8 @@ class ServerState:
                     tracked = self._broker_rows.get(command_id)
                     if isinstance(tracked, dict) and tracked.get("state") == "queued":
                         tracked["state"] = "delivered"
+                    if command_name == "camera_path_play" and isinstance(command_id, int):
+                        self._note_camera_path_play_locked(command_id, command.get("args"))
                     if command_name == "action_hold" and isinstance(command_id, int):
                         delivered_hold = self._hold_by_command.get(command_id)
                         if delivered_hold is not None:
@@ -4975,6 +5145,7 @@ class ServerState:
             self._note_hold_result_locked(
                 command_id, stored, discarded, instance or ""
             )
+            self._note_camera_path_result_locked(command_id, stored)
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
@@ -5298,7 +5469,8 @@ class ServerState:
                 cleanup["hold_cancel_enqueued"] = enqueued
         with self._lock:
             pending_bots = bool(self._bot_by_lease.get(lease_id))
-        if not vehicle_active and not pending_bots:
+            pending_paths = bool(self._camera_path_play_by_lease.get(lease_id))
+        if not vehicle_active and not pending_bots and not pending_paths:
             return cleanup
 
         if self._retail_quarantined():
@@ -5306,6 +5478,11 @@ class ServerState:
             values = list(existing) if isinstance(existing, list) else []
             if "retail_quarantine" not in values:
                 values.append("retail_quarantine")
+            if pending_paths:
+                # No release goes out, so a path may play on until it ends.
+                with self._lock:
+                    self._camera_path_play_by_lease.pop(lease_id, None)
+                values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
             return cleanup
 
@@ -5330,12 +5507,20 @@ class ServerState:
                 else:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
             report = self.enqueue_bot_stops_for_lease(lease_id)
+            paths = self.enqueue_camera_path_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
             cleanup["bot_stop_enqueued"] = report["enqueued"]
         if report["failed"]:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("bot_stop_failed")
+            cleanup["cleanup_degraded"] = values
+        if paths["enqueued"] or paths["failed"]:
+            cleanup["camera_path_release_enqueued"] = paths["enqueued"]
+        if paths["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
         return cleanup
 

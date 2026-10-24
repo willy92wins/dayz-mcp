@@ -67,6 +67,20 @@ def _minimal_args(cmd: str) -> dict:
             "fov": 0.0,
             "settle_ticks": 0,
         }
+    if cmd == "camera_set_focus":
+        return {
+            "cam_mode": "orient",
+            "cam_pos": [0.0, 0.0, 0.0],
+            "cam_orientation": [0.0, 0.0, 0.0],
+            "fov": 0.0,
+            "settle_ticks": 0,
+            "focus_distance": 2.0,
+            "focus_blur": 0.0,
+        }
+    if cmd == "camera_path_play":
+        return {"mode": "state", "path_id": ""}
+    if cmd == "hud_set":
+        return {"visible": True}
     if cmd == "engine_set":
         return {"mode": "start"}
     if cmd == "vehicle_control":
@@ -208,6 +222,8 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "player_look_at":
         return {"pos": [0.0, 0.0, 0.0], "timeout_s": 0.1}
     if cmd == "player_look_at_release":
+        return {"command_id": 1}
+    if cmd == "camera_path_release":
         return {"command_id": 1}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}

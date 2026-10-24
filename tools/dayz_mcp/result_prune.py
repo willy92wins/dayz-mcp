@@ -112,6 +112,10 @@ PRUNABLE_FIELDS = (
     "look_at",
     # action_cursor_ids fills it with registry ids for the captured pairs.
     "cursor_ids",
+    # camera_path_play fills it with the path's state (d026).
+    "camera_path",
+    # hud_set fills it with the HUD flags it read back (f427).
+    "hud",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -218,7 +222,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "already_placed": frozenset({"action_hold"}),
     "flag_restored": frozenset({"action_hold"}),
     "cleanup_complete": frozenset({"action_hold", "action_hold_cancel"}),
-    "matched": frozenset({"action_hold_cancel"}),
+    "matched": frozenset({"action_hold_cancel", "camera_path_release"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries

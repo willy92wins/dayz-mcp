@@ -108,6 +108,65 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ),
     ("camera_get", {}, "camera_get"),
     ("camera_get", {"cam_mode": ""}, "camera_get"),
+    # 702f: focus goes out on camera_set_focus, both arguments together.
+    (
+        "camera_set",
+        {
+            "cam_mode": "orient",
+            "cam_pos": [0.0, 2.0, 0.0],
+            "cam_orientation": [90.0, 0.0, 0.0],
+            "focus_distance": 2.0,
+            "focus_blur": 0.0,
+        },
+        "camera_set_focus",
+    ),
+    (
+        "camera_set",
+        {
+            "cam_mode": "free",
+            "cam_pos": [0.0, 2.0, 0.0],
+            "look_at": [5.0, 1.0, 5.0],
+            "fov": 0.9,
+            "focus_distance": 50,
+            "focus_blur": 4.5,
+        },
+        "camera_set_focus",
+    ),
+    (
+        "camera_set",
+        {"cam_mode": "matrix", "cam_matrix": [0.0] * 12, "focus_distance": 0.01, "focus_blur": 100.0},
+        "camera_set_focus",
+    ),
+    # d026: every mode, both kinds of key and the bounds.
+    (
+        "camera_path_play",
+        {
+            "mode": "play",
+            "keys": [
+                {"t": 0, "cam_pos": [0.0, 2.0, 0.0], "cam_orientation": [350.0, 0.0, 0.0]},
+                {"t": 6.0, "cam_pos": [10.0, 2.0, 0.0], "cam_orientation": [10.0, -5.0, 0.0]},
+            ],
+            "easing": "linear",
+            "path_id": "dolly_1",
+        },
+        "camera_path_play",
+    ),
+    (
+        "camera_path_play",
+        {
+            "mode": "play",
+            "keys": [
+                {"t": float(index) * 600.0 / 63.0, "cam_pos": [float(index), 2.0, 0.0], "look_at": [0.0, 1.0, 9.0], "fov": 0.5}
+                for index in range(64)
+            ],
+        },
+        "camera_path_play",
+    ),
+    ("camera_path_play", {"mode": "state"}, "camera_path_play"),
+    ("camera_path_play", {"mode": "stop", "path_id": "a" * 64}, "camera_path_play"),
+    # f427: both values.
+    ("hud_set", {"visible": False}, "hud_set"),
+    ("hud_set", {"visible": True, "timeout_s": 2.0}, "hud_set"),
     ("vehicle_get_in_client", {"pos": _POS}, "vehicle_get_in_client"),
     ("engine_set", {"mode": "start"}, "engine_set"),
     ("engine_set", {"mode": "stop"}, "engine_set"),

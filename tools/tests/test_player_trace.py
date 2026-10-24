@@ -1217,8 +1217,8 @@ class PlayerTraceMessagesTest(unittest.TestCase):
 
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-5:],
-            (FIELD, "direction", "action_cursor", "look_at", "cursor_ids"),
+            result_prune.PRUNABLE_FIELDS[-7:],
+            (FIELD, "direction", "action_cursor", "look_at", "cursor_ids", "camera_path", "hud"),
         )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("vehicle_trace", {"ok": 1, FIELD: {}})
