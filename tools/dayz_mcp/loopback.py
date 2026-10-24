@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import (
     anim_timeline,
+    camera_path,
     daemon_credential,
     orphan_guard,
     pinned_keyfile,
@@ -100,7 +101,10 @@ SERVER_COMMANDS = {
 }
 CLIENT_COMMANDS = {
     "camera_set",
+    "camera_set_focus",
     "camera_get",
+    "camera_path_play",
+    "hud_set",
     "restore_gameplay",
     "key_press",
     "input_describe",
@@ -771,6 +775,10 @@ def _validate_ui_dialog_args(args: dict) -> tuple[bool, str | None]:
     return ui_dialog.validate_command_args(args)
 
 
+def _validate_camera_path_play_args(args: dict) -> tuple[bool, str | None]:
+    return camera_path.validate_command_args(args)
+
+
 _SAFE_FINITE_REAL = _reject_numeric_errors(_real_in_range())
 _SAFE_POSITIVE_REAL = _reject_numeric_errors(
     _real_in_range(minimum=0.0, minimum_inclusive=False)
@@ -877,9 +885,10 @@ def _validate_world_weather_set_args(args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
+def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVariant:
     # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
-    # travel with every one of them.
+    # travel with every one of them. focus is the camera_set_focus shape
+    # (702f): the same plus both Camera.SetFocus arguments, always together.
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
@@ -888,10 +897,12 @@ def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
     }
     for field in vectors:
         validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3
-    return _schema_variant(
-        required=("cam_mode", *vectors, "fov", "settle_ticks"),
-        validators=validators,
-    )
+    required: tuple[str, ...] = ("cam_mode", *vectors, "fov", "settle_ticks")
+    if focus:
+        required = (*required, "focus_distance", "focus_blur")
+        validators["focus_distance"] = _SAFE_POSITIVE_REAL
+        validators["focus_blur"] = _SAFE_NON_NEGATIVE_REAL
+    return _schema_variant(required=required, validators=validators)
 
 
 _SAFE_INPUT_TRIGGER_HOLD = _reject_numeric_errors(
@@ -1034,9 +1045,15 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "action_cursor_ids",
     "hands_attach",
 })
-# Client verbs an older PBO must not be handed. Checked on the client census
-# (no server arg-contract hash) at enqueue and again at delivery.
-_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
+# Client verbs an older PBO must not be handed, each with the error it is
+# refused with. Checked on the client census (no server arg-contract hash) at
+# enqueue and again at delivery.
+_CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
+    "action_hold": "hold_not_supported",
+    "camera_path_play": "bridge_capability_missing",
+    "camera_set_focus": "bridge_capability_missing",
+    "hud_set": "bridge_capability_missing",
+}
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
@@ -1773,6 +1790,23 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _camera_variant("matrix", "cam_matrix"),
         _camera_variant("free", "cam_pos", "look_at"),
         _camera_variant("free", "cam_pos", "cam_orientation"),
+    ),
+    # camera_set with focus_distance and focus_blur (702f): the same five
+    # shapes, each with both focus arguments.
+    "camera_set_focus": _command_schema(
+        _camera_variant("orient", "cam_pos", "cam_orientation", focus=True),
+        _camera_variant("lookat", "cam_pos", "look_at", focus=True),
+        _camera_variant("matrix", "cam_matrix", focus=True),
+        _camera_variant("free", "cam_pos", "look_at", focus=True),
+        _camera_variant("free", "cam_pos", "cam_orientation", focus=True),
+    ),
+    # play carries mode, keys, easing and path_id; state and stop carry mode
+    # and path_id. The bounds mirror MCPCameraPath
+    # (addon/scripts/5_Mission/MCP_CameraPath.c) through camera_path.py.
+    "camera_path_play": _command_schema(delegated=_validate_camera_path_play_args),
+    # hud_set (f427): the tool always sends visible.
+    "hud_set": _command_schema(
+        _schema_variant(required=("visible",), validators={"visible": _is_strict_bool})
     ),
     # camera_get sends {} when cam_mode is empty.
     "camera_get": _command_schema(
@@ -3321,31 +3355,33 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, is hold_not_supported. Re-checked at
-        delivery so a destination change after enqueue cannot hand the verb
-        to an older PBO.
+        does not name the command, refuses it with the command's code in
+        _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold).
+        Re-checked at delivery so a destination change after enqueue cannot
+        hand the verb to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
             return None
+        refusal = _CLIENT_ANNOUNCED_COMMANDS[cmd]
         view = self._capabilities_view_locked(peer)
         if view.get("state") != "announced":
-            return "hold_not_supported"
+            return refusal
         entry = self._peer_caps.get(peer)
         if not isinstance(entry, dict):
-            return "hold_not_supported"
+            return refusal
         announced_at = entry.get("announced_at")
         if (
             not isinstance(announced_at, (int, float))
             or isinstance(announced_at, bool)
             or (self._now() - float(announced_at)) >= PEER_STALE_S
         ):
-            return "hold_not_supported"
+            return refusal
         if not isinstance(instance, str) or instance != entry.get("instance"):
-            return "hold_not_supported"
+            return refusal
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
-            return "hold_not_supported"
+            return refusal
         return None
 
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:

@@ -112,6 +112,10 @@ PRUNABLE_FIELDS = (
     "look_at",
     # action_cursor_ids fills it with registry ids for the captured pairs.
     "cursor_ids",
+    # camera_path_play fills it with the path's state (d026).
+    "camera_path",
+    # hud_set fills it with the HUD flags it read back (f427).
+    "hud",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

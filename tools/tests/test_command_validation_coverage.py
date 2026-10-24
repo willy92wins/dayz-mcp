@@ -67,6 +67,20 @@ def _minimal_args(cmd: str) -> dict:
             "fov": 0.0,
             "settle_ticks": 0,
         }
+    if cmd == "camera_set_focus":
+        return {
+            "cam_mode": "orient",
+            "cam_pos": [0.0, 0.0, 0.0],
+            "cam_orientation": [0.0, 0.0, 0.0],
+            "fov": 0.0,
+            "settle_ticks": 0,
+            "focus_distance": 2.0,
+            "focus_blur": 0.0,
+        }
+    if cmd == "camera_path_play":
+        return {"mode": "state", "path_id": ""}
+    if cmd == "hud_set":
+        return {"visible": True}
     if cmd == "engine_set":
         return {"mode": "start"}
     if cmd == "vehicle_control":

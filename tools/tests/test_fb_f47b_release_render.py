@@ -36,6 +36,7 @@ FINISH = "protected void FinishCameraHandoff()"
 QUEUE = "protected bool QueueRestoreGameplayJob(MCPCommand command, MCPResult result)"
 APPLY_STATIC = "protected bool ApplyCameraSet(MCPJob job)"
 APPLY_FREE = "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)"
+PATH_PLAY = "protected bool ProcessCameraPathPlayJob(MCPJob job)"
 ON_TICK = "void OnTick(float timeslice)"
 CONSTRUCTOR = "void MCPClientBridge()"
 SHUTDOWN = "void Shutdown()"
@@ -292,8 +293,9 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"\bm_CameraHandoffPending\s*=\s*false;", source)), 2)
         self.assertIn("m_CameraHandoffPending = false;", _body(source, CONSTRUCTOR))
         self.assertIn("m_CameraHandoffPending = false;", _body(source, FINISH))
-        # Every way a handoff ends goes through FinishCameraHandoff.
-        sites = {TICK: 1, RELEASE: 1, APPLY_STATIC: 1}
+        # Every way a handoff ends goes through FinishCameraHandoff; a camera_path_play
+        # start (d026) enters its staticcamera the way ApplyCameraSet does.
+        sites = {TICK: 1, RELEASE: 1, APPLY_STATIC: 1, PATH_PLAY: 1}
         for signature, count in sites.items():
             with self.subTest(site=signature):
                 self.assertEqual(_body(source, signature).count("FinishCameraHandoff();"), count)
@@ -302,12 +304,12 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
     def test_round_one_retire_logic_is_gone(self) -> None:
         # The handoff deletes the staticcamera itself, so the retire-until-next-
         # camera_set state of round 1 (54c2508) went, and DeleteOwnedCamera is back on
-        # its three call sites.
+        # its three call sites, plus the camera_path_play start (d026).
         source = _source()
         for name in ("m_RetiredCam", "RetireOwnedCamera", "DeleteRetiredCamera"):
             with self.subTest(name=name):
                 self.assertNotIn(name, source)
-        sites = {APPLY_STATIC: 1, APPLY_FREE: 1, RELEASE: 1}
+        sites = {APPLY_STATIC: 1, APPLY_FREE: 1, RELEASE: 1, PATH_PLAY: 1}
         for signature, count in sites.items():
             with self.subTest(site=signature):
                 self.assertEqual(_body(source, signature).count("DeleteOwnedCamera();"), count)

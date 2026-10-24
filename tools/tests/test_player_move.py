@@ -1726,8 +1726,17 @@ class PlayerMovePayloadTest(unittest.TestCase):
     def test_the_reply_is_prunable_and_a_refusal_keeps_its_zero_facts(self) -> None:
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-6:],
-            (FIELD, "player_trace", "direction", "action_cursor", "look_at", "cursor_ids"),
+            result_prune.PRUNABLE_FIELDS[-8:],
+            (
+                FIELD,
+                "player_trace",
+                "direction",
+                "action_cursor",
+                "look_at",
+                "cursor_ids",
+                "camera_path",
+                "hud",
+            ),
         )
         self.assertEqual(
             result_prune.PRUNABLE_FIELDS[
