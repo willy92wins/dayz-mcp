@@ -6751,27 +6751,27 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// actor_emote (inbox 36fa): one emote on the local player through
 	// EmoteManager.CreateEmoteCBFromMenu, the call the gestures menu makes
-	// (gesturesmenu.c:655). EmoteManager.Update then sends the request and the
-	// server answers it as it answers a person's gesture (emotemanager.c:480,
-	// :538, :551). end asks the server to end the playing emote
-	// (EmoteManager.MCP_RequestEmoteEnd, MCP_Emote.c). Refused before anything
-	// is sent: a name outside the catalog or a wait_s outside 0.5..30
-	// (bad_args), a local player that is not a PlayerBase (no_player; with no
-	// local player Dispatch answers client_not_in_game before this handler)
-	// or no emote manager (no_emote_manager); a new emote while
+	// (1.29 and 1.30 gesturesmenu.c:655). EmoteManager.Update then sends the
+	// request and the server answers it as it answers a person's gesture
+	// (1.30 emotemanager.c:480, :538, :551). end asks the server to end the
+	// playing emote (EmoteManager.MCP_RequestEmoteEnd, MCP_Emote.c). Refused
+	// before anything is sent: a name outside the catalog or a wait_s outside
+	// 0.5..30 (bad_args), a local player that is not a PlayerBase (no_player;
+	// with no local player Dispatch answers client_not_in_game before this
+	// handler) or no emote manager (no_emote_manager); a new emote while
 	// IsEmotePlaying() reads true (an emote playing, a request pending or the
-	// player surrendered, emotemanager.c:1328-1331), or one that CanPlayEmote
-	// and CanPlayEmoteClientCheck refuse (two of the checks
-	// SendEmoteRequestSync makes, :899), is emote_rejected; end while no emote
-	// plays (m_bEmoteIsPlaying false, a pending request included) is
-	// no_emote_playing. The job then watches m_bEmoteIsPlaying for wait_s
-	// (ProcessActorEmoteJob). An emote that is already playing is refused
-	// because the watch could not tell it from the new one; a pending request
-	// or a surrender the player made stays a refusal too (a request the server
-	// refused while surrendered would end in ClearSurrenderState, :314-315).
-	// So is any actor_emote, end included, while another one's job still
-	// watches: that emote may not play yet, and two jobs would watch the same
-	// flag.
+	// player surrendered, 1.30 emotemanager.c:1328-1331), or one that
+	// CanPlayEmote and CanPlayEmoteClientCheck refuse (two of the checks
+	// SendEmoteRequestSync makes, 1.30 emotemanager.c:899), is emote_rejected;
+	// end while no emote plays (m_bEmoteIsPlaying false, a pending request
+	// included) is no_emote_playing. The job then watches m_bEmoteIsPlaying for
+	// wait_s (ProcessActorEmoteJob). An emote that is already playing is
+	// refused because the watch could not tell it from the new one; a pending
+	// request or a surrender the player made stays a refusal too (a request the
+	// server refused while surrendered would end in ClearSurrenderState,
+	// 1.30 emotemanager.c:314-315). So is any actor_emote, end included, while
+	// another one's job still watches: that emote may not play yet, and two
+	// jobs would watch the same flag.
 	protected bool DispatchActorEmote(MCPCommand command, MCPResult result)
 	{
 		PlayerBase player;
@@ -6865,20 +6865,21 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	}
 
 	// actor_emote's closed catalog: each name is the EmoteConstants id of the
-	// same name, lowercase (constants.c:366-409), one that exists in 1.29 and
-	// 1.30. Not the suicide emote (it kills the player) nor the debug id, nor
-	// vomit or surrender. vomit's EmoteStartOverride queues the vomit symptom,
-	// which has gameplay effects, in both versions (emoteclasses.c:753-768;
-	// 1.29 :760-775). surrender's differs by version: in 1.30 it only changes
-	// the surrender state and returns true (:449-453), so PlayEmote creates no
-	// callback (emotemanager.c:667-671); in 1.29 it plays its own surrender in
-	// and out callbacks (PlaySurrenderInOut, 1.29 emotemanager.c:1156, :1183,
+	// same name, lowercase (1.30 constants.c:366-409), one that exists in 1.29
+	// and 1.30. Not the suicide emote (it kills the player) nor the debug id,
+	// nor vomit or surrender. vomit's EmoteStartOverride queues the vomit
+	// symptom, which has gameplay effects, in both versions
+	// (1.30 emoteclasses.c:753-768; 1.29 :760-775). surrender's differs by
+	// version: in 1.30 it only changes the surrender state and returns true
+	// (1.30 :449-453), so PlayEmote creates no callback
+	// (1.30 emotemanager.c:667-671); in 1.29 it plays its own surrender in and
+	// out callbacks (PlaySurrenderInOut, 1.29 emotemanager.c:1156, :1183,
 	// :1194) and changes the surrender state and the hands (1.29
 	// emoteclasses.c:449-460). In both the surrender state is one that
 	// IsEmotePlaying() reads, so every later emote, surrender included, would
-	// be emote_rejected: a surrender verb needs its own way out. The same
-	// names are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0
-	// for any other name.
+	// be emote_rejected: a surrender verb needs its own way out. The same names
+	// are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0 for any
+	// other name.
 	protected int ActorEmoteId(string emote)
 	{
 		if (emote == "greeting")
@@ -7032,18 +7033,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return 0;
 	}
 
-	// actor_emote: the first tick m_bEmoteIsPlaying (emotemanager.c:127)
+	// actor_emote: the first tick m_bEmoteIsPlaying (1.30 emotemanager.c:127)
 	// reads true is the start, and a started emote that reads false again is
 	// finished. Its only writes are true once CreateEmoteCallback has the
-	// callback (:709-711) and false in OnEmoteEnd (:501-502), on this client
-	// too. A request still pending is not a start: IsEmotePlaying() also
-	// counts it (and the surrender state, :1330), and a request the server
-	// refuses comes back as an INSTACANCEL (:537-552) that clears the pending
-	// flag with no callback (:304-312), which would read as started then
-	// finished. So the watch reads m_bEmoteIsPlaying alone, and such a
-	// request answers emote_timed_out. end starts nothing: it is finished
-	// once m_bEmoteIsPlaying reads false. No local player or emote manager
-	// reads as not playing.
+	// callback (1.30 :709-711) and false in OnEmoteEnd (1.30 :501-502), on this
+	// client too. A request still pending is not a start: IsEmotePlaying() also
+	// counts it (and the surrender state, 1.30 :1330), and a request the server
+	// refuses comes back as an INSTACANCEL (1.30 :537-552) that clears the
+	// pending flag with no callback (1.30 :304-312), which would read as
+	// started then finished. So the watch reads m_bEmoteIsPlaying alone, and
+	// such a request answers emote_timed_out. end starts nothing: it is
+	// finished once m_bEmoteIsPlaying reads false. No local player or emote
+	// manager reads as not playing.
 	// Times are GetTickTime seconds. A tick more than wait_s after the request
 	// records nothing and the watch goes on, so the job's deadline, wait_s
 	// after the request (MCP_PostJobTimeout, at the first runner tick past

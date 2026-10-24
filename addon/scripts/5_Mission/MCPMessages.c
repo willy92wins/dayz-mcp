@@ -205,7 +205,8 @@ class MCPArgs
 	ref array<int> net_high;
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
-	// survivor_drive_release (c801): the id of the drive command to drop.
+	// survivor_drive_release (c801): the id of the drive command to drop, with
+	// object_id, its survivor.
 	int command_id;
 	// actor_emote (36fa): a catalog name or end, and the seconds its job watches
 	// m_bEmoteIsPlaying. The tool always sends both; an absent wait_s reads 0,
@@ -1169,7 +1170,7 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	// action_hold_cancel, and survivor_drive_release (c801): whether the id
-	// named the live hold or drive.
+	// named the live hold, or the survivor's live drive.
 	bool matched;
 	// actor_emote: finished, started, timed_out or rejected, and the client
 	// GetTickTime seconds from the request to the start and to the end its job

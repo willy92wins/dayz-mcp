@@ -43,7 +43,7 @@ class MCPBridge : Managed
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "8cb9634b9b691ecf";
+	protected const string SERVER_ARG_CONTRACT_HASH = "f5c9d49336544bab";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -2291,8 +2291,9 @@ class MCPBridge : Managed
 	// anything but a PlayerBase, refused_player_controlled for one with a
 	// PlayerIdentity, player_dead, bot_busy while bot_start runs on it, and
 	// no_input_controller. pos_real is the survivor's position read back. A
-	// drive keeps the command's id, which survivor_drive_release names.
-	// DispatchBotStart refuses a driven survivor the same way (drive_busy).
+	// drive keeps the command's id, which survivor_drive_release names with the
+	// survivor's object_id. DispatchBotStart refuses a driven survivor the same
+	// way (drive_busy).
 	protected bool DispatchSurvivorDrive(MCPCommand command, MCPResult result)
 	{
 		int objectId;
@@ -2409,20 +2410,21 @@ class MCPBridge : Managed
 	}
 
 	// survivor_drive_release (c801), internal: the broker sends it with the id
-	// of a survivor_drive command when the lease that sent the command ends
-	// (cleanup_owner) or abandons it after delivery (RELEASE_REGISTRY). It
-	// drops the drive only if that command set it
-	// (MCPSurvivorDrive.ReleaseCommand) and answers whether it did in matched;
-	// any other id changes nothing.
+	// of a survivor_drive command and that drive's object_id when the lease
+	// that sent the command ends (cleanup_owner) or abandons it after delivery
+	// (RELEASE_REGISTRY). It drops that survivor's drive only if that command
+	// set it (MCPSurvivorDrive.ReleaseCommand) and answers whether it did in
+	// matched; any other id or survivor changes nothing. Command ids restart
+	// with each daemon, so the id alone could name another survivor's drive.
 	protected bool DispatchSurvivorDriveRelease(MCPCommand command, MCPResult result)
 	{
-		if (!command.args || command.args.command_id <= 0)
+		if (!command.args || command.args.command_id <= 0 || command.args.object_id <= 0)
 		{
 			result.ok = false;
 			result.error = "bad_args";
 			return true;
 		}
-		result.matched = MCPSurvivorDrive.ReleaseCommand(this, command.args.command_id);
+		result.matched = MCPSurvivorDrive.ReleaseCommand(this, command.args.object_id, command.args.command_id);
 		result.ok = true;
 		return true;
 	}

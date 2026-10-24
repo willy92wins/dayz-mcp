@@ -237,7 +237,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
     "survivor_drive": ("heading", "heading_set", "mode", "object_id", "speed", "speed_set"),
-    "survivor_drive_release": ("command_id",),
+    "survivor_drive_release": ("command_id", "object_id"),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
 }
 

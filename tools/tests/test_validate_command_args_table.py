@@ -2261,16 +2261,23 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("object_id", {"emote": "sita", "wait_s": 10.0, "object_id": 1}, (False, "bad_args")),
         ("extra_key", {"emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
     ),
-    # survivor_drive_release (c801), internal: the id of one drive command.
+    # survivor_drive_release (c801), internal: the id of one drive command and
+    # its survivor's object_id, both required.
     "survivor_drive_release": (
-        ("valid", {"command_id": 1}, (True, None)),
-        ("zero", {"command_id": 0}, (False, "bad_args")),
-        ("negative", {"command_id": -1}, (False, "bad_args")),
-        ("bool", {"command_id": True}, (False, "bad_args")),
-        ("string", {"command_id": "1"}, (False, "bad_args")),
+        ("valid", {"command_id": 1, "object_id": 7}, (True, None)),
+        ("zero", {"command_id": 0, "object_id": 7}, (False, "bad_args")),
+        ("negative", {"command_id": -1, "object_id": 7}, (False, "bad_args")),
+        ("bool", {"command_id": True, "object_id": 7}, (False, "bad_args")),
+        ("string", {"command_id": "1", "object_id": 7}, (False, "bad_args")),
         ("missing", {}, (False, "bad_args")),
-        ("object_id", {"command_id": 1, "object_id": 7}, (False, "bad_args")),
-        ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
+        ("command_id_only", {"command_id": 1}, (False, "bad_args")),
+        ("object_id_only", {"object_id": 7}, (False, "bad_args")),
+        ("object_id_zero", {"command_id": 1, "object_id": 0}, (False, "bad_args")),
+        ("object_id_negative", {"command_id": 1, "object_id": -7}, (False, "bad_args")),
+        ("object_id_bool", {"command_id": 1, "object_id": True}, (False, "bad_args")),
+        ("object_id_string", {"command_id": 1, "object_id": "7"}, (False, "bad_args")),
+        ("object_id_float", {"command_id": 1, "object_id": 7.0}, (False, "bad_args")),
+        ("extra_key", {"command_id": 1, "object_id": 7, "extra": None}, (False, "bad_args")),
     ),
     # survivor_drive (c801): a drive carries heading and speed with their
     # _set flags; a release carries mode alone.

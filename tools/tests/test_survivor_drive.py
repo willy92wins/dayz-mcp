@@ -40,7 +40,8 @@ PREVIOUS_ARG_CONTRACT_HASH = "4f90284258023d98"
 DRIVE_WIRE = {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": True}
 RELEASE_WIRE = {"object_id": 7, "mode": "release"}
 # The broker's release of one drive: internal, sent by cleanup_owner and
-# RELEASE_REGISTRY with the id of the drive command.
+# RELEASE_REGISTRY with the id of the drive command and its survivor's
+# object_id.
 DRIVE_RELEASE = "survivor_drive_release"
 HEADING_RULE = "be a finite number of compass degrees within [-360, 360]"
 
@@ -444,13 +445,31 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         self.assertIn(DRIVE_RELEASE, loopback._OWNER_CLEANUP_COMMANDS)
         self.assertIn(DRIVE_RELEASE, server._BRIDGE_COMMAND_TOOLS["server"])
         self.assertIsNone(server._BRIDGE_COMMAND_TOOLS["server"][DRIVE_RELEASE])
-        self.assertEqual(server.SERVER_ARG_CONTRACT[DRIVE_RELEASE], ("command_id",))
-        self.assertEqual(_schema_keys(DRIVE_RELEASE), {"command_id"})
+        self.assertEqual(server.SERVER_ARG_CONTRACT[DRIVE_RELEASE], ("command_id", "object_id"))
+        self.assertEqual(_schema_keys(DRIVE_RELEASE), {"command_id", "object_id"})
         plans = [entry for entry in loopback.RELEASE_REGISTRY if entry[0] == COMMAND]
         self.assertEqual([plan[1] for plan in plans], [DRIVE_RELEASE])
-        self.assertEqual(plans[0][2](41, dict(DRIVE_WIRE)), {"command_id": 41})
-        self.assertEqual(loopback.validate_command_args(DRIVE_RELEASE, {"command_id": 41}), (True, None))
-        for args in ({}, {"command_id": 0}, {"command_id": True}, {"command_id": "41"}, {"command_id": 41, "object_id": 7}):
+        # The release names the drive's id and the survivor of the drive's own
+        # args.
+        self.assertEqual(plans[0][2](41, dict(DRIVE_WIRE)), {"command_id": 41, "object_id": 7})
+        self.assertEqual(
+            plans[0][2](41, {**DRIVE_WIRE, "object_id": 9}), {"command_id": 41, "object_id": 9}
+        )
+        self.assertEqual(
+            loopback.validate_command_args(DRIVE_RELEASE, {"command_id": 41, "object_id": 7}), (True, None)
+        )
+        for args in (
+            {},
+            {"command_id": 41},
+            {"object_id": 7},
+            {"command_id": 0, "object_id": 7},
+            {"command_id": True, "object_id": 7},
+            {"command_id": "41", "object_id": 7},
+            {"command_id": 41, "object_id": 0},
+            {"command_id": 41, "object_id": True},
+            {"command_id": 41, "object_id": "7"},
+            {"command_id": 41, "object_id": 7, "mode": "release"},
+        ):
             with self.subTest(args=args):
                 self.assertIs(loopback.validate_command_args(DRIVE_RELEASE, args)[0], False)
 
@@ -469,7 +488,7 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
                     _announce(state, commands, ach)
                 before_id = state._next_id
                 status, body = state.enqueue_command(
-                    DRIVE_RELEASE, {"command_id": 5}, peer="server", internal=True
+                    DRIVE_RELEASE, {"command_id": 5, "object_id": 7}, peer="server", internal=True
                 )
                 self.assertEqual((status, body), (409, {"error": error}))
                 self.assertEqual(state._next_id, before_id)
@@ -478,7 +497,9 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         # peer that no longer advertises it.
         state = _bound_state()
         _announce(state, full, EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        status, body = state.enqueue_command(DRIVE_RELEASE, {"command_id": 5}, peer="server", internal=True)
+        status, body = state.enqueue_command(
+            DRIVE_RELEASE, {"command_id": 5, "object_id": 7}, peer="server", internal=True
+        )
         self.assertEqual(status, 200, body)
         self.assertEqual(_delivered(state, without_release), [])
         self.assertEqual(state.take_result(body["id"])["error"], "bridge_capability_missing")
@@ -494,7 +515,13 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
         self.assertEqual(
             _delivered(state),
-            [{"id": abandoned["release_id"], "cmd": DRIVE_RELEASE, "args": {"command_id": drive["id"]}}],
+            [
+                {
+                    "id": abandoned["release_id"],
+                    "cmd": DRIVE_RELEASE,
+                    "args": {"command_id": drive["id"], "object_id": 7},
+                }
+            ],
         )
         # Abandoned before delivery, it never runs: dropped, with no release.
         status, queued = state.enqueue_command(COMMAND, dict(DRIVE_WIRE), peer="server")
@@ -515,13 +542,35 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
             self.assertEqual(_answered(state, command_id)["ok"], 1)
         released = _release(coordinator, OWNER_A, token)
         self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 2)
-        self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
-        self.assertNotIn("survivor_drive_release_failed", released["cleanup_degraded"])
+        self.assertEqual(
+            [value for value in released["cleanup_degraded"] if value.startswith("survivor_drive")], []
+        )
         self.assertEqual(
             [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": latest}), (DRIVE_RELEASE, {"command_id": other})],
+            [
+                (DRIVE_RELEASE, {"command_id": latest, "object_id": 7}),
+                (DRIVE_RELEASE, {"command_id": other, "object_id": 9}),
+            ],
         )
         self.assertEqual(state._drive_by_lease, {})
+
+    def test_a_clean_lease_end_reports_the_release_count_and_no_drive_degradation(self) -> None:
+        # As bot_stop and camera_path_release: a release that went out is
+        # counted and degrades nothing, so a control client sees no conflict;
+        # survivor_drive_release_unconfirmed is for one that was not queued.
+        state, coordinator = _leased_state()
+        token = _acquire(coordinator, OWNER_A)
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([command["id"] for command in _delivered(state)], [drive])
+        _answered(state, drive)
+        released = _release(coordinator, OWNER_A, token)
+        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
+        self.assertEqual(released["cleanup"].get("cleanup_degraded", []), [])
+        self.assertEqual(released["cleanup_degraded"], [])
+        self.assertEqual(
+            [(command["cmd"], command["args"]) for command in _delivered(state)],
+            [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
+        )
 
     def test_a_drive_the_queue_drops_at_the_lease_end_leaves_the_delivered_one_named(self) -> None:
         # The id is taken at delivery: the queued drive is discarded by the
@@ -537,7 +586,7 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
         self.assertEqual(
             [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": delivered})],
+            [(DRIVE_RELEASE, {"command_id": delivered, "object_id": 7})],
         )
 
     def test_a_release_the_bridge_is_not_handed_is_reported(self) -> None:
@@ -559,9 +608,10 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
                 released = _release(coordinator, OWNER_A, token)
                 self.assertEqual(bound_queue(state, "server"), [])
                 if name == "missing_release":
+                    # Not queued: unconfirmed, as camera_path_release says it.
                     self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 0)
-                    self.assertIn("survivor_drive_release_failed", released["cleanup_degraded"])
-                    self.assertNotIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
+                    self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
+                    self.assertNotIn("survivor_drive_release_failed", released["cleanup_degraded"])
                 else:
                     self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
                     self.assertIn("retail_quarantine", released["cleanup_degraded"])
@@ -695,21 +745,25 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
         _in_order(
             self,
             body,
-            "if (!command.args || command.args.command_id <= 0)",
+            "if (!command.args || command.args.command_id <= 0 || command.args.object_id <= 0)",
             'result.error = "bad_args";',
-            "result.matched = MCPSurvivorDrive.ReleaseCommand(this, command.args.command_id);",
+            "result.matched = MCPSurvivorDrive.ReleaseCommand(this, command.args.object_id, command.args.command_id);",
             "result.ok = true;",
         )
         self.assertEqual(body.count("MCPSurvivorDrive."), 1)
-        release = _method_body(self.drive, "static bool ReleaseCommand(MCPBridge bridge, int commandId)")
+        release = _method_body(
+            self.drive, "static bool ReleaseCommand(MCPBridge bridge, int objectId, int commandId)"
+        )
         _in_order(
             self,
             release,
-            "if (entry && entry.command_id == commandId)",
-            "Release(bridge, entry.object_id);",
+            "index = Find(objectId);",
+            "if (!entry || entry.command_id != commandId)",
+            "Release(bridge, objectId);",
             "return true;",
         )
-        self.assertTrue(release.rstrip().endswith("return false;"), release)
+        self.assertEqual(release.count("return false;"), 2)
+        self.assertTrue(release.rstrip().endswith("return true;"), release)
 
     def test_the_tick_reapplies_and_drops_the_dead_walking_backwards(self) -> None:
         tick = _method_body(self.drive, "static void Tick(MCPBridge bridge)")
@@ -773,7 +827,7 @@ DRIVE_METHODS = (
     "static bool IsDriven(int objectId)",
     "static void Drive(PlayerBase survivor, int objectId, float headingDeg, float speed, int commandId)",
     "static void Release(MCPBridge bridge, int objectId)",
-    "static bool ReleaseCommand(MCPBridge bridge, int commandId)",
+    "static bool ReleaseCommand(MCPBridge bridge, int objectId, int commandId)",
     "static void OnObjectGone(MCPBridge bridge, int objectId)",
     "static void Tick(MCPBridge bridge)",
     "static void ShutdownAll(MCPBridge bridge)",
@@ -1232,7 +1286,7 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(self.model.command_ids(), {7: 41})
         writes = self.model.writes()
         # Another id leaves the drive on.
-        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 40), False)
+        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 40), False)
         self.assertEqual(self.model.registry(), [(7, 90.0, 1.0)])
         self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
         self.assertEqual(self.model.writes(), writes)
@@ -1240,10 +1294,10 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.model.drive(7, 180.0, 3.0, command_id=43)
         self.assertEqual(self.model.command_ids(), {7: 43})
         writes = self.model.writes()
-        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 41), False)
+        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 41), False)
         self.assertEqual(survivor.controller.driving(), (3.0, 180.0))
         self.assertEqual(self.model.writes(), writes)
-        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 43), True)
+        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 43), True)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(survivor.controller.driving())
         self.assertEqual(
@@ -1252,7 +1306,7 @@ class SurvivorDriveModelTest(unittest.TestCase):
         )
         writes = self.model.writes()
         self.model.call("Tick", self.model.bridge)
-        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 43), False)
+        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 43), False)
         self.assertEqual(self.model.writes(), writes)
 
     def test_a_drive_release_stops_only_the_survivor_its_id_drives(self) -> None:
@@ -1260,11 +1314,11 @@ class SurvivorDriveModelTest(unittest.TestCase):
         second = self.model.spawn(9)
         self.model.drive(7, 90.0, 1.0, command_id=41)
         self.model.drive(9, 0.0, 2.0, command_id=42)
-        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 42), True)
+        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 9, 42), True)
         self.assertEqual(self.model.command_ids(), {7: 41})
         self.assertIsNone(second.controller.driving())
         self.assertEqual(first.controller.driving(), (1.0, 90.0))
-        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 41), True)
+        self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 41), True)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(first.controller.driving())
 
@@ -1368,20 +1422,69 @@ class SurvivorDriveModelTest(unittest.TestCase):
         model.dispatch(41, COMMAND, DRIVE_WIRE)
         model.dispatch(42, COMMAND, {**DRIVE_WIRE, "object_id": 9, "heading": 0.0})
         writes = model.writes()
-        for wire in (None, {}, {"command_id": 0}, {"command_id": -42}):
+        for wire in (
+            None,
+            {},
+            {"command_id": 0, "object_id": 9},
+            {"command_id": -42, "object_id": 9},
+            {"command_id": 42},
+            {"command_id": 42, "object_id": 0},
+            {"command_id": 42, "object_id": -9},
+        ):
             with self.subTest(wire=wire):
                 result, post_now = model.dispatch(50, DRIVE_RELEASE, wire)
                 self.assertIs(post_now, True)
                 self.assertEqual((result.ok, result.error, result.matched), (False, EnforceString.of("bad_args"), False))
-        result, _post_now = model.dispatch(51, DRIVE_RELEASE, {"command_id": 40})
+                self.assertEqual((model.command_ids(), model.writes()), ({7: 41, 9: 42}, writes))
+        result, _post_now = model.dispatch(51, DRIVE_RELEASE, {"command_id": 40, "object_id": 7})
         self.assertEqual((result.ok, result.matched), (True, False))
         self.assertEqual((model.command_ids(), model.writes()), ({7: 41, 9: 42}, writes))
-        result, _post_now = model.dispatch(52, DRIVE_RELEASE, {"command_id": 42})
+        result, _post_now = model.dispatch(52, DRIVE_RELEASE, {"command_id": 42, "object_id": 9})
         self.assertEqual((result.ok, result.matched), (True, True))
         self.assertEqual(model.command_ids(), {7: 41})
         self.assertIsNone(second.controller.driving())
         self.assertEqual(first.controller.driving(), (1.0, 90.0))
         self.assertIsNone(result.pos_real)
+
+    def test_one_command_id_on_two_survivors_a_release_stops_only_the_one_it_names(self) -> None:
+        # Command ids restart with each daemon: after a restart a drive on 9
+        # can carry the id that a drive on 7 got before it.
+        model = _HandlerModel()
+        first = model.spawn(7)
+        second = model.spawn(9)
+        model.dispatch(5, COMMAND, DRIVE_WIRE)
+        model.dispatch(5, COMMAND, {**DRIVE_WIRE, "object_id": 9, "heading": 0.0})
+        self.assertEqual(model.command_ids(), {7: 5, 9: 5})
+        writes = len(first.controller.calls)
+        result, post_now = model.dispatch(60, DRIVE_RELEASE, {"command_id": 5, "object_id": 9})
+        self.assertIs(post_now, True)
+        self.assertEqual((result.ok, result.matched), (True, True))
+        self.assertEqual(model.command_ids(), {7: 5})
+        self.assertIsNone(second.controller.driving())
+        self.assertEqual(first.controller.driving(), (1.0, 90.0))
+        self.assertEqual(len(first.controller.calls), writes)
+
+    def test_a_release_with_the_right_id_and_another_survivor_matches_nothing(self) -> None:
+        model = _HandlerModel()
+        first = model.spawn(7)
+        second = model.spawn(9)
+        model.spawn(11)
+        model.dispatch(41, COMMAND, DRIVE_WIRE)
+        model.dispatch(42, COMMAND, {**DRIVE_WIRE, "object_id": 9, "heading": 0.0})
+        writes = model.writes()
+        # 41 drives 7 and 42 drives 9; 11 is not driven at all.
+        for wire in (
+            {"command_id": 41, "object_id": 9},
+            {"command_id": 42, "object_id": 7},
+            {"command_id": 41, "object_id": 11},
+        ):
+            with self.subTest(wire=wire):
+                result, post_now = model.dispatch(61, DRIVE_RELEASE, wire)
+                self.assertIs(post_now, True)
+                self.assertEqual((result.ok, result.matched), (True, False))
+                self.assertEqual((model.command_ids(), model.writes()), ({7: 41, 9: 42}, writes))
+        self.assertEqual(first.controller.driving(), (1.0, 90.0))
+        self.assertEqual(second.controller.driving(), (1.0, 0.0))
 
     def test_after_the_lease_ends_the_next_owner_inherits_no_drive(self) -> None:
         # Codex's probe, with the real coordinator, cleanup_owner and acquire
@@ -1404,10 +1507,12 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
         released = _release(coordinator, OWNER_A, token)
         self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
-        self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
+        self.assertEqual(released["cleanup_degraded"], [])
         _acquire(coordinator, OWNER_B)
         [command] = _delivered(state)
-        self.assertEqual((command["cmd"], command["args"]), (DRIVE_RELEASE, {"command_id": drive}))
+        self.assertEqual(
+            (command["cmd"], command["args"]), (DRIVE_RELEASE, {"command_id": drive, "object_id": 7})
+        )
         result, _post_now = model.dispatch(command["id"], command["cmd"], command["args"])
         self.assertEqual((result.ok, result.matched), (True, True))
         self.assertIsNone(survivor.controller.driving())

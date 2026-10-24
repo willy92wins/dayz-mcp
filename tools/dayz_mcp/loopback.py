@@ -162,7 +162,10 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
     (
         "survivor_drive",
         "survivor_drive_release",
-        lambda command_id, args: {"command_id": command_id},
+        lambda command_id, args: {
+            "command_id": command_id,
+            "object_id": args["object_id"],
+        },
     ),
 )
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
@@ -1958,12 +1961,17 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
-    # survivor_drive_release (c801), internal: the id of the drive command
-    # whose drive the bridge drops, and only that one.
+    # survivor_drive_release (c801), internal: the id of the drive command and
+    # its survivor's object_id. The bridge drops that survivor's drive only
+    # while that command's drive is the one set: command ids restart with each
+    # daemon, so the id alone could name another survivor's drive.
     "survivor_drive_release": _command_schema(
         _schema_variant(
-            required=("command_id",),
-            validators={"command_id": _integer_in_range(minimum=1)},
+            required=("command_id", "object_id"),
+            validators={
+                "command_id": _integer_in_range(minimum=1),
+                "object_id": _integer_in_range(minimum=1),
+            },
         )
     ),
     # actor_emote (36fa): a catalog name or end, and the seconds the client
@@ -3542,8 +3550,9 @@ class ServerState:
         self, lease_id: str
     ) -> dict[str, int]:
         """survivor_drive_release for the latest delivered drive of each
-        survivor that lease drove (c801). The bridge drops a drive only if
-        that id set it.
+        survivor that lease drove (c801), naming the drive's id and the
+        survivor. The bridge drops that survivor's drive only if that id set
+        it.
 
         Same rules as enqueue_bot_stops_for_lease: the caller holds the queue
         lock, and the releases are fire-and-forget owner cleanup.
@@ -3557,7 +3566,7 @@ class ServerState:
             for object_id in sorted(drives):
                 status, payload = self.enqueue_command(
                     "survivor_drive_release",
-                    {"command_id": drives[object_id]},
+                    {"command_id": drives[object_id], "object_id": object_id},
                     peer="server",
                     internal=True,
                 )
@@ -5530,18 +5539,15 @@ class ServerState:
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("bot_stop_failed")
             cleanup["cleanup_degraded"] = values
+        # As bot_stop and camera_path_release: the count when releases went
+        # out, and survivor_drive_release_unconfirmed only for one that could
+        # not be queued (retail quarantine reports it above).
         if drive_report["enqueued"] or drive_report["failed"]:
             cleanup["survivor_drive_release_enqueued"] = drive_report["enqueued"]
-        # Fire-and-forget, as a hold's cancel: no answer confirms the stop.
-        if drive_report["enqueued"]:
-            degraded = cleanup.get("cleanup_degraded", [])
-            values = list(degraded) if isinstance(degraded, list) else []
-            values.append("survivor_drive_release_unconfirmed")
-            cleanup["cleanup_degraded"] = values
         if drive_report["failed"]:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
-            values.append("survivor_drive_release_failed")
+            values.append("survivor_drive_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
         return cleanup
 
