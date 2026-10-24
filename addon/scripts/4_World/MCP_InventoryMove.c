@@ -2,10 +2,11 @@
 // predictive calls a drag in the inventory UI runs. The server reads the
 // location afterwards; this file only issues the call.
 const int MCP_RPC_INVENTORY_MOVE = 78541071;
+const int MCP_RPC_INVENTORY_MOVE_REFUSED = 78541072;
 
 modded class PlayerBase
 {
-	bool MCPRequestInventoryMove(EntityAI item, string itemType, EntityAI target, string targetType, string op, string slotName)
+	bool MCPRequestInventoryMove(int jobId, EntityAI item, string itemType, EntityAI target, string targetType, string op, string slotName)
 	{
 		if (!item)
 		{
@@ -34,6 +35,10 @@ modded class PlayerBase
 			target.GetNetworkID(targetLow, targetHigh);
 		}
 		ScriptRPC rpc = new ScriptRPC();
+		if (!rpc.Write(jobId))
+		{
+			return false;
+		}
 		if (!rpc.Write(itemLow))
 		{
 			return false;
@@ -93,6 +98,22 @@ modded class PlayerBase
 		Print("[DayZ_MCP] inventory_move dropped reason=" + reason);
 	}
 
+	// The id was read, so the server can match this refusal to the job.
+	protected void MCPRefuseInventoryMove(int jobId, string reason)
+	{
+		MCPDropInventoryMove(reason);
+		ScriptRPC rpc = new ScriptRPC();
+		if (!rpc.Write(jobId))
+		{
+			return;
+		}
+		if (!rpc.Write(reason))
+		{
+			return;
+		}
+		rpc.Send(this, MCP_RPC_INVENTORY_MOVE_REFUSED, true, null);
+	}
+
 	// Empty string means the client call was issued. A non-empty string is a
 	// refusal and nothing was called.
 	string MCPPerformClientInventoryMove(string op, EntityAI item, EntityAI target, string slotName)
@@ -114,8 +135,9 @@ modded class PlayerBase
 			return "input_busy";
 		}
 		// Another player's worn or carried item is never moved. The server
-		// applies the same check before the RPC. This RPC is server-to-client
-		// only: a refusal here is printed and does not travel back.
+		// applies the same check before the RPC. A refusal after the job id
+		// is read is sent back on MCP_RPC_INVENTORY_MOVE_REFUSED. Only a
+		// failure to read that id stays local and ends as a server timeout.
 		if (MCPInventoryMoveOwnedByOther(item))
 		{
 			return "not_reachable";
@@ -204,6 +226,7 @@ modded class PlayerBase
 
 	protected void MCPApplyInventoryMoveRpc(ParamsReadContext ctx)
 	{
+		int jobId = 0;
 		int itemLow = 0;
 		int itemHigh = 0;
 		string itemType = "";
@@ -212,57 +235,63 @@ modded class PlayerBase
 		string targetType = "";
 		string op = "";
 		string slotName = "";
+		if (!ctx.Read(jobId))
+		{
+			// No id was read, so there is no job to answer.
+			MCPDropInventoryMove("read_failed");
+			return;
+		}
 		if (!ctx.Read(itemLow))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(itemHigh))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(itemType))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(targetLow))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(targetHigh))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(targetType))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(op))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		if (!ctx.Read(slotName))
 		{
-			MCPDropInventoryMove("read_failed");
+			MCPRefuseInventoryMove(jobId, "read_failed");
 			return;
 		}
 		Object resolvedItem = GetGame().GetObjectByNetworkId(itemLow, itemHigh);
 		EntityAI item = EntityAI.Cast(resolvedItem);
 		if (!item)
 		{
-			MCPDropInventoryMove("not_streamed");
+			MCPRefuseInventoryMove(jobId, "not_streamed");
 			return;
 		}
 		string seenType = item.GetType();
 		if (seenType != itemType)
 		{
-			MCPDropInventoryMove("type_mismatch");
+			MCPRefuseInventoryMove(jobId, "type_mismatch");
 			return;
 		}
 		EntityAI target = null;
@@ -272,20 +301,20 @@ modded class PlayerBase
 			target = EntityAI.Cast(resolvedTarget);
 			if (!target)
 			{
-				MCPDropInventoryMove("not_streamed");
+				MCPRefuseInventoryMove(jobId, "not_streamed");
 				return;
 			}
 			string seenTarget = target.GetType();
 			if (seenTarget != targetType)
 			{
-				MCPDropInventoryMove("type_mismatch");
+				MCPRefuseInventoryMove(jobId, "type_mismatch");
 				return;
 			}
 		}
 		string refusal = MCPPerformClientInventoryMove(op, item, target, slotName);
 		if (refusal != "")
 		{
-			MCPDropInventoryMove(refusal);
+			MCPRefuseInventoryMove(jobId, refusal);
 		}
 	}
 

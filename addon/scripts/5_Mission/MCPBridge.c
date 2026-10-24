@@ -104,6 +104,18 @@ class MCPBridge : Managed
 			m_TelemetryFixtureLinePool.Insert(new MCPTelemetryFixtureLine());
 			fixtureLineIndex = fixtureLineIndex + 1;
 		}
+		if (g_Game)
+		{
+			g_Game.Event_OnRPC.Insert(MCPOnInventoryMoveRefused);
+		}
+	}
+
+	void ~MCPBridge()
+	{
+		if (g_Game)
+		{
+			g_Game.Event_OnRPC.Remove(MCPOnInventoryMoveRefused);
+		}
 	}
 
 	static MCPBridge Get()
@@ -798,7 +810,20 @@ class MCPBridge : Managed
 			}
 		}
 		PlayerBase player = null;
-		if (authority == "client" || MCPInventoryMoveNeedsPlayer(op))
+		// authority=server still needs the player when the item or the target
+		// is in someone's inventory. Otherwise MCPInventoryMoveForeign treats a
+		// null player as foreign to every player root, including this uid.
+		// World to world leaves both roots null and does not resolve anyone.
+		bool rootedOnPlayer = false;
+		if (item.GetHierarchyRootPlayer())
+		{
+			rootedOnPlayer = true;
+		}
+		if (target && target.GetHierarchyRootPlayer())
+		{
+			rootedOnPlayer = true;
+		}
+		if (authority == "client" || MCPInventoryMoveNeedsPlayer(op) || rootedOnPlayer)
 		{
 			string playerError = "";
 			player = ResolvePlayer(command.args, playerError);
@@ -842,26 +867,6 @@ class MCPBridge : Managed
 		{
 			beforeQty = MCPItemQuantity(target);
 		}
-		string performError = "";
-		if (authority == "server")
-		{
-			performError = MCPServerInventoryMove(player, item, target, op, command.args.slot);
-		}
-		else if (!GetGame().IsMultiplayer())
-		{
-			performError = player.MCPPerformClientInventoryMove(op, item, target, command.args.slot);
-		}
-		else
-		{
-			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot);
-		}
-		if (performError != "")
-		{
-			result.ok = false;
-			result.error = performError;
-			return true;
-		}
-		result.accepted = true;
 		MCPJob job = new MCPJob();
 		job.id = command.id;
 		job.kind = "inventory_move";
@@ -876,13 +881,63 @@ class MCPBridge : Managed
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
+		string performError = "";
+		bool clientRpc = false;
+		if (authority == "server")
+		{
+			performError = MCPServerInventoryMove(player, item, target, op, command.args.slot);
+		}
+		else if (!GetGame().IsMultiplayer())
+		{
+			performError = player.MCPPerformClientInventoryMove(op, item, target, command.args.slot);
+		}
+		else
+		{
+			// A listen server can deliver the refusal RPC before Send returns.
+			// The job has to be in m_Jobs first. The handler only sets phase.
+			// Dispatch or ProcessJobs posts the one result.
+			clientRpc = true;
+			m_Jobs.Insert(job.id, job);
+			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot, job.id);
+		}
+		if (performError != "")
+		{
+			if (clientRpc && m_Jobs.Contains(job.id))
+			{
+				m_Jobs.Remove(job.id);
+			}
+			result.ok = false;
+			result.error = performError;
+			return true;
+		}
+		if (clientRpc && job.phase == 2)
+		{
+			MCPPostInventoryMoveRefused(job, job.error);
+			m_Jobs.Remove(job.id);
+			return false;
+		}
+		if (clientRpc && job.phase == 1)
+		{
+			MCPWriteInventoryMove(result, job, true, "");
+			result.ok = true;
+			m_Jobs.Remove(job.id);
+			return true;
+		}
+		result.accepted = true;
 		if (MCPInventoryMoveReady(job))
 		{
 			MCPWriteInventoryMove(result, job, true, "");
 			result.ok = true;
+			if (clientRpc)
+			{
+				m_Jobs.Remove(job.id);
+			}
 			return true;
 		}
-		m_Jobs.Insert(job.id, job);
+		if (!clientRpc)
+		{
+			m_Jobs.Insert(job.id, job);
+		}
 		return false;
 	}
 
@@ -1134,7 +1189,7 @@ class MCPBridge : Managed
 		return item.GetQuantity();
 	}
 
-	protected string MCPSendInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName)
+	protected string MCPSendInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName, int jobId)
 	{
 		int itemLow = 0;
 		int itemHigh = 0;
@@ -1162,7 +1217,7 @@ class MCPBridge : Managed
 		{
 			targetType = target.GetType();
 		}
-		if (!player.MCPRequestInventoryMove(item, item.GetType(), target, targetType, op, slotName))
+		if (!player.MCPRequestInventoryMove(jobId, item, item.GetType(), target, targetType, op, slotName))
 		{
 			return "rpc_failed";
 		}
@@ -1307,6 +1362,8 @@ class MCPBridge : Managed
 		}
 		int locType = loc.GetType();
 		EntityAI parent = loc.GetParent();
+		// to_cargo, to_attachment and combine ignore job.actor. Resolving a
+		// player for a rooted item does not change these three verdicts.
 		if (op == "to_cargo")
 		{
 			if (parent != job.move_target)
@@ -1443,6 +1500,125 @@ class MCPBridge : Managed
 		MCPResult result = new MCPResult();
 		MCPWriteInventoryMove(result, job, settled, errorText);
 		PostResult(result);
+	}
+
+	// Confirm and timeout keep accepted=true through MCPWriteInventoryMove.
+	// A client refusal is a separate result: the call was not accepted.
+	protected void MCPPostInventoryMoveRefused(MCPJob job, string reason)
+	{
+		MCPResult result = new MCPResult();
+		MCPWriteInventoryMove(result, job, false, reason);
+		result.ok = false;
+		result.accepted = false;
+		result.confirmed = false;
+		result.error = reason;
+		PostResult(result);
+	}
+
+	protected string MCPInventoryMoveClientReason(string reason)
+	{
+		if (reason == "not_client")
+		{
+			return reason;
+		}
+		if (reason == "object_not_found")
+		{
+			return reason;
+		}
+		if (reason == "input_busy")
+		{
+			return reason;
+		}
+		if (reason == "not_reachable")
+		{
+			return reason;
+		}
+		if (reason == "slot_not_found")
+		{
+			return reason;
+		}
+		if (reason == "no_room")
+		{
+			return reason;
+		}
+		if (reason == "not_an_item")
+		{
+			return reason;
+		}
+		if (reason == "bad_args")
+		{
+			return reason;
+		}
+		if (reason == "not_streamed")
+		{
+			return reason;
+		}
+		if (reason == "type_mismatch")
+		{
+			return reason;
+		}
+		if (reason == "read_failed")
+		{
+			return reason;
+		}
+		return "client_refused";
+	}
+
+	// Client to server. Unrelated RPC types stay quiet. A failed check after
+	// the type matches is ignored and the job keeps its deadline.
+	void MCPOnInventoryMoveRefused(PlayerIdentity sender, Object target, int rpc_type, ParamsReadContext ctx)
+	{
+		if (rpc_type != MCP_RPC_INVENTORY_MOVE_REFUSED)
+		{
+			return;
+		}
+		if (!GetGame() || !GetGame().IsServer() || !GetGame().IsMultiplayer())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		int jobId = 0;
+		string reason = "";
+		if (!ctx.Read(jobId))
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (!ctx.Read(reason))
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		MCPJob job = m_Jobs.Get(jobId);
+		if (!job || job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (sender.GetId() != job.actor.GetIdentity().GetId())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		reason = MCPInventoryMoveClientReason(reason);
+		// Publishing here would be a write the census can reach from every
+		// command, because Event_OnRPC is not a command. The job pass posts it.
+		// phase 1: the server read already matches, so confirmation wins.
+		// phase 2: one refusal, and the deadline must not post a second result.
+		if (MCPInventoryMoveReady(job))
+		{
+			job.phase = 1;
+		}
+		else
+		{
+			job.phase = 2;
+			job.error = reason;
+		}
 	}
 
 	// hands_take validates on the server (object_id lives in m_RuntimeObjects:
@@ -4988,7 +5164,21 @@ class MCPBridge : Managed
 			}
 			else
 			{
-				if (IsJobReady(job))
+				if (job.kind == "inventory_move" && job.phase == 2)
+				{
+					MCPPostInventoryMoveRefused(job, job.error);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				else if (job.kind == "inventory_move" && job.phase == 1)
+				{
+					PostJobSuccess(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				else if (IsJobReady(job))
 				{
 					PostJobSuccess(job);
 					job.actor = null;

@@ -154,3 +154,174 @@ Linter (exit 1, 23 ficheros, 4 errors, 7 warnings). Los 4 errors son los de la b
 
 En juego: que `GetAmmoCount` confirme un combine o un split de munición; que `FindFreeLocationFor(..., ANY)` rechace un inventario lleno antes del RPC; que el ítem de otro jugador no se mueva; que un `to_inventory` que cae en manos confirme; que un `.adm` real aparezca solo con `start_epoch`.
 
+## Ronda 3
+
+La disputa de la ronda 2 («el canal no permite devolver el rechazo») queda cerrada: el cliente responde con `MCP_RPC_INVENTORY_MOVE_REFUSED` (`78541072`).
+
+### A. `authority=server` rechazaba el inventario propio
+
+`DispatchInventoryMove` resuelve jugador también cuando el ítem o el destino tienen `GetHierarchyRootPlayer()` (`MCPBridge.c:817-826`). Sin raíz de jugador, mundo a mundo sigue con `player` nulo. Si `ResolvePlayer` falla, se devuelve su error y no se mueve nada. `MCPServerInventoryMove` no se tocó. `MCPInventoryMoveReady` en `to_cargo`, `to_attachment` y `combine` no lee `job.actor` (`MCPBridge.c:1365`). El test de códigos lo comprueba en el fuente.
+
+### B. El rechazo del cliente vuelve
+
+El id del job (`command.id`) es el primer campo del RPC (`MCP_InventoryMove.c:38`, lectura en `:238`). Si esa lectura falla, solo se imprime (`:241`) y el servidor acaba en `timeout`. Cualquier rechazo posterior se imprime y se manda `(jobId, reason)` (`MCPRefuseInventoryMove`, `:102-114`).
+
+`MCPBridge` se suscribe a `g_Game.Event_OnRPC` en el constructor (`:109`) y se da de baja en `~MCPBridge` (`:113-117`). `MCPOnInventoryMoveRefused` (`:1560`) ignora el RPC si falla una comprobación y deja el job hasta su plazo. La lista blanca es `MCPInventoryMoveClientReason` (`:1509`): los once códigos del cliente; otro valor pasa a `client_refused`. Compara `sender.GetId()` con la identidad del actor.
+
+El manejador no escribe el resultado. `Event_OnRPC` no es un comando, y el censo de escalares trataría esa escritura como alcanzable desde cualquier verbo. Marca `job.phase`: 1 si la lectura del servidor ya cuadra (gana la confirmación), 2 si hay rechazo (`job.error`). En el listen server, `Send` puede entrar al manejador antes de volver: el job se inserta antes del RPC (`MCPBridge.c:900`) y, si `phase` ya es 2, `DispatchInventoryMove` publica el rechazo y saca el job (`:913`). Si el RPC llega después, lo publica `ProcessJobs` (`:5167`) antes del timeout, una sola vez. `MCPPostInventoryMoveRefused` (`:1498`) pone `ok=false`, `accepted=false`, `confirmed=false`. `MCPWriteInventoryMove` sigue poniendo `accepted=true` en confirmación y timeout.
+
+Documentado en `MCP_InventoryMove.c:137-140`, `README.md:136` y la descripción de `inventory_move` en `tools/dayz_mcp/server.py`.
+
+Tests: `test_a_client_refusal_reaches_the_caller_unchanged` (un `accepted=false` / `error=no_room` del puente llega igual) y `test_every_client_refusal_code_is_on_the_server_whitelist` (los dos `.c`). `PROJECT-MAP.md` pasa el changelog a 74 KB.
+
+### Gates
+
+Módulos tocados más el censo (el primer fallo de suite salía de ahí) y el tamaño del changelog:
+
+```
+Ran 38 tests in 6.720s
+
+OK
+```
+
+Suite completa, exit 1:
+
+```
+======================================================================
+FAIL: test_a_daemon_started_by_another_venv_exits_with_one_line (tests.test_fb_acf3_88c2_8575_4fdf_named_causes.DaemonPythonNotApprovedTest.test_a_daemon_started_by_another_venv_exits_with_one_line)
+The ticket's repro: a clone's venv named .venv-clone starts the daemon.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guill\AppData\Local\Temp\dzmcp-c817-17fa\tools\tests\test_fb_acf3_88c2_8575_4fdf_named_causes.py", line 886, in test_a_daemon_started_by_another_venv_exits_with_one_line
+    self.assertIn(
+    ~~~~~~~~~~~~~^
+        os.path.normcase(str(_TOOLS_DIR / ".venv-mcp" / "Scripts" / "python.exe")),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        line,
+        ^^^^^
+    )
+    ^
+AssertionError: 'c:\\users\\guill\\appdata\\local\\temp\\dzmcp-c817-17fa\\tools\\.venv-mcp\\scripts\\python.exe' not found in 'daemon: daemon_python_not_approved: this interpreter is c:\\users\\guill\\appdata\\local\\temp\\tmpiie5bt7a\\clone\\.venv-clone\\scripts\\python.exe, but the daemon runs only under c:\\users\\guill\\onedrive\\documentos\\dayz projects\\dayz_mcp_dev\\tools\\.venv-mcp\\scripts\\python.exe, the path it checks its own identity against. create that venv with the installer in readme "install" (it installs this package into tools\\.venv-mcp) and start the daemon with its python.exe.'
+
+----------------------------------------------------------------------
+Ran 6365 tests in 919.117s
+
+FAILED (failures=1, skipped=46)
+```
+
+Ese fallo es el único. Es el del intérprete del árbol vivo, no de este diff.
+
+Linter (exit 1). Cuatro errors, los de la base, mismas líneas. Siete warnings: el mismo `ES-EMPTY-IFDEF` y los seis `ES-GETTYPE-EXACT-MATCH`; en `MCPBridge.c` las líneas se desplazaron. Salida literal:
+
+```
+{
+  "addon_root": "C:\\Users\\guill\\AppData\\Local\\Temp\\dzmcp-c817-17fa\\addon",
+  "status": "FAIL",
+  "errors": [
+    {
+      "check": "ES-LOCAL-VAR-REDECLARE",
+      "file": "scripts\\5_Mission\\MCP_ActionCursor.c",
+      "line": 163,
+      "message": "[FAIL] scripts\\5_Mission\\MCP_ActionCursor.c line 163: local variable 'row' is re-declared in the same method. Enforce Script uses function scope for all locals (no block scope), so this is a compile error 'multiple declaration' (pitfalls-advanced.md:320-362). Declare it once and reuse it.",
+      "severity": "FAIL",
+      "rule_id": "ES-LOCAL-VAR-REDECLARE"
+    },
+    {
+      "check": "ES-LOCAL-VAR-REDECLARE",
+      "file": "scripts\\5_Mission\\MCP_ActionCursor.c",
+      "line": 234,
+      "message": "[FAIL] scripts\\5_Mission\\MCP_ActionCursor.c line 234: local variable 'row' is re-declared in the same method. Enforce Script uses function scope for all locals (no block scope), so this is a compile error 'multiple declaration' (pitfalls-advanced.md:320-362). Declare it once and reuse it.",
+      "severity": "FAIL",
+      "rule_id": "ES-LOCAL-VAR-REDECLARE"
+    },
+    {
+      "check": "ES-LAYOUT-PATH-PBOPREFIX-MISMATCH",
+      "file": "scripts\\5_Mission\\MCPDialogController.c",
+      "line": 39,
+      "message": "[FAIL] scripts\\5_Mission\\MCPDialogController.c line 39: layout path '$profile:mcp_hot.layout' does not start with $PBOPREFIX$ 'DayZ_MCP'. Mismatch causes crash + ghost menu in UIManager (pitfalls-advanced.md:304-316, SKILL.md rule 34). Update the layout path to begin with the addon's PBOPREFIX or update $PBOPREFIX$ to match.",
+      "severity": "FAIL",
+      "rule_id": "ES-LAYOUT-PATH-PBOPREFIX-MISMATCH"
+    },
+    {
+      "check": "ES-LAYOUT-FILE-MISSING",
+      "file": "scripts\\5_Mission\\MCPDialogController.c",
+      "line": 40,
+      "message": "[FAIL] scripts\\5_Mission\\MCPDialogController.c line 40: layout 'DayZ_MCP/gui/layouts/hot/mcp_hot.layout' is referenced but the file does not exist under the addon root (resolved 'gui/layouts/hot/mcp_hot.layout'). CreateWidgets on a missing .layout crashes inside the native call (origin: production mod bug ledger). Create the file or fix the path.",
+      "severity": "FAIL",
+      "rule_id": "ES-LAYOUT-FILE-MISSING"
+    }
+  ],
+  "warnings": [
+    {
+      "check": "ES-EMPTY-IFDEF-UNSUPPORTED-PATTERN",
+      "file": "scripts\\5_Mission\\MCP_ActionCursor.c",
+      "line": 65,
+      "message": "[WARN] scripts\\5_Mission\\MCP_ActionCursor.c line 65: unsupported preprocessor pattern for ES-EMPTY-IFDEF. Phase 1 supports only '#ifdef <macro>'/'#ifndef <macro>' paired with '#endif'; #if/#elif/#else and complex conditions are not analyzed.",
+      "severity": "WARN",
+      "rule_id": "ES-EMPTY-IFDEF-UNSUPPORTED-PATTERN"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "scripts\\5_Mission\\MCPBridge.c",
+      "line": 2365,
+      "message": "[WARN] scripts\\5_Mission\\MCPBridge.c line 2365: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "scripts\\5_Mission\\MCPBridge.c",
+      "line": 3751,
+      "message": "[WARN] scripts\\5_Mission\\MCPBridge.c line 3751: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "scripts\\5_Mission\\MCPBridge.c",
+      "line": 4444,
+      "message": "[WARN] scripts\\5_Mission\\MCPBridge.c line 4444: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "scripts\\5_Mission\\MCPClientBridge.c",
+      "line": 3940,
+      "message": "[WARN] scripts\\5_Mission\\MCPClientBridge.c line 3940: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "scripts\\5_Mission\\MCPClientBridge.c",
+      "line": 4239,
+      "message": "[WARN] scripts\\5_Mission\\MCPClientBridge.c line 4239: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    },
+    {
+      "check": "ES-GETTYPE-EXACT-MATCH",
+      "file": "scripts\\5_Mission\\MCPClientBridge.c",
+      "line": 5245,
+      "message": "[WARN] scripts\\5_Mission\\MCPClientBridge.c line 5245: `.GetType()` compared with `==`/`!=`. Exact match fails on inherited or modded variants; the server may silently reject actions whose client check uses IsKindOf (pitfalls-advanced.md:257-274, SKILL.md rules 31-32). Use `obj.IsKindOf(\"TypeName\")` for full inheritance-chain checks.",
+      "severity": "WARN",
+      "rule_id": "ES-GETTYPE-EXACT-MATCH"
+    }
+  ],
+  "info": {
+    "files_scanned": 23,
+    "elapsed_ms": 37959
+  }
+}
+```
+
+### DISPUTAS ronda 3
+
+- Un `Print` por cada RPC que no es el nuestro inundaría el log: `Event_OnRPC` ve todo el tráfico. El manejador vuelve en silencio si `rpc_type` no es `MCP_RPC_INVENTORY_MOVE_REFUSED`. El `Print` queda para cuando el tipo coincide y una comprobación posterior falla.
+- El resultado no se publica dentro del manejador. Se marca `job.phase` y lo publica el dispatch (si `Send` volvió en el mismo stack) o `ProcessJobs` (si el RPC llegó después). Sigue siendo una sola publicación, con `accepted=false`, y el job sale de `m_Jobs` antes del timeout.
+
+### LO QUE NO PUDE VERIFICAR ronda 3
+
+En juego, y por tanto sin ejecutar Enforce: el repro de A (ítem en las manos de U, caja B, `authority=server`, `to_cargo` ya no es `not_reachable`); que `DayZGame.OnRPC` entregue el ScriptRPC de vuelta; que el cargador dentro de un arma en el suelo produzca `no_room` y que ese código vuelva con `accepted=false`; que un fallo al leer solo el id siga en `timeout`. El linter no compila Enforce.
+
