@@ -39,10 +39,14 @@ class ArgContractHashTest(unittest.TestCase):
             "hands_attach=object_id,slot,uid\n"
             "object_resolve=pos,radius,type\n"
             "player_kill=uid\n"
-            "vehicle_prepare_fixture=mode,pos,radius,type",
+            "scene_clear=scene_id\n"
+            "scene_entities=scene_id\n"
+            "vehicle_prepare_fixture=mode,pos,radius,type\n"
+            "world_spawn=flags,lifetime_s,lifetime_s_set,pos,rotation,scene_id,type\n"
+            "world_spawn_batch=items,per_tick,scene_id",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "022d61fa7bd8c1e3"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

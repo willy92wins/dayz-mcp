@@ -29,18 +29,30 @@ class MCPBridge : Managed
 	// ends the pulse in OnEndServer (actioncardoorsoutside.c:109-118); 1000 ms spans
 	// the door's animPeriod of 0.5 s (config.cpp CarScript AnimationSources).
 	protected const int VEHICLE_DOOR_LIGHTS_PULSE_MS = 1000;
+	// 165a scene registry. scene_id is 1 to SCENE_ID_MAX_CHARS characters (loopback.py
+	// SCENE_ID_MAX_CHARS). A spawn that would take a scene past SCENE_ENTRIES_MAX
+	// entries is refused, so one scene_entities reply stays far below the daemon's
+	// 1 MiB result cap (server.py SCENE_ENTRIES_MAX).
+	protected const int SCENE_ID_MAX_CHARS = 64;
+	protected const int SCENE_ENTRIES_MAX = 2048;
+	// 7f5d world_spawn_batch bounds (loopback.py SPAWN_BATCH_ITEMS_MAX and
+	// SPAWN_BATCH_PER_TICK_MAX). Item object_ids count up from BATCH_OBJECT_ID_BASE,
+	// above any daemon command id, so they never take a world_spawn object_id.
+	protected const int SPAWN_BATCH_ITEMS_MAX = 200;
+	protected const int SPAWN_BATCH_PER_TICK_MAX = 50;
+	protected const int BATCH_OBJECT_ID_BASE = 1000000000;
 	// Capability census announced on every poll (caps=). Sorted ascending,
 	// comma separated; one entry per branch of Dispatch() before unknown_command.
 	// The daemon crosses this list against its registered tools; keep it in
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn,world_spawn_batch," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "4f90284258023d98";
+	protected const string SERVER_ARG_CONTRACT_HASH = "022d61fa7bd8c1e3";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -70,6 +82,11 @@ class MCPBridge : Managed
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref map<int, ref MCPJob> m_Jobs;
 	protected ref map<int, Object> m_RuntimeObjects;
+	// 165a: scene_id -> the objects world_spawn and world_spawn_batch registered
+	// under it, in registration order. This run only; an entry is never removed.
+	protected ref map<string, ref array<ref MCPSceneEntry>> m_Scenes;
+	// 7f5d: the object_id the next world_spawn_batch item gets.
+	protected int m_NextBatchObjectId;
 	protected ref array<Object> m_ReadyObjects;
 	protected ref array<CargoBase> m_ReadyProxyCargos;
 	protected ref array<ref MCPTelemetryFixtureLine> m_TelemetryFixtureLinePool;
@@ -96,6 +113,8 @@ class MCPBridge : Managed
 		m_Pending = new array<ref MCPCommand>();
 		m_Jobs = new map<int, ref MCPJob>();
 		m_RuntimeObjects = new map<int, Object>();
+		m_Scenes = new map<string, ref array<ref MCPSceneEntry>>();
+		m_NextBatchObjectId = BATCH_OBJECT_ID_BASE;
 		m_ReadyObjects = new array<Object>();
 		m_ReadyProxyCargos = new array<CargoBase>();
 		m_TelemetryFixtureLinePool = new array<ref MCPTelemetryFixtureLine>();
@@ -501,10 +520,21 @@ class MCPBridge : Managed
 		}
 		else if (command.cmd == "world_spawn")
 		{
-			postNow = DispatchWorldSpawn(command, result);
-			if (!postNow)
+			// 165a: a bad scene_id or a full scene is refused before anything is created.
+			result.error = SceneSpawnRefusal(command.args, 1);
+			if (result.error != "")
 			{
-				postNow = ApplySpawnLifetime(command, result);
+				result.ok = false;
+			}
+			else
+			{
+				postNow = DispatchWorldSpawn(command, result);
+				if (!postNow)
+				{
+					postNow = ApplySpawnLifetime(command, result);
+				}
+
+				RegisterSpawnScene(command);
 			}
 		}
 		else if (command.cmd == "object_delete")
@@ -627,6 +657,18 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchActionCursorIds(command, result);
 		}
+		else if (command.cmd == "world_spawn_batch")
+		{
+			postNow = DispatchWorldSpawnBatch(command, result);
+		}
+		else if (command.cmd == "scene_entities")
+		{
+			postNow = DispatchSceneEntities(command, result);
+		}
+		else if (command.cmd == "scene_clear")
+		{
+			postNow = DispatchSceneClear(command, result);
+		}
 		else if (command.cmd == "entities_query")
 		{
 			postNow = DispatchEntitiesQuery(command, result);
@@ -711,6 +753,507 @@ class MCPBridge : Managed
 
 		result.ok = true;
 		return true;
+	}
+
+	// 165a: scene_id is 1 to SCENE_ID_MAX_CHARS characters, each A-Z, a-z, 0-9, _
+	// or - (ToAscii 65..90, 97..122, 48..57, 95, 45). loopback.py is_scene_id
+	// applies the same rule before the command is queued.
+	protected bool IsValidSceneId(string sceneId)
+	{
+		int idLength = sceneId.Length();
+		int index = 0;
+		int code = 0;
+		bool allowed = false;
+		string character;
+
+		if (idLength < 1 || idLength > SCENE_ID_MAX_CHARS)
+		{
+			return false;
+		}
+
+		while (index < idLength)
+		{
+			character = sceneId.Substring(index, 1);
+			code = character.ToAscii();
+			allowed = false;
+			if (code >= 65 && code <= 90)
+			{
+				allowed = true;
+			}
+			else if (code >= 97 && code <= 122)
+			{
+				allowed = true;
+			}
+			else if (code >= 48 && code <= 57)
+			{
+				allowed = true;
+			}
+			else if (code == 95 || code == 45)
+			{
+				allowed = true;
+			}
+
+			if (!allowed)
+			{
+				return false;
+			}
+
+			index = index + 1;
+		}
+
+		return true;
+	}
+
+	// 165a: the refusal for a spawn of count objects under args.scene_id, or ""
+	// when it may go ahead. An empty scene_id is no scene. It runs before anything
+	// is created, and it is the only place the size of a scene is checked.
+	protected string SceneSpawnRefusal(MCPArgs args, int count)
+	{
+		array<ref MCPSceneEntry> entries;
+
+		if (!args || args.scene_id == "")
+		{
+			return "";
+		}
+
+		if (!IsValidSceneId(args.scene_id))
+		{
+			return "bad_args";
+		}
+
+		entries = m_Scenes.Get(args.scene_id);
+		if (entries && entries.Count() + count > SCENE_ENTRIES_MAX)
+		{
+			return "scene_full";
+		}
+
+		return "";
+	}
+
+	// 165a: registers the object world_spawn has just created under its scene_id.
+	// The spawn job is read, as ApplySpawnLifetime reads it: its subject is that
+	// object. No job for these very args means nothing was created, or
+	// lifetime_unsupported deleted it; a job for other args is an older
+	// command's, under an id the daemon has reused.
+	protected void RegisterSpawnScene(MCPCommand command)
+	{
+		MCPJob job;
+
+		if (!command.args || command.args.scene_id == "")
+		{
+			return;
+		}
+
+		job = m_Jobs.Get(command.id);
+		if (!job || job.args != command.args || !job.subject)
+		{
+			return;
+		}
+
+		AddSceneEntry(command.args.scene_id, command.id, job.subject);
+	}
+
+	// 165a: appends one object to sceneId. type is the object's own GetType.
+	protected void AddSceneEntry(string sceneId, int objectId, Object obj)
+	{
+		array<ref MCPSceneEntry> entries = m_Scenes.Get(sceneId);
+		MCPSceneEntry entry = new MCPSceneEntry();
+
+		if (!entries)
+		{
+			entries = new array<ref MCPSceneEntry>();
+			m_Scenes.Insert(sceneId, entries);
+		}
+
+		entry.object_id = objectId;
+		entry.type = obj.GetType();
+		entry.obj = obj;
+		entries.Insert(entry);
+	}
+
+	// 7f5d: checks the batch as a whole, then queues a job that creates per_tick
+	// items each server tick (StepSpawnBatch) and answers once, after the last.
+	// Nothing is created here, so a refusal leaves the world as it was. The tool
+	// and the daemon check the same shape first; per item, the job reports what
+	// only the game can tell (unknown_type, bad_pos, spawn_failed).
+	protected bool DispatchWorldSpawnBatch(MCPCommand command, MCPResult result)
+	{
+		MCPArgs args = command.args;
+		MCPSpawnBatchItem item;
+		MCPJob job;
+		int count = 0;
+		int index = 0;
+
+		if (!args || !args.items)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		count = args.items.Count();
+		if (count < 1 || count > SPAWN_BATCH_ITEMS_MAX || args.per_tick < 1 || args.per_tick > SPAWN_BATCH_PER_TICK_MAX)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		while (index < count)
+		{
+			item = args.items.Get(index);
+			if (!item)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+
+			// ypr replaces rotation: both on one item is refused.
+			if (item.ypr_set)
+			{
+				if (item.rotation != 0 || !item.ypr || item.ypr.Count() != 3)
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+
+				if (!IsFiniteFloat(item.ypr.Get(0)) || !IsFiniteFloat(item.ypr.Get(1)) || !IsFiniteFloat(item.ypr.Get(2)))
+				{
+					result.ok = false;
+					result.error = "bad_args";
+					return true;
+				}
+			}
+
+			index = index + 1;
+		}
+
+		result.error = SceneSpawnRefusal(args, count);
+		if (result.error != "")
+		{
+			result.ok = false;
+			return true;
+		}
+
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "spawn_batch";
+		job.args = args;
+		job.spawn_batch = new MCPSpawnBatch();
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Jobs.Insert(job.id, job);
+
+		Log("job queued id=" + job.id + " kind=spawn_batch items=" + count + " per_tick=" + args.per_tick);
+		return false;
+	}
+
+	// 7f5d: creates the next per_tick items of a world_spawn_batch job, one row
+	// each, in input order. True once every item has its row. Every tick creates
+	// items, so the job cannot stall: its deadline moves with it, and the call's
+	// own budget is the tool's timeout_s.
+	protected bool StepSpawnBatch(MCPJob job)
+	{
+		MCPArgs itemArgs = new MCPArgs();
+		int total = job.args.items.Count();
+		int done = job.spawn_batch.items.Count();
+		int stop = done + job.args.per_tick;
+
+		if (stop > total)
+		{
+			stop = total;
+		}
+
+		while (done < stop)
+		{
+			job.spawn_batch.items.Insert(SpawnBatchItem(job, done, itemArgs));
+			done = done + 1;
+		}
+
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		return done >= total;
+	}
+
+	// 7f5d: one batch item through world_spawn's own checks (ValidateSpawnArgs),
+	// then CreateObjectEx. A ground item takes the y DispatchSurfaceQuery reads.
+	// A refused item creates nothing; its row carries the error.
+	protected MCPSpawnBatchRow SpawnBatchItem(MCPJob job, int index, MCPArgs itemArgs)
+	{
+		MCPSpawnBatchItem item = job.args.items.Get(index);
+		MCPSpawnBatchRow row = new MCPSpawnBatchRow();
+		MCPSpawnValidation validation;
+		Object spawned;
+		vector pos;
+		int flags = 0;
+		string surfaceType = "";
+
+		row.index = index;
+		row.type = item.type;
+		itemArgs.type = item.type;
+		itemArgs.pos = item.pos;
+		itemArgs.flags = item.flags;
+		itemArgs.rotation = item.rotation;
+		validation = ValidateSpawnArgs(itemArgs);
+		if (!validation.ok)
+		{
+			row.error = validation.error;
+			return row;
+		}
+
+		pos = validation.pos;
+		if (item.ground)
+		{
+			pos[1] = GetGame().SurfaceGetType(pos[0], pos[2], surfaceType);
+		}
+
+		// fb-20261002-165830-0eb8: an infected spawned without ECE_INITAI was reported
+		// at health 0 minutes later (cause unverified). world_spawn leaves that flag to
+		// the caller; a batch item whose CfgVehicles class is a DayZInfected gets it here.
+		flags = validation.flags;
+		if (GetGame().IsKindOf(item.type, "DayZInfected"))
+		{
+			flags = flags | ECE_INITAI;
+		}
+
+		spawned = GetGame().CreateObjectEx(item.type, pos, flags, validation.rotation);
+		if (!spawned)
+		{
+			row.error = "spawn_failed";
+			return row;
+		}
+
+		// Created, then turned: the order 3_Game/ObjectSpawner.c uses for ypr.
+		if (item.ypr_set)
+		{
+			spawned.SetOrientation(Vector(item.ypr.Get(0), item.ypr.Get(1), item.ypr.Get(2)));
+		}
+
+		row.object_id = m_NextBatchObjectId;
+		m_NextBatchObjectId = m_NextBatchObjectId + 1;
+		m_RuntimeObjects.Insert(row.object_id, spawned);
+		if (job.args.scene_id != "")
+		{
+			AddSceneEntry(job.args.scene_id, row.object_id, spawned);
+		}
+
+		row.ok = true;
+		return row;
+	}
+
+	// 7f5d: the one reply of a world_spawn_batch, after its last item. status is
+	// ok when every item was created, partial otherwise.
+	protected void PostSpawnBatch(MCPJob job)
+	{
+		MCPResult result = new MCPResult();
+		MCPSpawnBatch batch = job.spawn_batch;
+		MCPSpawnBatchRow row;
+		int index = 0;
+
+		while (index < batch.items.Count())
+		{
+			row = batch.items.Get(index);
+			if (row.ok)
+			{
+				batch.created = batch.created + 1;
+			}
+			else
+			{
+				batch.failed = batch.failed + 1;
+			}
+
+			index = index + 1;
+		}
+
+		batch.status = "ok";
+		if (batch.failed > 0)
+		{
+			batch.status = "partial";
+		}
+
+		result.id = job.id;
+		result.ok = true;
+		result.world_spawn_batch = batch;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		Log("spawn batch done id=" + job.id + " created=" + batch.created + " failed=" + batch.failed);
+		PostResult(result);
+	}
+
+	// 165a: every object registered under scene_id, in registration order. An
+	// entry is never dropped: a live object reads its position now, and one that
+	// is gone (object_delete, scene_clear or the engine) reads deleted. A scene
+	// nothing was registered under answers [].
+	protected bool DispatchSceneEntities(MCPCommand command, MCPResult result)
+	{
+		array<ref MCPSceneEntry> entries;
+		MCPSceneEntry entry;
+		MCPSceneEntity row;
+		int index = 0;
+
+		if (!command.args || !IsValidSceneId(command.args.scene_id))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		result.scene_entities = new array<ref MCPSceneEntity>();
+		entries = m_Scenes.Get(command.args.scene_id);
+		if (entries)
+		{
+			while (index < entries.Count())
+			{
+				entry = entries.Get(index);
+				row = new MCPSceneEntity();
+				row.object_id = entry.object_id;
+				row.type = entry.type;
+				if (entry.obj)
+				{
+					VectorToArray(entry.obj.GetPosition(), row.pos);
+				}
+				else
+				{
+					row.deleted = true;
+				}
+
+				result.scene_entities.Insert(row);
+				index = index + 1;
+			}
+		}
+
+		result.ok = true;
+		return true;
+	}
+
+	// 5a21: deletes every object registered under scene_id that still exists, the
+	// way DispatchObjectDelete deletes one, and nothing else: each object is
+	// reached through its own entry, never by type or position, and its registry
+	// id is released only while that id still names it. Entries stay, so
+	// scene_entities reads them deleted. already_deleted counts the objects gone
+	// before this call; the job reads the others back (IsSceneClearDone).
+	protected bool DispatchSceneClear(MCPCommand command, MCPResult result)
+	{
+		array<ref MCPSceneEntry> entries;
+		MCPSceneEntry entry;
+		MCPSceneClear report;
+		MCPJob job;
+		int index = 0;
+
+		if (!command.args || !IsValidSceneId(command.args.scene_id))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		report = new MCPSceneClear();
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "scene_clear";
+		job.scene_clear = report;
+		job.scene_pending = new array<ref MCPSceneEntry>();
+		entries = m_Scenes.Get(command.args.scene_id);
+		if (entries)
+		{
+			while (index < entries.Count())
+			{
+				entry = entries.Get(index);
+				if (!entry.obj)
+				{
+					report.already_deleted = report.already_deleted + 1;
+				}
+				else
+				{
+					if (m_RuntimeObjects.Get(entry.object_id) == entry.obj)
+					{
+						MCPBotControl.OnObjectGone(this, entry.object_id);
+						m_RuntimeObjects.Remove(entry.object_id);
+					}
+
+					GetGame().ObjectDelete(entry.obj);
+					job.scene_pending.Insert(entry);
+				}
+
+				index = index + 1;
+			}
+		}
+
+		if (job.scene_pending.Count() == 0)
+		{
+			result.ok = true;
+			result.scene_clear = report;
+			return true;
+		}
+
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Jobs.Insert(job.id, job);
+
+		Log("job queued id=" + job.id + " kind=scene_clear pending=" + job.scene_pending.Count());
+		return false;
+	}
+
+	// 5a21: true once every object this scene_clear deleted is gone.
+	protected bool IsSceneClearDone(MCPJob job)
+	{
+		MCPSceneEntry entry;
+		int index = 0;
+
+		while (index < job.scene_pending.Count())
+		{
+			entry = job.scene_pending.Get(index);
+			if (entry.obj)
+			{
+				return false;
+			}
+
+			index = index + 1;
+		}
+
+		return true;
+	}
+
+	// 5a21: the scene_clear reply, read back from the objects it deleted. One that
+	// is gone counts as deleted; one still there at the job deadline counts as an
+	// error, with its id in error_ids.
+	protected void PostSceneClear(MCPJob job)
+	{
+		MCPResult result = new MCPResult();
+		MCPSceneClear report = job.scene_clear;
+		MCPSceneEntry entry;
+		int index = 0;
+
+		while (index < job.scene_pending.Count())
+		{
+			entry = job.scene_pending.Get(index);
+			if (entry.obj)
+			{
+				report.errors = report.errors + 1;
+				report.error_ids.Insert(entry.object_id);
+			}
+			else
+			{
+				report.deleted = report.deleted + 1;
+			}
+
+			index = index + 1;
+		}
+
+		result.id = job.id;
+		result.ok = true;
+		result.scene_clear = report;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		Log("scene clear done id=" + job.id + " deleted=" + report.deleted + " already_deleted=" + report.already_deleted + " errors=" + report.errors);
+		PostResult(result);
 	}
 
 	// hands_take validates on the server (object_id lives in m_RuntimeObjects:
@@ -4286,6 +4829,15 @@ class MCPBridge : Managed
 		{
 			return IsSeatReady(job);
 		}
+		else if (job.kind == "spawn_batch")
+		{
+			// 7f5d: each tick creates the next items; ready once the last has its row.
+			return StepSpawnBatch(job);
+		}
+		else if (job.kind == "scene_clear")
+		{
+			return IsSceneClearDone(job);
+		}
 
 		return false;
 	}
@@ -4401,6 +4953,18 @@ class MCPBridge : Managed
 			return;
 		}
 
+		if (job.kind == "spawn_batch")
+		{
+			PostSpawnBatch(job);
+			return;
+		}
+
+		if (job.kind == "scene_clear")
+		{
+			PostSceneClear(job);
+			return;
+		}
+
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = true;
@@ -4459,6 +5023,14 @@ class MCPBridge : Managed
 
 	protected void PostJobTimeout(MCPJob job)
 	{
+		// 5a21: at its deadline a scene_clear answers its counts; an object still
+		// there is one of its errors, not a timeout of the whole call.
+		if (job.kind == "scene_clear")
+		{
+			PostSceneClear(job);
+			return;
+		}
+
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = false;

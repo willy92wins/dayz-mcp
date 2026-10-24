@@ -1,7 +1,8 @@
 """Reply shaping for world reads: the world_time clock and the entities_query rows.
 
 Moved out of server.py unchanged (backlog 71fc); server.py imports every name
-back, so dayz_mcp.server.<name> is the same object.
+back, so dayz_mcp.server.<name> is the same object. The world_spawn_batch and
+scene_entities rows (7f5d, 165a) are shaped here too.
 """
 
 from __future__ import annotations
@@ -198,4 +199,66 @@ def _annotate_entities_reliability(
     # A missing or non-list field is reported as remote_unverified without a reason.
     if isinstance(players_raw, list) and not players_raw:
         result["reason"] = "no_player_connected"
+    return result
+
+
+def _wire_bool(value: object) -> bool:
+    # An Enforce bool arrives as 0 or 1, the way `ok` does.
+    return value is True or (
+        isinstance(value, int) and not isinstance(value, bool) and value != 0
+    )
+
+
+def _spawn_batch_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Publish each world_spawn_batch row with only the keys true of it.
+
+    The bridge sends every MCPSpawnBatchRow field on every row: ok as 0/1,
+    object_id 0 and error "" where they do not apply. A created item becomes
+    {index, ok: true, object_id}; a refused one {index, ok: false, error,
+    type}, type being the class the item asked for. Rows keep their order.
+    """
+    if not isinstance(result, dict):
+        return result
+    batch = result.get("world_spawn_batch")
+    rows = batch.get("items") if isinstance(batch, dict) else None
+    if not isinstance(rows, list):
+        return result
+    shaped: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            shaped.append(row)
+        elif _wire_bool(row.get("ok")):
+            shaped.append(
+                {"index": row.get("index"), "ok": True, "object_id": row.get("object_id")}
+            )
+        else:
+            shaped.append(
+                {
+                    "index": row.get("index"),
+                    "ok": False,
+                    "error": row.get("error"),
+                    "type": row.get("type"),
+                }
+            )
+    batch["items"] = shaped
+    return result
+
+
+def _scene_entities_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Publish deleted as a bool on every scene_entities row.
+
+    A row whose object is gone has no position to read: the bridge leaves its
+    pos empty, and the row goes out without pos. No row is dropped.
+    """
+    if not isinstance(result, dict):
+        return result
+    rows = result.get("scene_entities")
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row["deleted"] = _wire_bool(row.get("deleted"))
+        if row["deleted"]:
+            row.pop("pos", None)
     return result

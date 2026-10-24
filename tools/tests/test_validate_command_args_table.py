@@ -94,6 +94,13 @@ _SPAWN: dict[str, object] = {
     "flags": 0,
     "rotation": 0,
 }
+# One world_spawn_batch item as the tool sends it (7f5d).
+_BATCH_ITEM: dict[str, object] = {
+    "type": "Barrel_Green",
+    "pos": [1.0, 2.0, 3.0],
+    "flags": 0,
+    "rotation": 0,
+}
 
 
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
@@ -1560,6 +1567,22 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             {**_SPAWN, "lifetime_s": 10**400, "lifetime_s_set": True},
             (False, "bad_args"),
         ),
+        # scene_id travels only when the caller named a scene, 1 to 64
+        # characters from A-Z a-z 0-9 _ - (165a).
+        ("valid_scene_id", {**_SPAWN, "scene_id": "take_01-A"}, (True, None)),
+        ("valid_scene_id_64", {**_SPAWN, "scene_id": "a" * 64}, (True, None)),
+        (
+            "valid_scene_id_with_lifetime",
+            {**_SPAWN, "lifetime_s": 600.0, "lifetime_s_set": True, "scene_id": "a"},
+            (True, None),
+        ),
+        ("scene_id_empty", {**_SPAWN, "scene_id": ""}, (False, "bad_args")),
+        ("scene_id_65", {**_SPAWN, "scene_id": "a" * 65}, (False, "bad_args")),
+        ("scene_id_space", {**_SPAWN, "scene_id": "take 1"}, (False, "bad_args")),
+        ("scene_id_dot", {**_SPAWN, "scene_id": "take.1"}, (False, "bad_args")),
+        ("scene_id_accent", {**_SPAWN, "scene_id": "toma\u00f1"}, (False, "bad_args")),
+        ("scene_id_newline", {**_SPAWN, "scene_id": "a\n"}, (False, "bad_args")),
+        ("scene_id_wrong_type", {**_SPAWN, "scene_id": 1}, (False, "bad_args")),
     ),
     "vehicle_enter": (
         ("valid", {"pos": [0.0, 0.0, 0.0]}, (True, None)),
@@ -2247,6 +2270,114 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             {"net_low": [1], "net_high": [2], "run_token": "run-a", "extra": None},
             (False, "bad_args"),
         ),
+    ),
+    # 7f5d: items as the world_spawn_batch tool sends them.
+    "world_spawn_batch": (
+        ("valid", {"items": [_BATCH_ITEM], "per_tick": 10}, (True, None)),
+        (
+            "valid_scene_ground_ypr",
+            {
+                "items": [
+                    _BATCH_ITEM,
+                    {**_BATCH_ITEM, "ground": True},
+                    {**_BATCH_ITEM, "ypr": [90.0, 0.0, 0.0], "ypr_set": True},
+                ],
+                "per_tick": 1,
+                "scene_id": "a",
+            },
+            (True, None),
+        ),
+        ("valid_200_items", {"items": [_BATCH_ITEM] * 200, "per_tick": 50}, (True, None)),
+        ("no_items", {"items": [], "per_tick": 10}, (False, "bad_args")),
+        ("201_items", {"items": [_BATCH_ITEM] * 201, "per_tick": 10}, (False, "bad_args")),
+        ("items_not_a_list", {"items": _BATCH_ITEM, "per_tick": 10}, (False, "bad_args")),
+        ("per_tick_zero", {"items": [_BATCH_ITEM], "per_tick": 0}, (False, "bad_args")),
+        ("per_tick_51", {"items": [_BATCH_ITEM], "per_tick": 51}, (False, "bad_args")),
+        ("per_tick_bool", {"items": [_BATCH_ITEM], "per_tick": True}, (False, "bad_args")),
+        ("missing_per_tick", {"items": [_BATCH_ITEM]}, (False, "bad_args")),
+        (
+            "scene_id_bad",
+            {"items": [_BATCH_ITEM], "per_tick": 10, "scene_id": "a b"},
+            (False, "bad_args"),
+        ),
+        (
+            "scene_id_empty",
+            {"items": [_BATCH_ITEM], "per_tick": 10, "scene_id": ""},
+            (False, "bad_args"),
+        ),
+        (
+            "item_empty_type",
+            {"items": [{**_BATCH_ITEM, "type": ""}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_missing_rotation",
+            {"items": [{"type": "Barrel_Green", "pos": [1.0, 0.0, 3.0], "flags": 0}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_null_y",
+            {"items": [{**_BATCH_ITEM, "pos": [1.0, None, 3.0]}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_bad_flags",
+            {"items": [{**_BATCH_ITEM, "flags": 524288}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_ground_false",
+            {"items": [{**_BATCH_ITEM, "ground": False}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_ypr_without_flag",
+            {"items": [{**_BATCH_ITEM, "ypr": [0.0, 0.0, 0.0]}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_ypr_with_rotation",
+            {
+                "items": [{**_BATCH_ITEM, "rotation": 1, "ypr": [0.0, 0.0, 0.0], "ypr_set": True}],
+                "per_tick": 10,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "item_ypr_two_components",
+            {"items": [{**_BATCH_ITEM, "ypr": [0.0, 0.0], "ypr_set": True}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        (
+            "item_extra_key",
+            {"items": [{**_BATCH_ITEM, "lifetime_s": 60.0}], "per_tick": 10},
+            (False, "bad_args"),
+        ),
+        ("item_not_an_object", {"items": ["Barrel_Green"], "per_tick": 10}, (False, "bad_args")),
+        (
+            "extra_key",
+            {"items": [_BATCH_ITEM], "per_tick": 10, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    # 165a / 5a21: the scene a read or a clear names.
+    "scene_entities": (
+        ("valid", {"scene_id": "a"}, (True, None)),
+        ("valid_64", {"scene_id": "Z9_-" * 16}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("empty", {"scene_id": ""}, (False, "bad_args")),
+        ("too_long", {"scene_id": "a" * 65}, (False, "bad_args")),
+        ("bad_character", {"scene_id": "a/b"}, (False, "bad_args")),
+        ("wrong_type", {"scene_id": ["a"]}, (False, "bad_args")),
+        ("extra_key", {"scene_id": "a", "extra": None}, (False, "bad_args")),
+    ),
+    "scene_clear": (
+        ("valid", {"scene_id": "a"}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("empty", {"scene_id": ""}, (False, "bad_args")),
+        ("too_long", {"scene_id": "a" * 65}, (False, "bad_args")),
+        ("bad_character", {"scene_id": "a*"}, (False, "bad_args")),
+        ("extra_key", {"scene_id": "a", "timeout_s": 5.0}, (False, "bad_args")),
     ),
 }
 

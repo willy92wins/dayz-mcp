@@ -40,6 +40,27 @@ class MCPDialogResult
 	}
 };
 
+// world_spawn_batch item (7f5d). An absent key reads 0 or false, as in MCPArgs
+// below. type, pos, flags and rotation are world_spawn's. ground true puts the
+// item on the ground surface_query reads, in place of pos[1]; ypr_set true turns
+// it to ypr ([yaw, pitch, roll] in degrees) once it exists.
+class MCPSpawnBatchItem
+{
+	string type;
+	ref array<float> pos;
+	int flags;
+	int rotation;
+	bool ground;
+	ref array<float> ypr;
+	bool ypr_set;
+
+	void MCPSpawnBatchItem()
+	{
+		pos = new array<float>();
+		ypr = new array<float>();
+	}
+};
+
 // Command args. A key absent from the command JSON reaches the handler as 0 or
 // false, not as the constructor value (fb-20260930-065425-8779: an object_anim
 // read wrote phase 0 and a partial world_weather_set zeroed the other levels).
@@ -206,6 +227,14 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// 165a / 7f5d: world_spawn and world_spawn_batch register what they create
+	// under scene_id, and empty (what an absent key reads) is no scene.
+	// scene_entities and scene_clear name the scene they read or clear.
+	string scene_id;
+	// world_spawn_batch: its items, and how many of them one server tick creates.
+	// An absent per_tick reads 0, which the bridge refuses.
+	ref array<ref MCPSpawnBatchItem> items;
+	int per_tick;
 
 	void MCPArgs()
 	{
@@ -221,6 +250,7 @@ class MCPArgs
 		fields = new array<ref MCPDialogField>();
 		net_low = new array<int>();
 		net_high = new array<int>();
+		items = new array<ref MCPSpawnBatchItem>();
 		component = -1;
 		dik = -1;
 		limit = 64;
@@ -1023,6 +1053,69 @@ class MCPCursorIds
 	}
 };
 
+// world_spawn_batch row (7f5d), one per item in input order: object_id when the
+// item was created, otherwise error and the item's type.
+class MCPSpawnBatchRow
+{
+	int index;
+	bool ok;
+	int object_id;
+	string type;
+	string error;
+};
+
+class MCPSpawnBatch
+{
+	string status;
+	int created;
+	int failed;
+	ref array<ref MCPSpawnBatchRow> items;
+
+	void MCPSpawnBatch()
+	{
+		items = new array<ref MCPSpawnBatchRow>();
+	}
+};
+
+// scene_entities row (165a). pos is read when the reply is built and stays
+// empty once the object is gone.
+class MCPSceneEntity
+{
+	int object_id;
+	string type;
+	bool deleted;
+	ref array<float> pos;
+
+	void MCPSceneEntity()
+	{
+		pos = new array<float>();
+	}
+};
+
+// scene_clear counts (5a21). error_ids are the objects counted in errors.
+class MCPSceneClear
+{
+	int deleted;
+	int already_deleted;
+	int errors;
+	ref array<int> error_ids;
+
+	void MCPSceneClear()
+	{
+		error_ids = new array<int>();
+	}
+};
+
+// One object registered under a scene (165a). Not sent. obj is the object
+// itself, which Enforce nulls once it is gone: the id alone can come to name a
+// newer object, because the daemon restarts its ids at 1.
+class MCPSceneEntry
+{
+	int object_id;
+	string type;
+	Object obj;
+};
+
 class MCPResult
 {
 	int id;
@@ -1162,6 +1255,13 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	bool matched;
+	// world_spawn_batch reply. Unassigned on its refusals and on other commands.
+	ref MCPSpawnBatch world_spawn_batch;
+	// scene_entities rows, [] for a scene nothing was registered under.
+	// Unassigned on its refusals and on other commands.
+	ref array<ref MCPSceneEntity> scene_entities;
+	// scene_clear counts. Unassigned on its refusals and on other commands.
+	ref MCPSceneClear scene_clear;
 };
 
 class MCPJob
@@ -1202,6 +1302,11 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	// world_spawn_batch: the reply, one row per item created or refused so far.
+	ref MCPSpawnBatch spawn_batch;
+	// scene_clear: the counts so far and the entries whose delete is read back.
+	ref MCPSceneClear scene_clear;
+	ref array<ref MCPSceneEntry> scene_pending;
 };
 
 class MCPSpawnValidation

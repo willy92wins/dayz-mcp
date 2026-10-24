@@ -236,7 +236,21 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "hands_attach": ("object_id", "slot", "uid"),
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
+    "scene_clear": ("scene_id",),
+    "scene_entities": ("scene_id",),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
+    # world_spawn joins for scene_id (165a): only this hash tells an older
+    # bridge, which would leave the object out of the scene, from this one.
+    "world_spawn": (
+        "flags",
+        "lifetime_s",
+        "lifetime_s_set",
+        "pos",
+        "rotation",
+        "scene_id",
+        "type",
+    ),
+    "world_spawn_batch": ("items", "per_tick", "scene_id"),
 }
 
 
@@ -295,6 +309,8 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",
         "query_player_state": "query_player_state",
+        "scene_clear": "scene_clear",
+        "scene_entities": "scene_entities",
         "scene_raycast": "scene_raycast",
         "surface_query": "surface_query",
         "telemetry_read": "telemetry_read",
@@ -304,6 +320,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "weapon_state": "weapon_state",
         "action_cursor_ids": None,
         "world_spawn": "world_spawn",
+        "world_spawn_batch": "world_spawn_batch",
         "world_time_get": "world_time_get",
         "world_time_set": "world_time_set",
         "world_weather_set": "world_weather_set",

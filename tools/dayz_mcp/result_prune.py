@@ -112,6 +112,12 @@ PRUNABLE_FIELDS = (
     "look_at",
     # action_cursor_ids fills it with registry ids for the captured pairs.
     "cursor_ids",
+    # world_spawn_batch fills it once, after its last item (7f5d).
+    "world_spawn_batch",
+    # scene_entities fills it with the rows of one scene (165a).
+    "scene_entities",
+    # scene_clear fills it with its counts (5a21).
+    "scene_clear",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -127,6 +133,9 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
         # answer, not noise. Ficha 59d9 (2026-09-04): the key vanished on
         # every empty query and the description described what never came.
         ("entities_query", "entities"),
+        # scene_entities answers [] for a scene nothing was registered under
+        # (165a): an unknown scene is ok with an empty list, not a missing key.
+        ("scene_entities", "scene_entities"),
     }
 )
 

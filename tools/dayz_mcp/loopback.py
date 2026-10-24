@@ -97,6 +97,9 @@ SERVER_COMMANDS = {
     "hands_attach",
     "weapon_state",
     "action_cursor_ids",
+    "world_spawn_batch",
+    "scene_entities",
+    "scene_clear",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -803,6 +806,61 @@ _SAFE_SPAWN_LIFETIME = _reject_numeric_errors(
         minimum_inclusive=False,
     )
 )
+# 165a: a scene_id is 1 to SCENE_ID_MAX_CHARS characters from A-Z a-z 0-9 _ -.
+# Mirrors SCENE_ID_MAX_CHARS and IsValidSceneId in MCPBridge.c; a test keeps the
+# two rules equal.
+SCENE_ID_MAX_CHARS = 64
+_SCENE_ID_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{1,{SCENE_ID_MAX_CHARS}}}")
+
+
+def is_scene_id(value: object) -> bool:
+    return isinstance(value, str) and _SCENE_ID_PATTERN.fullmatch(value) is not None
+
+
+# 7f5d: world_spawn_batch takes 1 to SPAWN_BATCH_ITEMS_MAX items and creates 1
+# to SPAWN_BATCH_PER_TICK_MAX of them per server tick. Mirrors the constants of
+# the same names in MCPBridge.c; a test keeps them equal.
+SPAWN_BATCH_ITEMS_MAX = 200
+SPAWN_BATCH_PER_TICK_MAX = 50
+_SPAWN_BATCH_ITEM_REQUIRED = frozenset({"type", "pos", "flags", "rotation"})
+_SPAWN_BATCH_ITEM_OPTIONAL = frozenset({"ground", "ypr", "ypr_set"})
+_IS_SPAWN_ROTATION = _integer_in_range()
+
+
+def _is_spawn_batch_item(value: object) -> bool:
+    # One item as the world_spawn_batch tool sends it: world_spawn's four keys,
+    # ground only as true (y given as null, resolved by the bridge), and ypr with
+    # ypr_set true, or neither, on an item whose rotation is 0. The bridge reads
+    # an absent key as 0 or false (fb-20260930-065425-8779).
+    if not isinstance(value, dict):
+        return False
+    keys = set(value)
+    if not _SPAWN_BATCH_ITEM_REQUIRED.issubset(keys):
+        return False
+    if keys - _SPAWN_BATCH_ITEM_REQUIRED - _SPAWN_BATCH_ITEM_OPTIONAL:
+        return False
+    if not _is_non_empty_string(value["type"]) or not _is_real_vector3(value["pos"]):
+        return False
+    if not _is_spawn_flags(value["flags"]) or not _IS_SPAWN_ROTATION(value["rotation"]):
+        return False
+    if "ground" in value and not _is_true(value["ground"]):
+        return False
+    if ("ypr" in value) != ("ypr_set" in value):
+        return False
+    if "ypr" in value:
+        if not _is_true(value["ypr_set"]) or not _is_real_vector3(value["ypr"]):
+            return False
+        if value["rotation"] != 0:
+            return False
+    return True
+
+
+def _is_spawn_batch_items(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and 1 <= len(value) <= SPAWN_BATCH_ITEMS_MAX
+        and all(_is_spawn_batch_item(item) for item in value)
+    )
 
 
 def _is_real_list(length: int) -> _FieldValidator:
@@ -1033,10 +1091,24 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "object_resolve",
     "action_cursor_ids",
     "hands_attach",
+    "world_spawn_batch",
+    "scene_entities",
+    "scene_clear",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
 # (no server arg-contract hash) at enqueue and again at delivery.
 _CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
+
+
+def _requires_capability_admission(cmd: str, args: object) -> bool:
+    # A world_spawn that names a scene is admitted like a new verb (165a): an
+    # older PBO would create the object and never register it, and only the
+    # arg-contract hash tells the two world_spawn bridges apart.
+    if cmd in _CAPABILITY_ADMISSION_COMMANDS:
+        return True
+    return cmd == "world_spawn" and isinstance(args, Mapping) and "scene_id" in args
+
+
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
@@ -1662,18 +1734,22 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # lifetime_s travels with lifetime_s_set true, or neither travels: the bridge
     # reads an absent key as 0 or false (fb-20260930-065425-8779), so only the
     # flag asks for the economy lifetime override (fb-20260930-080543-bd28).
+    # scene_id travels only when the caller named a scene (165a).
     "world_spawn": _command_schema(
         _schema_variant(
             required=("type", "pos", "flags", "rotation"),
+            optional=("scene_id",),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
                 "flags": _is_spawn_flags,
                 "rotation": _integer_in_range(),
+                "scene_id": is_scene_id,
             },
         ),
         _schema_variant(
             required=("type", "pos", "flags", "rotation", "lifetime_s", "lifetime_s_set"),
+            optional=("scene_id",),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
@@ -1681,8 +1757,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "rotation": _integer_in_range(),
                 "lifetime_s": _SAFE_SPAWN_LIFETIME,
                 "lifetime_s_set": _is_true,
+                "scene_id": is_scene_id,
             },
         ),
+    ),
+    # 7f5d: the items the world_spawn_batch tool has checked one by one, and how
+    # many of them the bridge creates per server tick.
+    "world_spawn_batch": _command_schema(
+        _schema_variant(
+            required=("items", "per_tick"),
+            optional=("scene_id",),
+            validators={
+                "items": _is_spawn_batch_items,
+                "per_tick": _integer_in_range(minimum=1, maximum=SPAWN_BATCH_PER_TICK_MAX),
+                "scene_id": is_scene_id,
+            },
+        )
+    ),
+    # 165a / 5a21: the scene a read or a clear names.
+    "scene_entities": _command_schema(
+        _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
+    ),
+    "scene_clear": _command_schema(
+        _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
     ),
     "vehicle_enter": _command_schema(
         _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
@@ -3276,16 +3373,21 @@ class ServerState:
         }
 
     def _capability_refusal_locked(
-        self, peer: str, cmd: str, instance: str | None = None
+        self,
+        peer: str,
+        cmd: str,
+        instance: str | None = None,
+        args: object = None,
     ) -> str | None:
         """None when this command may be queued or delivered. Caller holds the lock.
 
         A missing, stale, aged or foreign-binding census is
         bridge_capability_missing. An announced census with a missing or
         different arg-contract hash is arg_contract_mismatch, and that wins
-        over a missing command name.
+        over a missing command name. args matter only to world_spawn
+        (_requires_capability_admission).
         """
-        if cmd not in _CAPABILITY_ADMISSION_COMMANDS:
+        if not _requires_capability_admission(cmd, args):
             return None
         from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 
@@ -3454,7 +3556,7 @@ class ServerState:
         gate_pin: tuple[str, str, int, int | None, str | None] | None = None
         with self._lock:
             error, queue, fence_instance, gate_pin = self._admit_enqueue_locked(
-                peer, cmd, internal=internal, owner_session=owner_session
+                peer, cmd, internal=internal, owner_session=owner_session, args=args
             )
             if error is not None:
                 return error
@@ -3483,7 +3585,7 @@ class ServerState:
             )
             with self._lock:
                 error, queue, fence_instance, repin = self._admit_enqueue_locked(
-                    peer, cmd, internal=internal, owner_session=owner_session
+                    peer, cmd, internal=internal, owner_session=owner_session, args=args
                 )
                 if error is not None:
                     return error
@@ -3528,6 +3630,7 @@ class ServerState:
         *,
         internal: bool,
         owner_session: str | None,
+        args: object = None,
     ) -> tuple[
         tuple[int, dict] | None,
         list[dict] | None,
@@ -3554,7 +3657,7 @@ class ServerState:
             return self._fence_reject_response(code, peer=peer), None, None, None
         if self._peer_queue_len(peer) >= MAX_QUEUE:
             return (429, {"error": "queue_full"}), None, None, None
-        refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
+        refusal = self._capability_refusal_locked(peer, cmd, fence_instance, args)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
         if not internal:
@@ -4588,11 +4691,13 @@ class ServerState:
                     refusal = None
                     if (
                         isinstance(command_name, str)
-                        and command_name in _CAPABILITY_ADMISSION_COMMANDS
+                        and _requires_capability_admission(
+                            command_name, command.get("args")
+                        )
                         and deliver_accredited
                     ):
                         refusal = self._capability_refusal_locked(
-                            peer, command_name, token
+                            peer, command_name, token, command.get("args")
                         )
                     if (
                         refusal is None
