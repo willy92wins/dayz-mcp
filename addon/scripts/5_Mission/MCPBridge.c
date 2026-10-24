@@ -2312,6 +2312,12 @@ class MCPBridge : Managed
 		result.object_id = command.id;
 		result.classname = command.args.classname;
 		result.type = spawned.GetType();
+		// 71c9: read back from the created item, for both dests. A bow (Archery_Base)
+		// keeps Weapon_Base's empty InitStateMachine (weapon_base.c:133) and has no
+		// state machine. Vanilla logs [wpnfsm] errors when the engine saves and loads
+		// its state anyway (weapon_base.c:568, :599); the item still arrives.
+		Weapon_Base spawnedWeapon = Weapon_Base.Cast(spawned);
+		result.weapon_without_fsm = spawnedWeapon && !spawnedWeapon.CanProcessWeaponEvents();
 		result.found = true;
 		result.deferred = false;
 		result.ok = true;
