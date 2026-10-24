@@ -971,6 +971,22 @@ _SUPPORT_METHODS = (
     "protected void PostJobTimeout(MCPJob job)",
     "protected void PostJobSuccess(MCPJob job)",
 )
+# Dispatch's world_spawn branch, cut from the real Dispatch: from its
+# `if (command.cmd == "world_spawn")` to the next `else if`. It runs inside a
+# method that declares postNow as Dispatch does and returns it.
+_WORLD_SPAWN_BRANCH = "protected bool WorldSpawnBranch(MCPCommand command, MCPResult result)"
+
+
+def _world_spawn_branch(bridge: str) -> str:
+    dispatch = method_body(bridge, "protected void Dispatch(MCPCommand command)")
+    head = 'if (command.cmd == "world_spawn")'
+    if dispatch.count(head) != 1 or dispatch.count("bool postNow = true;") != 1:
+        raise AssertionError("Dispatch's world_spawn branch or its postNow is not where the test cuts it")
+    start = dispatch.index(head)
+    branch = dispatch[start : dispatch.index("else if", start)]
+    return f"{_WORLD_SPAWN_BRANCH}\n{{\n\tbool postNow = true;\n\t{branch.strip()}\n\treturn postNow;\n}}\n"
+
+
 _MESSAGE_FAKES = (
     "MCPArgs",
     "MCPCommand",
@@ -1151,6 +1167,13 @@ class SceneBridgeExecutionTest(unittest.TestCase):
             ns[name] = _bridge_const(self.bridge, name)
         for signature in _SCENE_METHODS + _SUPPORT_METHODS:
             translate(self.bridge, signature, ns, class_types=_BRIDGE_CLASS_TYPES, members=_BRIDGE_MEMBERS)
+        translate(
+            _world_spawn_branch(self.bridge),
+            _WORLD_SPAWN_BRANCH,
+            ns,
+            class_types=_BRIDGE_CLASS_TYPES,
+            members=_BRIDGE_MEMBERS,
+        )
         self.ns = ns
 
     # Building commands and the world.
@@ -1181,19 +1204,16 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         post_now = self.ns["DispatchWorldSpawnBatch"](self._command(command_id, scene_id, items), result)
         return post_now, result
 
-    def _world_spawn(self, command_id: int, scene_id: str, type_name: str = "Barrel_Green") -> Any:
-        """Dispatch's world_spawn branch, in the order
-        test_a_spawn_is_refused_before_create_and_registered_after pins."""
+    def _world_spawn(self, command_id: int, scene_id: str, type_name: str = "Barrel_Green") -> tuple[bool, Any]:
+        """A world_spawn command through Dispatch's own world_spawn branch
+        (_world_spawn_branch): (postNow, result)."""
         command = self._command(command_id, scene_id)
+        command.cmd = EnforceString.of("world_spawn")
         command.args.type = EnforceString.of(type_name)
         command.args.pos = EnforceArray([10.0, 2.0, 20.0])
         result = self.ns["MCPResult"]()
-        result.error = self.ns["SceneSpawnRefusal"](command.args, 1)
-        if result.error.text == "":
-            if not self.ns["DispatchWorldSpawn"](command, result):
-                self.ns["ApplySpawnLifetime"](command, result)
-            self.ns["RegisterSpawnScene"](command)
-        return result
+        post_now = self.ns["WorldSpawnBranch"](command, result)
+        return post_now, result
 
     def _clear(self, scene_id: str, command_id: int = 50) -> tuple[bool, Any]:
         result = self.ns["MCPResult"]()
@@ -1332,38 +1352,40 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         runtime = self.ns["m_RuntimeObjects"]
         self.assertEqual([runtime.Get(row.object_id) for row in rows], objects)
 
-    # world_spawn with a scene
+    # world_spawn with a scene, through Dispatch's own branch
     def test_world_spawn_registers_its_own_object_under_its_scene(self) -> None:
-        result = self._world_spawn(5, "a")
-        self.assertEqual(result.error.text, "")
-        ((_type_name, _pos, _flags, _rotation, spawned),) = self.game.created
+        # Each object is registered once, under the scene its command named;
+        # one with no scene_id is registered nowhere.
+        spawns = ((5, "a", "Barrel_Green"), (6, "b", "CarBattery"), (7, "a", "CarBattery"), (8, "", "Barrel_Green"))
+        for command_id, scene_id, type_name in spawns:
+            with self.subTest(command_id=command_id):
+                post_now, result = self._world_spawn(command_id, scene_id, type_name)
+                self.assertEqual((post_now, result.error.text), (False, ""))
+        self.assertEqual(len(self.game.created), 4)
+        spawned = {command_id: created[4] for (command_id, *_rest), created in zip(spawns, self.game.created)}
         self.assertEqual(
             [(entry.object_id, entry.type.text, entry.obj) for entry in self._entries("a")],
-            [(5, "Barrel_Green", spawned)],
+            [(5, "Barrel_Green", spawned[5]), (7, "CarBattery", spawned[7])],
         )
-        self.assertIs(self.ns["m_Jobs"].Get(5).subject, spawned)
-        # The next one is appended; one with no scene_id registers nothing.
-        self._world_spawn(6, "a", "CarBattery")
-        self._world_spawn(7, "")
         self.assertEqual(
-            [(entry.object_id, entry.obj) for entry in self._entries("a")],
-            [(5, spawned), (6, self.game.created[1][4])],
+            [(entry.object_id, entry.type.text, entry.obj) for entry in self._entries("b")],
+            [(6, "CarBattery", spawned[6])],
         )
-        self.assertEqual(self.ns["m_Scenes"].Count(), 1)
-        self.assertEqual(len(self.game.created), 3)
+        self.assertEqual(self.ns["m_Scenes"].Count(), 2)
+        self.assertIs(self.ns["m_Jobs"].Get(5).subject, spawned[5])
 
     def test_world_spawn_registers_nothing_without_its_own_spawn_job(self) -> None:
         # No job for the id: the class is unknown, so nothing was created.
-        result = self._world_spawn(8, "a", "NoSuchClass")
-        self.assertEqual(result.error.text, "unknown_type")
+        post_now, result = self._world_spawn(8, "a", "NoSuchClass")
+        self.assertEqual((post_now, result.error.text), (True, "unknown_type"))
         self.assertEqual(self.ns["m_Jobs"].Count(), 0)
         self.assertIsNone(self._entries("a"))
         # A job for other args: an older command's, under an id the daemon
         # reused. Its object is not this command's.
         self._world_spawn(9, "")
         older = self.ns["m_Jobs"].Get(9)
-        result = self._world_spawn(9, "a", "NoSuchClass")
-        self.assertEqual(result.error.text, "unknown_type")
+        post_now, result = self._world_spawn(9, "a", "NoSuchClass")
+        self.assertEqual((post_now, result.error.text), (True, "unknown_type"))
         self.assertIs(self.ns["m_Jobs"].Get(9), older)
         self.assertIsNone(self._entries("a"))
         self.assertEqual(len(self.game.created), 1)
