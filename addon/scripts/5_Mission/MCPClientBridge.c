@@ -515,6 +515,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! The command id of the play that started m_CameraPath, the one
 	//! camera_path_release must name to stop it; 0 before the first play.
 	protected int m_CameraPathCommandId;
+	//! m_Tick when that play turned the path's camera on (TickCameraPath).
+	protected int m_CameraPathPlayTick;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -555,6 +557,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_CameraHandoffTicks = 0;
 		m_CameraPath = new MCPCameraPath();
 		m_CameraPathCommandId = 0;
+		m_CameraPathPlayTick = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_Pending = new array<ref MCPCommand>();
@@ -2010,6 +2013,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_CameraPath = candidate;
 			m_CameraPathCam = cam;
 			m_CameraPathCommandId = command.id;
+			m_CameraPathPlayTick = m_Tick;
 			Log("camera path playing id=" + command.id + " path_id=" + command.args.path_id + " duration_s=" + candidate.Duration());
 
 			result.camera_path = new MCPCameraPathState();
@@ -5222,6 +5226,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// promise no exclusivity, so the path's camera may still read active.
 	// The same lines in 1.29 and 1.30. The bridge's own free camera is never
 	// on while a path plays: a camera_set and a restore stop the path first.
+	// Neither IsActive is read before the second OnTick after the play's
+	// dispatch (m_Tick counts OnTick calls, made once a frame from
+	// MissionGameplay.OnUpdate): those lines do not say when a SetActive shows
+	// in IsActive, here the play's SetActive(true) on its camera and
+	// SetActive(false) on a free camera left on, and a play dispatched from the
+	// poll callback ahead of OnTick shares the first OnTick's frame with them.
+	// The second OnTick comes a full frame later. The first still moves the path.
 	protected void TickCameraPath(float timeslice)
 	{
 		FreeDebugCamera freeCam;
@@ -5229,16 +5240,24 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return;
 		}
-		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam || !m_CameraPathCam.IsActive())
+		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam)
 		{
 			StopCameraPath();
 			return;
 		}
-		freeCam = FreeDebugCamera.GetInstance();
-		if (freeCam && freeCam.IsActive())
+		if (m_Tick > m_CameraPathPlayTick + 1)
 		{
-			StopCameraPath();
-			return;
+			if (!m_CameraPathCam.IsActive())
+			{
+				StopCameraPath();
+				return;
+			}
+			freeCam = FreeDebugCamera.GetInstance();
+			if (freeCam && freeCam.IsActive())
+			{
+				StopCameraPath();
+				return;
+			}
 		}
 
 		m_CameraPath.Advance(timeslice);
@@ -5400,10 +5419,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// DispatchCameraSet applied the camera and queued this job in SETTLE; the
 	// job only waits out the settle and hands the report to MCP_PostJobSuccess.
+	// It reads nothing and does not end before the second OnTick after the
+	// dispatch (job.tick_dispatch is the dispatch's m_Tick), a full frame after
+	// the apply's SetActive, as TickCameraPath waits for a play's: an earlier
+	// CameraReadError could read the camera inactive and report the player view.
 	protected bool ProcessCameraSetJob(MCPJob job)
 	{
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
+			if (m_Tick <= job.tick_dispatch + 1)
+			{
+				return false;
+			}
 			// Time-only settle. Camera.IsInterpolationComplete / GetCurrentFOV
 			// walk the same native camera object as GetCurrentCamera (SUB_BRZ
 			// 2026-09-08) and have frozen the client render after camera_set

@@ -1067,12 +1067,19 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
 # server arg-contract hash) at enqueue, after the binding fence, and again at
 # delivery. With no client bound the fence answers first (legacy_unbound in
 # the plain case), so these codes mean a bound client whose census does not
-# name the verb, is stale or comes from another instance.
+# name the verb, is stale or comes from another instance. camera_path_release
+# is internal: that spares it a live lease at owner cleanup, not this check.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
     "camera_path_play": "bridge_capability_missing",
+    "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
+}
+# A verb whose census must also name the command that stops it: a client that
+# could not be sent camera_path_release is not handed a play (d026).
+_CLIENT_ANNOUNCED_WITH: dict[str, str] = {
+    "camera_path_play": "camera_path_release",
 }
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
@@ -3392,10 +3399,11 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, refuses it with the command's code in
+        does not name the command (or the command _CLIENT_ANNOUNCED_WITH
+        pairs it with), refuses it with the command's code in
         _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold).
-        Re-checked at delivery so a destination change after enqueue cannot
-        hand the verb to an older PBO.
+        Internal commands are checked too. Re-checked at delivery so a
+        destination change after enqueue cannot hand the verb to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
@@ -3418,6 +3426,9 @@ class ServerState:
             return refusal
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
+            return refusal
+        paired = _CLIENT_ANNOUNCED_WITH.get(cmd)
+        if paired is not None and paired not in announced:
             return refusal
         return None
 
@@ -3507,7 +3518,10 @@ class ServerState:
         that finished, failed or was followed by another changes nothing. As
         for enqueue_bot_stops_for_lease, the caller should hold the queue lock;
         each release is internal and fire-and-forget, so it is delivered
-        without a live lease (_cleanup_dispatch_locked).
+        without a live lease (_cleanup_dispatch_locked). A client whose census
+        does not announce camera_path_release is refused it here and at
+        delivery (_client_announce_refusal_locked), and a refusal here counts
+        as failed.
         """
         if not isinstance(lease_id, str) or not lease_id:
             return {"enqueued": 0, "failed": 0}
@@ -3705,12 +3719,11 @@ class ServerState:
         refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
-        if not internal:
-            client_refusal = self._client_announce_refusal_locked(
-                peer, cmd, fence_instance
-            )
-            if client_refusal is not None:
-                return (409, {"error": client_refusal}), None, None, None
+        client_refusal = self._client_announce_refusal_locked(
+            peer, cmd, fence_instance
+        )
+        if client_refusal is not None:
+            return (409, {"error": client_refusal}), None, None, None
         pin = None
         if peer == "client" and not internal:
             pin = self._client_gate_pin_locked(fence_instance)
@@ -4403,6 +4416,13 @@ class ServerState:
             or self._peer_queue_len(release_peer) >= MAX_QUEUE
         ):
             return False, "queue_full", None
+        # The same census check as an enqueue: camera_path_release goes only
+        # to a client that announces it.
+        refusal = self._client_announce_refusal_locked(
+            release_peer, target, pin.get("instance")
+        )
+        if refusal is not None:
+            return False, refusal, None
         if pin.get("legacy") is True:
             queue = self._legacy_queues.get(pin.get("peer"))
         else:
