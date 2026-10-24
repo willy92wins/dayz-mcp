@@ -245,6 +245,46 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_sights", {"mode": "ironsights"}, "weapon_sights"),
     ("weapon_sights", {"mode": "optics"}, "weapon_sights"),
     ("weapon_sights", {"mode": "none"}, "weapon_sights"),
+    # Both target shapes of the loadout verbs, and the rows of every dest
+    # at the depth and count caps (fb99, 220f).
+    ("loadout_get", {}, "loadout_get"),
+    ("loadout_get", {"uid": "76561198000000000"}, "loadout_get"),
+    ("loadout_get", {"object_id": 3}, "loadout_get"),
+    ("loadout_apply", {"loadout": {}}, "loadout_apply"),
+    (
+        "loadout_apply",
+        {
+            "loadout": {
+                "attachments": [
+                    {
+                        "type": "AssaultBag_Black",
+                        "slot": "Back",
+                        "cargo": [
+                            {
+                                "type": "FirstAidKit",
+                                "cargo": [{"type": "Bandage", "cargo": [{"type": "Rag"}]}],
+                            }
+                        ],
+                    }
+                ],
+                "hands": {
+                    "type": "M4A1",
+                    "attachments": [{"type": "Mag_STANAG_30Rnd", "slot": "magazine"}],
+                },
+            },
+            "object_id": 9,
+            "clear_first": True,
+        },
+        "loadout_apply",
+    ),
+    (
+        "loadout_apply",
+        {
+            "loadout": {"attachments": [{"type": "Apple", "slot": f"Slot{n}"} for n in range(64)]},
+            "uid": "76561198000000000",
+        },
+        "loadout_apply",
+    ),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and

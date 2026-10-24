@@ -112,6 +112,9 @@ PRUNABLE_FIELDS = (
     "look_at",
     # action_cursor_ids fills it with registry ids for the captured pairs.
     "cursor_ids",
+    # loadout_get and loadout_apply fill it with the read and the outcomes
+    # (fb99, 220f); never on their refusals.
+    "loadout",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

@@ -43,6 +43,8 @@ READ_ONLY_COMMANDS = frozenset(
         "input_describe",
         # Server read of the in-game clock (World.GetDate); it writes nothing.
         "world_time_get",
+        # Server read of what a player or survivor wears and holds (fb99).
+        "loadout_get",
         # Client read of the action cursor. The server correlate that
         # resolves its network pairs is the same read, not a mutation.
         "action_cursor",

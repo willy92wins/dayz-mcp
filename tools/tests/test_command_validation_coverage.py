@@ -33,6 +33,7 @@ def _minimal_args(cmd: str) -> dict:
         "weapon_fire",
         "world_time_get",
         "action_cursor",
+        "loadout_get",
     }:
         return {}
 
@@ -151,6 +152,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1}
     if cmd == "hands_attach":
         return {"object_id": 1, "slot": "LargeBattery"}
+    if cmd == "loadout_apply":
+        return {"clear_first": False, "loadout_items": []}
     if cmd == "weapon_raise":
         return {"raised": True, "hold_ttl_s": 3.0}
     if cmd == "weapon_aim":

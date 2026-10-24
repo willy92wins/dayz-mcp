@@ -70,6 +70,8 @@ EXPECTED_SERVER_CAPABILITIES = (
     "infected_drive",
     "inventory_attach",
     "inventory_give",
+    "loadout_apply",
+    "loadout_get",
     "notify_players",
     "object_anim",
     "object_delete",

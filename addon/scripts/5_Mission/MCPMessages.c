@@ -40,6 +40,21 @@ class MCPDialogResult
 	}
 };
 
+// loadout_get / loadout_apply row (fb99, 220f): one item of a loadout. The
+// tool flattens the loadout tree into these rows (tools/dayz_mcp/loadout.py)
+// and the bridge reads a target back into the same rows. dest is attachment,
+// cargo or hands. slot is the attachment slot name, "" for cargo and hands.
+// parent is the index of the row this item goes into, -1 for the target
+// itself; a parent row always comes before its children. Every key travels in
+// every row: an absent parent would read 0, which is a row index.
+class MCPLoadoutItem
+{
+	string type;
+	string slot;
+	string dest;
+	int parent;
+};
+
 // Command args. A key absent from the command JSON reaches the handler as 0 or
 // false, not as the constructor value (fb-20260930-065425-8779: an object_anim
 // read wrote phase 0 and a partial world_weather_set zeroed the other levels).
@@ -206,6 +221,12 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// loadout_apply (220f): the rows to create, in apply order. object_id and
+	// uid above select the target. clear_first true deletes what the target
+	// wears and holds first; the tool always sends it, and an absent key reads
+	// false, which keeps them.
+	ref array<ref MCPLoadoutItem> loadout_items;
+	bool clear_first;
 
 	void MCPArgs()
 	{
@@ -219,6 +240,7 @@ class MCPArgs
 		want = new array<string>();
 		sources = new array<string>();
 		fields = new array<ref MCPDialogField>();
+		loadout_items = new array<ref MCPLoadoutItem>();
 		net_low = new array<int>();
 		net_high = new array<int>();
 		component = -1;
@@ -1023,6 +1045,33 @@ class MCPCursorIds
 	}
 };
 
+// loadout_apply outcome of one request row, in request order. error is ""
+// when ok, else unknown_type, slot_not_found, slot_occupied, cannot_attach,
+// no_room or parent_failed (MCPBridge.CreateLoadoutItem).
+class MCPLoadoutApplied
+{
+	bool ok;
+	string error;
+};
+
+// loadout_get / loadout_apply reply. items is the target's inventory read
+// after the verb, in MCPLoadoutItem rows. applied is loadout_apply's outcome
+// per request row, empty for loadout_get. too_large is true when the read
+// went past MCPBridge.LOADOUT_MAX_ITEMS rows or LOADOUT_MAX_DEPTH levels;
+// items is then empty. Primitives only: no entity reference.
+class MCPLoadout
+{
+	ref array<ref MCPLoadoutItem> items;
+	ref array<ref MCPLoadoutApplied> applied;
+	bool too_large;
+
+	void MCPLoadout()
+	{
+		items = new array<ref MCPLoadoutItem>();
+		applied = new array<ref MCPLoadoutApplied>();
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1147,6 +1196,9 @@ class MCPResult
 	ref MCPLookAt look_at;
 	// action_cursor_ids registry ids. Unassigned on other commands.
 	ref MCPCursorIds cursor_ids;
+	// loadout_get / loadout_apply reply. Unassigned on their refusals and on
+	// other commands.
+	ref MCPLoadout loadout;
 	// action_hold observation. Unassigned on other commands.
 	int hold_protocol;
 	string hold_id;
@@ -1202,6 +1254,9 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	// loadout_apply with clear_first: the objects it deleted. The engine
+	// nulls each reference once its object is gone.
+	ref array<EntityAI> loadout_cleared;
 };
 
 class MCPSpawnValidation
