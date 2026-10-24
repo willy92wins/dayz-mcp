@@ -37,14 +37,15 @@ class ArgContractHashTest(unittest.TestCase):
             "bot_start=action,bot_ttl_s,object_id\n"
             "bot_stop=object_id\n"
             "hands_attach=object_id,slot,uid\n"
-            "loadout_apply=clear_first,loadout_items,object_id,uid\n"
+            "loadout_apply=loadout_items,object_id,uid\n"
+            "loadout_clear=object_id,uid\n"
             "loadout_get=object_id,uid\n"
             "object_resolve=pos,radius,type\n"
             "player_kill=uid\n"
             "vehicle_prepare_fixture=mode,pos,radius,type",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "6236c68dfa05bc83"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "63f8ac460f69ebaa"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

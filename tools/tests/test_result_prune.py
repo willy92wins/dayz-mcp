@@ -443,7 +443,7 @@ GENERIC_SCALAR_OWNERS = {
     ),
     "confirmed": ({"hands_attach", "hands_take", "weapon_state"}, 0),
     "sent": ({"exec_enforce", "notify_players"}, 0),
-    "deleted": ({"object_delete"}, 0),
+    "deleted": ({"object_delete", "loadout_clear"}, 0),
     "y": ({"surface_query"}, 0.0),
     "phase": ({"object_anim"}, 0.0),
     "source": ({"object_anim"}, ""),

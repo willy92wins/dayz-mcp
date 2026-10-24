@@ -40,12 +40,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,loadout_apply,loadout_get," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,loadout_apply,loadout_clear,loadout_get," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "6236c68dfa05bc83";
+	protected const string SERVER_ARG_CONTRACT_HASH = "63f8ac460f69ebaa";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -591,6 +591,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "loadout_apply")
 		{
 			postNow = DispatchLoadoutApply(command, result);
+		}
+		else if (command.cmd == "loadout_clear")
+		{
+			postNow = DispatchLoadoutClear(command, result);
 		}
 		else if (command.cmd == "object_inspect")
 		{
@@ -2551,19 +2555,14 @@ class MCPBridge : Managed
 	}
 
 	// loadout_apply (220f). The rows and the target are checked before anything
-	// changes. clear_first deletes what the target wears and holds (ClearLoadout)
-	// and leaves the creates to a "loadout" job, which runs them once every
-	// deleted object is gone, or at its deadline: Object.Delete defers
-	// ObjectDelete to the next frame (object.c:82-85), and whether ObjectDelete
-	// frees a slot within its own frame is not measured. Without clear_first, or
-	// with nothing to delete, the creates run now (ApplyLoadout).
+	// changes; then the rows are created and the target read back, all in this
+	// tick (ApplyLoadout). A loadout_clear job still pending on the target is
+	// busy: what it deleted may still hold its slots.
 	protected bool DispatchLoadoutApply(MCPCommand command, MCPResult result)
 	{
 		string rowsError = "";
 		string targetError = "";
 		PlayerBase target = null;
-		array<EntityAI> cleared = null;
-		MCPJob job = null;
 
 		if (!command.args)
 		{
@@ -2586,7 +2585,6 @@ class MCPBridge : Managed
 			result.error = targetError;
 			return true;
 		}
-		// A clear_first job still pending on this target has not created its rows.
 		if (HasActiveJobFor(null, target))
 		{
 			result.ok = false;
@@ -2594,38 +2592,72 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		if (command.args.clear_first)
-		{
-			cleared = new array<EntityAI>();
-			ClearLoadout(target, cleared);
-			if (cleared.Count() > 0)
-			{
-				job = new MCPJob();
-				job.id = command.id;
-				job.kind = "loadout";
-				job.args = command.args;
-				job.subject = target;
-				job.loadout_cleared = cleared;
-				job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
-				job.tick_poll_sent = result.tick_poll_sent;
-				job.tick_poll_callback = result.tick_poll_callback;
-				job.tick_dispatch = result.tick_dispatch;
-				m_Jobs.Insert(job.id, job);
-				Log("job queued id=" + job.id + " kind=loadout cleared=" + cleared.Count() + " deadline_s=" + job.deadline_s);
-				return false;
-			}
-		}
-
 		ApplyLoadout(target, command.args, result);
 		return true;
 	}
 
-	// The target of loadout_get and loadout_apply. object_id > 0 names a registry
-	// entry: an id nothing registered, or whose object is gone, is not_found; an
-	// object that is not a PlayerBase, or is a connected player (uid selects
-	// those), is bad_target. object_id 0 leaves the choice to uid, as
-	// ResolvePlayer makes it ("" the first human). object_id and uid together,
-	// or a negative object_id, are bad_args.
+	// loadout_clear (220f): what the loadout_apply tool sends first for
+	// clear_first. In this tick it deletes what the target wears and holds
+	// (ClearLoadout). With nothing to delete it answers now: deleted 0,
+	// cleanup_complete true. Otherwise a "loadout_clear" job only watches the
+	// deleted objects, changing nothing, until each reads null or its deadline
+	// passes, then posts deleted (how many) and cleanup_complete (true when all
+	// were gone before the deadline): Object.Delete defers ObjectDelete to the
+	// next frame (object.c:82-85), and whether ObjectDelete frees a slot within
+	// its own frame is not measured. A clear on a target with a job pending is
+	// busy.
+	protected bool DispatchLoadoutClear(MCPCommand command, MCPResult result)
+	{
+		string targetError = "";
+		PlayerBase target = null;
+		array<EntityAI> cleared = null;
+		MCPJob job = null;
+
+		target = ResolveLoadoutTarget(command.args, targetError);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = targetError;
+			return true;
+		}
+		if (HasActiveJobFor(null, target))
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+
+		cleared = new array<EntityAI>();
+		ClearLoadout(target, cleared);
+		if (cleared.Count() == 0)
+		{
+			result.ok = true;
+			result.deleted = 0;
+			result.cleanup_complete = true;
+			return true;
+		}
+
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "loadout_clear";
+		job.args = command.args;
+		job.subject = target;
+		job.loadout_cleared = cleared;
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Jobs.Insert(job.id, job);
+		Log("job queued id=" + job.id + " kind=loadout_clear deleted=" + cleared.Count() + " deadline_s=" + job.deadline_s);
+		return false;
+	}
+
+	// The target of loadout_get, loadout_apply and loadout_clear. object_id > 0
+	// names a registry entry: an id nothing registered, or whose object is
+	// gone, is not_found; an object that is not a PlayerBase, or is a connected
+	// player (uid selects those), is bad_target. object_id 0 leaves the choice
+	// to uid, as ResolvePlayer makes it ("" the first human). object_id and uid
+	// together, or a negative object_id, are bad_args.
 	protected PlayerBase ResolveLoadoutTarget(MCPArgs args, out string error)
 	{
 		Object registered = null;
@@ -2754,7 +2786,7 @@ class MCPBridge : Managed
 		return "";
 	}
 
-	// clear_first: deletes the target's attachments and the item in its hands
+	// loadout_clear: deletes the target's attachments and the item in its hands
 	// with GetGame().ObjectDelete, as object_delete does; what they hold goes
 	// with them. Each deleted object is added to cleared first, so the walk
 	// never reads a list it is changing; the engine nulls those references
@@ -3086,21 +3118,13 @@ class MCPBridge : Managed
 		return InventorySlots.GetSlotName(location.GetSlot());
 	}
 
-	// The "loadout" job is ready once no object clear_first deleted is still
-	// referenced, or once the target itself is gone (PostLoadoutJob answers
-	// not_found then).
+	// The "loadout_clear" job is ready once no object the clear deleted is
+	// still referenced. DispatchLoadoutClear queues it only with objects in
+	// loadout_cleared.
 	protected bool IsLoadoutClearDone(MCPJob job)
 	{
 		int i = 0;
 
-		if (!job.subject)
-		{
-			return true;
-		}
-		if (!job.loadout_cleared)
-		{
-			return true;
-		}
 		while (i < job.loadout_cleared.Count())
 		{
 			if (job.loadout_cleared.Get(i))
@@ -3112,27 +3136,21 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// The "loadout" job's reply, once the clear is done or at the deadline. At
-	// the deadline the creates still run: a slot an object still holds answers
-	// slot_occupied, and the read after shows what is there.
-	protected void PostLoadoutJob(MCPJob job)
+	// The "loadout_clear" job's reply: what it saw, and nothing else. deleted is
+	// how many objects the clear deleted; cleanup_complete is true when each
+	// read null before the deadline (PostJobSuccess) and false when the
+	// deadline came first (PostJobTimeout).
+	protected void PostLoadoutClearJob(MCPJob job, bool complete)
 	{
 		MCPResult result = new MCPResult();
-		PlayerBase target = PlayerBase.Cast(job.subject);
 
 		result.id = job.id;
 		result.tick_poll_sent = job.tick_poll_sent;
 		result.tick_poll_callback = job.tick_poll_callback;
 		result.tick_dispatch = job.tick_dispatch;
-		if (!target || !job.args)
-		{
-			result.ok = false;
-			result.error = "not_found";
-			PostResult(result);
-			return;
-		}
-
-		ApplyLoadout(target, job.args, result);
+		result.ok = true;
+		result.deleted = job.loadout_cleared.Count();
+		result.cleanup_complete = complete;
 		PostResult(result);
 	}
 
@@ -4923,7 +4941,7 @@ class MCPBridge : Managed
 		{
 			return IsSeatReady(job);
 		}
-		else if (job.kind == "loadout")
+		else if (job.kind == "loadout_clear")
 		{
 			return IsLoadoutClearDone(job);
 		}
@@ -5041,9 +5059,9 @@ class MCPBridge : Managed
 			PostSeatSuccess(job);
 			return;
 		}
-		if (job.kind == "loadout")
+		if (job.kind == "loadout_clear")
 		{
-			PostLoadoutJob(job);
+			PostLoadoutClearJob(job, true);
 			return;
 		}
 
@@ -5106,10 +5124,10 @@ class MCPBridge : Managed
 	protected void PostJobTimeout(MCPJob job)
 	{
 		MCPResult result = new MCPResult();
-		// A loadout job's deadline still runs its creates (PostLoadoutJob).
-		if (job.kind == "loadout")
+		// A loadout_clear job at its deadline reports, with cleanup_complete false.
+		if (job.kind == "loadout_clear")
 		{
-			PostLoadoutJob(job);
+			PostLoadoutClearJob(job, false);
 			return;
 		}
 		result.id = job.id;

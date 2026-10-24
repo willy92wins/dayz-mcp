@@ -846,7 +846,8 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_key", {"extra": None}, (False, "bad_args")),
         ("uid_not_string", {"uid": 1}, (False, "bad_args")),
     ),
-    # loadout_get / loadout_apply (fb99, 220f): uid or object_id, never both.
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): uid or object_id, never
+    # both. clear_first is not a wire key: the tool sends loadout_clear for it.
     "loadout_get": (
         ("empty", {}, (True, None)),
         ("valid_with_uid", {"uid": "player-1"}, (True, None)),
@@ -859,12 +860,11 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
     "loadout_apply": (
-        ("valid_empty", {"clear_first": False, "loadout_items": []}, (True, None)),
+        ("valid_empty", {"loadout_items": []}, (True, None)),
         (
             "valid_uid_tree",
             {
                 "uid": "player-1",
-                "clear_first": True,
                 "loadout_items": [
                     {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1},
                     {"type": "Rag", "slot": "", "dest": "cargo", "parent": 0},
@@ -876,22 +876,24 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ),
         (
             "valid_object_id",
-            {"object_id": 4, "clear_first": False, "loadout_items": []},
+            {"object_id": 4, "loadout_items": []},
             (True, None),
         ),
         (
             "both_targets",
-            {"object_id": 4, "uid": "player-1", "clear_first": False, "loadout_items": []},
+            {"object_id": 4, "uid": "player-1", "loadout_items": []},
             (False, "bad_args"),
         ),
-        ("missing_clear_first", {"loadout_items": []}, (False, "bad_args")),
-        ("missing_rows", {"clear_first": False}, (False, "bad_args")),
-        ("clear_first_int", {"clear_first": 1, "loadout_items": []}, (False, "bad_args")),
-        ("rows_not_a_list", {"clear_first": False, "loadout_items": {}}, (False, "bad_args")),
+        ("missing_rows", {}, (False, "bad_args")),
+        (
+            "clear_first_is_not_a_wire_key",
+            {"clear_first": True, "loadout_items": []},
+            (False, "bad_args"),
+        ),
+        ("rows_not_a_list", {"loadout_items": {}}, (False, "bad_args")),
         (
             "row_missing_parent",
             {
-                "clear_first": False,
                 "loadout_items": [{"type": "Apple", "slot": "Body", "dest": "attachment"}],
             },
             (False, "bad_args"),
@@ -899,7 +901,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "row_extra_key",
             {
-                "clear_first": False,
                 "loadout_items": [
                     {"type": "Apple", "slot": "Body", "dest": "attachment", "parent": -1, "qty": 1}
                 ],
@@ -909,7 +910,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "parent_not_earlier",
             {
-                "clear_first": False,
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": 0}],
             },
             (False, "bad_args"),
@@ -917,7 +917,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "cargo_on_the_target",
             {
-                "clear_first": False,
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": -1}],
             },
             (False, "bad_args"),
@@ -925,7 +924,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "attachment_without_slot",
             {
-                "clear_first": False,
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "attachment", "parent": -1}],
             },
             (False, "bad_args"),
@@ -933,7 +931,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "hands_inside_an_item",
             {
-                "clear_first": False,
                 "loadout_items": [
                     {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1},
                     {"type": "M4A1", "slot": "", "dest": "hands", "parent": 0},
@@ -944,7 +941,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "two_hands",
             {
-                "clear_first": False,
                 "loadout_items": [
                     {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
                     {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
@@ -955,7 +951,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "unknown_dest",
             {
-                "clear_first": False,
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "ground", "parent": -1}],
             },
             (False, "bad_args"),
@@ -963,7 +958,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "bool_parent",
             {
-                "clear_first": False,
                 "loadout_items": [{"type": "Apple", "slot": "Body", "dest": "attachment", "parent": True}],
             },
             (False, "bad_args"),
@@ -971,7 +965,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "depth_five",
             {
-                "clear_first": False,
                 "loadout_items": [
                     {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1}
                 ]
@@ -985,7 +978,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "sixty_five_rows",
             {
-                "clear_first": False,
                 "loadout_items": [
                     {"type": "Apple", "slot": "Body", "dest": "attachment", "parent": -1}
                 ]
@@ -993,7 +985,18 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             },
             (False, "bad_args"),
         ),
-        ("extra_key", {"clear_first": False, "loadout_items": [], "extra": None}, (False, "bad_args")),
+        ("extra_key", {"loadout_items": [], "extra": None}, (False, "bad_args")),
+    ),
+    "loadout_clear": (
+        ("empty", {}, (True, None)),
+        ("valid_with_uid", {"uid": "player-1"}, (True, None)),
+        ("valid_with_object_id", {"object_id": 3}, (True, None)),
+        ("both_targets", {"object_id": 3, "uid": "player-1"}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+        ("uid_not_string", {"uid": 1}, (False, "bad_args")),
+        ("rows_on_a_clear", {"loadout_items": []}, (False, "bad_args")),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
     "notify_players": (
         (

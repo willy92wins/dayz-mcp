@@ -17,6 +17,7 @@
       "inventory_attach": "inventory_attach",
       "inventory_give": "inventory_give",
       "loadout_apply": "loadout_apply",
+      "loadout_clear": null,
       "loadout_get": "loadout_get",
       "notify_players": "notify_players",
       "object_anim": "object_anim",

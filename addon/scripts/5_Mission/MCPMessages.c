@@ -222,11 +222,8 @@ class MCPArgs
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
 	// loadout_apply (220f): the rows to create, in apply order. object_id and
-	// uid above select the target. clear_first true deletes what the target
-	// wears and holds first; the tool always sends it, and an absent key reads
-	// false, which keeps them.
+	// uid above select the target.
 	ref array<ref MCPLoadoutItem> loadout_items;
-	bool clear_first;
 
 	void MCPArgs()
 	{
@@ -1103,6 +1100,7 @@ class MCPResult
 	int net_id_high;
 	bool is_authority_owner;
 	int object_id;
+	// object_delete, and loadout_clear: how many objects it deleted.
 	int deleted;
 	int tick_poll_sent;
 	int tick_poll_callback;
@@ -1212,6 +1210,8 @@ class MCPResult
 	bool placed_known;
 	bool already_placed;
 	bool flag_restored;
+	// Also loadout_clear's: true when every object it deleted was gone before
+	// its deadline.
 	bool cleanup_complete;
 	bool matched;
 };
@@ -1254,8 +1254,8 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
-	// loadout_apply with clear_first: the objects it deleted. The engine
-	// nulls each reference once its object is gone.
+	// loadout_clear: the objects it deleted. The engine nulls each reference
+	// once its object is gone.
 	ref array<EntityAI> loadout_cleared;
 };
 

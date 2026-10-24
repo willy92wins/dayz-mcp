@@ -28,6 +28,11 @@ past the caps, with items then empty. This module turns those rows back into
 the tree and the outcomes into the per-item list. MAX_ITEMS and MAX_DEPTH
 mirror LOADOUT_MAX_ITEMS and LOADOUT_MAX_DEPTH in MCPBridge.c; a test keeps
 the copies equal.
+
+clear_first is a separate bridge verb, loadout_clear, which the tool sends
+and waits for before loadout_apply. It answers deleted, how many objects it
+deleted, and cleanup_complete, whether they were all gone before its job's
+deadline (MCPResult scalars); clear_reply reads them.
 """
 from __future__ import annotations
 
@@ -281,7 +286,8 @@ def get_reply(result: dict[str, Any]) -> dict[str, Any]:
 
     An answer that is not ok (the not-ready envelope a read returns before
     enqueue) passes through untouched. An ok answer whose rows do not form a
-    tree, or that says too_large, is ok=0 with warnings [loadout_incomplete].
+    tree that loadout_apply takes (flatten_request), or that says too_large,
+    is ok=0 with warnings [loadout_incomplete].
     """
     if not isinstance(result, dict) or not result.get("ok"):
         return result
@@ -290,6 +296,10 @@ def get_reply(result: dict[str, Any]) -> dict[str, Any]:
         return _incomplete(result)
     tree = nest_rows(wire.get("items"))
     if tree is None:
+        return _incomplete(result)
+    try:
+        flatten_request(tree)
+    except ValueError:
         return _incomplete(result)
     response = dict(result)
     response["loadout"] = tree
@@ -340,3 +350,30 @@ def apply_reply(
     response["loadout"] = tree
     response["loadout_too_large"] = too_large
     return response
+
+
+def clear_reply(result: object) -> dict[str, Any]:
+    """loadout_clear's answer as loadout_apply reports it: {deleted, cleanup_complete}.
+
+    deleted is how many objects the clear deleted; cleanup_complete is True
+    when they were all gone before the bridge job's deadline. An answer
+    without both raises ValueError (loadout_incomplete): the tool then sends
+    nothing more.
+    """
+    deleted = result.get("deleted") if isinstance(result, dict) else None
+    complete = _wire_bool(result.get("cleanup_complete")) if isinstance(result, dict) else None
+    if not _is_index(deleted) or deleted < 0 or complete is None:
+        raise ValueError(
+            f"{INCOMPLETE}: loadout_clear answered without deleted and "
+            "cleanup_complete, so nothing was applied; read the target with "
+            "loadout_get"
+        )
+    return {"deleted": deleted, "cleanup_complete": complete}
+
+
+def refusal_after_clear(message: str, clear: dict[str, Any]) -> str:
+    """The error of a loadout_apply refused after its clear ran, with what the clear did."""
+    return (
+        f"{message}; clear=deleted={clear['deleted']} "
+        f"cleanup_complete={int(clear['cleanup_complete'])}"
+    )

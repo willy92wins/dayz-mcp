@@ -4,14 +4,21 @@ fb-20261023-235342-fb99 (loadout_get) and fb-20261023-235342-220f
 (loadout_apply). The tool checks the whole loadout and flattens it into rows
 (dayz_mcp/loadout.py); the bridge creates the rows in order, reads the target
 back into the same rows, and the tool nests them into the tree again.
+clear_first is its own internal bridge verb, loadout_clear: it deletes in its
+dispatch tick and its job only waits for the deleted objects to go, so no job
+changes the world after the tick it was dispatched in (#261 review Y1). The
+tool sends loadout_apply only once the clear has answered.
 
 These tests pin the Python contract, the ingress and lease split, the
 older-PBO admission, the reply shapes and the Enforce source the game will
-compile. They do not launch DayZ; the in-game criteria are listed in the PR.
+compile. LoadoutBridgeRunTest runs the real Enforce bodies on fakes through
+tests/enforce_subset_helpers.py. Nothing here launches DayZ; the in-game
+criteria are listed in the PR.
 """
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import time
@@ -39,6 +46,7 @@ from dayz_mcp.session_coordination import (
 )
 from tests._addon_paths import addon_root
 from tests._tiers import slow_test
+from tests.enforce_subset_helpers import EnforceString, method_body, translate
 from tests.fence_helpers import (
     INST_SERVER,
     PID_SERVER,
@@ -50,6 +58,7 @@ from tests.mcp_helpers import FakePeer, _content_json
 
 GET = "loadout_get"
 APPLY = "loadout_apply"
+CLEAR = "loadout_clear"
 SCRIPTS = addon_root() / "scripts"
 BRIDGE_PATH = SCRIPTS / "5_Mission" / "MCPBridge.c"
 MESSAGES_PATH = SCRIPTS / "5_Mission" / "MCPMessages.c"
@@ -58,6 +67,9 @@ CENSUS_FIXTURE = (
 )
 # The server arg contract before these verbs: an older PBO announces it.
 _PRE_LOADOUT_ARG_CONTRACT_HASH = "4f90284258023d98"
+# A PBO built from this PR's first round: loadout_apply took clear_first and
+# there was no loadout_clear.
+_FIRST_ROUND_ARG_CONTRACT_HASH = "6236c68dfa05bc83"
 IDENTITY = {
     "platform": "codex",
     "pid": 11,
@@ -95,10 +107,30 @@ PRESET_8_PATHS = [
     "loadout.hands",
     "loadout.hands.attachments[0]",
 ]
+# Two containers with different cargo (#261 review Y9): a read that moved
+# cargo from one to the other keeps the same classes and slots.
+TWO_CONTAINERS: dict[str, Any] = {
+    "attachments": [
+        {
+            "type": "TaloonBag_Blue",
+            "slot": "Back",
+            "cargo": [{"type": "Apple"}, {"type": "BandageDressing"}],
+        },
+        {"type": "SmershVest", "slot": "Vest", "cargo": [{"type": "Rag"}]},
+    ],
+    "hands": {
+        "type": "M4A1",
+        "attachments": [{"type": "Mag_STANAG_30Rnd", "slot": "magazine"}],
+    },
+}
 
 
 def _rows(tree: object) -> list[dict[str, Any]]:
     return [row for _path, row in loadout.flatten_request(tree)]
+
+
+def _flatten(tree: object) -> list[tuple[str, dict[str, Any]]]:
+    return loadout.flatten_request(tree)
 
 
 def _classes(tree: dict[str, Any]) -> Counter[str]:
@@ -116,6 +148,30 @@ def _classes(tree: dict[str, Any]) -> Counter[str]:
         walk(item)
     if tree.get("hands") is not None:
         walk(tree["hands"])
+    return found
+
+
+def _lineage(tree: dict[str, Any]) -> Counter[tuple[tuple[str, str, str], ...]]:
+    """Each item as its chain of (dest, slot, type) from the target down to it.
+
+    Free of list order, as the engine may list attachments in its own order,
+    but an Apple in a bag's cargo and an Apple in a vest's cargo differ: the
+    parent, slot and type of every item are compared.
+    """
+    found: Counter[tuple[tuple[str, str, str], ...]] = Counter()
+
+    def walk(item: dict[str, Any], dest: str, chain: tuple[tuple[str, str, str], ...]) -> None:
+        link = chain + ((dest, item.get("slot", ""), item["type"]),)
+        found[link] += 1
+        for child in item.get("attachments", []):
+            walk(child, "attachment", link)
+        for child in item.get("cargo", []):
+            walk(child, "cargo", link)
+
+    for item in tree.get("attachments", []):
+        walk(item, "attachment", ())
+    if tree.get("hands") is not None:
+        walk(tree["hands"], "hands", ())
     return found
 
 
@@ -145,7 +201,12 @@ def _flat_answer(
     return {"ok": 1, "type": "SurvivorM_Mirek", "loadout": wire}
 
 
+def _all_created(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return _flat_answer(rows, [{"ok": 1, "error": ""} for _ in rows])
+
+
 _COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
+_ENFORCE_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
 _MEMBER_RE = re.compile(
     r"(?m)(?<![A-Za-z0-9_>])(?P<type>(?:ref\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*<[^;{}]+>)?)"
     r"\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;"
@@ -158,22 +219,49 @@ _LOCAL_DECLARATION = re.compile(
 _SERVER_CAPS = re.compile(
     r'protected const string SERVER_CAPABILITIES = ((?:"[^"\n]*"(?: \+ )?)+);'
 )
-_ENFORCE_FUNCTIONS = (
-    "protected bool DispatchLoadoutGet(MCPCommand command, MCPResult result)",
-    "protected bool DispatchLoadoutApply(MCPCommand command, MCPResult result)",
-    "protected PlayerBase ResolveLoadoutTarget(MCPArgs args, out string error)",
-    "protected string LoadoutRowsError(array<ref MCPLoadoutItem> rows)",
-    "protected void ClearLoadout(PlayerBase target, array<EntityAI> cleared)",
-    "protected void ApplyLoadout(PlayerBase target, MCPArgs args, MCPResult result)",
+GET_FN = "protected bool DispatchLoadoutGet(MCPCommand command, MCPResult result)"
+APPLY_FN = "protected bool DispatchLoadoutApply(MCPCommand command, MCPResult result)"
+CLEAR_FN = "protected bool DispatchLoadoutClear(MCPCommand command, MCPResult result)"
+RESOLVE_FN = "protected PlayerBase ResolveLoadoutTarget(MCPArgs args, out string error)"
+ROWS_FN = "protected string LoadoutRowsError(array<ref MCPLoadoutItem> rows)"
+CLEAR_LOADOUT_FN = "protected void ClearLoadout(PlayerBase target, array<EntityAI> cleared)"
+APPLY_LOADOUT_FN = "protected void ApplyLoadout(PlayerBase target, MCPArgs args, MCPResult result)"
+CREATE_FN = (
     "protected EntityAI CreateLoadoutItem(PlayerBase target, EntityAI owner, "
-    "MCPLoadoutItem row, out string error)",
-    "protected void ReadLoadout(PlayerBase target, MCPLoadout loadoutRead)",
-    "protected void AppendLoadoutRow(MCPLoadout loadoutRead, EntityAI item, "
-    "string dest, int parent, int level)",
-    "protected string LoadoutSlotName(EntityAI item)",
-    "protected bool IsLoadoutClearDone(MCPJob job)",
-    "protected void PostLoadoutJob(MCPJob job)",
+    "MCPLoadoutItem row, out string error)"
 )
+READ_FN = "protected void ReadLoadout(PlayerBase target, MCPLoadout loadoutRead)"
+APPEND_FN = (
+    "protected void AppendLoadoutRow(MCPLoadout loadoutRead, EntityAI item, "
+    "string dest, int parent, int level)"
+)
+SLOT_NAME_FN = "protected string LoadoutSlotName(EntityAI item)"
+CLEAR_DONE_FN = "protected bool IsLoadoutClearDone(MCPJob job)"
+POST_CLEAR_FN = "protected void PostLoadoutClearJob(MCPJob job, bool complete)"
+# The bodies these verbs add to MCPBridge.c.
+_ENFORCE_FUNCTIONS = (
+    GET_FN,
+    APPLY_FN,
+    CLEAR_FN,
+    RESOLVE_FN,
+    ROWS_FN,
+    CLEAR_LOADOUT_FN,
+    APPLY_LOADOUT_FN,
+    CREATE_FN,
+    READ_FN,
+    APPEND_FN,
+    SLOT_NAME_FN,
+    CLEAR_DONE_FN,
+    POST_CLEAR_FN,
+)
+# The job runner the clear's job goes through. It is main's code, run here as
+# it is, and not held to the style checks above.
+HAS_JOB_FN = "protected bool HasActiveJobFor(Human actor, Object subject)"
+PROCESS_JOBS_FN = "protected void ProcessJobs()"
+JOB_READY_FN = "protected bool IsJobReady(MCPJob job)"
+JOB_SUCCESS_FN = "protected void PostJobSuccess(MCPJob job)"
+JOB_TIMEOUT_FN = "protected void PostJobTimeout(MCPJob job)"
+LOADOUT_CTOR = "void MCPLoadout()"
 
 
 def _block_after(source: str, start: int) -> str:
@@ -272,9 +360,9 @@ def _announce_server(
 _WIRE_ARGS = {
     GET: {"uid": ""},
     APPLY: {
-        "clear_first": False,
         "loadout_items": [{"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}],
     },
+    CLEAR: {"uid": ""},
 }
 
 
@@ -283,7 +371,7 @@ class LoadoutIngressTest(unittest.TestCase):
         self.events: list[dict[str, object]] = []
         self.state = loopback.ServerState("test-key")
         bind_both_peers(self.state)
-        # Both verbs are admitted only against a census that names them.
+        # The verbs are admitted only against a census that names them.
         _announce_server(self.state, _server_commands(), server.EXPECTED_SERVER_ARG_CONTRACT_HASH)
 
     def _coordinate(self) -> None:
@@ -296,8 +384,8 @@ class LoadoutIngressTest(unittest.TestCase):
             ),
         )
 
-    def test_both_are_server_verbs_and_only_the_read_skips_the_lease(self) -> None:
-        for command in (GET, APPLY):
+    def test_all_three_are_server_verbs_and_only_the_read_skips_the_lease(self) -> None:
+        for command in (GET, APPLY, CLEAR):
             with self.subTest(command=command):
                 self.assertIn(command, loopback.SERVER_COMMANDS)
                 self.assertNotIn(command, loopback.CLIENT_COMMANDS)
@@ -309,51 +397,54 @@ class LoadoutIngressTest(unittest.TestCase):
                 )
         self.assertIn(GET, READ_ONLY_COMMANDS)
         self.assertFalse(command_requires_lease(GET))
-        self.assertNotIn(APPLY, READ_ONLY_COMMANDS)
-        self.assertTrue(command_requires_lease(APPLY))
+        for command in (APPLY, CLEAR):
+            with self.subTest(command=command):
+                self.assertNotIn(command, READ_ONLY_COMMANDS)
+                self.assertTrue(command_requires_lease(command))
 
-    def test_a_session_without_a_lease_reads_and_cannot_apply(self) -> None:
+    def test_a_session_without_a_lease_reads_and_cannot_apply_or_clear(self) -> None:
         self._coordinate()
         status, body = self.state.enqueue_command(
             GET, {"object_id": 3}, "server", identity_payload=IDENTITY
         )
         self.assertEqual((status, body["peer"], body["cmd"]), (200, "server", GET))
-        refused = self.state.enqueue_command(
-            APPLY, dict(_WIRE_ARGS[APPLY]), "server", identity_payload=IDENTITY
-        )
-        self.assertEqual(refused, (423, {"error": "lease_required"}))
+        for command in (APPLY, CLEAR):
+            with self.subTest(command=command):
+                refused = self.state.enqueue_command(
+                    command, dict(_WIRE_ARGS[command]), "server", identity_payload=IDENTITY
+                )
+                self.assertEqual(refused, (423, {"error": "lease_required"}))
         decisions = [event.get("decision") for event in self.events]
         self.assertIn("read", decisions)
         self.assertIn("lease_required", decisions)
 
-    def test_the_rows_the_tool_builds_pass_the_ingress(self) -> None:
-        for args in (
-            {"clear_first": True, "loadout_items": _rows(PRESET_8)},
-            {"object_id": 9, "clear_first": False, "loadout_items": _rows(PRESET_8)},
-            {"uid": "76561198000000000", "clear_first": False, "loadout_items": []},
+    def test_the_payloads_the_tool_builds_pass_the_ingress(self) -> None:
+        for command, args in (
+            (APPLY, {"loadout_items": _rows(PRESET_8)}),
+            (APPLY, {"object_id": 9, "loadout_items": _rows(PRESET_8)}),
+            (APPLY, {"uid": "76561198000000000", "loadout_items": []}),
+            (CLEAR, {}),
+            (CLEAR, {"object_id": 9}),
+            (CLEAR, {"uid": "76561198000000000"}),
         ):
-            with self.subTest(args=args):
-                self.assertEqual(loopback.validate_command_args(APPLY, args), (True, None))
-                status, body = self.state.enqueue_command(APPLY, args)
+            with self.subTest(command=command, args=args):
+                self.assertEqual(loopback.validate_command_args(command, args), (True, None))
+                status, body = self.state.enqueue_command(command, args)
                 self.assertEqual(status, 200, body)
 
-    def test_the_ingress_refuses_what_the_bridge_would_refuse(self) -> None:
+    def test_the_ingress_refuses_bad_args_before_an_id(self) -> None:
+        # The bridge refuses each of these again in its own tick
+        # (ResolveLoadoutTarget, LoadoutRowsError). What only the ingress
+        # refuses is in the test below.
         good = _rows(PRESET_8)
         refused: list[tuple[str, dict[str, Any]]] = [
             (GET, {"object_id": 3, "uid": "x"}),
-            (GET, {"object_id": 0}),
-            (GET, {"loadout_items": []}),
-            (APPLY, {"loadout_items": good}),
-            (APPLY, {"clear_first": 1, "loadout_items": good}),
-            (APPLY, {"clear_first": False, "loadout_items": good, "object_id": 2, "uid": "x"}),
-            (APPLY, {"clear_first": False, "loadout_items": good * 9}),
-            (
-                APPLY,
-                {
-                    "clear_first": False,
-                    "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": -1}],
-                },
-            ),
+            (CLEAR, {"object_id": 3, "uid": "x"}),
+            (APPLY, {}),
+            (APPLY, {"loadout_items": good, "object_id": 2, "uid": "x"}),
+            (APPLY, {"loadout_items": good * 9}),
+            (APPLY, {"loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": -1}]}),
+            (APPLY, {"loadout_items": [{"type": "", "slot": "Body", "dest": "attachment", "parent": -1}]}),
         ]
         for command, args in refused:
             with self.subTest(command=command, args=args):
@@ -361,11 +452,37 @@ class LoadoutIngressTest(unittest.TestCase):
                     self.state.enqueue_command(command, args), (400, {"error": "bad_args"})
                 )
 
+    def test_only_the_ingress_refuses_object_id_0_and_names_with_spaces(self) -> None:
+        # The bridge would take each of these (#261 review Y3): object_id 0
+        # leaves the choice to uid (ResolveLoadoutTarget hands it to
+        # ResolvePlayer), LoadoutRowsError checks a type only for being empty
+        # and an attachment's slot likewise, and an unknown key is never read.
+        # The ingress is what refuses them, before an id is spent;
+        # LoadoutBridgeRunTest.test_the_bridge_takes_what_only_the_ingress_refuses
+        # pins the bridge side. The tool never sends object_id 0 (target_args).
+        body = {"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}
+        only_here: list[tuple[str, dict[str, Any]]] = [
+            (GET, {"object_id": 0}),
+            (CLEAR, {"object_id": 0}),
+            (APPLY, {"object_id": 0, "loadout_items": []}),
+            (APPLY, {"loadout_items": [dict(body, type="TShirt White")]}),
+            (APPLY, {"loadout_items": [dict(body, slot="Bo dy")]}),
+            (GET, {"loadout_items": []}),
+            (CLEAR, {"loadout_items": []}),
+            (APPLY, {"clear_first": True, "loadout_items": []}),
+        ]
+        for command, args in only_here:
+            with self.subTest(command=command, args=args):
+                self.assertEqual(loopback.validate_command_args(command, args), (False, "bad_args"))
+                self.assertEqual(
+                    self.state.enqueue_command(command, args), (400, {"error": "bad_args"})
+                )
+
 
 class LoadoutAdmissionTest(unittest.TestCase):
-    """An older PBO is never handed either verb, and no id is spent on it.
+    """An older PBO is never handed these verbs, and no id is spent on it.
 
-    Both fail on a tree that leaves the verbs out of _CAPABILITY_ADMISSION_COMMANDS
+    Each fails on a tree that leaves a verb out of _CAPABILITY_ADMISSION_COMMANDS
     or out of SERVER_ARG_CONTRACT: enqueue then answers 200 and allocates an id.
     """
 
@@ -377,7 +494,7 @@ class LoadoutAdmissionTest(unittest.TestCase):
         return state
 
     def test_a_census_without_the_verb_refuses_before_an_id(self) -> None:
-        for command in (GET, APPLY):
+        for command in (GET, APPLY, CLEAR):
             with self.subTest(command=command):
                 state = self._bound()
                 reduced = [name for name in _server_commands() if name != command]
@@ -391,22 +508,29 @@ class LoadoutAdmissionTest(unittest.TestCase):
                 self.assertEqual(state._next_id, before)
                 self.assertEqual(bound_queue(state, "server"), [])
 
-    def test_the_pre_loadout_contract_hash_refuses_before_an_id(self) -> None:
-        for command in (GET, APPLY):
-            with self.subTest(command=command):
-                state = self._bound()
-                _announce_server(state, _server_commands(), _PRE_LOADOUT_ARG_CONTRACT_HASH)
-                before = state._next_id
-                status, body = state.enqueue_command(
-                    command, dict(_WIRE_ARGS[command]), peer="server"
-                )
-                self.assertEqual(status, 409)
-                self.assertEqual(body["error"], "arg_contract_mismatch")
-                self.assertEqual(state._next_id, before)
-                self.assertEqual(bound_queue(state, "server"), [])
+    def test_an_older_contract_hash_refuses_before_an_id(self) -> None:
+        # Before these verbs, and the first round of this PR, whose
+        # loadout_apply still read clear_first.
+        for ach in (_PRE_LOADOUT_ARG_CONTRACT_HASH, _FIRST_ROUND_ARG_CONTRACT_HASH):
+            for command in (GET, APPLY, CLEAR):
+                with self.subTest(ach=ach, command=command):
+                    state = self._bound()
+                    _announce_server(state, _server_commands(), ach)
+                    before = state._next_id
+                    status, body = state.enqueue_command(
+                        command, dict(_WIRE_ARGS[command]), peer="server"
+                    )
+                    self.assertEqual(status, 409)
+                    self.assertEqual(body["error"], "arg_contract_mismatch")
+                    self.assertEqual(state._next_id, before)
+                    self.assertEqual(bound_queue(state, "server"), [])
+        self.assertNotIn(
+            server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            (_PRE_LOADOUT_ARG_CONTRACT_HASH, _FIRST_ROUND_ARG_CONTRACT_HASH),
+        )
 
-    def test_the_current_census_admits_both(self) -> None:
-        for command in (GET, APPLY):
+    def test_the_current_census_admits_all_three(self) -> None:
+        for command in (GET, APPLY, CLEAR):
             with self.subTest(command=command):
                 state = self._bound()
                 _announce_server(state, _server_commands(), server.EXPECTED_SERVER_ARG_CONTRACT_HASH)
@@ -418,15 +542,19 @@ class LoadoutAdmissionTest(unittest.TestCase):
     def test_the_contract_names_every_key_each_verb_sends(self) -> None:
         self.assertEqual(server.SERVER_ARG_CONTRACT[GET], ("object_id", "uid"))
         self.assertEqual(
-            server.SERVER_ARG_CONTRACT[APPLY],
-            ("clear_first", "loadout_items", "object_id", "uid"),
+            server.SERVER_ARG_CONTRACT[APPLY], ("loadout_items", "object_id", "uid")
         )
+        self.assertEqual(server.SERVER_ARG_CONTRACT[CLEAR], ("object_id", "uid"))
         self.assertEqual(_BRIDGE_COMMAND_TOOLS["server"][GET], GET)
         self.assertEqual(_BRIDGE_COMMAND_TOOLS["server"][APPLY], APPLY)
+        # loadout_clear has no tool of its own: loadout_apply sends it.
+        self.assertIn(CLEAR, _BRIDGE_COMMAND_TOOLS["server"])
+        self.assertIsNone(_BRIDGE_COMMAND_TOOLS["server"][CLEAR])
         fixture = json.loads(CENSUS_FIXTURE.read_text(encoding="utf-8"))
-        for command in (GET, APPLY):
+        for command, tool in ((GET, GET), (APPLY, APPLY), (CLEAR, None)):
             with self.subTest(command=command):
-                self.assertEqual(fixture["peers"]["server"].get(command), command)
+                self.assertIn(command, fixture["peers"]["server"])
+                self.assertEqual(fixture["peers"]["server"][command], tool)
                 self.assertNotIn(command, fixture["peers"]["client"])
 
 
@@ -445,6 +573,27 @@ class LoadoutTargetTest(unittest.TestCase):
         with self.assertRaises(ValueError) as both:
             loadout.target_args(4, "7656")
         self.assertIn("must not both be given", str(both.exception))
+
+
+# A list that is null where a loadout or an item has one (#261 review Y8).
+_NULL_LISTS: tuple[tuple[dict[str, Any], str], ...] = (
+    ({"attachments": None}, "loadout.attachments"),
+    (
+        {"attachments": [{"type": "TaloonBag_Blue", "slot": "Back", "cargo": None}]},
+        "loadout.attachments[0].cargo",
+    ),
+    (
+        {"attachments": [{"type": "PlateCarrierVest", "slot": "Vest", "attachments": None}]},
+        "loadout.attachments[0].attachments",
+    ),
+    ({"hands": {"type": "M4A1", "attachments": None}}, "loadout.hands.attachments"),
+    (
+        {"hands": {"type": "M4A1", "attachments": [
+            {"type": "Mag_STANAG_30Rnd", "slot": "magazine", "cargo": None}
+        ]}},
+        "loadout.hands.attachments[0].cargo",
+    ),
+)
 
 
 class LoadoutFlattenTest(unittest.TestCase):
@@ -534,6 +683,25 @@ class LoadoutFlattenTest(unittest.TestCase):
                     str(raised.exception).startswith(f"bad_args: {path} "), raised.exception
                 )
 
+    def test_a_null_list_is_bad_args_at_the_root_and_inside_an_item(self) -> None:
+        for tree, path in _NULL_LISTS:
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError) as raised:
+                    loadout.flatten_request(tree)
+                self.assertEqual(
+                    str(raised.exception), f"bad_args: {path} None must be a list of items"
+                )
+
+    def test_a_loadout_that_is_not_an_object_is_bad_args(self) -> None:
+        for value in ([], None, "TShirt_White", 3):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as raised:
+                    loadout.flatten_request(value)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"bad_args: loadout {value!r} must be an object with attachments and hands",
+                )
+
     def test_sixty_four_items_pass_and_the_sixty_fifth_is_bad_args(self) -> None:
         full = {"attachments": [{"type": "Rag", "slot": f"Slot{i}"} for i in range(64)]}
         self.assertEqual(len(loadout.flatten_request(full)), loadout.MAX_ITEMS)
@@ -572,11 +740,17 @@ class LoadoutFlattenTest(unittest.TestCase):
 
 class LoadoutWireRowsTest(unittest.TestCase):
     def test_every_request_the_tool_can_build_is_a_valid_row_list(self) -> None:
-        for tree in (PRESET_8, _chain(4), {}, {"hands": {"type": "Apple"}}):
+        for tree in (PRESET_8, TWO_CONTAINERS, _chain(4), {}, {"hands": {"type": "Apple"}}):
             with self.subTest(tree=tree):
                 self.assertTrue(loadout.is_wire_items(_rows(tree)))
 
-    def test_rows_the_bridge_refuses_are_refused_here(self) -> None:
+    def test_rows_the_ingress_refuses(self) -> None:
+        # is_wire_items is the ingress's check of loadout_items. LoadoutRowsError
+        # refuses most of these again in the bridge, but not all (#261 review
+        # Y3): a type or slot with whitespace (the bridge only checks that a
+        # type is not empty and that an attachment has a slot), a missing key
+        # (the bridge reads it as "" or 0) and an extra key (never read) only
+        # the ingress refuses.
         body = {"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}
         cargo = {"type": "Apple", "slot": "", "dest": "cargo", "parent": 0}
         hands = {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1}
@@ -590,6 +764,7 @@ class LoadoutWireRowsTest(unittest.TestCase):
             "extra_key": [dict(body, quantity=1)],
             "empty_type": [dict(body, type="")],
             "spaced_type": [dict(body, type="T Shirt")],
+            "spaced_slot": [dict(body, slot="Bo dy")],
             "attachment_without_slot": [dict(body, slot="")],
             "forward_parent": [dict(body, parent=1), dict(body)],
             "own_parent": [dict(body, parent=0)],
@@ -627,6 +802,24 @@ class LoadoutRoundTripTest(unittest.TestCase):
         self.assertNotIn("slot", tree["attachments"][3]["cargo"][0])
         self.assertEqual(tree["attachments"][0]["cargo"], [])
         self.assertEqual(tree["attachments"][0]["attachments"], [])
+
+    def test_two_containers_keep_their_own_cargo(self) -> None:
+        rows = _rows(TWO_CONTAINERS)
+        tree = loadout.nest_rows(rows)
+        assert tree is not None
+        self.assertEqual(_rows(tree), rows)
+        self.assertEqual(_lineage(tree), _lineage(TWO_CONTAINERS))
+        bag, vest = tree["attachments"]
+        self.assertEqual((bag["slot"], bag["type"]), ("Back", "TaloonBag_Blue"))
+        self.assertEqual([item["type"] for item in bag["cargo"]], ["Apple", "BandageDressing"])
+        self.assertEqual((vest["slot"], vest["type"]), ("Vest", "SmershVest"))
+        self.assertEqual([item["type"] for item in vest["cargo"]], ["Rag"])
+        # The class multiset cannot tell the cargo moved; the lineage can.
+        swapped = copy.deepcopy(TWO_CONTAINERS)
+        worn = swapped["attachments"]
+        worn[0]["cargo"], worn[1]["cargo"] = worn[1]["cargo"], worn[0]["cargo"]
+        self.assertEqual(_classes(swapped), _classes(TWO_CONTAINERS))
+        self.assertNotEqual(_lineage(swapped), _lineage(TWO_CONTAINERS))
 
     def test_rows_that_form_no_tree_are_refused(self) -> None:
         body = {"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}
@@ -684,10 +877,32 @@ class LoadoutReplyTest(unittest.TestCase):
                 self.assertEqual(shaped["ok"], 0)
                 self.assertEqual(shaped["warnings"], [loadout.INCOMPLETE])
 
+    def test_a_get_answer_loadout_apply_would_refuse_is_not_ok(self) -> None:
+        # #261 review Y5: rows that nest into a tree, but a tree that
+        # loadout_apply refuses, are not answered as a loadout.
+        body = {"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}
+        deep = [dict(body, type="SmershVest", slot="Vest")] + [
+            {"type": "SmershBag", "slot": "", "dest": "cargo", "parent": index}
+            for index in range(4)
+        ]
+        cases = {
+            "attachment_without_a_slot_name": [dict(body, slot="")],
+            "spaced_type": [dict(body, type="TShirt White")],
+            "spaced_slot": [dict(body, slot="Bo dy")],
+            "five_levels": deep,
+            "sixty_five_items": [dict(body, slot=f"Slot{index}") for index in range(65)],
+        }
+        for label, rows in cases.items():
+            with self.subTest(label):
+                self.assertIsNotNone(loadout.nest_rows(rows))
+                shaped = loadout.get_reply(_flat_answer(rows))
+                self.assertEqual(shaped["ok"], 0)
+                self.assertEqual(shaped["warnings"], [loadout.INCOMPLETE])
+        self.assertEqual(loadout.get_reply(_flat_answer(deep[:4]))["ok"], 1)
+
     def test_eight_items_created_answer_ok(self) -> None:
         flat = _flatten(PRESET_8)
-        applied = [{"ok": 1, "error": ""} for _ in flat]
-        shaped = loadout.apply_reply(flat, _flat_answer(_rows(PRESET_8), applied))
+        shaped = loadout.apply_reply(flat, _all_created(_rows(PRESET_8)))
         self.assertEqual(shaped["status"], "ok")
         self.assertEqual(
             shaped["items"],
@@ -797,9 +1012,44 @@ class LoadoutReplyTest(unittest.TestCase):
                 self.assertEqual(shaped["warnings"], [loadout.INCOMPLETE])
                 self.assertNotIn("status", shaped)
 
+    def test_the_clear_answers_what_it_deleted_and_whether_it_all_went(self) -> None:
+        for answer, expected in (
+            ({"ok": 1, "deleted": 4, "cleanup_complete": 1}, {"deleted": 4, "cleanup_complete": True}),
+            ({"ok": 1, "deleted": 4, "cleanup_complete": 0}, {"deleted": 4, "cleanup_complete": False}),
+            ({"ok": 1, "deleted": 0, "cleanup_complete": True}, {"deleted": 0, "cleanup_complete": True}),
+        ):
+            with self.subTest(answer=answer):
+                self.assertEqual(loadout.clear_reply(answer), expected)
 
-def _flatten(tree: object) -> list[tuple[str, dict[str, Any]]]:
-    return loadout.flatten_request(tree)
+    def test_a_clear_answer_without_its_counts_is_loadout_incomplete(self) -> None:
+        for answer in (
+            {"ok": 1},
+            {"ok": 1, "cleanup_complete": 1},
+            {"ok": 1, "deleted": 2},
+            {"ok": 1, "deleted": -1, "cleanup_complete": 1},
+            {"ok": 1, "deleted": True, "cleanup_complete": 1},
+            {"ok": 1, "deleted": 2.0, "cleanup_complete": 1},
+            {"ok": 1, "deleted": 2, "cleanup_complete": 2},
+            {"ok": 1, "deleted": 2, "cleanup_complete": "1"},
+            None,
+            [],
+        ):
+            with self.subTest(answer=answer):
+                with self.assertRaises(ValueError) as raised:
+                    loadout.clear_reply(answer)
+                self.assertTrue(
+                    str(raised.exception).startswith(f"{loadout.INCOMPLETE}: "), raised.exception
+                )
+
+    def test_a_refusal_after_the_clear_says_what_the_clear_did(self) -> None:
+        self.assertEqual(
+            loadout.refusal_after_clear("busy", {"deleted": 3, "cleanup_complete": False}),
+            "busy; clear=deleted=3 cleanup_complete=0",
+        )
+        self.assertEqual(
+            loadout.refusal_after_clear("timeout", {"deleted": 0, "cleanup_complete": True}),
+            "timeout; clear=deleted=0 cleanup_complete=1",
+        )
 
 
 class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
@@ -813,6 +1063,34 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime, "call_bridge", new=call):
             result = _content_json(await self.app.call_tool(name, dict(arguments)))
         return result, call
+
+    def _bridge(self, answers: dict[str, object]):
+        """A call_bridge answering per verb: a dict, or an exception it raises."""
+        sent: list[tuple[str, dict[str, Any], str, float]] = []
+
+        async def call_bridge(
+            command: str, args: dict[str, Any], peer: str, timeout_s: float
+        ) -> dict[str, Any]:
+            sent.append((command, copy.deepcopy(args), peer, timeout_s))
+            answer = answers[command]
+            if isinstance(answer, BaseException):
+                raise answer
+            return copy.deepcopy(answer)  # type: ignore[arg-type]
+
+        return call_bridge, sent
+
+    async def _run(self, answers: dict[str, object], **arguments: Any):
+        call_bridge, sent = self._bridge(answers)
+        with patch.object(self.runtime, "call_bridge", new=call_bridge):
+            result = _content_json(await self.app.call_tool(APPLY, dict(arguments)))
+        return result, sent
+
+    async def _run_refused(self, answers: dict[str, object], **arguments: Any):
+        call_bridge, sent = self._bridge(answers)
+        with patch.object(self.runtime, "call_bridge", new=call_bridge):
+            with self.assertRaises(ToolError) as raised:
+                await self.app.call_tool(APPLY, dict(arguments))
+        return str(raised.exception), sent
 
     async def _refused(self, name: str, **arguments: Any) -> str:
         call = AsyncMock(return_value={"ok": 1})
@@ -848,27 +1126,141 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bad_args", await self._refused(GET, object_id=-2))
 
     async def test_apply_sends_the_rows_in_apply_order(self) -> None:
-        flat = _flatten(PRESET_8)
-        applied = [{"ok": 1, "error": ""} for _ in flat]
         result, call = await self._call(
-            APPLY,
-            _flat_answer(_rows(PRESET_8), applied),
-            loadout=PRESET_8,
-            object_id=5,
-            clear_first=True,
-            timeout_s=3.0,
+            APPLY, _all_created(_rows(PRESET_8)), loadout=PRESET_8, object_id=5, timeout_s=3.0
         )
-        wire = {"object_id": 5, "clear_first": True, "loadout_items": _rows(PRESET_8)}
+        wire = {"object_id": 5, "loadout_items": _rows(PRESET_8)}
         call.assert_awaited_once_with(APPLY, wire, "server", 3.0)
         self.assertEqual(loopback.validate_command_args(APPLY, wire), (True, None))
         self.assertEqual(result["status"], "ok")
         self.assertEqual([item["path"] for item in result["items"]], PRESET_8_PATHS)
         self.assertEqual(_classes(result["loadout"]), _classes(PRESET_8))
+        # Without clear_first nothing was cleared, and the answer says so.
+        self.assertIn("clear", result)
+        self.assertIsNone(result["clear"])
 
         _default, default_call = await self._call(APPLY, _flat_answer([]), loadout={})
         default_call.assert_awaited_once_with(
-            APPLY, {"clear_first": False, "loadout_items": []}, "server", DEFAULT_TOOL_TIMEOUT_S
+            APPLY, {"loadout_items": []}, "server", DEFAULT_TOOL_TIMEOUT_S
         )
+
+    async def test_clear_first_sends_the_clear_and_then_the_rows(self) -> None:
+        for target, wire_target in (
+            ({"object_id": 5}, {"object_id": 5}),
+            ({"uid": "76561198000000000"}, {"uid": "76561198000000000"}),
+            ({}, {}),
+        ):
+            with self.subTest(target=target):
+                result, sent = await self._run(
+                    {
+                        CLEAR: {"ok": 1, "deleted": 4, "cleanup_complete": 1},
+                        APPLY: _all_created(_rows(PRESET_8)),
+                    },
+                    loadout=PRESET_8,
+                    clear_first=True,
+                    timeout_s=3.0,
+                    **target,
+                )
+                self.assertEqual(
+                    sent,
+                    [
+                        (CLEAR, wire_target, "server", 3.0),
+                        (APPLY, dict(wire_target, loadout_items=_rows(PRESET_8)), "server", 3.0),
+                    ],
+                )
+                for command, args, _peer, _timeout in sent:
+                    self.assertEqual(loopback.validate_command_args(command, args), (True, None))
+                self.assertEqual(result["clear"], {"deleted": 4, "cleanup_complete": True})
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(len(result["items"]), 8)
+
+    async def test_a_clear_past_its_deadline_still_applies_and_says_so(self) -> None:
+        tree = {"attachments": [
+            {"type": "TShirt_White", "slot": "Body"},
+            {"type": "Jeans_Blue", "slot": "Legs"},
+        ]}
+        rows = _rows(tree)
+        # What the clear deleted still held Body when the creates ran.
+        applied = [{"ok": 0, "error": "slot_occupied"}, {"ok": 1, "error": ""}]
+        result, sent = await self._run(
+            {
+                CLEAR: {"ok": 1, "deleted": 2, "cleanup_complete": 0},
+                APPLY: _flat_answer(rows[1:], applied),
+            },
+            loadout=tree,
+            clear_first=True,
+        )
+        self.assertEqual([command for command, *_rest in sent], [CLEAR, APPLY])
+        self.assertEqual(result["clear"], {"deleted": 2, "cleanup_complete": False})
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(
+            [(item["path"], item["error"]) for item in result["items"]],
+            [("loadout.attachments[0]", "slot_occupied"), ("loadout.attachments[1]", None)],
+        )
+
+    async def test_a_clear_that_fails_sends_nothing_more(self) -> None:
+        for label, answer, fragment in (
+            ("refused", ToolError("busy"), ": busy"),
+            ("timed_out", ToolError("timeout waiting for loadout_clear id=7"), "timeout waiting"),
+            ("unreadable", {"ok": 1}, f"{loadout.INCOMPLETE}: loadout_clear answered without"),
+        ):
+            with self.subTest(label):
+                text, sent = await self._run_refused(
+                    {CLEAR: answer, APPLY: _all_created(_rows(PRESET_8))},
+                    loadout=PRESET_8,
+                    object_id=5,
+                    clear_first=True,
+                )
+                self.assertIn(fragment, text)
+                self.assertNotIn("clear=deleted", text)
+                self.assertEqual([command for command, *_rest in sent], [CLEAR])
+
+    async def test_a_cancelled_clear_sends_nothing_more(self) -> None:
+        sent: list[str] = []
+        waiting = asyncio.Event()
+
+        async def call_bridge(
+            command: str, args: dict[str, Any], peer: str, timeout_s: float
+        ) -> dict[str, Any]:
+            sent.append(command)
+            if command == CLEAR:
+                waiting.set()
+                await asyncio.Event().wait()
+            return _all_created(_rows(PRESET_8))
+
+        with patch.object(self.runtime, "call_bridge", new=call_bridge):
+            task = asyncio.ensure_future(
+                self.app.call_tool(APPLY, {"loadout": PRESET_8, "clear_first": True})
+            )
+            await asyncio.wait_for(waiting.wait(), 2.0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(sent, [CLEAR])
+
+    async def test_a_refused_apply_after_its_clear_keeps_what_the_clear_did(self) -> None:
+        for complete, suffix in ((1, "cleanup_complete=1"), (0, "cleanup_complete=0")):
+            with self.subTest(complete=complete):
+                text, sent = await self._run_refused(
+                    {
+                        CLEAR: {"ok": 1, "deleted": 2, "cleanup_complete": complete},
+                        APPLY: ToolError("lease_required: call session_acquire_wait(purpose=...)"),
+                    },
+                    loadout=PRESET_8,
+                    clear_first=True,
+                )
+                self.assertTrue(
+                    text.endswith(
+                        "lease_required: call session_acquire_wait(purpose=...); "
+                        f"clear=deleted=2 {suffix}"
+                    ),
+                    text,
+                )
+                self.assertEqual([command for command, *_rest in sent], [CLEAR, APPLY])
+        # Without clear_first a refusal carries no clear.
+        text, sent = await self._run_refused({APPLY: ToolError("busy")}, loadout=PRESET_8)
+        self.assertTrue(text.endswith(": busy"), text)
+        self.assertEqual([command for command, *_rest in sent], [APPLY])
 
     async def test_apply_refuses_a_bad_loadout_before_the_bridge(self) -> None:
         missing_slot = {"attachments": [
@@ -888,10 +1280,31 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         for clear_first in (1, "true"):
             with self.subTest(clear_first=clear_first):
                 await self._refused(APPLY, loadout={}, clear_first=clear_first)
+        # A bad loadout is refused before a clear is sent too.
+        self.assertIn(
+            "bad_args: loadout.attachments[2].slot",
+            await self._refused(APPLY, loadout=missing_slot, clear_first=True),
+        )
 
-    async def test_a_bridge_refusal_reaches_the_caller(self) -> None:
-        # The embedded runtime's own call_bridge and wait_for_result, with only
-        # the loopback state and the readiness snapshot faked (fb99 NEG).
+    async def test_apply_refuses_a_loadout_that_is_not_an_object_with_its_path(self) -> None:
+        # #261 review Y2: the public tool answers bad_args for these, as for any
+        # other bad loadout, and never calls the bridge.
+        for value in ([], None, "TShirt_White"):
+            with self.subTest(value=value):
+                for clear_first in (False, True):
+                    text = await self._refused(APPLY, loadout=value, clear_first=clear_first)
+                    self.assertIn(
+                        f"bad_args: loadout {value!r} must be an object with attachments and hands",
+                        text,
+                    )
+
+    async def test_apply_refuses_a_null_list_with_its_path_before_the_bridge(self) -> None:
+        for tree, path in _NULL_LISTS:
+            with self.subTest(path=path):
+                text = await self._refused(APPLY, loadout=tree)
+                self.assertIn(f"bad_args: {path} None must be a list of items", text)
+
+    def _ready_runtime(self, enqueue, take_result):
         ready = {
             "server_peer": {
                 "last_poll_age_s": 0.1,
@@ -900,35 +1313,72 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
             },
             "client_peer": {"last_poll_age_s": 0.1, "version_state": "ok"},
         }
-        for name, arguments, error in (
-            (GET, {"object_id": 404}, "not_found"),
-            (GET, {"object_id": 12}, "bad_target"),
-            (GET, {}, "loadout_too_large"),
-            (APPLY, {"loadout": {}, "object_id": 404}, "not_found"),
-            (APPLY, {"loadout": {}, "object_id": 12}, "bad_target"),
-            (APPLY, {"loadout": {}, "object_id": 5, "clear_first": True}, "busy"),
+        state = SimpleNamespace(
+            enqueue_command=enqueue,
+            daemon_generation="generation-test",
+            take_result=take_result,
+        )
+        return (
+            patch.object(self.runtime, "status", return_value=ready),
+            patch.object(self.runtime, "loopback", SimpleNamespace(state=state)),
+        )
+
+    async def test_a_bridge_refusal_reaches_the_caller(self) -> None:
+        # The embedded runtime's own call_bridge and wait_for_result, with only
+        # the loopback state and the readiness snapshot faked (fb99 NEG).
+        for name, arguments, error, verbs in (
+            (GET, {"object_id": 404}, "not_found", [GET]),
+            (GET, {"object_id": 12}, "bad_target", [GET]),
+            (GET, {}, "loadout_too_large", [GET]),
+            (APPLY, {"loadout": {}, "object_id": 404}, "not_found", [APPLY]),
+            (APPLY, {"loadout": {}, "object_id": 12}, "bad_target", [APPLY]),
+            (APPLY, {"loadout": {}, "object_id": 5}, "busy", [APPLY]),
+            # The clear is refused, so the rows are never sent.
+            (APPLY, {"loadout": {}, "object_id": 5, "clear_first": True}, "busy", [CLEAR]),
+            (APPLY, {"loadout": {}, "object_id": 404, "clear_first": True}, "not_found", [CLEAR]),
         ):
-            with self.subTest(name=name, error=error):
+            with self.subTest(name=name, arguments=arguments):
                 enqueued: list[tuple[str, dict[str, object], object]] = []
 
                 def enqueue(cmd: str, args: dict[str, object], peer: object = None, **_kwargs: object):
                     enqueued.append((cmd, dict(args), peer))
                     return 200, {"id": 7}
 
-                state = SimpleNamespace(
-                    enqueue_command=enqueue,
-                    daemon_generation="generation-test",
-                    take_result=lambda *_args, _error=error, **_kwargs: {"ok": 0, "error": _error},
+                status, state = self._ready_runtime(
+                    enqueue, lambda *_args, _error=error, **_kwargs: {"ok": 0, "error": _error}
                 )
-                with patch.object(self.runtime, "status", return_value=ready), patch.object(
-                    self.runtime, "loopback", SimpleNamespace(state=state)
-                ):
+                with status, state:
                     with self.assertRaises(ToolError) as raised:
                         await self.app.call_tool(name, dict(arguments, timeout_s=1.0))
                 self.assertTrue(
                     str(raised.exception).endswith(f": {error}"), str(raised.exception)
                 )
-                self.assertEqual([entry[0] for entry in enqueued], [name])
+                self.assertEqual([entry[0] for entry in enqueued], verbs)
+
+    async def test_an_apply_refused_after_its_clear_reports_the_clear(self) -> None:
+        # The runtime's own call_bridge: the clear answers, then the session
+        # has lost its lease before the rows go out.
+        enqueued: list[str] = []
+
+        def enqueue(cmd: str, args: dict[str, object], peer: object = None, **_kwargs: object):
+            enqueued.append(cmd)
+            if cmd == APPLY:
+                return 423, {"error": "lease_required"}
+            return 200, {"id": 7}
+
+        status, state = self._ready_runtime(
+            enqueue, lambda *_args, **_kwargs: {"ok": 1, "deleted": 2, "cleanup_complete": 1}
+        )
+        with status, state:
+            with self.assertRaises(ToolError) as raised:
+                await self.app.call_tool(
+                    APPLY,
+                    {"loadout": PRESET_8, "object_id": 5, "clear_first": True, "timeout_s": 1.0},
+                )
+        text = str(raised.exception)
+        self.assertIn("lease_required", text)
+        self.assertTrue(text.endswith("; clear=deleted=2 cleanup_complete=1"), text)
+        self.assertEqual(enqueued, [CLEAR, APPLY])
 
     async def test_descriptions_state_the_lease_the_format_and_the_errors(self) -> None:
         read = await self._description(GET)
@@ -954,6 +1404,7 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
             "{attachments: [item, ...], hands: item or null}",
             "bad_args names the path (loadout.attachments[2].slot)",
             "clear_first=true first deletes",
+            "waits up to 5 s for the game to remove it",
             "slot_occupied and keeps what is there",
             "unknown_type",
             "slot_not_found",
@@ -962,9 +1413,13 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
             "parent_failed",
             "status is ok when every item was created and partial otherwise",
             "loadout_too_large true",
+            "clear is null without clear_first, else {deleted, cleanup_complete}",
+            "A clear that is refused, times out or is cancelled sends nothing more",
+            "clear=deleted=N cleanup_complete=0 or 1",
+            "timeout_s is the wait for each of these game calls",
             "Created items get no registry ids",
             "Quantity, health and other item state are not set",
-            "busy",
+            "busy (a clear_first on this target is still waiting for what it deleted to go)",
             "arg_contract_mismatch or bridge_capability_missing, with nothing sent",
         ):
             with self.subTest(fragment=fragment):
@@ -981,7 +1436,8 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         apply_schema = tools[APPLY].inputSchema
         self.assertEqual(apply_schema["required"], ["loadout"])
         self.assertEqual(apply_schema["properties"]["clear_first"]["type"], "boolean")
-        self.assertEqual(apply_schema["properties"]["loadout"]["type"], "object")
+        # loadout takes any JSON value and the tool checks it (#261 review Y2).
+        self.assertNotIn("type", apply_schema["properties"]["loadout"])
 
 
 class LoadoutCatalogTest(unittest.IsolatedAsyncioTestCase):
@@ -1015,11 +1471,12 @@ class LoadoutCatalogTest(unittest.IsolatedAsyncioTestCase):
             "takes. It changes nothing and needs no lease. …",
         )
 
-    async def test_the_embedded_registry_has_both(self) -> None:
+    async def test_the_embedded_registry_has_both_tools_and_no_clear_tool(self) -> None:
         app, _runtime = build_app(ServerConfig(log_sink=lambda _message: None))
         names = {tool.name for tool in app._tool_manager.list_tools()}
         self.assertIn(GET, names)
         self.assertIn(APPLY, names)
+        self.assertNotIn(CLEAR, names)
 
 
 class LoadoutPruneTest(unittest.TestCase):
@@ -1039,6 +1496,21 @@ class LoadoutPruneTest(unittest.TestCase):
                 )
                 self.assertNotIn("loadout", dropped)
 
+    def test_the_clear_keeps_its_counts_and_the_other_verbs_drop_them(self) -> None:
+        # The flat MCPResult carries deleted and cleanup_complete on every
+        # answer; 0 and false are loadout_clear's answers, and nobody else's.
+        flat = {"ok": 1, "deleted": 0, "cleanup_complete": 0, "loadout": {}}
+        kept = result_prune.prune_unfilled_fields(CLEAR, dict(flat))
+        self.assertEqual((kept["deleted"], kept["cleanup_complete"]), (0, 0))
+        self.assertNotIn("loadout", kept)
+        for command in (GET, APPLY):
+            with self.subTest(command=command):
+                dropped = result_prune.prune_unfilled_fields(command, dict(flat))
+                self.assertNotIn("deleted", dropped)
+                self.assertNotIn("cleanup_complete", dropped)
+        self.assertIn(CLEAR, result_prune.OWNED_SCALAR_FIELDS["deleted"])
+        self.assertIn(CLEAR, result_prune.OWNED_SCALAR_FIELDS["cleanup_complete"])
+
 
 class LoadoutEnforceTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -1048,15 +1520,20 @@ class LoadoutEnforceTest(unittest.TestCase):
     def _code(self, signature: str) -> str:
         return _without_comments(_method_body(self.source, signature))
 
-    def test_dispatch_routes_both_and_the_census_names_them(self) -> None:
+    def test_dispatch_routes_all_three_and_the_census_names_them(self) -> None:
         dispatch = _method_body(self.source, "protected void Dispatch(MCPCommand command)")
-        for command, handler in ((GET, "DispatchLoadoutGet"), (APPLY, "DispatchLoadoutApply")):
+        for command, handler in (
+            (GET, "DispatchLoadoutGet"),
+            (APPLY, "DispatchLoadoutApply"),
+            (CLEAR, "DispatchLoadoutClear"),
+        ):
             with self.subTest(command=command):
                 branch = _if_body(dispatch, f'command.cmd == "{command}"')
                 self.assertEqual(branch.strip(), f"postNow = {handler}(command, result);")
         caps = _server_capabilities(self.source)
-        self.assertIn(GET, caps)
-        self.assertIn(APPLY, caps)
+        for command in (GET, APPLY, CLEAR):
+            with self.subTest(command=command):
+                self.assertIn(command, caps)
         self.assertEqual(caps, sorted(caps))
         self.assertIn(
             f'SERVER_ARG_CONTRACT_HASH = "{server.EXPECTED_SERVER_ARG_CONTRACT_HASH}"',
@@ -1075,7 +1552,7 @@ class LoadoutEnforceTest(unittest.TestCase):
         self.assertEqual(int(depth.group(1)), loadout.MAX_DEPTH)
 
     def test_the_target_is_refused_before_anything_is_read(self) -> None:
-        code = self._code(_ENFORCE_FUNCTIONS[2])
+        code = self._code(RESOLVE_FN)
         self.assertEqual(_errors(code), {"bad_args", "not_found", "bad_target"})
         for token in (
             "return ResolvePlayer(args, error);",
@@ -1092,14 +1569,19 @@ class LoadoutEnforceTest(unittest.TestCase):
         both = _if_body(code, 'args.uid != ""')
         self.assertIn('error = "bad_args";', both)
         self.assertLess(code.index("return ResolvePlayer"), code.index('args.uid != ""'))
+        for signature in (GET_FN, APPLY_FN, CLEAR_FN):
+            with self.subTest(signature=signature):
+                self.assertEqual(
+                    self._code(signature).count(
+                        "target = ResolveLoadoutTarget(command.args, targetError);"
+                    ),
+                    1,
+                )
 
     def test_the_read_writes_nothing_and_answers_nothing_past_the_caps(self) -> None:
-        get = self._code(_ENFORCE_FUNCTIONS[0])
+        get = self._code(GET_FN)
         read_path = "".join(
-            self._code(signature) for signature in (
-                _ENFORCE_FUNCTIONS[0], _ENFORCE_FUNCTIONS[7], _ENFORCE_FUNCTIONS[8],
-                _ENFORCE_FUNCTIONS[9],
-            )
+            self._code(signature) for signature in (GET_FN, READ_FN, APPEND_FN, SLOT_NAME_FN)
         )
         for forbidden in ("ObjectDelete", "Create", "m_RuntimeObjects", "m_Jobs", "ApplyLoadout", "ClearLoadout"):
             with self.subTest(forbidden=forbidden):
@@ -1109,9 +1591,9 @@ class LoadoutEnforceTest(unittest.TestCase):
         self.assertNotIn("result.loadout", too_large)
         self.assertLess(get.index("ResolveLoadoutTarget("), get.index("ReadLoadout("))
         self.assertLess(get.index('"loadout_too_large"'), get.index("result.loadout = loadoutRead;"))
-        read = self._code(_ENFORCE_FUNCTIONS[7])
+        read = self._code(READ_FN)
         self.assertIn("loadoutRead.items.Clear();", _if_body(read, "loadoutRead.too_large"))
-        append = self._code(_ENFORCE_FUNCTIONS[8])
+        append = self._code(APPEND_FN)
         self.assertIn(
             "if (level > LOADOUT_MAX_DEPTH || loadoutRead.items.Count() >= LOADOUT_MAX_ITEMS)",
             append,
@@ -1125,18 +1607,15 @@ class LoadoutEnforceTest(unittest.TestCase):
             read.index('AppendLoadoutRow(loadoutRead, attachment, "attachment", -1, 1);'),
             read.index('AppendLoadoutRow(loadoutRead, hands, "hands", -1, 1);'),
         )
-        slot_name = self._code(_ENFORCE_FUNCTIONS[9])
+        slot_name = self._code(SLOT_NAME_FN)
         self.assertIn("return InventorySlots.GetSlotName(location.GetSlot());", slot_name)
 
-    def test_apply_checks_rows_and_target_before_it_changes_anything(self) -> None:
-        code = self._code(_ENFORCE_FUNCTIONS[1])
+    def test_apply_checks_rows_and_target_then_creates_in_its_tick(self) -> None:
+        code = self._code(APPLY_FN)
         order = [
             "rowsError = LoadoutRowsError(command.args.loadout_items);",
             "target = ResolveLoadoutTarget(command.args, targetError);",
             "if (HasActiveJobFor(null, target))",
-            "ClearLoadout(target, cleared);",
-            'job.kind = "loadout";',
-            "m_Jobs.Insert(job.id, job);",
             "ApplyLoadout(target, command.args, result);",
         ]
         positions = []
@@ -1146,12 +1625,12 @@ class LoadoutEnforceTest(unittest.TestCase):
             positions.append(code.index(token))
         self.assertEqual(positions, sorted(positions))
         self.assertIn('result.error = "busy";', _if_body(code, "HasActiveJobFor(null, target)"))
-        queued = _if_body(code, "cleared.Count() > 0")
-        self.assertIn("job.loadout_cleared = cleared;", queued)
-        self.assertIn("job.subject = target;", queued)
-        self.assertIn("return false;", queued)
+        # The apply queues no job and deletes nothing: that is loadout_clear's.
+        for forbidden in ("ClearLoadout", "ObjectDelete", "m_Jobs", "MCPJob", "clear_first"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, code)
 
-        rows = self._code(_ENFORCE_FUNCTIONS[3])
+        rows = self._code(ROWS_FN)
         self.assertEqual(set(re.findall(r'return "(\w*)";', rows)), {"bad_args", ""})
         for token in (
             "if (rows.Count() > LOADOUT_MAX_ITEMS)",
@@ -1163,9 +1642,51 @@ class LoadoutEnforceTest(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, rows)
 
+    def test_the_clear_deletes_in_its_tick_and_its_job_only_watches(self) -> None:
+        code = self._code(CLEAR_FN)
+        order = [
+            "target = ResolveLoadoutTarget(command.args, targetError);",
+            "if (HasActiveJobFor(null, target))",
+            "ClearLoadout(target, cleared);",
+            "if (cleared.Count() == 0)",
+            'job.kind = "loadout_clear";',
+            "m_Jobs.Insert(job.id, job);",
+        ]
+        positions = []
+        for token in order:
+            with self.subTest(token=token):
+                self.assertEqual(code.count(token), 1)
+            positions.append(code.index(token))
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn('result.error = "busy";', _if_body(code, "HasActiveJobFor(null, target)"))
+        self.assertNotIn("ApplyLoadout", code)
+        clear = self._code(CLEAR_LOADOUT_FN)
+        self.assertIn("GetGame().ObjectDelete(cleared.Get(i));", clear)
+        self.assertLess(clear.index("cleared.Insert(hands);"), clear.index("GetGame().ObjectDelete"))
+        # Nothing the job runs changes the world.
+        job_code = self._code(CLEAR_DONE_FN) + self._code(POST_CLEAR_FN)
+        for forbidden in ("ObjectDelete", "Create", "ApplyLoadout", "ClearLoadout", "m_RuntimeObjects"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, job_code)
+        ready = _method_body(self.source, JOB_READY_FN)
+        self.assertEqual(
+            _if_body(ready, 'job.kind == "loadout_clear"').strip(), "return IsLoadoutClearDone(job);"
+        )
+        for hook, complete in ((JOB_SUCCESS_FN, "true"), (JOB_TIMEOUT_FN, "false")):
+            with self.subTest(hook=hook):
+                body = _without_comments(_method_body(self.source, hook))
+                branch = _if_body(body, 'job.kind == "loadout_clear"')
+                self.assertEqual(
+                    [line.strip() for line in branch.strip().splitlines()],
+                    [f"PostLoadoutClearJob(job, {complete});", "return;"],
+                )
+        # The first round's "loadout" job kind is gone.
+        self.assertNotIn('job.kind == "loadout"', _without_comments(self.source))
+        self.assertNotIn('job.kind = "loadout";', _without_comments(self.source))
+
     def test_each_row_error_and_an_occupied_slot_keeps_its_item(self) -> None:
-        create = self._code(_ENFORCE_FUNCTIONS[6])
-        apply = self._code(_ENFORCE_FUNCTIONS[5])
+        create = self._code(CREATE_FN)
+        apply = self._code(APPLY_LOADOUT_FN)
         self.assertEqual(
             _errors(create),
             {"unknown_type", "slot_not_found", "slot_occupied", "cannot_attach", "no_room"},
@@ -1198,7 +1719,7 @@ class LoadoutEnforceTest(unittest.TestCase):
                 self.assertIn("GetGame().ObjectDelete(item);", _if_body(create, postcondition))
 
     def test_every_row_gets_one_outcome_and_a_failed_parent_stops_its_children(self) -> None:
-        apply = self._code(_ENFORCE_FUNCTIONS[5])
+        apply = self._code(APPLY_LOADOUT_FN)
         loop = _block_after(apply, apply.index("while (i < args.loadout_items.Count())"))
         for token in (
             "created.Insert(item);",
@@ -1212,29 +1733,6 @@ class LoadoutEnforceTest(unittest.TestCase):
         self.assertLess(apply.index("while (i < args.loadout_items.Count())"), apply.index("ReadLoadout(target, loadoutReply);"))
         self.assertIn("result.loadout = loadoutReply;", apply)
         self.assertNotIn("m_RuntimeObjects", apply)
-
-    def test_clear_first_deletes_then_waits_for_the_objects_to_go(self) -> None:
-        clear = self._code(_ENFORCE_FUNCTIONS[4])
-        self.assertIn("GetGame().ObjectDelete(cleared.Get(i));", clear)
-        self.assertLess(clear.index("cleared.Insert(hands);"), clear.index("GetGame().ObjectDelete"))
-        ready = _method_body(self.source, "protected bool IsJobReady(MCPJob job)")
-        self.assertEqual(
-            _if_body(ready, 'job.kind == "loadout"').strip(), "return IsLoadoutClearDone(job);"
-        )
-        for hook in ("protected void PostJobSuccess(MCPJob job)", "protected void PostJobTimeout(MCPJob job)"):
-            with self.subTest(hook=hook):
-                body = _without_comments(_method_body(self.source, hook))
-                branch = _if_body(body, 'job.kind == "loadout"')
-                self.assertEqual(
-                    [line.strip() for line in branch.strip().splitlines()],
-                    ["PostLoadoutJob(job);", "return;"],
-                )
-        done = self._code(_ENFORCE_FUNCTIONS[10])
-        self.assertIn("if (job.loadout_cleared.Get(i))", done)
-        post = self._code(_ENFORCE_FUNCTIONS[11])
-        self.assertIn("ApplyLoadout(target, job.args, result);", post)
-        self.assertIn("PostResult(result);", post)
-        self.assertEqual(_errors(post), {"not_found"})
 
     def test_compile_hazards_locals_on_top_and_no_ternary(self) -> None:
         for signature in _ENFORCE_FUNCTIONS:
@@ -1270,10 +1768,12 @@ class LoadoutEnforceTest(unittest.TestCase):
         )
         args = _class_members(self.messages, "MCPArgs")
         self.assertEqual(args.count(("ref array<ref MCPLoadoutItem>", "loadout_items")), 1)
-        self.assertEqual(args.count(("bool", "clear_first")), 1)
-        self.assertEqual(
-            _class_members(self.messages, "MCPResult").count(("ref MCPLoadout", "loadout")), 1
-        )
+        # clear_first is the tool's: on the wire it is the loadout_clear verb.
+        self.assertNotIn("clear_first", {name for _type, name in args})
+        result = _class_members(self.messages, "MCPResult")
+        self.assertEqual(result.count(("ref MCPLoadout", "loadout")), 1)
+        self.assertEqual(result.count(("int", "deleted")), 1)
+        self.assertEqual(result.count(("bool", "cleanup_complete")), 1)
         self.assertEqual(
             _class_members(self.messages, "MCPJob").count(("ref array<EntityAI>", "loadout_cleared")), 1
         )
@@ -1281,6 +1781,970 @@ class LoadoutEnforceTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertLess(self.messages.index(name), self.messages.index("class MCPResult"))
         self.assertLess(self.messages.index("class MCPLoadoutItem"), self.messages.index("class MCPArgs"))
+
+
+# ---------------------------------------------------------------------------
+# The Enforce bodies run on fakes (#261 review Y6, Y7). Each translated body
+# is the real one in MCPBridge.c or MCPMessages.c; only `new T()`, template
+# types and the calls to the two functions with mixed out parameters are
+# rewritten into names the translator can read.
+
+
+class _Str(EnforceString):
+    """An Enforce string with the + a log line uses: string + int or float too."""
+
+    __slots__ = ()
+
+    def __add__(self, other: object) -> "_Str":
+        if isinstance(other, EnforceString):
+            return _Str(self.data + other.data)
+        if isinstance(other, (int, float)) and not isinstance(other, bool):
+            return _Str(self.data + str(other).encode("ascii"))
+        raise TypeError(f"string + {type(other).__name__}")
+
+
+def _s(text: str) -> _Str:
+    return _Str.of(text)
+
+
+# Slot ids as InventorySlots numbers them here; -1 is InventorySlots.INVALID.
+_SLOT_IDS = {
+    name: index
+    for index, name in enumerate(("Body", "Legs", "Feet", "Back", "Vest", "magazine"))
+}
+_SURVIVOR_SLOTS = ("Body", "Legs", "Feet", "Back", "Vest")
+# class: (its attachment slots, whether it has cargo)
+_CATALOG: dict[str, tuple[tuple[str, ...], bool]] = {
+    "TShirt_White": ((), False),
+    "Jeans_Blue": ((), False),
+    "AthleticShoes_Black": ((), False),
+    "TaloonBag_Blue": ((), True),
+    "SmershVest": ((), True),
+    "SmershBag": ((), True),
+    "Apple": ((), False),
+    "Rag": ((), False),
+    "BandageDressing": ((), False),
+    "M4A1": (("magazine",), False),
+    "Mag_STANAG_30Rnd": ((), False),
+}
+
+
+class _Array:
+    """array<T>. Like an Enforce reference, an empty array is not null."""
+
+    def __init__(self, items: Any = ()) -> None:
+        self.items = list(items)
+
+    def Insert(self, value: object) -> int:
+        self.items.append(value)
+        return len(self.items) - 1
+
+    def Get(self, index: int) -> Any:
+        if type(index) is not int or not 0 <= index < len(self.items):
+            raise AssertionError(f"array index {index!r} outside {len(self.items)} items")
+        return self.items[index]
+
+    def Count(self) -> int:
+        return len(self.items)
+
+    def Clear(self) -> None:
+        self.items.clear()
+
+
+class _JobMap:
+    """map<int, ref MCPJob> m_Jobs."""
+
+    def __init__(self) -> None:
+        self.jobs: dict[int, Any] = {}
+
+    def Insert(self, key: int, value: object) -> None:
+        self.jobs[key] = value
+
+    def Count(self) -> int:
+        return len(self.jobs)
+
+    def GetKey(self, index: int) -> int:
+        return list(self.jobs)[index]
+
+    def GetElement(self, index: int) -> Any:
+        return list(self.jobs.values())[index]
+
+    def Remove(self, key: int) -> None:
+        del self.jobs[key]
+
+
+class _Row:
+    """MCPLoadoutItem as the engine allocates it."""
+
+    def __init__(self, type_name: str = "", slot: str = "", dest: str = "", parent: int = 0) -> None:
+        self.type = _s(type_name)
+        self.slot = _s(slot)
+        self.dest = _s(dest)
+        self.parent = parent
+
+
+class _Applied:
+    """MCPLoadoutApplied."""
+
+    def __init__(self) -> None:
+        self.ok = False
+        self.error = _s("")
+
+
+class _LoadoutObject:
+    """MCPLoadout before its constructor runs: every ref member null."""
+
+    def __init__(self) -> None:
+        self.items: Any = None
+        self.applied: Any = None
+        self.too_large = False
+
+
+class _Result:
+    """MCPResult, the members these verbs touch."""
+
+    def __init__(self) -> None:
+        self.id = 0
+        self.ok = False
+        self.error = _s("")
+        self.type = _s("")
+        self.object_id = 0
+        self.deleted = 0
+        self.cleanup_complete = False
+        self.loadout: Any = None
+        self.found = False
+        self.pos_real: Any = None
+        self.lifetime: Any = None
+        self.tick_poll_sent = 0
+        self.tick_poll_callback = 0
+        self.tick_dispatch = 0
+
+
+class _Job:
+    """MCPJob."""
+
+    def __init__(self) -> None:
+        self.id = 0
+        self.kind = _s("")
+        self.args: Any = None
+        self.subject: Any = None
+        self.actor: Any = None
+        self.loadout_cleared: Any = None
+        self.deadline_s = 0.0
+        self.error = _s("")
+        self.tick_poll_sent = 0
+        self.tick_poll_callback = 0
+        self.tick_dispatch = 0
+
+
+class _Args:
+    """MCPArgs: the target keys and the rows."""
+
+    def __init__(self, object_id: int = 0, uid: str = "", rows: list[dict[str, Any]] | None = None) -> None:
+        self.object_id = object_id
+        self.uid = _s(uid)
+        self.loadout_items = _wire_rows(rows or [])
+        self.type = _s("")
+        self.lifetime_s_set = False
+
+
+class _Command:
+    def __init__(self, cmd: str, args: _Args | None, command_id: int = 7) -> None:
+        self.id = command_id
+        self.cmd = _s(cmd)
+        self.args = args
+
+
+def _wire_rows(rows: list[dict[str, Any]]) -> _Array:
+    return _Array(_Row(row["type"], row["slot"], row["dest"], row["parent"]) for row in rows)
+
+
+def _read_rows(read: _LoadoutObject) -> list[dict[str, Any]]:
+    return [
+        {"type": row.type.text, "slot": row.slot.text, "dest": row.dest.text, "parent": row.parent}
+        for row in read.items.items
+    ]
+
+
+class _Location:
+    """InventoryLocation: only the slot is read."""
+
+    def __init__(self) -> None:
+        self.slot = -1
+
+    def GetSlot(self) -> int:
+        return self.slot
+
+
+class _Cargo:
+    def __init__(self) -> None:
+        self.items: list[_Entity] = []
+
+    def GetItemCount(self) -> int:
+        return len(self.items)
+
+    def GetItem(self, index: int) -> "_Entity":
+        return self.items[index]
+
+
+class _World:
+    """The engine of these fakes: what was created and deleted, in order."""
+
+    def __init__(self) -> None:
+        self.created: list[_Entity] = []
+        self.deleted: list[_Entity] = []
+        # True: the next creates make the item but put it somewhere else than asked.
+        self.misplace = False
+
+    def make(self, type_name: str, record: bool = True) -> "_Entity | None":
+        if type_name not in _CATALOG:
+            return None
+        slots, cargo = _CATALOG[type_name]
+        item = _Entity(self, type_name, slots, cargo)
+        if record:
+            self.created.append(item)
+        return item
+
+    def changes(self) -> tuple[int, int]:
+        return (len(self.created), len(self.deleted))
+
+    def finish_deletes(self, *references: _Array) -> None:
+        """The engine's next frame: what was deleted leaves its owner and reads null."""
+        for item in self.deleted:
+            item.detach()
+        for array in references:
+            array.items = [
+                None if entry is not None and entry.gone else entry for entry in array.items
+            ]
+
+
+class _Inventory:
+    """GameInventory of one entity."""
+
+    def __init__(self, owner: "_Entity", slots: tuple[str, ...], cargo: bool) -> None:
+        self.owner = owner
+        self.slot_ids = [_SLOT_IDS[name] for name in slots]
+        self.attachments: list[tuple[int, _Entity]] = []
+        self.cargo = _Cargo() if cargo else None
+
+    def AttachmentCount(self) -> int:
+        return len(self.attachments)
+
+    def GetAttachmentFromIndex(self, index: int) -> "_Entity":
+        return self.attachments[index][1]
+
+    def HasAttachmentSlot(self, slot_id: int) -> bool:
+        return slot_id in self.slot_ids
+
+    def FindAttachment(self, slot_id: int) -> "_Entity | None":
+        for attached_slot, item in self.attachments:
+            if attached_slot == slot_id:
+                return item
+        return None
+
+    def attach(self, item: "_Entity", slot_id: int) -> None:
+        self.attachments.append((slot_id, item))
+        item.location = (self.owner, "attachment", slot_id)
+
+    def CreateAttachmentEx(self, type_name: EnforceString, slot_id: int) -> "_Entity | None":
+        if slot_id not in self.slot_ids or self.FindAttachment(slot_id) is not None:
+            return None
+        item = self.owner.world.make(type_name.text)
+        if item is not None and not self.owner.world.misplace:
+            self.attach(item, slot_id)
+        return item
+
+    def GetCargo(self) -> _Cargo | None:
+        return self.cargo
+
+    def CreateEntityInCargo(self, type_name: EnforceString) -> "_Entity | None":
+        if self.cargo is None:
+            return None
+        item = self.owner.world.make(type_name.text)
+        if item is not None and not self.owner.world.misplace:
+            self.cargo.items.append(item)
+            item.location = (self.owner, "cargo", -1)
+        return item
+
+    def HasEntityInCargo(self, item: "_Entity") -> bool:
+        return self.cargo is not None and any(entry is item for entry in self.cargo.items)
+
+    def GetCurrentInventoryLocation(self, location: _Location) -> bool:
+        where = self.owner.location
+        location.slot = where[2] if where is not None and where[1] == "attachment" else -1
+        return True
+
+
+class _Entity:
+    def __init__(self, world: _World, type_name: str, slots: tuple[str, ...] = (), cargo: bool = False) -> None:
+        self.world = world
+        self.type = _s(type_name)
+        self.inventory = _Inventory(self, slots, cargo)
+        self.location: tuple[Any, str, int] | None = None
+        self.gone = False
+
+    def GetType(self) -> _Str:
+        return self.type
+
+    def GetInventory(self) -> _Inventory:
+        return self.inventory
+
+    def detach(self) -> None:
+        if self.location is not None:
+            owner, where, _slot = self.location
+            if where == "attachment":
+                owner.inventory.attachments = [
+                    entry for entry in owner.inventory.attachments if entry[1] is not self
+                ]
+            elif where == "cargo":
+                owner.inventory.cargo.items = [
+                    entry for entry in owner.inventory.cargo.items if entry is not self
+                ]
+            else:
+                owner.hands = None
+            self.location = None
+        self._gone()
+
+    def _gone(self) -> None:
+        self.gone = True
+        for _slot, child in self.inventory.attachments:
+            child._gone()
+        if self.inventory.cargo is not None:
+            for child in self.inventory.cargo.items:
+                child._gone()
+
+
+class _HumanInventory:
+    def __init__(self, player: "_Player") -> None:
+        self.player = player
+
+    def CreateInHands(self, type_name: EnforceString) -> _Entity | None:
+        if self.player.hands is not None:
+            return None
+        item = self.player.world.make(type_name.text)
+        if item is not None and not self.player.world.misplace:
+            self.player.hands = item
+            item.location = (self.player, "hands", -1)
+        return item
+
+
+class _Player(_Entity):
+    """PlayerBase: a survivor world_spawn made, or a connected player (identity)."""
+
+    def __init__(self, world: _World, identity: object = None) -> None:
+        super().__init__(world, "SurvivorM_Mirek", _SURVIVOR_SLOTS, False)
+        self.hands: _Entity | None = None
+        self.identity = identity
+
+    def GetItemInHands(self) -> _Entity | None:
+        return self.hands
+
+    def GetHumanInventory(self) -> _HumanInventory:
+        return _HumanInventory(self)
+
+    def GetIdentity(self) -> object:
+        return self.identity
+
+
+class _Game:
+    def __init__(self, world: _World) -> None:
+        self.world = world
+
+    def ObjectDelete(self, item: _Entity) -> None:
+        self.world.deleted.append(item)
+
+
+class _InventorySlots:
+    INVALID = -1
+
+    @staticmethod
+    def GetSlotIdFromString(name: EnforceString) -> int:
+        return _SLOT_IDS.get(name.text, -1)
+
+    @staticmethod
+    def IsSlotIdValid(slot_id: int) -> bool:
+        return slot_id >= 0
+
+    @staticmethod
+    def GetSlotName(slot_id: int) -> _Str:
+        for name, value in _SLOT_IDS.items():
+            if value == slot_id:
+                return _s(name)
+        return _s("")
+
+
+_BRIDGE_REWRITES = (
+    (re.compile(r"new array<EntityAI>\(\)"), "NewEntityArray()"),
+    (re.compile(r"new array<int>\(\)"), "NewIntArray()"),
+    (re.compile(r"new array<float>\(\)"), "NewFloatArray()"),
+    (re.compile(r"\barray<EntityAI>"), "EntityArray"),
+    (re.compile(r"\barray<int>"), "IntArray"),
+    (
+        re.compile(
+            r"new (MCPJob|MCPResult|MCPLoadout|MCPLoadoutApplied|MCPLoadoutItem|"
+            r"InventoryLocation|MCPSpawnLifetime)\(\)"
+        ),
+        r"New\1()",
+    ),
+    # The two callees with in and out parameters, through adapters that run
+    # the translated callee and hand its out value back.
+    (
+        re.compile(r"(\w+) = ResolveLoadoutTarget\(command\.args, (\w+)\);"),
+        r"\1 = ResolveLoadoutTargetOut(command.args); \2 = LastOutError();",
+    ),
+    (
+        re.compile(r"(\w+) = CreateLoadoutItem\(target, owner, row, (\w+)\);"),
+        r"\1 = CreateLoadoutItemOut(target, owner, row); \2 = LastOutError();",
+    ),
+    (re.compile(r"\bpos\[(\d)\]"), r"VecAt(pos, \1)"),
+)
+_CTOR_REWRITES = (
+    (re.compile(r"new array<ref MCPLoadout(?:Item|Applied)>\(\)"), "NewArray()"),
+    (re.compile(r"(?<![\w.])(items|applied|too_large)\s*="), r"this.\1 ="),
+)
+_BRIDGE_TYPES = (
+    "Object",
+    "Human",
+    "PlayerBase",
+    "EntityAI",
+    "GameInventory",
+    "CargoBase",
+    "InventoryLocation",
+    "MCPJob",
+    "MCPResult",
+    "MCPLoadout",
+    "MCPLoadoutItem",
+    "MCPLoadoutApplied",
+    "EntityArray",
+    "IntArray",
+    "RowArray",
+    "vector",
+)
+# (signature in MCPBridge.c, signature to translate it as)
+_RUN_FUNCTIONS: tuple[tuple[str, str], ...] = tuple(
+    (signature, signature)
+    for signature in _ENFORCE_FUNCTIONS
+    if signature != ROWS_FN
+) + (
+    (ROWS_FN, "protected string LoadoutRowsError(RowArray rows)"),
+    (HAS_JOB_FN, HAS_JOB_FN),
+    (PROCESS_JOBS_FN, PROCESS_JOBS_FN),
+    (JOB_READY_FN, JOB_READY_FN),
+    (JOB_SUCCESS_FN, JOB_SUCCESS_FN),
+    (JOB_TIMEOUT_FN, JOB_TIMEOUT_FN),
+)
+
+
+def _rewrite(code: str, rewrites) -> str:
+    for pattern, replacement in rewrites:
+        code = pattern.sub(replacement, code)
+    return code
+
+
+def _standalone(source: str, signature: str, rewrites, as_signature: str) -> str:
+    """One method of `source` on its own, its code rewritten (never its string
+    literals), declared with `as_signature`."""
+    body = method_body(source, signature)
+    pieces: list[str] = []
+    last = 0
+    for match in _ENFORCE_STRING.finditer(body):
+        pieces.append(_rewrite(body[last : match.start()], rewrites))
+        pieces.append(match.group(0))
+        last = match.end()
+    pieces.append(_rewrite(body[last:], rewrites))
+    return as_signature + "\n{" + "".join(pieces) + "}\n"
+
+
+def _bridge_constant(source: str, declaration: str) -> float:
+    match = re.search(rf"protected const {declaration} = ([0-9.]+);", source)
+    if match is None:
+        raise AssertionError(f"{declaration} is absent from MCPBridge.c")
+    return float(match.group(1))
+
+
+class _Bridge:
+    """The loadout bodies of MCPBridge.c and the job runner, translated and
+    run on one fake world. MCPLoadout is built by its translated constructor."""
+
+    def __init__(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        messages = MESSAGES_PATH.read_text(encoding="utf-8")
+        self.world = _World()
+        self.registry: dict[int, object] = {}
+        self.jobs = _JobMap()
+        self.posted: list[_Result] = []
+        self.logged: list[str] = []
+        self.resolve_player_calls: list[_Args] = []
+        self.player: _Player | None = None
+        self.job_timeout_s = _bridge_constant(source, "float JOB_TIMEOUT_S")
+        self._out_error: _Str = _s("")
+        self.ctor: dict[str, Any] = {"_S": _Str, "NewArray": _Array}
+        translate(
+            _standalone(messages, LOADOUT_CTOR, _CTOR_REWRITES, LOADOUT_CTOR),
+            LOADOUT_CTOR,
+            self.ctor,
+        )
+        game = _Game(self.world)
+        self.namespace: dict[str, Any] = {
+            "_S": _Str,
+            "m_Jobs": self.jobs,
+            "m_ElapsedS": 0.0,
+            "JOB_TIMEOUT_S": self.job_timeout_s,
+            "LOADOUT_MAX_ITEMS": int(_bridge_constant(source, "int LOADOUT_MAX_ITEMS")),
+            "LOADOUT_MAX_DEPTH": int(_bridge_constant(source, "int LOADOUT_MAX_DEPTH")),
+            "InventorySlots": _InventorySlots,
+            "GetGame": lambda: game,
+            "PlayerBase": SimpleNamespace(Cast=lambda item: item if isinstance(item, _Player) else None),
+            "EntityAI": SimpleNamespace(Cast=lambda item: item if isinstance(item, _Entity) else None),
+            "RuntimeObjectById": lambda object_id: self.registry.get(object_id),
+            "ResolvePlayer": self._resolve_player,
+            "IsKnownInventoryClassname": lambda name: name.text in _CATALOG,
+            "PostResult": self.posted.append,
+            "Log": lambda line: self.logged.append(line.text),
+            "NewEntityArray": _Array,
+            "NewIntArray": _Array,
+            "NewFloatArray": _Array,
+            "NewMCPJob": _Job,
+            "NewMCPResult": _Result,
+            "NewMCPLoadout": self._new_loadout,
+            "NewMCPLoadoutApplied": _Applied,
+            "NewMCPLoadoutItem": _Row,
+            "NewInventoryLocation": _Location,
+            "NewMCPSpawnLifetime": SimpleNamespace,
+            "ResolveLoadoutTargetOut": lambda args: self._out("ResolveLoadoutTarget", args),
+            "CreateLoadoutItemOut": lambda target, owner, row: self._out(
+                "CreateLoadoutItem", target, owner, row
+            ),
+            "LastOutError": lambda: self._out_error,
+            "IsSpawnReady": lambda _job: False,
+            "IsSeatReady": lambda _job: False,
+            "PostSeatSuccess": self._unexpected,
+            "VectorToArray": self._unexpected,
+            "VecAt": self._unexpected,
+        }
+        for signature, as_signature in _RUN_FUNCTIONS:
+            translate(
+                _standalone(source, signature, _BRIDGE_REWRITES, as_signature),
+                as_signature,
+                self.namespace,
+                class_types=_BRIDGE_TYPES,
+                out_functions={"ResolveLoadoutTarget": 1, "CreateLoadoutItem": 1},
+            )
+
+    def _unexpected(self, *_args: object) -> None:
+        raise AssertionError("a spawn or seat path ran for a loadout job")
+
+    def _new_loadout(self) -> _LoadoutObject:
+        made = _LoadoutObject()
+        self.ctor["this"] = made
+        self.ctor["MCPLoadout"]()
+        return made
+
+    def _resolve_player(self, args: _Args, _error: object) -> _Player | None:
+        self.resolve_player_calls.append(args)
+        return self.player
+
+    def _out(self, name: str, *args: object) -> Any:
+        value, self._out_error = self.namespace[name](*args)
+        return value
+
+    def call(self, name: str, *args: object) -> Any:
+        return self.namespace[name](*args)
+
+    def tick(self, elapsed_s: float) -> None:
+        """One OnUpdate's job pass at game time elapsed_s."""
+        self.namespace["m_ElapsedS"] = elapsed_s
+        self.call("ProcessJobs")
+
+    def survivor(self, object_id: int, identity: object = None) -> _Player:
+        player = _Player(self.world, identity)
+        self.registry[object_id] = player
+        return player
+
+    def put(self, owner: _Entity, where: str, type_name: str, slot: str = "") -> _Entity:
+        """Something the target already has, set up without counting as a change."""
+        item = self.world.make(type_name, record=False)
+        assert item is not None
+        if where == "attachment":
+            owner.inventory.attach(item, _SLOT_IDS[slot])
+        elif where == "cargo":
+            assert owner.inventory.cargo is not None
+            owner.inventory.cargo.items.append(item)
+            item.location = (owner, "cargo", -1)
+        else:
+            assert isinstance(owner, _Player)
+            owner.hands = item
+            item.location = (owner, "hands", -1)
+        return item
+
+
+class LoadoutBridgeRunTest(unittest.TestCase):
+    """The real Enforce bodies on fakes: branches and effects, not tokens."""
+
+    def _dressed(self, bridge: _Bridge) -> tuple[_Player, list[_Entity]]:
+        survivor = bridge.survivor(3)
+        shirt = bridge.put(survivor, "attachment", "TShirt_White", "Body")
+        bag = bridge.put(survivor, "attachment", "TaloonBag_Blue", "Back")
+        bridge.put(bag, "cargo", "Apple")
+        weapon = bridge.put(survivor, "hands", "M4A1")
+        return survivor, [shirt, bag, weapon]
+
+    def test_the_target_is_resolved_or_refused_before_anything_is_read(self) -> None:
+        bridge = _Bridge()
+        survivor = bridge.survivor(3)
+        bridge.survivor(4, identity=object())
+        bridge.registry[5] = _Entity(bridge.world, "Apple")
+
+        def resolve(args: _Args | None) -> tuple[object, str]:
+            target, error = bridge.call("ResolveLoadoutTarget", args)
+            return target, error.text
+
+        self.assertEqual(resolve(_Args(object_id=3)), (survivor, ""))
+        # An id that names a connected player is bad_target: uid selects those (U5).
+        self.assertEqual(resolve(_Args(object_id=4)), (None, "bad_target"))
+        self.assertEqual(resolve(_Args(object_id=5)), (None, "bad_target"))
+        self.assertEqual(resolve(_Args(object_id=9)), (None, "not_found"))
+        self.assertEqual(resolve(_Args(object_id=3, uid="76561198000000000")), (None, "bad_args"))
+        self.assertEqual(resolve(_Args(object_id=-1)), (None, "bad_args"))
+        self.assertEqual(resolve(None), (None, "bad_args"))
+        self.assertEqual(bridge.resolve_player_calls, [])
+        self.assertEqual(bridge.world.changes(), (0, 0))
+
+    def test_the_bridge_takes_what_only_the_ingress_refuses(self) -> None:
+        # The other half of LoadoutIngressTest.test_only_the_ingress_refuses_object_id_0_and_names_with_spaces.
+        bridge = _Bridge()
+        bridge.player = _Player(bridge.world)
+        for uid in ("", "76561198000000000"):
+            with self.subTest(uid=uid):
+                args = _Args(object_id=0, uid=uid)
+                target, error = bridge.call("ResolveLoadoutTarget", args)
+                self.assertIs(target, bridge.player)
+                self.assertEqual(error.text, "")
+                self.assertIs(bridge.resolve_player_calls[-1], args)
+        body = {"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}
+        for row in (dict(body, type="TShirt White"), dict(body, slot="Bo dy")):
+            with self.subTest(row=row):
+                self.assertEqual(bridge.call("LoadoutRowsError", _wire_rows([row])).text, "")
+        # What both refuse: an empty type, or rows past the caps.
+        self.assertEqual(
+            bridge.call("LoadoutRowsError", _wire_rows([dict(body, type="")])).text, "bad_args"
+        )
+        self.assertEqual(
+            bridge.call("LoadoutRowsError", _wire_rows([dict(body)] * 65)).text, "bad_args"
+        )
+
+    def test_the_clear_job_waits_while_any_deleted_object_is_still_there(self) -> None:
+        bridge = _Bridge()
+        still_there = _Entity(bridge.world, "TShirt_White")
+        job = _Job()
+        for references, done in (
+            ([None, still_there, None], False),
+            ([still_there], False),
+            ([None, None, None], True),
+        ):
+            with self.subTest(references=references):
+                job.loadout_cleared = _Array(references)
+                self.assertIs(bridge.call("IsLoadoutClearDone", job), done)
+
+    def test_the_clear_deletes_in_its_tick_and_its_job_changes_nothing_after(self) -> None:
+        bridge = _Bridge()
+        survivor, worn = self._dressed(bridge)
+        bridge.namespace["m_ElapsedS"] = 2.0
+        result = _Result()
+        posted_now = bridge.call("DispatchLoadoutClear", _Command(CLEAR, _Args(object_id=3), 21), result)
+        # The dispatch tick deletes what the target wears and holds (the apple
+        # goes with its bag) and leaves the answer to the job.
+        self.assertIs(posted_now, False)
+        self.assertEqual(bridge.world.deleted, worn)
+        self.assertEqual(bridge.world.created, [])
+        job = bridge.jobs.jobs[21]
+        self.assertEqual(job.kind.text, "loadout_clear")
+        self.assertIs(job.subject, survivor)
+        self.assertEqual(job.loadout_cleared.items, worn)
+        self.assertEqual(job.deadline_s, 2.0 + bridge.job_timeout_s)
+        self.assertIn("kind=loadout_clear deleted=3", bridge.logged[-1])
+        after_dispatch = bridge.world.changes()
+
+        # While the deleted objects are still there: no answer, and both verbs
+        # are busy on this target.
+        bridge.tick(3.0)
+        self.assertEqual(bridge.posted, [])
+        for verb, dispatch, args in (
+            (APPLY, "DispatchLoadoutApply", _Args(object_id=3, rows=_rows(PRESET_8))),
+            (CLEAR, "DispatchLoadoutClear", _Args(object_id=3)),
+        ):
+            with self.subTest(verb=verb):
+                refused = _Result()
+                self.assertIs(bridge.call(dispatch, _Command(verb, args, 22), refused), True)
+                self.assertEqual((refused.ok, refused.error.text), (False, "busy"))
+        self.assertEqual(bridge.world.changes(), after_dispatch)
+        self.assertEqual(list(bridge.jobs.jobs), [21])
+
+        # The engine removes them: the next pass posts what the clear saw.
+        bridge.world.finish_deletes(job.loadout_cleared)
+        bridge.tick(3.5)
+        self.assertEqual(len(bridge.posted), 1)
+        posted = bridge.posted[0]
+        self.assertEqual(
+            (posted.id, posted.ok, posted.deleted, posted.cleanup_complete), (21, True, 3, True)
+        )
+        self.assertIsNone(posted.loadout)
+        self.assertEqual(bridge.jobs.Count(), 0)
+        self.assertEqual(bridge.world.changes(), after_dispatch)
+
+        # With the job gone, an apply runs in its own tick and queues nothing.
+        applied = _Result()
+        rows = _rows(PRESET_8)
+        self.assertIs(
+            bridge.call("DispatchLoadoutApply", _Command(APPLY, _Args(object_id=3, rows=rows), 23), applied),
+            True,
+        )
+        self.assertEqual([outcome.ok for outcome in applied.loadout.applied.items], [True] * 8)
+        self.assertEqual(_read_rows(applied.loadout), rows)
+        self.assertEqual(bridge.jobs.Count(), 0)
+        self.assertEqual(len(bridge.posted), 1)
+
+    def test_a_clear_job_at_its_deadline_says_so_and_still_changes_nothing(self) -> None:
+        bridge = _Bridge()
+        _survivor, worn = self._dressed(bridge)
+        bridge.namespace["m_ElapsedS"] = 2.0
+        self.assertIs(
+            bridge.call("DispatchLoadoutClear", _Command(CLEAR, _Args(object_id=3), 21), _Result()),
+            False,
+        )
+        after_dispatch = bridge.world.changes()
+        bridge.tick(2.0 + bridge.job_timeout_s)
+        self.assertEqual(bridge.posted, [])
+        # The deleted objects never read null; past the deadline the job reports.
+        bridge.tick(2.25 + bridge.job_timeout_s)
+        self.assertEqual(len(bridge.posted), 1)
+        posted = bridge.posted[0]
+        self.assertEqual(
+            (posted.id, posted.ok, posted.deleted, posted.cleanup_complete),
+            (21, True, len(worn), False),
+        )
+        self.assertIsNone(posted.loadout)
+        self.assertEqual(posted.error.text, "")
+        self.assertEqual(bridge.jobs.Count(), 0)
+        self.assertEqual(bridge.world.changes(), after_dispatch)
+
+    def test_a_clear_with_nothing_to_delete_answers_at_once(self) -> None:
+        bridge = _Bridge()
+        bridge.survivor(3)
+        result = _Result()
+        self.assertIs(
+            bridge.call("DispatchLoadoutClear", _Command(CLEAR, _Args(object_id=3)), result), True
+        )
+        self.assertEqual((result.ok, result.deleted, result.cleanup_complete), (True, 0, True))
+        self.assertEqual(bridge.jobs.Count(), 0)
+        self.assertEqual(bridge.world.changes(), (0, 0))
+
+    def test_a_refused_target_clears_nothing(self) -> None:
+        bridge = _Bridge()
+        self._dressed(bridge)
+        bridge.survivor(4, identity=object())
+        for args, error in ((_Args(object_id=9), "not_found"), (_Args(object_id=4), "bad_target")):
+            with self.subTest(error=error):
+                result = _Result()
+                self.assertIs(bridge.call("DispatchLoadoutClear", _Command(CLEAR, args), result), True)
+                self.assertEqual((result.ok, result.error.text), (False, error))
+        self.assertEqual(bridge.world.changes(), (0, 0))
+        self.assertEqual(bridge.jobs.Count(), 0)
+
+    def test_a_pending_job_on_the_target_makes_both_verbs_busy_and_nothing_else(self) -> None:
+        # U14: the busy branch has to return, for the clear and for the apply.
+        bridge = _Bridge()
+        survivor, _worn = self._dressed(bridge)
+        other = bridge.survivor(4)
+        pending = _Job()
+        pending.id = 40
+        pending.kind = _s("loadout_clear")
+        pending.subject = survivor
+        pending.loadout_cleared = _Array([object()])
+        pending.deadline_s = 99.0
+        bridge.jobs.Insert(40, pending)
+        for verb, dispatch, args in (
+            (APPLY, "DispatchLoadoutApply", _Args(object_id=3, rows=_rows({"hands": {"type": "Apple"}}))),
+            (CLEAR, "DispatchLoadoutClear", _Args(object_id=3)),
+        ):
+            with self.subTest(verb=verb):
+                result = _Result()
+                self.assertIs(bridge.call(dispatch, _Command(verb, args), result), True)
+                self.assertEqual((result.ok, result.error.text), (False, "busy"))
+                self.assertIsNone(result.loadout)
+        self.assertEqual(bridge.world.changes(), (0, 0))
+        self.assertEqual(list(bridge.jobs.jobs), [40])
+        # A job on another target does not hold this one.
+        applied = _Result()
+        rows = _rows({"attachments": [{"type": "TShirt_White", "slot": "Body"}]})
+        self.assertIs(
+            bridge.call("DispatchLoadoutApply", _Command(APPLY, _Args(object_id=4, rows=rows)), applied),
+            True,
+        )
+        self.assertTrue(applied.ok)
+        self.assertIs(other.inventory.FindAttachment(_SLOT_IDS["Body"]), bridge.world.created[0])
+
+    def test_rows_and_target_are_checked_before_the_apply_creates(self) -> None:
+        bridge = _Bridge()
+        bridge.survivor(3)
+        bad_rows = [{"type": "Apple", "slot": "", "dest": "cargo", "parent": -1}]
+        for args, error in (
+            (_Args(object_id=3, rows=bad_rows), "bad_args"),
+            (_Args(object_id=9, rows=_rows(PRESET_8)), "not_found"),
+        ):
+            with self.subTest(error=error):
+                result = _Result()
+                self.assertIs(bridge.call("DispatchLoadoutApply", _Command(APPLY, args), result), True)
+                self.assertEqual((result.ok, result.error.text), (False, error))
+        null_args = _Result()
+        self.assertIs(bridge.call("DispatchLoadoutApply", _Command(APPLY, None), null_args), True)
+        self.assertEqual(null_args.error.text, "bad_args")
+        self.assertEqual(bridge.world.changes(), (0, 0))
+
+    def test_two_containers_read_back_with_their_own_cargo(self) -> None:
+        # #261 review Y9 at the bridge: ApplyLoadout, then ReadLoadout,
+        # AppendLoadoutRow and LoadoutSlotName give each item its parent row.
+        bridge = _Bridge()
+        bridge.survivor(3)
+        rows = _rows(TWO_CONTAINERS)
+        result = _Result()
+        self.assertIs(
+            bridge.call("DispatchLoadoutApply", _Command(APPLY, _Args(object_id=3, rows=rows)), result),
+            True,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.type.text, "SurvivorM_Mirek")
+        self.assertEqual(result.object_id, 3)
+        self.assertEqual(
+            [(outcome.ok, outcome.error.text) for outcome in result.loadout.applied.items],
+            [(True, "")] * len(rows),
+        )
+        read = _read_rows(result.loadout)
+        self.assertEqual(read, rows)
+        tree = loadout.nest_rows(read)
+        assert tree is not None
+        self.assertEqual(_lineage(tree), _lineage(TWO_CONTAINERS))
+
+    def test_an_occupied_slot_or_hands_keeps_what_is_there_and_creates_nothing(self) -> None:
+        bridge = _Bridge()
+        survivor = bridge.survivor(3)
+        shirt = bridge.put(survivor, "attachment", "TShirt_White", "Body")
+        weapon = bridge.put(survivor, "hands", "M4A1")
+        for row, error in (
+            (_Row("TShirt_White", "Body", "attachment", -1), "slot_occupied"),
+            (_Row("Apple", "", "hands", -1), "slot_occupied"),
+            (_Row("NoSuchClass", "Legs", "attachment", -1), "unknown_type"),
+            (_Row("Jeans_Blue", "Hips", "attachment", -1), "slot_not_found"),
+            (_Row("Jeans_Blue", "magazine", "attachment", -1), "slot_not_found"),
+            (_Row("Apple", "", "cargo", 0), "no_room"),
+        ):
+            with self.subTest(row=row.type.text, slot=row.slot.text, dest=row.dest.text):
+                item, out_error = bridge.call("CreateLoadoutItem", survivor, survivor, row)
+                self.assertIsNone(item)
+                self.assertEqual(out_error.text, error)
+        self.assertEqual(bridge.world.changes(), (0, 0))
+        self.assertIs(survivor.inventory.FindAttachment(_SLOT_IDS["Body"]), shirt)
+        self.assertIs(survivor.hands, weapon)
+
+    def test_an_item_made_elsewhere_than_asked_is_deleted_again(self) -> None:
+        # U13: each postcondition has to delete what it caught.
+        for dest, error in (("cargo", "no_room"), ("attachment", "cannot_attach"), ("hands", "cannot_attach")):
+            with self.subTest(dest=dest):
+                bridge = _Bridge()
+                survivor = bridge.survivor(3)
+                bag = bridge.put(survivor, "attachment", "TaloonBag_Blue", "Back")
+                owner: _Entity = bag if dest == "cargo" else survivor
+                row = {
+                    "cargo": _Row("Apple", "", "cargo", 0),
+                    "attachment": _Row("TShirt_White", "Body", "attachment", -1),
+                    "hands": _Row("Apple", "", "hands", -1),
+                }[dest]
+                bridge.world.misplace = True
+                item, out_error = bridge.call("CreateLoadoutItem", survivor, owner, row)
+                self.assertIsNone(item)
+                self.assertEqual(out_error.text, error)
+                self.assertEqual(len(bridge.world.created), 1)
+                self.assertEqual(bridge.world.deleted, bridge.world.created)
+
+    def test_a_failed_parent_stops_its_children_and_every_row_answers(self) -> None:
+        bridge = _Bridge()
+        bridge.survivor(3)
+        tree = json.loads(json.dumps(PRESET_8))
+        tree["attachments"][3]["slot"] = "Hips"
+        result = _Result()
+        bridge.call(
+            "DispatchLoadoutApply", _Command(APPLY, _Args(object_id=3, rows=_rows(tree))), result
+        )
+        self.assertEqual(
+            [(outcome.ok, outcome.error.text) for outcome in result.loadout.applied.items],
+            [(True, "")] * 3
+            + [(False, "slot_not_found"), (False, "parent_failed"), (False, "parent_failed")]
+            + [(True, "")] * 2,
+        )
+        self.assertEqual(
+            Counter(item.type.text for item in bridge.world.created),
+            Counter(["TShirt_White", "Jeans_Blue", "AthleticShoes_Black", "M4A1", "Mag_STANAG_30Rnd"]),
+        )
+
+    def test_a_new_mcploadout_starts_with_empty_lists(self) -> None:
+        # U6: the constructor has to give items and applied an array.
+        made = _Bridge().call("NewMCPLoadout")
+        for member in ("items", "applied"):
+            with self.subTest(member=member):
+                self.assertIsInstance(getattr(made, member), _Array)
+                self.assertEqual(getattr(made, member).Count(), 0)
+        self.assertIs(made.too_large, False)
+
+    def test_a_read_answers_rows_and_empty_lists_never_null(self) -> None:
+        bridge = _Bridge()
+        bare = bridge.survivor(4)
+        result = _Result()
+        self.assertIs(bridge.call("DispatchLoadoutGet", _Command(GET, _Args(object_id=4)), result), True)
+        self.assertTrue(result.ok)
+        self.assertEqual((result.loadout.items.Count(), result.loadout.applied.Count()), (0, 0))
+        self.assertEqual(result.type.text, bare.type.text)
+
+        self._dressed(bridge)
+        dressed = _Result()
+        self.assertIs(bridge.call("DispatchLoadoutGet", _Command(GET, _Args(object_id=3)), dressed), True)
+        self.assertEqual(
+            _read_rows(dressed.loadout),
+            [
+                {"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1},
+                {"type": "TaloonBag_Blue", "slot": "Back", "dest": "attachment", "parent": -1},
+                {"type": "Apple", "slot": "", "dest": "cargo", "parent": 1},
+                {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
+            ],
+        )
+        self.assertEqual(dressed.loadout.applied.Count(), 0)
+        self.assertEqual(bridge.world.changes(), (0, 0))
+
+    def test_a_read_past_the_caps_is_loadout_too_large_with_no_read(self) -> None:
+        # Five levels down, or 65 items (a bag and 64 apples); a bag and 63
+        # apples, 64 items, still read.
+        for cap, apples in (("depth", 0), ("items", 64), ("at_the_item_cap", 63)):
+            with self.subTest(cap=cap):
+                bridge = _Bridge()
+                survivor = bridge.survivor(3)
+                if cap == "depth":
+                    holder = bridge.put(survivor, "attachment", "SmershVest", "Vest")
+                    for _ in range(3):
+                        holder = bridge.put(holder, "cargo", "SmershBag")
+                    bridge.put(holder, "cargo", "Rag")
+                else:
+                    bag = bridge.put(survivor, "attachment", "TaloonBag_Blue", "Back")
+                    for _ in range(apples):
+                        bridge.put(bag, "cargo", "Apple")
+                result = _Result()
+                self.assertIs(
+                    bridge.call("DispatchLoadoutGet", _Command(GET, _Args(object_id=3)), result), True
+                )
+                if cap == "at_the_item_cap":
+                    self.assertIs(result.ok, True)
+                    self.assertEqual(len(_read_rows(result.loadout)), 64)
+                    continue
+                self.assertEqual((result.ok, result.error.text), (False, "loadout_too_large"))
+                self.assertIsNone(result.loadout)
 
 
 class LoadoutRoundTripThroughThePollerTest(unittest.IsolatedAsyncioTestCase):
@@ -1310,44 +2774,76 @@ class LoadoutRoundTripThroughThePollerTest(unittest.IsolatedAsyncioTestCase):
         self.peers.append(fake)
         return fake
 
-    @slow_test
-    async def test_an_apply_arrives_shaped_with_the_other_refs_pruned(self) -> None:
-        def answer(command: dict[str, Any]) -> dict[str, Any]:
-            result: dict[str, Any] = {"id": command["id"], "ok": 1, "cmd": command["cmd"]}
-            if command["cmd"] == APPLY:
-                rows = command["args"]["loadout_items"]
-                # The flat MCPResult: the verb's own member plus empty others.
-                result["type"] = "SurvivorM_Mirek"
-                result["loadout"] = {
-                    "items": rows,
-                    "applied": [{"ok": 1, "error": ""} for _ in rows],
-                    "too_large": 0,
-                }
-                result["applied"] = {}
-                result["world_time"] = {}
-            return result
-
-        server_peer = self._peer("server", answer)
-        self._peer("client")
+    async def _ready(self) -> None:
         deadline = time.monotonic() + 2.0
         while not server.compute_bridge_ready(self.runtime.status())["ready"]:
             if time.monotonic() > deadline:
                 self.fail("bridge never became ready")
             await asyncio.sleep(0.02)
 
+    @staticmethod
+    def _answer(command: dict[str, Any]) -> dict[str, Any]:
+        # The flat MCPResult: the verb's own members plus the others' defaults.
+        result: dict[str, Any] = {
+            "id": command["id"],
+            "ok": 1,
+            "cmd": command["cmd"],
+            "deleted": 0,
+            "cleanup_complete": 0,
+            "loadout": {},
+            "applied": {},
+            "world_time": {},
+        }
+        if command["cmd"] == CLEAR:
+            result["deleted"] = 3
+            result["cleanup_complete"] = 1
+        if command["cmd"] == APPLY:
+            rows = command["args"]["loadout_items"]
+            result["type"] = "SurvivorM_Mirek"
+            result["loadout"] = {
+                "items": rows,
+                "applied": [{"ok": 1, "error": ""} for _ in rows],
+                "too_large": 0,
+            }
+        return result
+
+    @slow_test
+    async def test_an_apply_arrives_shaped_with_the_other_refs_pruned(self) -> None:
+        server_peer = self._peer("server", self._answer)
+        self._peer("client")
+        await self._ready()
         result = _content_json(
             await self.app.call_tool(APPLY, {"loadout": PRESET_8, "timeout_s": 2.0})
         )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(result["items"]), 8)
         self.assertEqual(_classes(result["loadout"]), _classes(PRESET_8))
-        self.assertNotIn("applied", result)
-        self.assertNotIn("world_time", result)
-        sent = [command for command in server_peer.commands_seen if command["cmd"] == APPLY]
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(
-            sent[0]["args"], {"clear_first": False, "loadout_items": _rows(PRESET_8)}
+        self.assertIsNone(result["clear"])
+        for pruned in ("applied", "world_time", "deleted", "cleanup_complete"):
+            with self.subTest(pruned=pruned):
+                self.assertNotIn(pruned, result)
+        sent = [command for command in server_peer.commands_seen if command["cmd"] in (CLEAR, APPLY)]
+        self.assertEqual([command["cmd"] for command in sent], [APPLY])
+        self.assertEqual(sent[0]["args"], {"loadout_items": _rows(PRESET_8)})
+
+    @slow_test
+    async def test_clear_first_goes_out_as_the_clear_then_the_rows(self) -> None:
+        server_peer = self._peer("server", self._answer)
+        self._peer("client")
+        await self._ready()
+        result = _content_json(
+            await self.app.call_tool(
+                APPLY, {"loadout": PRESET_8, "clear_first": True, "object_id": 6, "timeout_s": 2.0}
+            )
         )
+        sent = [command for command in server_peer.commands_seen if command["cmd"] in (CLEAR, APPLY)]
+        self.assertEqual([command["cmd"] for command in sent], [CLEAR, APPLY])
+        self.assertEqual(sent[0]["args"], {"object_id": 6})
+        self.assertEqual(sent[1]["args"], {"object_id": 6, "loadout_items": _rows(PRESET_8)})
+        self.assertEqual(result["clear"], {"deleted": 3, "cleanup_complete": True})
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn("deleted", result)
+        self.assertNotIn("cleanup_complete", result)
 
 
 if __name__ == "__main__":

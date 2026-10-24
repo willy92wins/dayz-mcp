@@ -246,11 +246,18 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_sights", {"mode": "optics"}, "weapon_sights"),
     ("weapon_sights", {"mode": "none"}, "weapon_sights"),
     # Both target shapes of the loadout verbs, and the rows of every dest
-    # at the depth and count caps (fb99, 220f).
+    # at the depth and count caps (fb99, 220f). clear_first sends loadout_clear
+    # before loadout_apply, and both payloads must pass.
     ("loadout_get", {}, "loadout_get"),
     ("loadout_get", {"uid": "76561198000000000"}, "loadout_get"),
     ("loadout_get", {"object_id": 3}, "loadout_get"),
     ("loadout_apply", {"loadout": {}}, "loadout_apply"),
+    ("loadout_apply", {"loadout": {}, "clear_first": True}, "loadout_clear"),
+    (
+        "loadout_apply",
+        {"loadout": {}, "uid": "76561198000000000", "clear_first": True},
+        "loadout_clear",
+    ),
     (
         "loadout_apply",
         {
@@ -292,6 +299,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
 _BRIDGE_ANSWERS: dict[str, dict[str, Any]] = {
     "surface_query": {"ok": 1, "y": 5.0},
     "scene_raycast": {"ok": 1, "hit": 1, "pos": [10.0, 5.0, 20.0]},
+    "loadout_clear": {"ok": 1, "deleted": 2, "cleanup_complete": 1},
 }
 
 

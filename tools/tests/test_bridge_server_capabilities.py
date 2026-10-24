@@ -71,6 +71,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "inventory_attach",
     "inventory_give",
     "loadout_apply",
+    "loadout_clear",
     "loadout_get",
     "notify_players",
     "object_anim",

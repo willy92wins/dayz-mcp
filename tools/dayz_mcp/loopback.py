@@ -91,6 +91,7 @@ SERVER_COMMANDS = {
     "inventory_give",
     "loadout_get",
     "loadout_apply",
+    "loadout_clear",
     "object_inspect",
     "object_resolve",
     "object_doors",
@@ -1038,6 +1039,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "hands_attach",
     "loadout_get",
     "loadout_apply",
+    "loadout_clear",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
 # (no server arg-contract hash) at enqueue and again at delivery.
@@ -1443,11 +1445,12 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"uid": _is_string},
         )
     ),
-    # loadout_get / loadout_apply (fb99, 220f): the target is a connected
-    # player by uid (absent is the first human) or a survivor by object_id,
-    # never both. clear_first and the rows always travel: the bridge reads an
-    # absent key as false or as no rows (fb-20260930-065425-8779). The rows
-    # are the flat list loadout.py builds.
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): the target is
+    # a connected player by uid (absent is the first human) or a survivor by
+    # object_id, never both. The rows always travel: the bridge reads an absent
+    # key as no rows (fb-20260930-065425-8779). They are the flat list
+    # loadout.py builds. loadout_clear is what the loadout_apply tool sends
+    # first for clear_first.
     "loadout_get": _command_schema(
         _schema_variant(
             optional=("uid",),
@@ -1460,21 +1463,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     "loadout_apply": _command_schema(
         _schema_variant(
-            required=("clear_first", "loadout_items"),
+            required=("loadout_items",),
             optional=("uid",),
             validators={
-                "clear_first": _is_strict_bool,
                 "loadout_items": loadout.is_wire_items,
                 "uid": _is_string,
             },
         ),
         _schema_variant(
-            required=("object_id", "clear_first", "loadout_items"),
+            required=("object_id", "loadout_items"),
             validators={
                 "object_id": _integer_in_range(minimum=1),
-                "clear_first": _is_strict_bool,
                 "loadout_items": loadout.is_wire_items,
             },
+        ),
+    ),
+    "loadout_clear": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
         ),
     ),
     "notify_players": _command_schema(

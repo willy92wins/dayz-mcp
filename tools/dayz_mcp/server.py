@@ -7401,36 +7401,47 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{loadout_contract.MAX_DEPTH} levels below the target. The whole "
             "loadout is checked before anything is sent: bad_args names the "
             "path (loadout.attachments[2].slot). clear_first=true first deletes "
-            "what the target wears and holds, with everything inside. Then each "
-            "attachment is created in its slot, in list order, with its own "
-            "attachments and then its cargo, and then the item in hands. A slot "
-            "or hands already in use is slot_occupied and keeps what is there. "
-            "items lists every item in that order: path, type (the class it "
-            "asked for), ok, and error, null when ok, else unknown_type, "
+            "what the target wears and holds, with everything inside, and waits "
+            "up to 5 s for the game to remove it. Then each attachment is "
+            "created in its slot, in list order, with its own attachments and "
+            "then its cargo, and then the item in hands. A slot or hands "
+            "already in use is slot_occupied and keeps what is there. items "
+            "lists every item in that order: path, type (the class it asked "
+            "for), ok, and error, null when ok, else unknown_type, "
             "slot_not_found, slot_occupied, cannot_attach, no_room or "
             "parent_failed (inside an item that failed). status is ok when every "
             "item was created and partial otherwise. loadout is the target read "
             "after, as loadout_get answers it; it is null, with "
-            "loadout_too_large true, when that read is past the caps. Created "
-            "items get no registry ids. The target is chosen as loadout_get "
-            "chooses it: uid or object_id, not both. Quantity, health and other "
-            "item state are not set. ok is 0 and warnings includes "
-            "loadout_incomplete when the answer cannot be read: the apply may "
-            "have run, so read the target with loadout_get before applying "
-            "again. Errors: bad_args, not_found, bad_target, no_players, "
-            "player_not_found, busy (a clear_first apply on this target has not "
-            "finished), and, before the game runs a PBO built with this verb, "
-            "arg_contract_mismatch or bridge_capability_missing, with nothing "
-            "sent."
+            "loadout_too_large true, when that read is past the caps. clear is "
+            "null without clear_first, else {deleted, cleanup_complete}: how "
+            "many objects the clear deleted, and whether all were gone within "
+            "the 5 s (when not, a slot one still holds answers slot_occupied). "
+            "A clear that is refused, times out or is cancelled sends nothing "
+            "more; when the creates are refused after a clear, the error ends "
+            "with clear=deleted=N cleanup_complete=0 or 1. timeout_s is the wait "
+            "for each of these game calls. Created items get no registry ids. "
+            "The target is chosen as loadout_get chooses it: uid or object_id, "
+            "not both. Quantity, health and other item state are not set. ok is "
+            "0 and warnings includes loadout_incomplete when the answer cannot "
+            "be read: the apply may have run, so read the target with "
+            "loadout_get before applying again. Errors: bad_args, not_found, "
+            "bad_target, no_players, player_not_found, busy (a clear_first on "
+            "this target is still waiting for what it deleted to go), "
+            "loadout_incomplete (the clear's answer cannot be read, and nothing "
+            "is created), and, before the game runs a PBO built with these "
+            "verbs, arg_contract_mismatch or bridge_capability_missing, with "
+            "nothing sent."
         )
     )
     async def loadout_apply(
-        loadout: dict[str, Any],
+        loadout: object,
         object_id: StrictInt = 0,
         uid: StrictStr = "",
         clear_first: StrictBool = False,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        # loadout is taken as any JSON value and checked here, so a list, null
+        # or a string answers bad_args with its path like any other mistake.
         if not isinstance(clear_first, bool):
             raise ToolError(_bad_args("clear_first", clear_first, "be a bool"))
         try:
@@ -7438,14 +7449,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             rows = loadout_contract.flatten_request(loadout)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+        timeout = _timeout(timeout_s)
         args: dict[str, Any] = dict(target)
-        args["clear_first"] = clear_first
         args["loadout_items"] = [row for _path, row in rows]
+        clear: dict[str, Any] | None = None
         async with runtime.tool_lock:
-            result = await runtime.call_bridge(
-                "loadout_apply", args, "server", _timeout(timeout_s)
-            )
-        return loadout_contract.apply_reply(rows, result)
+            # clear_first is its own bridge verb: the clear deletes in its own
+            # tick and its job only waits; the creates go out only once the
+            # clear has answered (220f; #261 review Y1).
+            if clear_first:
+                cleared = await runtime.call_bridge(
+                    "loadout_clear", dict(target), "server", timeout
+                )
+                try:
+                    clear = loadout_contract.clear_reply(cleared)
+                except ValueError as exc:
+                    raise ToolError(str(exc)) from exc
+            try:
+                result = await runtime.call_bridge(
+                    "loadout_apply", args, "server", timeout
+                )
+            except ToolError as exc:
+                if clear is None:
+                    raise
+                raise ToolError(
+                    loadout_contract.refusal_after_clear(str(exc), clear)
+                ) from exc
+        response = loadout_contract.apply_reply(rows, result)
+        response["clear"] = clear
+        return response
 
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(

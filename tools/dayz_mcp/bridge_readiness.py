@@ -234,7 +234,8 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
     "hands_attach": ("object_id", "slot", "uid"),
-    "loadout_apply": ("clear_first", "loadout_items", "object_id", "uid"),
+    "loadout_apply": ("loadout_items", "object_id", "uid"),
+    "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
@@ -285,6 +286,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "inventory_attach": "inventory_attach",
         "inventory_give": "inventory_give",
         "loadout_apply": "loadout_apply",
+        "loadout_clear": None,  # sent by loadout_apply for clear_first
         "loadout_get": "loadout_get",
         "notify_players": "notify_players",
         "object_anim": "object_anim",
