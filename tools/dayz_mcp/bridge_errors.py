@@ -21,6 +21,7 @@ from dayz_mcp.bridge_readiness import (
     _game_not_ready_reason,
     _target_peer_down,
 )
+from dayz_mcp.loopback import is_scene_id
 from dayz_mcp.session_coordination import public_audit_stage
 
 
@@ -457,6 +458,30 @@ def _player_move_detail(result: dict[str, Any]) -> str:
     return ""
 
 
+# scene_clear fills scene_clear with the pair that blocked it before refusing
+# with scene_shared (MCPBridge.c RefuseSceneShared): two registry ids and the
+# scene each was registered under. Only positive ints and scene ids cross.
+def _scene_shared_detail(result: dict[str, Any]) -> str:
+    report = result.get("scene_clear")
+    if not isinstance(report, dict):
+        return ""
+    pairs: list[str] = []
+    for id_key, scene_key in (
+        ("carrier_id", "carrier_scene_id"),
+        ("carried_id", "carried_scene_id"),
+    ):
+        object_id = report.get(id_key)
+        scene_id = report.get(scene_key)
+        if (
+            isinstance(object_id, int)
+            and not isinstance(object_id, bool)
+            and object_id > 0
+            and is_scene_id(scene_id)
+        ):
+            pairs.append(f"{id_key}={object_id} {scene_key}={scene_id}")
+    return " ".join(pairs)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -484,6 +509,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     player_move is the fifth: not_held and aborted carry observed=released_by=
     with a known release cause, and nothing else crosses.
 
+    scene_clear is the sixth: scene_shared carries the pair that blocked it,
+    carrier_id and carrier_scene_id, then carried_id and carried_scene_id.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -504,6 +532,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _input_trigger_detail(result)
     if cmd == "player_move":
         return _player_move_detail(result)
+    if cmd == "scene_clear" and str(result.get("error") or "") == "scene_shared":
+        return _scene_shared_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -541,8 +571,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
     # observed= telemetry allowlist the bridge already filled,
     # vehicle_door/door_missing, which carries the empty slot,
-    # input_trigger, whose refusals carry reason= and observed=, and
-    # player_move, whose not_held and aborted carry observed=released_by=.
+    # input_trigger, whose refusals carry reason= and observed=,
+    # player_move, whose not_held and aborted carry observed=released_by=, and
+    # scene_clear/scene_shared, which carries the pair that blocked it.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

@@ -128,6 +128,46 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 600}, "world_spawn"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 0.001}, "world_spawn"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 3888000.0}, "world_spawn"),
+    # scene_id and the scene verbs (165a, 5a21, 7f5d).
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "scene_id": "a" * 64}, "world_spawn"),
+    (
+        "world_spawn",
+        {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 600, "scene_id": "take_1-B"},
+        "world_spawn",
+    ),
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "scene_id": ""}, "world_spawn"),
+    ("world_spawn_batch", {"items": [{"type": "Barrel_Green", "pos": _POS}]}, "world_spawn_batch"),
+    (
+        "world_spawn_batch",
+        {
+            "items": [
+                {"type": "Barrel_Green", "pos": [1, None, 3], "flags": 1060, "rotation": 2},
+                {"type": "ZmbM_CitizenASkinny", "pos": [1, 2, 3], "flags": 3108, "ypr": [90, -5, 0]},
+                {"type": "CivilianSedan", "pos": [1.5, 0, 3.5], "flags": 1028},
+            ],
+            "per_tick": 1,
+            "scene_id": "a",
+        },
+        "world_spawn_batch",
+    ),
+    (
+        "world_spawn_batch",
+        {"items": [{"type": "Barrel_Green", "pos": _POS}] * 200, "per_tick": 50},
+        "world_spawn_batch",
+    ),
+    (
+        "world_spawn_batch",
+        {
+            "items": [
+                {"type": "Barrel_Green", "pos": _POS, "rotation": -2147483648},
+                {"type": "Barrel_Green", "pos": _POS, "rotation": 2147483647},
+            ],
+            "per_tick": 1,
+        },
+        "world_spawn_batch",
+    ),
+    ("scene_entities", {"scene_id": "a"}, "scene_entities"),
+    ("scene_clear", {"scene_id": "Z" * 64}, "scene_clear"),
     (
         "camera_set",
         {

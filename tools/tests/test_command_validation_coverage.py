@@ -151,6 +151,10 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1}
     if cmd == "hands_attach":
         return {"object_id": 1, "slot": "LargeBattery"}
+    if cmd == "world_spawn_batch":
+        return {"items": [{"type": "Item", "pos": [0.0, 0.0, 0.0], "flags": 0, "rotation": 0}]}
+    if cmd in {"scene_entities", "scene_clear"}:
+        return {"scene_id": "a"}
     if cmd == "weapon_raise":
         return {"raised": True, "hold_ttl_s": 3.0}
     if cmd == "weapon_aim":

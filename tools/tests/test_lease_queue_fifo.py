@@ -76,6 +76,7 @@ READ_ONLY = {
     "world_time_get",
     "action_cursor",
     "action_cursor_ids",
+    "scene_entities",
 }
 
 

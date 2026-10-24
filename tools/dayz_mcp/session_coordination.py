@@ -47,6 +47,8 @@ READ_ONLY_COMMANDS = frozenset(
         # resolves its network pairs is the same read, not a mutation.
         "action_cursor",
         "action_cursor_ids",
+        # Server read of one scene's registry and its objects (165a).
+        "scene_entities",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

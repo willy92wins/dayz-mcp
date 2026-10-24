@@ -77,6 +77,7 @@ def _wire_result(**filled: object) -> dict[str, object]:
         "entities": [],
         "input_describe": {},
         "building_doors": {},
+        "scene_entities": [],
     }
     empty.update(filled)
     return {"ok": 1, "cmd": "fixture", **empty}
@@ -158,6 +159,7 @@ class ResultPruneTest(unittest.TestCase):
                     ("query_all_players", "players"),
                     ("ui_dialog", "dialog"),
                     ("entities_query", "entities"),
+                    ("scene_entities", "scene_entities"),
                 }
             ),
         )
