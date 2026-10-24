@@ -219,6 +219,10 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "flag_restored": frozenset({"action_hold"}),
     "cleanup_complete": frozenset({"action_hold", "action_hold_cancel"}),
     "matched": frozenset({"action_hold_cancel"}),
+    # actor_emote's watch (36fa). The tool drops a time its state did not reach.
+    "emote_state": frozenset({"actor_emote"}),
+    "started_after_s": frozenset({"actor_emote"}),
+    "finished_after_s": frozenset({"actor_emote"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries

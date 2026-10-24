@@ -457,6 +457,25 @@ def _player_move_detail(result: dict[str, Any]) -> str:
     return ""
 
 
+# actor_emote fills emote_state before its three refusals (MCPClientBridge.c
+# DispatchActorEmote, PostActorEmoteJob): rejected for emote_rejected and
+# no_emote_playing, timed_out for emote_timed_out. Only those two values
+# cross, and only on those codes.
+_ACTOR_EMOTE_ERROR_STATES = frozenset({"rejected", "timed_out"})
+_ACTOR_EMOTE_STATE_CODES = frozenset(
+    {"emote_rejected", "no_emote_playing", "emote_timed_out"}
+)
+
+
+def _actor_emote_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") not in _ACTOR_EMOTE_STATE_CODES:
+        return ""
+    state = result.get("emote_state")
+    if isinstance(state, str) and state in _ACTOR_EMOTE_ERROR_STATES:
+        return f"observed=emote_state={state}"
+    return ""
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -484,6 +503,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     player_move is the fifth: not_held and aborted carry observed=released_by=
     with a known release cause, and nothing else crosses.
 
+    actor_emote is the sixth: emote_rejected, no_emote_playing and
+    emote_timed_out carry observed=emote_state= (rejected or timed_out).
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -504,6 +526,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _input_trigger_detail(result)
     if cmd == "player_move":
         return _player_move_detail(result)
+    if cmd == "actor_emote":
+        return _actor_emote_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -541,8 +565,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # vehicle_prepare_fixture/fixture_not_ready, which carries the
     # observed= telemetry allowlist the bridge already filled,
     # vehicle_door/door_missing, which carries the empty slot,
-    # input_trigger, whose refusals carry reason= and observed=, and
-    # player_move, whose not_held and aborted carry observed=released_by=.
+    # input_trigger, whose refusals carry reason= and observed=,
+    # player_move, whose not_held and aborted carry observed=released_by=,
+    # and actor_emote, whose refusals carry observed=emote_state=.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

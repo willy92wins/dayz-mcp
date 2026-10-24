@@ -92,6 +92,7 @@ SERVER_COMMANDS = {
     "object_resolve",
     "object_doors",
     "infected_drive",
+    "survivor_drive",
     "entities_query",
     "hands_take",
     "hands_attach",
@@ -134,6 +135,7 @@ CLIENT_COMMANDS = {
     "action_cursor",
     "player_look_at",
     "player_look_at_release",
+    "actor_emote",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -1023,6 +1025,63 @@ BOT_START_ACTIONS = (
     "PLAYER_BOT_TEST_SWAP_G2H",
     "PLAYER_BOT_TEST_SWAP_INTERNAL",
 )
+# actor_emote's closed catalog (36fa): each name is an EmoteConstants id of the
+# same name, lowercase, that exists in 1.29 and 1.30 (constants.c:366-409), in
+# id order. Not the suicide emote (it kills the player) nor the debug id. The
+# bridge refuses any other name too (MCPClientBridge.c ActorEmoteId). end is
+# not an id: it ends the playing emote.
+ACTOR_EMOTES = (
+    "greeting",
+    "sos",
+    "heart",
+    "taunt",
+    "lyingdown",
+    "tauntkiss",
+    "facepalm",
+    "tauntelbow",
+    "thumb",
+    "throat",
+    "dance",
+    "campfire",
+    "sita",
+    "sitb",
+    "thumbdown",
+    "dabbing",
+    "timeout",
+    "clap",
+    "point",
+    "silent",
+    "salute",
+    "rps",
+    "watching",
+    "hold",
+    "listening",
+    "pointself",
+    "lookatme",
+    "tauntthink",
+    "move",
+    "down",
+    "come",
+    "rps_r",
+    "rps_p",
+    "rps_s",
+    "nod",
+    "shake",
+    "shrug",
+    "surrender",
+    "vomit",
+)
+ACTOR_EMOTE_END = "end"
+# wait_s, the seconds the client job watches IsEmotePlaying(). Mirrored by
+# ACTOR_EMOTE_WAIT_MIN_S and ACTOR_EMOTE_WAIT_MAX_S in MCPClientBridge.c.
+ACTOR_EMOTE_WAIT_MIN_S = 0.5
+ACTOR_EMOTE_WAIT_MAX_S = 30.0
+# The tool waits at least wait_s plus this for the answer, as player_move
+# waits hold_s plus HOLD_SLACK_S.
+ACTOR_EMOTE_WAIT_SLACK_S = 5.0
+# survivor_drive heading bound, compass degrees either way, as infected_drive's.
+# Mirrored by SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG in MCPBridge.c.
+SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = 360.0
 # Verbs an older PBO must never be handed. Admission and delivery both require
 # a fresh accredited server census that names the command and the current
 # arg-contract hash.
@@ -1033,10 +1092,11 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "object_resolve",
     "action_cursor_ids",
     "hands_attach",
+    "survivor_drive",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
 # (no server arg-contract hash) at enqueue and again at delivery.
-_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
+_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold", "actor_emote"})
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
@@ -1240,6 +1300,34 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "type": _is_non_empty_string,
                 "pos": _is_real_vector3,
+                "mode": _equal_to("release"),
+            },
+        ),
+    ),
+    # survivor_drive (c801): a registry survivor. A drive carries heading and
+    # speed, each with its _set flag true, as infected_drive; speed is the
+    # OverrideMovementSpeed value of walk, jog or sprint. A release carries
+    # mode alone.
+    "survivor_drive": _command_schema(
+        _schema_variant(
+            required=("object_id", "heading", "heading_set", "speed", "speed_set"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "heading": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=-SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
+                        maximum=SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
+                    )
+                ),
+                "heading_set": _is_true,
+                "speed": _is_player_move_speed,
+                "speed_set": _is_true,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "mode"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
                 "mode": _equal_to("release"),
             },
         ),
@@ -1852,6 +1940,21 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _schema_variant(
             required=("command_id",),
             validators={"command_id": _integer_in_range(minimum=1)},
+        )
+    ),
+    # actor_emote (36fa): a catalog name or end, and the seconds the client
+    # job watches IsEmotePlaying(). The tool always sends both.
+    "actor_emote": _command_schema(
+        _schema_variant(
+            required=("emote", "wait_s"),
+            validators={
+                "emote": _one_of(*ACTOR_EMOTES, ACTOR_EMOTE_END),
+                "wait_s": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=ACTOR_EMOTE_WAIT_MIN_S, maximum=ACTOR_EMOTE_WAIT_MAX_S
+                    )
+                ),
+            },
         )
     ),
     "action_cursor_ids": _command_schema(delegated=_validate_action_cursor_ids),
@@ -3321,31 +3424,35 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, is hold_not_supported. Re-checked at
+        does not name the command, is hold_not_supported for action_hold and
+        bridge_capability_missing for any other command. Re-checked at
         delivery so a destination change after enqueue cannot hand the verb
         to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
             return None
+        missing = "bridge_capability_missing"
+        if cmd == "action_hold":
+            missing = "hold_not_supported"
         view = self._capabilities_view_locked(peer)
         if view.get("state") != "announced":
-            return "hold_not_supported"
+            return missing
         entry = self._peer_caps.get(peer)
         if not isinstance(entry, dict):
-            return "hold_not_supported"
+            return missing
         announced_at = entry.get("announced_at")
         if (
             not isinstance(announced_at, (int, float))
             or isinstance(announced_at, bool)
             or (self._now() - float(announced_at)) >= PEER_STALE_S
         ):
-            return "hold_not_supported"
+            return missing
         if not isinstance(instance, str) or instance != entry.get("instance"):
-            return "hold_not_supported"
+            return missing
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
-            return "hold_not_supported"
+            return missing
         return None
 
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:

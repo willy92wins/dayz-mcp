@@ -206,6 +206,12 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// actor_emote (36fa): a catalog name or end, and the seconds its job watches
+	// IsEmotePlaying(). The tool always sends both; an absent wait_s reads 0,
+	// which the bridge refuses. survivor_drive (c801) reuses object_id, heading,
+	// speed, their _set flags and mode above.
+	string emote;
+	float wait_s;
 
 	void MCPArgs()
 	{
@@ -1162,6 +1168,13 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	bool matched;
+	// actor_emote: finished, started, timed_out or rejected, and the client
+	// GetTickTime seconds from the request to the start and to the end its job
+	// saw. A time not reached stays 0 here and the tool drops it. Unassigned on
+	// other commands.
+	string emote_state;
+	float started_after_s;
+	float finished_after_s;
 };
 
 class MCPJob
@@ -1202,6 +1215,14 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	// actor_emote: end is the request to end the playing emote; the times are
+	// client GetTickTime seconds of the request and of the start and the end
+	// the job saw.
+	bool emote_end;
+	bool emote_started;
+	float emote_request_s;
+	float emote_started_s;
+	float emote_finished_s;
 };
 
 class MCPSpawnValidation

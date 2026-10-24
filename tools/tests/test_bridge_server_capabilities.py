@@ -85,6 +85,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "query_player_state",
     "scene_raycast",
     "surface_query",
+    "survivor_drive",
     "telemetry_read",
     "vehicle_door",
     "vehicle_enter",

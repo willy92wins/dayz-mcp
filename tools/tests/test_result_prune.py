@@ -450,6 +450,10 @@ GENERIC_SCALAR_OWNERS = {
     "deferred": ({"inventory_give"}, 0),
     "count_total": ({"entities_query"}, 0),
     "component_index": ({"action_use_door", "action_use_component", "action_hold"}, 0),
+    # actor_emote's watch (36fa): kept at "" and 0.0 for it, dropped elsewhere.
+    "emote_state": ({"actor_emote"}, ""),
+    "started_after_s": ({"actor_emote"}, 0.0),
+    "finished_after_s": ({"actor_emote"}, 0.0),
 }
 
 # Deliberately not owned. A stale 0 here is still not dropped.

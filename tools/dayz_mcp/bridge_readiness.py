@@ -236,6 +236,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "hands_attach": ("object_id", "slot", "uid"),
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
+    "survivor_drive": ("heading", "heading_set", "mode", "object_id", "speed", "speed_set"),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
 }
 
@@ -297,6 +298,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "query_player_state": "query_player_state",
         "scene_raycast": "scene_raycast",
         "surface_query": "surface_query",
+        "survivor_drive": "survivor_drive",
         "telemetry_read": "telemetry_read",
         "vehicle_door": "vehicle_door",
         "vehicle_enter": "vehicle_enter",
@@ -316,6 +318,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "action_use_component": "action_use",
         "action_use_door": "action_use",
         "action_use_target": "action_use",
+        "actor_emote": "actor_emote",
         "anim_timeline": "anim_timeline",
         "camera_get": "camera_get",
         "camera_set": "camera_set",

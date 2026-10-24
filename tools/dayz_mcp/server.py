@@ -101,6 +101,11 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    ACTOR_EMOTE_END,
+    ACTOR_EMOTE_WAIT_MAX_S,
+    ACTOR_EMOTE_WAIT_MIN_S,
+    ACTOR_EMOTE_WAIT_SLACK_S,
+    ACTOR_EMOTES,
     BOT_START_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
@@ -108,6 +113,7 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
+    SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
     LoopbackServer,
     _FENCE_OMITTED,
     is_printable_input_name,
@@ -369,6 +375,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "player_kill",
     "bot_start",
     "bot_stop",
+    # A mistyped key (heading_deg=, timeout=) must not walk a survivor or
+    # play an emote on defaults: an unknown key is refused, not dropped.
+    "survivor_drive",
+    "actor_emote",
 )
 
 
@@ -6965,6 +6975,89 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("infected_drive", args, "server", _timeout(timeout_s))
 
+    # Probe verb (inbox c801): walk a world_spawn survivor through its server
+    # input overrides, re-applied on every server bridge tick.
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Walk a survivor this bridge spawned (object_id "
+            "from world_spawn: a PlayerBase with no connected player) on the "
+            "server, through its HumanInputController alone: "
+            "OverrideMovementSpeed and OverrideMovementAngle ENABLED, the angle "
+            "recomputed on every server bridge tick from the survivor's own "
+            "heading, so it keeps walking toward heading. heading is compass "
+            "DEGREES (0 north = +Z, 90 east = +X), finite, within -"
+            f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g} to "
+            f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}; speed is walk, jog or "
+            "sprint (OverrideMovementSpeed 1, 2, 3, as player_move; not m/s). "
+            "A drive needs both; a new drive on a driven survivor replaces its "
+            "heading and speed. mode='release', with neither heading nor speed, "
+            "sets the overrides DISABLED and ends the drive; on a survivor that "
+            "is not driven it changes nothing. Nothing else ends a drive but "
+            "the survivor's death, its object_delete and the bridge shutting "
+            "down: until one of those the survivor keeps walking. A probe like "
+            "infected_drive: if the survivor does not move, that is the "
+            "finding. The answer is pos_real, the survivor's position read "
+            "back on the call. Refused before anything changes: bad_args, "
+            "object_id_unknown, object_id_stale, bad_target (not a survivor), "
+            "refused_player_controlled (a connected player), player_dead, "
+            "bot_busy (a bot_start action runs on it), no_input_controller. A "
+            "PBO without the verb: bridge_capability_missing or "
+            "arg_contract_mismatch, and nothing is sent."
+        )
+    )
+    async def survivor_drive(
+        object_id: StrictInt,
+        heading: StrictFloat | None = None,
+        speed: StrictStr | None = None,
+        mode: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        args: dict[str, Any] = {"object_id": object_id}
+        if mode is not None:
+            if mode != "release":
+                raise ToolError(_bad_args("mode", mode, "be 'release' or omitted"))
+            if heading is not None:
+                raise ToolError(
+                    _bad_args("heading", heading, "be omitted when mode is 'release'")
+                )
+            if speed is not None:
+                raise ToolError(
+                    _bad_args("speed", speed, "be omitted when mode is 'release'")
+                )
+            args["mode"] = mode
+        else:
+            if heading is None:
+                raise ToolError(
+                    _bad_args("heading", heading, "be provided when mode is omitted")
+                )
+            if speed is None:
+                raise ToolError(
+                    _bad_args("speed", speed, "be provided when mode is omitted")
+                )
+            heading_error = _bad_args(
+                "heading",
+                heading,
+                "be a finite number of compass degrees within "
+                f"[-{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}, "
+                f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}]",
+            )
+            heading_value = _finite_float(heading, heading_error)
+            if abs(heading_value) > SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:
+                raise ToolError(heading_error)
+            if speed not in player_move_contract.SPEEDS:
+                raise ToolError(
+                    _bad_args("speed", speed, "be one of 'walk', 'jog' or 'sprint'")
+                )
+            # Each value travels with its presence flag (fb-20260930-065425-8779).
+            args["heading"] = heading_value
+            args["heading_set"] = True
+            args["speed"] = player_move_contract.SPEEDS[speed]
+            args["speed_set"] = True
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("survivor_drive", args, "server", _timeout(timeout_s))
+
     # Spawn into a player's inventory.
     @app.tool(
         description=(
@@ -7887,6 +7980,78 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await execute_player_look_at(runtime, pos, timeout_s)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Play one emote (gesture) on the local player of "
+            "the managed client through EmoteManager.CreateEmoteCBFromMenu, the "
+            "call the gestures menu makes: the client asks the server, which "
+            "checks it and plays it on every peer as it does a person's "
+            "gesture. Only the local player: in vanilla the server starts an "
+            "emote only at a client's request, so there is no object_id. emote "
+            f"is one of {', '.join(ACTOR_EMOTES)}, or {ACTOR_EMOTE_END}, which "
+            "asks the server to end the emote that is playing (a looping one, "
+            "such as sita), as the client does to end one. wait_s (default 10, "
+            f"{ACTOR_EMOTE_WAIT_MIN_S:g} to {ACTOR_EMOTE_WAIT_MAX_S:g}) is how "
+            "long the client then watches EmoteManager.IsEmotePlaying(); the "
+            "tool waits at least wait_s + "
+            f"{ACTOR_EMOTE_WAIT_SLACK_S:g} s for the answer. The answer is "
+            "emote_state: finished (it started and stopped within wait_s; for "
+            "end, the playing emote stopped) or started (it started and still "
+            "plays at wait_s, as a looping emote does until end), with "
+            "started_after_s and finished_after_s, client GetTickTime seconds "
+            "from the request, each absent when not reached (end has no "
+            "started_after_s). emote_timed_out, observed=emote_state=timed_out: "
+            "it did not start within wait_s, or for end the emote still plays; "
+            "the request was sent, so a later start is possible. Refused "
+            "before anything is sent, observed=emote_state=rejected: "
+            "emote_rejected when an emote is already playing (end it first) or "
+            "the client check refuses it (CanPlayEmote and "
+            "CanPlayEmoteClientCheck, the check the request itself makes), and "
+            "no_emote_playing for end with nothing playing. Errors: bad_args "
+            "(it lists the allowed names), client_not_in_game, no_player, "
+            "no_emote_manager, emote_rejected, no_emote_playing, "
+            "emote_timed_out, and bridge_capability_missing from a PBO "
+            "without the verb, which is never handed it."
+        )
+    )
+    async def actor_emote(
+        emote: StrictStr,
+        wait_s: StrictFloat = 10.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if emote not in ACTOR_EMOTES and emote != ACTOR_EMOTE_END:
+            raise ToolError(
+                _bad_args(
+                    "emote",
+                    emote,
+                    "be one of " + ", ".join((*ACTOR_EMOTES, ACTOR_EMOTE_END)),
+                )
+            )
+        wait_error = _bad_args(
+            "wait_s",
+            wait_s,
+            "be a finite number of seconds within "
+            f"[{ACTOR_EMOTE_WAIT_MIN_S:g}, {ACTOR_EMOTE_WAIT_MAX_S:g}]",
+        )
+        wait = _finite_float(wait_s, wait_error)
+        if wait < ACTOR_EMOTE_WAIT_MIN_S or wait > ACTOR_EMOTE_WAIT_MAX_S:
+            raise ToolError(wait_error)
+        # The client answers wait_s after the request at the latest; the
+        # transport waits that long plus the slack, as player_move does for
+        # hold_s.
+        timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
+        args = {"emote": emote, "wait_s": wait}
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge("actor_emote", args, "client", timeout)
+        # MCPResult is one flat class: a time the watch did not reach arrives
+        # as 0 and is dropped here, by the state that says which were reached.
+        state = result.get("emote_state")
+        if state not in ("started", "finished") or emote == ACTOR_EMOTE_END:
+            result.pop("started_after_s", None)
+        if state != "finished":
+            result.pop("finished_after_s", None)
+        return result
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
