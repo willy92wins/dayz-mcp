@@ -1070,6 +1070,9 @@ class MCPResult
 	// F3.5: true when dest=hands and hands were occupied — vanilla drops the held
 	// item and CallLater-spawns ~500 ms later (SpawnEntityInPlayerInventory returns null).
 	bool deferred;
+	// inventory_give (71c9): the created item is a Weapon_Base with no running
+	// state machine (CanProcessWeaponEvents false, weapon_base.c:270), such as a bow.
+	bool weapon_without_fsm;
 	// F3.6 object_inspect
 	ref MCPObjectInspect inspect;
 	// entities_query: raw nearby objects, nearest-first, cut at args.limit.
