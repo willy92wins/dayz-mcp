@@ -18,7 +18,7 @@ import struct
 import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import camera_path, loopback, result_prune, server
@@ -1777,12 +1777,14 @@ class ExecutedDispatchTest(unittest.TestCase):
             raise AssertionError(body)
         return body
 
-    def _leased(self) -> tuple[loopback.ServerState, SessionCoordinator, ClientIdentity, str]:
+    def _leased(
+        self, clock: Callable[[], float] | None = None
+    ) -> tuple[loopback.ServerState, SessionCoordinator, ClientIdentity, str]:
         """A bound client and a held lease. Releasing it runs the loopback's own
         cleanup_owner and then raises the owner fence on the run, the order the
         daemon's cleanup_begin and begin_release_owner run them in; nothing else
-        of the lifecycle and no process."""
-        state = loopback.ServerState("test-key")
+        of the lifecycle and no process. clock, if given, is the loopback's."""
+        state = loopback.ServerState("test-key", time_fn=clock)
         bind_both_peers(state)
 
         def cleanup(session_id: str, lease_id: str, reason: str, vehicle_active: bool) -> dict[str, object]:
@@ -1804,7 +1806,9 @@ class ExecutedDispatchTest(unittest.TestCase):
         self.assertEqual(status, 200, active)
         return state, coordinator, client, str(active["lease_token"])
 
-    def _deliver_play(self, state: loopback.ServerState, token: str, path_id: str) -> dict[str, Any]:
+    def _deliver_play(
+        self, state: loopback.ServerState, token: str, path_id: str, timeout_s: float = 30.0
+    ) -> dict[str, Any]:
         wire = {"mode": "play", "keys": _three_keys(), "easing": "linear", "path_id": path_id}
         status, queued = state.enqueue_command(
             "camera_path_play",
@@ -1812,7 +1816,7 @@ class ExecutedDispatchTest(unittest.TestCase):
             peer="client",
             identity_payload=_PATH_OWNER,
             lease_token=token,
-            operation_timeout_s=30.0,
+            operation_timeout_s=timeout_s,
         )
         self.assertEqual(status, 200, queued)
         delivered = self._poll(state)["commands"]
@@ -1870,6 +1874,103 @@ class ExecutedDispatchTest(unittest.TestCase):
         self.assertEqual(state._camera_path_play_by_lease, {})
         state.retail_probe = lambda: {"known": True, "processes": []}
         self.assertEqual(self._poll(state)["commands"], [])
+
+    def _sent(self, state: loopback.ServerState) -> list[tuple[str, dict[str, Any]]]:
+        return [(command["cmd"], command["args"]) for command in self._poll(state)["commands"]]
+
+    @staticmethod
+    def _releases(*play_ids: int) -> list[tuple[str, dict[str, Any]]]:
+        return [("camera_path_release", {"command_id": play_id}) for play_id in play_ids]
+
+    def test_plays_past_the_queue_size_end_in_one_release(self) -> None:
+        # Each play that starts replaces the path before it, so however many
+        # played under the lease, its end sends the client one release.
+        state, coordinator, client, token = self._leased()
+        play_ids = []
+        for index in range(loopback.MAX_QUEUE + 5):
+            play = self._deliver_play(state, token, f"take{index}")
+            state.store_result({"id": play["id"], "ok": True}, instance=INST_CLIENT)
+            state.take_result(play["id"], remove=True)
+            play_ids.append(play["id"])
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
+        self.assertNotIn("camera_path_release_unconfirmed", released.get("cleanup_degraded") or [])
+        self.assertEqual(self._sent(state), self._releases(play_ids[-1]))
+
+    def test_a_busy_play_leaves_the_release_to_the_path_that_plays(self) -> None:
+        state, coordinator, client, token = self._leased()
+        playing = self._deliver_play(state, token, "playing")
+        self._new_camera()
+        answer = self.client.play(playing["args"], command_id=playing["id"])
+        state.store_result(
+            {"id": playing["id"], "ok": answer.ok, "camera_path": _block(answer.camera_path)}, instance=INST_CLIENT
+        )
+        busy = self._deliver_play(state, token, "busy")
+        answer = self.client.play(busy["args"], command_id=busy["id"])
+        self.assertEqual((answer.ok, answer.error.text), (False, "path_busy"))
+        state.store_result({"id": busy["id"], "ok": answer.ok, "error": answer.error.text}, instance=INST_CLIENT)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
+        [release] = self._poll(state)["commands"]
+        self.assertEqual([(release["cmd"], release["args"])], self._releases(playing["id"]))
+        stopped = self.client.release(release["args"]["command_id"], command_id=release["id"])
+        self.assertEqual((stopped.ok, stopped.matched), (True, True))
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+
+    def test_the_lease_releases_its_started_play_and_one_unanswered(self) -> None:
+        state, coordinator, client, token = self._leased()
+        replaced = self._deliver_play(state, token, "replaced")
+        state.store_result({"id": replaced["id"], "ok": True}, instance=INST_CLIENT)
+        started = self._deliver_play(state, token, "started")
+        state.store_result({"id": started["id"], "ok": True}, instance=INST_CLIENT)
+        # Its answer is not back when the lease ends, so it may be the one playing.
+        unanswered = self._deliver_play(state, token, "unanswered")
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 2)
+        self.assertEqual(self._sent(state), self._releases(started["id"], unanswered["id"]))
+
+    def test_a_play_answered_after_its_deadline_is_still_released(self) -> None:
+        now = [100.0]
+        state, coordinator, client, token = self._leased(clock=lambda: now[0])
+        replaced = self._deliver_play(state, token, "replaced")
+        state.store_result({"id": replaced["id"], "ok": True}, instance=INST_CLIENT)
+        late = self._deliver_play(state, token, "late", timeout_s=0.5)
+        now[0] += 1.0
+        # The loopback discards an answer past its deadline, but the path started.
+        status, stored = state.store_result({"id": late["id"], "ok": True}, instance=INST_CLIENT)
+        self.assertEqual((status, stored.get("discarded")), (200, True), stored)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
+        self.assertEqual(self._sent(state), self._releases(late["id"]))
+
+    def test_a_play_that_never_started_is_not_released(self) -> None:
+        state, coordinator, client, token = self._leased()
+        play = self._deliver_play(state, token, "refused")
+        # No camera object to make: the play is refused and changes nothing.
+        answer = self.client.play(play["args"], command_id=play["id"])
+        self.assertEqual((answer.ok, answer.error.text), (False, "camera_create_failed"))
+        state.store_result({"id": play["id"], "ok": answer.ok, "error": answer.error.text}, instance=INST_CLIENT)
+        self.assertEqual(state._camera_path_play_by_lease, {})
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertNotIn("camera_path_release_enqueued", released["cleanup"])
+        self.assertFalse(released.get("cleanup_degraded"))
+        self.assertEqual(self._poll(state)["commands"], [])
+
+    def test_an_ok_of_one_counts_as_a_started_play(self) -> None:
+        state, coordinator, client, token = self._leased()
+        first = self._deliver_play(state, token, "first")
+        state.store_result({"id": first["id"], "ok": 1}, instance=INST_CLIENT)
+        second = self._deliver_play(state, token, "second")
+        state.store_result({"id": second["id"], "ok": 1}, instance=INST_CLIENT)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
+        self.assertEqual(self._sent(state), self._releases(second["id"]))
 
     def test_camera_set_applies_at_its_dispatch_and_its_job_only_settles(self) -> None:
         bridge = _CameraSetBridge(self.bridge_source)

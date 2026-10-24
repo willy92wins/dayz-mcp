@@ -2100,8 +2100,9 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
-        # d026: lease -> ids of camera_path_play plays delivered under it. A
-        # path plays on after its play answers; cleanup_owner stops it.
+        # d026: lease -> the last camera_path_play play that started under it
+        # and any delivered since without an answer (store_result prunes the
+        # rest). A path plays on after its play answers; cleanup_owner stops it.
         self._camera_path_play_by_lease: dict[str, set[int]] = {}
         self._holds: dict[str, dict[str, object]] = {}
         self._hold_by_command: dict[int, str] = {}
@@ -3464,8 +3465,41 @@ class ServerState:
             return
         self._camera_path_play_by_lease.setdefault(owner[1], set()).add(command_id)
 
+    def _note_camera_path_result_locked(self, command_id: int, stored: dict) -> None:
+        """One play's answer prunes the plays its lease would release (d026).
+
+        A play that started replaced every path before it, so the plays below
+        it need no release; a play that answered otherwise never started. A
+        discarded late answer counts the same way; one that store_result turns
+        away earlier (binding_retired, late_result_fenced) leaves the play
+        held. Caller holds the lock.
+        """
+
+        for lease_id, command_ids in self._camera_path_play_by_lease.items():
+            if command_id in command_ids:
+                break
+        else:
+            return
+        ok_value = stored.get("ok")
+        if ok_value is True or (
+            isinstance(ok_value, int)
+            and not isinstance(ok_value, bool)
+            and ok_value == 1
+        ):
+            command_ids.difference_update(
+                [held for held in command_ids if held < command_id]
+            )
+        else:
+            command_ids.discard(command_id)
+        if not command_ids:
+            del self._camera_path_play_by_lease[lease_id]
+
     def enqueue_camera_path_releases_for_lease(self, lease_id: str) -> dict[str, int]:
-        """camera_path_release for each play delivered under that lease (d026).
+        """camera_path_release for each play that lease still holds (d026).
+
+        That is the last play that started under it and any delivered since
+        without an answer: store_result drops a play that answered without
+        starting and every play below one that started.
 
         A path moves the camera every frame after its play has answered, so it
         must not outlive the lease that started it. The client stops a path
@@ -5091,6 +5125,7 @@ class ServerState:
             self._note_hold_result_locked(
                 command_id, stored, discarded, instance or ""
             )
+            self._note_camera_path_result_locked(command_id, stored)
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
