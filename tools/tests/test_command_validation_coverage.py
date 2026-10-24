@@ -211,6 +211,12 @@ def _minimal_args(cmd: str) -> dict:
         return {"command_id": 1}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
+    if cmd == "server_perf":
+        return {"window_s": 10.0}
+    if cmd == "nav_path_query":
+        return {"from": [0.0, 0.0, 0.0], "to": [1.0, 0.0, 1.0], "snap_radius": 2.0}
+    if cmd == "players_visibility":
+        return {"pos": [0.0, 0.0, 0.0], "radius": 0.0}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

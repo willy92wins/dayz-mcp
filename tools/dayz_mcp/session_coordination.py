@@ -47,6 +47,11 @@ READ_ONLY_COMMANDS = frozenset(
         # resolves its network pairs is the same read, not a mutation.
         "action_cursor",
         "action_cursor_ids",
+        # Server reads: the frame rate over a window and the entity counts, a
+        # navmesh path between two points, and which players could see a point.
+        "server_perf",
+        "nav_path_query",
+        "players_visibility",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

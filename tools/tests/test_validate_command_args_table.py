@@ -1736,6 +1736,120 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("set_shape", {"year": 2026, "month": 9, "day": 28, "hour": 9, "minute": 0}, (False, "bad_args")),
         ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
+    # 2427: window_s is required on the wire (the bridge reads an absent key as
+    # 0) and finite in [1, 60].
+    "server_perf": (
+        ("valid_default", {"window_s": 10.0}, (True, None)),
+        ("window_at_min", {"window_s": 1.0}, (True, None)),
+        ("window_at_max", {"window_s": 60.0}, (True, None)),
+        ("window_json_int", {"window_s": 5}, (True, None)),
+        ("missing_window", {}, (False, "bad_args")),
+        ("window_zero", {"window_s": 0.0}, (False, "bad_args")),
+        ("window_below_min", {"window_s": 0.999}, (False, "bad_args")),
+        ("window_over_max", {"window_s": 61.0}, (False, "bad_args")),
+        ("window_nan", {"window_s": float("nan")}, (False, "bad_args")),
+        ("window_inf", {"window_s": float("inf")}, (False, "bad_args")),
+        ("window_bool", {"window_s": True}, (False, "bad_args")),
+        ("window_string", {"window_s": "10"}, (False, "bad_args")),
+        ("timeout_on_the_wire", {"window_s": 10.0, "timeout_s": 1.0}, (False, "bad_args")),
+        ("extra_key", {"window_s": 10.0, "extra": None}, (False, "bad_args")),
+    ),
+    # 0131: three finite numbers for each end and snap_radius in (0, 50], all
+    # required on the wire. from is the wire name; from_pos is the tool's.
+    "nav_path_query": (
+        (
+            "valid",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 2.0},
+            (True, None),
+        ),
+        (
+            "snap_radius_at_max",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 50.0},
+            (True, None),
+        ),
+        ("missing_from", {"to": [4.0, 5.0, 6.0], "snap_radius": 2.0}, (False, "bad_args")),
+        ("missing_to", {"from": [1.0, 2.0, 3.0], "snap_radius": 2.0}, (False, "bad_args")),
+        (
+            "missing_snap_radius",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0]},
+            (False, "bad_args"),
+        ),
+        (
+            "from_two_components",
+            {"from": [1.0, 2.0], "to": [4.0, 5.0, 6.0], "snap_radius": 2.0},
+            (False, "bad_args"),
+        ),
+        (
+            "from_nan_component",
+            {"from": [1.0, float("nan"), 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 2.0},
+            (False, "bad_args"),
+        ),
+        (
+            "to_inf_component",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, float("inf"), 6.0], "snap_radius": 2.0},
+            (False, "bad_args"),
+        ),
+        (
+            "to_bool_component",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, True, 6.0], "snap_radius": 2.0},
+            (False, "bad_args"),
+        ),
+        (
+            "snap_radius_zero",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 0.0},
+            (False, "bad_args"),
+        ),
+        (
+            "snap_radius_negative",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": -1.0},
+            (False, "bad_args"),
+        ),
+        (
+            "snap_radius_over_max",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 50.1},
+            (False, "bad_args"),
+        ),
+        (
+            "snap_radius_nan",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": float("nan")},
+            (False, "bad_args"),
+        ),
+        (
+            "tool_name_from_pos",
+            {"from_pos": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 2.0},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {"from": [1.0, 2.0, 3.0], "to": [4.0, 5.0, 6.0], "snap_radius": 2.0, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
+    # 33c5: pos is three finite numbers and radius is in [0, 100], 0 a point.
+    "players_visibility": (
+        ("valid_point", {"pos": [1.0, 2.0, 3.0], "radius": 0.0}, (True, None)),
+        ("radius_at_max", {"pos": [1.0, 2.0, 3.0], "radius": 100.0}, (True, None)),
+        ("missing_pos", {"radius": 0.0}, (False, "bad_args")),
+        ("missing_radius", {"pos": [1.0, 2.0, 3.0]}, (False, "bad_args")),
+        ("pos_two_components", {"pos": [1.0, 2.0], "radius": 0.0}, (False, "bad_args")),
+        (
+            "pos_nan_component",
+            {"pos": [1.0, float("nan"), 3.0], "radius": 0.0},
+            (False, "bad_args"),
+        ),
+        ("radius_negative", {"pos": [1.0, 2.0, 3.0], "radius": -0.1}, (False, "bad_args")),
+        ("radius_over_max", {"pos": [1.0, 2.0, 3.0], "radius": 100.5}, (False, "bad_args")),
+        (
+            "radius_inf",
+            {"pos": [1.0, 2.0, 3.0], "radius": float("inf")},
+            (False, "bad_args"),
+        ),
+        (
+            "extra_key",
+            {"pos": [1.0, 2.0, 3.0], "radius": 0.0, "extra": None},
+            (False, "bad_args"),
+        ),
+    ),
     # time_multiplier travels with time_multiplier_set true (fb-20260930-065425-8779).
     "world_time_set": (
         (

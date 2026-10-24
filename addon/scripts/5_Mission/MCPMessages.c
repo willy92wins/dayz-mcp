@@ -206,6 +206,14 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// server_perf: seconds of the measured window, 1 to 60. An absent key
+	// reads 0, which the bridge refuses.
+	float window_s;
+	// nav_path_query: how far SampleNavmeshPosition looks around from and to
+	// (both reused above), above 0 and at most 50 m. An absent key reads 0,
+	// which the bridge refuses. players_visibility reuses pos and radius, the
+	// size of what is hidden (0 a point); the tool always sends both.
+	float snap_radius;
 
 	void MCPArgs()
 	{
@@ -1023,6 +1031,34 @@ class MCPCursorIds
 	}
 };
 
+// server_perf counts, read once after the window closes: one
+// SceneGetEntitiesInBox pass over the map (dayzplayerutils.c:75), each entry
+// it returns counted once, in the first class it matches in this order:
+// players (a PlayerBase with a PlayerIdentity), ai (any other PlayerBase),
+// infected (DayZInfected), animals (DayZAnimal), vehicles (Transport), items
+// (InventoryItem). Primitives only: no entity reference.
+class MCPServerPerfCounts
+{
+	int players;
+	int ai;
+	int infected;
+	int animals;
+	int vehicles;
+	int items;
+};
+
+// players_visibility row, one per PlayerBase with a PlayerIdentity. uid is
+// GetPlainId, as query_all_players names it. distance is head to pos. visible
+// is in_fov and line_of_sight both. Primitives only: no entity reference.
+class MCPPlayerVisibility
+{
+	string uid;
+	float distance;
+	bool in_fov;
+	bool line_of_sight;
+	bool visible;
+};
+
 class MCPResult
 {
 	int id;
@@ -1162,6 +1198,22 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	bool matched;
+	// server_perf reply. Only server_perf writes the three scalars; counts is
+	// unassigned on other commands.
+	float avg_fps;
+	int min_fps;
+	bool insufficient_samples;
+	ref MCPServerPerfCounts counts;
+	// nav_path_query reply: FindPath's waypoints flattened as x0, y0, z0,
+	// x1, ... (the tool regroups them in threes), their 3D length, and the
+	// ends SampleNavmeshPosition snapped. Unassigned on its refusals and on
+	// other commands.
+	ref array<float> points;
+	float length_m;
+	ref array<float> from_snapped;
+	ref array<float> to_snapped;
+	// players_visibility rows. Unassigned on other commands.
+	ref array<ref MCPPlayerVisibility> players_visibility;
 };
 
 class MCPJob
@@ -1202,6 +1254,19 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	// server_perf: phase 1 once the first tick has set sample_start_s
+	// (GetTickTime); sample_s_target is window_s. perf_frames counts the ticks
+	// after that one, perf_second is the whole second of the window the last
+	// tick ended in and perf_second_frames its ticks so far (second 0 also
+	// holds the first tick), perf_whole_seconds the seconds closed inside the
+	// window and perf_min_frames the fewest ticks of one, perf_measured_s the
+	// elapsed seconds at the last tick.
+	int perf_frames;
+	int perf_second;
+	int perf_second_frames;
+	int perf_whole_seconds;
+	int perf_min_frames;
+	float perf_measured_s;
 };
 
 class MCPSpawnValidation
