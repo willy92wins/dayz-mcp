@@ -2230,6 +2230,179 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("missing", {}, (False, "bad_args")),
         ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
     ),
+    # actor_emote (36fa): a catalog name or end, and wait_s in [0.5, 30].
+    "actor_emote": (
+        ("valid", {"emote": "greeting", "wait_s": 10.0}, (True, None)),
+        ("valid_end", {"emote": "end", "wait_s": 10.0}, (True, None)),
+        ("valid_last_catalog_name", {"emote": "shrug", "wait_s": 10.0}, (True, None)),
+        ("wait_at_minimum", {"emote": "sita", "wait_s": 0.5}, (True, None)),
+        ("wait_at_maximum", {"emote": "sita", "wait_s": 30.0}, (True, None)),
+        ("wait_int", {"emote": "sita", "wait_s": 5}, (True, None)),
+        ("unknown_emote", {"emote": "nope", "wait_s": 10.0}, (False, "bad_args")),
+        ("constant_name", {"emote": "ID_EMOTE_GREETING", "wait_s": 10.0}, (False, "bad_args")),
+        ("upper_case", {"emote": "Greeting", "wait_s": 10.0}, (False, "bad_args")),
+        ("suicide", {"emote": "suicide", "wait_s": 10.0}, (False, "bad_args")),
+        ("debug", {"emote": "debug", "wait_s": 10.0}, (False, "bad_args")),
+        # Not in the catalog: vomit queues a symptom, and surrender changes a state
+        # IsEmotePlaying() reads (in 1.29 with its own callbacks; MCPClientBridge.c
+        # ActorEmoteId).
+        ("surrender", {"emote": "surrender", "wait_s": 10.0}, (False, "bad_args")),
+        ("vomit", {"emote": "vomit", "wait_s": 10.0}, (False, "bad_args")),
+        ("emote_id", {"emote": 1, "wait_s": 10.0}, (False, "bad_args")),
+        ("empty_emote", {"emote": "", "wait_s": 10.0}, (False, "bad_args")),
+        ("wait_below", {"emote": "sita", "wait_s": 0.49}, (False, "bad_args")),
+        ("wait_above", {"emote": "sita", "wait_s": 30.01}, (False, "bad_args")),
+        ("wait_zero", {"emote": "sita", "wait_s": 0.0}, (False, "bad_args")),
+        ("wait_nan", {"emote": "sita", "wait_s": float("nan")}, (False, "bad_args")),
+        ("wait_inf", {"emote": "sita", "wait_s": float("inf")}, (False, "bad_args")),
+        ("wait_bool", {"emote": "sita", "wait_s": True}, (False, "bad_args")),
+        ("missing_wait", {"emote": "sita"}, (False, "bad_args")),
+        ("missing_emote", {"wait_s": 10.0}, (False, "bad_args")),
+        ("object_id", {"emote": "sita", "wait_s": 10.0, "object_id": 1}, (False, "bad_args")),
+        ("extra_key", {"emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
+    ),
+    # survivor_drive_release (c801), internal: the id of one drive command and
+    # its survivor's object_id, both required.
+    "survivor_drive_release": (
+        ("valid", {"command_id": 1, "object_id": 7}, (True, None)),
+        ("zero", {"command_id": 0, "object_id": 7}, (False, "bad_args")),
+        ("negative", {"command_id": -1, "object_id": 7}, (False, "bad_args")),
+        ("bool", {"command_id": True, "object_id": 7}, (False, "bad_args")),
+        ("string", {"command_id": "1", "object_id": 7}, (False, "bad_args")),
+        ("missing", {}, (False, "bad_args")),
+        ("command_id_only", {"command_id": 1}, (False, "bad_args")),
+        ("object_id_only", {"object_id": 7}, (False, "bad_args")),
+        ("object_id_zero", {"command_id": 1, "object_id": 0}, (False, "bad_args")),
+        ("object_id_negative", {"command_id": 1, "object_id": -7}, (False, "bad_args")),
+        ("object_id_bool", {"command_id": 1, "object_id": True}, (False, "bad_args")),
+        ("object_id_string", {"command_id": 1, "object_id": "7"}, (False, "bad_args")),
+        ("object_id_float", {"command_id": 1, "object_id": 7.0}, (False, "bad_args")),
+        ("extra_key", {"command_id": 1, "object_id": 7, "extra": None}, (False, "bad_args")),
+    ),
+    # survivor_drive (c801): a drive carries heading and speed with their
+    # _set flags; a release carries mode alone.
+    "survivor_drive": (
+        (
+            "valid_drive",
+            {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": True},
+            (True, None),
+        ),
+        (
+            "valid_drive_sprint_bounds",
+            {"object_id": 7, "heading": -360.0, "heading_set": True, "speed": 3.0, "speed_set": True},
+            (True, None),
+        ),
+        (
+            "valid_drive_heading_max",
+            {"object_id": 7, "heading": 360.0, "heading_set": True, "speed": 2.0, "speed_set": True},
+            (True, None),
+        ),
+        ("valid_release", {"object_id": 7, "mode": "release"}, (True, None)),
+        (
+            "release_with_heading",
+            {"object_id": 7, "mode": "release", "heading": 90.0, "heading_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "release_with_speed",
+            {"object_id": 7, "mode": "release", "speed": 1.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "missing_speed",
+            {"object_id": 7, "heading": 90.0, "heading_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "missing_heading",
+            {"object_id": 7, "speed": 1.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "missing_heading_flag",
+            {"object_id": 7, "heading": 90.0, "speed": 1.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "false_speed_flag",
+            {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": False},
+            (False, "bad_args"),
+        ),
+        (
+            "speed_not_a_gait",
+            {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.5, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "speed_zero",
+            {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 0.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "speed_name",
+            {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": "walk", "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "speed_bool",
+            {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": True, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "heading_nan",
+            {
+                "object_id": 7,
+                "heading": float("nan"),
+                "heading_set": True,
+                "speed": 1.0,
+                "speed_set": True,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "heading_inf",
+            {
+                "object_id": 7,
+                "heading": float("inf"),
+                "heading_set": True,
+                "speed": 1.0,
+                "speed_set": True,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "heading_above",
+            {"object_id": 7, "heading": 360.5, "heading_set": True, "speed": 1.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "heading_below",
+            {"object_id": 7, "heading": -360.5, "heading_set": True, "speed": 1.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        (
+            "zero_object_id",
+            {"object_id": 0, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": True},
+            (False, "bad_args"),
+        ),
+        ("negative_object_id_release", {"object_id": -1, "mode": "release"}, (False, "bad_args")),
+        ("bool_object_id", {"object_id": True, "mode": "release"}, (False, "bad_args")),
+        ("missing_object_id", {"mode": "release"}, (False, "bad_args")),
+        ("other_mode", {"object_id": 7, "mode": "stop"}, (False, "bad_args")),
+        (
+            "extra_key",
+            {
+                "object_id": 7,
+                "heading": 90.0,
+                "heading_set": True,
+                "speed": 1.0,
+                "speed_set": True,
+                "extra": None,
+            },
+            (False, "bad_args"),
+        ),
+        ("extra_key_release", {"object_id": 7, "mode": "release", "extra": None}, (False, "bad_args")),
+    ),
     "action_cursor_ids": (
         (
             "valid",

@@ -402,7 +402,7 @@ class InputTriggerCensusTest(unittest.TestCase):
     def test_daemon_map_names_its_tool_and_the_version_and_hash_stay(self) -> None:
         self.assertEqual(_BRIDGE_COMMAND_TOOLS["client"].get(COMMAND), COMMAND)
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "f5c9d49336544bab")
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
 

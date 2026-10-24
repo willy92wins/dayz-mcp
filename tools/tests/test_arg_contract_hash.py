@@ -39,10 +39,12 @@ class ArgContractHashTest(unittest.TestCase):
             "hands_attach=object_id,slot,uid\n"
             "object_resolve=pos,radius,type\n"
             "player_kill=uid\n"
+            "survivor_drive=heading,heading_set,mode,object_id,speed,speed_set\n"
+            "survivor_drive_release=command_id,object_id\n"
             "vehicle_prepare_fixture=mode,pos,radius,type",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "f5c9d49336544bab"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),
