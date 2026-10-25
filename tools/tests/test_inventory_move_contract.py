@@ -148,3 +148,18 @@ class InventoryMoveRefusalCodesTest(unittest.TestCase):
         cargo_at = ready.index('if (op == "to_cargo")')
         hands_at = ready.index('if (op == "to_hands")', cargo_at)
         self.assertNotIn("job.actor", ready[cargo_at:hands_at])
+
+
+class InventoryMoveConfirmationOrderTest(unittest.TestCase):
+    def test_the_server_read_is_checked_before_a_client_refusal_is_posted(self):
+        bridge = (_ROOT / "addon" / "scripts" / "5_Mission" / "MCPBridge.c").read_text(encoding="utf-8")
+        dispatch = _function_body(bridge, "bool DispatchInventoryMove(")
+        self.assertLess(
+            dispatch.index("if (MCPInventoryMoveReady(job))"),
+            dispatch.index("if (clientRpc && job.phase == 2)"),
+        )
+        jobs = _function_body(bridge, "void ProcessJobs()")
+        self.assertLess(
+            jobs.index("else if (IsJobReady(job))"),
+            jobs.index('job.kind == "inventory_move" && job.phase == 2'),
+        )

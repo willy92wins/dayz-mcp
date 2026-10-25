@@ -325,3 +325,16 @@ Linter (exit 1). Cuatro errors, los de la base, mismas líneas. Siete warnings: 
 
 En juego, y por tanto sin ejecutar Enforce: el repro de A (ítem en las manos de U, caja B, `authority=server`, `to_cargo` ya no es `not_reachable`); que `DayZGame.OnRPC` entregue el ScriptRPC de vuelta; que el cargador dentro de un arma en el suelo produzca `no_room` y que ese código vuelva con `accepted=false`; que un fallo al leer solo el id siga en `timeout`. El linter no compila Enforce.
 
+## Cierre de la ronda 3 (integrador)
+
+La revisión adversarial de la ronda 3 (gpt-6-astra) dio ROJO. A queda FIXED y B, PARTIAL. El P1 que deja: el rechazo pendiente (`phase == 2`) se publicaba antes de mirar si el servidor ya ve el movimiento, en el dispatch y en `ProcessJobs`, así que un movimiento que sí ocurrió podía salir como rechazado. Era la última ronda del tope de 3. Con el visto bueno del dueño, el integrador aplicó el arreglo exacto que propuso la revisión, sin otra ronda:
+
+- `DispatchInventoryMove`: el rechazo va después de `MCPInventoryMoveReady(job)`.
+- `ProcessJobs`: el rechazo va después de `IsJobReady(job)`, que para `inventory_move` es `MCPInventoryMoveReady`. El timeout sigue el último y cada job se publica una sola vez.
+- `InventoryMoveConfirmationOrderTest` en `tools/tests/test_inventory_move_contract.py` fija ese orden. Falla con el `MCPBridge.c` de `1d018286` y pasa con el arreglo.
+
+Gates del integrador:
+
+- 8 módulos (`test_inventory_move_contract`, `test_server_adminlog`, `test_owned_scalar_census`, `test_wire_coercion_census`, `test_ingress_schema_coherence`, `test_command_validation_coverage`, `test_validate_command_args_table`, `test_bridge_server_capabilities`): `Ran 164 tests ... OK`.
+- Linter offline: 4 errors, los de la base (`MCP_ActionCursor.c` 163 y 234, `MCPDialogController.c` 39 y 40).
+

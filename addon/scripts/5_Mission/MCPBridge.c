@@ -910,12 +910,6 @@ class MCPBridge : Managed
 			result.error = performError;
 			return true;
 		}
-		if (clientRpc && job.phase == 2)
-		{
-			MCPPostInventoryMoveRefused(job, job.error);
-			m_Jobs.Remove(job.id);
-			return false;
-		}
 		if (clientRpc && job.phase == 1)
 		{
 			MCPWriteInventoryMove(result, job, true, "");
@@ -933,6 +927,14 @@ class MCPBridge : Managed
 				m_Jobs.Remove(job.id);
 			}
 			return true;
+		}
+		// The server read wins: a client refusal is posted only when the move
+		// is not visible yet.
+		if (clientRpc && job.phase == 2)
+		{
+			MCPPostInventoryMoveRefused(job, job.error);
+			m_Jobs.Remove(job.id);
+			return false;
 		}
 		if (!clientRpc)
 		{
@@ -5164,14 +5166,7 @@ class MCPBridge : Managed
 			}
 			else
 			{
-				if (job.kind == "inventory_move" && job.phase == 2)
-				{
-					MCPPostInventoryMoveRefused(job, job.error);
-					job.actor = null;
-					job.subject = null;
-					m_Jobs.Remove(jobId);
-				}
-				else if (job.kind == "inventory_move" && job.phase == 1)
+				if (job.kind == "inventory_move" && job.phase == 1)
 				{
 					PostJobSuccess(job);
 					job.actor = null;
@@ -5181,6 +5176,14 @@ class MCPBridge : Managed
 				else if (IsJobReady(job))
 				{
 					PostJobSuccess(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				// A refusal stands only once the read above did not show the move.
+				else if (job.kind == "inventory_move" && job.phase == 2)
+				{
+					MCPPostInventoryMoveRefused(job, job.error);
 					job.actor = null;
 					job.subject = null;
 					m_Jobs.Remove(jobId);
