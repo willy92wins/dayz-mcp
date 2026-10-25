@@ -209,6 +209,11 @@ class MCPArgs
 	// player_view_set: first or third. An absent key reads "", which the
 	// bridge refuses (bad_args). Empty on every other command.
 	string view;
+	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
+	int item_object_id;
+	int target_object_id;
+	string op;
+	string authority;
 
 	void MCPArgs()
 	{
@@ -1026,6 +1031,19 @@ class MCPCursorIds
 	}
 };
 
+// inventory_move location the server read after the call. Unassigned until
+// the verb has a location to report, including a timeout.
+class MCPInventoryMove
+{
+	string op;
+	string authority;
+	string loc_type;
+	int parent_object_id;
+	string parent_type;
+	string slot;
+	float quantity;
+};
+
 class MCPResult
 {
 	int id;
@@ -1171,6 +1189,7 @@ class MCPResult
 	// refusals and on other commands.
 	string person_view;
 	string camera_class;
+	ref MCPInventoryMove inventory_move;
 };
 
 class MCPJob
@@ -1211,6 +1230,8 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	Object move_target;
+	float move_quantity;
 };
 
 class MCPSpawnValidation

@@ -112,6 +112,8 @@ PRUNABLE_FIELDS = (
     "look_at",
     # action_cursor_ids fills it with registry ids for the captured pairs.
     "cursor_ids",
+    # inventory_move fills it with the server-read location, also on timeout.
+    "inventory_move",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -181,7 +183,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
         "action_use_component",
         "action_hold",
     }),
-    "confirmed": frozenset({"hands_attach", "hands_take", "weapon_state"}),
+    "confirmed": frozenset({"hands_attach", "hands_take", "inventory_move", "weapon_state"}),
     "sent": frozenset({"exec_enforce", "notify_players"}),
     "deleted": frozenset({"object_delete"}),
     "y": frozenset({"surface_query"}),

@@ -2814,6 +2814,14 @@ NAVMESH_DATA_SERVER_DESCRIPTION = (
     "Preflight validates the request without launching. A successful launch "
     "does not prove the generator connected or produced a usable navmesh."
 )
+SERVER_ADMINLOG_DESCRIPTION = (
+    "Opt-in. Default false. With mode=server or mode=all, adds -adminlog to "
+    "the server argv so DayZ writes the profile .ADM. Rejected with "
+    "mode=client or mode=offline (bad_dayz_test_request:"
+    "server_adminlog_requires_server). logs_since and wait_for read a .adm "
+    "in the server profile of the launch, whatever its file name. The flag "
+    "does not prove the file was created."
+)
 AUTO_REMEDIATE_STEAM_DESCRIPTION = (
     "Opt-in. Default false. When the Steam gate refuses (steam_not_running or "
     "steam_session_stale), dayz-mcp prepares Steam once before it launches the "
@@ -2887,6 +2895,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
         ("navmesh_data_server", NAVMESH_DATA_SERVER_DESCRIPTION),
+        ("server_adminlog", SERVER_ADMINLOG_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
         ("takeover", TAKEOVER_DESCRIPTION),
     ):
@@ -4971,8 +4980,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "pos=[x, surface_query.y, z]; y=0 is ground; example "
             "type=CivilianSedan; living infected flags=3108 "
             "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
-            "wait_for/logs_since read script/RPT only — player chat is not "
-            "there; with -adminlog the server .ADM has chat, no tool reads it. "
+            "wait_for/logs_since read script, RPT and a profile .ADM when one "
+            "exists. Player chat is in the .ADM, which DayZ writes only with "
+            "-adminlog (dayz_test_run server_adminlog=true). "
             "wait_for(log_matches) lookback_lines=200 includes the last N "
             "lines already on disk so a sequential action_use then wait_for "
             "does not miss a ~200ms response. action_use: held item is the "
@@ -5386,6 +5396,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         wait_for_box_s: StrictFloat = 0.0,
         auto_remediate_steam: StrictBool = False,
         navmesh_data_server: StrictBool = False,
+        server_adminlog: StrictBool = False,
         takeover: StrictBool = False,
         project_mod_override: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
@@ -5412,6 +5423,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if navmesh_data_server and (mode != "server" or pack_only):
             raise ToolError(
                 "bad_dayz_test_request:navmesh_data_server_requires_server_launch"
+            )
+        if server_adminlog and mode not in {"server", "all"}:
+            raise ToolError(
+                "bad_dayz_test_request:server_adminlog_requires_server"
             )
         client = _client_runtime()
         # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
@@ -5477,6 +5492,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         no_base_mods=no_base_mods,
                         no_file_patching=no_file_patching,
                         navmesh_data_server=navmesh_data_server,
+                        server_adminlog=server_adminlog,
                         port=port,
                         width=width,
                         height=height,
@@ -6009,7 +6025,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         max_lines: StrictInt = 200,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Drain RPT/script logs since a previous marker.
+        """Drain RPT, script and .ADM logs since a previous marker.
 
         ``marker`` is the exact value returned by a previous call. Accepted
         input: ``None`` (session-stored marker, or current launch if none),
@@ -7081,6 +7097,102 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("hands_attach", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} "
+            "Move a registered item the way a player would, or on the server "
+            "without a player command. item_object_id is a same-run registry "
+            "id. op is to_cargo, to_attachment, to_hands, to_inventory, "
+            "combine, split_half or split_to_hands. target_object_id is the "
+            "destination container or the combine receiver; slot is the "
+            "attachment name for to_attachment. authority=client (default) "
+            "runs the owner's predictive call (PredictiveTakeEntityToTargetCargo, "
+            "PredictiveTakeEntityToTargetAttachmentEx, PredictiveTakeEntityToHands, "
+            "PredictiveTakeEntityToInventory, CombineItemsClient, OnRightClick, "
+            "SplitIntoStackMaxHandsClient). authority=server uses "
+            "LocationSyncMoveEntity or ServerTake* and CombineItems / SplitItem "
+            "on the server, with no player command. authority=client uses "
+            "that predictive call; a juncture held during the move is "
+            "confirmed in game, not by the call itself. authority=server "
+            "does not promise that no juncture was already held. split_half "
+            "is the right-click split and can leave the new stack on the "
+            "ground when nothing has room. split_to_hands does not split a "
+            "stack that already fits in the hand (vanilla ShouldSplitQuantity). "
+            "to_inventory uses FindInventoryLocationType.ANY, which includes "
+            "hands, and confirmed is true when the item lands in this "
+            "player's hands. Magazine quantity is GetAmmoCount, not "
+            "GetQuantity. accepted=true means the call was issued. "
+            "confirmed=true means a later server read of the item matches "
+            "the op (cargo or attachment parent, hands, player inventory, "
+            "receiver quantity up, or source quantity down). The "
+            "read is inventory_move: loc_type, parent_object_id, parent_type, "
+            "slot, quantity. confirmed stays false on timeout. A client "
+            "refusal after the job id is read returns accepted=false and "
+            "that code (no_room, not_reachable, and the other client codes). "
+            "Only a failure to read the id ends as timeout. Refusals "
+            "before the call move nothing: object_not_found, not_reachable, "
+            "no_room, slot_not_found, slot_occupied. uid empty targets the "
+            "first human. Client moves need that player in reach "
+            "(UAMaxDistances.DEFAULT). No OS input and no client focus."
+        )
+    )
+    async def inventory_move(
+        item_object_id: StrictInt,
+        op: StrictStr,
+        target_object_id: StrictInt = 0,
+        slot: StrictStr = "",
+        authority: StrictStr = "client",
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(item_object_id, int) or isinstance(item_object_id, bool):
+            raise ToolError(_bad_args("item_object_id", item_object_id, "be a positive int"))
+        if item_object_id <= 0:
+            raise ToolError(_bad_args("item_object_id", item_object_id, "be a positive int"))
+        if op not in {
+            "to_cargo",
+            "to_attachment",
+            "to_hands",
+            "to_inventory",
+            "combine",
+            "split_half",
+            "split_to_hands",
+        }:
+            raise ToolError(
+                _bad_args(
+                    "op",
+                    op,
+                    "be to_cargo, to_attachment, to_hands, to_inventory, combine, split_half or split_to_hands",
+                )
+            )
+        if not isinstance(target_object_id, int) or isinstance(target_object_id, bool):
+            raise ToolError(_bad_args("target_object_id", target_object_id, "be an int >= 0"))
+        if target_object_id < 0:
+            raise ToolError(_bad_args("target_object_id", target_object_id, "be an int >= 0"))
+        if not isinstance(slot, str):
+            raise ToolError(_bad_args("slot", slot, "be a string"))
+        if authority not in {"client", "server"}:
+            raise ToolError(_bad_args("authority", authority, "be client or server"))
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if op == "to_attachment" and slot == "":
+            raise ToolError(_bad_args("slot", slot, "be a non-empty string for to_attachment"))
+        if op in {"to_cargo", "to_attachment", "combine"} and target_object_id <= 0:
+            raise ToolError(_bad_args("target_object_id", target_object_id, "be a positive int"))
+        args: dict[str, Any] = {
+            "item_object_id": item_object_id,
+            "op": op,
+            "target_object_id": target_object_id,
+            "slot": slot,
+            "authority": authority,
+        }
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "inventory_move", args, "server", _timeout(timeout_s)
+            )
 
     @app.tool(
         description=(

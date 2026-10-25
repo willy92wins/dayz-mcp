@@ -32,6 +32,8 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_state", {}, "weapon_state"),
     ("weapon_state", {"uid": "76561198000000000"}, "weapon_state"),
     ("hands_take", {"object_id": 1}, "hands_take"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "client"}, "inventory_move"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_hands", "authority": "server"}, "inventory_move"),
     ("hands_take", {"object_id": 4, "uid": "76561198000000000"}, "hands_take"),
     ("query_all_players", {}, "query_all_players"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS}, "world_spawn"),
