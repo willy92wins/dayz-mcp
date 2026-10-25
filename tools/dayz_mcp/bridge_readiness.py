@@ -285,6 +285,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "infected_drive": "infected_drive",
         "inventory_attach": "inventory_attach",
         "inventory_give": "inventory_give",
+        "inventory_move": "inventory_move",
         "loadout_apply": "loadout_apply",
         "loadout_clear": None,  # sent by loadout_apply for clear_first
         "loadout_get": "loadout_get",

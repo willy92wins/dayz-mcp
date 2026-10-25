@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 90 typed
+game, put the world into a state, act, and read back what the engine did — 91 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -77,10 +77,10 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**90 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**91 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `key_press`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `pipeline_feedback`, `pipeline_inbox`,
 `pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
@@ -131,7 +131,9 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **`exec_enforce` does not execute on a headless diag server.** `ExecuteEnforceScript` is marked Developer-only (`game.c:776`) and returned `false` under `NO_GUI`, including with the vanilla script-console wrapper (`product-spec.md:171-177`). Allowlist gating and JSONL audit are verified in-game; script effect is not a contract. The tool is opt-in breakglass, not a general interpreter (`product-spec.md:167`).
 
-**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (`tools/README-mcp.md:128`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]` (`tools/README-mcp.md:126`). For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
+**`wait_for` and `logs_since` read script logs, `.RPT` and a profile `.ADM` only when the launch time is known.** Player chat is not in the script log or the RPT. With `dayz_test_run(server_adminlog=true)` the server starts with `-adminlog`. Those tools tail a `.ADM` of any name whose mtime is at or after the run's start. Without that timestamp no `.ADM` is read, so a leftover from another run on the same profile stays out. `.RPT` and script selection is unchanged. (`tools/README-mcp.md`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]` (`tools/README-mcp.md:126`). For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
+
+**`inventory_move` `authority=client` issues the player's predictive call.** That a juncture is held while the item moves is confirmed in game, not by the call. `authority=server` does not promise there was no juncture already. `split_half` is the right-click split and can drop the new stack on the ground when nothing has room. `split_to_hands` does not split a stack that already fits in the hand (`ShouldSplitQuantity`, `itembase.c`). `to_inventory` uses `FindInventoryLocationType.ANY`, which includes hands, and a landing in that player's hands counts as confirmed. A client refusal after the job id is read comes back with `accepted=false` and that code. Only a failure to read the id ends as `timeout`.
 
 **Synchronous RestApi calls block the sim.** `POST_now` is documented as a thread-blocking operation (`restapi.c:125-128`). The bridge uses callback `GET`/`POST` only (`dayz-mcp-architecture.md` §9, "Bloqueo del loop").
 

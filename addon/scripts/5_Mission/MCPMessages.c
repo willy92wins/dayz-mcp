@@ -224,6 +224,11 @@ class MCPArgs
 	// loadout_apply (220f): the rows to create, in apply order. object_id and
 	// uid above select the target.
 	ref array<ref MCPLoadoutItem> loadout_items;
+	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
+	int item_object_id;
+	int target_object_id;
+	string op;
+	string authority;
 
 	void MCPArgs()
 	{
@@ -1069,6 +1074,19 @@ class MCPLoadout
 	}
 };
 
+// inventory_move location the server read after the call. Unassigned until
+// the verb has a location to report, including a timeout.
+class MCPInventoryMove
+{
+	string op;
+	string authority;
+	string loc_type;
+	int parent_object_id;
+	string parent_type;
+	string slot;
+	float quantity;
+};
+
 class MCPResult
 {
 	int id;
@@ -1218,6 +1236,7 @@ class MCPResult
 	// its job's last check, which can come one tick after the deadline.
 	bool cleanup_complete;
 	bool matched;
+	ref MCPInventoryMove inventory_move;
 };
 
 class MCPJob
@@ -1263,6 +1282,8 @@ class MCPJob
 	ref array<EntityAI> loadout_cleared;
 	// loadout_clear: the uid its reply carries (MCPResult.uid).
 	string loadout_uid;
+	Object move_target;
+	float move_quantity;
 };
 
 class MCPSpawnValidation

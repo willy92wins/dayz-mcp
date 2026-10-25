@@ -16,6 +16,7 @@
       "infected_drive": "infected_drive",
       "inventory_attach": "inventory_attach",
       "inventory_give": "inventory_give",
+      "inventory_move": "inventory_move",
       "loadout_apply": "loadout_apply",
       "loadout_clear": null,
       "loadout_get": "loadout_get",

@@ -115,6 +115,8 @@ PRUNABLE_FIELDS = (
     # loadout_get and loadout_apply fill it with the read and the outcomes
     # (fb99, 220f); never on their refusals.
     "loadout",
+    # inventory_move fills it with the server-read location, also on timeout.
+    "inventory_move",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -184,7 +186,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
         "action_use_component",
         "action_hold",
     }),
-    "confirmed": frozenset({"hands_attach", "hands_take", "weapon_state"}),
+    "confirmed": frozenset({"hands_attach", "hands_take", "inventory_move", "weapon_state"}),
     "sent": frozenset({"exec_enforce", "notify_players"}),
     # loadout_clear answers how many objects it deleted (220f), and the uid of
     # the player it acted on, "" for a survivor by object_id (#261 review Y11).

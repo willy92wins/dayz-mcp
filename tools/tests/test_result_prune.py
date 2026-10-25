@@ -441,7 +441,7 @@ GENERIC_SCALAR_OWNERS = {
         },
         False,
     ),
-    "confirmed": ({"hands_attach", "hands_take", "weapon_state"}, 0),
+    "confirmed": ({"hands_attach", "hands_take", "inventory_move", "weapon_state"}, 0),
     "sent": ({"exec_enforce", "notify_players"}, 0),
     "deleted": ({"object_delete", "loadout_clear"}, 0),
     "uid": ({"loadout_clear"}, ""),

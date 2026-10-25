@@ -70,6 +70,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "infected_drive",
     "inventory_attach",
     "inventory_give",
+    "inventory_move",
     "loadout_apply",
     "loadout_clear",
     "loadout_get",
