@@ -35,7 +35,7 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give," + "inventory_move,notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -103,6 +103,18 @@ class MCPBridge : Managed
 		{
 			m_TelemetryFixtureLinePool.Insert(new MCPTelemetryFixtureLine());
 			fixtureLineIndex = fixtureLineIndex + 1;
+		}
+		if (g_Game)
+		{
+			g_Game.Event_OnRPC.Insert(MCPOnInventoryMoveRefused);
+		}
+	}
+
+	void ~MCPBridge()
+	{
+		if (g_Game)
+		{
+			g_Game.Event_OnRPC.Remove(MCPOnInventoryMoveRefused);
 		}
 	}
 
@@ -615,6 +627,10 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchHandsAttach(command, result);
 		}
+		else if (command.cmd == "inventory_move")
+		{
+			postNow = DispatchInventoryMove(command, result);
+		}
 		else if (command.cmd == "object_doors")
 		{
 			postNow = DispatchObjectDoors(command, result);
@@ -711,6 +727,900 @@ class MCPBridge : Managed
 
 		result.ok = true;
 		return true;
+	}
+
+	// inventory_move (fb-20261024-212316-17fa). authority=client issues the
+	// player's predictive call and confirms only from a later server read.
+	// authority=server moves with ServerTake* or LocationSyncMoveEntity and
+	// confirms from the read in this call when the location already matches.
+	protected bool DispatchInventoryMove(MCPCommand command, MCPResult result)
+	{
+		result.accepted = false;
+		result.confirmed = false;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		int itemId = command.args.item_object_id;
+		result.object_id = itemId;
+		if (itemId <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		string op = command.args.op;
+		if (!MCPInventoryMoveOpKnown(op))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		string authority = command.args.authority;
+		if (authority == "")
+		{
+			authority = "client";
+		}
+		if (authority != "client")
+		{
+			if (authority != "server")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		if (op == "to_attachment")
+		{
+			if (command.args.slot == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		string itemError = "";
+		EntityAI item = MCPInventoryMoveEntity(itemId, itemError);
+		if (!item)
+		{
+			result.ok = false;
+			result.error = itemError;
+			return true;
+		}
+		result.type = item.GetType();
+		EntityAI target = null;
+		if (MCPInventoryMoveNeedsTarget(op))
+		{
+			int targetId = command.args.target_object_id;
+			if (targetId <= 0)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			string targetError = "";
+			target = MCPInventoryMoveEntity(targetId, targetError);
+			if (!target)
+			{
+				result.ok = false;
+				result.error = targetError;
+				return true;
+			}
+		}
+		PlayerBase player = null;
+		// authority=server still needs the player when the item or the target
+		// is in someone's inventory. Otherwise MCPInventoryMoveForeign treats a
+		// null player as foreign to every player root, including this uid.
+		// World to world leaves both roots null and does not resolve anyone.
+		bool rootedOnPlayer = false;
+		if (item.GetHierarchyRootPlayer())
+		{
+			rootedOnPlayer = true;
+		}
+		if (target && target.GetHierarchyRootPlayer())
+		{
+			rootedOnPlayer = true;
+		}
+		if (authority == "client" || MCPInventoryMoveNeedsPlayer(op) || rootedOnPlayer)
+		{
+			string playerError = "";
+			player = ResolvePlayer(command.args, playerError);
+			if (!player)
+			{
+				result.ok = false;
+				result.error = playerError;
+				return true;
+			}
+		}
+		string foreignError = MCPInventoryMoveForeign(player, item);
+		if (foreignError == "")
+		{
+			foreignError = MCPInventoryMoveForeign(player, target);
+		}
+		if (foreignError != "")
+		{
+			result.ok = false;
+			result.error = foreignError;
+			return true;
+		}
+		if (authority == "client")
+		{
+			string reachError = MCPInventoryMoveReach(player, item, target);
+			if (reachError != "")
+			{
+				result.ok = false;
+				result.error = reachError;
+				return true;
+			}
+		}
+		string roomError = MCPInventoryMoveRoom(player, item, target, op, command.args.slot);
+		if (roomError != "")
+		{
+			result.ok = false;
+			result.error = roomError;
+			return true;
+		}
+		float beforeQty = MCPItemQuantity(item);
+		if (op == "combine")
+		{
+			beforeQty = MCPItemQuantity(target);
+		}
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "inventory_move";
+		job.args = command.args;
+		job.args.op = op;
+		job.args.authority = authority;
+		job.subject = item;
+		job.actor = player;
+		job.move_target = target;
+		job.move_quantity = beforeQty;
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		string performError = "";
+		bool clientRpc = false;
+		if (authority == "server")
+		{
+			performError = MCPServerInventoryMove(player, item, target, op, command.args.slot);
+		}
+		else if (!GetGame().IsMultiplayer())
+		{
+			performError = player.MCPPerformClientInventoryMove(op, item, target, command.args.slot);
+		}
+		else
+		{
+			// A listen server can deliver the refusal RPC before Send returns.
+			// The job has to be in m_Jobs first. The handler only sets phase.
+			// Dispatch or ProcessJobs posts the one result.
+			clientRpc = true;
+			m_Jobs.Insert(job.id, job);
+			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot, job.id);
+		}
+		if (performError != "")
+		{
+			if (clientRpc && m_Jobs.Contains(job.id))
+			{
+				m_Jobs.Remove(job.id);
+			}
+			result.ok = false;
+			result.error = performError;
+			return true;
+		}
+		if (clientRpc && job.phase == 1)
+		{
+			MCPWriteInventoryMove(result, job, true, "");
+			result.ok = true;
+			m_Jobs.Remove(job.id);
+			return true;
+		}
+		result.accepted = true;
+		if (MCPInventoryMoveReady(job))
+		{
+			MCPWriteInventoryMove(result, job, true, "");
+			result.ok = true;
+			if (clientRpc)
+			{
+				m_Jobs.Remove(job.id);
+			}
+			return true;
+		}
+		// The server read wins: a client refusal is posted only when the move
+		// is not visible yet.
+		if (clientRpc && job.phase == 2)
+		{
+			MCPPostInventoryMoveRefused(job, job.error);
+			m_Jobs.Remove(job.id);
+			return false;
+		}
+		if (!clientRpc)
+		{
+			m_Jobs.Insert(job.id, job);
+		}
+		return false;
+	}
+
+	protected bool MCPInventoryMoveOpKnown(string op)
+	{
+		if (op == "to_cargo")
+		{
+			return true;
+		}
+		if (op == "to_attachment")
+		{
+			return true;
+		}
+		if (op == "to_hands")
+		{
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			return true;
+		}
+		if (op == "combine")
+		{
+			return true;
+		}
+		if (op == "split_half")
+		{
+			return true;
+		}
+		if (op == "split_to_hands")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected bool MCPInventoryMoveNeedsTarget(string op)
+	{
+		if (op == "to_cargo")
+		{
+			return true;
+		}
+		if (op == "to_attachment")
+		{
+			return true;
+		}
+		if (op == "combine")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected bool MCPInventoryMoveNeedsPlayer(string op)
+	{
+		if (op == "to_hands")
+		{
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			return true;
+		}
+		if (op == "split_half")
+		{
+			return true;
+		}
+		if (op == "split_to_hands")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected EntityAI MCPInventoryMoveEntity(int objectId, out string error)
+	{
+		error = "";
+		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			error = "object_not_found";
+			return null;
+		}
+		Object registered = m_RuntimeObjects.Get(objectId);
+		if (!registered)
+		{
+			error = "object_not_found";
+			return null;
+		}
+		EntityAI entity = EntityAI.Cast(registered);
+		if (!entity)
+		{
+			error = "not_an_item";
+			return null;
+		}
+		return entity;
+	}
+
+	// Worn or carried by a player who is not the selected one: never moved.
+	protected string MCPInventoryMoveForeign(PlayerBase player, EntityAI entity)
+	{
+		if (!entity)
+		{
+			return "";
+		}
+		Man root = entity.GetHierarchyRootPlayer();
+		if (!root)
+		{
+			return "";
+		}
+		if (player && root == player)
+		{
+			return "";
+		}
+		return "not_reachable";
+	}
+
+	protected bool MCPInventoryMoveNear(PlayerBase player, EntityAI entity)
+	{
+		if (!player || !entity)
+		{
+			return false;
+		}
+		Man root = entity.GetHierarchyRootPlayer();
+		if (root)
+		{
+			if (root == player)
+			{
+				return true;
+			}
+		}
+		float reach = UAMaxDistances.DEFAULT;
+		float reachSq = reach * reach;
+		float distSq = vector.DistanceSq(player.GetPosition(), entity.GetPosition());
+		if (distSq > reachSq)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	protected string MCPInventoryMoveReach(PlayerBase player, EntityAI item, EntityAI target)
+	{
+		if (!MCPInventoryMoveNear(player, item))
+		{
+			return "not_reachable";
+		}
+		if (target)
+		{
+			if (!MCPInventoryMoveNear(player, target))
+			{
+				return "not_reachable";
+			}
+		}
+		return "";
+	}
+
+	protected string MCPInventoryMoveRoom(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName)
+	{
+		if (op == "to_cargo")
+		{
+			if (!target || !target.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			InventoryLocation cargoLoc = new InventoryLocation;
+			if (!target.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY_CARGO, cargoLoc))
+			{
+				return "no_room";
+			}
+		}
+		if (op == "to_attachment")
+		{
+			if (!target || !target.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			int slotId = InventorySlots.GetSlotIdFromString(slotName);
+			if (!InventorySlots.IsSlotIdValid(slotId))
+			{
+				return "slot_not_found";
+			}
+			if (!target.GetInventory().HasAttachmentSlot(slotId))
+			{
+				return "slot_not_found";
+			}
+			if (target.GetInventory().FindAttachment(slotId))
+			{
+				return "slot_occupied";
+			}
+		}
+		if (op == "combine")
+		{
+			ItemBase combineReceiver = ItemBase.Cast(target);
+			ItemBase combineSource = ItemBase.Cast(item);
+			if (!combineReceiver)
+			{
+				return "not_an_item";
+			}
+			if (!combineSource)
+			{
+				return "not_an_item";
+			}
+			if (!combineReceiver.CanBeCombined(combineSource, false))
+			{
+				return "no_room";
+			}
+		}
+		if (op == "split_half" || op == "split_to_hands")
+		{
+			ItemBase stack = ItemBase.Cast(item);
+			if (!stack)
+			{
+				return "not_an_item";
+			}
+			if (!stack.CanBeSplit())
+			{
+				return "no_room";
+			}
+		}
+		// Same flags as PredictiveTakeEntityToInventory and ServerTakeEntityToInventory.
+		// ANY includes HANDS. The confirmation accepts that when the parent is the player.
+		if (op == "to_inventory")
+		{
+			if (!player || !player.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			InventoryLocation invLoc = new InventoryLocation;
+			if (!player.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY, invLoc))
+			{
+				return "no_room";
+			}
+		}
+		return "";
+	}
+
+	protected float MCPItemQuantity(EntityAI entity)
+	{
+		ItemBase item = ItemBase.Cast(entity);
+		if (!item)
+		{
+			return 0;
+		}
+		Magazine mag = Magazine.Cast(entity);
+		if (mag)
+		{
+			return mag.GetAmmoCount();
+		}
+		return item.GetQuantity();
+	}
+
+	protected string MCPSendInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName, int jobId)
+	{
+		int itemLow = 0;
+		int itemHigh = 0;
+		item.GetNetworkID(itemLow, itemHigh);
+		if (itemLow == 0 && itemHigh == 0)
+		{
+			return "not_networked";
+		}
+		if (target)
+		{
+			int targetLow = 0;
+			int targetHigh = 0;
+			target.GetNetworkID(targetLow, targetHigh);
+			if (targetLow == 0 && targetHigh == 0)
+			{
+				return "not_networked";
+			}
+		}
+		if (!player.GetIdentity())
+		{
+			return "no_identity";
+		}
+		string targetType = "";
+		if (target)
+		{
+			targetType = target.GetType();
+		}
+		if (!player.MCPRequestInventoryMove(jobId, item, item.GetType(), target, targetType, op, slotName))
+		{
+			return "rpc_failed";
+		}
+		return "";
+	}
+
+	protected string MCPServerInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName)
+	{
+		GameInventory itemInventory = item.GetInventory();
+		if (!itemInventory)
+		{
+			return "inventory_unavailable";
+		}
+		InventoryLocation src = new InventoryLocation;
+		if (!itemInventory.GetCurrentInventoryLocation(src))
+		{
+			return "not_reachable";
+		}
+		if (op == "to_cargo")
+		{
+			InventoryLocation dst = new InventoryLocation;
+			if (!target.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY_CARGO, dst))
+			{
+				return "no_room";
+			}
+			if (!GameInventory.LocationSyncMoveEntity(src, dst))
+			{
+				return "no_room";
+			}
+			return "";
+		}
+		if (op == "to_attachment")
+		{
+			int slotId = InventorySlots.GetSlotIdFromString(slotName);
+			InventoryLocation dstAtt = new InventoryLocation;
+			dstAtt.SetAttachment(target, item, slotId);
+			if (!GameInventory.LocationSyncMoveEntity(src, dstAtt))
+			{
+				return "no_room";
+			}
+			return "";
+		}
+		if (op == "to_hands")
+		{
+			player.ServerTakeEntityToHands(item);
+			return "";
+		}
+		if (op == "to_inventory")
+		{
+			if (!player.ServerTakeEntityToInventory(FindInventoryLocationType.ANY, item))
+			{
+				return "no_room";
+			}
+			return "";
+		}
+		if (op == "combine")
+		{
+			ItemBase receiver = ItemBase.Cast(target);
+			ItemBase source = ItemBase.Cast(item);
+			if (!receiver)
+			{
+				return "not_an_item";
+			}
+			if (!source)
+			{
+				return "not_an_item";
+			}
+			receiver.CombineItems(source, true);
+			return "";
+		}
+		if (op == "split_half")
+		{
+			ItemBase half = ItemBase.Cast(item);
+			if (!half)
+			{
+				return "not_an_item";
+			}
+			half.SplitItem(player);
+			return "";
+		}
+		if (op == "split_to_hands")
+		{
+			ItemBase toHands = ItemBase.Cast(item);
+			if (!toHands)
+			{
+				return "not_an_item";
+			}
+			toHands.SplitIntoStackMaxHands(player);
+			return "";
+		}
+		return "bad_args";
+	}
+
+	protected bool MCPInventoryMoveReady(MCPJob job)
+	{
+		if (!job || !job.args)
+		{
+			return false;
+		}
+		string op = job.args.op;
+		EntityAI item = EntityAI.Cast(job.subject);
+		if (op == "combine")
+		{
+			if (MCPItemQuantity(EntityAI.Cast(job.move_target)) > job.move_quantity + 0.001)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "split_half")
+		{
+			if (!item)
+			{
+				return false;
+			}
+			if (MCPItemQuantity(item) + 0.001 < job.move_quantity)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "split_to_hands")
+		{
+			if (!item)
+			{
+				return false;
+			}
+			if (MCPItemQuantity(item) + 0.001 < job.move_quantity)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (!item || !item.GetInventory())
+		{
+			return false;
+		}
+		InventoryLocation loc = new InventoryLocation;
+		if (!item.GetInventory().GetCurrentInventoryLocation(loc))
+		{
+			return false;
+		}
+		int locType = loc.GetType();
+		EntityAI parent = loc.GetParent();
+		// to_cargo, to_attachment and combine ignore job.actor. Resolving a
+		// player for a rooted item does not change these three verdicts.
+		if (op == "to_cargo")
+		{
+			if (parent != job.move_target)
+			{
+				return false;
+			}
+			if (locType == InventoryLocationType.CARGO)
+			{
+				return true;
+			}
+			if (locType == InventoryLocationType.PROXYCARGO)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "to_attachment")
+		{
+			if (parent != job.move_target)
+			{
+				return false;
+			}
+			if (locType != InventoryLocationType.ATTACHMENT)
+			{
+				return false;
+			}
+			string slotName = InventorySlots.GetSlotName(loc.GetSlot());
+			if (slotName != job.args.slot)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (op == "to_hands")
+		{
+			if (locType != InventoryLocationType.HANDS)
+			{
+				return false;
+			}
+			if (parent != job.actor)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			// ANY includes HANDS, so a move into this player's hands is confirmed.
+			if (locType == InventoryLocationType.HANDS)
+			{
+				if (parent == job.actor)
+				{
+					return true;
+				}
+				return false;
+			}
+			if (locType == InventoryLocationType.GROUND)
+			{
+				return false;
+			}
+			Man root = item.GetHierarchyRootPlayer();
+			if (root != job.actor)
+			{
+				return false;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	protected void MCPWriteInventoryMove(MCPResult result, MCPJob job, bool settled, string errorText)
+	{
+		result.accepted = true;
+		result.confirmed = settled;
+		if (settled)
+		{
+			result.ok = true;
+			result.error = "";
+		}
+		else
+		{
+			result.ok = false;
+			result.error = errorText;
+		}
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		if (job.args)
+		{
+			result.object_id = job.args.item_object_id;
+		}
+		EntityAI item = EntityAI.Cast(job.subject);
+		MCPInventoryMove report = new MCPInventoryMove();
+		if (job.args)
+		{
+			report.op = job.args.op;
+			report.authority = job.args.authority;
+		}
+		report.loc_type = "missing";
+		report.parent_object_id = 0;
+		report.parent_type = "";
+		report.slot = "";
+		report.quantity = 0;
+		if (item)
+		{
+			result.type = item.GetType();
+			report.quantity = MCPItemQuantity(item);
+			GameInventory inventory = item.GetInventory();
+			if (inventory)
+			{
+				InventoryLocation loc = new InventoryLocation;
+				if (inventory.GetCurrentInventoryLocation(loc))
+				{
+					report.loc_type = typename.EnumToString(InventoryLocationType, loc.GetType());
+					EntityAI parent = loc.GetParent();
+					if (parent)
+					{
+						report.parent_object_id = RuntimeObjectId(parent);
+						report.parent_type = parent.GetType();
+					}
+					if (loc.GetType() == InventoryLocationType.ATTACHMENT)
+					{
+						report.slot = InventorySlots.GetSlotName(loc.GetSlot());
+					}
+				}
+			}
+		}
+		result.inventory_move = report;
+	}
+
+	protected void MCPPostInventoryMove(MCPJob job, bool settled, string errorText)
+	{
+		MCPResult result = new MCPResult();
+		MCPWriteInventoryMove(result, job, settled, errorText);
+		PostResult(result);
+	}
+
+	// Confirm and timeout keep accepted=true through MCPWriteInventoryMove.
+	// A client refusal is a separate result: the call was not accepted.
+	protected void MCPPostInventoryMoveRefused(MCPJob job, string reason)
+	{
+		MCPResult result = new MCPResult();
+		MCPWriteInventoryMove(result, job, false, reason);
+		result.ok = false;
+		result.accepted = false;
+		result.confirmed = false;
+		result.error = reason;
+		PostResult(result);
+	}
+
+	protected string MCPInventoryMoveClientReason(string reason)
+	{
+		if (reason == "not_client")
+		{
+			return reason;
+		}
+		if (reason == "object_not_found")
+		{
+			return reason;
+		}
+		if (reason == "input_busy")
+		{
+			return reason;
+		}
+		if (reason == "not_reachable")
+		{
+			return reason;
+		}
+		if (reason == "slot_not_found")
+		{
+			return reason;
+		}
+		if (reason == "no_room")
+		{
+			return reason;
+		}
+		if (reason == "not_an_item")
+		{
+			return reason;
+		}
+		if (reason == "bad_args")
+		{
+			return reason;
+		}
+		if (reason == "not_streamed")
+		{
+			return reason;
+		}
+		if (reason == "type_mismatch")
+		{
+			return reason;
+		}
+		if (reason == "read_failed")
+		{
+			return reason;
+		}
+		return "client_refused";
+	}
+
+	// Client to server. Unrelated RPC types stay quiet. A failed check after
+	// the type matches is ignored and the job keeps its deadline.
+	void MCPOnInventoryMoveRefused(PlayerIdentity sender, Object target, int rpc_type, ParamsReadContext ctx)
+	{
+		if (rpc_type != MCP_RPC_INVENTORY_MOVE_REFUSED)
+		{
+			return;
+		}
+		if (!GetGame() || !GetGame().IsServer() || !GetGame().IsMultiplayer())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		int jobId = 0;
+		string reason = "";
+		if (!ctx.Read(jobId))
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (!ctx.Read(reason))
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		MCPJob job = m_Jobs.Get(jobId);
+		if (!job || job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (sender.GetId() != job.actor.GetIdentity().GetId())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		reason = MCPInventoryMoveClientReason(reason);
+		// Publishing here would be a write the census can reach from every
+		// command, because Event_OnRPC is not a command. The job pass posts it.
+		// phase 1: the server read already matches, so confirmation wins.
+		// phase 2: one refusal, and the deadline must not post a second result.
+		if (MCPInventoryMoveReady(job))
+		{
+			job.phase = 1;
+		}
+		else
+		{
+			job.phase = 2;
+			job.error = reason;
+		}
 	}
 
 	// hands_take validates on the server (object_id lives in m_RuntimeObjects:
@@ -4273,9 +5183,24 @@ class MCPBridge : Managed
 			}
 			else
 			{
-				if (IsJobReady(job))
+				if (job.kind == "inventory_move" && job.phase == 1)
 				{
 					PostJobSuccess(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				else if (IsJobReady(job))
+				{
+					PostJobSuccess(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				// A refusal stands only once the read above did not show the move.
+				else if (job.kind == "inventory_move" && job.phase == 2)
+				{
+					MCPPostInventoryMoveRefused(job, job.error);
 					job.actor = null;
 					job.subject = null;
 					m_Jobs.Remove(jobId);
@@ -4302,6 +5227,10 @@ class MCPBridge : Managed
 		else if (job.kind == "seat")
 		{
 			return IsSeatReady(job);
+		}
+		else if (job.kind == "inventory_move")
+		{
+			return MCPInventoryMoveReady(job);
 		}
 
 		return false;
@@ -4417,6 +5346,11 @@ class MCPBridge : Managed
 			PostSeatSuccess(job);
 			return;
 		}
+		if (job.kind == "inventory_move")
+		{
+			MCPPostInventoryMove(job, true, "");
+			return;
+		}
 
 		MCPResult result = new MCPResult();
 		result.id = job.id;
@@ -4476,6 +5410,11 @@ class MCPBridge : Managed
 
 	protected void PostJobTimeout(MCPJob job)
 	{
+		if (job.kind == "inventory_move")
+		{
+			MCPPostInventoryMove(job, false, "timeout");
+			return;
+		}
 		MCPResult result = new MCPResult();
 		result.id = job.id;
 		result.ok = false;

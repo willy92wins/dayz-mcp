@@ -206,6 +206,11 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
+	int item_object_id;
+	int target_object_id;
+	string op;
+	string authority;
 
 	void MCPArgs()
 	{
@@ -1033,6 +1038,19 @@ class MCPCursorIds
 	}
 };
 
+// inventory_move location the server read after the call. Unassigned until
+// the verb has a location to report, including a timeout.
+class MCPInventoryMove
+{
+	string op;
+	string authority;
+	string loc_type;
+	int parent_object_id;
+	string parent_type;
+	string slot;
+	float quantity;
+};
+
 class MCPResult
 {
 	int id;
@@ -1172,6 +1190,7 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	bool matched;
+	ref MCPInventoryMove inventory_move;
 };
 
 class MCPJob
@@ -1212,6 +1231,8 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	Object move_target;
+	float move_quantity;
 };
 
 class MCPSpawnValidation

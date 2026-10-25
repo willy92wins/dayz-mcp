@@ -282,6 +282,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "infected_drive": "infected_drive",
         "inventory_attach": "inventory_attach",
         "inventory_give": "inventory_give",
+        "inventory_move": "inventory_move",
         "notify_players": "notify_players",
         "object_anim": "object_anim",
         "object_delete": "object_delete",

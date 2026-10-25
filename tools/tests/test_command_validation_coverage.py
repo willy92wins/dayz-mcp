@@ -151,6 +151,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1}
     if cmd == "hands_attach":
         return {"object_id": 1, "slot": "LargeBattery"}
+    if cmd == "inventory_move":
+        return {"item_object_id": 1, "op": "to_hands"}
     if cmd == "weapon_raise":
         return {"raised": True, "hold_ttl_s": 3.0}
     if cmd == "weapon_aim":
