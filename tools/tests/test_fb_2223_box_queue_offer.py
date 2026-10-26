@@ -1626,5 +1626,54 @@ class Fb2223BoxQueueOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("run_id"), _LAUNCH_OK["run_id"])
 
 
+class _ExitsAfterTheFirstWait(_BoxHarness):
+    """The foreign DayZ holds the box and its ports until the first FIFO wait."""
+
+    def handle_box(self, identity, **kwargs: object) -> dict[str, object]:
+        result = super().handle_box(identity, **kwargs)
+        if kwargs.get("wait"):
+            self.occupied = False
+            self.foreign = []
+            self.foreign_ports = []
+        return result
+
+
+class Fb88feForeignDayzQueueTest(unittest.IsolatedAsyncioTestCase):
+    """fb-20261026-203149-88fe: a port held while a foreign DayZ occupies the box."""
+
+    async def test_on_busy_queue_waits_for_the_foreign_dayz_then_launches(self) -> None:
+        runtime, app = _build()
+        harness = _ExitsAfterTheFirstWait(
+            runs=[],
+            foreign=[{"port": 2302, "mods": ["@DayZ_MCP"], "profiles": "profiles-130"}],
+            foreign_ports=[2302, 2304],
+        )
+        harness.bind(runtime)
+        execute = AsyncMock(return_value=dict(_LAUNCH_OK))
+        try:
+            with (
+                patch.object(server.dayz_test_tool, "execute_dayz_test_run", execute),
+                _fast_box_wait(),
+            ):
+                payload = _content_json(
+                    await app.call_tool(
+                        "dayz_test_run",
+                        {
+                            "project": "ExampleMod",
+                            "mode": "server",
+                            "on_busy": "queue",
+                            "wait_for_box_s": 5.0,
+                            "port": 2302,
+                        },
+                    )
+                )
+        except BaseException as exc:
+            _fail_product(self, exc)
+        self.assertTrue(any(call.get("wait") for call in harness.box_calls))
+        execute.assert_awaited_once()
+        self.assertEqual(payload.get("status"), "succeeded")
+        self.assertEqual(payload.get("run_id"), _LAUNCH_OK["run_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

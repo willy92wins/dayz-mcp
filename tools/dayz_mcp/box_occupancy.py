@@ -194,7 +194,10 @@ def _box_wait_cannot_help(
         for item in runs:
             if isinstance(item, dict) and item.get("state") == "UNRECONCILED":
                 return "unreconciled"
-    if _port_conflict_fields(box, port).get("reason") == "port_in_use_foreign":
+    if (
+        _port_conflict_fields(box, port).get("reason") == "port_in_use_foreign"
+        and not _foreign_dayz_present(box)
+    ):
         return "port_in_use_foreign"
     return None
 
@@ -259,7 +262,10 @@ def _box_queue_offer(
     )
     if wait_reason is not None and wait_reason != "own_run":
         return None
-    if _port_conflict_fields(box, port).get("reason") == "port_in_use_foreign":
+    if (
+        _port_conflict_fields(box, port).get("reason") == "port_in_use_foreign"
+        and not _foreign_dayz_present(box)
+    ):
         return None
     waiters = 0
     queue = box.get("queue")
@@ -329,6 +335,17 @@ def _foreign_ports_contain(foreign_ports: object, port: int) -> bool:
     if not isinstance(foreign_ports, list):
         return False
     return any(_foreign_port_number(item) == port for item in foreign_ports)
+
+
+def _foreign_dayz_present(box: dict[str, Any]) -> bool:
+    """A DayZ this daemon did not launch occupies the box.
+
+    fb-20261026-203149-88fe: while it runs a launch is refused on any port (a
+    DayZ image on any port is foreign), so the wait for the box comes first
+    even when the requested port is also held; that DayZ may be its holder.
+    """
+    foreign = box.get("foreign")
+    return isinstance(foreign, list) and bool(foreign)
 
 
 def _annotate_foreign_port_list(
@@ -438,8 +455,18 @@ def _port_conflict_fields(box: object, port: int | None) -> dict[str, Any]:
     if isinstance(port, int) and _foreign_ports_contain(foreign_ports, port):
         # Any requested port, any image: foreign_ports_all is the socket table
         # minus managed runs. When a run also occupies the box, both blockers
-        # are named -- freeing the box does not free this port.
-        if isinstance(runs, list) and runs:
+        # are named -- freeing the box does not free this port. A DayZ without
+        # a run record refuses every port while it runs, so the box comes first.
+        if _foreign_dayz_present(box):
+            hint = (
+                f"port {port} is held by a process that is not a managed run, and a "
+                "DayZ this daemon did not launch occupies the box (see "
+                "session_status.box.foreign): while it runs a launch is refused on "
+                "any port, so another port= does not help yet; wait for the box "
+                "with wait_for_box_s=<n> or on_busy=\"queue\", and pass another "
+                "port= only if this one is still held after the box frees"
+            )
+        elif isinstance(runs, list) and runs:
             hint = (
                 f"the box is busy (see occupied_by_run_id) AND port {port} is held "
                 "by a process that is not a managed run: after the box frees, pass "
