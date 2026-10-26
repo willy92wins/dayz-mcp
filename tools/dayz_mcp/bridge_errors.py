@@ -458,6 +458,28 @@ def _player_move_detail(result: dict[str, Any]) -> str:
     return ""
 
 
+# player_view_set fills person_view and camera_class before view_not_applied
+# (MCPClientBridge.c PostPlayerViewSetJob). Only first or third and a plain
+# class-name token cross; anything else is omitted, not leaked. A null camera
+# reads back as camera_class "", which is omitted too, as the tool says.
+_PLAYER_VIEW_CAMERA_CLASS_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+def _player_view_set_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") != "view_not_applied":
+        return ""
+    pairs: list[str] = []
+    person_view = result.get("person_view")
+    if person_view in ("first", "third"):
+        pairs.append(f"person_view={person_view}")
+    camera_class = result.get("camera_class")
+    if isinstance(camera_class, str) and _PLAYER_VIEW_CAMERA_CLASS_RE.fullmatch(camera_class):
+        pairs.append(f"camera_class={camera_class}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
 # scene_clear fills scene_clear with the pair that blocked it before refusing
 # with scene_shared (MCPBridge.c RefuseSceneShared): two registry ids and the
 # scene each was registered under. Only positive ints and scene ids cross.
@@ -509,7 +531,12 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     player_move is the fifth: not_held and aborted carry observed=released_by=
     with a known release cause, and nothing else crosses.
 
-    scene_clear is the sixth: scene_shared carries the pair that blocked it,
+    player_view_set is the sixth: view_not_applied carries observed= with the
+    person_view and camera_class it read back, so the caller sees which view
+    and camera the engine kept. An empty camera_class (a null camera) is left
+    out.
+
+    scene_clear is the seventh: scene_shared carries the pair that blocked it,
     carrier_id and carrier_scene_id, then carried_id and carried_scene_id.
 
     The decision is by VERB, never by key presence: MCPResult is one flat class
@@ -532,6 +559,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _input_trigger_detail(result)
     if cmd == "player_move":
         return _player_move_detail(result)
+    if cmd == "player_view_set":
+        return _player_view_set_detail(result)
     if cmd == "scene_clear" and str(result.get("error") or "") == "scene_shared":
         return _scene_shared_detail(result)
     if cmd not in _UI_ECHO_VERBS:
@@ -572,8 +601,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # observed= telemetry allowlist the bridge already filled,
     # vehicle_door/door_missing, which carries the empty slot,
     # input_trigger, whose refusals carry reason= and observed=,
-    # player_move, whose not_held and aborted carry observed=released_by=, and
-    # scene_clear/scene_shared, which carries the pair that blocked it.
+    # player_move, whose not_held and aborted carry observed=released_by=,
+    # player_view_set, whose view_not_applied carries observed= with its read-back,
+    # and scene_clear/scene_shared, which carries the pair that blocked it.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

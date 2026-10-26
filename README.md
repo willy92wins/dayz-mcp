@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 91 typed
+game, put the world into a state, act, and read back what the engine did — 98 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -29,10 +29,10 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 | Step | Tool(s) | What it does |
 |---|---|---|
 | **Build + launch** | `dayz_test_run(project, mode, build=True, …)` | Packs the mod with AddonBuilder, starts a diag server and/or client with it loaded, waits for readiness. Managed run, returns a `run_id`. |
-| **Set up the scene** | `world_spawn`, `world_spawn_batch`, `player_teleport`, `player_heal`, `player_godmode`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `hands_attach`, `hands_take`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. Heal a player at once, seated or not, or switch its godmode. Spawn up to 200 objects in one call, sent in groups of `per_tick` that the bridge each creates in one server tick, every one registered under a scene when given a `scene_id`. |
-| **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move` | Drive, animate, open or close a car door, frame the shot, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, and walk the on-foot player in a direction or to a point. |
+| **Set up the scene** | `world_spawn`, `world_spawn_batch`, `player_teleport`, `player_heal`, `player_godmode`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `loadout_apply`, `hands_attach`, `hands_take`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. Heal a player at once, seated or not, or switch its godmode. Spawn up to 200 objects in one call, sent in groups of `per_tick` that the bridge each creates in one server tick, every one registered under a scene when given a `scene_id`. |
+| **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `player_view_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move` | Drive, animate, open or close a car door, frame the shot, set the local player's first or third person view, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, and walk the on-foot player in a direction or to a point. |
 | **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `ui_dialog`, `capture_screenshot` | Reload a `.layout` written into the client's profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. `ui_dialog` is the client modal (acknowledge/confirm/form) for the local player. |
-| **Observe** | `wait_for`, `logs_since`, `query_player_state`, `weapon_state`, `object_inspect`, `object_doors`, `input_describe`, `world_time_get`, `scene_entities`, `vehicle_telemetry`, `vehicle_trace`, `player_trace`, `anim_timeline`, `scene_raycast`, `surface_query`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle and on-foot player traces, client action/animation-phase timelines, raycasts, frames. Building door flags, registered input bindings, the in-game clock and what a scene holds are reads. Data an agent can assert on, not pixels to squint at. |
+| **Observe** | `wait_for`, `logs_since`, `query_player_state`, `weapon_state`, `object_inspect`, `object_doors`, `loadout_get`, `input_describe`, `world_time_get`, `scene_entities`, `vehicle_telemetry`, `vehicle_trace`, `player_trace`, `anim_timeline`, `scene_raycast`, `surface_query`, `server_perf`, `nav_path_query`, `players_visibility`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle and on-foot player traces, client action/animation-phase timelines, raycasts, frames. Building door flags, registered input bindings, the in-game clock, what a scene holds, the server frame rate with its entity counts, a navmesh path and which players could see a point are reads. Data an agent can assert on, not pixels to squint at. |
 | **Reset + repeat** | `scene_clear`, `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Delete the objects a scene spawned, as `object_delete` deletes one (or nothing, when one shares a hierarchy with another scene's), return the world to normal, stop the managed run, hand the game to the next session. |
 
 An agent that can call these can iterate on a mod the way it iterates on code: change,
@@ -77,14 +77,14 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**91 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**98 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `key_press`,
-`lease_acquire`, `list_projects`, `logs_since`, `notify_players`, `object_anim`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
+`lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `pipeline_feedback`, `pipeline_inbox`,
-`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
-`query_player_state`, `restore_gameplay`, `scene_clear`, `scene_entities`, `scene_raycast`, `session_acquire`,
+`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `player_view_set`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
+`query_player_state`, `restore_gameplay`, `scene_clear`, `scene_entities`, `scene_raycast`, `server_perf`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
 `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,
 `ui_set_text`, `ui_tree`, `vehicle_control`, `vehicle_door`, `vehicle_enter`, `vehicle_get_in_client`,
@@ -131,7 +131,9 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **`exec_enforce` does not execute on a headless diag server.** `ExecuteEnforceScript` is marked Developer-only (`game.c:776`) and returned `false` under `NO_GUI`, including with the vanilla script-console wrapper (`product-spec.md:171-177`). Allowlist gating and JSONL audit are verified in-game; script effect is not a contract. The tool is opt-in breakglass, not a general interpreter (`product-spec.md:167`).
 
-**`wait_for` and `logs_since` read script logs and `.RPT` only.** Player chat is not in those files. With `-adminlog`, chat lands in a profiles `.ADM` that no tool reads (`tools/README-mcp.md:128`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]` (`tools/README-mcp.md:126`). For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
+**`wait_for` and `logs_since` read script logs, `.RPT` and a profile `.ADM` only when the launch time is known.** Player chat is not in the script log or the RPT. With `dayz_test_run(server_adminlog=true)` the server starts with `-adminlog`. Those tools tail a `.ADM` of any name whose mtime is at or after the run's start. Without that timestamp no `.ADM` is read, so a leftover from another run on the same profile stays out. `.RPT` and script selection is unchanged. (`tools/README-mcp.md`). `wait_for` on timeout still returns `ok: true` with `satisfied: false` — gate on `satisfied` (`tools/README-mcp.md:124`). Its `pattern` is a plain substring, never a regex: `[DayZ-MCP]`, not `\[DayZ-MCP\]` (`tools/README-mcp.md:126`). For a line printed at mission start, pass `lookback_from="launch"`; `lookback_lines` cannot reach that far back.
+
+**`inventory_move` `authority=client` issues the player's predictive call.** That a juncture is held while the item moves is confirmed in game, not by the call. `authority=server` does not promise there was no juncture already. `split_half` is the right-click split and can drop the new stack on the ground when nothing has room. `split_to_hands` does not split a stack that already fits in the hand (`ShouldSplitQuantity`, `itembase.c`). `to_inventory` uses `FindInventoryLocationType.ANY`, which includes hands, and a landing in that player's hands counts as confirmed. A client refusal after the job id is read comes back with `accepted=false` and that code. Only a failure to read the id ends as `timeout`.
 
 **Synchronous RestApi calls block the sim.** `POST_now` is documented as a thread-blocking operation (`restapi.c:125-128`). The bridge uses callback `GET`/`POST` only (`dayz-mcp-architecture.md` §9, "Bloqueo del loop").
 

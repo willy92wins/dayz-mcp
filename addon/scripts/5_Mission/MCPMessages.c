@@ -40,6 +40,21 @@ class MCPDialogResult
 	}
 };
 
+// loadout_get / loadout_apply row (fb99, 220f): one item of a loadout. The
+// tool flattens the loadout tree into these rows (tools/dayz_mcp/loadout.py)
+// and the bridge reads a target back into the same rows. dest is attachment,
+// cargo or hands. slot is the attachment slot name, "" for cargo and hands.
+// parent is the index of the row this item goes into, -1 for the target
+// itself; a parent row always comes before its children. Every key travels in
+// every row: an absent parent would read 0, which is a row index.
+class MCPLoadoutItem
+{
+	string type;
+	string slot;
+	string dest;
+	int parent;
+};
+
 // world_spawn_batch item (7f5d). An absent key reads 0 or false, as in MCPArgs
 // below. type, pos, flags and rotation are world_spawn's. ground true puts the
 // item on the ground surface_query reads, in place of pos[1]; ypr_set true turns
@@ -227,6 +242,25 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// loadout_apply (220f): the rows to create, in apply order. object_id and
+	// uid above select the target.
+	ref array<ref MCPLoadoutItem> loadout_items;
+	// player_view_set: first or third. An absent key reads "", which the
+	// bridge refuses (bad_args). Empty on every other command.
+	string view;
+	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
+	int item_object_id;
+	int target_object_id;
+	string op;
+	string authority;
+	// server_perf: seconds of the measured window, 1 to 60. An absent key
+	// reads 0, which the bridge refuses.
+	float window_s;
+	// nav_path_query: how far SampleNavmeshPosition looks around from and to
+	// (both reused above), above 0 and at most 50 m. An absent key reads 0,
+	// which the bridge refuses. players_visibility reuses pos and radius, the
+	// size of what is hidden (0 a point); the tool always sends both.
+	float snap_radius;
 	// 165a / 7f5d: world_spawn and world_spawn_batch register what they create
 	// under scene_id, and empty (what an absent key reads) is no scene.
 	// scene_entities and scene_clear name the scene they read or clear.
@@ -247,6 +281,7 @@ class MCPArgs
 		want = new array<string>();
 		sources = new array<string>();
 		fields = new array<ref MCPDialogField>();
+		loadout_items = new array<ref MCPLoadoutItem>();
 		net_low = new array<int>();
 		net_high = new array<int>();
 		items = new array<ref MCPSpawnBatchItem>();
@@ -288,12 +323,15 @@ class MCPCommandBatch
 };
 
 // godmode, here and in MCPAllPlayer, is MCPGodmode.IsOn: GetAllowDamage() false
-// on the server's body (MCP_PlayerCare.c).
+// on the server's body (MCP_PlayerCare.c). water and energy are that body's
+// stats as player_heal reads them (MCPPlayerVitals), 0 to 5000 (inbox fb98).
 class MCPPlayerState
 {
 	string name;
 	ref array<float> pos;
 	bool godmode;
+	float water;
+	float energy;
 
 	void MCPPlayerState()
 	{
@@ -519,18 +557,25 @@ class MCPWeaponState
 };
 
 // F3.6 object_inspect payload. bounding_center is model-local (GetBoundingCenter).
+// With want quantity, has_quantity is true for an ItemBase whose HasQuantity() is
+// true, and quantity and quantity_max are its GetQuantity() and GetQuantityMax();
+// otherwise they stay false and 0 (inbox fb98).
 class MCPObjectInspect
 {
 	string type;
 	ref array<float> bounding_center;
 	bool has_bounding_center;
 	ref array<ref MCPMemoryPoint> memory_points;
+	bool has_quantity;
+	float quantity;
+	float quantity_max;
 
 	void MCPObjectInspect()
 	{
 		bounding_center = new array<float>();
 		memory_points = new array<ref MCPMemoryPoint>();
 		has_bounding_center = false;
+		has_quantity = false;
 	}
 };
 
@@ -1052,6 +1097,74 @@ class MCPCursorIds
 	}
 };
 
+// loadout_apply outcome of one request row, in request order. error is ""
+// when ok, else unknown_type, slot_not_found, slot_occupied, cannot_attach,
+// no_room or parent_failed (MCPBridge.CreateLoadoutItem).
+class MCPLoadoutApplied
+{
+	bool ok;
+	string error;
+};
+
+// loadout_get / loadout_apply reply. items is the target's inventory read
+// after the verb, in MCPLoadoutItem rows. applied is loadout_apply's outcome
+// per request row, empty for loadout_get. too_large is true when the read
+// went past MCPBridge.LOADOUT_MAX_ITEMS rows or LOADOUT_MAX_DEPTH levels;
+// items is then empty. Primitives only: no entity reference.
+class MCPLoadout
+{
+	ref array<ref MCPLoadoutItem> items;
+	ref array<ref MCPLoadoutApplied> applied;
+	bool too_large;
+
+	void MCPLoadout()
+	{
+		items = new array<ref MCPLoadoutItem>();
+		applied = new array<ref MCPLoadoutApplied>();
+	}
+};
+
+// inventory_move location the server read after the call. Unassigned until
+// the verb has a location to report, including a timeout.
+class MCPInventoryMove
+{
+	string op;
+	string authority;
+	string loc_type;
+	int parent_object_id;
+	string parent_type;
+	string slot;
+	float quantity;
+};
+
+// server_perf counts, read once after the window closes: one
+// SceneGetEntitiesInBox pass over the map (dayzplayerutils.c:75), each entry
+// it returns counted once, in the first class it matches in this order:
+// players (a PlayerBase with a PlayerIdentity), ai (any other PlayerBase),
+// infected (DayZInfected), animals (DayZAnimal), vehicles (Transport), items
+// (InventoryItem). Primitives only: no entity reference.
+class MCPServerPerfCounts
+{
+	int players;
+	int ai;
+	int infected;
+	int animals;
+	int vehicles;
+	int items;
+};
+
+// players_visibility row, one per PlayerBase with a PlayerIdentity. uid is
+// GetPlainId, as query_all_players names it. distance is head to pos. visible
+// is in_fov and line_of_sight both. Primitives only: no entity reference.
+class MCPPlayerVisibility
+{
+	string uid;
+	float distance;
+	bool in_fov;
+	bool line_of_sight;
+	bool visible;
+};
+
 // world_spawn_batch row (7f5d), one per item in input order: object_id when the
 // item was created, otherwise error and the item's type.
 class MCPSpawnBatchRow
@@ -1152,7 +1265,12 @@ class MCPResult
 	int net_id_high;
 	bool is_authority_owner;
 	int object_id;
+	// object_delete, and loadout_clear: how many objects it deleted.
 	int deleted;
+	// loadout_clear: the PlayerIdentity.GetPlainId() of the player it
+	// cleared, whom the loadout_apply tool then targets by uid; "" for a
+	// survivor named by object_id.
+	string uid;
 	int tick_poll_sent;
 	int tick_poll_callback;
 	int tick_dispatch;
@@ -1168,6 +1286,9 @@ class MCPResult
 	// F3.5: true when dest=hands and hands were occupied — vanilla drops the held
 	// item and CallLater-spawns ~500 ms later (SpawnEntityInPlayerInventory returns null).
 	bool deferred;
+	// inventory_give (71c9): the created item is a Weapon_Base with no running
+	// state machine (CanProcessWeaponEvents false, weapon_base.c:270), such as a bow.
+	bool weapon_without_fsm;
 	// F3.6 object_inspect
 	ref MCPObjectInspect inspect;
 	// entities_query: raw nearby objects, nearest-first, cut at args.limit.
@@ -1245,6 +1366,9 @@ class MCPResult
 	ref MCPLookAt look_at;
 	// action_cursor_ids registry ids. Unassigned on other commands.
 	ref MCPCursorIds cursor_ids;
+	// loadout_get / loadout_apply reply. Unassigned on their refusals and on
+	// other commands.
+	ref MCPLoadout loadout;
 	// action_hold observation. Unassigned on other commands.
 	int hold_protocol;
 	string hold_id;
@@ -1258,8 +1382,33 @@ class MCPResult
 	bool placed_known;
 	bool already_placed;
 	bool flag_restored;
+	// Also loadout_clear's: true when every object it deleted read null at
+	// its job's last check, which can come one tick after the deadline.
 	bool cleanup_complete;
 	bool matched;
+	// player_view_set read-back after its settle: person_view is third when
+	// IsInThirdPerson, else first; camera_class is the ClassName of the
+	// player's GetCurrentCamera, empty when it returns null. Unassigned on its
+	// refusals and on other commands.
+	string person_view;
+	string camera_class;
+	ref MCPInventoryMove inventory_move;
+	// server_perf reply. Only server_perf writes the three scalars; counts is
+	// unassigned on other commands.
+	float avg_fps;
+	int min_fps;
+	bool insufficient_samples;
+	ref MCPServerPerfCounts counts;
+	// nav_path_query reply: FindPath's waypoints flattened as x0, y0, z0,
+	// x1, ... (the tool regroups them in threes), their 3D length, and the
+	// ends SampleNavmeshPosition snapped. Unassigned on its refusals and on
+	// other commands.
+	ref array<float> points;
+	float length_m;
+	ref array<float> from_snapped;
+	ref array<float> to_snapped;
+	// players_visibility rows. Unassigned on other commands.
+	ref array<ref MCPPlayerVisibility> players_visibility;
 	// world_spawn_batch reply. Unassigned on its refusals and on other commands.
 	ref MCPSpawnBatch world_spawn_batch;
 	// scene_entities rows, [] for a scene nothing was registered under.
@@ -1308,6 +1457,26 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	// loadout_clear: the objects it deleted. The engine nulls each reference
+	// once its object is gone.
+	ref array<EntityAI> loadout_cleared;
+	// loadout_clear: the uid its reply carries (MCPResult.uid).
+	string loadout_uid;
+	Object move_target;
+	float move_quantity;
+	// server_perf: phase 1 once the first tick has set sample_start_s
+	// (GetTickTime); sample_s_target is window_s. perf_frames counts the ticks
+	// after that one, perf_second is the whole second of the window the last
+	// tick ended in and perf_second_frames its ticks so far (second 0 also
+	// holds the first tick), perf_whole_seconds the seconds closed inside the
+	// window and perf_min_frames the fewest ticks of one, perf_measured_s the
+	// elapsed seconds at the last tick.
+	int perf_frames;
+	int perf_second;
+	int perf_second_frames;
+	int perf_whole_seconds;
+	int perf_min_frames;
+	float perf_measured_s;
 	// scene_clear: the counts so far and the entries whose delete is read back.
 	ref MCPSceneClear scene_clear;
 	ref array<ref MCPSceneEntry> scene_pending;

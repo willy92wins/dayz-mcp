@@ -149,6 +149,7 @@ from dayz_mcp.session_coordination import (
 from dayz_mcp.steam_preflight import STEAM_APP_VIEW_STALE, observe_app_steam_view
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+from dayz_mcp import loadout as loadout_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
@@ -272,9 +273,11 @@ from dayz_mcp.world_results import (
     _is_int_clock_part,
     _normalize_applied_clock,
     _normalize_entities_cargo,
+    _nav_path_reply,
     _overflow_clock_parts,
     _scene_clear_reply,
     _scene_entities_reply,
+    _server_perf_reply,
     _spawn_batch_failed_rows,
     _spawn_batch_group_rows,
     _spawn_batch_reply,
@@ -359,6 +362,7 @@ VehicleDoorMode = Literal["read", "open", "close"]
 InputTriggerKind = Literal["key", "input"]
 InputTriggerEntry = Literal["game", "mission"]
 InputTriggerPhase = Literal["click", "hold", "press", "release"]
+PlayerViewMode = Literal["first", "third"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -463,6 +467,19 @@ WORLD_SPAWN_FLAGS_LINE = (
 # addon/scripts/5_Mission/MCPBridge.c: 3888000 (45 days) is the largest
 # <lifetime> in the dayzOffline.chernarusplus db/types.xml.
 WORLD_SPAWN_LIFETIME_MAX_S = 3888000.0
+# server_perf window_s bounds in seconds, nav_path_query's snap_radius cap and
+# players_visibility's radius cap in metres. Mirror SERVER_PERF_WINDOW_MIN_S,
+# SERVER_PERF_WINDOW_MAX_S, NAV_SNAP_RADIUS_MAX and VISIBILITY_RADIUS_MAX in
+# addon/scripts/5_Mission/MCPBridge.c and the loopback schemas; a test pins the
+# bridge's values and comparisons and tries the loopback's edges with these. A
+# server_perf call answers window_s after its job starts: the tool waits at
+# least window_s plus SERVER_PERF_SLACK_S, which covers the job's JOB_TIMEOUT_S
+# (5 s) past the window and the poll and the reply around it.
+SERVER_PERF_WINDOW_MIN_S = 1.0
+SERVER_PERF_WINDOW_MAX_S = 60.0
+SERVER_PERF_SLACK_S = 10.0
+NAV_SNAP_RADIUS_MAX_M = 50.0
+VISIBILITY_RADIUS_MAX_M = 100.0
 # 165a: the most entries one scene holds. Mirrors SCENE_ENTRIES_MAX in
 # addon/scripts/5_Mission/MCPBridge.c, which refuses a spawn past it with
 # scene_full, so the scene_entities reply of a full scene stays far below the
@@ -2845,6 +2862,14 @@ NAVMESH_DATA_SERVER_DESCRIPTION = (
     "Preflight validates the request without launching. A successful launch "
     "does not prove the generator connected or produced a usable navmesh."
 )
+SERVER_ADMINLOG_DESCRIPTION = (
+    "Opt-in. Default false. With mode=server or mode=all, adds -adminlog to "
+    "the server argv so DayZ writes the profile .ADM. Rejected with "
+    "mode=client or mode=offline (bad_dayz_test_request:"
+    "server_adminlog_requires_server). logs_since and wait_for read a .adm "
+    "in the server profile of the launch, whatever its file name. The flag "
+    "does not prove the file was created."
+)
 AUTO_REMEDIATE_STEAM_DESCRIPTION = (
     "Opt-in. Default false. When the Steam gate refuses (steam_not_running or "
     "steam_session_stale), dayz-mcp prepares Steam once before it launches the "
@@ -2918,6 +2943,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
         ("navmesh_data_server", NAVMESH_DATA_SERVER_DESCRIPTION),
+        ("server_adminlog", SERVER_ADMINLOG_DESCRIPTION),
         ("client_start_budget_s", CLIENT_START_BUDGET_DESCRIPTION),
         ("takeover", TAKEOVER_DESCRIPTION),
     ):
@@ -5002,8 +5028,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "pos=[x, surface_query.y, z]; y=0 is ground; example "
             "type=CivilianSedan; living infected flags=3108 "
             "(ECE_PLACE_ON_SURFACE|ECE_INITAI|ECE_CREATEPHYSICS). "
-            "wait_for/logs_since read script/RPT only — player chat is not "
-            "there; with -adminlog the server .ADM has chat, no tool reads it. "
+            "wait_for/logs_since read script, RPT and a profile .ADM when one "
+            "exists. Player chat is in the .ADM, which DayZ writes only with "
+            "-adminlog (dayz_test_run server_adminlog=true). "
             "wait_for(log_matches) lookback_lines=200 includes the last N "
             "lines already on disk so a sequential action_use then wait_for "
             "does not miss a ~200ms response. action_use: held item is the "
@@ -5417,6 +5444,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         wait_for_box_s: StrictFloat = 0.0,
         auto_remediate_steam: StrictBool = False,
         navmesh_data_server: StrictBool = False,
+        server_adminlog: StrictBool = False,
         takeover: StrictBool = False,
         project_mod_override: StrictBool = False,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
@@ -5443,6 +5471,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if navmesh_data_server and (mode != "server" or pack_only):
             raise ToolError(
                 "bad_dayz_test_request:navmesh_data_server_requires_server_launch"
+            )
+        if server_adminlog and mode not in {"server", "all"}:
+            raise ToolError(
+                "bad_dayz_test_request:server_adminlog_requires_server"
             )
         client = _client_runtime()
         # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
@@ -5508,6 +5540,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         no_base_mods=no_base_mods,
                         no_file_patching=no_file_patching,
                         navmesh_data_server=navmesh_data_server,
+                        server_adminlog=server_adminlog,
                         port=port,
                         width=width,
                         height=height,
@@ -5986,7 +6019,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "pos stays where the server last put the player (for example the "
             "player_teleport position). Read the car with vehicle_telemetry. "
             "godmode is true while the player is immune to damage "
-            "(GetAllowDamage() false on the server). "
+            "(GetAllowDamage() false on the server). water and energy are "
+            "the body's stats, 0 to 5000, as player_heal reads them; an older "
+            "PBO leaves them out. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
@@ -6040,7 +6075,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         max_lines: StrictInt = 200,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Drain RPT/script logs since a previous marker.
+        """Drain RPT, script and .ADM logs since a previous marker.
 
         ``marker`` is the exact value returned by a previous call. Accepted
         input: ``None`` (session-stored marker, or current launch if none),
@@ -7192,6 +7227,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "hands via CreateInHands. dest is 'hands' or 'inventory'. "
             "Success returns object_id, the created item's same-run registry "
             "id, for both dests. hands_take and object_delete take that id. "
+            "weapon_without_fsm is true when the created item is a weapon "
+            "with no state machine, such as a bow. When such a weapon is "
+            "created, vanilla logs [wpnfsm] ... without FSM errors from the "
+            "engine's save on the server and its load on the client, which a "
+            "count of script errors should subtract; the item still arrives. "
             "uid empty (default) targets the first human; a non-empty uid "
             "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
             "success without a positive object_id still created the item: "
@@ -7299,6 +7339,102 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("hands_attach", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} "
+            "Move a registered item the way a player would, or on the server "
+            "without a player command. item_object_id is a same-run registry "
+            "id. op is to_cargo, to_attachment, to_hands, to_inventory, "
+            "combine, split_half or split_to_hands. target_object_id is the "
+            "destination container or the combine receiver; slot is the "
+            "attachment name for to_attachment. authority=client (default) "
+            "runs the owner's predictive call (PredictiveTakeEntityToTargetCargo, "
+            "PredictiveTakeEntityToTargetAttachmentEx, PredictiveTakeEntityToHands, "
+            "PredictiveTakeEntityToInventory, CombineItemsClient, OnRightClick, "
+            "SplitIntoStackMaxHandsClient). authority=server uses "
+            "LocationSyncMoveEntity or ServerTake* and CombineItems / SplitItem "
+            "on the server, with no player command. authority=client uses "
+            "that predictive call; a juncture held during the move is "
+            "confirmed in game, not by the call itself. authority=server "
+            "does not promise that no juncture was already held. split_half "
+            "is the right-click split and can leave the new stack on the "
+            "ground when nothing has room. split_to_hands does not split a "
+            "stack that already fits in the hand (vanilla ShouldSplitQuantity). "
+            "to_inventory uses FindInventoryLocationType.ANY, which includes "
+            "hands, and confirmed is true when the item lands in this "
+            "player's hands. Magazine quantity is GetAmmoCount, not "
+            "GetQuantity. accepted=true means the call was issued. "
+            "confirmed=true means a later server read of the item matches "
+            "the op (cargo or attachment parent, hands, player inventory, "
+            "receiver quantity up, or source quantity down). The "
+            "read is inventory_move: loc_type, parent_object_id, parent_type, "
+            "slot, quantity. confirmed stays false on timeout. A client "
+            "refusal after the job id is read returns accepted=false and "
+            "that code (no_room, not_reachable, and the other client codes). "
+            "Only a failure to read the id ends as timeout. Refusals "
+            "before the call move nothing: object_not_found, not_reachable, "
+            "no_room, slot_not_found, slot_occupied. uid empty targets the "
+            "first human. Client moves need that player in reach "
+            "(UAMaxDistances.DEFAULT). No OS input and no client focus."
+        )
+    )
+    async def inventory_move(
+        item_object_id: StrictInt,
+        op: StrictStr,
+        target_object_id: StrictInt = 0,
+        slot: StrictStr = "",
+        authority: StrictStr = "client",
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(item_object_id, int) or isinstance(item_object_id, bool):
+            raise ToolError(_bad_args("item_object_id", item_object_id, "be a positive int"))
+        if item_object_id <= 0:
+            raise ToolError(_bad_args("item_object_id", item_object_id, "be a positive int"))
+        if op not in {
+            "to_cargo",
+            "to_attachment",
+            "to_hands",
+            "to_inventory",
+            "combine",
+            "split_half",
+            "split_to_hands",
+        }:
+            raise ToolError(
+                _bad_args(
+                    "op",
+                    op,
+                    "be to_cargo, to_attachment, to_hands, to_inventory, combine, split_half or split_to_hands",
+                )
+            )
+        if not isinstance(target_object_id, int) or isinstance(target_object_id, bool):
+            raise ToolError(_bad_args("target_object_id", target_object_id, "be an int >= 0"))
+        if target_object_id < 0:
+            raise ToolError(_bad_args("target_object_id", target_object_id, "be an int >= 0"))
+        if not isinstance(slot, str):
+            raise ToolError(_bad_args("slot", slot, "be a string"))
+        if authority not in {"client", "server"}:
+            raise ToolError(_bad_args("authority", authority, "be client or server"))
+        if not isinstance(uid, str):
+            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if op == "to_attachment" and slot == "":
+            raise ToolError(_bad_args("slot", slot, "be a non-empty string for to_attachment"))
+        if op in {"to_cargo", "to_attachment", "combine"} and target_object_id <= 0:
+            raise ToolError(_bad_args("target_object_id", target_object_id, "be a positive int"))
+        args: dict[str, Any] = {
+            "item_object_id": item_object_id,
+            "op": op,
+            "target_object_id": target_object_id,
+            "slot": slot,
+            "authority": authority,
+        }
+        if uid != "":
+            args["uid"] = uid
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "inventory_move", args, "server", _timeout(timeout_s)
+            )
 
     @app.tool(
         description=(
@@ -7565,15 +7701,166 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         return _require_inventory_attach_child(result)
 
+    # loadout_get and loadout_apply (fb99, 220f) share one loadout format;
+    # loadout.py flattens it into the bridge's rows and nests the read back.
+    @app.tool(
+        description=(
+            "Read what one target wears and holds, in the format loadout_apply "
+            "takes. It changes nothing and needs no lease. The answer's loadout "
+            "is {attachments: [item, ...], hands: item or null}, where an item is "
+            "{type, slot, attachments, cargo}: slot, in an attachments list only, "
+            "is the slot name InventorySlots.GetSlotName gives (Body, Back, "
+            "Headgear), and attachments and cargo list what the item holds, [] "
+            "when nothing. Attachments come in the engine's order and the item "
+            "in hands last. The target is a connected player by uid (empty, the "
+            "default, is the first human; otherwise PlayerIdentity.GetPlainId()) "
+            "or, by object_id, a survivor world_spawn made: the same-run registry "
+            "id of a PlayerBase with no connected identity. Not both. type is "
+            "the target's class. Quantity, health and other item state are not "
+            "read. ok is 0 and warnings includes loadout_incomplete when the "
+            "answer's rows do not form a loadout. Errors: bad_args, not_found "
+            "(nothing registered under object_id, or it is gone), bad_target "
+            "(not a survivor, or a connected player: use uid), no_players, "
+            "player_not_found, loadout_too_large (more than "
+            f"{loadout_contract.MAX_ITEMS} items or {loadout_contract.MAX_DEPTH} "
+            "levels below the target; nothing is returned), and, before the "
+            "game runs a PBO built with this verb, arg_contract_mismatch or "
+            "bridge_capability_missing, with nothing sent."
+        )
+    )
+    async def loadout_get(
+        object_id: StrictInt = 0,
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = loadout_contract.target_args(object_id, uid)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "loadout_get", args, "server", _timeout(timeout_s)
+            )
+        return loadout_contract.get_reply(result)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Dress one target in a loadout, the format "
+            "loadout_get answers, so the read of one target can be applied to "
+            "another. loadout is {attachments: [item, ...], hands: item or "
+            "null}; an item is {type, slot, attachments, cargo}, with slot "
+            "required in an attachments list and absent in cargo and hands, and "
+            "attachments and cargo optional; at most "
+            f"{loadout_contract.MAX_ITEMS} items and "
+            f"{loadout_contract.MAX_DEPTH} levels below the target. The whole "
+            "loadout is checked before anything is sent: bad_args names the "
+            "path (loadout.attachments[2].slot). clear_first=true first deletes "
+            "what the target wears and holds, with everything inside, and waits "
+            "while the game removes it: the game checks once per tick until all "
+            "of it is gone or 5 s have passed. Then each attachment is "
+            "created in its slot, in list order, with its own attachments and "
+            "then its cargo, and then the item in hands. A slot or hands "
+            "already in use is slot_occupied and keeps what is there. items "
+            "lists every item in that order: path, type (the class it asked "
+            "for), ok, and error, null when ok, else unknown_type, "
+            "slot_not_found, slot_occupied, cannot_attach, no_room or "
+            "parent_failed (inside an item that failed). status is ok when every "
+            "item was created and partial otherwise. loadout is the target read "
+            "after, as loadout_get answers it; it is null, with "
+            "loadout_too_large true, when that read is past the caps. clear is "
+            "null without clear_first, else {deleted, cleanup_complete}: how "
+            "many objects the clear deleted, and whether all were gone at its "
+            "last check, which can come one tick after the 5 s (when not, a "
+            "slot one still holds answers slot_occupied). A clear that is "
+            "refused, times out or is cancelled sends nothing more; when the "
+            "creates are refused after a clear, the error ends with "
+            "clear=deleted=N cleanup_complete=0 or 1. A command the game was "
+            "already handed still runs after the tool gave up on it: that is "
+            "the transport's behavior. timeout_s is the wait for each of these "
+            "game calls. Created items get no registry ids. The target is "
+            "chosen as loadout_get chooses it: uid or object_id, not both. With "
+            "clear_first and neither, the creates go by uid to the player the "
+            "clear acted on, so a first human who left in between answers "
+            "player_not_found. Quantity, health and other item state are not "
+            "set. ok is 0 and warnings includes loadout_incomplete when the "
+            "answer cannot be read: the apply may have run, so read the target "
+            "with loadout_get before applying again. Errors: bad_args, not_found, "
+            "bad_target, no_players, player_not_found, busy (a clear_first on "
+            "this target is still waiting for what it deleted to go), "
+            "loadout_incomplete (the clear's answer cannot be read, and nothing "
+            "is created), and, before the game runs a PBO built with these "
+            "verbs, arg_contract_mismatch or bridge_capability_missing, with "
+            "nothing sent."
+        )
+    )
+    async def loadout_apply(
+        loadout: object,
+        object_id: StrictInt = 0,
+        uid: StrictStr = "",
+        clear_first: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        # loadout is taken as any JSON value and checked here, so a list, null
+        # or a string answers bad_args with its path like any other mistake.
+        if not isinstance(clear_first, bool):
+            raise ToolError(_bad_args("clear_first", clear_first, "be a bool"))
+        try:
+            target = loadout_contract.target_args(object_id, uid)
+            rows = loadout_contract.flatten_request(loadout)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        timeout = _timeout(timeout_s)
+        args: dict[str, Any] = dict(target)
+        args["loadout_items"] = [row for _path, row in rows]
+        clear: dict[str, Any] | None = None
+        async with runtime.tool_lock:
+            # clear_first is its own bridge verb: the clear deletes in its own
+            # tick and its job only waits; the creates go out only once the
+            # clear has answered (220f; #261 review Y1).
+            if clear_first:
+                cleared = await runtime.call_bridge(
+                    "loadout_clear", dict(target), "server", timeout
+                )
+                try:
+                    clear = loadout_contract.clear_reply(cleared)
+                    if not target:
+                        # The first human can change between the two commands:
+                        # the creates go by uid to the player the clear acted
+                        # on, and are refused if that player has left (#261
+                        # review Y11).
+                        args = {
+                            "uid": loadout_contract.cleared_uid(cleared),
+                            "loadout_items": args["loadout_items"],
+                        }
+                except ValueError as exc:
+                    raise ToolError(str(exc)) from exc
+            try:
+                result = await runtime.call_bridge(
+                    "loadout_apply", args, "server", timeout
+                )
+            except ToolError as exc:
+                if clear is None:
+                    raise
+                raise ToolError(
+                    loadout_contract.refusal_after_clear(str(exc), clear)
+                ) from exc
+        response = loadout_contract.apply_reply(rows, result)
+        response["clear"] = clear
+        return response
+
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
         description=(
             "Inspect an object: memory points (exists+pos) and optional "
-            "bounding_center. Target by object_id (from world_spawn or from "
-            "inventory_attach.item_object_id; that id is the created item, "
-            "not the destination owner, and lasts this run only) or by "
-            "classname near pos. Absent memory points return exists:false "
-            "with ok:true."
+            "bounding_center and quantity. Target by object_id (from "
+            "world_spawn or from inventory_attach.item_object_id; that id is "
+            "the created item, not the destination owner, and lasts this run "
+            "only) or by classname near pos. Absent memory points return "
+            "exists:false with ok:true. want 'quantity' reads an item's "
+            "quantity without changing it: has_quantity true, with quantity "
+            "and quantity_max from GetQuantity() and GetQuantityMax(), for an "
+            "item that has one (the liquid in a bottle, a food), and false "
+            "with both 0 otherwise; an older PBO has no has_quantity."
         )
     )
     async def object_inspect(
@@ -7853,6 +8140,164 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
+            "Measure the server's frame rate over window_s seconds "
+            f"({SERVER_PERF_WINDOW_MIN_S:g} to {SERVER_PERF_WINDOW_MAX_S:g}, "
+            "default 10) and count its entities. It changes nothing and needs "
+            "no lease. The bridge counts the frames the server runs during the "
+            "window and times them with GetTickTime; no FPS API is asked. "
+            "avg_fps is the frames over the measured seconds and min_fps the "
+            "fewest frames in any whole second of the window (a partial last "
+            "second is dropped). insufficient_samples is 1 when the window "
+            "held no whole second or fewer than 2 frames, and the answer then "
+            "carries no avg_fps and no min_fps. counts is read once, after the "
+            "window has closed, in one pass over the dynamic entities of the "
+            "whole map (SceneGetEntitiesInBox, which takes what touches or "
+            "overlaps the box), each entry it returns counted once, in the "
+            "first class it matches: players (a PlayerBase with a player "
+            "identity), ai (any other PlayerBase, such as a spawned survivor), "
+            "infected (DayZInfected), animals (DayZAnimal), vehicles "
+            "(Transport), items (InventoryItem). Whether it can return one "
+            "entity twice, and whether an item held in an inventory, worn or "
+            "attached is in that pass, and so in items, are not checked. The "
+            "call answers after the window "
+            "and holds this session's tool calls until then; the tool waits at "
+            f"least window_s + {SERVER_PERF_SLACK_S:g} s. Errors: bad_args, "
+            "timeout, world_unavailable, and bridge_capability_missing or "
+            "arg_contract_mismatch from a PBO built before this verb."
+        )
+    )
+    async def server_perf(
+        window_s: StrictFloat = 10.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        window_value = _require_range(
+            window_s,
+            SERVER_PERF_WINDOW_MIN_S,
+            SERVER_PERF_WINDOW_MAX_S,
+            _bad_args(
+                "window_s",
+                window_s,
+                f"be a finite number from {SERVER_PERF_WINDOW_MIN_S:g} to "
+                f"{SERVER_PERF_WINDOW_MAX_S:g}",
+            ),
+        )
+        timeout = max(_timeout(timeout_s), window_value + SERVER_PERF_SLACK_S)
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "server_perf", {"window_s": window_value}, "server", timeout
+            )
+        return _server_perf_reply(result)
+
+    @app.tool(
+        description=(
+            "Find the engine's navmesh path for a walking survivor between two "
+            "world points. It changes nothing and needs no lease. Public arg is "
+            "from (alias of from_pos); from and to are [x, y, z]. Each end is "
+            "first snapped to the navmesh within snap_radius metres (above 0 "
+            f"and at most {NAV_SNAP_RADIUS_MAX_M:g}, default 2) with "
+            "SampleNavmeshPosition, then FindPath runs between the snapped "
+            "ends, the whole query inside one server frame, so a long path "
+            "costs that frame. The answer is points (FindPath's own waypoints, "
+            "both ends included, each [x, y, z]), length_m (the sum of their 3D "
+            "segment lengths), from_snapped and to_snapped. The path filter "
+            "takes the walking flags (ground, doors, inside buildings) and "
+            "leaves out the disabled and swimming ones; its flag values are "
+            "not measured in game yet. A terrain without a navmesh (a custom "
+            "map that ships none) answers no_navmesh, or no_navmesh_at_from / "
+            "no_navmesh_at_to, as does an end with no navmesh the filter "
+            "admits within snap_radius (expected of open sea farther than "
+            "snap_radius from the shore; not measured in game yet). Errors "
+            "carry only the error: "
+            "bad_args, no_navmesh, no_navmesh_at_from, no_navmesh_at_to, "
+            "no_path, and bridge_capability_missing or arg_contract_mismatch "
+            "from a PBO built before this verb."
+        )
+    )
+    async def nav_path_query(
+        from_pos: list[StrictFloat],
+        to: list[StrictFloat],
+        snap_radius: StrictFloat = 2.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        snap_error = _bad_args(
+            "snap_radius",
+            snap_radius,
+            f"be a finite number above 0 and at most {NAV_SNAP_RADIUS_MAX_M:g}",
+        )
+        args = {
+            "from": _require_vec3(from_pos, "from"),
+            "to": _require_vec3(to, "to"),
+            "snap_radius": _finite_float(snap_radius, snap_error),
+        }
+        if args["snap_radius"] <= 0.0 or args["snap_radius"] > NAV_SNAP_RADIUS_MAX_M:
+            raise ToolError(snap_error)
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "nav_path_query", args, "server", _timeout(timeout_s)
+            )
+        return _nav_path_reply(result)
+
+    @app.tool(
+        description=(
+            "Read which connected players could see a world point. It changes "
+            "nothing and needs no lease: check before editing or spawning where "
+            "nobody should see it. The answer, players_visibility, has one "
+            "entry per player with a player identity: {uid (as "
+            "query_all_players names it), distance (metres from the head to "
+            "pos), in_fov, line_of_sight, visible}. radius is the size of what "
+            "is hidden, 0 (default, "
+            f"a point) to {VISIBILITY_RADIUS_MAX_M:g} metres; for an object, "
+            "pass its size, so that the ray meeting the object itself counts "
+            "as seen; for a point on a surface, the ground included, pass a "
+            "radius above 0 too, since the ray (0.05 m in radius) can meet that "
+            "surface at or just before pos. The head is the player's Head bone, "
+            "or its position plus "
+            "1.6 m without one. The server does not know a client's exact "
+            "camera, so in_fov is an approximation, generous on purpose (a "
+            "hidden edit fails safe when it over-reports): horizontal only, "
+            "true when any part of a sphere of radius around pos lies within "
+            "60 degrees of the heading the server reads for the player "
+            "(GetHeadingAngle, not measured in game yet), that is when the "
+            "bearing to pos is within 60 degrees plus asin(radius / the "
+            "horizontal distance); also true when that horizontal distance is "
+            "at most radius (pos straight above or below included) or the "
+            "heading cannot be read. line_of_sight is scene_raycast's default "
+            "ray (rvproxy, view geometry) from the head to pos only, ignoring "
+            "the player's own entity (whether it also skips what the player "
+            "wears is not checked): true when nothing is hit or the nearest "
+            "hit is within radius of pos. visible is in_fov and line_of_sight "
+            "both. Since the ray goes to pos only, visible false is no "
+            "guarantee that nobody sees part of a volume of that radius: only "
+            "in_fov covers the volume. No player connected is ok with an empty "
+            "list. Errors: bad_args, and bridge_capability_missing or "
+            "arg_contract_mismatch from a PBO built before this verb."
+        )
+    )
+    async def players_visibility(
+        pos: list[StrictFloat],
+        radius: StrictFloat = 0.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args = {
+            "pos": _require_float_list(pos, 3, "pos"),
+            "radius": _require_range(
+                radius,
+                0.0,
+                VISIBILITY_RADIUS_MAX_M,
+                _bad_args(
+                    "radius",
+                    radius,
+                    f"be a finite number from 0 to {VISIBILITY_RADIUS_MAX_M:g}",
+                ),
+            ),
+        }
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "players_visibility", args, "server", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
             "Requires a lease (session_acquire_wait). Set server weather "
             "overcast, rain, or fog forecast values. time is the transition "
             "duration in seconds; min_duration is the minimum hold duration "
@@ -8106,6 +8551,46 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await execute_player_look_at(runtime, pos, timeout_s)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Set the local player's view to first or third "
+            "person (DayZPlayerImplement.SetIsInThirdPerson) and read it back "
+            "once the client's job runner has counted camera_set's default "
+            "settle of 3 x 0.05 s of frame time (not a wall-clock bound, and not "
+            "proof the camera finished moving): person_view is third when "
+            "IsInThirdPerson, else first, and camera_class is the class of the "
+            "player's current camera (GetCurrentCamera), for example "
+            "DayZPlayerCamera1stPerson or DayZPlayerCamera3rdPersonErc standing, "
+            "and empty when that camera is null. It sets the client's view "
+            "only: the flag is not networked, so the server's copy of the player "
+            "is not changed. The player's view key still toggles it as before. "
+            "With a raised weapon aimed down the sights in third person the "
+            "camera is still first person, and camera_class shows it. A view the "
+            "engine does not keep, as when the server disables third person, is "
+            "view_not_applied, and its message carries observed=person_view=... "
+            "camera_class=..., without camera_class when it is empty. "
+            "Refused before the view changes: client_not_in_game without a local "
+            "player, no_player when the local player is not a PlayerBase, "
+            "script_camera while camera_set's camera is mounted "
+            "(restore_gameplay first) and busy while an exclusive client job "
+            "runs, such as camera_set or player_look_at (a ui_dialog, "
+            "weapon_action, input_trigger or player_move job does not count). "
+            "After the settle the view is already set, and no_player answers "
+            "when the player is gone by then, script_camera when camera_set's "
+            "camera is mounted by then."
+        )
+    )
+    async def player_view_set(
+        view: PlayerViewMode,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if view not in ("first", "third"):
+            raise ToolError(_bad_args("view", view, "be 'first' or 'third'"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "player_view_set", {"view": view}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
@@ -9146,7 +9631,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "can therefore run. Non-local multiplayer actions are also sent to "
         "the server, which can reject them. No callbacks are invoked directly "
         "by this tool. started:true / started:1 only means the client manager "
-        "retained a running/pending action immediately after the start call; "
+        "retained a running/pending action immediately after the start call, "
+        "or that the action ran its Start with this call's target inside "
+        "that call, as a local instant action such as ActionTogglePlaceObject "
+        "does; "
         "it proves neither server acceptance, callback execution nor "
         "completion. condition_failed means this call did not dispatch the "
         "action (action.Can or, from DayZ 1.30, action.CanBeStarted was "
@@ -9214,7 +9702,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "only when the client data is PlaceObjectActionData, false kept; "
             "flag_restored and cleanup_complete. ok true means the observation "
             "is valid. Only end_state finished is a local UA_FINISHED. "
-            "Placement and other effects need their own read. A transport "
+            "Placement and other effects need their own read. On 1.29 drink "
+            "and eat actions whose component is a CAContinuousQuantityRepeat, "
+            "such as ActionDrink and ActionEatFruit, count a cycle only when "
+            "the item runs out, so completed_cycles stays 0 while they consume; "
+            "read the item with object_inspect(want=['quantity']) and the "
+            "player's water and energy with query_player_state. A transport "
             "failure is hold_result_unknown, not end_state timeout, and is not "
             "retried. After the client is retired, an unreconciled hold stays "
             "fenced for that run (hold_unreconciled); a cancel acknowledgement "
@@ -9560,6 +10053,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
+    _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 

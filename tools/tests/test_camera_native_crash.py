@@ -48,6 +48,33 @@ def _body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated source contract: {signature}")
 
 
+# Both 2026-09-08 RPTs map deployed BuildCameraResult:3664 to the static
+# Camera.GetCurrentCamera() (fdb6d73). DayZPlayer.GetCurrentCamera
+# (dayzplayer.c:1234 in 1.30, :1216 in 1.29) is a different native, which
+# player_view_set (854c) reads once, on the local PlayerBase. Every other
+# GetCurrentCamera call stays out.
+VIEW_POST = "protected void PostPlayerViewSetJob(MCPJob job)"
+CAMERA_GETTER_CALL = re.compile(r"[\w.]*\bGetCurrentCamera\s*\(")
+PLAYER_CAMERA_CALL = "player.GetCurrentCamera("
+
+
+def assert_only_the_player_camera_getter(source: str) -> None:
+    calls = CAMERA_GETTER_CALL.findall(source)
+    if calls != [PLAYER_CAMERA_CALL]:
+        raise AssertionError(
+            "Both RPTs map deployed BuildCameraResult:3664 to Camera.GetCurrentCamera(); "
+            f"a null check on its return value is too late. GetCurrentCamera calls: {calls}"
+        )
+    body = _body(source, VIEW_POST)
+    for needle in (
+        "PlayerBase player;",
+        "player = PlayerBase.Cast(GetGame().GetPlayer());",
+        "playerCamera = player.GetCurrentCamera();",
+    ):
+        if needle not in body:
+            raise AssertionError(f"the one GetCurrentCamera call is the local PlayerBase's: {needle}")
+
+
 DENIED = (
     ("!IsClientInGame()", "client_not_in_game"),
     ("!cameraPlayer", "camera_unavailable_player"),
@@ -90,11 +117,20 @@ def assert_live_vehicle_guard(source: str) -> None:
 
 class CameraNativeCrashSourceTest(unittest.TestCase):
     def test_native_getter_from_both_crash_stacks_is_never_called(self) -> None:
-        self.assertEqual(
-            re.findall(r"\bGetCurrentCamera\s*\(", _source()), [],
-            "Both RPTs map deployed BuildCameraResult:3664 to this native call; "
-            "a null check on its return value is too late.",
-        )
+        source = _source()
+        assert_only_the_player_camera_getter(source)
+        # Red controls: the static getter, another receiver, a second call.
+        for mutant in (
+            source.replace(PLAYER_CAMERA_CALL, "Camera.GetCurrentCamera(", 1),
+            source.replace(PLAYER_CAMERA_CALL, "cameraPlayer.GetCurrentCamera(", 1),
+            source.replace(
+                "Camera current = m_ActiveCam;", "Camera current = Camera.GetCurrentCamera();", 1
+            ),
+        ):
+            with self.subTest(mutant=CAMERA_GETTER_CALL.findall(mutant)):
+                self.assertNotEqual(mutant, source)
+                with self.assertRaises(AssertionError):
+                    assert_only_the_player_camera_getter(mutant)
 
     def test_readiness_and_state_guards_return_before_camera_reads(self) -> None:
         body = _body(_source(), READ_ERROR)

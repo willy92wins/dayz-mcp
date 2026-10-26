@@ -74,8 +74,12 @@ READ_ONLY = {
     "weapon_state",
     "input_describe",
     "world_time_get",
+    "loadout_get",
     "action_cursor",
     "action_cursor_ids",
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
     "scene_entities",
 }
 
