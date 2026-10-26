@@ -190,9 +190,11 @@ server replica is.
 3. `vehicle_enter` near the fixture pos: the server half of the seat. It
    runs `StartCommand_Vehicle` (`MCPBridge.c:1001-1011`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
-   (product-spec B2). `seated=1` says the command was accepted, not that
-   the state settled: assert `seated` and `seat == "driver"`, and treat the
-   settle as unproven until step 6 reads it back.
+   (product-spec B2). `seated=1` means the server read the player in the
+   driver seat of that car once the get-in ended (`IsSeatReady`). The bridge
+   waits for that at most 5 s (`JOB_TIMEOUT_S`), whatever `timeout_s` is, so
+   a `timeout` can still end seated: read `query_all_players` (`in_vehicle`)
+   before retrying. Assert `seated` and `seat == "driver"`.
 4. `vehicle_get_in_client`: the client-ownership half, which `engine_set`,
    `vehicle_control` and `vehicle_trace` require and which does not place
    the player in the server crew (its description in

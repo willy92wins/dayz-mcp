@@ -540,10 +540,12 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         self.tools = {tool.name: tool for tool in await app.list_tools()}
 
     @slow_test
-    async def test_vehicle_enter_distinguishes_accepted_order_from_final_state(self) -> None:
+    async def test_vehicle_enter_says_what_seated_means_and_the_bridge_wait(self) -> None:
         description = self.tools["vehicle_enter"].description or ""
-        self.assertIn("seated=1 confirms the command was accepted", description)
-        self.assertIn("not the final seated state", description)
+        self.assertIn("seated=1 means the server read that player", description)
+        self.assertIn("at most 5 s, whatever timeout_s is", description)
+        self.assertIn("query_all_players (in_vehicle)", description)
+        self.assertNotIn("confirms the command was accepted", description)
         self.assertIn("client-side ownership", description)
         self.assertIn("vehicle_get_in_client", description)
 
@@ -590,7 +592,7 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         description = self.tools["vehicle_get_in_client"].description or ""
         self.assertIn("does not place the player in the server crew", description)
         self.assertIn("ActionSwitchLights", description)
-        self.assertIn("until vehicle_enter", description)
+        self.assertIn("client seat and vehicle_enter's server seat both", description)
 
     async def test_world_time_set_description_matches_divmod_overflow(self) -> None:
         description = self.tools["world_time_set"].description or ""
