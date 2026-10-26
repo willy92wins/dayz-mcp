@@ -715,6 +715,65 @@ class MCPHoldControl
 	}
 };
 
+// 204e: action_use watches the action it starts and the ActionTarget it made
+// for that start, a new one for each command. A local instant action runs its
+// Start and then OnActionEnd inside the start call (actionmanagerclient.c:719-721
+// in 1.30, :677-679 in 1.29), so no running action is left when
+// PerformActionStart returns, as after a start that SetupAction refused. A
+// Start of that action with that target during the call means it ran:
+// SetupAction keeps the target it is given in m_Target (actionbase.c:174 in
+// 1.30, :167 in 1.29). The target is read when the addon's Start is entered,
+// before super.Start, so what a Start puts in m_Target after that does not
+// change what is counted. An action or mod whose code puts another
+// ActionTarget in m_Target before that, or whose Start does not reach the
+// addon's (in vanilla only ActionDebug's, which skips super.Start), is not
+// seen.
+class MCPActionUseWatch
+{
+	protected static ActionBase s_Watched;
+	protected static ref ActionTarget s_WatchedTarget;
+	protected static int s_Starts;
+
+	static void Begin(ActionBase action, ActionTarget target)
+	{
+		s_Watched = action;
+		s_WatchedTarget = target;
+		s_Starts = 0;
+	}
+
+	// The watched Starts since Begin. Nothing is watched after it.
+	static int End()
+	{
+		int starts = s_Starts;
+		s_Watched = null;
+		s_WatchedTarget = null;
+		s_Starts = 0;
+		return starts;
+	}
+
+	static void NoteStart(ActionBase action, ActionData action_data)
+	{
+		if (IsWatched(action, action_data))
+		{
+			s_Starts++;
+		}
+	}
+
+	protected static bool IsWatched(ActionBase action, ActionData action_data)
+	{
+		return action == s_Watched && action_data.m_Target == s_WatchedTarget;
+	}
+};
+
+modded class ActionBase
+{
+	override void Start(ActionData action_data)
+	{
+		MCPActionUseWatch.NoteStart(this, action_data);
+		super.Start(action_data);
+	}
+};
+
 modded class ActionManagerClient
 {
 	bool MCP_HoldBusy()

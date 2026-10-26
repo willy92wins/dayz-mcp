@@ -43,10 +43,19 @@ READ_ONLY_COMMANDS = frozenset(
         "input_describe",
         # Server read of the in-game clock (World.GetDate); it writes nothing.
         "world_time_get",
+        # Server read of what a player or survivor wears and holds (fb99).
+        "loadout_get",
         # Client read of the action cursor. The server correlate that
         # resolves its network pairs is the same read, not a mutation.
         "action_cursor",
         "action_cursor_ids",
+        # Server reads: the frame rate over a window and the entity counts, a
+        # navmesh path between two points, and which players could see a point.
+        "server_perf",
+        "nav_path_query",
+        "players_visibility",
+        # Server read of one scene's registry and its objects (165a).
+        "scene_entities",
     }
 )
 MAX_OPERATION_PIN_S = 300.0
