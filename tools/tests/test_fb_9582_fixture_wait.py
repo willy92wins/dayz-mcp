@@ -206,9 +206,18 @@ class Fb9582FixtureWaitContract:
         else_at, else_start, else_end = _block_after(loop, "else", missing_end + 1)
         case.assertEqual(loop[missing_end + 1 : else_at].strip(), "")
         case.assertEqual(_flat(loop[else_end + 1 :]), "i = i - 1;")
-        links = _chain_links(loop[else_start:else_end])
-        case.assertIn("else if (IsJobReady(job))", links)
-        case.assertIn("else if (m_ElapsedS > job.deadline_s)", links)
+        # Codex H2 (r3 of #272): one more link before readiness can hold the
+        # fixture by a property of the job, such as its args.mode, and keep
+        # every anchor; so the links are pinned, in order.
+        case.assertEqual(
+            _chain_links(loop[else_start:else_end]),
+            [
+                'if (job.kind == "inventory_move" && job.phase == 1)',
+                "else if (IsJobReady(job))",
+                'else if (job.kind == "inventory_move" && job.phase == 2)',
+                "else if (m_ElapsedS > job.deadline_s)",
+            ],
+        )
 
     @staticmethod
     def _assert_job_only_reads(case: unittest.TestCase, is_job_ready: str) -> None:
@@ -315,11 +324,26 @@ class Fb9582FixtureWaitTest(unittest.TestCase):
                 'job.kind = "vehicle_fixture";',
                 'job.kind = "spawn";',
             ),
-            # Codex H1 (r1 of #272): the tick skips the fixture's ready read.
-            "ready_skips_the_fixture": _mutant(
+            # Codex H1 (r1 of #272; named in r3): IsJobReady still reads the
+            # fixture, but its success branch is closed to it, so a ready car
+            # waits for the deadline and answers fixture_not_ready.
+            "ready_success_excludes_the_fixture": _mutant(
                 self.source,
                 "else if (IsJobReady(job))",
                 'else if (IsJobReady(job) && job.kind != "vehicle_fixture")',
+            ),
+            # The kind is tested first, so IsJobReady never reads the fixture.
+            "ready_read_skips_the_fixture": _mutant(
+                self.source,
+                "else if (IsJobReady(job))",
+                'else if (job.kind != "vehicle_fixture" && IsJobReady(job))',
+            ),
+            # Codex H2 (r3 of #272): a link before readiness holds every
+            # object_at job, the fixture included, past its deadline.
+            "object_at_held_before_the_ready_read": _mutant(
+                self.source,
+                "\t\t\t\telse if (IsJobReady(job))",
+                '\t\t\t\telse if (job.args && job.args.mode == "object_at")\n\t\t\t\t{\n\t\t\t\t\ti = i - 1;\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\telse if (IsJobReady(job))',
             ),
             "no_wait": _mutant(
                 self.source,
