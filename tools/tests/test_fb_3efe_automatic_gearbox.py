@@ -5,10 +5,9 @@ so an automatic (vanilla Offroad_02, LFQuad) stayed in N and SetThrottle revved
 it in place. CarAutomaticGearboxMode is P, R, N, D (car.c:56-63 in 1.30.164200),
 GearboxGetMode only reads it and no proto sets it; ShiftUp shifts the future
 gear (car.c:256-269). The automatic branch shifts up behind the same settle
-interval as the manual upshift, and the car gets no throttle until the mode
-reads D, so going through R on the way from P never drives it backwards.
-That ShiftUp walks the modes in the enum's order is native: the in-game round
-checks it.
+interval as the manual upshift, and the car is asked for no throttle until
+the mode reads D, R included. That ShiftUp walks the modes in the enum's
+order is native: the in-game round checks it.
 
 File-only: reads the Enforce sources; does not import the server stack.
 """
@@ -33,7 +32,6 @@ AUTOMATIC = (
 )
 GUARD = r"\bif\s*\("
 STAMP = "MCPCarDrive.s_LastAutoShiftS"
-SETTLE = "MCPCarDrive.AUTO_SHIFT_SETTLE_S"
 NO_THROTTLE = "throttle = 0.0;"
 SET_THROTTLE = "SetThrottle(throttle);"
 
@@ -73,9 +71,34 @@ def _ready(on_input: str) -> str:
     return _block(_block(on_input, APPLY_CONTROL), ENGINE_READY)
 
 
-def _on_input() -> str:
+def _on_input(source: str | None = None) -> str:
     # No string literal in MCP_CarScript.c holds "//" or "/*".
-    return _block(_without_comments(CAR_SCRIPT.read_text(encoding="utf-8")), ON_INPUT)
+    if source is None:
+        source = CAR_SCRIPT.read_text(encoding="utf-8")
+    return _block(_without_comments(source), ON_INPUT)
+
+
+def _flat(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# The manual block of OnInput at origin/main 2e844c5, comments out and blanks
+# collapsed. A manual gearbox does what it did there.
+MANUAL_AT_2E844C5 = (
+    "if (rpm > EngineGetRPMRedline() * 0.8) { if (throttle > 0.1) { "
+    "float nowS = GetGame().GetTickTime(); "
+    "if (MCPCarDrive.s_LastAutoShiftS < 0.0 || nowS < MCPCarDrive.s_LastAutoShiftS || "
+    "nowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S) { "
+    "ShiftUp(); MCPCarDrive.s_LastAutoShiftS = nowS; } } } "
+    "else if (GetGear() < CarGear.FIRST || (throttle > 0.0 && spd < 5.0)) { "
+    "ShiftTo(CarGear.FIRST); }"
+)
+# The settle guard of the manual upshift, read with the automatic branch's clock.
+AUTOMATIC_GUARD = (
+    "if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || "
+    "modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)"
+)
+ASSIGNS_THROTTLE = r"\bthrottle\s*=(?!=)"
 
 
 # Pre-fix shape (origin/main 2e844c5), trimmed to the lines the contract reads.
@@ -143,13 +166,11 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
         self.assertEqual(_depth_at(ready, automatic_at), 0)
         body = ready[body_start:body_end]
 
-        # ShiftUp sits behind the settle interval the manual upshift uses.
+        # ShiftUp sits behind the settle interval the manual upshift uses, with
+        # the stamp subtracted from this tick's clock.
         guard_at, guard_start, guard_end = _span(body, GUARD)
-        condition = body[guard_at:guard_start]
-        self.assertIn(STAMP, condition)
-        self.assertIn(SETTLE, condition)
-        self.assertIn(">=", condition)
-        self.assertIn("GetGame().GetTickTime()", body[:guard_at])
+        self.assertEqual(_flat(body[guard_at : guard_start - 1]), AUTOMATIC_GUARD)
+        self.assertEqual(_flat(body[:guard_at]), "float modeNowS = GetGame().GetTickTime();")
         guarded = body[guard_start:guard_end]
         self.assertEqual(guarded.count("ShiftUp();"), 1)
         self.assertRegex(guarded, re.escape(STAMP) + r"\s*=\s*\w+\s*;")
@@ -167,11 +188,21 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
     def test_fb_3efe_an_automatic_shifts_up_to_d_before_it_gets_throttle(self) -> None:
         self._assert_automatic_shifts_to_drive(_on_input())
 
+    def _assert_manual_unchanged(self, on_input: str) -> None:
+        ready = _ready(on_input)
+        self.assertEqual(_flat(_block(ready, MANUAL)), MANUAL_AT_2E844C5)
+
+        # throttle is written once after its declaration, in the automatic
+        # branch, so a manual gets the throttle it was asked for.
+        writes = [m.start() for m in re.finditer(ASSIGNS_THROTTLE, ready)]
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(_flat(ready[writes[0] : ready.index(";", writes[0]) + 1]),
+                         "throttle = MCPCarDrive.s_Throttle;")
+        _, body_start, body_end = _span(ready, AUTOMATIC)
+        self.assertTrue(body_start < writes[1] < body_end)
+
     def test_fb_3efe_the_manual_branch_is_unchanged(self) -> None:
-        manual = _block(_ready(_on_input()), MANUAL)
-        self.assertNotIn("GearboxGetMode", manual)
-        self.assertEqual(manual.count("ShiftUp();"), 1)
-        self.assertEqual(manual.count("ShiftTo(CarGear.FIRST);"), 1)
+        self._assert_manual_unchanged(_on_input())
 
     def test_fb_3efe_pre_fix_and_throttle_kept_shapes_fail_the_contract(self) -> None:
         self.assertNotEqual(THROTTLE_KEPT_ON_INPUT, PRE_FIX_ON_INPUT)
@@ -182,6 +213,30 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaises(AssertionError):
                     self._assert_automatic_shifts_to_drive(_block(source, ON_INPUT))
+
+    def test_fb_3efe_mutants_of_the_shipped_source_fail(self) -> None:
+        source = CAR_SCRIPT.read_text(encoding="utf-8")
+
+        def mutant(old: str, new: str) -> str:
+            self.assertEqual(source.count(old), 1, old)
+            return source.replace(old, new)
+
+        manual_cut = mutant(
+            "\t\t\t\t\t\tShiftTo(CarGear.FIRST);\n",
+            "\t\t\t\t\t\tShiftTo(CarGear.FIRST);\n\t\t\t\t\t\tthrottle = 0.0;\n",
+        )
+        with self.subTest("manual_throttle_cut"), self.assertRaises(AssertionError):
+            self._assert_manual_unchanged(_on_input(manual_cut))
+        for label, old, new in (
+            ("interval_inverted", "modeNowS - MCPCarDrive.s_LastAutoShiftS",
+             "MCPCarDrive.s_LastAutoShiftS - modeNowS"),
+            ("interval_never_reached",
+             "modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S",
+             "modeNowS - MCPCarDrive.s_LastAutoShiftS < MCPCarDrive.AUTO_SHIFT_SETTLE_S"),
+        ):
+            shipped = mutant(old, new)
+            with self.subTest(label), self.assertRaises(AssertionError):
+                self._assert_automatic_shifts_to_drive(_on_input(shipped))
 
 
 if __name__ == "__main__":
