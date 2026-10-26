@@ -63,7 +63,9 @@ MUTATIONS = (
 
 def _block_after(text: str, needle: str, start: int = 0) -> tuple[int, int, int]:
     """Where `needle` starts, and the body bounds of the brace block after it."""
-    at = text.index(needle, start)
+    at = text.find(needle, start)
+    if at < 0:
+        raise AssertionError(f"missing source contract: {needle!r}")
     brace = text.index("{", at + len(needle))
     if text[at + len(needle) : brace].strip():
         raise AssertionError(f"text between {needle!r} and its block")
@@ -82,6 +84,36 @@ def _depth_at(text: str, index: int) -> int:
     return text.count("{", 0, index) - text.count("}", 0, index)
 
 
+def _flat(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _chain_links(chain: str) -> list[str]:
+    """The headers of the one if/else-if chain that is all of `chain`."""
+    headers: list[str] = []
+    position = 0
+    while chain[position:].strip():
+        brace = chain.find("{", position)
+        if brace < 0:
+            raise AssertionError(f"not a link of one if/else-if chain: {_flat(chain[position:])!r}")
+        header = _flat(chain[position:brace])
+        if not header.startswith("else if (" if headers else "if ("):
+            raise AssertionError(f"not a link of one if/else-if chain: {header!r}")
+        depth = 0
+        for index in range(brace, len(chain)):
+            if chain[index] == "{":
+                depth += 1
+            elif chain[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        else:
+            raise AssertionError(f"unterminated block after {header!r}")
+        headers.append(header)
+        position = index + 1
+    return headers
+
+
 def _assert_in_order(case: unittest.TestCase, text: str, tokens: tuple[str, ...]) -> None:
     position = 0
     for token in tokens:
@@ -97,6 +129,7 @@ class Fb9582FixtureWaitContract:
         case.assertIsNotNone(re.search(WAIT_CONSTANT, clean(source)), "VEHICLE_FIXTURE_WAIT_S")
         self._assert_dispatch_queues_the_wait(case, method_body(source, DISPATCH))
         self._assert_ready_is_read_before_the_deadline(case, method_body(source, PROCESS_JOBS))
+        self._assert_chain_runs_for_every_job(case, method_body(source, PROCESS_JOBS))
         self._assert_job_only_reads(case, method_body(source, IS_JOB_READY))
         self._assert_job_routes_to_fixture_reply(
             case, method_body(source, POST_SUCCESS), "PostVehicleFixture(job, true);", "MCPResult result = new MCPResult();"
@@ -143,9 +176,9 @@ class Fb9582FixtureWaitContract:
 
     @staticmethod
     def _assert_ready_is_read_before_the_deadline(case: unittest.TestCase, process_jobs: str) -> None:
-        # Every tick asks IsJobReady of each job, whatever its kind, before it
-        # looks at the deadline, so a car that reads ready within the wait
-        # answers ok.
+        # The generic readiness branch does not filter by kind and comes before
+        # the deadline branch, so a car that reads ready within the wait answers
+        # ok. (An inventory_move in phase 1 answers in the branch before it.)
         ready = "else if (IsJobReady(job))"
         deadline = "else if (m_ElapsedS > job.deadline_s)"
         case.assertIn(ready, process_jobs)
@@ -156,6 +189,26 @@ class Fb9582FixtureWaitContract:
         _assert_in_order(case, process_jobs[ready_start:ready_end], ("PostJobSuccess(job);", "m_Jobs.Remove(jobId);"))
         _assert_in_order(case, process_jobs[deadline_start:deadline_end], ("PostJobTimeout(job);", "m_Jobs.Remove(jobId);"))
         case.assertNotIn("vehicle_fixture", process_jobs)
+
+    @staticmethod
+    def _assert_chain_runs_for_every_job(case: unittest.TestCase, process_jobs: str) -> None:
+        # Codex H3 (r2 of #272): a filter on job.kind around the chain, or a
+        # skip before it, keeps every anchor above while no fixture is read.
+        # The loop body is the two map reads, `if (!job)` and its else, then
+        # the step; that else is one if/else-if chain and nothing else.
+        _, loop_start, loop_end = _block_after(process_jobs, "while (i >= 0)")
+        loop = process_jobs[loop_start:loop_end]
+        missing_at, missing_start, missing_end = _block_after(loop, "if (!job)")
+        case.assertEqual(
+            _flat(loop[:missing_at]), "int jobId = m_Jobs.GetKey(i); MCPJob job = m_Jobs.GetElement(i);"
+        )
+        case.assertEqual(_flat(loop[missing_start:missing_end]), "m_Jobs.Remove(jobId);")
+        else_at, else_start, else_end = _block_after(loop, "else", missing_end + 1)
+        case.assertEqual(loop[missing_end + 1 : else_at].strip(), "")
+        case.assertEqual(_flat(loop[else_end + 1 :]), "i = i - 1;")
+        links = _chain_links(loop[else_start:else_end])
+        case.assertIn("else if (IsJobReady(job))", links)
+        case.assertIn("else if (m_ElapsedS > job.deadline_s)", links)
 
     @staticmethod
     def _assert_job_only_reads(case: unittest.TestCase, is_job_ready: str) -> None:
@@ -278,10 +331,32 @@ class Fb9582FixtureWaitTest(unittest.TestCase):
                 "return IsVehicleFixtureReady(CarScript.Cast(job.subject));",
                 "CarScript.Cast(job.subject).OnDebugSpawn();\n\t\t\treturn IsVehicleFixtureReady(CarScript.Cast(job.subject));",
             ),
-            "timeout_answers_bare_timeout": _mutant(
+            # Codex H1 (r2 of #272): the timeout branch returns with no answer.
+            "timeout_drops_its_answer": _mutant(
                 self.source,
                 "PostVehicleFixture(job, false);",
                 "",
+            ),
+            # The fixture job falls through to the generic error="timeout".
+            "timeout_answers_bare_timeout": _mutant(
+                self.source,
+                '\t\tif (job.kind == "vehicle_fixture")\n\t\t{\n\t\t\tPostVehicleFixture(job, false);\n\t\t\treturn;\n\t\t}\n',
+                "",
+            ),
+            # Codex H3 (r2 of #272): the chain runs only for other kinds.
+            "outer_kind_filter": _mutant(
+                _mutant(
+                    self.source,
+                    '\t\t\telse\n\t\t\t{\n\t\t\t\tif (job.kind == "inventory_move" && job.phase == 1)',
+                    '\t\t\telse\n\t\t\t{\n\t\t\t\tif (job.kind == "spawn" || job.kind == "seat" || job.kind == "inventory_move")\n\t\t\t\t{\n\t\t\t\tif (job.kind == "inventory_move" && job.phase == 1)',
+                ),
+                "\t\t\t\t\tm_Jobs.Remove(jobId);\n\t\t\t\t}\n\t\t\t}\n\n\t\t\ti = i - 1;",
+                "\t\t\t\t\tm_Jobs.Remove(jobId);\n\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\n\t\t\ti = i - 1;",
+            ),
+            "fixture_skipped_before_the_chain": _mutant(
+                self.source,
+                '\t\t\telse\n\t\t\t{\n\t\t\t\tif (job.kind == "inventory_move" && job.phase == 1)',
+                '\t\t\telse\n\t\t\t{\n\t\t\t\tif (job.kind == "vehicle_fixture")\n\t\t\t\t{\n\t\t\t\t\ti = i - 1;\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tif (job.kind == "inventory_move" && job.phase == 1)',
             ),
             "gone_car_is_read": _mutant(
                 self.source,
