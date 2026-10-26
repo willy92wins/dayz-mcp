@@ -155,6 +155,31 @@ def open_parent_wait_handle(ppid: int) -> object | None:
     return handle if handle else None
 
 
+def open_process_anchor(pid: int) -> object | None:
+    """Hold a handle so this pid cannot be reused while the token is open.
+
+    inbox 7417. Windows: SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION.
+    None when the pid cannot be opened, and off Windows.
+    """
+    if not pid:
+        return None
+    if not _IS_WINDOWS:  # pragma: no cover
+        return None
+    access = _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION
+    handle = _k32.OpenProcess(access, False, int(pid))
+    return handle if handle else None
+
+
+def close_process_anchor(token: object) -> None:
+    """Release a token from ``open_process_anchor``. Never raises."""
+    if token is None or not _IS_WINDOWS:  # pragma: no cover
+        return
+    try:
+        _k32.CloseHandle(token)
+    except Exception:
+        return
+
+
 def wait_for_parent_exit(handle: object) -> int:
     """Block until the parent referenced by ``handle`` exits."""
     if not _IS_WINDOWS:  # pragma: no cover

@@ -630,6 +630,10 @@ def _activate_server_coordination(
         child_probe=lambda: orphan_guard.snapshot_processes_with_parent(
             ["CrashReporter.exe"]
         ),
+        parent_anchor=(
+            orphan_guard.open_process_anchor,
+            orphan_guard.close_process_anchor,
+        ),
         game_path=game_path if game_path is not None else _lifecycle_game_path(None),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,

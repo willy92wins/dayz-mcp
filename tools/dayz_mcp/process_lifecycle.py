@@ -2134,6 +2134,8 @@ class ProcessLifecycle:
         diag_probe: RetailProbe | None = None,
         port_probe: RetailProbe | None = None,
         child_probe: RetailProbe | None = None,
+        parent_anchor: tuple[Callable[[int], object | None], Callable[[object], None]]
+        | None = None,
         launcher: Launcher | None = None,
         id_fn: Callable[[], str] | None = None,
         recovery_fault_arm: RecoveryFaultArm | None = None,
@@ -2157,6 +2159,8 @@ class ProcessLifecycle:
         self.diag_probe = diag_probe
         self.port_probe = port_probe
         self.child_probe = child_probe
+        self.parent_anchor = parent_anchor
+        self._parent_anchors: dict[tuple[str, int, str], object] = {}
         self.game_path = Path(game_path).resolve()
         self.launcher = launcher or self._launch
         self.steam_gate = steam_gate if steam_gate is not None else SteamPreparationGate()
@@ -2388,6 +2392,7 @@ class ProcessLifecycle:
             self.manifest.replace(run)
         except Exception:
             return False
+        self._release_parent_anchors_locked()
         self._best_effort_post_persist_retirement(run, event, reason, decision)
         return True
 
@@ -4426,6 +4431,7 @@ class ProcessLifecycle:
                         attempt_started_at=attempt_started_at,
                         foreground_lock=lock_decision,
                     )
+                self._anchor_parents_locked(completed)
                 if intent is not None:
                     # What recover_launch_intent would conclude about this very
                     # process after a crash. A mismatch changes nothing here;
@@ -4764,6 +4770,7 @@ class ProcessLifecycle:
             self.manifest.replace(completed)
         except Exception:
             return {"launch_intent": "kept", "reason": "manifest_failed", "run_id": run_id}
+        self._anchor_parents_locked(completed)
         self._invalidate_box_cache()
         outcome: dict[str, object] = {
             "launch_intent": "recovered",
@@ -4962,6 +4969,105 @@ class ProcessLifecycle:
             observed.append({"pid": pid, "ppid": ppid, "name": name})
         return None, observed
 
+    @staticmethod
+    def _parent_anchor_key(
+        run_id: str, record: ProcessRecord
+    ) -> tuple[str, int, str]:
+        return (run_id, record.pid, record.creation_time_utc)
+
+    def _parent_is_anchored(self, run: RunRecord, record: ProcessRecord) -> bool:
+        return self._parent_anchor_key(run.run_id, record) in self._parent_anchors
+
+    def _anchor_parents_locked(self, run: RunRecord) -> None:
+        """Open a handle on each live parent so its pid cannot be reused.
+
+        Caller holds _operation_lock. Never raises (inbox 7417).
+        """
+        pair = self.parent_anchor
+        if pair is None:
+            return
+        open_fn, close_fn = pair
+        for record in run.processes:
+            if record.role not in _CRASH_REPORTER_PARENT_ROLES:
+                continue
+            key = self._parent_anchor_key(run.run_id, record)
+            if key in self._parent_anchors:
+                continue
+            try:
+                token = open_fn(record.pid)
+            except Exception:
+                continue
+            if token is None:
+                continue
+            try:
+                actual = self.guard.snapshot(record.pid)
+            except Exception:
+                actual = None
+            if not self._identity_matches(record, actual):
+                try:
+                    close_fn(token)
+                except Exception:
+                    pass
+                continue
+            self._parent_anchors[key] = token
+
+    def _release_parent_anchors_locked(self) -> None:
+        """Close anchors whose run is gone, EXITED, or no longer holds the record."""
+        live: set[tuple[str, int, str]] = set()
+        try:
+            runs = self.manifest.list_runs()
+        except Exception:
+            runs = []
+        for run in runs:
+            if run.state == "EXITED":
+                continue
+            for record in run.processes:
+                if record.role in _CRASH_REPORTER_PARENT_ROLES:
+                    live.add(self._parent_anchor_key(run.run_id, record))
+        close_fn = None if self.parent_anchor is None else self.parent_anchor[1]
+        for key, token in list(self._parent_anchors.items()):
+            if key in live:
+                continue
+            if close_fn is not None:
+                try:
+                    close_fn(token)
+                except Exception:
+                    pass
+            self._parent_anchors.pop(key, None)
+
+    def _kept_after_partial_stop(
+        self,
+        run: RunRecord,
+        survivors: list[ProcessRecord],
+        *,
+        keep_parents: bool,
+    ) -> list[ProcessRecord]:
+        """Records a partial stop still owns (inbox 7417, H7)."""
+        kept = list(survivors)
+        keep_parent_roles = keep_parents or any(
+            item.role == "crash_reporter" for item in kept
+        )
+        if keep_parent_roles:
+            seen = {(item.pid, item.creation_time_utc) for item in kept}
+            for record in run.processes:
+                if record.role not in _CRASH_REPORTER_PARENT_ROLES:
+                    continue
+                key = (record.pid, record.creation_time_utc)
+                if key in seen:
+                    continue
+                kept.append(record)
+                seen.add(key)
+            order = {
+                (item.pid, item.creation_time_utc): index
+                for index, item in enumerate(run.processes)
+            }
+            kept.sort(
+                key=lambda item: order.get(
+                    (item.pid, item.creation_time_utc), len(order)
+                )
+            )
+        return kept
+
     def _register_crash_reporters_locked(self, run: RunRecord) -> str | None:
         """Attach matching CrashReporter.exe children to the run.
 
@@ -4970,6 +5076,8 @@ class ProcessLifecycle:
         stopped or reaped yet: the scan is unknown, or the new records could
         not be written.
         """
+        self._release_parent_anchors_locked()
+        self._anchor_parents_locked(run)
         reason, rows = self._crash_reporter_probe_rows()
         if reason is not None or rows is None:
             return reason or "child_scan_unknown"
@@ -4988,6 +5096,7 @@ class ProcessLifecycle:
             if record.role in _CRASH_REPORTER_PARENT_ROLES
         ]
         added: list[tuple[ProcessRecord, int]] = []
+        scan_reason: str | None = None
         for row in rows:
             if str(row["name"]).casefold() != "crashreporter.exe":
                 continue
@@ -5006,15 +5115,36 @@ class ProcessLifecycle:
                 parent_snap.get("error") == "process_not_found"
                 and parent_snap.get("exit_code") == 4
             )
-            if not parent_gone and not self._identity_matches(parent, parent_snap):
+            if parent_gone:
+                if not self._parent_is_anchored(run, parent):
+                    self._audit(
+                        "crash_reporter_parent_unverified",
+                        None,
+                        "identity_unverified",
+                        "denied",
+                        run_id=run.run_id,
+                        pid=pid,
+                        ppid=ppid,
+                    )
+                    scan_reason = "crash_reporter_parent_unverified"
+                    continue
+            elif not self._identity_matches(parent, parent_snap):
                 continue
             try:
                 child_snap = self.guard.snapshot(pid)
             except Exception:
+                scan_reason = "child_scan_unknown"
                 continue
             if not isinstance(child_snap, dict):
+                scan_reason = "child_scan_unknown"
+                continue
+            if (
+                child_snap.get("error") == "process_not_found"
+                and child_snap.get("exit_code") == 4
+            ):
                 continue
             if child_snap.get("identity_complete") is not True:
+                scan_reason = "child_scan_unknown"
                 continue
             if (
                 str(child_snap.get("executable_sha256", "")).casefold()
@@ -5047,29 +5177,28 @@ class ProcessLifecycle:
             except Exception:
                 continue
             added.append((record, ppid))
-        if not added:
-            return None
-        for record, _ppid in added:
-            run.processes.append(record)
-        try:
-            self.manifest.replace(run)
-        except Exception:
+        if added:
             for record, _ppid in added:
-                if record in run.processes:
-                    run.processes.remove(record)
-            return "manifest_failed"
-        self._invalidate_box_cache()
-        for record, ppid in added:
-            self._audit(
-                "crash_reporter_registered",
-                None,
-                "identity_match",
-                "allowed",
-                run_id=run.run_id,
-                pid=record.pid,
-                ppid=ppid,
-            )
-        return None
+                run.processes.append(record)
+            try:
+                self.manifest.replace(run)
+            except Exception:
+                for record, _ppid in added:
+                    if record in run.processes:
+                        run.processes.remove(record)
+                return "manifest_failed"
+            self._invalidate_box_cache()
+            for record, ppid in added:
+                self._audit(
+                    "crash_reporter_registered",
+                    None,
+                    "identity_match",
+                    "allowed",
+                    run_id=run.run_id,
+                    pid=record.pid,
+                    ppid=ppid,
+                )
+        return scan_reason
 
     def _partition_registered_processes(
         self, processes: list[ProcessRecord]
@@ -5537,7 +5666,7 @@ class ProcessLifecycle:
                         return {"error": refusal, "run_id": run_id}
                 terminated = 0
                 acted_pids: list[int] = []
-                handled_pids: set[int] = set()
+                handled: set[tuple[int, str]] = set()
                 untouched_reasons: list[tuple[int, str]] = []
                 survivors = list(owned)
                 late_child_scan: str | None = None
@@ -5618,7 +5747,7 @@ class ProcessLifecycle:
                         ):
                             if record in survivors:
                                 survivors.remove(record)
-                            handled_pids.add(record.pid)
+                            handled.add((record.pid, record.creation_time_utc))
                             continue
                         # The guard refused inside the residual window: the
                         # process was not killed. Do not record a cleanup of it.
@@ -5642,7 +5771,9 @@ class ProcessLifecycle:
                         run.owner_session_id = None
                         run.owner_lease_id = None
                         run.state = "UNRECONCILED"
-                        run.processes = list(survivors)
+                        run.processes = self._kept_after_partial_stop(
+                            run, list(survivors), keep_parents=False
+                        )
                         degraded = []
                         try:
                             self.manifest.replace(run)
@@ -5674,85 +5805,174 @@ class ProcessLifecycle:
                         )
                     terminated += 1
                     acted_pids.append(record.pid)
-                    handled_pids.add(record.pid)
+                    handled.add((record.pid, record.creation_time_utc))
                     survivors.remove(record)
                 if stop_guard is None:
+                    before_scan = {
+                        (item.pid, item.creation_time_utc) for item in run.processes
+                    }
                     late_child_scan = self._register_crash_reporters_locked(run)
-                    if late_child_scan is None:
-                        extra: list[ProcessRecord] = []
-                        for record in run.processes:
-                            if record.pid in handled_pids:
-                                continue
-                            kind, _reason = self._classify_registered_process(record)
-                            if kind == "owned":
-                                extra.append(record)
-                        for record in extra:
-                            try:
-                                guard_result = self.guard.terminate(record)
-                            except Exception:
-                                guard_result = {
-                                    "error": "guard_unavailable",
-                                    "exit_code": 3,
-                                    "terminated": False,
-                                }
+                    if late_child_scan is not None:
+                        # A reporter this scan registered was neither killed
+                        # nor found gone: the run keeps it.
+                        fresh = [
+                            item
+                            for item in run.processes
+                            if (item.pid, item.creation_time_utc) not in before_scan
+                        ]
+                        run.owner_session_id = None
+                        run.owner_lease_id = None
+                        run.state = "UNRECONCILED"
+                        run.processes = self._kept_after_partial_stop(
+                            run, list(survivors) + fresh, keep_parents=True
+                        )
+                        degraded = []
+                        try:
+                            self.manifest.replace(run)
+                        except Exception:
+                            degraded.append("manifest_failed")
+                        else:
+                            self._invalidate_box_cache()
+                        response: dict[str, object] = {
+                            "error": "partial_cleanup",
+                            "reason": late_child_scan,
+                            "terminated": terminated,
+                            "run_id": run_id,
+                            "_http_status": 409,
+                        }
+                        if degraded:
+                            response["cleanup_degraded"] = degraded
+                        return self._terminal_outcome(
+                            response,
+                            "lifecycle_stop_outcome",
+                            client,
+                            reason=late_child_scan,
+                            decision="partial_cleanup",
+                            run_id=run_id,
+                            state="UNRECONCILED",
+                            terminated=terminated,
+                        )
+                    extra: list[ProcessRecord] = []
+                    unknown_extra: str | None = None
+                    for record in run.processes:
+                        if (record.pid, record.creation_time_utc) in handled:
+                            continue
+                        kind, classify_reason = self._classify_registered_process(
+                            record
+                        )
+                        if kind in {"gone", "foreign"}:
+                            continue
+                        extra.append(record)
+                        if kind != "owned" and unknown_extra is None:
+                            unknown_extra = classify_reason or "process_identity_mismatch"
+                    if unknown_extra is not None:
+                        run.owner_session_id = None
+                        run.owner_lease_id = None
+                        run.state = "UNRECONCILED"
+                        run.processes = self._kept_after_partial_stop(
+                            run,
+                            list(survivors) + extra,
+                            keep_parents=True,
+                        )
+                        degraded = []
+                        try:
+                            self.manifest.replace(run)
+                        except Exception:
+                            degraded.append("manifest_failed")
+                        else:
+                            self._invalidate_box_cache()
+                        response: dict[str, object] = {
+                            "error": "partial_cleanup",
+                            "reason": unknown_extra,
+                            "terminated": terminated,
+                            "run_id": run_id,
+                            "_http_status": 409,
+                        }
+                        if degraded:
+                            response["cleanup_degraded"] = degraded
+                        return self._terminal_outcome(
+                            response,
+                            "lifecycle_stop_outcome",
+                            client,
+                            reason=unknown_extra,
+                            decision="partial_cleanup",
+                            run_id=run_id,
+                            state="UNRECONCILED",
+                            terminated=terminated,
+                        )
+                    for record in extra:
+                        try:
+                            guard_result = self.guard.terminate(record)
+                        except Exception:
+                            guard_result = {
+                                "error": "guard_unavailable",
+                                "exit_code": 3,
+                                "terminated": False,
+                            }
+                        if (
+                            not isinstance(guard_result, dict)
+                            or guard_result.get("terminated") is not True
+                        ):
                             if (
-                                not isinstance(guard_result, dict)
-                                or guard_result.get("terminated") is not True
+                                isinstance(guard_result, dict)
+                                and guard_result.get("error")
+                                == "process_not_found"
+                                and guard_result.get("exit_code") == 4
                             ):
-                                if (
-                                    isinstance(guard_result, dict)
-                                    and guard_result.get("error")
-                                    == "process_not_found"
-                                    and guard_result.get("exit_code") == 4
-                                ):
-                                    handled_pids.add(record.pid)
-                                    continue
-                                run.owner_session_id = None
-                                run.owner_lease_id = None
-                                run.state = "UNRECONCILED"
-                                # The record whose kill failed stays with
-                                # the ones not tried yet, as in the first loop.
-                                run.processes = list(survivors) + [
+                                handled.add(
+                                    (record.pid, record.creation_time_utc)
+                                )
+                                continue
+                            run.owner_session_id = None
+                            run.owner_lease_id = None
+                            run.state = "UNRECONCILED"
+                            run.processes = self._kept_after_partial_stop(
+                                run,
+                                list(survivors)
+                                + [
                                     item
                                     for item in extra
-                                    if item.pid not in handled_pids
-                                ]
-                                degraded = []
-                                try:
-                                    self.manifest.replace(run)
-                                except Exception:
-                                    degraded.append("manifest_failed")
-                                else:
-                                    self._invalidate_box_cache()
-                                response: dict[str, object] = {
-                                    "error": "partial_cleanup",
-                                    "terminated": terminated,
-                                    "run_id": run_id,
-                                    "_http_status": 409,
-                                }
-                                if degraded:
-                                    response["cleanup_degraded"] = degraded
-                                return self._terminal_outcome(
-                                    response,
-                                    "lifecycle_stop_outcome",
-                                    client,
-                                    reason=(
-                                        str(
-                                            guard_result.get(
-                                                "error", "termination_failed"
-                                            )
+                                    if (item.pid, item.creation_time_utc)
+                                    not in handled
+                                ],
+                                keep_parents=False,
+                            )
+                            degraded = []
+                            try:
+                                self.manifest.replace(run)
+                            except Exception:
+                                degraded.append("manifest_failed")
+                            else:
+                                self._invalidate_box_cache()
+                            response: dict[str, object] = {
+                                "error": "partial_cleanup",
+                                "terminated": terminated,
+                                "run_id": run_id,
+                                "_http_status": 409,
+                            }
+                            if degraded:
+                                response["cleanup_degraded"] = degraded
+                            return self._terminal_outcome(
+                                response,
+                                "lifecycle_stop_outcome",
+                                client,
+                                reason=(
+                                    str(
+                                        guard_result.get(
+                                            "error", "termination_failed"
                                         )
-                                        if isinstance(guard_result, dict)
-                                        else "termination_failed"
-                                    ),
-                                    decision="partial_cleanup",
-                                    run_id=run_id,
-                                    state="UNRECONCILED",
-                                    terminated=terminated,
-                                )
-                            terminated += 1
-                            acted_pids.append(record.pid)
-                            handled_pids.add(record.pid)
+                                    )
+                                    if isinstance(guard_result, dict)
+                                    else "termination_failed"
+                                ),
+                                decision="partial_cleanup",
+                                run_id=run_id,
+                                state="UNRECONCILED",
+                                terminated=terminated,
+                            )
+                        terminated += 1
+                        acted_pids.append(record.pid)
+                        handled.add((record.pid, record.creation_time_utc))
                 if stop_guard is not None and acted_pids and untouched_reasons:
                     run.owner_session_id = None
                     run.owner_lease_id = None
@@ -5844,8 +6064,6 @@ class ProcessLifecycle:
                     ),
                     "exit_metrics_valid": False,
                 }
-                if late_child_scan is not None:
-                    self._add_degradation(result, late_child_scan)
                 return self._terminal_outcome(
                     result,
                     retire_event,
@@ -6699,6 +6917,8 @@ class ProcessLifecycle:
         fns = getattr(self, "window_fns", None)
         listed: list[tuple[ProcessRecord, list[tuple[int, int]]]] = []
         for record in run.processes:
+            if record.role == "crash_reporter":
+                continue
             listed.append(
                 (
                     record,
