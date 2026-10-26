@@ -270,6 +270,7 @@ class ModePathParityTest(unittest.TestCase):
             "width": 640,
             "height": 480,
             "navmesh_data_server": False,
+            "server_adminlog": False,
             "server_mods": [],
             "mode": mode,
             "instance_token": TOKEN,

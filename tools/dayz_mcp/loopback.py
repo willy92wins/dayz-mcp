@@ -88,6 +88,7 @@ SERVER_COMMANDS = {
     "vehicle_door",
     "inventory_attach",
     "inventory_give",
+    "inventory_move",
     "object_inspect",
     "object_resolve",
     "object_doors",
@@ -1421,6 +1422,32 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # hands_attach is predictive like hands_take: the held item into one
     # attachment slot of a registered world entity (9608).
+    # inventory_move is predictive on authority=client: accepted is not the
+    # server read. The result waits until that read matches, or times out.
+    # Per-op rules (destination, slot) are applied in validate_command_args,
+    # the same rules as the public tool.
+    "inventory_move": _command_schema(
+        _schema_variant(
+            required=("item_object_id", "op"),
+            optional=("target_object_id", "slot", "authority", "uid"),
+            validators={
+                "item_object_id": _integer_in_range(minimum=1),
+                "op": _one_of(
+                    "to_cargo",
+                    "to_attachment",
+                    "to_hands",
+                    "to_inventory",
+                    "combine",
+                    "split_half",
+                    "split_to_hands",
+                ),
+                "target_object_id": _integer_in_range(minimum=0),
+                "slot": _is_string,
+                "authority": _one_of("client", "server"),
+                "uid": _is_string,
+            },
+        )
+    ),
     "hands_attach": _command_schema(
         _schema_variant(
             required=("object_id", "slot"),
@@ -1872,6 +1899,20 @@ def _matches_schema_variant(
     return True
 
 
+def _inventory_move_op_rules(args: dict) -> tuple[bool, str | None]:
+    """Destination and slot rules shared with the public inventory_move tool."""
+    op = args.get("op")
+    target = args.get("target_object_id", 0)
+    slot = args.get("slot", "")
+    if op in {"to_cargo", "to_attachment", "combine"} and (
+        not isinstance(target, int) or isinstance(target, bool) or target <= 0
+    ):
+        return False, "bad_args"
+    if op == "to_attachment" and slot == "":
+        return False, "bad_args"
+    return True, None
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
     schema = _COMMAND_ARG_SCHEMAS.get(cmd)
     if schema is not None:
@@ -1881,6 +1922,8 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
 
         keys = set(args)
         if any(_matches_schema_variant(args, keys, variant) for variant in variants):
+            if cmd == "inventory_move":
+                return _inventory_move_op_rules(args)
             return True, None
         return False, "bad_args"
 
