@@ -9,6 +9,7 @@ whatever role said, so a check "by role" passed on the other side's line.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,9 @@ if str(_TOOLS_DIR) not in sys.path:
 from mcp.server.fastmcp.exceptions import ToolError
 
 from dayz_mcp import server
+from dayz_mcp.server import ServerConfig, build_app
+from tests.client_helpers import _fixture_client_runtime
+from tests.mcp_helpers import _content_json
 
 _CLIENT_LINE = 'SCRIPT : Module: World; loaded 2349x files defines: "DAYZ_1_30,PLATFORM_WINDOWS,DIAG"'
 _SERVER_LINE = 'SCRIPT : Module: World; loaded 2351x files defines: "DAYZ_1_30,SERVER_FOR_WINDOWS,SERVER"'
@@ -76,6 +80,22 @@ def _two_sides(directory: str) -> list[Path]:
 
 def _sides(result: dict) -> set[str]:
     return {entry["name"].split("/", 1)[0] for entry in result["scanned"]["files"]}
+
+
+def _public_app():
+    """The registered tools, over a client runtime that reaches no daemon."""
+
+    config = ServerConfig(
+        mode="client",
+        key="k",
+        port=12345,
+        client_platform="codex",
+        log_sink=lambda _message: None,
+    )
+    runtime = _fixture_client_runtime(config)
+    with patch.object(server, "ClientRuntime", return_value=runtime):
+        app, _built = build_app(config)
+    return app, runtime
 
 
 class WaitForRoleTest(unittest.IsolatedAsyncioTestCase):
@@ -133,6 +153,91 @@ class WaitForRoleTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ToolError) as raised:
                 await self._wait([client_profiles], role="server", lookback_from="launch")
         self.assertEqual(str(raised.exception), "profile_unresolved")
+
+    async def test_a_side_folder_with_no_log_of_this_launch_waits(self) -> None:
+        # The folder decides profile_unresolved, not its logs: a folder kept from
+        # an earlier launch, or one with no log yet, is waited on (inbox 33c3).
+        with tempfile.TemporaryDirectory() as directory:
+            client_profiles, server_profiles = _two_sides(directory)
+            old = client_profiles / "script_2026-10-26_21-09-46.log"
+            stale = (datetime.now(timezone.utc) - timedelta(hours=1)).timestamp()
+            os.utime(old, (stale, stale))
+            for name, setup in (("stale", lambda: None), ("empty", old.unlink)):
+                with self.subTest(folder=name):
+                    setup()
+                    result = await self._wait(
+                        [client_profiles, server_profiles],
+                        role="client",
+                        lookback_from="launch",
+                    )
+                    self.assertFalse(result["satisfied"])
+                    self.assertEqual(result["scanned"]["files"], [])
+
+    async def test_a_marker_with_role_reads_only_that_side(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dirs = _two_sides(directory)
+            client_log = dirs[0] / "script_2026-10-26_21-09-46.log"
+            app, runtime = _public_app()
+            fake = _FakeRuntime(dirs[-1])
+            listed = [str(item) for item in dirs]
+            with patch.object(runtime, "lifecycle_status", new=fake.lifecycle_status), patch.object(
+                server, "_profile_dirs_from_runs", return_value=listed
+            ):
+                marker = _content_json(await app.call_tool("logs_since", {}))["marker"]
+                with client_log.open("a", encoding="utf-8") as handle:
+                    handle.write("SCRIPT : ONLY-CLIENT after the marker\n")
+                for role, satisfied, sides in (
+                    ("server", False, {"_server"}),
+                    ("client", True, {"_client"}),
+                ):
+                    for lookback_from in ("launch", "lines"):
+                        with self.subTest(role=role, lookback_from=lookback_from):
+                            result = _content_json(
+                                await app.call_tool(
+                                    "wait_for",
+                                    {
+                                        "condition": "log_matches",
+                                        "pattern": "ONLY-CLIENT",
+                                        "role": role,
+                                        "marker": marker,
+                                        "lookback_from": lookback_from,
+                                        "timeout_s": 0.6,
+                                        "poll_interval_s": 0.5,
+                                    },
+                                )
+                            )
+                            self.assertEqual(result["satisfied"], satisfied)
+                            self.assertEqual(_sides(result), sides)
+
+    async def test_the_tool_without_role_reads_both_sides(self) -> None:
+        # The tool's own default, not only the executor's (inbox 33c3).
+        with tempfile.TemporaryDirectory() as directory:
+            dirs = _two_sides(directory)
+            app, runtime = _public_app()
+            fake = _FakeRuntime(dirs[-1])
+            for order in (dirs, dirs[::-1]):
+                with self.subTest(first=order[0].parent.name):
+                    with patch.object(
+                        runtime, "lifecycle_status", new=fake.lifecycle_status
+                    ), patch.object(
+                        server,
+                        "_profile_dirs_from_runs",
+                        return_value=[str(item) for item in order],
+                    ):
+                        result = _content_json(
+                            await app.call_tool(
+                                "wait_for",
+                                {
+                                    "condition": "log_matches",
+                                    "pattern": "loaded 2349x",
+                                    "lookback_from": "launch",
+                                    "timeout_s": 0.6,
+                                    "poll_interval_s": 0.5,
+                                },
+                            )
+                        )
+                    self.assertTrue(result["satisfied"])
+                    self.assertEqual(result["observed"], _CLIENT_LINE)
 
     async def test_an_unknown_role_is_bad_args(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
