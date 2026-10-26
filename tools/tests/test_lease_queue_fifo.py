@@ -80,6 +80,7 @@ READ_ONLY = {
     "server_perf",
     "nav_path_query",
     "players_visibility",
+    "scene_entities",
 }
 
 

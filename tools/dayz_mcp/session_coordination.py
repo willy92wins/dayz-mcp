@@ -54,6 +54,8 @@ READ_ONLY_COMMANDS = frozenset(
         "server_perf",
         "nav_path_query",
         "players_visibility",
+        # Server read of one scene's registry and its objects (165a).
+        "scene_entities",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

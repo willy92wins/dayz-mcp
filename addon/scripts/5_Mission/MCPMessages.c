@@ -55,6 +55,27 @@ class MCPLoadoutItem
 	int parent;
 };
 
+// world_spawn_batch item (7f5d). An absent key reads 0 or false, as in MCPArgs
+// below. type, pos, flags and rotation are world_spawn's. ground true puts the
+// item on the ground surface_query reads, in place of pos[1]; ypr_set true turns
+// it to ypr ([yaw, pitch, roll] in degrees) once it exists.
+class MCPSpawnBatchItem
+{
+	string type;
+	ref array<float> pos;
+	int flags;
+	int rotation;
+	bool ground;
+	ref array<float> ypr;
+	bool ypr_set;
+
+	void MCPSpawnBatchItem()
+	{
+		pos = new array<float>();
+		ypr = new array<float>();
+	}
+};
+
 // Command args. A key absent from the command JSON reaches the handler as 0 or
 // false, not as the constructor value (fb-20260930-065425-8779: an object_anim
 // read wrote phase 0 and a partial world_weather_set zeroed the other levels).
@@ -240,6 +261,13 @@ class MCPArgs
 	// which the bridge refuses. players_visibility reuses pos and radius, the
 	// size of what is hidden (0 a point); the tool always sends both.
 	float snap_radius;
+	// 165a / 7f5d: world_spawn and world_spawn_batch register what they create
+	// under scene_id, and empty (what an absent key reads) is no scene.
+	// scene_entities and scene_clear name the scene they read or clear.
+	string scene_id;
+	// world_spawn_batch: the items of one command, all created in the tick that
+	// dispatches it. The tool sends a longer list as several commands.
+	ref array<ref MCPSpawnBatchItem> items;
 
 	void MCPArgs()
 	{
@@ -256,6 +284,7 @@ class MCPArgs
 		loadout_items = new array<ref MCPLoadoutItem>();
 		net_low = new array<int>();
 		net_high = new array<int>();
+		items = new array<ref MCPSpawnBatchItem>();
 		component = -1;
 		dik = -1;
 		limit = 64;
@@ -1136,6 +1165,75 @@ class MCPPlayerVisibility
 	bool visible;
 };
 
+// world_spawn_batch row (7f5d), one per item in input order: object_id when the
+// item was created, otherwise error and the item's type.
+class MCPSpawnBatchRow
+{
+	int index;
+	bool ok;
+	int object_id;
+	string type;
+	string error;
+};
+
+class MCPSpawnBatch
+{
+	string status;
+	int created;
+	int failed;
+	ref array<ref MCPSpawnBatchRow> items;
+
+	void MCPSpawnBatch()
+	{
+		items = new array<ref MCPSpawnBatchRow>();
+	}
+};
+
+// scene_entities row (165a). pos is read when the reply is built and stays
+// empty once the object is gone.
+class MCPSceneEntity
+{
+	int object_id;
+	string type;
+	bool deleted;
+	ref array<float> pos;
+
+	void MCPSceneEntity()
+	{
+		pos = new array<float>();
+	}
+};
+
+// scene_clear counts (5a21). error_ids are the objects counted in errors. On a
+// scene_shared refusal only the pair that blocked it is set: carrier_id, of
+// carrier_scene_id, carries carried_id, of carried_scene_id, at some depth.
+class MCPSceneClear
+{
+	int deleted;
+	int already_deleted;
+	int errors;
+	ref array<int> error_ids;
+	int carrier_id;
+	string carrier_scene_id;
+	int carried_id;
+	string carried_scene_id;
+
+	void MCPSceneClear()
+	{
+		error_ids = new array<int>();
+	}
+};
+
+// One object registered under a scene (165a). Not sent. obj is the object
+// itself, which Enforce nulls once it is gone: the id alone can come to name a
+// newer object, because the daemon restarts its ids at 1.
+class MCPSceneEntry
+{
+	int object_id;
+	string type;
+	Object obj;
+};
+
 class MCPResult
 {
 	int id;
@@ -1311,6 +1409,14 @@ class MCPResult
 	ref array<float> to_snapped;
 	// players_visibility rows. Unassigned on other commands.
 	ref array<ref MCPPlayerVisibility> players_visibility;
+	// world_spawn_batch reply. Unassigned on its refusals and on other commands.
+	ref MCPSpawnBatch world_spawn_batch;
+	// scene_entities rows, [] for a scene nothing was registered under.
+	// Unassigned on its refusals and on other commands.
+	ref array<ref MCPSceneEntity> scene_entities;
+	// scene_clear counts, or on scene_shared the pair that blocked it.
+	// Unassigned on its other refusals and on other commands.
+	ref MCPSceneClear scene_clear;
 };
 
 class MCPJob
@@ -1371,6 +1477,9 @@ class MCPJob
 	int perf_whole_seconds;
 	int perf_min_frames;
 	float perf_measured_s;
+	// scene_clear: the counts so far and the entries whose delete is read back.
+	ref MCPSceneClear scene_clear;
+	ref array<ref MCPSceneEntry> scene_pending;
 };
 
 class MCPSpawnValidation

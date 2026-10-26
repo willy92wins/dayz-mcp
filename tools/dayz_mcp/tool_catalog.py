@@ -62,6 +62,7 @@ _INITIAL_READ_TOOL_NAMES = frozenset(
         "query_all_players",
         "query_get_in_condition",
         "query_player_state",
+        "scene_entities",
         "scene_raycast",
         "server_perf",
         "surface_query",

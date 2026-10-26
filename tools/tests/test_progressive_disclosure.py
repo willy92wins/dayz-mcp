@@ -3,9 +3,9 @@
 The initial client-mode catalog is the session and lifecycle core plus the
 reads that need no lease: about 17 KB since fb-20260925-233937-b753 added the
 reads (11 KB before) and about 20 KB since loadout_get, server_perf,
-nav_path_query and players_visibility joined them (fb99, 2427, 0131, 33c5),
-against about 88 KB for the whole catalog. The mutating
-world_*/vehicle_*/ui_* tools appear only after a lease is held.
+nav_path_query, players_visibility and scene_entities joined them (fb99,
+2427, 0131, 33c5, 165a), against about 88 KB for the whole catalog. The
+mutating world_*/vehicle_*/ui_* tools appear only after a lease is held.
 """
 
 from __future__ import annotations

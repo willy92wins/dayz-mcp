@@ -125,6 +125,12 @@ PRUNABLE_FIELDS = (
     "to_snapped",
     # players_visibility fills it, empty when no player is connected (33c5).
     "players_visibility",
+    # world_spawn_batch fills it once, after its last item (7f5d).
+    "world_spawn_batch",
+    # scene_entities fills it with the rows of one scene (165a).
+    "scene_entities",
+    # scene_clear fills it with its counts (5a21).
+    "scene_clear",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -142,6 +148,9 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
         ("entities_query", "entities"),
         # 33c5: no player connected is ok with an empty list, the answer itself.
         ("players_visibility", "players_visibility"),
+        # scene_entities answers [] for a scene nothing was registered under
+        # (165a): an unknown scene is ok with an empty list, not a missing key.
+        ("scene_entities", "scene_entities"),
     }
 )
 

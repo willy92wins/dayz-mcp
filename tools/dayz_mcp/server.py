@@ -108,9 +108,13 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
+    SCENE_ID_MAX_CHARS,
+    SPAWN_BATCH_ITEMS_MAX,
+    SPAWN_BATCH_PER_TICK_MAX,
     LoopbackServer,
     _FENCE_OMITTED,
     is_printable_input_name,
+    is_scene_id,
     read_key,
 )
 from dayz_mcp.instance_context import (
@@ -255,6 +259,7 @@ from dayz_mcp.tool_args import (
     _require_float_list,
     _require_range,
     _require_vec3,
+    _spawn_batch_item_args,
     _timeout,
     _unknown_spawn_type,
 )
@@ -270,7 +275,12 @@ from dayz_mcp.world_results import (
     _normalize_entities_cargo,
     _nav_path_reply,
     _overflow_clock_parts,
+    _scene_clear_reply,
+    _scene_entities_reply,
     _server_perf_reply,
+    _spawn_batch_failed_rows,
+    _spawn_batch_group_rows,
+    _spawn_batch_reply,
     _world_time_reply,
 )
 from dayz_mcp.launch_logs import (
@@ -373,6 +383,9 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "player_kill",
     "bot_start",
     "bot_stop",
+    # A mistyped scene_id key must not create a batch outside its scene, where
+    # scene_clear never reaches it: an unknown key is refused, not dropped.
+    "world_spawn_batch",
 )
 
 
@@ -467,6 +480,25 @@ SERVER_PERF_WINDOW_MAX_S = 60.0
 SERVER_PERF_SLACK_S = 10.0
 NAV_SNAP_RADIUS_MAX_M = 50.0
 VISIBILITY_RADIUS_MAX_M = 100.0
+# 165a: the most entries one scene holds. Mirrors SCENE_ENTRIES_MAX in
+# addon/scripts/5_Mission/MCPBridge.c, which refuses a spawn past it with
+# scene_full, so the scene_entities reply of a full scene stays far below the
+# daemon's 1 MiB result cap. Entries are never dropped: a deleted object still
+# counts, and scene_clear frees no room.
+SCENE_ENTRIES_MAX = 2048
+# The cap sentence of the tools that add to a scene or clear one (165a, 5a21).
+SCENE_CAP_LINE = (
+    f"A scene holds at most {SCENE_ENTRIES_MAX} entries and never drops one: an "
+    "object deleted since still counts, so scene_clear frees no room."
+)
+SCENE_ID_REQUIREMENT = (
+    f"be 1 to {SCENE_ID_MAX_CHARS} characters from A-Z a-z 0-9 _ -"
+)
+# The registry sentence every scene tool carries (165a).
+SCENE_REGISTRY_LINE = (
+    "The scene registry lives in the bridge, in memory, for this run only: like "
+    "object_id it does not survive a restart."
+)
 DAEMON_AUTOSPAWN_DISABLED = (
     "daemon_autospawn_disabled: start the daemon (--daemon) or omit "
     "--no-daemon-autospawn"
@@ -6147,7 +6179,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "gives remaining_s (GetLifetime) and max_s (GetLifetimeMax). A "
             "type that is not an EntityAI has no economy lifetime to set: "
             "with lifetime_s it is deleted and the call fails with "
-            "lifetime_unsupported."
+            "lifetime_unsupported. "
+            f"scene_id ({SCENE_ID_MAX_CHARS} characters at most, from A-Z a-z "
+            "0-9 _ -) registers the new object under that scene: "
+            "scene_entities lists it and scene_clear deletes it. Empty "
+            f"(default) is no scene. {SCENE_CAP_LINE} A spawn past it returns "
+            f"scene_full and creates nothing. {SCENE_REGISTRY_LINE}"
         )
     )
     async def world_spawn(
@@ -6156,6 +6193,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         flags: StrictInt = 0,
         rotation: StrictInt = 0,
         lifetime_s: StrictFloat | None = None,
+        scene_id: StrictStr = "",
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         parsed_flags = int(flags)
@@ -6167,6 +6205,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "flags": parsed_flags,
             "rotation": int(rotation),
         }
+        # 165a: scene_id travels only when a scene is named, so a spawn without
+        # one reaches an older bridge exactly as before.
+        if scene_id != "":
+            if not is_scene_id(scene_id):
+                raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+            args["scene_id"] = scene_id
         # The flag travels with the value: the bridge reads an absent key as 0
         # or false, so only lifetime_s_set asks for the override
         # (fb-20260930-065425-8779). Without lifetime_s neither travels and the
@@ -6194,6 +6238,181 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 if str(error) != "unknown_type":
                     raise
                 raise ToolError(_unknown_spawn_type(type)) from None
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Spawn 1 to {SPAWN_BATCH_ITEMS_MAX} objects in one "
+            "call. Each item is an object with type, pos and optional flags and "
+            "rotation, as in world_spawn (rotation an RF_* int from -2147483648 "
+            "to 2147483647), except that pos [x, y, z] takes y null to put the "
+            "item on the ground surface_query reads at (x, z), and that ypr "
+            "[yaw, pitch, roll] in degrees may replace rotation (not both): the "
+            "object is turned to it once created. flags takes world_spawn's "
+            "allowlist; an item whose class is a DayZInfected gets ECE_INITAI "
+            "added to its flags. world_spawn leaves that flag to the caller, and "
+            "an infected spawned without it was reported at health 0 minutes "
+            "later (cause unverified). "
+            "Every item is checked before anything is sent: a malformed item is "
+            "bad_args naming its index, and so is a list outside 1 to "
+            f"{SPAWN_BATCH_ITEMS_MAX} items. The items then go to the bridge in "
+            f"groups of per_tick (1 to {SPAWN_BATCH_PER_TICK_MAX}, default 10), "
+            "one command per group, each sent once the one before it has "
+            "answered. The bridge creates a whole group in the server tick that "
+            "dispatches it, which can be a later tick than the one that receives "
+            "it, so per_tick bounds the work of one tick: it is meant "
+            "to keep a large scene from stalling the server, which is not "
+            "measured yet. A group takes at least one bridge poll, 5 a second "
+            "in the bridge config the installer and the daemon write, and every "
+            "group shares the one timeout_s: raise it for many groups (200 "
+            "items at per_tick 1 take 200 polls, 40 s or more). "
+            "The reply's world_spawn_batch has status (ok when every item was "
+            "created, partial otherwise), created (the objects the bridge "
+            "confirmed), failed (every other item) and items: one row per item "
+            "in input order, either index, ok true and object_id, or index, ok "
+            "false, error and the item's type. A row's error is unknown_type, "
+            "bad_pos or spawn_failed from the bridge, its group's error when "
+            "that command failed, or not_sent for a group never sent. If the "
+            "first group fails, the call fails with its error. If a later one "
+            "fails or timeout_s runs out, the call stops there and answers "
+            "partial; the groups before it stay. A group refused whole "
+            "(bad_args, scene_full) created nothing. After a timeout or a "
+            "cancel, a group the game has already received still runs, so its "
+            "objects may exist, and scene_entities lists them under a scene_id. "
+            "A cancelled call sends no further group. object_ids work with "
+            "object_delete like world_spawn's. scene_id (as in world_spawn) "
+            f"registers every created object under that scene. {SCENE_CAP_LINE} "
+            "A group that would take the scene past it is refused whole with "
+            f"scene_full. No lifetime_s. {SCENE_REGISTRY_LINE}"
+        )
+    )
+    async def world_spawn_batch(
+        items: list[Any],
+        per_tick: StrictInt = 10,
+        scene_id: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(items, list) or not 1 <= len(items) <= SPAWN_BATCH_ITEMS_MAX:
+            count = len(items) if isinstance(items, list) else items
+            raise ToolError(
+                f"bad_args: items holds {count!r} items; it must hold 1 to "
+                f"{SPAWN_BATCH_ITEMS_MAX}"
+            )
+        if (
+            isinstance(per_tick, bool)
+            or not isinstance(per_tick, int)
+            or not 1 <= per_tick <= SPAWN_BATCH_PER_TICK_MAX
+        ):
+            raise ToolError(
+                _bad_args(
+                    "per_tick",
+                    per_tick,
+                    f"be an int from 1 to {SPAWN_BATCH_PER_TICK_MAX}",
+                )
+            )
+        if scene_id != "" and not is_scene_id(scene_id):
+            raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+        # Every item is checked before the first group is sent (items is
+        # list[Any], so a non-object item reaches this check too).
+        wire_items = [
+            _spawn_batch_item_args(index, item) for index, item in enumerate(items)
+        ]
+        budget = _timeout(timeout_s)
+        rows: list[dict[str, Any]] = []
+        last: dict[str, Any] = {}
+        async with runtime.tool_lock:
+            # One deadline for every group: the first gets the whole budget,
+            # each later one what is left of it.
+            deadline = time.monotonic() + budget
+            for start in range(0, len(wire_items), per_tick):
+                remaining = budget if start == 0 else deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                group = wire_items[start : start + per_tick]
+                args: dict[str, Any] = {"items": group}
+                if scene_id != "":
+                    args["scene_id"] = scene_id
+                try:
+                    result = await runtime.call_bridge(
+                        "world_spawn_batch", args, "server", remaining
+                    )
+                except ToolError as error:
+                    if start == 0:
+                        raise
+                    # The groups before it stay; its items carry its error.
+                    rows.extend(_spawn_batch_failed_rows(group, start, str(error)))
+                    break
+                last = result
+                rows.extend(_spawn_batch_group_rows(result, group, start))
+        return _spawn_batch_reply(last, rows, wire_items)
+
+    @app.tool(
+        description=(
+            "List the objects world_spawn and world_spawn_batch registered under "
+            "scene_id, in the order they were registered. No lease. scene_id is "
+            f"1 to {SCENE_ID_MAX_CHARS} characters from A-Z a-z 0-9 _ -; "
+            "anything else is bad_args. Each row of scene_entities has object_id, "
+            "type, deleted and pos: pos is read now while the object exists, and "
+            "a row whose object is gone (object_delete, scene_clear, or the engine "
+            "removed it) stays in the list with deleted true and no pos. A scene "
+            f"nothing was registered under answers scene_entities []. {SCENE_REGISTRY_LINE}"
+        )
+    )
+    async def scene_entities(
+        scene_id: StrictStr,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not is_scene_id(scene_id):
+            raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "scene_entities", {"scene_id": scene_id}, "server", _timeout(timeout_s)
+            )
+        return _scene_entities_reply(result)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Delete every object registered under scene_id "
+            "(by world_spawn or world_spawn_batch) that still exists, the way "
+            "object_delete deletes one: each through its own entry, never by "
+            "type or position. It deletes live world objects only and never "
+            "touches the server's storage. A delete reaches past its object: "
+            "the engine deletes what the object holds (attached, in cargo or in "
+            "hands) with it, and deleting a vehicle ejects its crew. So before "
+            "deleting anything the call checks that no live object of this scene "
+            "and live object of another scene are in one hierarchy, one carrying "
+            "the other at any depth (holding it, or above it in the entity tree, "
+            "as a vehicle is above its seats); if two are, it deletes nothing and "
+            "fails with scene_shared naming the first pair found: carrier_id, of "
+            "carrier_scene_id, carries carried_id, of carried_scene_id. An object "
+            "registered under no scene follows its carrier, as with "
+            "object_delete: one that an object of this scene holds is deleted "
+            "with it, one seated in it is ejected, and an object of this scene "
+            "that an unregistered one holds (a player's hands, for one) is "
+            "deleted out of it. An object of this scene that another one of this "
+            "scene holds is not deleted by itself: it goes with its holder and is "
+            "read back like the others. scene_id is 1 to "
+            f"{SCENE_ID_MAX_CHARS} characters from A-Z a-z 0-9 _ -; anything "
+            "else is bad_args. The reply's scene_clear counts deleted (the "
+            "objects this call removed, read back on the following server "
+            "ticks), already_deleted (gone before the call) and errors (still "
+            "there 5 s later), with the ids of the errors in error_ids. An "
+            "unknown scene is ok with every count 0. The scene's entries stay: "
+            "scene_entities lists them with deleted true, and they keep "
+            f"counting toward the {SCENE_ENTRIES_MAX} a scene holds. "
+            f"{SCENE_REGISTRY_LINE}"
+        )
+    )
+    async def scene_clear(
+        scene_id: StrictStr,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not is_scene_id(scene_id):
+            raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "scene_clear", {"scene_id": scene_id}, "server", _timeout(timeout_s)
+            )
+        return _scene_clear_reply(result)
 
     @app.tool(
         description=(

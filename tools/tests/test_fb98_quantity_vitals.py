@@ -26,7 +26,7 @@ from unittest.mock import patch
 from dayz_mcp import server
 from dayz_mcp.effective_schema import resolve_effective_schemas
 from tests._addon_paths import addon_root
-from tests.enforce_subset_helpers import EnforceString, method_body, translate
+from tests.enforce_subset_helpers import EnforceString, EnforceVector, method_body, translate
 from tests.mcp_helpers import _content_json
 
 SCRIPTS = addon_root() / "scripts" / "5_Mission"
@@ -158,6 +158,14 @@ class _Vector(tuple):
         return self[index]
 
 
+class _CopiedVector(EnforceVector):
+    """A vector local as the translator copies it on assignment (165a), with
+    the At that _adapted writes for its v[i]."""
+
+    def At(self, index: int) -> float:
+        return self[index]
+
+
 class _State:
     """MCPPlayerState as its constructor leaves it; water and energy keep Enforce's 0."""
 
@@ -272,6 +280,7 @@ def _state_namespace(listed: list[_Man | None], fill: Any) -> dict[str, Any]:
         "MCPPlayerVitals": _Vitals,
         "PlayerBase": SimpleNamespace(Cast=lambda man: man if isinstance(man, _Body) else None),
         "FillPlayerVitals": fill,
+        "_vector": _CopiedVector,
     }
 
 

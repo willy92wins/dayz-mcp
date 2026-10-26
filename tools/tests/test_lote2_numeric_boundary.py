@@ -114,10 +114,13 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 4 from fb99/220f (loadout_get and loadout_apply object_id/timeout_s;
         # uid is a string, clear_first a bool and loadout an object).
         # + 3 from 17fa (inventory_move item_object_id, target_object_id, timeout_s).
-        # 177 before either batch, plus both additions.
         # + 9 from 2427/0131/33c5 (server_perf window_s/timeout_s, nav_path_query
         # from_pos/to/snap_radius/timeout_s, players_visibility pos/radius/timeout_s).
-        self.assertEqual(len(rows), 207)
+        # + 4 from 165a/5a21/7f5d (world_spawn_batch per_tick/timeout_s,
+        # scene_entities timeout_s, scene_clear timeout_s; scene_id is a string
+        # and items a list, not in this census).
+        # 177 before either batch, plus both additions.
+        self.assertEqual(len(rows), 211)
         self.assertIn(("player_view_set", "timeout_s", "float"), rows)
         for tool in ("loadout_get", "loadout_apply"):
             self.assertIn((tool, "object_id", "int"), rows)
@@ -131,6 +134,10 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("players_visibility", "pos", "vector"), rows)
         self.assertIn(("players_visibility", "radius", "float"), rows)
         self.assertIn(("players_visibility", "timeout_s", "float"), rows)
+        self.assertIn(("world_spawn_batch", "per_tick", "int"), rows)
+        self.assertIn(("world_spawn_batch", "timeout_s", "float"), rows)
+        self.assertIn(("scene_entities", "timeout_s", "float"), rows)
+        self.assertIn(("scene_clear", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
         self.assertIn(("inventory_move", "item_object_id", "int"), rows)
