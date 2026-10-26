@@ -363,9 +363,9 @@ class VehicleDoorCensusTest(unittest.TestCase):
     def test_the_arg_contract_hash_does_not_cover_the_command(self) -> None:
         # The hash covers vehicle_prepare_fixture only; a new command leaves it as is.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "63f8ac460f69ebaa")
         self.assertIn(
-            'SERVER_ARG_CONTRACT_HASH = "4f90284258023d98"',
+            'SERVER_ARG_CONTRACT_HASH = "63f8ac460f69ebaa"',
             BRIDGE_PATH.read_text(encoding="utf-8"),
         )
 

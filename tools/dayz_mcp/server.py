@@ -145,6 +145,7 @@ from dayz_mcp.session_coordination import (
 from dayz_mcp.steam_preflight import STEAM_APP_VIEW_STALE, observe_app_steam_view
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+from dayz_mcp import loadout as loadout_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
 # Moved out of this module unchanged (backlog 71fc) and imported back, so
@@ -5971,7 +5972,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "pos stays where the server last put the player (for example the "
             "player_teleport position). Read the car with vehicle_telemetry. "
             "godmode is true while the player is immune to damage "
-            "(GetAllowDamage() false on the server). "
+            "(GetAllowDamage() false on the server). water and energy are "
+            "the body's stats, 0 to 5000, as player_heal reads them; an older "
+            "PBO leaves them out. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
@@ -6990,6 +6993,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "hands via CreateInHands. dest is 'hands' or 'inventory'. "
             "Success returns object_id, the created item's same-run registry "
             "id, for both dests. hands_take and object_delete take that id. "
+            "weapon_without_fsm is true when the created item is a weapon "
+            "with no state machine, such as a bow. When such a weapon is "
+            "created, vanilla logs [wpnfsm] ... without FSM errors from the "
+            "engine's save on the server and its load on the client, which a "
+            "count of script errors should subtract; the item still arrives. "
             "uid empty (default) targets the first human; a non-empty uid "
             "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
             "success without a positive object_id still created the item: "
@@ -7459,15 +7467,166 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         return _require_inventory_attach_child(result)
 
+    # loadout_get and loadout_apply (fb99, 220f) share one loadout format;
+    # loadout.py flattens it into the bridge's rows and nests the read back.
+    @app.tool(
+        description=(
+            "Read what one target wears and holds, in the format loadout_apply "
+            "takes. It changes nothing and needs no lease. The answer's loadout "
+            "is {attachments: [item, ...], hands: item or null}, where an item is "
+            "{type, slot, attachments, cargo}: slot, in an attachments list only, "
+            "is the slot name InventorySlots.GetSlotName gives (Body, Back, "
+            "Headgear), and attachments and cargo list what the item holds, [] "
+            "when nothing. Attachments come in the engine's order and the item "
+            "in hands last. The target is a connected player by uid (empty, the "
+            "default, is the first human; otherwise PlayerIdentity.GetPlainId()) "
+            "or, by object_id, a survivor world_spawn made: the same-run registry "
+            "id of a PlayerBase with no connected identity. Not both. type is "
+            "the target's class. Quantity, health and other item state are not "
+            "read. ok is 0 and warnings includes loadout_incomplete when the "
+            "answer's rows do not form a loadout. Errors: bad_args, not_found "
+            "(nothing registered under object_id, or it is gone), bad_target "
+            "(not a survivor, or a connected player: use uid), no_players, "
+            "player_not_found, loadout_too_large (more than "
+            f"{loadout_contract.MAX_ITEMS} items or {loadout_contract.MAX_DEPTH} "
+            "levels below the target; nothing is returned), and, before the "
+            "game runs a PBO built with this verb, arg_contract_mismatch or "
+            "bridge_capability_missing, with nothing sent."
+        )
+    )
+    async def loadout_get(
+        object_id: StrictInt = 0,
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = loadout_contract.target_args(object_id, uid)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "loadout_get", args, "server", _timeout(timeout_s)
+            )
+        return loadout_contract.get_reply(result)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Dress one target in a loadout, the format "
+            "loadout_get answers, so the read of one target can be applied to "
+            "another. loadout is {attachments: [item, ...], hands: item or "
+            "null}; an item is {type, slot, attachments, cargo}, with slot "
+            "required in an attachments list and absent in cargo and hands, and "
+            "attachments and cargo optional; at most "
+            f"{loadout_contract.MAX_ITEMS} items and "
+            f"{loadout_contract.MAX_DEPTH} levels below the target. The whole "
+            "loadout is checked before anything is sent: bad_args names the "
+            "path (loadout.attachments[2].slot). clear_first=true first deletes "
+            "what the target wears and holds, with everything inside, and waits "
+            "while the game removes it: the game checks once per tick until all "
+            "of it is gone or 5 s have passed. Then each attachment is "
+            "created in its slot, in list order, with its own attachments and "
+            "then its cargo, and then the item in hands. A slot or hands "
+            "already in use is slot_occupied and keeps what is there. items "
+            "lists every item in that order: path, type (the class it asked "
+            "for), ok, and error, null when ok, else unknown_type, "
+            "slot_not_found, slot_occupied, cannot_attach, no_room or "
+            "parent_failed (inside an item that failed). status is ok when every "
+            "item was created and partial otherwise. loadout is the target read "
+            "after, as loadout_get answers it; it is null, with "
+            "loadout_too_large true, when that read is past the caps. clear is "
+            "null without clear_first, else {deleted, cleanup_complete}: how "
+            "many objects the clear deleted, and whether all were gone at its "
+            "last check, which can come one tick after the 5 s (when not, a "
+            "slot one still holds answers slot_occupied). A clear that is "
+            "refused, times out or is cancelled sends nothing more; when the "
+            "creates are refused after a clear, the error ends with "
+            "clear=deleted=N cleanup_complete=0 or 1. A command the game was "
+            "already handed still runs after the tool gave up on it: that is "
+            "the transport's behavior. timeout_s is the wait for each of these "
+            "game calls. Created items get no registry ids. The target is "
+            "chosen as loadout_get chooses it: uid or object_id, not both. With "
+            "clear_first and neither, the creates go by uid to the player the "
+            "clear acted on, so a first human who left in between answers "
+            "player_not_found. Quantity, health and other item state are not "
+            "set. ok is 0 and warnings includes loadout_incomplete when the "
+            "answer cannot be read: the apply may have run, so read the target "
+            "with loadout_get before applying again. Errors: bad_args, not_found, "
+            "bad_target, no_players, player_not_found, busy (a clear_first on "
+            "this target is still waiting for what it deleted to go), "
+            "loadout_incomplete (the clear's answer cannot be read, and nothing "
+            "is created), and, before the game runs a PBO built with these "
+            "verbs, arg_contract_mismatch or bridge_capability_missing, with "
+            "nothing sent."
+        )
+    )
+    async def loadout_apply(
+        loadout: object,
+        object_id: StrictInt = 0,
+        uid: StrictStr = "",
+        clear_first: StrictBool = False,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        # loadout is taken as any JSON value and checked here, so a list, null
+        # or a string answers bad_args with its path like any other mistake.
+        if not isinstance(clear_first, bool):
+            raise ToolError(_bad_args("clear_first", clear_first, "be a bool"))
+        try:
+            target = loadout_contract.target_args(object_id, uid)
+            rows = loadout_contract.flatten_request(loadout)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        timeout = _timeout(timeout_s)
+        args: dict[str, Any] = dict(target)
+        args["loadout_items"] = [row for _path, row in rows]
+        clear: dict[str, Any] | None = None
+        async with runtime.tool_lock:
+            # clear_first is its own bridge verb: the clear deletes in its own
+            # tick and its job only waits; the creates go out only once the
+            # clear has answered (220f; #261 review Y1).
+            if clear_first:
+                cleared = await runtime.call_bridge(
+                    "loadout_clear", dict(target), "server", timeout
+                )
+                try:
+                    clear = loadout_contract.clear_reply(cleared)
+                    if not target:
+                        # The first human can change between the two commands:
+                        # the creates go by uid to the player the clear acted
+                        # on, and are refused if that player has left (#261
+                        # review Y11).
+                        args = {
+                            "uid": loadout_contract.cleared_uid(cleared),
+                            "loadout_items": args["loadout_items"],
+                        }
+                except ValueError as exc:
+                    raise ToolError(str(exc)) from exc
+            try:
+                result = await runtime.call_bridge(
+                    "loadout_apply", args, "server", timeout
+                )
+            except ToolError as exc:
+                if clear is None:
+                    raise
+                raise ToolError(
+                    loadout_contract.refusal_after_clear(str(exc), clear)
+                ) from exc
+        response = loadout_contract.apply_reply(rows, result)
+        response["clear"] = clear
+        return response
+
     # Memory points + bounding_center. Missing points are exists:false, ok:true.
     @app.tool(
         description=(
             "Inspect an object: memory points (exists+pos) and optional "
-            "bounding_center. Target by object_id (from world_spawn or from "
-            "inventory_attach.item_object_id; that id is the created item, "
-            "not the destination owner, and lasts this run only) or by "
-            "classname near pos. Absent memory points return exists:false "
-            "with ok:true."
+            "bounding_center and quantity. Target by object_id (from "
+            "world_spawn or from inventory_attach.item_object_id; that id is "
+            "the created item, not the destination owner, and lasts this run "
+            "only) or by classname near pos. Absent memory points return "
+            "exists:false with ok:true. want 'quantity' reads an item's "
+            "quantity without changing it: has_quantity true, with quantity "
+            "and quantity_max from GetQuantity() and GetQuantityMax(), for an "
+            "item that has one (the liquid in a bottle, a food), and false "
+            "with both 0 otherwise; an older PBO has no has_quantity."
         )
     )
     async def object_inspect(
@@ -9080,7 +9239,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "can therefore run. Non-local multiplayer actions are also sent to "
         "the server, which can reject them. No callbacks are invoked directly "
         "by this tool. started:true / started:1 only means the client manager "
-        "retained a running/pending action immediately after the start call; "
+        "retained a running/pending action immediately after the start call, "
+        "or that the action ran its Start with this call's target inside "
+        "that call, as a local instant action such as ActionTogglePlaceObject "
+        "does; "
         "it proves neither server acceptance, callback execution nor "
         "completion. condition_failed means this call did not dispatch the "
         "action (action.Can or, from DayZ 1.30, action.CanBeStarted was "
@@ -9148,7 +9310,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "only when the client data is PlaceObjectActionData, false kept; "
             "flag_restored and cleanup_complete. ok true means the observation "
             "is valid. Only end_state finished is a local UA_FINISHED. "
-            "Placement and other effects need their own read. A transport "
+            "Placement and other effects need their own read. On 1.29 drink "
+            "and eat actions whose component is a CAContinuousQuantityRepeat, "
+            "such as ActionDrink and ActionEatFruit, count a cycle only when "
+            "the item runs out, so completed_cycles stays 0 while they consume; "
+            "read the item with object_inspect(want=['quantity']) and the "
+            "player's water and energy with query_player_state. A transport "
             "failure is hold_result_unknown, not end_state timeout, and is not "
             "retried. After the client is retired, an unreconciled hold stays "
             "fenced for that run (hold_unreconciled); a cancel acknowledgement "

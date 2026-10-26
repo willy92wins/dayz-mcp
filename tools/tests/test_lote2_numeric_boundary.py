@@ -107,10 +107,15 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 2 from 9608 (hands_attach object_id/timeout_s; slot and uid are strings).
         # + 1 from 8b1c (dayz_test_foreground hold_s; run_id is a string).
         # + 1 from 854c (player_view_set timeout_s; view is a string).
+        # + 4 from fb99/220f (loadout_get and loadout_apply object_id/timeout_s;
+        # uid is a string, clear_first a bool and loadout an object).
         # + 3 from 17fa (inventory_move item_object_id, target_object_id, timeout_s).
         # 177 before either batch, plus both additions.
-        self.assertEqual(len(rows), 194)
+        self.assertEqual(len(rows), 198)
         self.assertIn(("player_view_set", "timeout_s", "float"), rows)
+        for tool in ("loadout_get", "loadout_apply"):
+            self.assertIn((tool, "object_id", "int"), rows)
+            self.assertIn((tool, "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
         self.assertIn(("inventory_move", "item_object_id", "int"), rows)
