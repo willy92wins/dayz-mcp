@@ -1437,7 +1437,7 @@ class HealGodmodeMessagesTest(unittest.TestCase):
         )
         self.assertEqual(
             _class_members(self.messages, "MCPPlayerState"),
-            [("string", "name"), ("ref array<float>", "pos"), ("bool", "godmode")],
+            [("string", "name"), ("ref array<float>", "pos"), ("bool", "godmode"), ("float", "water"), ("float", "energy")],
         )
 
     def test_both_reads_fill_godmode_from_the_server_body(self) -> None:

@@ -196,6 +196,8 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "phase": frozenset({"object_anim"}),
     "source": frozenset({"object_anim"}),
     "deferred": frozenset({"inventory_give"}),
+    # inventory_give reads it back from the item it created (71c9).
+    "weapon_without_fsm": frozenset({"inventory_give"}),
     "count_total": frozenset({"entities_query"}),
     # vehicle_enter answers from its seat job (PostSeatSuccess), vehicle_get_in_client
     # from its vehicle_get_in job (MCP_PostJobSuccess).
