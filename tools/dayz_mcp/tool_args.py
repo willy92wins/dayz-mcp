@@ -16,11 +16,14 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from dayz_mcp import dayz_test_modes
 from dayz_mcp.bridge_errors import _is_safe_error_token
+from dayz_mcp.core import is_allowed_spawn_flags
 from dayz_mcp.loopback import (
     INPUT_NAME_MAX_CHARS,
     INPUT_TRIGGER_DIK_MAX,
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
+    SPAWN_ROTATION_MAX,
+    SPAWN_ROTATION_MIN,
     is_printable_input_name,
 )
 
@@ -111,6 +114,109 @@ def _finite_float(value: float, error: str = "bad_args") -> float:
     if not math.isfinite(converted):
         raise ToolError(resolved_error)
     return converted
+
+
+# world_spawn_batch items (7f5d), checked one by one before the call reaches the
+# bridge: a malformed item refuses the whole call, naming its index, so nothing
+# is created. A class the game does not know is not malformed; the bridge
+# reports it on that item's row (unknown_type) and creates the others.
+_SPAWN_BATCH_ITEM_KEYS = ("flags", "pos", "rotation", "type", "ypr")
+
+
+def _is_wire_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
+def _spawn_batch_item_args(index: int, item: object) -> dict[str, Any]:
+    """The wire form of one world_spawn_batch item, or bad_args naming it.
+
+    y null travels as 0.0 with ground true, the bridge's flag for "the ground
+    surface_query reads"; an explicit y travels as world_spawn's does. ypr
+    travels with ypr_set true, in place of rotation.
+    """
+    field = f"items[{index}]"
+    if not isinstance(item, dict):
+        raise ToolError(_bad_args(field, item, "be an object with type and pos"))
+    unknown = sorted(str(key) for key in item if key not in _SPAWN_BATCH_ITEM_KEYS)
+    if unknown:
+        raise ToolError(
+            f"bad_args: {field} has unexpected keys {unknown!r} "
+            f"(accepted: {', '.join(_SPAWN_BATCH_ITEM_KEYS)})"
+        )
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or item_type == "":
+        raise ToolError(
+            _bad_args(f"{field}.type", item_type, "be a CfgVehicles classname")
+        )
+    pos = item.get("pos")
+    if (
+        not isinstance(pos, list)
+        or len(pos) != 3
+        or not _is_wire_number(pos[0])
+        or not (pos[1] is None or _is_wire_number(pos[1]))
+        or not _is_wire_number(pos[2])
+    ):
+        raise ToolError(
+            _bad_args(
+                f"{field}.pos",
+                pos,
+                "be [x, y, z] finite numbers, y null for the ground",
+            )
+        )
+    flags = item.get("flags", 0)
+    if (
+        isinstance(flags, bool)
+        or not isinstance(flags, int)
+        or not is_allowed_spawn_flags(flags)
+    ):
+        raise ToolError(
+            _bad_args(f"{field}.flags", flags, "be 0 or a mask world_spawn allows")
+        )
+    if "rotation" in item and "ypr" in item:
+        raise ToolError(f"bad_args: {field} takes rotation or ypr, not both")
+    rotation = item.get("rotation", 0)
+    if (
+        isinstance(rotation, bool)
+        or not isinstance(rotation, int)
+        or not SPAWN_ROTATION_MIN <= rotation <= SPAWN_ROTATION_MAX
+    ):
+        raise ToolError(
+            _bad_args(
+                f"{field}.rotation",
+                rotation,
+                f"be an RF_* int from {SPAWN_ROTATION_MIN} to {SPAWN_ROTATION_MAX}",
+            )
+        )
+    wire: dict[str, Any] = {
+        "type": item_type,
+        "pos": [
+            float(pos[0]),
+            0.0 if pos[1] is None else float(pos[1]),
+            float(pos[2]),
+        ],
+        "flags": flags,
+        "rotation": rotation,
+    }
+    if pos[1] is None:
+        wire["ground"] = True
+    if "ypr" in item:
+        ypr = item["ypr"]
+        if (
+            not isinstance(ypr, list)
+            or len(ypr) != 3
+            or not all(_is_wire_number(value) for value in ypr)
+        ):
+            raise ToolError(
+                _bad_args(f"{field}.ypr", ypr, "be [yaw, pitch, roll] finite degrees")
+            )
+        wire["ypr"] = [float(value) for value in ypr]
+        wire["ypr_set"] = True
+    return wire
 
 
 # A hold answers after its release, hold_s after the press: the tool waits at
