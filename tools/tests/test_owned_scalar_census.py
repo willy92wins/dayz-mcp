@@ -1007,6 +1007,12 @@ class OwnedScalarCensusTest(unittest.TestCase):
     def test_never_filled_fields_have_no_write(self) -> None:
         self.assertEqual(_never_filled_problems(census(_census_sources())), [])
 
+    def test_inventory_give_alone_writes_weapon_without_fsm(self) -> None:
+        # 71c9: DispatchInventoryGive reads it back from the item it created.
+        # The census watches it only while OWNED_SCALAR_FIELDS lists it.
+        observed = census(_census_sources())
+        self.assertEqual(observed.get("weapon_without_fsm"), frozenset({"inventory_give"}))
+
     def test_owned_and_never_filled_fields_are_scalar_members_of_mcp_result(self) -> None:
         messages = (MISSION / MESSAGES).read_text(encoding="utf-8")
         members = _mcp_result_members(messages)
