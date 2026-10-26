@@ -100,14 +100,21 @@ class WaitForRoleTest(unittest.IsolatedAsyncioTestCase):
                 ("client", _CLIENT_LINE, "_client"),
                 ("offline", _CLIENT_LINE, "_client"),
             ):
-                for lookback_from in ("launch", "lines"):
-                    with self.subTest(role=role, lookback_from=lookback_from):
-                        result = await self._wait(
-                            dirs, role=role, lookback_from=lookback_from
-                        )
-                        self.assertTrue(result["satisfied"])
-                        self.assertEqual(result["observed"], line)
-                        self.assertEqual(_sides(result), {side})
+                # Both orders: a scan of every side that stops at the first
+                # match passes when the role's side happens to come first.
+                for order in (dirs, dirs[::-1]):
+                    for lookback_from in ("launch", "lines"):
+                        with self.subTest(
+                            role=role,
+                            first=order[0].parent.name,
+                            lookback_from=lookback_from,
+                        ):
+                            result = await self._wait(
+                                order, role=role, lookback_from=lookback_from
+                            )
+                            self.assertTrue(result["satisfied"])
+                            self.assertEqual(result["observed"], line)
+                            self.assertEqual(_sides(result), {side})
 
     async def test_without_role_both_sides_are_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
