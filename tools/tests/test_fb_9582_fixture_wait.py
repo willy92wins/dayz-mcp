@@ -29,6 +29,7 @@ IS_JOB_READY = "protected bool IsJobReady(MCPJob job)"
 POST_SUCCESS = "protected void PostJobSuccess(MCPJob job)"
 POST_TIMEOUT = "protected void PostJobTimeout(MCPJob job)"
 POST_FIXTURE = "protected void PostVehicleFixture(MCPJob job, bool ready)"
+PROCESS_JOBS = "protected void ProcessJobs()"
 
 WAIT_CONSTANT = r"protected\s+const\s+float\s+VEHICLE_FIXTURE_WAIT_S\s*=\s*1(?:\.0+)?\s*;"
 NOT_READY = "if (!IsVehicleFixtureReady(car))"
@@ -95,6 +96,7 @@ class Fb9582FixtureWaitContract:
     def assert_fixture_waits(self, case: unittest.TestCase, source: str) -> None:
         case.assertIsNotNone(re.search(WAIT_CONSTANT, clean(source)), "VEHICLE_FIXTURE_WAIT_S")
         self._assert_dispatch_queues_the_wait(case, method_body(source, DISPATCH))
+        self._assert_ready_is_read_before_the_deadline(case, method_body(source, PROCESS_JOBS))
         self._assert_job_only_reads(case, method_body(source, IS_JOB_READY))
         self._assert_job_routes_to_fixture_reply(
             case, method_body(source, POST_SUCCESS), "PostVehicleFixture(job, true);", "MCPResult result = new MCPResult();"
@@ -138,6 +140,22 @@ class Fb9582FixtureWaitContract:
         )
         case.assertNotIn("fixture_not_ready", dispatch)
         case.assertNotIn("PostResult", dispatch)
+
+    @staticmethod
+    def _assert_ready_is_read_before_the_deadline(case: unittest.TestCase, process_jobs: str) -> None:
+        # Every tick asks IsJobReady of each job, whatever its kind, before it
+        # looks at the deadline, so a car that reads ready within the wait
+        # answers ok.
+        ready = "else if (IsJobReady(job))"
+        deadline = "else if (m_ElapsedS > job.deadline_s)"
+        case.assertIn(ready, process_jobs)
+        case.assertIn(deadline, process_jobs)
+        ready_at, ready_start, ready_end = _block_after(process_jobs, ready)
+        deadline_at, deadline_start, deadline_end = _block_after(process_jobs, deadline)
+        case.assertLess(ready_at, deadline_at)
+        _assert_in_order(case, process_jobs[ready_start:ready_end], ("PostJobSuccess(job);", "m_Jobs.Remove(jobId);"))
+        _assert_in_order(case, process_jobs[deadline_start:deadline_end], ("PostJobTimeout(job);", "m_Jobs.Remove(jobId);"))
+        case.assertNotIn("vehicle_fixture", process_jobs)
 
     @staticmethod
     def _assert_job_only_reads(case: unittest.TestCase, is_job_ready: str) -> None:
@@ -232,11 +250,23 @@ class Fb9582FixtureWaitTest(unittest.TestCase):
 
     def test_fb_9582_shapes_that_answer_too_early_or_change_the_world_fail(self) -> None:
         mutants = {
-            # Main before the fix: the read right after OnDebugSpawn answers.
+            # The dispatch posts its reply in the tick it calls OnDebugSpawn.
             "answers_in_the_same_tick": _mutant(
+                self.source,
+                "m_Jobs.Insert(job.id, job);\n\t\t\tLog(\"job queued id=\" + job.id + \" kind=vehicle_fixture deadline_s=\" + job.deadline_s);\n\t\t\treturn false;",
+                "m_Jobs.Insert(job.id, job);\n\t\t\tLog(\"job queued id=\" + job.id + \" kind=vehicle_fixture deadline_s=\" + job.deadline_s);\n\t\t\treturn true;",
+            ),
+            # A job of another kind, so IsJobReady never reads the fixture.
+            "wrong_job_kind": _mutant(
                 self.source,
                 'job.kind = "vehicle_fixture";',
                 'job.kind = "spawn";',
+            ),
+            # Codex H1 (r1 of #272): the tick skips the fixture's ready read.
+            "ready_skips_the_fixture": _mutant(
+                self.source,
+                "else if (IsJobReady(job))",
+                'else if (IsJobReady(job) && job.kind != "vehicle_fixture")',
             ),
             "no_wait": _mutant(
                 self.source,
