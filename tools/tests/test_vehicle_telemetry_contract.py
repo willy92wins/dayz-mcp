@@ -120,6 +120,9 @@ def observed_telemetry(
         return result
 
     pos = observed.get("pos")
+    # The bridge reads an empty pos as none (command.args.pos.Count() > 0).
+    if isinstance(pos, (list, tuple)) and not pos:
+        pos = None
     if pos is not None:
         if not _finite_pos(pos):
             result["ok"] = False
@@ -618,6 +621,28 @@ class TestVehicleTelemetryWireContract(unittest.TestCase):
         self.assertEqual(
             map_vehicle_telemetry_seat_token(-999, self.named_seats), "unknown"
         )
+
+    def test_model_reads_an_empty_pos_as_none(self) -> None:
+        # The bridge's handler and test_fb_035a read pos=[] as no pos (H3,
+        # Codex's second review); a non-empty pos that is not three numbers
+        # is bad_args.
+        car_driver = {
+            "crew_index": 0,
+            "vehicle_seat": self.named_seats["VEHICLESEAT_DRIVER"],
+            "type": "CivilianSedan",
+            "classname": "CivilianSedan",
+            "is_carscript": True,
+            "speedo_max": 0.0,
+            "gear": 0,
+            "lights_on_client": True,
+            "engine_on_server": False,
+        }
+        without = observed_telemetry(car_driver, self.named_seats)
+        self.assertEqual(
+            observed_telemetry(dict(car_driver, pos=[]), self.named_seats), without
+        )
+        refused = observed_telemetry(dict(car_driver, pos=[1.0, 2.0]), self.named_seats)
+        self.assertEqual((refused["ok"], refused["error"]), (False, "bad_args"))
 
     def test_discriminating_telemetry_mutants_fail(self) -> None:
         assert_vehicle_telemetry_source(self.bridge)

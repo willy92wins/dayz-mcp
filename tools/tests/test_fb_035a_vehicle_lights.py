@@ -514,6 +514,15 @@ class VehicleTelemetryToolPosTest(unittest.IsolatedAsyncioTestCase):
             "vehicle_telemetry", {}, "client", 1.0
         )
 
+    async def test_null_pos_forwards_empty_args(self) -> None:
+        # pos is optional, so null is the same as leaving it out, not a
+        # schema failure (H1, Codex's second review).
+        self.runtime.call_bridge = AsyncMock(return_value={"ok": True, "found": False})
+        await self.app.call_tool("vehicle_telemetry", {"pos": None, "timeout_s": 1.0})
+        self.runtime.call_bridge.assert_awaited_once_with(
+            "vehicle_telemetry", {}, "client", 1.0
+        )
+
     async def test_invalid_pos_is_tool_error_before_the_bridge(self) -> None:
         self.runtime.call_bridge = AsyncMock(return_value={"ok": True, "found": False})
         with self.assertRaises(ToolError) as caught:
@@ -576,7 +585,11 @@ class FindTransportNearClientRadiusTest(unittest.TestCase):
         self.assertIsNotNone(found)
         self.radius = float(found.group(1))
 
-    def _find(self, *positions: tuple[float, float, float]):
+    def _find(
+        self,
+        *positions: tuple[float, float, float],
+        centre: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ):
         transports = []
         for position in positions:
             transport = FakeTransport()
@@ -598,7 +611,7 @@ class FindTransportNearClientRadiusTest(unittest.TestCase):
             class_types={"Transport", "Object"},
             members=("m_ReadyObjects", "m_ReadyProxyCargos"),
         )
-        return find(EnforceVector((0.0, 0.0, 0.0))), transports, game
+        return find(EnforceVector(centre)), transports, game
 
     def test_the_search_radius_is_four_metres(self) -> None:
         self.assertEqual(self.radius, 4.0)
@@ -618,6 +631,18 @@ class FindTransportNearClientRadiusTest(unittest.TestCase):
     def test_the_nearer_of_two_cars_is_found(self) -> None:
         found, transports, _game = self._find((3.0, 0.0, 0.0), (0.0, 0.0, 2.0))
         self.assertIs(found, transports[1])
+
+    def test_the_search_is_centred_on_pos_off_the_origin(self) -> None:
+        # From the origin alone, a finder that dropped pos's height or used
+        # another centre would still pass (H2, Codex's second review).
+        centre = (100.0, 50.0, 100.0)
+        found, transports, game = self._find((102.0, 50.0, 100.0), centre=centre)
+        self.assertIs(found, transports[0])
+        self.assertEqual(game.radii, [4.0])
+        for position in ((100.0, 54.1, 100.0), (102.0, 0.0, 100.0)):
+            with self.subTest(position=position):
+                found, _transports, _game = self._find(position, centre=centre)
+                self.assertIsNone(found)
 
 
 class ResultPruneLightsTest(unittest.TestCase):
