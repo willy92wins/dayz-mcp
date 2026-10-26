@@ -627,6 +627,9 @@ def _activate_server_coordination(
         # fb-20260904-114520-6927: the socket table is the second witness of
         # the box; a DayZ image holding a UDP port occupies it without a run.
         port_probe=orphan_guard.snapshot_udp_port_holders,
+        child_probe=lambda: orphan_guard.snapshot_processes_with_parent(
+            ["CrashReporter.exe"]
+        ),
         game_path=game_path if game_path is not None else _lifecycle_game_path(None),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,

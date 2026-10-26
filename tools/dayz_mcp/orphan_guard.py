@@ -230,13 +230,14 @@ def _named_snapshot_from_entries(
     return {"known": True, "processes": processes}
 
 
-def _snapshot_all_process_entries() -> list[tuple[int, str]] | None:
+def _snapshot_all_process_entries_with_parent() -> list[tuple[int, int, str]] | None:
+    """ToolHelp rows with th32ParentProcessID (inbox 7417)."""
     if not _IS_WINDOWS:  # pragma: no cover - production target is Windows.
         return None
     snapshot = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == wintypes.HANDLE(-1).value:
         return None
-    entries: list[tuple[int, str]] = []
+    entries: list[tuple[int, int, str]] = []
     failed = False
     close_ok = False
     try:
@@ -251,6 +252,7 @@ def _snapshot_all_process_entries() -> list[tuple[int, str]] | None:
                 entries.append(
                     (
                         int(entry.th32ProcessID),
+                        int(entry.th32ParentProcessID),
                         entry.szExeFile.decode("ascii", "replace"),
                     )
                 )
@@ -272,6 +274,26 @@ def _snapshot_all_process_entries() -> list[tuple[int, str]] | None:
     return entries
 
 
+def _snapshot_all_process_entries() -> list[tuple[int, str]] | None:
+    entries = _snapshot_all_process_entries_with_parent()
+    if entries is None:
+        return None
+    return [(pid, name) for pid, _ppid, name in entries]
+
+
+def _named_parent_snapshot_from_entries(
+    entries: list[tuple[int, int, str]], names: list[str]
+) -> dict[str, object]:
+    exact_names = {name.casefold() for name in names}
+    processes = [
+        {"pid": int(pid), "ppid": int(ppid), "name": name}
+        for pid, ppid, name in entries
+        if isinstance(name, str) and name.casefold() in exact_names
+    ]
+    processes.sort(key=lambda item: int(item["pid"]))
+    return {"known": True, "processes": processes}
+
+
 def snapshot_processes_by_name(names: list[str]) -> dict[str, object]:
     """Return exact case-insensitive ToolHelp matches as PID/name observations only."""
     if (
@@ -284,6 +306,20 @@ def snapshot_processes_by_name(names: list[str]) -> dict[str, object]:
     if entries is None:
         return {"known": False, "processes": []}
     return _named_snapshot_from_entries(entries, names)
+
+
+def snapshot_processes_with_parent(names: list[str]) -> dict[str, object]:
+    """Exact case-insensitive ToolHelp matches with parent pid (inbox 7417)."""
+    if (
+        not isinstance(names, list)
+        or not names
+        or any(not isinstance(name, str) or not name for name in names)
+    ):
+        raise ValueError("invalid_process_names")
+    entries = _snapshot_all_process_entries_with_parent()
+    if entries is None:
+        return {"known": False, "processes": []}
+    return _named_parent_snapshot_from_entries(entries, names)
 
 
 def snapshot_retail_processes() -> dict[str, object]:
