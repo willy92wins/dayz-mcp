@@ -616,6 +616,9 @@ def _start_core(
             argv.append("-filePatching")
         if payload.get("navmesh_data_server", False):
             argv.append("-startNavmeshDataServer")
+        # Only an explicit true. An older sealed request omits the key.
+        if payload.get("server_adminlog") is True:
+            argv.append("-adminlog")
         argv.append(f"-port={port}")
         server_mods = list(payload.get("server_mods", []))
         if server_mods:

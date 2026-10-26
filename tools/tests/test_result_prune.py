@@ -447,15 +447,21 @@ GENERIC_SCALAR_OWNERS = {
         },
         False,
     ),
-    "confirmed": ({"hands_attach", "hands_take", "weapon_state"}, 0),
+    "confirmed": ({"hands_attach", "hands_take", "inventory_move", "weapon_state"}, 0),
     "sent": ({"exec_enforce", "notify_players"}, 0),
-    "deleted": ({"object_delete"}, 0),
+    "deleted": ({"object_delete", "loadout_clear"}, 0),
+    "uid": ({"loadout_clear"}, ""),
     "y": ({"surface_query"}, 0.0),
     "phase": ({"object_anim"}, 0.0),
     "source": ({"object_anim"}, ""),
     "deferred": ({"inventory_give"}, 0),
+    # 71c9: an Apple given answers 0, a real answer; on any other verb 0 is noise.
+    "weapon_without_fsm": ({"inventory_give"}, 0),
     "count_total": ({"entities_query"}, 0),
     "component_index": ({"action_use_door", "action_use_component", "action_hold"}, 0),
+    # 854c: the player_view_set read-back.
+    "person_view": ({"player_view_set"}, ""),
+    "camera_class": ({"player_view_set"}, ""),
     # 2427 and 0131: written from the server_perf job and by nav_path_query.
     "avg_fps": ({"server_perf"}, 0.0),
     "min_fps": ({"server_perf"}, 0),

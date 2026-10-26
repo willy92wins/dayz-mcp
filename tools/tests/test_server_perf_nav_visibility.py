@@ -416,9 +416,9 @@ class ReadsCensusTest(unittest.TestCase):
                 self.assertEqual(
                     set(server.SERVER_ARG_CONTRACT[command]), set(WIRE_ARGS[command])
                 )
-        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "e72320ee432246c5")
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "4e6500849680c89b")
         self.assertNotEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, PREVIOUS_ARG_CONTRACT_HASH)
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "e72320ee432246c5"', self.source)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "4e6500849680c89b"', self.source)
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
 

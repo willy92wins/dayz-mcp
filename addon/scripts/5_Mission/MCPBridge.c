@@ -29,6 +29,11 @@ class MCPBridge : Managed
 	// ends the pulse in OnEndServer (actioncardoorsoutside.c:109-118); 1000 ms spans
 	// the door's animPeriod of 0.5 s (config.cpp CarScript AnimationSources).
 	protected const int VEHICLE_DOOR_LIGHTS_PULSE_MS = 1000;
+	// loadout_get / loadout_apply (fb99, 220f): a loadout holds at most this many
+	// items, at most this many levels below the target (what the target wears or
+	// holds is level 1). Mirrors MAX_ITEMS and MAX_DEPTH in tools/dayz_mcp/loadout.py.
+	protected const int LOADOUT_MAX_ITEMS = 64;
+	protected const int LOADOUT_MAX_DEPTH = 4;
 	// server_perf window_s bounds in seconds, and nav_path_query's snap_radius
 	// and players_visibility's radius caps in metres. Mirrored by server.py and
 	// loopback.py; a test pins the values in all three and the comparisons here.
@@ -50,12 +55,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,nav_path_query," + "notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport,players_visibility," + "query_all_players,query_get_in_condition,query_player_state,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "e72320ee432246c5";
+	protected const string SERVER_ARG_CONTRACT_HASH = "4e6500849680c89b";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -118,6 +123,18 @@ class MCPBridge : Managed
 		{
 			m_TelemetryFixtureLinePool.Insert(new MCPTelemetryFixtureLine());
 			fixtureLineIndex = fixtureLineIndex + 1;
+		}
+		if (g_Game)
+		{
+			g_Game.Event_OnRPC.Insert(MCPOnInventoryMoveRefused);
+		}
+	}
+
+	void ~MCPBridge()
+	{
+		if (g_Game)
+		{
+			g_Game.Event_OnRPC.Remove(MCPOnInventoryMoveRefused);
 		}
 	}
 
@@ -594,6 +611,18 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchInventoryAttach(command, result);
 		}
+		else if (command.cmd == "loadout_get")
+		{
+			postNow = DispatchLoadoutGet(command, result);
+		}
+		else if (command.cmd == "loadout_apply")
+		{
+			postNow = DispatchLoadoutApply(command, result);
+		}
+		else if (command.cmd == "loadout_clear")
+		{
+			postNow = DispatchLoadoutClear(command, result);
+		}
 		else if (command.cmd == "object_inspect")
 		{
 			postNow = DispatchObjectInspect(command, result);
@@ -629,6 +658,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "hands_attach")
 		{
 			postNow = DispatchHandsAttach(command, result);
+		}
+		else if (command.cmd == "inventory_move")
+		{
+			postNow = DispatchInventoryMove(command, result);
 		}
 		else if (command.cmd == "object_doors")
 		{
@@ -738,6 +771,900 @@ class MCPBridge : Managed
 
 		result.ok = true;
 		return true;
+	}
+
+	// inventory_move (fb-20261024-212316-17fa). authority=client issues the
+	// player's predictive call and confirms only from a later server read.
+	// authority=server moves with ServerTake* or LocationSyncMoveEntity and
+	// confirms from the read in this call when the location already matches.
+	protected bool DispatchInventoryMove(MCPCommand command, MCPResult result)
+	{
+		result.accepted = false;
+		result.confirmed = false;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		int itemId = command.args.item_object_id;
+		result.object_id = itemId;
+		if (itemId <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		string op = command.args.op;
+		if (!MCPInventoryMoveOpKnown(op))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		string authority = command.args.authority;
+		if (authority == "")
+		{
+			authority = "client";
+		}
+		if (authority != "client")
+		{
+			if (authority != "server")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		if (op == "to_attachment")
+		{
+			if (command.args.slot == "")
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+		}
+		string itemError = "";
+		EntityAI item = MCPInventoryMoveEntity(itemId, itemError);
+		if (!item)
+		{
+			result.ok = false;
+			result.error = itemError;
+			return true;
+		}
+		result.type = item.GetType();
+		EntityAI target = null;
+		if (MCPInventoryMoveNeedsTarget(op))
+		{
+			int targetId = command.args.target_object_id;
+			if (targetId <= 0)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			string targetError = "";
+			target = MCPInventoryMoveEntity(targetId, targetError);
+			if (!target)
+			{
+				result.ok = false;
+				result.error = targetError;
+				return true;
+			}
+		}
+		PlayerBase player = null;
+		// authority=server still needs the player when the item or the target
+		// is in someone's inventory. Otherwise MCPInventoryMoveForeign treats a
+		// null player as foreign to every player root, including this uid.
+		// World to world leaves both roots null and does not resolve anyone.
+		bool rootedOnPlayer = false;
+		if (item.GetHierarchyRootPlayer())
+		{
+			rootedOnPlayer = true;
+		}
+		if (target && target.GetHierarchyRootPlayer())
+		{
+			rootedOnPlayer = true;
+		}
+		if (authority == "client" || MCPInventoryMoveNeedsPlayer(op) || rootedOnPlayer)
+		{
+			string playerError = "";
+			player = ResolvePlayer(command.args, playerError);
+			if (!player)
+			{
+				result.ok = false;
+				result.error = playerError;
+				return true;
+			}
+		}
+		string foreignError = MCPInventoryMoveForeign(player, item);
+		if (foreignError == "")
+		{
+			foreignError = MCPInventoryMoveForeign(player, target);
+		}
+		if (foreignError != "")
+		{
+			result.ok = false;
+			result.error = foreignError;
+			return true;
+		}
+		if (authority == "client")
+		{
+			string reachError = MCPInventoryMoveReach(player, item, target);
+			if (reachError != "")
+			{
+				result.ok = false;
+				result.error = reachError;
+				return true;
+			}
+		}
+		string roomError = MCPInventoryMoveRoom(player, item, target, op, command.args.slot);
+		if (roomError != "")
+		{
+			result.ok = false;
+			result.error = roomError;
+			return true;
+		}
+		float beforeQty = MCPItemQuantity(item);
+		if (op == "combine")
+		{
+			beforeQty = MCPItemQuantity(target);
+		}
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "inventory_move";
+		job.args = command.args;
+		job.args.op = op;
+		job.args.authority = authority;
+		job.subject = item;
+		job.actor = player;
+		job.move_target = target;
+		job.move_quantity = beforeQty;
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		string performError = "";
+		bool clientRpc = false;
+		if (authority == "server")
+		{
+			performError = MCPServerInventoryMove(player, item, target, op, command.args.slot);
+		}
+		else if (!GetGame().IsMultiplayer())
+		{
+			performError = player.MCPPerformClientInventoryMove(op, item, target, command.args.slot);
+		}
+		else
+		{
+			// A listen server can deliver the refusal RPC before Send returns.
+			// The job has to be in m_Jobs first. The handler only sets phase.
+			// Dispatch or ProcessJobs posts the one result.
+			clientRpc = true;
+			m_Jobs.Insert(job.id, job);
+			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot, job.id);
+		}
+		if (performError != "")
+		{
+			if (clientRpc && m_Jobs.Contains(job.id))
+			{
+				m_Jobs.Remove(job.id);
+			}
+			result.ok = false;
+			result.error = performError;
+			return true;
+		}
+		if (clientRpc && job.phase == 1)
+		{
+			MCPWriteInventoryMove(result, job, true, "");
+			result.ok = true;
+			m_Jobs.Remove(job.id);
+			return true;
+		}
+		result.accepted = true;
+		if (MCPInventoryMoveReady(job))
+		{
+			MCPWriteInventoryMove(result, job, true, "");
+			result.ok = true;
+			if (clientRpc)
+			{
+				m_Jobs.Remove(job.id);
+			}
+			return true;
+		}
+		// The server read wins: a client refusal is posted only when the move
+		// is not visible yet.
+		if (clientRpc && job.phase == 2)
+		{
+			MCPPostInventoryMoveRefused(job, job.error);
+			m_Jobs.Remove(job.id);
+			return false;
+		}
+		if (!clientRpc)
+		{
+			m_Jobs.Insert(job.id, job);
+		}
+		return false;
+	}
+
+	protected bool MCPInventoryMoveOpKnown(string op)
+	{
+		if (op == "to_cargo")
+		{
+			return true;
+		}
+		if (op == "to_attachment")
+		{
+			return true;
+		}
+		if (op == "to_hands")
+		{
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			return true;
+		}
+		if (op == "combine")
+		{
+			return true;
+		}
+		if (op == "split_half")
+		{
+			return true;
+		}
+		if (op == "split_to_hands")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected bool MCPInventoryMoveNeedsTarget(string op)
+	{
+		if (op == "to_cargo")
+		{
+			return true;
+		}
+		if (op == "to_attachment")
+		{
+			return true;
+		}
+		if (op == "combine")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected bool MCPInventoryMoveNeedsPlayer(string op)
+	{
+		if (op == "to_hands")
+		{
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			return true;
+		}
+		if (op == "split_half")
+		{
+			return true;
+		}
+		if (op == "split_to_hands")
+		{
+			return true;
+		}
+		return false;
+	}
+
+	protected EntityAI MCPInventoryMoveEntity(int objectId, out string error)
+	{
+		error = "";
+		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			error = "object_not_found";
+			return null;
+		}
+		Object registered = m_RuntimeObjects.Get(objectId);
+		if (!registered)
+		{
+			error = "object_not_found";
+			return null;
+		}
+		EntityAI entity = EntityAI.Cast(registered);
+		if (!entity)
+		{
+			error = "not_an_item";
+			return null;
+		}
+		return entity;
+	}
+
+	// Worn or carried by a player who is not the selected one: never moved.
+	protected string MCPInventoryMoveForeign(PlayerBase player, EntityAI entity)
+	{
+		if (!entity)
+		{
+			return "";
+		}
+		Man root = entity.GetHierarchyRootPlayer();
+		if (!root)
+		{
+			return "";
+		}
+		if (player && root == player)
+		{
+			return "";
+		}
+		return "not_reachable";
+	}
+
+	protected bool MCPInventoryMoveNear(PlayerBase player, EntityAI entity)
+	{
+		if (!player || !entity)
+		{
+			return false;
+		}
+		Man root = entity.GetHierarchyRootPlayer();
+		if (root)
+		{
+			if (root == player)
+			{
+				return true;
+			}
+		}
+		float reach = UAMaxDistances.DEFAULT;
+		float reachSq = reach * reach;
+		float distSq = vector.DistanceSq(player.GetPosition(), entity.GetPosition());
+		if (distSq > reachSq)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	protected string MCPInventoryMoveReach(PlayerBase player, EntityAI item, EntityAI target)
+	{
+		if (!MCPInventoryMoveNear(player, item))
+		{
+			return "not_reachable";
+		}
+		if (target)
+		{
+			if (!MCPInventoryMoveNear(player, target))
+			{
+				return "not_reachable";
+			}
+		}
+		return "";
+	}
+
+	protected string MCPInventoryMoveRoom(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName)
+	{
+		if (op == "to_cargo")
+		{
+			if (!target || !target.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			InventoryLocation cargoLoc = new InventoryLocation;
+			if (!target.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY_CARGO, cargoLoc))
+			{
+				return "no_room";
+			}
+		}
+		if (op == "to_attachment")
+		{
+			if (!target || !target.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			int slotId = InventorySlots.GetSlotIdFromString(slotName);
+			if (!InventorySlots.IsSlotIdValid(slotId))
+			{
+				return "slot_not_found";
+			}
+			if (!target.GetInventory().HasAttachmentSlot(slotId))
+			{
+				return "slot_not_found";
+			}
+			if (target.GetInventory().FindAttachment(slotId))
+			{
+				return "slot_occupied";
+			}
+		}
+		if (op == "combine")
+		{
+			ItemBase combineReceiver = ItemBase.Cast(target);
+			ItemBase combineSource = ItemBase.Cast(item);
+			if (!combineReceiver)
+			{
+				return "not_an_item";
+			}
+			if (!combineSource)
+			{
+				return "not_an_item";
+			}
+			if (!combineReceiver.CanBeCombined(combineSource, false))
+			{
+				return "no_room";
+			}
+		}
+		if (op == "split_half" || op == "split_to_hands")
+		{
+			ItemBase stack = ItemBase.Cast(item);
+			if (!stack)
+			{
+				return "not_an_item";
+			}
+			if (!stack.CanBeSplit())
+			{
+				return "no_room";
+			}
+		}
+		// Same flags as PredictiveTakeEntityToInventory and ServerTakeEntityToInventory.
+		// ANY includes HANDS. The confirmation accepts that when the parent is the player.
+		if (op == "to_inventory")
+		{
+			if (!player || !player.GetInventory())
+			{
+				return "inventory_unavailable";
+			}
+			InventoryLocation invLoc = new InventoryLocation;
+			if (!player.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY, invLoc))
+			{
+				return "no_room";
+			}
+		}
+		return "";
+	}
+
+	protected float MCPItemQuantity(EntityAI entity)
+	{
+		ItemBase item = ItemBase.Cast(entity);
+		if (!item)
+		{
+			return 0;
+		}
+		Magazine mag = Magazine.Cast(entity);
+		if (mag)
+		{
+			return mag.GetAmmoCount();
+		}
+		return item.GetQuantity();
+	}
+
+	protected string MCPSendInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName, int jobId)
+	{
+		int itemLow = 0;
+		int itemHigh = 0;
+		item.GetNetworkID(itemLow, itemHigh);
+		if (itemLow == 0 && itemHigh == 0)
+		{
+			return "not_networked";
+		}
+		if (target)
+		{
+			int targetLow = 0;
+			int targetHigh = 0;
+			target.GetNetworkID(targetLow, targetHigh);
+			if (targetLow == 0 && targetHigh == 0)
+			{
+				return "not_networked";
+			}
+		}
+		if (!player.GetIdentity())
+		{
+			return "no_identity";
+		}
+		string targetType = "";
+		if (target)
+		{
+			targetType = target.GetType();
+		}
+		if (!player.MCPRequestInventoryMove(jobId, item, item.GetType(), target, targetType, op, slotName))
+		{
+			return "rpc_failed";
+		}
+		return "";
+	}
+
+	protected string MCPServerInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName)
+	{
+		GameInventory itemInventory = item.GetInventory();
+		if (!itemInventory)
+		{
+			return "inventory_unavailable";
+		}
+		InventoryLocation src = new InventoryLocation;
+		if (!itemInventory.GetCurrentInventoryLocation(src))
+		{
+			return "not_reachable";
+		}
+		if (op == "to_cargo")
+		{
+			InventoryLocation dst = new InventoryLocation;
+			if (!target.GetInventory().FindFreeLocationFor(item, FindInventoryLocationType.ANY_CARGO, dst))
+			{
+				return "no_room";
+			}
+			if (!GameInventory.LocationSyncMoveEntity(src, dst))
+			{
+				return "no_room";
+			}
+			return "";
+		}
+		if (op == "to_attachment")
+		{
+			int slotId = InventorySlots.GetSlotIdFromString(slotName);
+			InventoryLocation dstAtt = new InventoryLocation;
+			dstAtt.SetAttachment(target, item, slotId);
+			if (!GameInventory.LocationSyncMoveEntity(src, dstAtt))
+			{
+				return "no_room";
+			}
+			return "";
+		}
+		if (op == "to_hands")
+		{
+			player.ServerTakeEntityToHands(item);
+			return "";
+		}
+		if (op == "to_inventory")
+		{
+			if (!player.ServerTakeEntityToInventory(FindInventoryLocationType.ANY, item))
+			{
+				return "no_room";
+			}
+			return "";
+		}
+		if (op == "combine")
+		{
+			ItemBase receiver = ItemBase.Cast(target);
+			ItemBase source = ItemBase.Cast(item);
+			if (!receiver)
+			{
+				return "not_an_item";
+			}
+			if (!source)
+			{
+				return "not_an_item";
+			}
+			receiver.CombineItems(source, true);
+			return "";
+		}
+		if (op == "split_half")
+		{
+			ItemBase half = ItemBase.Cast(item);
+			if (!half)
+			{
+				return "not_an_item";
+			}
+			half.SplitItem(player);
+			return "";
+		}
+		if (op == "split_to_hands")
+		{
+			ItemBase toHands = ItemBase.Cast(item);
+			if (!toHands)
+			{
+				return "not_an_item";
+			}
+			toHands.SplitIntoStackMaxHands(player);
+			return "";
+		}
+		return "bad_args";
+	}
+
+	protected bool MCPInventoryMoveReady(MCPJob job)
+	{
+		if (!job || !job.args)
+		{
+			return false;
+		}
+		string op = job.args.op;
+		EntityAI item = EntityAI.Cast(job.subject);
+		if (op == "combine")
+		{
+			if (MCPItemQuantity(EntityAI.Cast(job.move_target)) > job.move_quantity + 0.001)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "split_half")
+		{
+			if (!item)
+			{
+				return false;
+			}
+			if (MCPItemQuantity(item) + 0.001 < job.move_quantity)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "split_to_hands")
+		{
+			if (!item)
+			{
+				return false;
+			}
+			if (MCPItemQuantity(item) + 0.001 < job.move_quantity)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (!item || !item.GetInventory())
+		{
+			return false;
+		}
+		InventoryLocation loc = new InventoryLocation;
+		if (!item.GetInventory().GetCurrentInventoryLocation(loc))
+		{
+			return false;
+		}
+		int locType = loc.GetType();
+		EntityAI parent = loc.GetParent();
+		// to_cargo, to_attachment and combine ignore job.actor. Resolving a
+		// player for a rooted item does not change these three verdicts.
+		if (op == "to_cargo")
+		{
+			if (parent != job.move_target)
+			{
+				return false;
+			}
+			if (locType == InventoryLocationType.CARGO)
+			{
+				return true;
+			}
+			if (locType == InventoryLocationType.PROXYCARGO)
+			{
+				return true;
+			}
+			return false;
+		}
+		if (op == "to_attachment")
+		{
+			if (parent != job.move_target)
+			{
+				return false;
+			}
+			if (locType != InventoryLocationType.ATTACHMENT)
+			{
+				return false;
+			}
+			string slotName = InventorySlots.GetSlotName(loc.GetSlot());
+			if (slotName != job.args.slot)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (op == "to_hands")
+		{
+			if (locType != InventoryLocationType.HANDS)
+			{
+				return false;
+			}
+			if (parent != job.actor)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (op == "to_inventory")
+		{
+			// ANY includes HANDS, so a move into this player's hands is confirmed.
+			if (locType == InventoryLocationType.HANDS)
+			{
+				if (parent == job.actor)
+				{
+					return true;
+				}
+				return false;
+			}
+			if (locType == InventoryLocationType.GROUND)
+			{
+				return false;
+			}
+			Man root = item.GetHierarchyRootPlayer();
+			if (root != job.actor)
+			{
+				return false;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	protected void MCPWriteInventoryMove(MCPResult result, MCPJob job, bool settled, string errorText)
+	{
+		result.accepted = true;
+		result.confirmed = settled;
+		if (settled)
+		{
+			result.ok = true;
+			result.error = "";
+		}
+		else
+		{
+			result.ok = false;
+			result.error = errorText;
+		}
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		if (job.args)
+		{
+			result.object_id = job.args.item_object_id;
+		}
+		EntityAI item = EntityAI.Cast(job.subject);
+		MCPInventoryMove report = new MCPInventoryMove();
+		if (job.args)
+		{
+			report.op = job.args.op;
+			report.authority = job.args.authority;
+		}
+		report.loc_type = "missing";
+		report.parent_object_id = 0;
+		report.parent_type = "";
+		report.slot = "";
+		report.quantity = 0;
+		if (item)
+		{
+			result.type = item.GetType();
+			report.quantity = MCPItemQuantity(item);
+			GameInventory inventory = item.GetInventory();
+			if (inventory)
+			{
+				InventoryLocation loc = new InventoryLocation;
+				if (inventory.GetCurrentInventoryLocation(loc))
+				{
+					report.loc_type = typename.EnumToString(InventoryLocationType, loc.GetType());
+					EntityAI parent = loc.GetParent();
+					if (parent)
+					{
+						report.parent_object_id = RuntimeObjectId(parent);
+						report.parent_type = parent.GetType();
+					}
+					if (loc.GetType() == InventoryLocationType.ATTACHMENT)
+					{
+						report.slot = InventorySlots.GetSlotName(loc.GetSlot());
+					}
+				}
+			}
+		}
+		result.inventory_move = report;
+	}
+
+	protected void MCPPostInventoryMove(MCPJob job, bool settled, string errorText)
+	{
+		MCPResult result = new MCPResult();
+		MCPWriteInventoryMove(result, job, settled, errorText);
+		PostResult(result);
+	}
+
+	// Confirm and timeout keep accepted=true through MCPWriteInventoryMove.
+	// A client refusal is a separate result: the call was not accepted.
+	protected void MCPPostInventoryMoveRefused(MCPJob job, string reason)
+	{
+		MCPResult result = new MCPResult();
+		MCPWriteInventoryMove(result, job, false, reason);
+		result.ok = false;
+		result.accepted = false;
+		result.confirmed = false;
+		result.error = reason;
+		PostResult(result);
+	}
+
+	protected string MCPInventoryMoveClientReason(string reason)
+	{
+		if (reason == "not_client")
+		{
+			return reason;
+		}
+		if (reason == "object_not_found")
+		{
+			return reason;
+		}
+		if (reason == "input_busy")
+		{
+			return reason;
+		}
+		if (reason == "not_reachable")
+		{
+			return reason;
+		}
+		if (reason == "slot_not_found")
+		{
+			return reason;
+		}
+		if (reason == "no_room")
+		{
+			return reason;
+		}
+		if (reason == "not_an_item")
+		{
+			return reason;
+		}
+		if (reason == "bad_args")
+		{
+			return reason;
+		}
+		if (reason == "not_streamed")
+		{
+			return reason;
+		}
+		if (reason == "type_mismatch")
+		{
+			return reason;
+		}
+		if (reason == "read_failed")
+		{
+			return reason;
+		}
+		return "client_refused";
+	}
+
+	// Client to server. Unrelated RPC types stay quiet. A failed check after
+	// the type matches is ignored and the job keeps its deadline.
+	void MCPOnInventoryMoveRefused(PlayerIdentity sender, Object target, int rpc_type, ParamsReadContext ctx)
+	{
+		if (rpc_type != MCP_RPC_INVENTORY_MOVE_REFUSED)
+		{
+			return;
+		}
+		if (!GetGame() || !GetGame().IsServer() || !GetGame().IsMultiplayer())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		int jobId = 0;
+		string reason = "";
+		if (!ctx.Read(jobId))
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (!ctx.Read(reason))
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		MCPJob job = m_Jobs.Get(jobId);
+		if (!job || job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		if (sender.GetId() != job.actor.GetIdentity().GetId())
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
+		reason = MCPInventoryMoveClientReason(reason);
+		// Publishing here would be a write the census can reach from every
+		// command, because Event_OnRPC is not a command. The job pass posts it.
+		// phase 1: the server read already matches, so confirmation wins.
+		// phase 2: one refusal, and the deadline must not post a second result.
+		if (MCPInventoryMoveReady(job))
+		{
+			job.phase = 1;
+		}
+		else
+		{
+			job.phase = 2;
+			job.error = reason;
+		}
 	}
 
 	// hands_take validates on the server (object_id lives in m_RuntimeObjects:
@@ -2339,6 +3266,12 @@ class MCPBridge : Managed
 		result.object_id = command.id;
 		result.classname = command.args.classname;
 		result.type = spawned.GetType();
+		// 71c9: read back from the created item, for both dests. A bow (Archery_Base)
+		// keeps Weapon_Base's empty InitStateMachine (weapon_base.c:133) and has no
+		// state machine. Vanilla logs [wpnfsm] errors when the engine saves and loads
+		// its state anyway (weapon_base.c:568, :599); the item still arrives.
+		Weapon_Base spawnedWeapon = Weapon_Base.Cast(spawned);
+		result.weapon_without_fsm = spawnedWeapon && !spawnedWeapon.CanProcessWeaponEvents();
 		result.found = true;
 		result.deferred = false;
 		result.ok = true;
@@ -2524,6 +3457,667 @@ class MCPBridge : Managed
 			return true;
 		}
 		return false;
+	}
+
+	// loadout_get (fb99): what the target wears and holds, as MCPLoadout.items
+	// rows (MCPMessages.c). It writes nothing. A refusal carries no read, and a
+	// read past LOADOUT_MAX_ITEMS rows or LOADOUT_MAX_DEPTH levels is
+	// loadout_too_large with no read either. result.type is the target's class;
+	// result.object_id echoes the request when it named one.
+	protected bool DispatchLoadoutGet(MCPCommand command, MCPResult result)
+	{
+		string targetError = "";
+		PlayerBase target = null;
+		MCPLoadout loadoutRead = null;
+
+		target = ResolveLoadoutTarget(command.args, targetError);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = targetError;
+			return true;
+		}
+
+		loadoutRead = new MCPLoadout();
+		ReadLoadout(target, loadoutRead);
+		if (loadoutRead.too_large)
+		{
+			result.ok = false;
+			result.error = "loadout_too_large";
+			return true;
+		}
+
+		if (command.args.object_id > 0)
+		{
+			result.object_id = command.args.object_id;
+		}
+		result.type = target.GetType();
+		result.loadout = loadoutRead;
+		result.ok = true;
+		return true;
+	}
+
+	// loadout_apply (220f). The rows and the target are checked before anything
+	// changes; then the rows are created and the target read back, all in this
+	// tick (ApplyLoadout). A loadout_clear job still pending on the target is
+	// busy: what it deleted may still hold its slots.
+	protected bool DispatchLoadoutApply(MCPCommand command, MCPResult result)
+	{
+		string rowsError = "";
+		string targetError = "";
+		PlayerBase target = null;
+
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		rowsError = LoadoutRowsError(command.args.loadout_items);
+		if (rowsError != "")
+		{
+			result.ok = false;
+			result.error = rowsError;
+			return true;
+		}
+
+		target = ResolveLoadoutTarget(command.args, targetError);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = targetError;
+			return true;
+		}
+		if (HasActiveJobFor(null, target))
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+
+		ApplyLoadout(target, command.args, result);
+		return true;
+	}
+
+	// loadout_clear (220f): what the loadout_apply tool sends first for
+	// clear_first. In this tick it deletes what the target wears and holds
+	// (ClearLoadout). With nothing to delete it answers now: deleted 0,
+	// cleanup_complete true. Otherwise a "loadout_clear" job only watches the
+	// deleted objects, changing nothing: the runner checks them each tick
+	// until all read null or the deadline has passed, then the job posts
+	// deleted (how many) and cleanup_complete (true when all read null at that
+	// last check, which can come one tick after the deadline). Object.Delete
+	// defers ObjectDelete to the next frame (object.c:82-85), and whether
+	// ObjectDelete frees a slot within its own frame is not measured. uid is
+	// the PlainId of the player the clear acted on, by uid or as the first
+	// human, and "" for a survivor by object_id: the tool sends the creates to
+	// that uid, so whoever is first human by then is never dressed in that
+	// player's place (#261 review Y11). A first human with no identity is
+	// player_not_found, and a target with a job pending is busy, both before
+	// anything is deleted.
+	protected bool DispatchLoadoutClear(MCPCommand command, MCPResult result)
+	{
+		string targetError = "";
+		string clearedUid = "";
+		PlayerBase target = null;
+		PlayerIdentity identity = null;
+		array<EntityAI> cleared = null;
+		MCPJob job = null;
+
+		target = ResolveLoadoutTarget(command.args, targetError);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = targetError;
+			return true;
+		}
+		if (command.args.object_id == 0)
+		{
+			identity = target.GetIdentity();
+			if (!identity)
+			{
+				result.ok = false;
+				result.error = "player_not_found";
+				return true;
+			}
+			clearedUid = identity.GetPlainId();
+		}
+		if (HasActiveJobFor(null, target))
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+
+		cleared = new array<EntityAI>();
+		ClearLoadout(target, cleared);
+		if (cleared.Count() == 0)
+		{
+			result.ok = true;
+			result.deleted = 0;
+			result.cleanup_complete = true;
+			result.uid = clearedUid;
+			return true;
+		}
+
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "loadout_clear";
+		job.args = command.args;
+		job.subject = target;
+		job.loadout_cleared = cleared;
+		job.loadout_uid = clearedUid;
+		job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Jobs.Insert(job.id, job);
+		Log("job queued id=" + job.id + " kind=loadout_clear deleted=" + cleared.Count() + " deadline_s=" + job.deadline_s);
+		return false;
+	}
+
+	// The target of loadout_get, loadout_apply and loadout_clear. object_id > 0
+	// names a registry entry: an id nothing registered, or whose object is
+	// gone, is not_found; an object that is not a PlayerBase, or is a connected
+	// player (uid selects those), is bad_target. object_id 0 leaves the choice
+	// to uid, as ResolvePlayer makes it ("" the first human). object_id and uid
+	// together, or a negative object_id, are bad_args.
+	protected PlayerBase ResolveLoadoutTarget(MCPArgs args, out string error)
+	{
+		Object registered = null;
+		PlayerBase survivor = null;
+
+		error = "";
+		if (!args)
+		{
+			error = "bad_args";
+			return null;
+		}
+		if (args.object_id < 0)
+		{
+			error = "bad_args";
+			return null;
+		}
+		if (args.object_id == 0)
+		{
+			return ResolvePlayer(args, error);
+		}
+		if (args.uid != "")
+		{
+			error = "bad_args";
+			return null;
+		}
+
+		registered = RuntimeObjectById(args.object_id);
+		if (!registered)
+		{
+			error = "not_found";
+			return null;
+		}
+		survivor = PlayerBase.Cast(registered);
+		if (!survivor)
+		{
+			error = "bad_target";
+			return null;
+		}
+		if (survivor.GetIdentity())
+		{
+			error = "bad_target";
+			return null;
+		}
+		return survivor;
+	}
+
+	// The rows the tool sends (tools/dayz_mcp/loadout.py flatten_request): at most
+	// LOADOUT_MAX_ITEMS; each parent an earlier row or -1 (the target); dest
+	// attachment with a slot, cargo inside an item, or hands once on the target,
+	// both without a slot; no row more than LOADOUT_MAX_DEPTH levels down.
+	// "" when they hold, else bad_args. Nothing is created before this passes.
+	protected string LoadoutRowsError(array<ref MCPLoadoutItem> rows)
+	{
+		array<int> levels = new array<int>();
+		MCPLoadoutItem row = null;
+		int level = 0;
+		int handsRows = 0;
+		int i = 0;
+
+		if (!rows)
+		{
+			return "bad_args";
+		}
+		if (rows.Count() > LOADOUT_MAX_ITEMS)
+		{
+			return "bad_args";
+		}
+		while (i < rows.Count())
+		{
+			row = rows.Get(i);
+			if (!row)
+			{
+				return "bad_args";
+			}
+			if (row.type == "")
+			{
+				return "bad_args";
+			}
+			if (row.parent < -1 || row.parent >= i)
+			{
+				return "bad_args";
+			}
+			if (row.dest == "attachment")
+			{
+				if (row.slot == "")
+				{
+					return "bad_args";
+				}
+			}
+			else if (row.dest == "cargo")
+			{
+				if (row.parent == -1 || row.slot != "")
+				{
+					return "bad_args";
+				}
+			}
+			else if (row.dest == "hands")
+			{
+				if (row.parent != -1 || row.slot != "")
+				{
+					return "bad_args";
+				}
+				handsRows = handsRows + 1;
+				if (handsRows > 1)
+				{
+					return "bad_args";
+				}
+			}
+			else
+			{
+				return "bad_args";
+			}
+
+			level = 1;
+			if (row.parent >= 0)
+			{
+				level = levels.Get(row.parent) + 1;
+			}
+			if (level > LOADOUT_MAX_DEPTH)
+			{
+				return "bad_args";
+			}
+			levels.Insert(level);
+			i = i + 1;
+		}
+		return "";
+	}
+
+	// loadout_clear: deletes the target's attachments and the item in its hands
+	// with GetGame().ObjectDelete, as object_delete does; what they hold goes
+	// with them. Each deleted object is added to cleared first, so the walk
+	// never reads a list it is changing; the engine nulls those references
+	// once an object is gone (the stale read hands_take makes).
+	protected void ClearLoadout(PlayerBase target, array<EntityAI> cleared)
+	{
+		GameInventory inventory = target.GetInventory();
+		EntityAI hands = target.GetItemInHands();
+		EntityAI attachment = null;
+		int count = 0;
+		int i = 0;
+
+		if (inventory)
+		{
+			count = inventory.AttachmentCount();
+			while (i < count)
+			{
+				attachment = inventory.GetAttachmentFromIndex(i);
+				if (attachment && attachment != hands)
+				{
+					cleared.Insert(attachment);
+				}
+				i = i + 1;
+			}
+		}
+		if (hands)
+		{
+			cleared.Insert(hands);
+		}
+
+		i = 0;
+		while (i < cleared.Count())
+		{
+			if (cleared.Get(i))
+			{
+				GetGame().ObjectDelete(cleared.Get(i));
+			}
+			i = i + 1;
+		}
+	}
+
+	// Creates args.loadout_items in order, then reads the target back.
+	// result.loadout.applied holds one outcome per row; a row whose parent row
+	// failed is parent_failed and not created. result.loadout.items is the read
+	// after (too_large past the caps). result.ok is true whatever the rows did:
+	// loadout_apply's status comes from the outcomes. Created items are not
+	// registered in m_RuntimeObjects.
+	protected void ApplyLoadout(PlayerBase target, MCPArgs args, MCPResult result)
+	{
+		array<EntityAI> created = new array<EntityAI>();
+		MCPLoadout loadoutReply = new MCPLoadout();
+		MCPLoadoutApplied outcome = null;
+		MCPLoadoutItem row = null;
+		EntityAI owner = null;
+		EntityAI item = null;
+		string itemError = "";
+		int i = 0;
+
+		while (i < args.loadout_items.Count())
+		{
+			row = args.loadout_items.Get(i);
+			item = null;
+			itemError = "";
+			owner = target;
+			if (row.parent >= 0)
+			{
+				owner = created.Get(row.parent);
+			}
+			if (!owner)
+			{
+				itemError = "parent_failed";
+			}
+			else
+			{
+				item = CreateLoadoutItem(target, owner, row, itemError);
+			}
+			created.Insert(item);
+
+			outcome = new MCPLoadoutApplied();
+			if (item)
+			{
+				outcome.ok = true;
+			}
+			else
+			{
+				outcome.ok = false;
+				outcome.error = itemError;
+			}
+			loadoutReply.applied.Insert(outcome);
+			i = i + 1;
+		}
+
+		ReadLoadout(target, loadoutReply);
+		if (args.object_id > 0)
+		{
+			result.object_id = args.object_id;
+		}
+		result.type = target.GetType();
+		result.loadout = loadoutReply;
+		result.ok = true;
+	}
+
+	// One row into owner: an attachment in its slot (the checks and the
+	// postcondition inventory_attach makes), an item in owner's cargo, or the
+	// target's hands (CreateInHands, as inventory_give). An item that is created
+	// but is not where it was asked for is deleted, so a failed row leaves
+	// nothing behind. error is unknown_type, slot_not_found, slot_occupied,
+	// cannot_attach or no_room; an occupied slot or hands keep what is there.
+	protected EntityAI CreateLoadoutItem(PlayerBase target, EntityAI owner, MCPLoadoutItem row, out string error)
+	{
+		GameInventory inventory = owner.GetInventory();
+		EntityAI item = null;
+		int slotId = InventorySlots.INVALID;
+
+		error = "";
+		if (!IsKnownInventoryClassname(row.type))
+		{
+			error = "unknown_type";
+			return null;
+		}
+
+		if (row.dest == "hands")
+		{
+			if (target.GetItemInHands())
+			{
+				error = "slot_occupied";
+				return null;
+			}
+			item = target.GetHumanInventory().CreateInHands(row.type);
+			if (!item)
+			{
+				error = "cannot_attach";
+				return null;
+			}
+			if (target.GetItemInHands() != item)
+			{
+				GetGame().ObjectDelete(item);
+				error = "cannot_attach";
+				return null;
+			}
+			return item;
+		}
+
+		if (row.dest == "attachment")
+		{
+			if (!inventory)
+			{
+				error = "slot_not_found";
+				return null;
+			}
+			slotId = InventorySlots.GetSlotIdFromString(row.slot);
+			if (!InventorySlots.IsSlotIdValid(slotId))
+			{
+				error = "slot_not_found";
+				return null;
+			}
+			if (!inventory.HasAttachmentSlot(slotId))
+			{
+				error = "slot_not_found";
+				return null;
+			}
+			if (inventory.FindAttachment(slotId))
+			{
+				error = "slot_occupied";
+				return null;
+			}
+			item = inventory.CreateAttachmentEx(row.type, slotId);
+			if (!item)
+			{
+				error = "cannot_attach";
+				return null;
+			}
+			if (inventory.FindAttachment(slotId) != item)
+			{
+				GetGame().ObjectDelete(item);
+				error = "cannot_attach";
+				return null;
+			}
+			return item;
+		}
+
+		if (!inventory)
+		{
+			error = "no_room";
+			return null;
+		}
+		if (!inventory.GetCargo())
+		{
+			error = "no_room";
+			return null;
+		}
+		item = inventory.CreateEntityInCargo(row.type);
+		if (!item)
+		{
+			error = "no_room";
+			return null;
+		}
+		if (!inventory.HasEntityInCargo(item))
+		{
+			GetGame().ObjectDelete(item);
+			error = "no_room";
+			return null;
+		}
+		return item;
+	}
+
+	// The target's attachments, in GetAttachmentFromIndex order, then the item
+	// in its hands, each followed by what it holds, as rows of loadoutRead.items.
+	// The hands item is skipped among the attachments in case the engine lists
+	// it there too. Past the caps too_large is set and items emptied.
+	protected void ReadLoadout(PlayerBase target, MCPLoadout loadoutRead)
+	{
+		GameInventory inventory = target.GetInventory();
+		EntityAI hands = target.GetItemInHands();
+		EntityAI attachment = null;
+		int count = 0;
+		int i = 0;
+
+		if (inventory)
+		{
+			count = inventory.AttachmentCount();
+			while (i < count)
+			{
+				attachment = inventory.GetAttachmentFromIndex(i);
+				if (attachment && attachment != hands)
+				{
+					AppendLoadoutRow(loadoutRead, attachment, "attachment", -1, 1);
+				}
+				i = i + 1;
+			}
+		}
+		if (hands)
+		{
+			AppendLoadoutRow(loadoutRead, hands, "hands", -1, 1);
+		}
+		if (loadoutRead.too_large)
+		{
+			loadoutRead.items.Clear();
+		}
+	}
+
+	// One row for item, then its attachments and its cargo, depth first. level
+	// is 1 for what the target wears or holds; parent is the row item sits in.
+	protected void AppendLoadoutRow(MCPLoadout loadoutRead, EntityAI item, string dest, int parent, int level)
+	{
+		MCPLoadoutItem row = null;
+		GameInventory inventory = null;
+		CargoBase cargo = null;
+		EntityAI child = null;
+		int rowIndex = 0;
+		int count = 0;
+		int i = 0;
+
+		if (loadoutRead.too_large)
+		{
+			return;
+		}
+		if (level > LOADOUT_MAX_DEPTH || loadoutRead.items.Count() >= LOADOUT_MAX_ITEMS)
+		{
+			loadoutRead.too_large = true;
+			return;
+		}
+
+		row = new MCPLoadoutItem();
+		row.type = item.GetType();
+		row.dest = dest;
+		row.parent = parent;
+		if (dest == "attachment")
+		{
+			row.slot = LoadoutSlotName(item);
+		}
+		rowIndex = loadoutRead.items.Count();
+		loadoutRead.items.Insert(row);
+
+		inventory = item.GetInventory();
+		if (!inventory)
+		{
+			return;
+		}
+		count = inventory.AttachmentCount();
+		while (i < count)
+		{
+			child = inventory.GetAttachmentFromIndex(i);
+			if (child)
+			{
+				AppendLoadoutRow(loadoutRead, child, "attachment", rowIndex, level + 1);
+			}
+			i = i + 1;
+		}
+
+		cargo = inventory.GetCargo();
+		if (!cargo)
+		{
+			return;
+		}
+		count = cargo.GetItemCount();
+		i = 0;
+		while (i < count)
+		{
+			child = cargo.GetItem(i);
+			if (child)
+			{
+				AppendLoadoutRow(loadoutRead, child, "cargo", rowIndex, level + 1);
+			}
+			i = i + 1;
+		}
+	}
+
+	// The slot an attached item sits in, as InventorySlots.GetSlotName gives it:
+	// the read MCP_CarDoor.c SlotName makes. "" when the engine reports none.
+	protected string LoadoutSlotName(EntityAI item)
+	{
+		GameInventory itemInventory = item.GetInventory();
+		InventoryLocation location = null;
+
+		if (!itemInventory)
+		{
+			return "";
+		}
+		location = new InventoryLocation();
+		if (!itemInventory.GetCurrentInventoryLocation(location))
+		{
+			return "";
+		}
+		if (location.GetSlot() == -1)
+		{
+			return "";
+		}
+		return InventorySlots.GetSlotName(location.GetSlot());
+	}
+
+	// The "loadout_clear" job is ready once no object the clear deleted is
+	// still referenced. DispatchLoadoutClear queues it only with objects in
+	// loadout_cleared.
+	protected bool IsLoadoutClearDone(MCPJob job)
+	{
+		int i = 0;
+
+		while (i < job.loadout_cleared.Count())
+		{
+			if (job.loadout_cleared.Get(i))
+			{
+				return false;
+			}
+			i = i + 1;
+		}
+		return true;
+	}
+
+	// The "loadout_clear" job's reply: what it saw, and nothing else. deleted is
+	// how many objects the clear deleted; cleanup_complete is true when each
+	// read null at the job's last check (PostJobSuccess), which can come one
+	// tick after the deadline, and false when that check found one still there
+	// past the deadline (PostJobTimeout). uid is the dispatch's, unchanged.
+	protected void PostLoadoutClearJob(MCPJob job, bool complete)
+	{
+		MCPResult result = new MCPResult();
+
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.ok = true;
+		result.deleted = job.loadout_cleared.Count();
+		result.cleanup_complete = complete;
+		result.uid = job.loadout_uid;
+		PostResult(result);
 	}
 
 	// Raw nearby objects via GetObjectsAtPosition3D. No classname filter.
@@ -2716,6 +4310,10 @@ class MCPBridge : Managed
 				VectorToArray(center, inspect.bounding_center);
 				inspect.has_bounding_center = true;
 			}
+			else if (wantName == "quantity")
+			{
+				FillInspectQuantity(match, inspect);
+			}
 			else
 			{
 				MCPMemoryPoint point = new MCPMemoryPoint();
@@ -2744,6 +4342,19 @@ class MCPBridge : Managed
 		}
 		result.ok = true;
 		return true;
+	}
+
+	// object_inspect want quantity (inbox fb98): an item's quantity, read without
+	// changing it. Anything but an ItemBase with a quantity leaves has_quantity false.
+	protected void FillInspectQuantity(Object match, MCPObjectInspect inspect)
+	{
+		ItemBase item = ItemBase.Cast(match);
+		if (item && item.HasQuantity())
+		{
+			inspect.has_quantity = true;
+			inspect.quantity = item.GetQuantity();
+			inspect.quantity_max = item.GetQuantityMax();
+		}
 	}
 
 	// Shared resolution for anim/inspect verbs. object_id > 0 selects from the runtime
@@ -4603,9 +6214,24 @@ class MCPBridge : Managed
 			}
 			else
 			{
-				if (IsJobReady(job))
+				if (job.kind == "inventory_move" && job.phase == 1)
 				{
 					PostJobSuccess(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				else if (IsJobReady(job))
+				{
+					PostJobSuccess(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobId);
+				}
+				// A refusal stands only once the read above did not show the move.
+				else if (job.kind == "inventory_move" && job.phase == 2)
+				{
+					MCPPostInventoryMoveRefused(job, job.error);
 					job.actor = null;
 					job.subject = null;
 					m_Jobs.Remove(jobId);
@@ -4632,6 +6258,14 @@ class MCPBridge : Managed
 		else if (job.kind == "seat")
 		{
 			return IsSeatReady(job);
+		}
+		else if (job.kind == "loadout_clear")
+		{
+			return IsLoadoutClearDone(job);
+		}
+		else if (job.kind == "inventory_move")
+		{
+			return MCPInventoryMoveReady(job);
 		}
 		else if (job.kind == "server_perf")
 		{
@@ -4792,6 +6426,16 @@ class MCPBridge : Managed
 			PostSeatSuccess(job);
 			return;
 		}
+		if (job.kind == "loadout_clear")
+		{
+			PostLoadoutClearJob(job, true);
+			return;
+		}
+		if (job.kind == "inventory_move")
+		{
+			MCPPostInventoryMove(job, true, "");
+			return;
+		}
 
 		if (job.kind == "server_perf")
 		{
@@ -4940,7 +6584,18 @@ class MCPBridge : Managed
 
 	protected void PostJobTimeout(MCPJob job)
 	{
+		if (job.kind == "inventory_move")
+		{
+			MCPPostInventoryMove(job, false, "timeout");
+			return;
+		}
 		MCPResult result = new MCPResult();
+		// A loadout_clear job at its deadline reports, with cleanup_complete false.
+		if (job.kind == "loadout_clear")
+		{
+			PostLoadoutClearJob(job, false);
+			return;
+		}
 		result.id = job.id;
 		result.ok = false;
 		result.error = "timeout";
@@ -5045,6 +6700,15 @@ class MCPBridge : Managed
 		state.pos.Insert(pos[1]);
 		state.pos.Insert(pos[2]);
 		state.godmode = MCPGodmode.IsOn(player);
+		// Water and energy as player_heal reads them (inbox fb98).
+		PlayerBase body = PlayerBase.Cast(player);
+		if (body)
+		{
+			MCPPlayerVitals vitals = new MCPPlayerVitals();
+			FillPlayerVitals(body, vitals);
+			state.water = vitals.water;
+			state.energy = vitals.energy;
+		}
 		return state;
 	}
 

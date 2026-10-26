@@ -110,10 +110,18 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # component_index, pos, cursor_pos). action, classname and target are strings.
         # + 2 from 9608 (hands_attach object_id/timeout_s; slot and uid are strings).
         # + 1 from 8b1c (dayz_test_foreground hold_s; run_id is a string).
+        # + 1 from 854c (player_view_set timeout_s; view is a string).
+        # + 4 from fb99/220f (loadout_get and loadout_apply object_id/timeout_s;
+        # uid is a string, clear_first a bool and loadout an object).
+        # + 3 from 17fa (inventory_move item_object_id, target_object_id, timeout_s).
         # 177 before either batch, plus both additions.
         # + 9 from 2427/0131/33c5 (server_perf window_s/timeout_s, nav_path_query
         # from_pos/to/snap_radius/timeout_s, players_visibility pos/radius/timeout_s).
-        self.assertEqual(len(rows), 199)
+        self.assertEqual(len(rows), 207)
+        self.assertIn(("player_view_set", "timeout_s", "float"), rows)
+        for tool in ("loadout_get", "loadout_apply"):
+            self.assertIn((tool, "object_id", "int"), rows)
+            self.assertIn((tool, "timeout_s", "float"), rows)
         self.assertIn(("server_perf", "window_s", "float"), rows)
         self.assertIn(("server_perf", "timeout_s", "float"), rows)
         self.assertIn(("nav_path_query", "from_pos", "vector"), rows)
@@ -125,6 +133,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("players_visibility", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
+        self.assertIn(("inventory_move", "item_object_id", "int"), rows)
+        self.assertIn(("inventory_move", "target_object_id", "int"), rows)
+        self.assertIn(("inventory_move", "timeout_s", "float"), rows)
         self.assertIn(("action_cursor", "timeout_s", "float"), rows)
         self.assertIn(("player_look_at", "pos", "vector"), rows)
         self.assertIn(("player_look_at", "timeout_s", "float"), rows)

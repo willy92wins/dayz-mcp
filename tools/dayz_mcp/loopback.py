@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse
 from dayz_mcp import (
     anim_timeline,
     daemon_credential,
+    loadout,
     orphan_guard,
     pinned_keyfile,
     player_move,
@@ -88,6 +89,10 @@ SERVER_COMMANDS = {
     "vehicle_door",
     "inventory_attach",
     "inventory_give",
+    "inventory_move",
+    "loadout_get",
+    "loadout_apply",
+    "loadout_clear",
     "object_inspect",
     "object_resolve",
     "object_doors",
@@ -139,6 +144,7 @@ CLIENT_COMMANDS = {
     "action_cursor",
     "player_look_at",
     "player_look_at_release",
+    "player_view_set",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -1038,13 +1044,18 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "object_resolve",
     "action_cursor_ids",
     "hands_attach",
+    "loadout_get",
+    "loadout_apply",
+    "loadout_clear",
     "server_perf",
     "nav_path_query",
     "players_visibility",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
-# (no server arg-contract hash) at enqueue and again at delivery.
-_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
+# (no server arg-contract hash) at enqueue and again at delivery. action_hold
+# keeps the hold_not_supported its tool publishes; any other verb is refused
+# with the server census code, bridge_capability_missing.
+_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold", "player_view_set"})
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
@@ -1429,6 +1440,32 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # hands_attach is predictive like hands_take: the held item into one
     # attachment slot of a registered world entity (9608).
+    # inventory_move is predictive on authority=client: accepted is not the
+    # server read. The result waits until that read matches, or times out.
+    # Per-op rules (destination, slot) are applied in validate_command_args,
+    # the same rules as the public tool.
+    "inventory_move": _command_schema(
+        _schema_variant(
+            required=("item_object_id", "op"),
+            optional=("target_object_id", "slot", "authority", "uid"),
+            validators={
+                "item_object_id": _integer_in_range(minimum=1),
+                "op": _one_of(
+                    "to_cargo",
+                    "to_attachment",
+                    "to_hands",
+                    "to_inventory",
+                    "combine",
+                    "split_half",
+                    "split_to_hands",
+                ),
+                "target_object_id": _integer_in_range(minimum=0),
+                "slot": _is_string,
+                "authority": _one_of("client", "server"),
+                "uid": _is_string,
+            },
+        )
+    ),
     "hands_attach": _command_schema(
         _schema_variant(
             required=("object_id", "slot"),
@@ -1445,6 +1482,49 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             optional=("uid",),
             validators={"uid": _is_string},
         )
+    ),
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): the target is
+    # a connected player by uid (absent is the first human) or a survivor by
+    # object_id, never both. The rows always travel: the bridge reads an absent
+    # key as no rows (fb-20260930-065425-8779). They are the flat list
+    # loadout.py builds. loadout_clear is what the loadout_apply tool sends
+    # first for clear_first.
+    "loadout_get": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        ),
+    ),
+    "loadout_apply": _command_schema(
+        _schema_variant(
+            required=("loadout_items",),
+            optional=("uid",),
+            validators={
+                "loadout_items": loadout.is_wire_items,
+                "uid": _is_string,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "loadout_items"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "loadout_items": loadout.is_wire_items,
+            },
+        ),
+    ),
+    "loadout_clear": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        ),
     ),
     "notify_players": _command_schema(
         _schema_variant(
@@ -1899,6 +1979,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
+    # player_view_set (854c): the local player's first or third person view.
+    "player_view_set": _command_schema(
+        _schema_variant(
+            required=("view",),
+            validators={"view": _one_of("first", "third")},
+        )
+    ),
     "action_cursor_ids": _command_schema(delegated=_validate_action_cursor_ids),
 }
 
@@ -1917,6 +2004,20 @@ def _matches_schema_variant(
     return True
 
 
+def _inventory_move_op_rules(args: dict) -> tuple[bool, str | None]:
+    """Destination and slot rules shared with the public inventory_move tool."""
+    op = args.get("op")
+    target = args.get("target_object_id", 0)
+    slot = args.get("slot", "")
+    if op in {"to_cargo", "to_attachment", "combine"} and (
+        not isinstance(target, int) or isinstance(target, bool) or target <= 0
+    ):
+        return False, "bad_args"
+    if op == "to_attachment" and slot == "":
+        return False, "bad_args"
+    return True, None
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
     schema = _COMMAND_ARG_SCHEMAS.get(cmd)
     if schema is not None:
@@ -1926,6 +2027,8 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
 
         keys = set(args)
         if any(_matches_schema_variant(args, keys, variant) for variant in variants):
+            if cmd == "inventory_move":
+                return _inventory_move_op_rules(args)
             return True, None
         return False, "bad_args"
 
@@ -3366,31 +3469,35 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, is hold_not_supported. Re-checked at
+        does not name the command, is hold_not_supported for action_hold and
+        bridge_capability_missing for the other verbs. Re-checked at
         delivery so a destination change after enqueue cannot hand the verb
         to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
             return None
+        refusal = (
+            "hold_not_supported" if cmd == "action_hold" else "bridge_capability_missing"
+        )
         view = self._capabilities_view_locked(peer)
         if view.get("state") != "announced":
-            return "hold_not_supported"
+            return refusal
         entry = self._peer_caps.get(peer)
         if not isinstance(entry, dict):
-            return "hold_not_supported"
+            return refusal
         announced_at = entry.get("announced_at")
         if (
             not isinstance(announced_at, (int, float))
             or isinstance(announced_at, bool)
             or (self._now() - float(announced_at)) >= PEER_STALE_S
         ):
-            return "hold_not_supported"
+            return refusal
         if not isinstance(instance, str) or instance != entry.get("instance"):
-            return "hold_not_supported"
+            return refusal
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
-            return "hold_not_supported"
+            return refusal
         return None
 
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:

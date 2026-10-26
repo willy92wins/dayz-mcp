@@ -53,6 +53,7 @@ _INITIAL_READ_TOOL_NAMES = frozenset(
         "camera_get",
         "entities_query",
         "input_describe",
+        "loadout_get",
         "logs_since",
         "nav_path_query",
         "object_doors",

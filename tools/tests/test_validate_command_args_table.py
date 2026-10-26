@@ -826,6 +826,32 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
         ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
     ),
+    "inventory_move": (
+        ("valid_hands", {"item_object_id": 1, "op": "to_hands"}, (True, None)),
+        (
+            "valid_cargo",
+            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "server"},
+            (True, None),
+        ),
+        ("cargo_without_target", {"item_object_id": 1, "op": "to_cargo"}, (False, "bad_args")),
+        ("cargo_target_zero", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 0}, (False, "bad_args")),
+        ("combine_without_target", {"item_object_id": 1, "op": "combine"}, (False, "bad_args")),
+        (
+            "attachment_empty_slot",
+            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 2, "slot": ""},
+            (False, "bad_args"),
+        ),
+        (
+            "valid_attachment",
+            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 2, "slot": "Vest"},
+            (True, None),
+        ),
+        ("unknown_op", {"item_object_id": 1, "op": "drop"}, (False, "bad_args")),
+        ("missing_op", {"item_object_id": 1}, (False, "bad_args")),
+        ("zero_item", {"item_object_id": 0, "op": "to_hands"}, (False, "bad_args")),
+        ("bad_authority", {"item_object_id": 1, "op": "to_hands", "authority": "both"}, (False, "bad_args")),
+        ("extra_key", {"item_object_id": 1, "op": "to_hands", "extra": None}, (False, "bad_args")),
+    ),
     "hands_attach": (
         ("valid", {"object_id": 1, "slot": "LargeBattery"}, (True, None)),
         (
@@ -845,6 +871,158 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_with_uid", {"uid": "player-1"}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
         ("uid_not_string", {"uid": 1}, (False, "bad_args")),
+    ),
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): uid or object_id, never
+    # both. clear_first is not a wire key: the tool sends loadout_clear for it.
+    "loadout_get": (
+        ("empty", {}, (True, None)),
+        ("valid_with_uid", {"uid": "player-1"}, (True, None)),
+        ("valid_with_object_id", {"object_id": 3}, (True, None)),
+        ("both_targets", {"object_id": 3, "uid": "player-1"}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+        ("uid_not_string", {"uid": 1}, (False, "bad_args")),
+        ("rows_on_a_read", {"loadout_items": []}, (False, "bad_args")),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+    ),
+    "loadout_apply": (
+        ("valid_empty", {"loadout_items": []}, (True, None)),
+        (
+            "valid_uid_tree",
+            {
+                "uid": "player-1",
+                "loadout_items": [
+                    {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1},
+                    {"type": "Rag", "slot": "", "dest": "cargo", "parent": 0},
+                    {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
+                    {"type": "Mag_STANAG_30Rnd", "slot": "magazine", "dest": "attachment", "parent": 2},
+                ],
+            },
+            (True, None),
+        ),
+        (
+            "valid_object_id",
+            {"object_id": 4, "loadout_items": []},
+            (True, None),
+        ),
+        (
+            "both_targets",
+            {"object_id": 4, "uid": "player-1", "loadout_items": []},
+            (False, "bad_args"),
+        ),
+        ("missing_rows", {}, (False, "bad_args")),
+        (
+            "clear_first_is_not_a_wire_key",
+            {"clear_first": True, "loadout_items": []},
+            (False, "bad_args"),
+        ),
+        ("rows_not_a_list", {"loadout_items": {}}, (False, "bad_args")),
+        (
+            "row_missing_parent",
+            {
+                "loadout_items": [{"type": "Apple", "slot": "Body", "dest": "attachment"}],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "row_extra_key",
+            {
+                "loadout_items": [
+                    {"type": "Apple", "slot": "Body", "dest": "attachment", "parent": -1, "qty": 1}
+                ],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "parent_not_earlier",
+            {
+                "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": 0}],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "cargo_on_the_target",
+            {
+                "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": -1}],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "attachment_without_slot",
+            {
+                "loadout_items": [{"type": "Apple", "slot": "", "dest": "attachment", "parent": -1}],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "hands_inside_an_item",
+            {
+                "loadout_items": [
+                    {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1},
+                    {"type": "M4A1", "slot": "", "dest": "hands", "parent": 0},
+                ],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "two_hands",
+            {
+                "loadout_items": [
+                    {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
+                    {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
+                ],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "unknown_dest",
+            {
+                "loadout_items": [{"type": "Apple", "slot": "", "dest": "ground", "parent": -1}],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "bool_parent",
+            {
+                "loadout_items": [{"type": "Apple", "slot": "Body", "dest": "attachment", "parent": True}],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "depth_five",
+            {
+                "loadout_items": [
+                    {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1}
+                ]
+                + [
+                    {"type": "Rag", "slot": "", "dest": "cargo", "parent": index}
+                    for index in range(4)
+                ],
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "sixty_five_rows",
+            {
+                "loadout_items": [
+                    {"type": "Apple", "slot": "Body", "dest": "attachment", "parent": -1}
+                ]
+                * 65,
+            },
+            (False, "bad_args"),
+        ),
+        ("extra_key", {"loadout_items": [], "extra": None}, (False, "bad_args")),
+    ),
+    "loadout_clear": (
+        ("empty", {}, (True, None)),
+        ("valid_with_uid", {"uid": "player-1"}, (True, None)),
+        ("valid_with_object_id", {"object_id": 3}, (True, None)),
+        ("both_targets", {"object_id": 3, "uid": "player-1"}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+        ("uid_not_string", {"uid": 1}, (False, "bad_args")),
+        ("rows_on_a_clear", {"loadout_items": []}, (False, "bad_args")),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
     "notify_players": (
         (
@@ -2343,6 +2521,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool", {"command_id": True}, (False, "bad_args")),
         ("missing", {}, (False, "bad_args")),
         ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
+    ),
+    # 854c: first or third, nothing else, before anything reaches the client.
+    "player_view_set": (
+        ("valid_first", {"view": "first"}, (True, None)),
+        ("valid_third", {"view": "third"}, (True, None)),
+        ("missing_view", {}, (False, "bad_args")),
+        ("bad_view", {"view": "3rd"}, (False, "bad_args")),
+        ("empty_view", {"view": ""}, (False, "bad_args")),
+        ("cased_view", {"view": "Third"}, (False, "bad_args")),
+        ("number_view", {"view": 3}, (False, "bad_args")),
+        ("bool_view", {"view": True}, (False, "bad_args")),
+        ("null_view", {"view": None}, (False, "bad_args")),
+        ("unhashable_view", {"view": ["third"]}, (False, "bad_args")),
+        ("extra_key", {"view": "third", "extra": None}, (False, "bad_args")),
     ),
     "action_cursor_ids": (
         (

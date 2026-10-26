@@ -32,6 +32,8 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_state", {}, "weapon_state"),
     ("weapon_state", {"uid": "76561198000000000"}, "weapon_state"),
     ("hands_take", {"object_id": 1}, "hands_take"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "client"}, "inventory_move"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_hands", "authority": "server"}, "inventory_move"),
     ("hands_take", {"object_id": 4, "uid": "76561198000000000"}, "hands_take"),
     ("query_all_players", {}, "query_all_players"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS}, "world_spawn"),
@@ -245,6 +247,57 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_sights", {"mode": "ironsights"}, "weapon_sights"),
     ("weapon_sights", {"mode": "optics"}, "weapon_sights"),
     ("weapon_sights", {"mode": "none"}, "weapon_sights"),
+    # Both target shapes of the loadout verbs, and the rows of every dest
+    # at the depth and count caps (fb99, 220f). clear_first sends loadout_clear
+    # before loadout_apply, and both payloads must pass; with neither target
+    # the apply goes by the uid the clear answered (#261 review Y11).
+    ("loadout_get", {}, "loadout_get"),
+    ("loadout_get", {"uid": "76561198000000000"}, "loadout_get"),
+    ("loadout_get", {"object_id": 3}, "loadout_get"),
+    ("loadout_apply", {"loadout": {}}, "loadout_apply"),
+    ("loadout_apply", {"loadout": {}, "clear_first": True}, "loadout_apply"),
+    (
+        "loadout_apply",
+        {"loadout": {}, "uid": "76561198000000000", "clear_first": True},
+        "loadout_clear",
+    ),
+    (
+        "loadout_apply",
+        {
+            "loadout": {
+                "attachments": [
+                    {
+                        "type": "AssaultBag_Black",
+                        "slot": "Back",
+                        "cargo": [
+                            {
+                                "type": "FirstAidKit",
+                                "cargo": [{"type": "Bandage", "cargo": [{"type": "Rag"}]}],
+                            }
+                        ],
+                    }
+                ],
+                "hands": {
+                    "type": "M4A1",
+                    "attachments": [{"type": "Mag_STANAG_30Rnd", "slot": "magazine"}],
+                },
+            },
+            "object_id": 9,
+            "clear_first": True,
+        },
+        "loadout_apply",
+    ),
+    (
+        "loadout_apply",
+        {
+            "loadout": {"attachments": [{"type": "Apple", "slot": f"Slot{n}"} for n in range(64)]},
+            "uid": "76561198000000000",
+        },
+        "loadout_apply",
+    ),
+    # Both views player_view_set sends (854c).
+    ("player_view_set", {"view": "first"}, "player_view_set"),
+    ("player_view_set", {"view": "third"}, "player_view_set"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and
@@ -252,6 +305,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
 _BRIDGE_ANSWERS: dict[str, dict[str, Any]] = {
     "surface_query": {"ok": 1, "y": 5.0},
     "scene_raycast": {"ok": 1, "hit": 1, "pos": [10.0, 5.0, 20.0]},
+    "loadout_clear": {"ok": 1, "deleted": 2, "cleanup_complete": 1, "uid": "76561198000000000"},
 }
 
 

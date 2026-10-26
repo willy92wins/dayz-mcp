@@ -840,6 +840,7 @@ class OverrideTests(unittest.TestCase):
             "mod": policy.mod,
             "mode": "server",
             "navmesh_data_server": False,
+            "server_adminlog": False,
             "no_base_mods": False,
             "no_file_patching": False,
             "pack_only": False,
