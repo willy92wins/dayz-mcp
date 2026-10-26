@@ -543,7 +543,7 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
     async def test_vehicle_enter_says_what_seated_means_and_the_bridge_wait(self) -> None:
         description = self.tools["vehicle_enter"].description or ""
         self.assertIn("seated=1 means the server read that player", description)
-        self.assertIn("at most 5 s, whatever timeout_s is", description)
+        self.assertIn("once 5 s have passed, whatever timeout_s is", description)
         self.assertIn("query_all_players (in_vehicle)", description)
         self.assertNotIn("confirms the command was accepted", description)
         self.assertIn("client-side ownership", description)
@@ -592,7 +592,8 @@ class ToolDescriptionTruthTest(unittest.IsolatedAsyncioTestCase):
         description = self.tools["vehicle_get_in_client"].description or ""
         self.assertIn("does not place the player in the server crew", description)
         self.assertIn("ActionSwitchLights", description)
-        self.assertIn("client seat and vehicle_enter's server seat both", description)
+        self.assertIn("ActionCondition on the client", description)
+        self.assertIn("server step, which reads vehicle_enter's server seat", description)
 
     async def test_world_time_set_description_matches_divmod_overflow(self) -> None:
         description = self.tools["world_time_set"].description or ""
