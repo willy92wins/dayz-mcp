@@ -450,6 +450,8 @@ GENERIC_SCALAR_OWNERS = {
     "phase": ({"object_anim"}, 0.0),
     "source": ({"object_anim"}, ""),
     "deferred": ({"inventory_give"}, 0),
+    # 71c9: an Apple given answers 0, a real answer; on any other verb 0 is noise.
+    "weapon_without_fsm": ({"inventory_give"}, 0),
     "count_total": ({"entities_query"}, 0),
     "component_index": ({"action_use_door", "action_use_component", "action_hold"}, 0),
 }
