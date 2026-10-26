@@ -381,6 +381,7 @@ class Round2Findings(unittest.TestCase):
                 "width": 640,
                 "height": 480,
                 "navmesh_data_server": False,
+                "server_adminlog": False,
                 "server_mods": [],
             }
             payload["instance_token"] = "130"

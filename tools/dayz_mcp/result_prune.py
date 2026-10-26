@@ -112,6 +112,25 @@ PRUNABLE_FIELDS = (
     "look_at",
     # action_cursor_ids fills it with registry ids for the captured pairs.
     "cursor_ids",
+    # loadout_get and loadout_apply fill it with the read and the outcomes
+    # (fb99, 220f); never on their refusals.
+    "loadout",
+    # inventory_move fills it with the server-read location, also on timeout.
+    "inventory_move",
+    # server_perf fills it with the entity counts (2427).
+    "counts",
+    # nav_path_query fills these on success (0131).
+    "points",
+    "from_snapped",
+    "to_snapped",
+    # players_visibility fills it, empty when no player is connected (33c5).
+    "players_visibility",
+    # world_spawn_batch fills it once, after its last item (7f5d).
+    "world_spawn_batch",
+    # scene_entities fills it with the rows of one scene (165a).
+    "scene_entities",
+    # scene_clear fills it with its counts (5a21).
+    "scene_clear",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -127,6 +146,11 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
         # answer, not noise. Ficha 59d9 (2026-09-04): the key vanished on
         # every empty query and the description described what never came.
         ("entities_query", "entities"),
+        # 33c5: no player connected is ok with an empty list, the answer itself.
+        ("players_visibility", "players_visibility"),
+        # scene_entities answers [] for a scene nothing was registered under
+        # (165a): an unknown scene is ok with an empty list, not a missing key.
+        ("scene_entities", "scene_entities"),
     }
 )
 
@@ -181,13 +205,18 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
         "action_use_component",
         "action_hold",
     }),
-    "confirmed": frozenset({"hands_attach", "hands_take", "weapon_state"}),
+    "confirmed": frozenset({"hands_attach", "hands_take", "inventory_move", "weapon_state"}),
     "sent": frozenset({"exec_enforce", "notify_players"}),
-    "deleted": frozenset({"object_delete"}),
+    # loadout_clear answers how many objects it deleted (220f), and the uid of
+    # the player it acted on, "" for a survivor by object_id (#261 review Y11).
+    "deleted": frozenset({"object_delete", "loadout_clear"}),
+    "uid": frozenset({"loadout_clear"}),
     "y": frozenset({"surface_query"}),
     "phase": frozenset({"object_anim"}),
     "source": frozenset({"object_anim"}),
     "deferred": frozenset({"inventory_give"}),
+    # inventory_give reads it back from the item it created (71c9).
+    "weapon_without_fsm": frozenset({"inventory_give"}),
     "count_total": frozenset({"entities_query"}),
     # vehicle_enter answers from its seat job (PostSeatSuccess), vehicle_get_in_client
     # from its vehicle_get_in job (MCP_PostJobSuccess).
@@ -205,6 +234,8 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "net_id_high": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
     # action_hold observation. The flat MCPResult sends the defaults on every
     # verb; only the hold commands write them, and 0 / false are answers.
+    # loadout_clear writes cleanup_complete too: whether what it deleted was
+    # all gone at its job's last check (220f).
     "hold_protocol": frozenset({"action_hold", "action_hold_cancel"}),
     "hold_id": frozenset({"action_hold", "action_hold_cancel"}),
     "end_state": frozenset({"action_hold"}),
@@ -217,8 +248,18 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "placed_known": frozenset({"action_hold"}),
     "already_placed": frozenset({"action_hold"}),
     "flag_restored": frozenset({"action_hold"}),
-    "cleanup_complete": frozenset({"action_hold", "action_hold_cancel"}),
+    "cleanup_complete": frozenset({"action_hold", "action_hold_cancel", "loadout_clear"}),
     "matched": frozenset({"action_hold_cancel"}),
+    # player_view_set read-back (854c), also on view_not_applied.
+    "person_view": frozenset({"player_view_set"}),
+    "camera_class": frozenset({"player_view_set"}),
+    # server_perf answers from its job (PostServerPerfSuccess). With
+    # insufficient_samples the two rates are the unassigned 0 and the tool
+    # drops them.
+    "avg_fps": frozenset({"server_perf"}),
+    "min_fps": frozenset({"server_perf"}),
+    "insufficient_samples": frozenset({"server_perf"}),
+    "length_m": frozenset({"nav_path_query"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries
