@@ -270,6 +270,21 @@ class DayzTestWorkerTests(unittest.TestCase):
         starts[2]["argv"].remove("-startNavmeshDataServer")
         self.assertEqual(starts[2], starts[0])
 
+    def test_adminlog_adds_only_literal_flag_to_managed_server_launch(self) -> None:
+        starts = []
+        for options in ({}, {"server_adminlog": False}, {"server_adminlog": True}):
+            broker = _Broker()
+            result = self._run(_raw(**options), broker)
+            self.assertEqual(result.exit_code, 0)
+            start = json.loads(broker.requests[0].stdin)
+            self.assertEqual(start["role"], "server")
+            starts.append(start["argv"])
+        self.assertEqual(starts[0], starts[1])
+        self.assertNotIn("-adminlog", starts[0])
+        self.assertEqual(starts[2].count("-adminlog"), 1)
+        without = [item for item in starts[2] if item != "-adminlog"]
+        self.assertEqual(without, starts[0])
+
     def test_new_start_retries_same_recoverable_request_after_lost_response(self) -> None:
         broker = _Broker()
         broker.lose_first_new_start_response = True

@@ -206,6 +206,11 @@ class MCPArgs
 	string run_token;
 	// player_look_at_release. The command id that owns the aim overrides.
 	int command_id;
+	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
+	int item_object_id;
+	int target_object_id;
+	string op;
+	string authority;
 
 	void MCPArgs()
 	{
@@ -259,12 +264,15 @@ class MCPCommandBatch
 };
 
 // godmode, here and in MCPAllPlayer, is MCPGodmode.IsOn: GetAllowDamage() false
-// on the server's body (MCP_PlayerCare.c).
+// on the server's body (MCP_PlayerCare.c). water and energy are that body's
+// stats as player_heal reads them (MCPPlayerVitals), 0 to 5000 (inbox fb98).
 class MCPPlayerState
 {
 	string name;
 	ref array<float> pos;
 	bool godmode;
+	float water;
+	float energy;
 
 	void MCPPlayerState()
 	{
@@ -490,18 +498,25 @@ class MCPWeaponState
 };
 
 // F3.6 object_inspect payload. bounding_center is model-local (GetBoundingCenter).
+// With want quantity, has_quantity is true for an ItemBase whose HasQuantity() is
+// true, and quantity and quantity_max are its GetQuantity() and GetQuantityMax();
+// otherwise they stay false and 0 (inbox fb98).
 class MCPObjectInspect
 {
 	string type;
 	ref array<float> bounding_center;
 	bool has_bounding_center;
 	ref array<ref MCPMemoryPoint> memory_points;
+	bool has_quantity;
+	float quantity;
+	float quantity_max;
 
 	void MCPObjectInspect()
 	{
 		bounding_center = new array<float>();
 		memory_points = new array<ref MCPMemoryPoint>();
 		has_bounding_center = false;
+		has_quantity = false;
 	}
 };
 
@@ -1023,6 +1038,19 @@ class MCPCursorIds
 	}
 };
 
+// inventory_move location the server read after the call. Unassigned until
+// the verb has a location to report, including a timeout.
+class MCPInventoryMove
+{
+	string op;
+	string authority;
+	string loc_type;
+	int parent_object_id;
+	string parent_type;
+	string slot;
+	float quantity;
+};
+
 class MCPResult
 {
 	int id;
@@ -1165,6 +1193,7 @@ class MCPResult
 	bool flag_restored;
 	bool cleanup_complete;
 	bool matched;
+	ref MCPInventoryMove inventory_move;
 };
 
 class MCPJob
@@ -1205,6 +1234,8 @@ class MCPJob
 	ref MCPInputTrigger input_trigger;
 	// player_move hold: the reply posted after the release.
 	ref MCPPlayerMove player_move;
+	Object move_target;
+	float move_quantity;
 };
 
 class MCPSpawnValidation
