@@ -70,6 +70,13 @@ class Fb2277SeatedMountedCameraContract:
         source = _clean(source)
         build = _body(source, BUILD)
 
+        # cameraError is written twice: read before the seated branch and
+        # cleared for a mounted camera. Any later write could bring the seated
+        # reject back before the scripted read.
+        writes = re.findall(r"\bcameraError\s*=(?!=)[^;]*;", build)
+        case.assertEqual([_flat(w) for w in writes],
+                         ["cameraError = CameraReadError();", 'cameraError = "";'])
+
         # The seated branch asks first whether a camera this bridge mounted is
         # active. If it is, it only clears the seated reject and lets the
         # scripted read at the end of the method run.
@@ -126,8 +133,10 @@ CONTRACT = Fb2277SeatedMountedCameraContract()
 
 
 def _mutant(source: str, old: str, new: str) -> str:
+    # A missing anchor is an error of this test, not a rejection by the
+    # contract: LookupError makes the test error where a rejection fails.
     if source.count(old) != 1:
-        raise AssertionError(f"mutant anchor not found exactly once: {old!r}")
+        raise LookupError(f"mutant anchor not found exactly once: {old!r}")
     return source.replace(old, new)
 
 
@@ -151,6 +160,11 @@ class Fb2277SeatedMountedCameraTest(unittest.TestCase):
                 self.source,
                 mounted_block,
                 MOUNTED + "\n\t\t\t{\n\t\t\t\tFillSeatedCameraView(camera, seatedPlayer);\n\t\t\t\treturn camera;\n\t\t\t}",
+            ),
+            "error_read_again_after_seated": _mutant(
+                self.source,
+                "\t\tif (CameraErrorIsMissingScripted(cameraError))",
+                "\t\tcameraError = CameraReadError();\n\t\tif (CameraErrorIsMissingScripted(cameraError))",
             ),
             "observe_judges_scripted": _mutant(
                 self.source,
