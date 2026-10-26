@@ -32,9 +32,48 @@ def _box(*, foreign: list[dict[str, object]], runs: list[dict[str, object]] | No
     }
 
 
-def _failed(box: dict[str, object], port: int) -> dict[str, object]:
+def _failed(
+    box: dict[str, object], port: int, caller_session: str | None = None
+) -> dict[str, object]:
     return server._failed_active_run_result(
-        project="DayZ_MCP", mode="all", box=box, started=0.0, caller_session=None, port=port
+        project="DayZ_MCP", mode="all", box=box, started=0.0, caller_session=caller_session, port=port
+    )
+
+
+def _run(state: str, owner_session: str) -> dict[str, object]:
+    return {
+        "run_id": "run-x",
+        "mod": "@M",
+        "label": "l",
+        "age_s": 1.0,
+        "state": state,
+        "owner_session": owner_session,
+    }
+
+
+def _refusals(
+    box: dict[str, object], port: int, caller_session: str | None
+) -> tuple[tuple[str, dict[str, object]], ...]:
+    """The three answers that carry a held port: at launch, after a wait, and
+    a box taken during the build."""
+    return (
+        (
+            "launch",
+            server._enrich_active_run_result(
+                {"status": "failed"}, box, caller_session=caller_session, port=port
+            ),
+        ),
+        ("wait", _failed(box, port, caller_session)),
+        (
+            "build",
+            server._box_taken_result(
+                {"status": "failed"},
+                box,
+                built=True,
+                caller_session=caller_session,
+                port=port,
+            ),
+        ),
     )
 
 
@@ -76,6 +115,37 @@ class ForeignDayzPortAnswerTest(unittest.TestCase):
                 self.assertEqual(
                     server._box_wait_cannot_help(box, port=2302), "port_in_use_foreign"
                 )
+
+    def test_a_managed_run_beside_the_foreign_dayz_still_points_to_the_wait(self) -> None:
+        # Another session's run does not stop the wait, and the foreign DayZ
+        # still refuses every port: the box comes first.
+        box = _box(foreign=[dict(_FOREIGN_SERVER)], runs=[_run("RUNNING", "other")])
+        failed = _failed(box, 2302)
+        self.assertEqual(failed["reason"], "port_in_use_foreign")
+        self.assertIn("another port= does not help yet", failed["hint"])
+        offer = failed["queue_offer"]
+        self.assertIsInstance(offer, dict)
+        self.assertEqual(offer["retry"].get("on_busy"), "queue")
+        self.assertIsNone(server._box_wait_cannot_help(box, port=2302))
+
+    def test_what_else_stops_the_wait_keeps_the_managed_run_answer(self) -> None:
+        # An unreconciled run, or the caller's own run, refuses the wait
+        # whatever the port, so the answer must not send the caller to it.
+        for label, run, caller, cannot in (
+            ("an unreconciled run", _run("UNRECONCILED", "other"), None, "unreconciled"),
+            ("the caller's own run", _run("RUNNING", "sess-mine"), "sess-mine", "own_run"),
+        ):
+            box = _box(foreign=[dict(_FOREIGN_SERVER)], runs=[run])
+            self.assertEqual(
+                server._box_wait_cannot_help(box, caller_session=caller, port=2302), cannot
+            )
+            for where, answer in _refusals(box, 2302, caller):
+                with self.subTest(label, where=where):
+                    self.assertEqual(answer["reason"], "port_in_use_foreign")
+                    self.assertEqual(answer["port"], 2302)
+                    self.assertIn("waiting for the box alone does not free the port", answer["hint"])
+                    self.assertNotIn("does not help yet", answer["hint"])
+                    self.assertIsNone(answer["queue_offer"])
 
 
 if __name__ == "__main__":
