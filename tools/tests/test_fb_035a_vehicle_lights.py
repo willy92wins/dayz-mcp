@@ -643,6 +643,10 @@ class FindTransportNearClientRadiusTest(unittest.TestCase):
             with self.subTest(position=position):
                 found, _transports, _game = self._find(position, centre=centre)
                 self.assertIsNone(found)
+        # x differs from z here: a finder that read one for the other would
+        # search 98 m from the car (H1, Codex's third review).
+        found, transports, _game = self._find((102.0, 50.0, 200.0), centre=(100.0, 50.0, 200.0))
+        self.assertIs(found, transports[0])
 
 
 class ResultPruneLightsTest(unittest.TestCase):
