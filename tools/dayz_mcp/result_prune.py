@@ -103,8 +103,8 @@ PRUNABLE_FIELDS = (
     "player_move",
     # player_trace fills it with the trace header and its paged samples (4ae5).
     "player_trace",
-    # vehicle_telemetry fills it with the seated transport's GetDirection.
-    # Omitted when the player is not in a transport (c32c).
+    # vehicle_telemetry fills it with the read transport's GetDirection.
+    # Omitted when no transport is read (c32c, 035a).
     "direction",
     # action_cursor fills it with the HUD snapshot (86a3).
     "action_cursor",
@@ -199,6 +199,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "engine_on_server": frozenset({"engine_set", "vehicle_control", "vehicle_telemetry"}),
     "speedo_max": frozenset({"vehicle_telemetry"}),
     "gear": frozenset({"vehicle_telemetry"}),
+    "lights_on_client": frozenset({"vehicle_telemetry"}),
     "net_strategy": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
     "is_owner": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),
     "is_authority_owner": frozenset({"vehicle_get_in_client", "vehicle_telemetry"}),

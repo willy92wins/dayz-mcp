@@ -108,7 +108,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from 8b1c (dayz_test_foreground hold_s; run_id is a string).
         # + 3 from 17fa (inventory_move item_object_id, target_object_id, timeout_s).
         # 177 before either batch, plus both additions.
-        self.assertEqual(len(rows), 193)
+        # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
+        self.assertEqual(len(rows), 194)
+        self.assertIn(("vehicle_telemetry", "pos", "vector"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
         self.assertIn(("inventory_move", "item_object_id", "int"), rows)

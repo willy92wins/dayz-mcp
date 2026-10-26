@@ -357,6 +357,7 @@ class MCPTelemetry
 	float speedo;
 	int wheel_count;
 	float fuel_fraction;
+	bool lights_on_server;
 	string path;
 	int line_count_read;
 	ref MCPTelemetryFixtureLine last_valid;
@@ -1065,6 +1066,7 @@ class MCPResult
 	float speedo_max;
 	float pos_delta;
 	int gear;
+	bool lights_on_client;
 	int net_strategy;
 	bool is_owner;
 	string owner_identity;

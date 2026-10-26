@@ -120,6 +120,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "vehicle_control",
     ),
     ("vehicle_telemetry", {}, "vehicle_telemetry"),
+    ("vehicle_telemetry", {"pos": _POS}, "vehicle_telemetry"),
     ("vehicle_release", {}, "vehicle_release"),
     # Edges of what the tools accept. A schema that is narrower than its tool
     # anywhere inside these ranges fails here (review R1 of this change: a

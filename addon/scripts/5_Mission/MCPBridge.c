@@ -4589,6 +4589,8 @@ class MCPBridge : Managed
 			telemetry.speedo = car.GetSpeedometer();
 			telemetry.wheel_count = car.WheelCountPresent();
 			telemetry.fuel_fraction = car.GetFluidFraction(CarFluid.FUEL);
+			// Transport.LightIsOn: true when lights are on (transport.c:229-230).
+			telemetry.lights_on_server = car.LightIsOn();
 		}
 	}
 

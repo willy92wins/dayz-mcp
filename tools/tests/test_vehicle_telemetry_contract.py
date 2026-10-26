@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ CLIENT_BRIDGE = MOD_SCRIPTS / "5_Mission" / "MCPClientBridge.c"
 MESSAGES = MOD_SCRIPTS / "5_Mission" / "MCPMessages.c"
 
 TELEMETRY_REGION_SHA256 = (
-    "cc117467d9f9f89ee22a3ce452214678733e73f46893eb4c90f70a181b08194d"
+    "6733f0168d0d9a71f7413e4d2ba94ae95cc4154337c36554874db4c5bacfe246"
 )
 
 _TELEMETRY_REGION = re.compile(
@@ -95,6 +96,15 @@ def map_vehicle_telemetry_seat_token(vehicle_seat: int, named: dict[str, int]) -
     return "unknown"
 
 
+def _finite_pos(pos: object) -> bool:
+    if not isinstance(pos, (list, tuple)) or len(pos) != 3:
+        return False
+    try:
+        return all(math.isfinite(float(component)) for component in pos)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def observed_telemetry(
     observed: dict[str, object] | None, named_seats: dict[str, int]
 ) -> dict[str, object]:
@@ -107,6 +117,42 @@ def observed_telemetry(
         "classname": "",
     }
     if observed is None:
+        return result
+
+    pos = observed.get("pos")
+    if pos is not None:
+        if not _finite_pos(pos):
+            result["ok"] = False
+            result["error"] = "bad_args"
+            return result
+        nearby = observed.get("nearby_transport")
+        if not nearby:
+            return result
+        seated_transport = observed.get("seated_transport")
+        seated = nearby is seated_transport or bool(observed.get("pos_matches_seated"))
+        result.update(
+            found=True,
+            seated=seated,
+            seat="unknown" if seated else "",
+            type=observed["type"],
+            classname=observed["classname"],
+        )
+        vehicle_seat = observed.get("vehicle_seat")
+        if (
+            seated
+            and vehicle_seat is not None
+            and bool(observed.get("command_transport_matches", True))
+        ):
+            result["seat"] = map_vehicle_telemetry_seat_token(
+                int(vehicle_seat), named_seats
+            )
+        if bool(observed["is_carscript"]):
+            result.update(
+                speedo_max=observed["speedo_max"],
+                gear=observed["gear"],
+                lights_on_client=observed.get("lights_on_client", False),
+                engine_on_server=observed["engine_on_server"],
+            )
         return result
 
     if int(observed["crew_index"]) < 0:
@@ -129,6 +175,7 @@ def observed_telemetry(
         result.update(
             speedo_max=observed["speedo_max"],
             gear=observed["gear"],
+            lights_on_client=observed.get("lights_on_client", False),
             engine_on_server=observed["engine_on_server"],
         )
     return result
@@ -245,10 +292,20 @@ def assert_vehicle_telemetry_source(source: str) -> None:
         if index < 0 or index > player_idx:
             raise AssertionError(f"telemetry default missing before lookup: {token}")
 
+    pos_idx = telemetry.find("command.args.pos.Count() != 3")
+    if pos_idx < 0 or pos_idx > player_idx:
+        raise AssertionError("pos must be validated before the player lookup")
+    if 'result.error = "bad_args"' not in telemetry:
+        raise AssertionError("invalid pos must refuse with bad_args")
+    finite_idx = telemetry.find("IsFiniteFloat(command.args.pos.Get(0))")
+    if finite_idx < 0 or finite_idx > player_idx:
+        raise AssertionError("pos components must be checked with IsFiniteFloat before lookup")
+
     ordered = (
         "ResolveLiveSeatedTransport(player)",
+        "FindTransportNearClient(Vector(",
         "result.found = true;",
-        "result.seated = true;",
+        "result.seated = transport == seatedTransport;",
         'result.seat = "unknown";',
         "result.type = transport.GetType();",
         "result.classname = transport.ClassName();",
@@ -257,6 +314,8 @@ def assert_vehicle_telemetry_source(source: str) -> None:
         "VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat())",
         "CarScript.Cast(transport)",
         "car.GetSpeedometer()",
+        "car.GetGear()",
+        "car.LightIsOn()",
     )
     previous = -1
     for token in ordered:
@@ -270,7 +329,8 @@ def assert_vehicle_telemetry_source(source: str) -> None:
     if "if (!vehicleCommand)" in telemetry:
         raise AssertionError("missing optional command must not make telemetry absent")
     optional_seat = _method_body(
-        telemetry, "if (vehicleCommand && vehicleCommand.GetTransport() == transport)"
+        telemetry,
+        "if (result.seated && vehicleCommand && vehicleCommand.GetTransport() == transport)",
     )
     if optional_seat.strip() != (
         "result.seat = VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat());"
@@ -474,6 +534,7 @@ class TestVehicleTelemetryWireContract(unittest.TestCase):
             "is_carscript": True,
             "speedo_max": 0.0,
             "gear": 0,
+            "lights_on_client": False,
             "engine_on_server": False,
         }
         driver = observed_telemetry(car_driver, self.named_seats)
@@ -566,7 +627,22 @@ class TestVehicleTelemetryWireContract(unittest.TestCase):
                 'CarScript car;\n\t\tresult.error = "not_seated";',
             ),
             "drop_found": ("result.found = true;", "result.found = false;"),
-            "drop_seated": ("result.seated = true;", "result.seated = false;"),
+            "drop_seated": (
+                "result.seated = transport == seatedTransport;",
+                "result.seated = true;",
+            ),
+            "drop_lights": (
+                "result.lights_on_client = car.LightIsOn();",
+                "",
+            ),
+            "ignore_pos": (
+                "transport = FindTransportNearClient(Vector(command.args.pos.Get(0), command.args.pos.Get(1), command.args.pos.Get(2)));",
+                "transport = seatedTransport;",
+            ),
+            "skip_pos_validation": (
+                "command.args.pos.Count() != 3 || !IsFiniteFloat(command.args.pos.Get(0)) || !IsFiniteFloat(command.args.pos.Get(1)) || !IsFiniteFloat(command.args.pos.Get(2)) || command.args.pos.Get(0) * 0.0 != 0.0 || command.args.pos.Get(1) * 0.0 != 0.0 || command.args.pos.Get(2) * 0.0 != 0.0",
+                "false",
+            ),
             "drop_type": (
                 "result.type = transport.GetType();",
                 'result.type = "";',
@@ -588,13 +664,13 @@ class TestVehicleTelemetryWireContract(unittest.TestCase):
                 "ResolveOwnedCar()",
             ),
             "command_only_presence": (
-                "transport = ResolveLiveSeatedTransport(player);",
+                "seatedTransport = ResolveLiveSeatedTransport(player);",
                 "vehicleCommand = player.GetCommand_Vehicle();\n"
                 "\t\tif (!vehicleCommand)\n"
                 "\t\t{\n"
                 "\t\t\treturn true;\n"
                 "\t\t}\n"
-                "\t\ttransport = vehicleCommand.GetTransport();",
+                "\t\tseatedTransport = vehicleCommand.GetTransport();",
             ),
         }
         for name, (old, new) in mutants.items():
