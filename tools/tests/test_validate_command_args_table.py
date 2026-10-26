@@ -1621,6 +1621,8 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("pos_two_components", {"pos": [1.0, 2.0]}, (False, "bad_args")),
         ("pos_four_components", {"pos": [1.0, 2.0, 3.0, 4.0]}, (False, "bad_args")),
         ("pos_non_numeric", {"pos": [1.0, "2", 3.0]}, (False, "bad_args")),
+        ("pos_bool", {"pos": [True, 2.0, 3.0]}, (False, "bad_args")),
+        ("pos_empty", {"pos": []}, (False, "bad_args")),
         ("pos_not_list", {"pos": "1,2,3"}, (False, "bad_args")),
     ),
     "vehicle_release": (

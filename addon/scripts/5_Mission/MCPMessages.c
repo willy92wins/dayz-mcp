@@ -1358,9 +1358,9 @@ class MCPResult
 	ref MCPPlayerMove player_move;
 	// player_trace header and paged samples. Unassigned on other commands.
 	ref MCPPlayerTraceRead player_trace;
-	// vehicle_telemetry heading. GetDirection of the seated transport
-	// (object.c:320): [x, y, z], the same vector vehicle_trace stores as
-	// direction_x/y/z. Unassigned when that player is not in a transport.
+	// vehicle_telemetry heading. GetDirection of the transport read, the seated
+	// one or the nearest to pos (object.c:320): [x, y, z], the same vector
+	// vehicle_trace stores as direction_x/y/z. Unassigned when none is read.
 	ref array<float> direction;
 	// action_cursor snapshot. Unassigned on other commands.
 	ref MCPActionCursor action_cursor;

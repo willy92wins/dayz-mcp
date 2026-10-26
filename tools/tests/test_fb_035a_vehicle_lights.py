@@ -13,6 +13,7 @@ them against fakes of the vanilla calls they make.
 """
 from __future__ import annotations
 
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -23,7 +24,13 @@ from dayz_mcp import result_prune, server
 from dayz_mcp.server import ServerConfig, build_app
 from tests._addon_paths import addon_root
 from tests.client_helpers import _fixture_client_runtime
-from tests.enforce_subset_helpers import EnforceString, method_body, translate
+from tests.enforce_subset_helpers import (
+    EnforceArray,
+    EnforceString,
+    EnforceVector,
+    method_body,
+    translate,
+)
 
 SCRIPTS = addon_root() / "scripts" / "5_Mission"
 CLIENT_BRIDGE = SCRIPTS / "MCPClientBridge.c"
@@ -35,6 +42,7 @@ TELEMETRY = "protected bool DispatchVehicleTelemetry(MCPCommand command, MCPResu
 LIVE = "protected Transport ResolveLiveSeatedTransport(PlayerBase player)"
 FINITE = "protected bool IsFiniteFloat(float value)"
 SEAT_TOKEN = "protected string VehicleTelemetrySeatToken(int vehicleSeat)"
+FIND_NEAR = "protected Transport FindTransportNearClient(vector pos)"
 
 SEATS = SimpleNamespace(
     VEHICLESEAT_DRIVER=101,
@@ -451,6 +459,20 @@ class DispatchVehicleTelemetryLightsTest(unittest.TestCase):
                 self.assertEqual(self.model.game.object_reads, 0)
                 self.assertEqual(self.model.find_calls, 0)
 
+    def test_empty_pos_reads_the_seated_car_as_without_pos(self) -> None:
+        # The plan reads an empty pos as none. The daemon refuses [] before
+        # the game (test_validate_command_args_table, pos_empty).
+        car = FakeTransport(lights=True)
+        self._seat_driver(car)
+        self.model.near = FakeTransport(lights=False)
+        posted, result = self.model.run(pos=[])
+        self.assertIs(posted, True)
+        self.assertIs(result.ok, True)
+        self.assertIs(result.found, True)
+        self.assertIs(result.seated, True)
+        self.assertIs(result.lights_on_client, True)
+        self.assertEqual(self.model.find_calls, 0)
+
     def test_without_pos_matches_today(self) -> None:
         posted, result = self.model.run()
         self.assertIs(posted, True)
@@ -500,6 +522,102 @@ class VehicleTelemetryToolPosTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("bad_pos", str(caught.exception))
         self.runtime.call_bridge.assert_not_awaited()
+
+    async def test_pos_of_another_length_is_bad_pos(self) -> None:
+        self.runtime.call_bridge = AsyncMock(return_value={"ok": True, "found": False})
+        for pos in ([], [1.0, 2.0], [1.0, 2.0, 3.0, 4.0]):
+            with self.subTest(pos=pos):
+                with self.assertRaises(ToolError) as caught:
+                    await self.app.call_tool("vehicle_telemetry", {"pos": pos})
+                self.assertIn("bad_pos", str(caught.exception))
+        self.runtime.call_bridge.assert_not_awaited()
+
+    async def test_pos_that_is_not_a_list_of_numbers_fails_the_schema(self) -> None:
+        # list[StrictFloat] refuses these before the tool body, so before
+        # _require_vec3: the error is the argument check's, not bad_pos.
+        self.runtime.call_bridge = AsyncMock(return_value={"ok": True, "found": False})
+        for pos in ([True, 2.0, 3.0], ["1", 2.0, 3.0], "1,2,3"):
+            with self.subTest(pos=pos):
+                with self.assertRaises(ToolError) as caught:
+                    await self.app.call_tool("vehicle_telemetry", {"pos": pos})
+                self.assertIn("validation error", str(caught.exception))
+                self.assertNotIn("bad_pos", str(caught.exception))
+        self.runtime.call_bridge.assert_not_awaited()
+
+
+class FinderGame:
+    """GetObjectsAtPosition3D as a sphere of the radius it is given
+    (game.c:924-930); the native does that cut, so the fake does it here."""
+
+    def __init__(self, transports: list[FakeTransport]) -> None:
+        self.transports = transports
+        self.radii: list[float] = []
+
+    def GetObjectsAtPosition3D(self, pos, radius, objects, _proxies) -> None:
+        self.radii.append(radius)
+        for transport in self.transports:
+            if _distance_sq(pos, transport.GetPosition()) <= radius * radius:
+                objects.Insert(transport)
+
+
+def _distance_sq(a, b) -> float:
+    return sum((a[index] - b[index]) ** 2 for index in range(3))
+
+
+class FindTransportNearClientRadiusTest(unittest.TestCase):
+    """pos reads within 4 m: the translated finder, with the radius the
+    source declares, on both sides of that limit (H4, Codex's first review)."""
+
+    def setUp(self) -> None:
+        self.source = CLIENT_BRIDGE.read_text(encoding="utf-8")
+        found = re.search(
+            r"protected const float DRIVE_CLIENT_SEARCH_RADIUS = ([0-9.]+);", self.source
+        )
+        self.assertIsNotNone(found)
+        self.radius = float(found.group(1))
+
+    def _find(self, *positions: tuple[float, float, float]):
+        transports = []
+        for position in positions:
+            transport = FakeTransport()
+            transport.position = position
+            transports.append(transport)
+        game = FinderGame(transports)
+        namespace: dict[str, object] = {
+            "GetGame": lambda: game,
+            "Transport": Caster(lambda value: isinstance(value, FakeTransport)),
+            "vector": SimpleNamespace(DistanceSq=_distance_sq),
+            "m_ReadyObjects": EnforceArray(),
+            "m_ReadyProxyCargos": EnforceArray(),
+            "DRIVE_CLIENT_SEARCH_RADIUS": self.radius,
+        }
+        find = translate(
+            self.source,
+            FIND_NEAR,
+            namespace,
+            class_types={"Transport", "Object"},
+            members=("m_ReadyObjects", "m_ReadyProxyCargos"),
+        )
+        return find(EnforceVector((0.0, 0.0, 0.0))), transports, game
+
+    def test_the_search_radius_is_four_metres(self) -> None:
+        self.assertEqual(self.radius, 4.0)
+
+    def test_a_car_inside_four_metres_is_found(self) -> None:
+        found, transports, game = self._find((3.9, 0.0, 0.0))
+        self.assertIs(found, transports[0])
+        self.assertEqual(game.radii, [4.0])
+
+    def test_a_car_beyond_four_metres_is_not_found(self) -> None:
+        for position in ((4.1, 0.0, 0.0), (10.0, 0.0, 0.0), (0.0, 4.1, 0.0)):
+            with self.subTest(position=position):
+                found, _transports, game = self._find(position)
+                self.assertIsNone(found)
+                self.assertEqual(game.radii, [4.0])
+
+    def test_the_nearer_of_two_cars_is_found(self) -> None:
+        found, transports, _game = self._find((3.0, 0.0, 0.0), (0.0, 0.0, 2.0))
+        self.assertIs(found, transports[1])
 
 
 class ResultPruneLightsTest(unittest.TestCase):

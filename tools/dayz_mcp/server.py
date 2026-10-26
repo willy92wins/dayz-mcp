@@ -9185,8 +9185,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "which is not a measurement). pos reads the nearest Transport to pos "
             "within 4 m whether or not the player is seated; seated says whether "
             "the local player is seated in it; seat is empty when they are not. "
-            "A pos that is not 3 finite numbers is ToolError(bad_pos). Without pos "
-            "nothing changes."
+            "pos takes 3 finite numbers: another count, NaN or an infinity is "
+            "ToolError(bad_pos). Without pos nothing changes."
         )
     )
     async def vehicle_telemetry(
