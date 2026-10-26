@@ -117,6 +117,14 @@ PRUNABLE_FIELDS = (
     "loadout",
     # inventory_move fills it with the server-read location, also on timeout.
     "inventory_move",
+    # server_perf fills it with the entity counts (2427).
+    "counts",
+    # nav_path_query fills these on success (0131).
+    "points",
+    "from_snapped",
+    "to_snapped",
+    # players_visibility fills it, empty when no player is connected (33c5).
+    "players_visibility",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -132,6 +140,8 @@ SEMANTIC_EMPTY_FIELDS = frozenset(
         # answer, not noise. Ficha 59d9 (2026-09-04): the key vanished on
         # every empty query and the description described what never came.
         ("entities_query", "entities"),
+        # 33c5: no player connected is ok with an empty list, the answer itself.
+        ("players_visibility", "players_visibility"),
     }
 )
 
@@ -234,6 +244,13 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     # player_view_set read-back (854c), also on view_not_applied.
     "person_view": frozenset({"player_view_set"}),
     "camera_class": frozenset({"player_view_set"}),
+    # server_perf answers from its job (PostServerPerfSuccess). With
+    # insufficient_samples the two rates are the unassigned 0 and the tool
+    # drops them.
+    "avg_fps": frozenset({"server_perf"}),
+    "min_fps": frozenset({"server_perf"}),
+    "insufficient_samples": frozenset({"server_perf"}),
+    "length_m": frozenset({"nav_path_query"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries

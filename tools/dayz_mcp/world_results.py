@@ -1,7 +1,8 @@
 """Reply shaping for world reads: the world_time clock and the entities_query rows.
 
 Moved out of server.py unchanged (backlog 71fc); server.py imports every name
-back, so dayz_mcp.server.<name> is the same object.
+back, so dayz_mcp.server.<name> is the same object. The server_perf rates and
+the nav_path_query points were added here later (2427, 0131).
 """
 
 from __future__ import annotations
@@ -199,3 +200,32 @@ def _annotate_entities_reliability(
     if isinstance(players_raw, list) and not players_raw:
         result["reason"] = "no_player_connected"
     return result
+
+
+# server_perf: with insufficient_samples the bridge leaves avg_fps and min_fps
+# unwritten, the flat MCPResult still sends their 0 defaults, and result_prune
+# keeps an owned scalar for its owner whatever the value (inbox 2427). The
+# reply then carries no rate at all, never a 0 that reads as a measure.
+def _server_perf_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Drop avg_fps and min_fps from a server_perf answer with insufficient_samples."""
+    if not isinstance(result, dict) or not result.get("insufficient_samples"):
+        return result
+    return {
+        key: value for key, value in result.items() if key not in ("avg_fps", "min_fps")
+    }
+
+
+# nav_path_query: the bridge sends FindPath's waypoints flattened, x0, y0, z0,
+# x1, ..., in MCPResult.points (MCPMessages.c), and the reply regroups them as
+# one [x, y, z] per waypoint (inbox 0131). A list whose length is not a
+# multiple of 3 is left as it arrived.
+def _nav_path_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Regroup a nav_path_query answer's flat points into [x, y, z] waypoints."""
+    if not isinstance(result, dict):
+        return result
+    points = result.get("points")
+    if not isinstance(points, list) or len(points) % 3 != 0:
+        return result
+    response = dict(result)
+    response["points"] = [points[index : index + 3] for index in range(0, len(points), 3)]
+    return response

@@ -77,6 +77,11 @@ def _wire_result(**filled: object) -> dict[str, object]:
         "entities": [],
         "input_describe": {},
         "building_doors": {},
+        "counts": {},
+        "points": [],
+        "from_snapped": [],
+        "to_snapped": [],
+        "players_visibility": [],
     }
     empty.update(filled)
     return {"ok": 1, "cmd": "fixture", **empty}
@@ -158,6 +163,7 @@ class ResultPruneTest(unittest.TestCase):
                     ("query_all_players", "players"),
                     ("ui_dialog", "dialog"),
                     ("entities_query", "entities"),
+                    ("players_visibility", "players_visibility"),
                 }
             ),
         )
@@ -456,6 +462,11 @@ GENERIC_SCALAR_OWNERS = {
     # 854c: the player_view_set read-back.
     "person_view": ({"player_view_set"}, ""),
     "camera_class": ({"player_view_set"}, ""),
+    # 2427 and 0131: written from the server_perf job and by nav_path_query.
+    "avg_fps": ({"server_perf"}, 0.0),
+    "min_fps": ({"server_perf"}, 0),
+    "insufficient_samples": ({"server_perf"}, 0),
+    "length_m": ({"nav_path_query"}, 0.0),
 }
 
 # Deliberately not owned. A stale 0 here is still not dropped.

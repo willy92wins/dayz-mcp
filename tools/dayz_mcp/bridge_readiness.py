@@ -237,8 +237,11 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
+    "nav_path_query": ("from", "snap_radius", "to"),
     "object_resolve": ("pos", "radius", "type"),
     "player_kill": ("uid",),
+    "players_visibility": ("pos", "radius"),
+    "server_perf": ("window_s",),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
 }
 
@@ -289,6 +292,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "loadout_apply": "loadout_apply",
         "loadout_clear": None,  # sent by loadout_apply for clear_first
         "loadout_get": "loadout_get",
+        "nav_path_query": "nav_path_query",
         "notify_players": "notify_players",
         "object_anim": "object_anim",
         "object_delete": "object_delete",
@@ -299,10 +303,12 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_heal": "player_heal",
         "player_kill": "player_kill",
         "player_teleport": "player_teleport",
+        "players_visibility": "players_visibility",
         "query_all_players": "query_all_players",
         "query_get_in_condition": "query_get_in_condition",
         "query_player_state": "query_player_state",
         "scene_raycast": "scene_raycast",
+        "server_perf": "server_perf",
         "surface_query": "surface_query",
         "telemetry_read": "telemetry_read",
         "vehicle_door": "vehicle_door",

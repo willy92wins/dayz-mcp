@@ -15,6 +15,10 @@ from dayz_mcp import server
 from tests._tiers import slow_test
 
 
+# Tools whose public argument "from" is the Python parameter from_pos.
+FROM_ALIASES = {("scene_raycast", "from_pos"), ("nav_path_query", "from_pos")}
+
+
 def numeric_shape(annotation):
     origin = get_origin(annotation)
     if origin is Annotated:
@@ -111,11 +115,22 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # uid is a string, clear_first a bool and loadout an object).
         # + 3 from 17fa (inventory_move item_object_id, target_object_id, timeout_s).
         # 177 before either batch, plus both additions.
-        self.assertEqual(len(rows), 198)
+        # + 9 from 2427/0131/33c5 (server_perf window_s/timeout_s, nav_path_query
+        # from_pos/to/snap_radius/timeout_s, players_visibility pos/radius/timeout_s).
+        self.assertEqual(len(rows), 207)
         self.assertIn(("player_view_set", "timeout_s", "float"), rows)
         for tool in ("loadout_get", "loadout_apply"):
             self.assertIn((tool, "object_id", "int"), rows)
             self.assertIn((tool, "timeout_s", "float"), rows)
+        self.assertIn(("server_perf", "window_s", "float"), rows)
+        self.assertIn(("server_perf", "timeout_s", "float"), rows)
+        self.assertIn(("nav_path_query", "from_pos", "vector"), rows)
+        self.assertIn(("nav_path_query", "to", "vector"), rows)
+        self.assertIn(("nav_path_query", "snap_radius", "float"), rows)
+        self.assertIn(("nav_path_query", "timeout_s", "float"), rows)
+        self.assertIn(("players_visibility", "pos", "vector"), rows)
+        self.assertIn(("players_visibility", "radius", "float"), rows)
+        self.assertIn(("players_visibility", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
         self.assertIn(("inventory_move", "item_object_id", "int"), rows)
@@ -179,7 +194,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_every_numeric_parameter_rejects_both_booleans_before_handler(self):
         for name, param, shape in self.rows:
-            wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param
+            wire_param = "from" if (name, param) in FROM_ALIASES else param
             for value in (False, True):
                 positions = range(3) if shape == "vector" else (None,)
                 for position in positions:
@@ -198,7 +213,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
     @slow_test
     async def test_every_numeric_parameter_accepts_real_numbers(self):
         for name, param, shape in self.rows:
-            wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param
+            wire_param = "from" if (name, param) in FROM_ALIASES else param
             values = ([0, 1, 2], [0.0, 1.25, 2.5]) if shape == "vector" else (0, 1) if shape == "int" else (0, 1, 1.25)
             for value in values:
                 with self.subTest(tool=name, param=param, value=value):
@@ -214,7 +229,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         for name, param, _shape in self.rows:
             tool = self.app._tool_manager.get_tool(name)
             props = tool.parameters["properties"]
-            wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param
+            wire_param = "from" if (name, param) in FROM_ALIASES else param
             prop = props[wire_param]
             if not any(s.get("type") == "null" for s in prop.get("anyOf", [])):
                 continue

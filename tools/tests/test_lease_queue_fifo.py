@@ -77,6 +77,9 @@ READ_ONLY = {
     "loadout_get",
     "action_cursor",
     "action_cursor_ids",
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
 }
 
 

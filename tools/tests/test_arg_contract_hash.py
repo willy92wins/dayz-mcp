@@ -40,12 +40,15 @@ class ArgContractHashTest(unittest.TestCase):
             "loadout_apply=loadout_items,object_id,uid\n"
             "loadout_clear=object_id,uid\n"
             "loadout_get=object_id,uid\n"
+            "nav_path_query=from,snap_radius,to\n"
             "object_resolve=pos,radius,type\n"
             "player_kill=uid\n"
+            "players_visibility=pos,radius\n"
+            "server_perf=window_s\n"
             "vehicle_prepare_fixture=mode,pos,radius,type",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "63f8ac460f69ebaa"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4e6500849680c89b"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),
