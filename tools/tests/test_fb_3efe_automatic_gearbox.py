@@ -99,6 +99,8 @@ AUTOMATIC_GUARD = (
     "modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)"
 )
 ASSIGNS_THROTTLE = r"\bthrottle\s*=(?!=)"
+# Any other write: a compound assignment, ++ or --.
+REWRITES_THROTTLE = r"\bthrottle\s*(?:[-+*/%&|^]=|\+\+|--)|(?:\+\+|--)\s*throttle\b"
 
 
 # Pre-fix shape (origin/main 2e844c5), trimmed to the lines the contract reads.
@@ -173,7 +175,8 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
         self.assertEqual(_flat(body[:guard_at]), "float modeNowS = GetGame().GetTickTime();")
         guarded = body[guard_start:guard_end]
         self.assertEqual(guarded.count("ShiftUp();"), 1)
-        self.assertRegex(guarded, re.escape(STAMP) + r"\s*=\s*\w+\s*;")
+        self.assertEqual(len(re.findall(re.escape(STAMP) + r"\s*=(?!=)", guarded)), 1)
+        self.assertRegex(guarded, re.escape(STAMP) + r"\s*=\s*modeNowS\s*;")
         self.assertLess(guarded.index("ShiftUp();"), guarded.index(STAMP))
         self.assertNotIn("ShiftTo", body)
         self.assertNotIn("ShiftDown", body)
@@ -193,7 +196,9 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
         self.assertEqual(_flat(_block(ready, MANUAL)), MANUAL_AT_2E844C5)
 
         # throttle is written once after its declaration, in the automatic
-        # branch, so a manual gets the throttle it was asked for.
+        # branch, and never with a compound operator, ++ or --, so a manual
+        # gets the throttle it was asked for.
+        self.assertEqual(re.findall(REWRITES_THROTTLE, ready), [])
         writes = [m.start() for m in re.finditer(ASSIGNS_THROTTLE, ready)]
         self.assertEqual(len(writes), 2)
         self.assertEqual(_flat(ready[writes[0] : ready.index(";", writes[0]) + 1]),
@@ -218,21 +223,29 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
         source = CAR_SCRIPT.read_text(encoding="utf-8")
 
         def mutant(old: str, new: str) -> str:
-            self.assertEqual(source.count(old), 1, old)
+            # A missing anchor is an error of this test, not a rejection by the
+            # contract: LookupError makes the test error where a rejection fails.
+            if source.count(old) != 1:
+                raise LookupError(f"mutant anchor not found exactly once: {old!r}")
             return source.replace(old, new)
 
-        manual_cut = mutant(
-            "\t\t\t\t\t\tShiftTo(CarGear.FIRST);\n",
-            "\t\t\t\t\t\tShiftTo(CarGear.FIRST);\n\t\t\t\t\t\tthrottle = 0.0;\n",
-        )
-        with self.subTest("manual_throttle_cut"), self.assertRaises(AssertionError):
-            self._assert_manual_unchanged(_on_input(manual_cut))
+        for label, old, new in (
+            ("manual_throttle_cut", "\t\t\t\t\t\tShiftTo(CarGear.FIRST);\n",
+             "\t\t\t\t\t\tShiftTo(CarGear.FIRST);\n\t\t\t\t\t\tthrottle = 0.0;\n"),
+            ("compound_throttle_cut", "\t\t\t\tSetThrottle(throttle);\n",
+             "\t\t\t\tthrottle -= throttle;\n\t\t\t\tSetThrottle(throttle);\n"),
+        ):
+            shipped = mutant(old, new)
+            with self.subTest(label), self.assertRaises(AssertionError):
+                self._assert_manual_unchanged(_on_input(shipped))
         for label, old, new in (
             ("interval_inverted", "modeNowS - MCPCarDrive.s_LastAutoShiftS",
              "MCPCarDrive.s_LastAutoShiftS - modeNowS"),
-            ("interval_never_reached",
+            ("settle_comparison_flipped",
              "modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S",
              "modeNowS - MCPCarDrive.s_LastAutoShiftS < MCPCarDrive.AUTO_SHIFT_SETTLE_S"),
+            ("stamp_not_the_clock", "MCPCarDrive.s_LastAutoShiftS = modeNowS;",
+             "MCPCarDrive.s_LastAutoShiftS = 0;"),
         ):
             shipped = mutant(old, new)
             with self.subTest(label), self.assertRaises(AssertionError):
