@@ -350,6 +350,7 @@ VehicleDoorMode = Literal["read", "open", "close"]
 InputTriggerKind = Literal["key", "input"]
 InputTriggerEntry = Literal["game", "mission"]
 InputTriggerPhase = Literal["click", "hold", "press", "release"]
+PlayerViewMode = Literal["first", "third"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -8158,6 +8159,46 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await execute_player_look_at(runtime, pos, timeout_s)
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Set the local player's view to first or third "
+            "person (DayZPlayerImplement.SetIsInThirdPerson) and read it back "
+            "once the client's job runner has counted camera_set's default "
+            "settle of 3 x 0.05 s of frame time (not a wall-clock bound, and not "
+            "proof the camera finished moving): person_view is third when "
+            "IsInThirdPerson, else first, and camera_class is the class of the "
+            "player's current camera (GetCurrentCamera), for example "
+            "DayZPlayerCamera1stPerson or DayZPlayerCamera3rdPersonErc standing, "
+            "and empty when that camera is null. It sets the client's view "
+            "only: the flag is not networked, so the server's copy of the player "
+            "is not changed. The player's view key still toggles it as before. "
+            "With a raised weapon aimed down the sights in third person the "
+            "camera is still first person, and camera_class shows it. A view the "
+            "engine does not keep, as when the server disables third person, is "
+            "view_not_applied, and its message carries observed=person_view=... "
+            "camera_class=..., without camera_class when it is empty. "
+            "Refused before the view changes: client_not_in_game without a local "
+            "player, no_player when the local player is not a PlayerBase, "
+            "script_camera while camera_set's camera is mounted "
+            "(restore_gameplay first) and busy while an exclusive client job "
+            "runs, such as camera_set or player_look_at (a ui_dialog, "
+            "weapon_action, input_trigger or player_move job does not count). "
+            "After the settle the view is already set, and no_player answers "
+            "when the player is gone by then, script_camera when camera_set's "
+            "camera is mounted by then."
+        )
+    )
+    async def player_view_set(
+        view: PlayerViewMode,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if view not in ("first", "third"):
+            raise ToolError(_bad_args("view", view, "be 'first' or 'third'"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "player_view_set", {"view": view}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "

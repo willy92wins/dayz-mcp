@@ -231,6 +231,9 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "flag_restored": frozenset({"action_hold"}),
     "cleanup_complete": frozenset({"action_hold", "action_hold_cancel", "loadout_clear"}),
     "matched": frozenset({"action_hold_cancel"}),
+    # player_view_set read-back (854c), also on view_not_applied.
+    "person_view": frozenset({"player_view_set"}),
+    "camera_class": frozenset({"player_view_set"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries

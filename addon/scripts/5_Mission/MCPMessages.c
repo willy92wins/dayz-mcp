@@ -224,6 +224,9 @@ class MCPArgs
 	// loadout_apply (220f): the rows to create, in apply order. object_id and
 	// uid above select the target.
 	ref array<ref MCPLoadoutItem> loadout_items;
+	// player_view_set: first or third. An absent key reads "", which the
+	// bridge refuses (bad_args). Empty on every other command.
+	string view;
 	// inventory_move (fb-20261024-212316-17fa). 0 means no target.
 	int item_object_id;
 	int target_object_id;
@@ -1249,6 +1252,12 @@ class MCPResult
 	// its job's last check, which can come one tick after the deadline.
 	bool cleanup_complete;
 	bool matched;
+	// player_view_set read-back after its settle: person_view is third when
+	// IsInThirdPerson, else first; camera_class is the ClassName of the
+	// player's GetCurrentCamera, empty when it returns null. Unassigned on its
+	// refusals and on other commands.
+	string person_view;
+	string camera_class;
 	ref MCPInventoryMove inventory_move;
 };
 

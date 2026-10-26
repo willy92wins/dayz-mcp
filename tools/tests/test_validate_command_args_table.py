@@ -2408,6 +2408,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("missing", {}, (False, "bad_args")),
         ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
     ),
+    # 854c: first or third, nothing else, before anything reaches the client.
+    "player_view_set": (
+        ("valid_first", {"view": "first"}, (True, None)),
+        ("valid_third", {"view": "third"}, (True, None)),
+        ("missing_view", {}, (False, "bad_args")),
+        ("bad_view", {"view": "3rd"}, (False, "bad_args")),
+        ("empty_view", {"view": ""}, (False, "bad_args")),
+        ("cased_view", {"view": "Third"}, (False, "bad_args")),
+        ("number_view", {"view": 3}, (False, "bad_args")),
+        ("bool_view", {"view": True}, (False, "bad_args")),
+        ("null_view", {"view": None}, (False, "bad_args")),
+        ("unhashable_view", {"view": ["third"]}, (False, "bad_args")),
+        ("extra_key", {"view": "third", "extra": None}, (False, "bad_args")),
+    ),
     "action_cursor_ids": (
         (
             "valid",

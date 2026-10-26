@@ -335,6 +335,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "player_move": "player_move",
         "player_respawn": "player_respawn",
         "player_trace": "player_trace",
+        "player_view_set": "player_view_set",
         "restore_gameplay": "restore_gameplay",
         "ui_click": "ui_click",
         "ui_dialog": "ui_dialog",
