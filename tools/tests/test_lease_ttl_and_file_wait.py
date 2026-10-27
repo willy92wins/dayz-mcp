@@ -860,18 +860,30 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         # profile checks come before the read, so (a) and (c) give the read
         # the same 2 s to begin that (b) waits for. Each wait of (a)'s fake
         # outlasts that deadline, so a reader that gets no stop signal is
-        # still blocked when the caller returns.
+        # still blocked when the caller returns. Once stopped, the fake takes
+        # 0.2 s to leave, in a finally so that the exception the cleanup
+        # injects cannot cut it short, and a caller that does not wait for it
+        # finds it alive. (a) and (b) raise the stop grace from the server's
+        # 50 ms (_THREAD_STOP_GRACE_S) to 2 s: a runner that gives the reader
+        # no CPU for 50 ms makes the server report it alive, as it should, and
+        # (c) checks that report.
         state: dict = {"started": threading.Event()}
 
         def blocked_on_stop(*_args, stop=None, **_kwargs):
             state["thread"] = threading.current_thread()
             state["started"].set()
             signal = stop if stop is not None else _StopDeaf()
-            while not signal.stopped:
-                signal.wait(5.0)
+            try:
+                while not signal.stopped:
+                    signal.wait(5.0)
+            finally:
+                time.sleep(0.2)
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
-        with patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop):
+        with (
+            patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop),
+            patch.object(server, "_THREAD_STOP_GRACE_S", 2.0),
+        ):
             began = time.monotonic()
             result = await execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
@@ -880,54 +892,68 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
             elapsed = time.monotonic() - began
         self.assertTrue(state["started"].is_set())
         self.assertFalse(result["satisfied"])
+        self.assertNotIn("reader_alive_at_return", result["scanned"])
         self.assertFalse(state["thread"].is_alive())
-        self.assertLess(elapsed, 3.0)
+        self.assertLess(elapsed, 3.5)
 
-        # (b) Cancelling the wait also stops and joins the reader.
+        # (b) Cancelling the wait also stops and joins the reader, which again
+        # takes 0.2 s to leave.
         state2: dict = {"started": threading.Event()}
 
         def blocked_on_stop2(*_args, stop=None, **_kwargs):
             state2["thread"] = threading.current_thread()
             state2["started"].set()
             signal = stop if stop is not None else _StopDeaf()
-            while not signal.stopped:
-                signal.wait(0.5)
+            try:
+                while not signal.stopped:
+                    signal.wait(0.5)
+            finally:
+                time.sleep(0.2)
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
-        with patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop2):
+        with (
+            patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop2),
+            patch.object(server, "_THREAD_STOP_GRACE_S", 2.0),
+        ):
             task = asyncio.create_task(execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
                 timeout_s=5.0, poll_interval_s=0.5, lookback_lines=0,
             ))
-            await asyncio.to_thread(state2["started"].wait, 2.0)
+            self.assertTrue(await asyncio.to_thread(state2["started"].wait, 2.0))
             began = time.monotonic()
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
-            self.assertLess(time.monotonic() - began, 1.0)
+            self.assertLess(time.monotonic() - began, 1.5)
         self.assertFalse(state2["thread"].is_alive())
 
         # (c) A reader that ignores the stop signal is not claimed terminated:
-        # the scan diagnostics say it was still alive at return.
+        # the scan diagnostics say it was still alive at return. Its fake
+        # waits for the test to release it, so it cannot leave on its own
+        # before the caller looks, and it is released and joined even when a
+        # check fails.
         state3: dict = {"started": threading.Event()}
         release = threading.Event()
 
         def ignores_stop(*_args, stop=None, **_kwargs):
             state3["thread"] = threading.current_thread()
             state3["started"].set()
-            release.wait(5.0)
+            release.wait(30.0)
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
-        with patch.object(server, "_read_contained_handle", side_effect=ignores_stop):
-            result = await execute_wait_for(
-                self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=2.0, poll_interval_s=0.5, lookback_lines=0,
-            )
-        self.assertTrue(state3["started"].is_set())
-        self.assertFalse(result["satisfied"])
-        self.assertTrue(result["scanned"].get("reader_alive_at_return"))
-        release.set()
-        state3["thread"].join(6.0)
+        try:
+            with patch.object(server, "_read_contained_handle", side_effect=ignores_stop):
+                result = await execute_wait_for(
+                    self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
+                    timeout_s=2.0, poll_interval_s=0.5, lookback_lines=0,
+                )
+            self.assertTrue(state3["started"].is_set())
+            self.assertFalse(result["satisfied"])
+            self.assertTrue(result["scanned"].get("reader_alive_at_return"))
+        finally:
+            release.set()
+            if "thread" in state3:
+                state3["thread"].join(6.0)
         self.assertFalse(state3["thread"].is_alive())
 
     async def test_f10_release_during_final_status_aborts(self) -> None:
