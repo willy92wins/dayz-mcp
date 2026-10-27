@@ -139,10 +139,19 @@ _HEALTH_VALUE_APIS = (
     "SetHealth01",
     "GetSlotIdFromString",
 )
-_DISPATCH_POST = (
-    'else { result.ok = false; result.error = "unknown_command"; } '
-    "if (postNow) { PostResult(result); }"
+_DISPATCH_CMD_LITERAL = r'command\s*\.\s*cmd\s*==\s*("(?:\\.|[^"\\\n])*")'
+_DISPATCH_CMD_IF = re.compile(r"if\s*\(\s*" + _DISPATCH_CMD_LITERAL + r"\s*\)")
+_DISPATCH_CMD_ELSE_IF = re.compile(
+    r"else\s+if\s*\(\s*" + _DISPATCH_CMD_LITERAL + r"\s*\)"
 )
+_DISPATCH_PREAMBLE = (
+    "if (!command) { return; } MCPResult result = new MCPResult(); "
+    "result.id = command.id; result.tick_poll_sent = m_TickPollSent; "
+    "result.tick_poll_callback = m_TickPollCallback; "
+    "result.tick_dispatch = m_Tick; bool postNow = true;"
+)
+_DISPATCH_UNKNOWN = 'result.ok = false; result.error = "unknown_command";'
+_DISPATCH_POST_CALL = "if (postNow) { PostResult(result); }"
 
 
 def _blank_match(match: re.Match[str], *, strings: bool) -> str:
@@ -166,7 +175,9 @@ def _without_comments_and_strings(source: str) -> str:
 
 def _block_span(source: str, start: int) -> tuple[int, int]:
     view = _without_comments_and_strings(source)
-    brace = view.index("{", start)
+    brace = view.find("{", start)
+    if brace < 0:
+        raise AssertionError(f"no opening brace at offset {start}")
     depth = 0
     for index in range(brace, len(view)):
         if view[index] == "{":
@@ -208,6 +219,26 @@ def _collapse_dots(source: str) -> str:
     return _DOT_SPACES.sub(".", source)
 
 
+def _skip_ws(source: str, pos: int) -> int:
+    while pos < len(source) and source[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _ws_one_line(source: str) -> str:
+    return re.sub(r"\s+", " ", source).strip()
+
+
+def _braced_block(source: str, start: int, what: str) -> tuple[int, int]:
+    # The block must open right after start, with only blanks between, so a
+    # statement without braces cannot borrow a later branch's block.
+    view = _without_comments_and_strings(source)
+    brace = _skip_ws(view, start)
+    if not view.startswith("{", brace):
+        raise AssertionError(f"{what} is not followed by its block")
+    return _block_span(source, brace)
+
+
 def _paren_pairs(source: str) -> list[tuple[int, int]]:
     stack: list[int] = []
     pairs: list[tuple[int, int]] = []
@@ -235,10 +266,9 @@ def _health_locals_unmutated(testcase: unittest.TestCase, bare: str) -> None:
         writes = _local_writes(source, name)
         testcase.assertEqual(len(writes), 1, name)
         for match in re.finditer(rf"(?<![\w.]){name}\b", source):
-            testcase.assertFalse(
-                source[match.end() :].startswith("."),
-                name,
-            )
+            rest = source[match.end() :]
+            testcase.assertFalse(rest.startswith("."), name)
+            testcase.assertIsNone(re.match(r"\s*\[", rest), name)
             enclosing = [
                 (open_at, close_at)
                 for open_at, close_at in pairs
@@ -624,14 +654,71 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
     def test_e1_dispatch_posts_in_the_same_tick_with_no_job(self) -> None:
         # E1. Every return in the method is the literal true (return (true);
         # is rejected on purpose). The final return true; is its own outer
-        # statement, so no path falls off the end. Dispatch's unknown_command
-        # else is followed immediately by if (postNow) { PostResult(result); },
-        # and Dispatch ends there.
+        # statement, so no path falls off the end. Dispatch's preamble is the
+        # null-command return and the MCPResult setup; for object_set_health
+        # it takes only that verb's branch (each branch is command.cmd == a
+        # distinct string literal, chained with else, and each condition and
+        # the final else open their block at once) and calls PostResult in
+        # that tick. PostResult serializes and leaves the send asynchronous
+        # (MCPBridge.c:7547).
         dispatch = _without_comments(
             _block_after(self.source, self.source.index(DISPATCH_CHAIN))
         )
-        branch = _if_body(dispatch, f'command.cmd == "{COMMAND}"')
-        self.assertEqual(branch.strip(), f"postNow = {DISPATCHER}(command, result);")
+        head = _DISPATCH_CMD_IF.search(dispatch)
+        self.assertIsNotNone(head, "Dispatch has no command.cmd chain")
+        assert head is not None
+        preamble = dispatch[: head.start()]
+        self.assertEqual(_ws_one_line(preamble), _DISPATCH_PREAMBLE)
+        preamble_returns = re.findall(r"\breturn\b([^;]*);", preamble)
+        self.assertEqual([value.strip() for value in preamble_returns], [""])
+        literals: list[str] = []
+        pos = head.start()
+        first = _DISPATCH_CMD_IF.match(dispatch, pos)
+        self.assertIsNotNone(first, "first Dispatch branch is not command.cmd == literal")
+        assert first is not None
+        while True:
+            if first is not None:
+                matched = first
+                first = None
+            else:
+                pos = _skip_ws(dispatch, pos)
+                self.assertLess(pos, len(dispatch), "Dispatch chain ended before else")
+                self.assertTrue(
+                    dispatch.startswith("else", pos),
+                    "Dispatch branch is not followed by else",
+                )
+                after_else = _skip_ws(dispatch, pos + 4)
+                self.assertLess(after_else, len(dispatch), "else has no continuation")
+                if dispatch.startswith("if", after_else):
+                    matched = _DISPATCH_CMD_ELSE_IF.match(dispatch, pos)
+                    self.assertIsNotNone(
+                        matched,
+                        "else if is not command.cmd == a string literal",
+                    )
+                    assert matched is not None
+                else:
+                    inner_start, inner_end = _braced_block(dispatch, after_else, "else")
+                    self.assertEqual(
+                        _ws_one_line(dispatch[inner_start:inner_end]),
+                        _DISPATCH_UNKNOWN,
+                    )
+                    self.assertEqual(
+                        _ws_one_line(dispatch[inner_end + 1 :]),
+                        _DISPATCH_POST_CALL,
+                    )
+                    break
+            literal = matched.group(1)[1:-1]
+            self.assertNotIn(literal, literals, literal)
+            literals.append(literal)
+            inner_start, inner_end = _braced_block(dispatch, matched.end(), literal)
+            if literal == COMMAND:
+                self.assertEqual(
+                    dispatch[inner_start:inner_end].strip(),
+                    f"postNow = {DISPATCHER}(command, result);",
+                )
+            pos = inner_end + 1
+            self.assertGreater(pos, matched.end())
+        self.assertIn(COMMAND, literals)
         self.assertNotIn("job", self.code.lower())
         self.assertNotIn("CallLater", self.code)
         self.assertNotIn("AddJob", self.code)
@@ -640,19 +727,18 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         self.assertEqual([value.strip() for value in returns], ["true"] * len(returns))
         stripped = self.bare.rstrip()
         self.assertTrue(stripped.endswith("return true;"))
-        head = stripped[: -len("return true;")].rstrip()
-        self.assertTrue(head == "" or head.endswith(";") or head.endswith("}"), head)
+        head_stmt = stripped[: -len("return true;")].rstrip()
         self.assertTrue(
-            re.sub(r"\s+", " ", dispatch).strip().endswith(_DISPATCH_POST),
-            dispatch,
+            head_stmt == "" or head_stmt.endswith(";") or head_stmt.endswith("}"),
+            head_stmt,
         )
 
     def test_e2_the_steps_run_in_d2_order(self) -> None:
         # E2. Each of health01, zone and slot is assigned only at its read,
-        # is never followed by a member access, and sits inside no call but
-        # GetMaxHealth, GetHealth01, GetHealthLevel, SetHealth01 and
-        # GetSlotIdFromString. An if condition and plain parentheses are not
-        # calls; any other name before a parenthesis is, while and switch
+        # is never followed by a member access or an index, and sits inside
+        # no call but GetMaxHealth, GetHealth01, GetHealthLevel, SetHealth01
+        # and GetSlotIdFromString. An if condition and plain parentheses are
+        # not calls; any other name before a parenthesis is, while and switch
         # included, and so is a call around an allowed one.
         _in_order(
             self,
