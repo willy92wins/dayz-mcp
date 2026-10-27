@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -107,7 +108,7 @@ class VehiclePrepareFixtureTest(unittest.TestCase):
             "car.OnDebugSpawn();",
             "PopulateTelemetryObject(car, telemetry);",
             "result.telemetry = telemetry;",
-            "result.vehicle_fixture_ready = IsVehicleFixtureReady(car);",
+            "result.vehicle_fixture_ready = true;",
         ]
         for token in required:
             with self.subTest(token=token):
@@ -116,8 +117,9 @@ class VehiclePrepareFixtureTest(unittest.TestCase):
         # Classname allowlist must stay gone.
         self.assertNotIn("ExampleCar", body)
         self.assertEqual(body.count("car.OnDebugSpawn();"), 1)
+        # fb-20261026-150310-9582: the one job it queues only waits for the car.
+        self.assertEqual(re.findall(r'job\.kind = "(\w+)";', body), ["vehicle_fixture"])
         forbidden = [
-            "MCPJob",
             "StartCommand_Vehicle",
             "EngineStart",
             "SetThrottle",
