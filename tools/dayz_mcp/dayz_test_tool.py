@@ -3430,9 +3430,12 @@ def _launched_roles(run: dict[str, object]) -> list[str]:
             if not isinstance(item, dict):
                 continue
             role = item.get("role")
-            if isinstance(role, str) and role and role not in seen:
-                seen.add(role)
-                roles.append(role)
+            if not isinstance(role, str) or not role or role in seen:
+                continue
+            if role == "crash_reporter":
+                continue
+            seen.add(role)
+            roles.append(role)
     roles.sort(key=lambda role: (_ROLE_CLOSE_ORDER.get(role, 2), role))
     return roles
 

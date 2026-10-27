@@ -1049,6 +1049,14 @@ class LaunchIntentActivationTest(unittest.TestCase):
             daemon.orphan_guard,
             "snapshot_udp_port_holders",
             return_value={"known": True, "holders": []},
+        ), patch.object(
+            daemon.orphan_guard,
+            "snapshot_processes_with_parent",
+            return_value={"known": True, "processes": []},
+        ), patch.object(
+            daemon.orphan_guard, "open_process_anchor", return_value=None
+        ), patch.object(
+            daemon.orphan_guard, "close_process_anchor", return_value=None
         ):
             daemon._activate_server_coordination(state, "generation-after-the-crash")
         return state
