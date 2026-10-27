@@ -4446,7 +4446,7 @@ def _failed_active_run_result(
     port: int | None = None,
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
-    extra.update(_port_conflict_fields(box, port))
+    extra.update(_port_conflict_fields(box, port, caller_session=caller_session))
     return _attach_queue_offer(
         _apply_takeover_required(
             {
@@ -6468,7 +6468,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ambiguous_object. An object already registered keeps that "
             "same-run id; otherwise the id is this command's id. The reply "
             "is object_id, type and pos_real. object_delete of that id "
-            "deletes the object. This does not pick a nearest neighbour."
+            "deletes the object. This does not pick a nearest neighbour. "
+            "The search does not walk attachments: an item attached to another "
+            "entity (a mounted headlight bulb) is not among the objects it "
+            "matches, so with no loose object of that class in range it answers "
+            "object_not_found. inventory_attach answers the id of the item it "
+            "attaches as item_object_id; world_spawn registers what it spawns."
         )
     )
     async def object_resolve(
@@ -6570,7 +6575,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             "Requires a lease (session_acquire_wait). Seat the first "
             "player in the driver seat of a vehicle near pos. seated=1 "
-            "confirms the command was accepted, not the final seated state. "
+            "means the server read that player (or, if that one is gone, the "
+            "first player) in the driver seat of that vehicle once the get-in "
+            "ended. The bridge checks that each tick: seated=1 on the first "
+            "tick that reads it, timeout on a tick that does not once 5 s have "
+            "passed, whatever timeout_s is. A timeout can still end seated: "
+            "read query_all_players (in_vehicle) before you retry. "
             "engine_set and vehicle_control require client-side ownership; "
             "establish it with vehicle_get_in_client."
         )
@@ -9088,10 +9098,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Seats the client in the vehicle nearest to pos within the search radius. "
             "This is client ownership for engine_set, vehicle_control, and "
             "vehicle_trace; it does not place the player in the server crew. "
-            "ActionCondition gates such as ActionSwitchLights still fail "
-            "until vehicle_enter. One car per run: there is no get-out after "
-            "this seat; player_teleport of the occupant returns "
-            "occupant_client_seated. Tear down with object_delete of the "
+            "action_use checks an action's ActionCondition on the client, where "
+            "ActionSwitchLights reads this client seat and the vehicle's power; "
+            "the lights toggle in the action's server step, which reads "
+            "vehicle_enter's server seat, so a lights test takes both seats. "
+            "One car per run: there is no get-out after this seat; "
+            "player_teleport of the occupant returns occupant_client_seated. "
+            "vehicle_enter runs no client get-in: after a get-out with "
+            "action_use ActionGetOutTransport, vehicle_enter in a second car "
+            "seats only the server's player there. Tear down with object_delete of the "
             "in-session world_spawn object_id — that id does not survive the "
             "run. Deleting a seated transport needs care (it ejects; a stale "
             "or guessed object_id is not that fixture)."
