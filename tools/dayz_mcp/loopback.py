@@ -5261,6 +5261,14 @@ class ServerState:
             response["discarded"] = True
         return 200, response
 
+    def command_owner(
+        self, command_id: int
+    ) -> tuple[ClientIdentity, str] | None:
+        """inbox 6310: the lease that enqueued this command, if any."""
+
+        with self._lock:
+            return self._command_owner.get(command_id)
+
     def take_result(self, command_id: int, remove: bool = False) -> dict | None:
         self.reap_expired_commands()
         owner_operation: tuple[ClientIdentity, str, int] | None = None
@@ -5992,6 +6000,19 @@ class Handler(BaseHTTPRequestHandler):
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
         sink(message)
 
+    def _human_input_payload(
+        self, session_id: object, lease_id: object
+    ) -> dict[str, object] | None:
+        # inbox 6310: report only; a failure never changes the verb or heartbeat.
+        lifecycle = self.state.lifecycle
+        if lifecycle is None or not hasattr(lifecycle, "human_input_block"):
+            return None
+        try:
+            return lifecycle.human_input_block(session_id, lease_id)
+        except Exception:
+            self._log("human_input_block failed")
+            return {"signal": "unavailable", "runs": []}
+
     def _clear_request_renewed_lease(self) -> None:
         """Drop a lease id left on this thread by an earlier request.
 
@@ -6318,6 +6339,12 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._adopt_on_grant(client, payload)
 
         payload = self._persist_coordination(payload)
+        if action == "heartbeat" and status == 200:
+            block = self._human_input_payload(
+                client.session_id, payload.get("lease_id")
+            )
+            if block is not None:
+                payload["human_input"] = block
         self._log(
             "SESSION "
             f"event={action} status={status} "
@@ -6556,12 +6583,18 @@ class Handler(BaseHTTPRequestHandler):
         # leak one _results entry per command in the shared daemon. Default keeps
         # the non-destructive read for back-compat with the harness.
         remove = qs.get("remove", ["0"])[0] == "1"
+        owner = self.state.command_owner(command_id)
         result = self.state.take_result(command_id, remove=remove)
         if result is None:
             self._json(200, {"status": "pending"})
             return
 
-        self._json(200, {"status": "done", "result": result})
+        body: dict[str, object] = {"status": "done", "result": result}
+        if owner is not None:
+            block = self._human_input_payload(owner[0].session_id, owner[1])
+            if block is not None:
+                body["human_input"] = block
+        self._json(200, body)
 
     def _handle_status(self) -> None:
         # Authenticated health/status read used by client bridge_status and by the

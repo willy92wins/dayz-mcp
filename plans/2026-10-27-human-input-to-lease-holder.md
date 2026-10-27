@@ -2,7 +2,7 @@
 
 Base: main `4c4e52c`. Python only: no sealed module, no PBO, no bridge change, no new Win32 read.
 
-Revision 1, written before Guillermo answers the card (27/10 ~17:45Z). It follows the recommended option, «En cada resultado». With «Solo heartbeat», D4 and its tests (T4 to T6, M7 and M8) drop out.
+Revision 2: the tests as built, after the first implementation. Like revision 1, written before Guillermo answers the card (27/10 ~17:45Z), it follows the recommended option, «En cada resultado». With «Solo heartbeat», D4 and its tests (T4 to T6, M7 and M8) drop out.
 
 ## What happened (fb-20261027-173606-6310, LFSkateboard F3a run 4)
 
@@ -33,7 +33,7 @@ There is one block, built in one place and published in two:
 }
 ```
 
-- **`runs`**: the runs in state `RUNNING` whose `owner_session_id` and `owner_lease_id` are the caller's session and lease, sorted by `run_id`. It is an empty list when the lease owns no run.
+- **`runs`**: the runs in state `RUNNING` whose `owner_session_id` and `owner_lease_id` are the caller's session and lease, sorted by `run_id`, the order `list_runs` gives (`process_lifecycle.py:1906-1908`). It is an empty list when the lease owns no run.
 - **`count`**: how many samples this daemon has credited to the run as verified input. It never goes down while the daemon generation lasts. A new generation starts again from 0, because the counters use the same `(generation, run_id)` keys as `_human_input_at`.
 - **`uncertain_count`**: the same, for input credited as uncertain.
 - **`last_age_s`**: seconds since the latest verified input on the run, as `human_input_age_s` gives it; null when there was none.
@@ -64,7 +64,7 @@ The block is a report. No verb is refused, delayed or retried because of it. Bui
 - **Owner lookup.** `ServerState.command_owner(command_id)` reads `_command_owner` (`loopback.py:2286`) under the state lock. That table is filled at `:3958-3959`, and only for a command enqueued under a lease.
 - **The daemon's answer.** `_handle_await` reads the owner before `take_result`, which pops it (`:5277`). A `done` answer then gets `human_input` for that owner. Pending answers, and commands with no owner, are unchanged.
 - **The client.** `ClientRuntime._await_result` (`server.py:2516-2521`) copies `human_input` onto the result after `prune_unfilled_fields`. So `call_bridge` returns it, and every tool that returns the bridge result as it is carries it.
-- **Composite tools.** Tools that build their own payload from bridge results keep their shape; one example is `entities_query` (`server.py:8007-8016`). The next heartbeat or plain verb gives the same counts.
+- **Composite tools.** Tools that build their own payload from bridge results keep their shape; one example is `entities_query` (`server.py:8007-8016`). So does `ClientRuntime.probe_bridge_result` (`server.py:2684-2711`, used only by `ui_dialog`), which reads `/await?remove=1` itself and returns the pruned row without the block. The next heartbeat or plain verb gives the same counts.
 - **Embedded mode.** It has no leases (`_client_runtime`, `server.py:5058-5061`), so nothing changes there.
 
 ## Out of scope
@@ -77,23 +77,25 @@ The block is a report. No verb is refused, delayed or retried because of it. Bui
 
 ## Tests (fakes only)
 
-No test calls a real Windows API, starts or snapshots a real process, or opens a real socket. The tests use fake `InputSample`s, a fake guard, a real manifest store in a temporary folder, and the loopback handler driven in-process.
+No test calls a real Windows API or starts or snapshots a real process. The tests use fake `InputSample`s, a fake guard, a real manifest store in a temporary folder, and the `SessionLoopback` daemon (`session_http_helpers.py:42-79`), which listens on 127.0.0.1 with port 0. That is the only socket. The daemon binds both peers to the run `test-run` (`fence_helpers.py:15-42`), so the HTTP tests' owned run takes that id, and they store each result as the bound server instance presents it, since another instance's result is discarded (`loopback.py:5170-5187`).
 
 - **T1 (D1).** A RUNNING run is owned by session S with lease L, and has a client record that the fake guard matches.
-  - Three samples whose tick advances with the client's pid in front give `count` 3, `uncertain_count` 0, and `last_age_s` equal to the clock minus the last epoch.
-  - A sample whose tick does not advance, and a sample with another pid in front, change nothing.
+  - A first sample sets the baseline (`input_activity.py:184-186`). Three more whose tick advances, with the client's pid in front, give `count` 3, `uncertain_count` 0, and `last_age_s` equal to the clock minus the last epoch.
+  - With the clock before that epoch, `last_age_s` is null and `count` is still 3, as `human_input_age_s` drops a stamp later than the clock (`process_lifecycle.py:913-914`).
+  - A sample whose tick does not advance changes nothing. Neither does new input with another pid in front at that sample and at the one before it. The attributor credits the run in front at either end of a step (`input_activity.py:196-208`), so the focus leaves the client before that input.
   - A sample whose foreground identity the guard cannot read gives `uncertain_count` 1, with `count` still 3.
   - A sample whose tick advances but whose epoch is not newer than the run's stored stamp leaves both counters as they were.
   - Negative: after the run retires, it has no row and no counters left.
 - **T2 (D2).** `human_input_block(S, L)` gives T1's row.
   - `(S, L2)`, `(S2, L)`, a RUNNING_IDLE ownerless run, and empty strings all give `runs: []`.
+  - A second run of S and L, `run-a`, comes before T1's run, with `count` 0 and `last_age_s` null.
   - `signal` is `ok` with a good sample 1 s old. It is `unavailable` with no sample, with one 3 s old, and after a stretch of failed samples.
 - **T3 (D3).** Through `_handle_session`:
   - a 200 heartbeat carries T2's block;
   - a heartbeat with a wrong token keeps its error status and has no `human_input`;
   - with no lifecycle on the state, there is no key.
 - **T4 (D4, daemon).**
-  - For a command enqueued under L with its result stored, `/await?remove=1` gives `status` done, the bridge row unchanged, and `human_input`.
+  - For a command enqueued under L with its result stored, `/await?remove=1` gives `status` done, the bridge row unchanged, and `human_input`. The result is stored as not discarded.
   - A command enqueued with no lease gets no `human_input`.
   - A pending command gets `{"status": "pending"}` only.
 - **T5 (D4, client).** `ClientRuntime._await_result` with a fake `_call`:
@@ -101,19 +103,21 @@ No test calls a real Windows API, starts or snapshots a real process, or opens a
   - an answer without it returns no key;
   - an `ok: 0` row still raises the bridge error.
 - **T6 (D4, tools).** With a fake runtime whose `call_bridge` returns a row with the block, `query_player_state`, `object_delete` and `ui_focus` return it as it is.
-- **T7 (exception).** If `human_input_block` raises, the heartbeat and `/await` still answer 200, with `{"signal": "unavailable", "runs": []}` and one log line.
+- **T7 (exception).** If `human_input_block` raises, the heartbeat and `/await` still answer 200, with `{"signal": "unavailable", "runs": []}` and one log line. A dropped connection, which is what an escaping exception gives, fails the test as an assertion.
 
 Mutants are applied one at a time on a copy. Each is killed by the test named:
 
 - M1: uncertain input counted as verified (T1).
 - M2: a counter that grows on a sample that did not update the stamp (T1).
 - M3: counters kept after the run retires (T1).
-- M4: rows for runs of another lease or session (T2).
-- M5: `signal` ok with a stale or missing sample (T2).
+- M4: rows for runs of another lease, or of another session (T2).
+- M5: `signal` ok with a stale sample, or with none (T2).
 - M6: the block on a heartbeat error answer (T3).
 - M7: the owner read after `take_result`, which leaves no block (T4).
 - M8: the client dropping the block (T5).
 - M9: an exception escaping `human_input_block` (T7).
+- M10: the rows in reverse order (T2).
+- M11: an age for a stamp later than the clock (T1).
 
 Pass criteria (R26):
 

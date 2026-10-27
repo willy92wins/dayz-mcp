@@ -2517,7 +2517,10 @@ class ClientRuntime:
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
                 if not result.get("ok"):
                     raise _bridge_error(result, cmd)
-                return result_prune.prune_unfilled_fields(cmd, result)
+                pruned = result_prune.prune_unfilled_fields(cmd, result)
+                if "human_input" in payload:
+                    pruned["human_input"] = payload["human_input"]
+                return pruned
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break
@@ -5191,6 +5194,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "LOW-LEVEL: prefer session_acquire_wait. "
             "Renew an active lease while exclusive work is in progress or "
             "across a pause with no other dayz-mcp calls. "
+            "The answer carries human_input for the lease's RUNNING runs; "
+            "compare count and uncertain_count between two answers to see "
+            "input credited in between. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )

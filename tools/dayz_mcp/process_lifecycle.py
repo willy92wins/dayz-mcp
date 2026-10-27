@@ -2196,6 +2196,9 @@ class ProcessLifecycle:
         self._ownerless_since: dict[tuple[str, str], float] = {}
         self._human_input_at: dict[tuple[str, str], float] = {}
         self._uncertain_input_at: dict[tuple[str, str], float] = {}
+        # inbox 6310: how many samples updated each stamp this generation.
+        self._human_input_count: dict[tuple[str, str], int] = {}
+        self._uncertain_input_count: dict[tuple[str, str], int] = {}
         self._launched_by: dict[tuple[str, str], ClientIdentity] = {}
         # 250f PR 3. Launcher requests restart the idle clock (§3.2). Closing
         # is the warden's countdown. A failed warning stays idle_waiting until
@@ -2904,9 +2907,13 @@ class ProcessLifecycle:
                 if key in self._retired_use_keys:
                     continue
                 table = self._human_input_at if verified else self._uncertain_input_at
+                counters = (
+                    self._human_input_count if verified else self._uncertain_input_count
+                )
                 current = table.get(key)
                 if current is None or epoch > current:
                     table[key] = epoch
+                    counters[key] = counters.get(key, 0) + 1
                 credited.append(run_id)
                 self._invalidate_pending_adoption_locked(
                     run_id, "human" if verified else "uncertain"
@@ -3004,6 +3011,8 @@ class ProcessLifecycle:
                 self._ownerless_since,
                 self._human_input_at,
                 self._uncertain_input_at,
+                self._human_input_count,
+                self._uncertain_input_count,
                 self._launched_by,
             ):
                 for key in [key for key in table if key[1] == run_id]:
@@ -6775,6 +6784,65 @@ class ProcessLifecycle:
     def human_input_at(self, run_id: str) -> float | None:
         with self._activity_lock:
             return self._human_input_at.get(self._activity_key(run_id))
+
+    def human_input_block(
+        self,
+        session_id: object,
+        lease_id: object,
+        *,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """inbox 6310: cumulative input counts for this lease's RUNNING runs.
+
+        One clock reading. Empty or non-string ids yield runs=[] and still
+        report whether the sampler signal is fresh.
+        """
+
+        clock = time.time() if now is None else float(now)
+        runs = self.manifest.list_runs()
+        with self._activity_lock:
+            good_at = self._input_good_at
+            signal_ok = (
+                good_at is not None
+                and 0.0 <= clock - good_at <= INPUT_SIGNAL_STALE_S
+            )
+            rows: list[dict[str, object]] = []
+            if (
+                isinstance(session_id, str)
+                and session_id
+                and isinstance(lease_id, str)
+                and lease_id
+            ):
+                # list_runs gives the runs sorted by run_id.
+                owned = [
+                    run
+                    for run in runs
+                    if run.state == "RUNNING"
+                    and run.owner_session_id == session_id
+                    and run.owner_lease_id == lease_id
+                ]
+                for run in owned:
+                    key = self._activity_key(run.run_id)
+                    human_at = self._human_input_at.get(key)
+                    if human_at is not None and human_at > clock:
+                        human_at = None
+                    last_age_s = (
+                        round(clock - human_at, 3) if human_at is not None else None
+                    )
+                    rows.append(
+                        {
+                            "run_id": run.run_id,
+                            "count": self._human_input_count.get(key, 0),
+                            "uncertain_count": self._uncertain_input_count.get(
+                                key, 0
+                            ),
+                            "last_age_s": last_age_s,
+                        }
+                    )
+            return {
+                "signal": "ok" if signal_ok else "unavailable",
+                "runs": rows,
+            }
 
     def launcher_request_at(self, run_id: str) -> float | None:
         with self._activity_lock:
