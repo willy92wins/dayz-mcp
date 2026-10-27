@@ -850,20 +850,22 @@ class CrashReporter7417Test(unittest.TestCase):
         self.anchors.refuse.add(server.pid)
         self.add_run(server, client)
         self.anchor_alive(server, client)
-        self.assertNotIn(
-            (RUN_ID, server.pid, server.creation_time_utc),
-            self.lifecycle._parent_anchors,
-        )
-        self.anchors.refuse.discard(server.pid)
+        server_key = (RUN_ID, server.pid, server.creation_time_utc)
+        self.assertNotIn(server_key, self.lifecycle._parent_anchors)
         self.guard.snapshots[server.pid] = snapshot(server)
         self.guard.snapshots[client.pid] = dict(GONE)
         reused = self.reporter_snapshot(server.pid, "2026-07-15T00:02:00.0000000Z")
         scans = {"n": 0}
+        anchored_at_reuse: list[bool] = []
 
         def probe() -> dict[str, object]:
             scans["n"] += 1
             if scans["n"] < 2:
                 return {"known": True, "processes": []}
+            # The server's pid is reused only while nothing anchors it; from
+            # here its open is the reporter's pin.
+            anchored_at_reuse.append(server_key in self.lifecycle._parent_anchors)
+            self.anchors.refuse.discard(server.pid)
             self.guard.snapshots[server.pid] = reused
             return {
                 "known": True,
@@ -872,6 +874,7 @@ class CrashReporter7417Test(unittest.TestCase):
 
         self.lifecycle.child_probe = probe
         stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(set(anchored_at_reuse), {False})
         self.assertEqual(stopped.get("ok"), True)
         self.assertEqual(stopped.get("state"), "EXITED")
         self.assertEqual(stopped.get("terminated"), 2)
@@ -1319,6 +1322,341 @@ class CrashReporter7417Test(unittest.TestCase):
         self.assertEqual(result.get("terminal_safe"), True)
         self.assertEqual(self.lifecycle._parent_anchors, {})
         self.assertTrue(self.anchors.closed)
+
+    def reset_run(self, *records: ProcessRecord) -> None:
+        run = self.store.get(RUN_ID)
+        run.state = "RUNNING"
+        run.owner_session_id = "A"
+        run.owner_lease_id = "lease-A"
+        run.processes = list(records)
+        self.store.replace(run)
+
+    def reused_after_pin(self, server: ProcessRecord, at_recheck: dict[str, object]) -> list[object]:
+        """r3 H1: the parent and its reporter die between the parent gate
+        and the pin, and the pin opens whatever holds the reporter's pid."""
+        self.add_run(server)
+        self.anchors.refuse.add(server.pid)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.child_rows = [self.reporter_row(40784, server.pid)]
+        pins: list[object] = []
+
+        def open_pin(pid: int) -> object | None:
+            token = self.anchors.open(pid)
+            if pid == 40784:
+                self.guard.snapshots[server.pid] = dict(at_recheck)
+                self.guard.snapshots[40784] = self.reporter_snapshot(
+                    40784, "2026-07-15T00:05:01.0000000Z"
+                )
+                pins.append(token)
+            return token
+
+        self.lifecycle.parent_anchor = (open_pin, self.anchors.close)
+        return pins
+
+    def test_t24_unanchored_parent_reused_before_the_pin_is_not_the_parent(self) -> None:
+        server = process(57116, "server")
+        foreign = dict(snapshot(server), creation_time_utc="2026-07-15T00:05:00.0000000Z")
+        pins = self.reused_after_pin(server, foreign)
+        self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(self.guard.terminate_calls, [])
+        stored = self.store.get(RUN_ID)
+        self.assertNotIn("crash_reporter", [item.role for item in stored.processes])
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(self.anchors.closed.count(pins[0]), 1)
+
+    def test_t24_unanchored_parent_gone_or_unknown_at_the_recheck_refuses(self) -> None:
+        cases = (
+            (dict(GONE), "crash_reporter_parent_unverified"),
+            ({"error": "identity_unavailable"}, "parent_scan_unknown"),
+        )
+        for at_recheck, reason in cases:
+            with self.subTest(reason=reason):
+                self.tearDown()
+                self.setUp()
+                server = process(57116, "server")
+                pins = self.reused_after_pin(server, at_recheck)
+                stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+                self.assertEqual(stopped.get("error"), reason)
+                self.assertEqual(self.guard.terminate_calls, [])
+                stored = self.store.get(RUN_ID)
+                self.assertNotIn(
+                    "crash_reporter", [item.role for item in stored.processes]
+                )
+                self.assertEqual(self.anchors.closed.count(pins[0]), 1)
+
+    def test_t25_partial_stop_before_the_rescan_keeps_the_new_reporters_parent(self) -> None:
+        # r3 H2: the server dies with a reporter, then the client's kill
+        # fails before the stop's own rescan.
+        server = process(57116, "server")
+        client = process(53904, "client")
+        self.add_run(server, client)
+        self.anchor_alive(server, client)
+        self.guard.snapshots[40784] = self.reporter_snapshot(
+            40784, "2026-07-15T00:01:00.0000000Z"
+        )
+        failed_kill = {"terminated": False, "error": "termination_unconfirmed"}
+        scans = {"n": 0}
+
+        def born_after_first_scan() -> dict[str, object]:
+            scans["n"] += 1
+            if scans["n"] < 2:
+                return {"known": True, "processes": []}
+            return {
+                "known": True,
+                "processes": [self.reporter_row(40784, server.pid)],
+            }
+
+        self.lifecycle.child_probe = born_after_first_scan
+        self.guard.terminate_results = [{"terminated": True}, dict(failed_kill)]
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        self.assertEqual(
+            [record.pid for record in self.guard.terminate_calls],
+            [server.pid, client.pid],
+        )
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (client.pid, "client"), (40784, "crash_reporter")],
+        )
+
+        # The rescan finds nothing: only the survivor stays.
+        self.reset_run(server, client)
+        self.lifecycle.child_probe = lambda: {"known": True, "processes": []}
+        self.guard.terminate_calls.clear()
+        self.guard.terminate_results = [{"terminated": True}, dict(failed_kill)]
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(client.pid, "client")],
+        )
+
+        # The rescan is unknown: the parents stay with the survivor.
+        self.reset_run(server, client)
+        scans["n"] = 0
+
+        def unknown_after_first_scan() -> dict[str, object]:
+            scans["n"] += 1
+            if scans["n"] < 2:
+                return {"known": True, "processes": []}
+            return {"known": False}
+
+        self.lifecycle.child_probe = unknown_after_first_scan
+        self.guard.terminate_calls.clear()
+        self.guard.terminate_results = [{"terminated": True}, dict(failed_kill)]
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (client.pid, "client")],
+        )
+
+    def test_t25_quarantine_before_the_rescan_keeps_the_new_reporters_parent(self) -> None:
+        server = process(57116, "server")
+        client = process(53904, "client")
+        self.add_run(server, client)
+        self.anchor_alive(server, client)
+        self.guard.snapshots[40784] = self.reporter_snapshot(
+            40784, "2026-07-15T00:01:00.0000000Z"
+        )
+        scans = {"n": 0}
+
+        def born_after_first_scan() -> dict[str, object]:
+            scans["n"] += 1
+            if scans["n"] < 2:
+                return {"known": True, "processes": []}
+            return {
+                "known": True,
+                "processes": [self.reporter_row(40784, server.pid)],
+            }
+
+        self.lifecycle.child_probe = born_after_first_scan
+        original = self.guard.terminate
+
+        def terminate_then_quarantine(record: ProcessRecord) -> dict[str, object]:
+            result = original(record)
+            self.lifecycle.retail_probe = lambda: {
+                "known": True,
+                "processes": [{"pid": 1, "name": "DayZ_x64.exe"}],
+            }
+            return result
+
+        self.guard.terminate = terminate_then_quarantine  # type: ignore[method-assign]
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        self.assertEqual(stopped.get("reason"), "retail_quarantine")
+        self.assertEqual(
+            [record.pid for record in self.guard.terminate_calls], [server.pid]
+        )
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (client.pid, "client"), (40784, "crash_reporter")],
+        )
+
+    def test_t26_reconcile_keeps_the_gone_parent_of_a_surviving_reporter(self) -> None:
+        # r3 H5: the dead server's pid still names the ports its reporter
+        # inherited.
+        server = process(57116, "server")
+        reporter = ProcessRecord(
+            40784,
+            "2026-07-15T00:01:00.0000000Z",
+            self.reporter_hash,
+            "c" * 64,
+            "crash_reporter",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.add_run(server, reporter, owner=None, state="UNRECONCILED")
+        self.guard.snapshots[server.pid] = dict(GONE)
+        self.guard.snapshots[reporter.pid] = self.reporter_snapshot(
+            reporter.pid, reporter.creation_time_utc
+        )
+        reconciled = self.lifecycle.admin_reconcile(RUN_ID, reporter.pid, "incident")
+        self.assertEqual(reconciled.get("reconciled"), True)
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (reporter.pid, "crash_reporter")],
+        )
+
+    def test_t27_second_walk_unknown_with_a_pin_open_closes_it(self) -> None:
+        # r3 H6, first part.
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchor_alive(server)
+        self.guard.snapshots[40784] = self.reporter_snapshot(
+            40784, "2026-07-15T00:01:00.0000000Z"
+        )
+        walks = {"n": 0}
+
+        def unknown_second_walk() -> dict[str, object]:
+            walks["n"] += 1
+            if walks["n"] == 1:
+                return {
+                    "known": True,
+                    "processes": [self.reporter_row(40784, server.pid)],
+                }
+            return {"known": False}
+
+        self.lifecycle.child_probe = unknown_second_walk
+        pins: list[object] = []
+
+        def open_pin(pid: int) -> object | None:
+            token = self.anchors.open(pid)
+            if pid == 40784:
+                pins.append(token)
+            return token
+
+        self.lifecycle.parent_anchor = (open_pin, self.anchors.close)
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "child_scan_unknown")
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(self.anchors.closed.count(pins[0]), 1)
+
+    def test_t27_candidate_gone_from_the_second_walk_lets_the_reap_retire(self) -> None:
+        # r3 H6, second part: with an anchored parent that is gone, a reporter
+        # no longer listed is no reason to keep the run.
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchor_alive(server)
+        self.guard.snapshots[server.pid] = dict(GONE)
+        self.guard.snapshots[40784] = self.reporter_snapshot(
+            40784, "2026-07-15T00:01:00.0000000Z"
+        )
+        walks = {"n": 0}
+
+        def missing_later() -> dict[str, object]:
+            walks["n"] += 1
+            if walks["n"] == 1:
+                return {
+                    "known": True,
+                    "processes": [self.reporter_row(40784, server.pid)],
+                }
+            return {"known": True, "processes": []}
+
+        self.lifecycle.child_probe = missing_later
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [RUN_ID])
+        self.assertIn(self.anchors.tokens[40784], self.anchors.closed)
+
+    def test_t28_warden_partial_keeps_the_untouched_reporter_and_the_new_one(self) -> None:
+        # r3 H7: the warden stops the server, leaves the old reporter
+        # untouched, and its final scan finds a new one.
+        server = process(57116, "server")
+        old = ProcessRecord(
+            40784,
+            "2026-07-15T00:01:00.0000000Z",
+            self.reporter_hash,
+            "c" * 64,
+            "crash_reporter",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.add_run(server, old)
+        self.anchor_alive(server)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.guard.snapshots[old.pid] = self.reporter_snapshot(
+            old.pid, old.creation_time_utc
+        )
+        self.guard.snapshots[51036] = self.reporter_snapshot(
+            51036, "2026-07-15T00:01:02.0000000Z"
+        )
+        scans = {"n": 0}
+
+        def probe() -> dict[str, object]:
+            scans["n"] += 1
+            if scans["n"] < 2:
+                return {"known": True, "processes": []}
+            return {
+                "known": True,
+                "processes": [self.reporter_row(51036, server.pid)],
+            }
+
+        self.lifecycle.child_probe = probe
+        guard = {
+            "operation": "stop",
+            "session_id": IDENTITY_A.session_id,
+            "run_id": RUN_ID,
+            "expected": tuple(),
+            "allow_gone": False,
+            "settings_path": self.root / "idle.json",
+            "wall": 0.0,
+        }
+        boundaries = {"n": 0}
+
+        def boundary(*_args, **_kwargs):
+            boundaries["n"] += 1
+            if boundaries["n"] == 1:
+                return None
+            return ("operation", "warden_disabled")
+
+        with patch.object(self.lifecycle, "_warden_idle_guard", return_value=guard), patch.object(
+            self.lifecycle, "_idle_switch_on", return_value=True
+        ), patch.object(
+            self.lifecycle, "_idle_anchors_changed", return_value=False
+        ), patch.object(
+            self.lifecycle, "_idle_destruction_refusal", return_value=None
+        ), patch.object(
+            self.lifecycle, "_idle_effect_boundary", side_effect=boundary
+        ):
+            stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        self.assertEqual(stopped.get("reason"), "crash_reporter_left")
+        self.assertEqual(
+            [record.pid for record in self.guard.terminate_calls], [server.pid]
+        )
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [
+                (server.pid, "server"),
+                (old.pid, "crash_reporter"),
+                (51036, "crash_reporter"),
+            ],
+        )
 
 
 class DaemonWiring7417Test(unittest.TestCase):

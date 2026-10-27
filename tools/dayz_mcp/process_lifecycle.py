@@ -5042,7 +5042,11 @@ class ProcessLifecycle:
         *,
         keep_parents: bool,
     ) -> list[ProcessRecord]:
-        """Records a partial stop still owns (inbox 7417, H7)."""
+        """Records a partial stop or a reconcile still owns (inbox 7417, H7).
+
+        While a reporter stays, or with keep_parents, the run's parent
+        records stay too.
+        """
         kept = list(survivors)
         keep_parent_roles = keep_parents or any(
             item.role == "crash_reporter" for item in kept
@@ -5067,6 +5071,25 @@ class ProcessLifecycle:
                 )
             )
         return kept
+
+    def _kept_before_rescan(
+        self, run: RunRecord, survivors: list[ProcessRecord]
+    ) -> list[ProcessRecord]:
+        """Records a partial stop keeps when it ends before the rescan.
+
+        A reporter born during the stop is not registered yet, so the scan
+        runs first; an unknown scan keeps the parents (inbox 7417, r3 H2).
+        """
+        before = {(item.pid, item.creation_time_utc) for item in run.processes}
+        scan = self._register_crash_reporters_locked(run)
+        fresh = [
+            item
+            for item in run.processes
+            if (item.pid, item.creation_time_utc) not in before
+        ]
+        return self._kept_after_partial_stop(
+            run, list(survivors) + fresh, keep_parents=scan is not None
+        )
 
     def _register_crash_reporters_locked(self, run: RunRecord) -> str | None:
         """Attach matching CrashReporter.exe children to the run.
@@ -5097,7 +5120,7 @@ class ProcessLifecycle:
         ]
         added: list[tuple[ProcessRecord, int]] = []
         scan_reason: str | None = None
-        pins: list[tuple[int, int, object, ProcessRecord]] = []
+        pins: list[tuple[int, int, object, ProcessRecord, bool]] = []
 
         def _process_not_found(actual: object) -> bool:
             return (
@@ -5150,9 +5173,10 @@ class ProcessLifecycle:
                 if not isinstance(parent_snap, dict):
                     scan_reason = "parent_scan_unknown"
                     continue
+                anchored = self._parent_is_anchored(run, parent)
                 parent_gone = _process_not_found(parent_snap)
                 if parent_gone:
-                    if not self._parent_is_anchored(run, parent):
+                    if not anchored:
                         self._audit(
                             "crash_reporter_parent_unverified",
                             None,
@@ -5184,7 +5208,9 @@ class ProcessLifecycle:
                 if token is None:
                     scan_reason = "child_scan_unknown"
                     continue
-                pins.append((pid, ppid, token, parent))
+                # Without an anchor the parent's pid can be reused before the
+                # pin: its identity is proven again below (inbox 7417, r3 H1).
+                pins.append((pid, ppid, token, parent, not anchored))
             if pins:
                 later_reason, later_rows = self._crash_reporter_probe_rows()
                 if later_reason is not None or later_rows is None:
@@ -5192,9 +5218,34 @@ class ProcessLifecycle:
                 listed = {
                     int(item["pid"]): int(item["ppid"]) for item in later_rows
                 }
-                for pid, ppid, _token, parent in pins:
+                for pid, ppid, _token, parent, recheck in pins:
                     if listed.get(pid) != ppid:
                         continue
+                    if recheck:
+                        try:
+                            again = self.guard.snapshot(ppid)
+                        except Exception:
+                            scan_reason = "parent_scan_unknown"
+                            continue
+                        if not isinstance(again, dict):
+                            scan_reason = "parent_scan_unknown"
+                            continue
+                        if _process_not_found(again):
+                            self._audit(
+                                "crash_reporter_parent_unverified",
+                                None,
+                                "identity_unverified",
+                                "denied",
+                                run_id=run.run_id,
+                                pid=pid,
+                                ppid=ppid,
+                            )
+                            scan_reason = "crash_reporter_parent_unverified"
+                            continue
+                        if not self._identity_matches(parent, again):
+                            if again.get("identity_complete") is not True:
+                                scan_reason = "parent_scan_unknown"
+                            continue
                     try:
                         child_snap = self.guard.snapshot(pid)
                     except Exception:
@@ -5251,7 +5302,7 @@ class ProcessLifecycle:
                     added.append((record, ppid))
         finally:
             close_fn = None if self.parent_anchor is None else self.parent_anchor[1]
-            for _pid, _ppid, token, _parent in pins:
+            for _pid, _ppid, token, _parent, _recheck in pins:
                 if close_fn is not None:
                     try:
                         close_fn(token)
@@ -5755,9 +5806,7 @@ class ProcessLifecycle:
                         run.owner_session_id = None
                         run.owner_lease_id = None
                         run.state = "UNRECONCILED"
-                        run.processes = self._kept_after_partial_stop(
-                            run, list(survivors), keep_parents=False
-                        )
+                        run.processes = self._kept_before_rescan(run, survivors)
                         degraded: list[str] = []
                         try:
                             self.manifest.replace(run)
@@ -5853,9 +5902,7 @@ class ProcessLifecycle:
                         run.owner_session_id = None
                         run.owner_lease_id = None
                         run.state = "UNRECONCILED"
-                        run.processes = self._kept_after_partial_stop(
-                            run, list(survivors), keep_parents=False
-                        )
+                        run.processes = self._kept_before_rescan(run, survivors)
                         degraded = []
                         try:
                             self.manifest.replace(run)
@@ -9026,7 +9073,11 @@ class ProcessLifecycle:
                     return self._error(diag_error, 409)
             run.owner_session_id = None
             run.owner_lease_id = None
-            run.processes = survivors
+            # A surviving reporter keeps its parents, whose pids hold the
+            # ports it inherited (inbox 7417, r3 H5).
+            run.processes = self._kept_after_partial_stop(
+                run, survivors, keep_parents=False
+            )
             if (
                 run.state in {"STARTING", "STOPPING"}
                 and survivors
