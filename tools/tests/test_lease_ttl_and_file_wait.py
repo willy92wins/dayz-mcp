@@ -856,7 +856,11 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         # (a) A reader blocked on the stop signal ends when the deadline or
         # the cleanup fires. An injected exception cannot run inside the
         # blocking wait, so only the cooperative signal can end it, and the
-        # caller must join it before returning.
+        # caller must join it before returning. The lock, heartbeat, run and
+        # profile checks come before the read, so (a) and (c) give the read
+        # the same 2 s to begin that (b) waits for. Each wait of (a)'s fake
+        # outlasts that deadline, so a reader that gets no stop signal is
+        # still blocked when the caller returns.
         state: dict = {"started": threading.Event()}
 
         def blocked_on_stop(*_args, stop=None, **_kwargs):
@@ -864,19 +868,20 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
             state["started"].set()
             signal = stop if stop is not None else _StopDeaf()
             while not signal.stopped:
-                signal.wait(0.5)
+                signal.wait(5.0)
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
         with patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop):
             began = time.monotonic()
             result = await execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=0.05, poll_interval_s=0.5, lookback_lines=0,
+                timeout_s=2.0, poll_interval_s=0.5, lookback_lines=0,
             )
             elapsed = time.monotonic() - began
+        self.assertTrue(state["started"].is_set())
         self.assertFalse(result["satisfied"])
         self.assertFalse(state["thread"].is_alive())
-        self.assertLess(elapsed, 1.0)
+        self.assertLess(elapsed, 3.0)
 
         # (b) Cancelling the wait also stops and joins the reader.
         state2: dict = {"started": threading.Event()}
@@ -916,8 +921,9 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "_read_contained_handle", side_effect=ignores_stop):
             result = await execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=0.4, poll_interval_s=0.5, lookback_lines=0,
+                timeout_s=2.0, poll_interval_s=0.5, lookback_lines=0,
             )
+        self.assertTrue(state3["started"].is_set())
         self.assertFalse(result["satisfied"])
         self.assertTrue(result["scanned"].get("reader_alive_at_return"))
         release.set()
