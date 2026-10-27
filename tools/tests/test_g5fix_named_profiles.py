@@ -458,21 +458,33 @@ class LogAndWaitTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
                 tool_lock=asyncio.Lock(),
                 lifecycle_status=lifecycle_status,
             )
+            # seen and missed look for a line on the side its file is on, so the
+            # run's leaf decides them; other_side is the side check (inbox 33c3).
             seen = await execute_wait_for(
                 runtime,
                 "log_matches",
                 pattern="client-boot",
-                role="server",
+                role="client",
                 timeout_s=1.0,
                 poll_interval_s=0.2,
                 lookback_lines=20,
             )
             self.assertTrue(seen["satisfied"])
+            other_side = await execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern="client-boot",
+                role="server",
+                timeout_s=0.3,
+                poll_interval_s=0.2,
+                lookback_lines=20,
+            )
+            self.assertFalse(other_side["satisfied"])
             missed = await execute_wait_for(
                 runtime,
                 "log_matches",
                 pattern="LEGACY-READY",
-                role="client",
+                role="server",
                 timeout_s=0.3,
                 poll_interval_s=0.2,
                 lookback_lines=50,
