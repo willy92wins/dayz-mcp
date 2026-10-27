@@ -143,7 +143,7 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    on this stand (see "The exit reality"). Tear down with `vehicle_release`
    and `object_delete` of the fixture (`vehicle_release` only aborts the
    trace and clears the drive-control state,
-   `MCPClientBridge.c:2627-2632` — it is not a get-out); verify the ejection
+   `MCPClientBridge.c:2656-2661` — it is not a get-out); verify the ejection
    via telemetry (`not_seated`), then `restore_gameplay`.
 10. Release the session lease.
 
@@ -190,9 +190,13 @@ server replica is.
 3. `vehicle_enter` near the fixture pos: the server half of the seat. It
    runs `StartCommand_Vehicle` (`MCPBridge.c:1001-1011`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
-   (product-spec B2). `seated=1` says the command was accepted, not that
-   the state settled: assert `seated` and `seat == "driver"`, and treat the
-   settle as unproven until step 6 reads it back.
+   (product-spec B2). `seated=1` means the server read the player it seated
+   (or, if that one is gone, the first player) in the driver seat of that car
+   once the get-in ended (`IsSeatReady`). The bridge checks that each tick and
+   answers `timeout` on a tick that does not read it once 5 s
+   (`JOB_TIMEOUT_S`) have passed, whatever `timeout_s` is, so a `timeout` can
+   still end seated: read `query_all_players` (`in_vehicle`) before retrying.
+   Assert `seated` and `seat == "driver"`.
 4. `vehicle_get_in_client`: the client-ownership half, which `engine_set`,
    `vehicle_control` and `vehicle_trace` require and which does not place
    the player in the server crew (its description in
@@ -217,7 +221,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: `vehicle_release`, then
    `object_delete` of the registered fixture id — the release only clears
-   trace/control (`MCPClientBridge.c:2627-2632`), the delete performs the
+   trace/control (`MCPClientBridge.c:2656-2661`), the delete performs the
    ejection, verified via telemetry (`not_seated`) — then
    `restore_gameplay` and the session release.
 

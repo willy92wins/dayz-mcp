@@ -1615,6 +1615,15 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     "vehicle_telemetry": (
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"unchecked": True}, (False, "bad_args")),
+        ("valid_pos", {"pos": [1.0, 2.0, 3.0]}, (True, None)),
+        ("pos_nan", {"pos": [1.0, float("nan"), 3.0]}, (False, "bad_args")),
+        ("pos_inf", {"pos": [1.0, float("inf"), 3.0]}, (False, "bad_args")),
+        ("pos_two_components", {"pos": [1.0, 2.0]}, (False, "bad_args")),
+        ("pos_four_components", {"pos": [1.0, 2.0, 3.0, 4.0]}, (False, "bad_args")),
+        ("pos_non_numeric", {"pos": [1.0, "2", 3.0]}, (False, "bad_args")),
+        ("pos_bool", {"pos": [True, 2.0, 3.0]}, (False, "bad_args")),
+        ("pos_empty", {"pos": []}, (False, "bad_args")),
+        ("pos_not_list", {"pos": "1,2,3"}, (False, "bad_args")),
     ),
     "vehicle_release": (
         ("valid_empty", {}, (True, None)),
