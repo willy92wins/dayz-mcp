@@ -2974,7 +2974,9 @@ CLEARANCE_LANDING_BAND_M = 0.5
 _CAPTURE_LIVE_RUN_STATES = frozenset({"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING"})
 
 
-async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
+async def _wait_for_script_log_paths(
+    runtime: Any, role: str | None = None
+) -> list[str]:
     status_fn = getattr(runtime, "lifecycle_status", None)
     if status_fn is None:
         raise ToolError("no_active_run")
@@ -2992,6 +2994,13 @@ async def _wait_for_script_log_paths(runtime: Any) -> list[str]:
         # No live run: the newest-file fallback would scan a dead launch
         # and wait_for could report satisfied:true on a line hours old.
         raise ToolError("no_active_run")
+    if role is not None:
+        # fb-20261026-203149-33c3: without this, role=server read the client's
+        # logs too, and a server check passed on the client's line.
+        side = _PROFILE_ROLE_PARENT[role]
+        profiles = [item for item in profiles if Path(item).parent.name.casefold() == side]
+        if not profiles:
+            raise ToolError("profile_unresolved")
     paths: list[str] = []
     for profiles_dir in profiles:
         paths.extend(_current_launch_logs(profiles_dir, start_epoch))
@@ -3911,7 +3920,7 @@ async def execute_wait_for(
     marker: str | dict[str, Any] | None = None,
     entity: dict[str, Any] | None = None,
     profile_file: str | None = None,
-    role: str = "server",
+    role: str | None = None,
 ) -> dict[str, Any]:
     """Poll until a wait_for condition holds.
 
@@ -3952,6 +3961,8 @@ async def execute_wait_for(
     if poll_value <= 0.0:
         raise ToolError("bad_args: poll_interval_s must be > 0")
     poll_interval_s = max(poll_value, WAIT_FOR_MIN_POLL_INTERVAL_S)
+    if role is not None and role not in _PROFILE_ROLE_PARENT:
+        raise ToolError('bad_args: role must be "server", "client" or "offline"')
     if condition == "file_matches":
         started_file = time.monotonic()
         return await _execute_file_matches(
@@ -3963,7 +3974,7 @@ async def execute_wait_for(
             lookback_from=lookback_from,
             marker=marker,
             profile_file=profile_file,
-            role=role,
+            role="server" if role is None else role,
             started=started_file,
             deadline=started_file + timeout_s,
         )
@@ -4057,7 +4068,7 @@ async def execute_wait_for(
                     satisfied=False,
                     scanned=scan_summary(),
                 )
-            probe_paths = await _wait_for_script_log_paths(runtime)
+            probe_paths = await _wait_for_script_log_paths(runtime, role)
             # Markers FIRST, then the launch scan. A line written between the
             # two is read twice, which costs nothing; the other order drops it.
             if marker_state is not None:
@@ -4184,7 +4195,7 @@ async def execute_wait_for(
                         else observed <= value
                     )
             else:
-                probe_paths = await _wait_for_script_log_paths(runtime)
+                probe_paths = await _wait_for_script_log_paths(runtime, role)
                 lines, log_markers, counts = _new_log_lines(probe_paths, log_markers)
                 _record_scan(
                     probe_paths, counts, seen_paths, scanned_lines, unreadable
@@ -9820,6 +9831,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{WAIT_FOR_LOOKBACK_MAX}) rewinds N lines, or "
             "lookback_from='launch' scans from byte 0. That heuristic can match "
             "a line written before the caller's action and cause a false positive. "
+            "log_matches with role reads only that side's logs (offline is the "
+            "client's) and answers profile_unresolved when the run has no profile "
+            "folder on that side; without "
+            "role it reads both sides, and file_matches defaults role to server. "
             "On timeout still returns "
             "ok: true with satisfied: false -- gate on satisfied, not ok. "
             "timeout_s <= 600 (bad_args above; never clamped). "
@@ -9858,7 +9873,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         marker: str | dict[str, Any] | None = None,
         entity: dict[str, Any] | None = None,
         profile_file: str | None = None,
-        role: Literal["server", "client", "offline"] = "server",
+        role: Literal["server", "client", "offline"] | None = None,
     ) -> dict[str, Any]:
         # wait_for, ui_dialog, and playbook_run: do not wrap the whole body
         # in tool_lock. Any tool that waits on a human or a slow condition
