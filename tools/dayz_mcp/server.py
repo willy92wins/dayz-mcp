@@ -7135,6 +7135,51 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
 
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} set one object's health on the server and "
+            "read it back in the same tick. Target by object_id (world_spawn, "
+            "object_resolve, inventory_give.object_id, inventory_attach.item_object_id) "
+            "or by exact classname within 25 m of pos. With slot, the target is "
+            "the item attached to that object in that inventory slot "
+            "(telemetry_read object_at lists the slot names in declared_slots). "
+            "health01 is a fraction of the zone's maximum Health; an empty zone "
+            "is the global health. The reply, object_health, gives health01 and "
+            "the health level the object reports (vanilla's usual scale: 0 "
+            "pristine to 4 ruined), read before and after the call. A player is "
+            "refused: use player_heal or player_kill "
+            "(target_is_player). An item the game replaces when it is ruined "
+            "(a 1.30 car wheel becomes its _Ruined class) is replaced by the "
+            "game, not by this tool: read the vehicle again with telemetry_read "
+            "object_at to see what sits in the slot."
+        )
+    )
+    async def object_set_health(
+        health01: StrictFloat,
+        object_id: StrictInt = 0,
+        type: str = "",
+        pos: list[StrictFloat] | None = None,
+        slot: str = "",
+        zone: str = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        health_value = _require_range(
+            health01,
+            0.0,
+            1.0,
+            _bad_args("health01", health01, "be a finite real in [0, 1]"),
+        )
+        args: dict[str, Any] = {"health01": health_value}
+        args.update(_object_target_args(type, pos, object_id))
+        if slot != "":
+            args["slot"] = slot
+        if zone != "":
+            args["zone"] = zone
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "object_set_health", args, "server", _timeout(timeout_s)
+            )
+
     # One car door through the server half of the vanilla door action
     # (MCPBridge.c DispatchVehicleDoor). The lease follows the command name, so
     # mode=read is leased too, as object_anim's read is.
