@@ -20,6 +20,7 @@ CLIENT_PATH = SCRIPTS / "MCPClientBridge.c"
 SERVER_FLAG = "bool deferFromWorldSpawn = m_Pending.Count() > 0;"
 CLIENT_FLAG = "bool deferBehindPending = m_Pending.Count() > 0;"
 POLL_SIG = "void OnPollSuccess(string data, int dataSize)"
+COUNT_LINE = "int count = batch.commands.Count();"
 DRAIN_SIG = "protected void DrainPending()"
 QUEUE_SIG = "protected void QueuePendingOrFail(MCPCommand command)"
 START_SIG = "protected void StartPoll()"
@@ -83,9 +84,13 @@ def _constant(source: str, name: str) -> int:
 
 
 def _poll_loop_source(source: str, flag: str) -> str:
+    # From the real batch count to the end, so a clip before the flag is
+    # translated too; the JSON parse above it stays out.
     body = method_body(source, POLL_SIG)
-    start = body.find(flag)
+    start = body.find(COUNT_LINE)
     if start < 0:
+        raise AssertionError("OnPollSuccess is missing the batch count")
+    if body.find(flag, start) < 0:
         raise AssertionError("OnPollSuccess is missing the defer flag")
     return "void OnPollSuccessLoop()\n{" + body[start:] + "}\n"
 
@@ -125,10 +130,11 @@ class LeaseCloseBridgeTests(unittest.TestCase):
             "Log": Log,
             "m_Pending": pending,
             "m_TickPollCallback": 0,
+            "m_TickPollSent": 0,
             "MAX_DISPATCH_PER_TICK": _constant(source, "MAX_DISPATCH_PER_TICK"),
             "MAX_PENDING": _constant(source, "MAX_PENDING"),
+            "MAX_POLL_RESULTS": _constant(source, "MAX_POLL_RESULTS"),
             "batch": None,
-            "count": 0,
         }
         drain_text = drain_source if drain_source is not None else method_body(source, DRAIN_SIG)
         queue_text = method_body(source, QUEUE_SIG)
@@ -153,10 +159,11 @@ class LeaseCloseBridgeTests(unittest.TestCase):
             class_types=("MCPCommand",),
             members=(
                 "batch",
-                "count",
                 "m_Pending",
                 "m_TickPollCallback",
+                "m_TickPollSent",
                 "MAX_DISPATCH_PER_TICK",
+                "MAX_POLL_RESULTS",
             ),
         )
         ns["_dispatched"] = dispatched
@@ -166,7 +173,6 @@ class LeaseCloseBridgeTests(unittest.TestCase):
 
     def _poll(self, ns: dict[str, Any], commands: list[Command]) -> None:
         ns["batch"] = Batch(PendingArray(commands))
-        ns["count"] = len(commands)
         ns["_in_callback"]["v"] = True
         ns["OnPollSuccessLoop"]()
         ns["_in_callback"]["v"] = False
@@ -326,6 +332,25 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                     self.assertEqual(item[1], err_code)
                 self.assertEqual(pending.Get(pending.Count() - 1).id, close_id)
                 self.assertEqual(pending.Get(pending.Count() - 1).cmd, _LogString.of(close_cmd))
+
+                # The count is the batch's own; above it only the null check
+                # reads the batch, and a clip before the flag drops the close.
+                body = method_body(source, POLL_SIG)
+                head = body[: body.find(COUNT_LINE)]
+                self.assertEqual(head.count("batch.commands"), 1, "only the null check reads the batch")
+                loop = _poll_loop_source(source, flag)
+                clipped = loop.replace(
+                    COUNT_LINE,
+                    COUNT_LINE + "\n\t\tif (count > MAX_POLL_RESULTS)\n\t\t{\n\t\t\tcount = MAX_POLL_RESULTS;\n\t\t}",
+                    1,
+                )
+                self.assertNotEqual(clipped, loop)
+                ns_clip = self._bind(source, flag, loop_source=clipped)
+                self._poll(ns_clip, cmds)
+                clip_pending: PendingArray = ns_clip["m_Pending"]
+                clip_total = len(ns_clip["_dispatched"]) + clip_pending.Count() + len(ns_clip["_errors"])
+                self.assertEqual(clip_total, 64, "a count clipped to MAX_POLL_RESULTS")
+                self.assertNotIn(close_id, [command.id for command in clip_pending])
 
                 ns_slot = self._bind(source, flag)
                 for ident in range(max_pending - 1):
