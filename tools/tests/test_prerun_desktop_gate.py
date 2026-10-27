@@ -558,15 +558,33 @@ class PrerunDesktopDayzTestRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(ticks["n"], 3)
 
     async def test_execute_path_keeps_event_loop_alive_during_gate(self) -> None:
+        # The gate holds its thread until the loop has ticked three times
+        # since it began, for at most 5 s. A pause of the loop delays those
+        # ticks: the test passes if the third lands before that wait runs out
+        # (one heartbeat step took 0.109 s in a 3.11 CI run) and fails if it
+        # does not, so what counts is the time left in the wait, not the
+        # length of one pause. A gate run on the loop thread blocks the ticks,
+        # and its wait ends at 5 s without them. The test does not time how
+        # long the loop is blocked, so it misses a caller that runs the gate
+        # in a thread but also blocks the loop, as long as the third tick
+        # still lands inside the wait.
+        began = threading.Event()
+        ticked = threading.Event()
+        seen = {"ticks": False}
+
         def blocking_gate(*_args: object, **_kwargs: object) -> mcp_capture.PrerunDesktopResult:
-            time.sleep(0.12)
+            began.set()
+            seen["ticks"] = ticked.wait(5.0)
             return _locked_desktop()
 
         ticks = {"n": 0}
 
         async def heartbeat() -> None:
             while True:
-                ticks["n"] = ticks["n"] + 1
+                if began.is_set():
+                    ticks["n"] = ticks["n"] + 1
+                    if ticks["n"] >= 3:
+                        ticked.set()
                 await asyncio.sleep(0.01)
 
         policy = _policy()
@@ -599,7 +617,7 @@ class PrerunDesktopDayzTestRunTest(unittest.IsolatedAsyncioTestCase):
 
         launch.assert_not_awaited()
         self.assertEqual(result["error_code"], "session_locked")
-        self.assertGreaterEqual(ticks["n"], 3)
+        self.assertTrue(seen["ticks"])
 
 
 class PrerunDesktopDescriptionTest(unittest.TestCase):
