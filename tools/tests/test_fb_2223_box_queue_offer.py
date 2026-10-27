@@ -1724,6 +1724,44 @@ class Fb88feForeignDayzQueueTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.coordinator.box_queue_public(), [])
         self.assertEqual(harness.done, ["ticket-1"])
 
+    async def test_on_busy_queue_beside_an_unreconciled_run_keeps_the_port_reason(
+        self,
+    ) -> None:
+        runtime, app = _build()
+        harness = _BoxHarness(
+            runs=[_run_row(state="UNRECONCILED")],
+            foreign=[{"port": 2302, "mods": ["@DayZ_MCP"], "profiles": "profiles-130"}],
+            foreign_ports=[2302, 2304],
+        )
+        harness.bind(runtime)
+        execute = AsyncMock(side_effect=AssertionError("must not launch"))
+        try:
+            with (
+                patch.object(server.dayz_test_tool, "execute_dayz_test_run", execute),
+                _fast_box_wait(),
+            ):
+                payload = _content_json(
+                    await app.call_tool(
+                        "dayz_test_run",
+                        {
+                            "project": "ExampleMod",
+                            "mode": "server",
+                            "on_busy": "queue",
+                            "wait_for_box_s": 5.0,
+                            "port": 2302,
+                        },
+                    )
+                )
+        except BaseException as exc:
+            _fail_product(self, exc)
+        self.assertFalse(any(call.get("wait") for call in harness.box_calls))
+        execute.assert_not_awaited()
+        self.assertEqual(payload.get("reason"), "port_in_use_foreign")
+        self.assertEqual(payload.get("port"), 2302)
+        self.assertIsNone(payload.get("queue_offer"))
+        self.assertEqual(harness.coordinator.box_queue_public(), [])
+        self.assertEqual(harness.done, [])
+
 
 if __name__ == "__main__":
     unittest.main()
