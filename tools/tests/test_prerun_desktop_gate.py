@@ -558,10 +558,13 @@ class PrerunDesktopDayzTestRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(ticks["n"], 3)
 
     async def test_execute_path_keeps_event_loop_alive_during_gate(self) -> None:
-        # The gate holds its thread until the loop has ticked three times since
-        # it began, so a pause of the loop only delays the ticks (one heartbeat
-        # step took 0.109 s in a 3.11 CI run). A gate run on the loop thread
-        # blocks them, and its wait ends at the timeout without them.
+        # The gate holds its thread for up to 5 s, until the loop has ticked
+        # three times since it began. A pause of the loop shorter than that
+        # only delays the ticks (one heartbeat step took 0.109 s in a 3.11 CI
+        # run); a longer one fails the test. A gate run on the loop thread
+        # blocks the ticks, and its wait ends at 5 s without them. A caller
+        # that runs the gate in a thread but also blocks the loop for less than
+        # 5 s is not caught: the gate waits that block out.
         began = threading.Event()
         ticked = threading.Event()
         seen = {"ticks": False}
