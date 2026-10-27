@@ -660,7 +660,7 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         # distinct string literal, chained with else, and each condition and
         # the final else open their block at once) and calls PostResult in
         # that tick. PostResult serializes and leaves the send asynchronous
-        # (MCPBridge.c:7547).
+        # (MCPBridge.c:7611).
         dispatch = _without_comments(
             _block_after(self.source, self.source.index(DISPATCH_CHAIN))
         )
