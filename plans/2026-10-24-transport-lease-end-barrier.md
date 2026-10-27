@@ -768,6 +768,15 @@ it runs.
   client reserve is **65**, the same producer max (admitted + refusals +
   close), not `MAX_POLL_RESULTS + 1`. K25 uses that real producer (64 + close),
   not 20.
+- **Stage 1 implementation note.** Client `MAX_POLL_RESULTS` is 64
+  (MCPClientBridge.c:415) so StartPoll
+  `OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1`
+  (MCPClientBridge.c:798) reserves 65, matching the server
+  (MCPBridge.c:8, MCPBridge.c:307). The plan's remark that the client reserve
+  is not `MAX_POLL_RESULTS + 1` named the previous 20; after stage 1 both
+  peers subtract `MAX_POLL_RESULTS + 1` from `MAX_CALLBACK_REFS`.
+  K24 also polls `[A, world_spawn, B]` with nothing pending: A runs in the
+  callback, and `world_spawn` and B wait for `DrainPending`.
 - **Reserved slot (H6).** `QueuePendingOrFail` refuses an ordinary command from `MAX_PENDING - 1`
   on, and a close only at `MAX_PENDING` [DESIGN]. The broker queues one close per (instance, peer)
   at a time (§2.4), so one slot is enough while the bridge ticks.
