@@ -130,35 +130,71 @@ _LOCAL_DECLARATION = re.compile(
     r"^\s*(?:int|bool|float|string|vector|Object|EntityAI|GameInventory|"
     r"MCPObjectHealth)\s+(\w+)\s*;\s*$"
 )
+_DOT_SPACES = re.compile(r"\s*\.\s*")
+_NAME_BEFORE_PAREN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+_HEALTH_VALUE_APIS = (
+    "GetMaxHealth",
+    "GetHealth01",
+    "GetHealthLevel",
+    "SetHealth01",
+    "GetSlotIdFromString",
+)
+_DISPATCH_POST = (
+    'else { result.ok = false; result.error = "unknown_command"; } '
+    "if (postNow) { PostResult(result); }"
+)
 
 
-def _block_after(source: str, start: int) -> str:
-    brace = source.index("{", start)
-    depth = 0
-    for index in range(brace, len(source)):
-        if source[index] == "{":
-            depth += 1
-        elif source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return source[brace + 1 : index]
-    raise AssertionError(f"unterminated block at offset {start}")
+def _blank_match(match: re.Match[str], *, strings: bool) -> str:
+    text = match.group(0)
+    if text.startswith('"'):
+        if not strings:
+            return text
+        return '"' + re.sub(r"[^\n]", " ", text[1:-1]) + '"'
+    return re.sub(r"[^\n]", " ", text)
 
 
 def _without_comments(source: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        text = match.group(0)
-        return text if text.startswith('"') else re.sub(r"[^\n]", " ", text)
+    return _COMMENT_OR_STRING.sub(lambda m: _blank_match(m, strings=False), source)
 
-    return _COMMENT_OR_STRING.sub(replace, source)
+
+def _without_comments_and_strings(source: str) -> str:
+    # Same length as source: comments and string interiors become spaces;
+    # quotes and newlines stay, so brace offsets match the comment-free view.
+    return _COMMENT_OR_STRING.sub(lambda m: _blank_match(m, strings=True), source)
+
+
+def _block_span(source: str, start: int) -> tuple[int, int]:
+    view = _without_comments_and_strings(source)
+    brace = view.index("{", start)
+    depth = 0
+    for index in range(brace, len(view)):
+        if view[index] == "{":
+            depth += 1
+        elif view[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return brace + 1, index
+    raise AssertionError(f"unterminated block at offset {start}")
+
+
+def _block_after(source: str, start: int) -> str:
+    inner_start, inner_end = _block_span(source, start)
+    return source[inner_start:inner_end]
+
+
+def _method_views(source: str, name: str) -> tuple[str, str]:
+    clean = _without_comments(source)
+    bare = _without_comments_and_strings(source)
+    found = list(re.finditer(rf"\bprotected\s+[\w<>]+\s+{re.escape(name)}\(", bare))
+    if len(found) != 1:
+        raise AssertionError(f"{name} is declared {len(found)} times")
+    inner_start, inner_end = _block_span(bare, found[0].end())
+    return clean[inner_start:inner_end], bare[inner_start:inner_end]
 
 
 def _method_code(source: str, name: str) -> str:
-    clean = _without_comments(source)
-    found = list(re.finditer(rf"\bprotected\s+[\w<>]+\s+{re.escape(name)}\(", clean))
-    if len(found) != 1:
-        raise AssertionError(f"{name} is declared {len(found)} times")
-    return _block_after(clean, found[0].end())
+    return _method_views(source, name)[0]
 
 
 def _if_body(code: str, condition: str) -> str:
@@ -166,6 +202,57 @@ def _if_body(code: str, condition: str) -> str:
     if code.count(needle) != 1:
         raise AssertionError(f"{needle!r} occurs {code.count(needle)} times")
     return _block_after(code, code.index(needle))
+
+
+def _collapse_dots(source: str) -> str:
+    return _DOT_SPACES.sub(".", source)
+
+
+def _paren_pairs(source: str) -> list[tuple[int, int]]:
+    stack: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    for index, char in enumerate(source):
+        if char == "(":
+            stack.append(index)
+        elif char == ")" and stack:
+            pairs.append((stack.pop(), index))
+    return pairs
+
+
+def _local_writes(source: str, name: str) -> list[str]:
+    pattern = (
+        rf"(?:(?<![\w.])(?:\+\+|--)\s*{name}\b|"
+        rf"(?<![\w.]){name}\b\s*(?:\+\+|--)|"
+        rf"(?<![\w.]){name}\b\s*[-+*/]?=(?!=))"
+    )
+    return re.findall(pattern, source)
+
+
+def _health_locals_unmutated(testcase: unittest.TestCase, bare: str) -> None:
+    source = _collapse_dots(bare)
+    pairs = _paren_pairs(source)
+    for name in ("health01", "zone", "slot"):
+        writes = _local_writes(source, name)
+        testcase.assertEqual(len(writes), 1, name)
+        for match in re.finditer(rf"(?<![\w.]){name}\b", source):
+            testcase.assertFalse(
+                source[match.end() :].startswith("."),
+                name,
+            )
+            enclosing = [
+                (open_at, close_at)
+                for open_at, close_at in pairs
+                if open_at < match.start() and close_at >= match.end()
+            ]
+            enclosing.sort(key=lambda span: span[0], reverse=True)
+            for open_at, _close_at in enclosing:
+                prefix = source[:open_at].rstrip()
+                if re.search(r"\bif$", prefix):
+                    continue
+                api = _NAME_BEFORE_PAREN.search(prefix)
+                if api is None:
+                    continue
+                testcase.assertIn(api.group(0), _HEALTH_VALUE_APIS, name)
 
 
 def _class_members(source: str, class_name: str) -> list[tuple[str, str]]:
@@ -532,10 +619,14 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.source = BRIDGE_PATH.read_text(encoding="utf-8")
         self.messages = MESSAGES_PATH.read_text(encoding="utf-8")
-        self.code = _method_code(self.source, DISPATCHER)
+        self.code, self.bare = _method_views(self.source, DISPATCHER)
 
     def test_e1_dispatch_posts_in_the_same_tick_with_no_job(self) -> None:
-        # E1
+        # E1. Every return in the method is the literal true (return (true);
+        # is rejected on purpose). The final return true; is its own outer
+        # statement, so no path falls off the end. Dispatch's unknown_command
+        # else is followed immediately by if (postNow) { PostResult(result); },
+        # and Dispatch ends there.
         dispatch = _without_comments(
             _block_after(self.source, self.source.index(DISPATCH_CHAIN))
         )
@@ -544,15 +635,25 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         self.assertNotIn("job", self.code.lower())
         self.assertNotIn("CallLater", self.code)
         self.assertNotIn("AddJob", self.code)
-        # Every exit answers true, so Dispatch posts the result in this tick:
-        # each return in the method returns true, and the method ends on one.
-        returns = re.findall(r"\breturn\b([^;]*);", self.code)
+        returns = re.findall(r"\breturn\b([^;]*);", self.bare)
         self.assertGreater(len(returns), 0)
         self.assertEqual([value.strip() for value in returns], ["true"] * len(returns))
-        self.assertTrue(self.code.rstrip().endswith("return true;"))
+        stripped = self.bare.rstrip()
+        self.assertTrue(stripped.endswith("return true;"))
+        head = stripped[: -len("return true;")].rstrip()
+        self.assertTrue(head == "" or head.endswith(";") or head.endswith("}"), head)
+        self.assertTrue(
+            re.sub(r"\s+", " ", dispatch).strip().endswith(_DISPATCH_POST),
+            dispatch,
+        )
 
     def test_e2_the_steps_run_in_d2_order(self) -> None:
-        # E2
+        # E2. Each of health01, zone and slot is assigned only at its read,
+        # is never followed by a member access, and sits inside no call but
+        # GetMaxHealth, GetHealth01, GetHealthLevel, SetHealth01 and
+        # GetSlotIdFromString. An if condition and plain parentheses are not
+        # calls; any other name before a parenthesis is, while and switch
+        # included, and so is a call around an allowed one.
         _in_order(
             self,
             self.code,
@@ -574,10 +675,7 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
                 'result.error = "health_not_applied"',
             ),
         )
-        # Each argument's local is assigned once, by its read above, and never again.
-        for name in ("health01", "zone", "slot"):
-            writes = re.findall(rf"(?<![\w.]){name}\b\s*[-+*/]?=(?!=)", self.code)
-            self.assertEqual(len(writes), 1, name)
+        _health_locals_unmutated(self, self.bare)
         self.assertIn('result.error = "slot_not_found"', self.code)
         self.assertLess(
             self.code.index("ResolveCommandObject(command.args, error)"),
