@@ -809,6 +809,39 @@ it runs.
   most 25 s. That is 35 s plus polls and round trips. Past the bound, a late clean result still
   clears its row (§2.3).
 
+- **Stage 2a implementation note.** The coordinator half of §2.3, §2.8, §2.11 and §2.12 is in
+  `tools/dayz_mcp/session_coordination.py`, in memory only (no snapshot, WAL or audit line). The
+  broker, `cleanup_owner`, the daemon, the lifecycle, the bridges, version 13 and the docs come
+  in later stages. The criteria are `tools/tests/test_lease_close_broker.py`.
+  - State: `LEASE_END_BOUND_S` (16), `_Lease.delivered_work` and `lease_end` (233-234), the row
+    and the round (250-274), the bound's check (353-360) and the coordinator's fields (394-397).
+    `claim_dispatch` marks delivered work (1588).
+  - The API is 1591-1797. Each method first turns expired rows into OWED (`_expire_rows_locked`,
+    4508-4516), and so does `_expire_due` (2709).
+  - The round opens right after `_releasing` is set (2776; 4518-4559). A saturated hook owes the
+    round's pending rows at once (2816), one that raises owes the reported ones too (2846), and
+    one that returns owes the rows it did not name (2848).
+  - `_lease_end_blocks_locked` (4488-4496) joins the grant checks at 554, 575, 1213, 3153 and
+    3726, and `wait` wakes at the earliest deadline (1308-1310). `_new_lease_locked` takes the
+    grant's photo (3419); `_grant_payload_locked` (4460-4470) copies it at 511, 784, 3394, 3642
+    and 4110, and `_merge_cleanup_degraded` (4472-4486) keeps the debt's warning on every payload
+    path. Status adds `lease_end` (2283; 4624-4639).
+  - Outcomes go through `_apply_close_outcome_locked` (4641-4664) and its helpers (to 4813); the
+    floors are compared by `_floor_gap` (4832-4851).
+  - Restart debt has instance "" (1638): no peer is bound yet at daemon start (§2.12), and the
+    stage 2b broker reports such a row unreachable.
+  - Only a server close may be deferred (§2.3). A client `deferred` report is not accepted, so
+    that row ends `close_not_reported` when the hook returns.
+  - A late clean of an OWED server row whose floors fall short answers `applied` and changes
+    nothing: it is the row's current close, so it is not `ignored`, and the row keeps its
+    reasons. One whose floors pass clears the row and stores them.
+  - Reports and restart pairs are all checked before any row changes, so a bad one raises with
+    nothing applied, and a published close needs a `close_id` (1623-1629, 1689-1699, 1751).
+  - After a cleared server row, a client floor is compared only with the floors that row's clean
+    stored in this round (4752-4813). A run with no server row brings none back, and neither does
+    one `note_processes_gone` removed, which also drops its stored floors (1617-1618). The row a
+    client floor brings back requires that floor, as a CLOSING one does.
+
 ### 2.12 Known peers, retirement, restart (H4)
 - **Registry.** The coordinator keeps `(run_id, peer) → instance`. The broker feeds it with
   `note_peer_bound` when a binding becomes BOUND: in `confirm` (loopback.py:2489) and in
