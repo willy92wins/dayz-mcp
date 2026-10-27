@@ -6,12 +6,13 @@ bridges. Bodies are translated against doubles; this is not an Enforce VM
 """
 from __future__ import annotations
 
+import json
 import re
 import unittest
-from typing import Any
+from typing import Any, Callable
 
 from tests._addon_paths import addon_root
-from tests.enforce_subset_helpers import EnforceArray, EnforceString, method_body, translate
+from tests.enforce_subset_helpers import EnforceArray, EnforceMap, EnforceString, method_body, translate
 
 
 SCRIPTS = addon_root() / "scripts" / "5_Mission"
@@ -24,6 +25,8 @@ COUNT_LINE = "int count = batch.commands.Count();"
 DRAIN_SIG = "protected void DrainPending()"
 QUEUE_SIG = "protected void QueuePendingOrFail(MCPCommand command)"
 START_SIG = "protected void StartPoll()"
+OUTSTANDING_SIG = "protected int OutstandingWork()"
+GATE_SIG = "void StartPollGate()"
 SERVER_GUARD = (
     "m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > "
     "MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1"
@@ -68,8 +71,25 @@ class Command:
 
 
 class Batch:
-    def __init__(self, commands: PendingArray) -> None:
+    def __init__(self, commands: PendingArray | None = None) -> None:
         self.commands = commands
+
+
+class _Serializer:
+    """JsonSerializer.ReadFromString over the test's own JSON: id and cmd only."""
+
+    def ReadFromString(self, batch: Batch, data: EnforceString, _error: EnforceString) -> bool:
+        decoded = json.loads(data.text)
+        batch.commands = PendingArray(Command(item["id"], item["cmd"]) for item in decoded["commands"])
+        return True
+
+
+class _JobRunner:
+    def __init__(self, jobs: int) -> None:
+        self._jobs = jobs
+
+    def Count(self) -> int:
+        return self._jobs
 
 
 def _read(path) -> str:
@@ -99,6 +119,17 @@ def _wrap(signature: str, body: str) -> str:
     return signature + "\n{" + body + "}\n"
 
 
+def _gate_source(source: str, guard: str) -> str:
+    # StartPoll up to the end of its admission guard, then a probe that
+    # records the admission; the request it would send stays out.
+    body = method_body(source, START_SIG)
+    start = body.find(guard)
+    if start < 0:
+        raise AssertionError("StartPoll is missing the admission guard")
+    end = body.index("}", body.index("{", start)) + 1
+    return _wrap(GATE_SIG, body[:end] + "\n\tAdmitted();\n")
+
+
 class LeaseCloseBridgeTests(unittest.TestCase):
     def _bind(
         self,
@@ -107,10 +138,12 @@ class LeaseCloseBridgeTests(unittest.TestCase):
         *,
         drain_source: str | None = None,
         loop_source: str | None = None,
+        poll_source: str | None = None,
     ) -> dict[str, Any]:
         pending = PendingArray()
         dispatched: list[tuple[int, bool]] = []
         errors: list[tuple[int, str, bool]] = []
+        failures: list[str] = []
         in_callback = {"v": False}
 
         def Dispatch(command: Command) -> None:
@@ -120,6 +153,9 @@ class LeaseCloseBridgeTests(unittest.TestCase):
             text = code.text if isinstance(code, EnforceString) else str(code)
             errors.append((command.id, text, in_callback["v"]))
 
+        def OnPollFail(reason: object) -> None:
+            failures.append(reason.text if isinstance(reason, EnforceString) else str(reason))
+
         def Log(_msg: object) -> None:
             return None
 
@@ -127,8 +163,15 @@ class LeaseCloseBridgeTests(unittest.TestCase):
             "_S": _LogString,
             "Dispatch": Dispatch,
             "PostCommandError": PostCommandError,
+            "OnPollFail": OnPollFail,
             "Log": Log,
+            "MCPCommandBatch": Batch,
+            "JsonSerializer": _Serializer,
+            "m_Backoff": 0.0,
+            "m_Configured": True,
             "m_Pending": pending,
+            "m_PollInFlight": False,
+            "m_Tick": 0,
             "m_TickPollCallback": 0,
             "m_TickPollSent": 0,
             "MAX_DISPATCH_PER_TICK": _constant(source, "MAX_DISPATCH_PER_TICK"),
@@ -166,8 +209,26 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                 "MAX_POLL_RESULTS",
             ),
         )
+        if poll_source is not None:
+            translate(
+                poll_source,
+                POLL_SIG,
+                ns,
+                class_types=("JsonSerializer", "MCPCommand", "MCPCommandBatch"),
+                members=(
+                    "m_Backoff",
+                    "m_Configured",
+                    "m_Pending",
+                    "m_PollInFlight",
+                    "m_Tick",
+                    "m_TickPollCallback",
+                    "m_TickPollSent",
+                    "MAX_DISPATCH_PER_TICK",
+                ),
+            )
         ns["_dispatched"] = dispatched
         ns["_errors"] = errors
+        ns["_failures"] = failures
         ns["_in_callback"] = in_callback
         return ns
 
@@ -176,6 +237,59 @@ class LeaseCloseBridgeTests(unittest.TestCase):
         ns["_in_callback"]["v"] = True
         ns["OnPollSuccessLoop"]()
         ns["_in_callback"]["v"] = False
+
+    def _poll_answer(self, ns: dict[str, Any], commands: list[Command]) -> None:
+        # The whole OnPollSuccess, given the JSON of a poll answer and its size.
+        data = json.dumps({"commands": [{"id": c.id, "cmd": c.cmd.text} for c in commands]})
+        ns["_in_callback"]["v"] = True
+        ns["OnPollSuccess"](_LogString.of(data), len(data.encode("utf-8")))
+        ns["_in_callback"]["v"] = False
+
+    def _admits(
+        self,
+        peer: str,
+        *,
+        gate_source: str | None = None,
+        outstanding_source: str | None = None,
+    ) -> Callable[[int, int, int], bool]:
+        # The real StartPoll guard and, on the client, the real
+        # OutstandingWork(), over doubles that hold each term's count.
+        source = self._peer_source(peer)[0]
+        guard = "if (" + (SERVER_GUARD if peer == "server" else CLIENT_GUARD) + ")"
+        admitted: list[bool] = []
+        ns: dict[str, Any] = {
+            "Admitted": lambda: admitted.append(True),
+            "MAX_CALLBACK_REFS": _constant(source, "MAX_CALLBACK_REFS"),
+            "MAX_POLL_RESULTS": _constant(source, "MAX_POLL_RESULTS"),
+            "m_PollCtx": object(),
+        }
+        if peer == "client":
+            work = outstanding_source if outstanding_source is not None else method_body(source, OUTSTANDING_SIG)
+            translate(
+                _wrap(OUTSTANDING_SIG, work),
+                OUTSTANDING_SIG,
+                ns,
+                members=("m_CallbackRefs", "m_JobRunner", "m_Pending"),
+            )
+        translate(
+            gate_source if gate_source is not None else _gate_source(source, guard),
+            GATE_SIG,
+            ns,
+            members=("m_CallbackRefs", "m_Jobs", "m_Pending", "m_PollCtx", "MAX_CALLBACK_REFS", "MAX_POLL_RESULTS"),
+        )
+
+        def admits(callbacks: int, pending: int, jobs: int) -> bool:
+            ns["m_CallbackRefs"] = EnforceArray(object() for _ in range(callbacks))
+            ns["m_Pending"] = PendingArray(Command(i) for i in range(pending))
+            ns["m_Jobs"] = EnforceMap()
+            for job in range(jobs):
+                ns["m_Jobs"].Insert(job, object())
+            ns["m_JobRunner"] = _JobRunner(jobs)
+            admitted.clear()
+            ns["StartPollGate"]()
+            return admitted == [True]
+
+        return admits
 
     def _drain_all(self, ns: dict[str, Any]) -> None:
         pending: PendingArray = ns["m_Pending"]
@@ -307,18 +421,28 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                 self.assertEqual(cap, 128)
                 self.assertEqual(batch, 64)
 
-                ns = self._bind(source, flag)
+                # Above the count only the null check reads the batch, so a
+                # clip or a Resize there fails here, before the poll runs.
+                body = method_body(source, POLL_SIG)
+                head = body[: body.find(COUNT_LINE)]
+                self.assertEqual(head.count("batch.commands"), 1, "only the null check reads the batch")
+
+                # The whole OnPollSuccess, its parse and checks included, on a
+                # valid answer of 64 ordinary commands and a close.
+                full = _wrap(POLL_SIG, body)
+                ns = self._bind(source, flag, poll_source=full)
                 ordinary = 64
                 close_id = 65
                 cmds = [Command(i) for i in range(1, ordinary + 1)]
                 cmds.append(Command(close_id, close_cmd))
-                self._poll(ns, cmds)
+                self._poll_answer(ns, cmds)
                 pending: PendingArray = ns["m_Pending"]
                 dispatched = ns["_dispatched"]
                 errors = ns["_errors"]
                 n_disp = len(dispatched)
                 n_err = len(errors)
                 n_queued = pending.Count()
+                self.assertEqual(ns["_failures"], [], "a valid answer is no poll failure")
                 self.assertEqual(n_disp, 4, "inline dispatch")
                 if peer == "server":
                     self.assertEqual(n_queued, 32, "server queued including close")
@@ -327,30 +451,33 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                     self.assertEqual(n_queued, 16, "client queued including close")
                     self.assertEqual(n_err, 45, "client refusals")
                 self.assertEqual(n_disp + n_queued + n_err, 65, "batch is not clipped")
-                self.assertEqual(len(errors), n_err, "error list length")
                 for item in errors:
                     self.assertEqual(item[1], err_code)
                 self.assertEqual(pending.Get(pending.Count() - 1).id, close_id)
                 self.assertEqual(pending.Get(pending.Count() - 1).cmd, _LogString.of(close_cmd))
 
-                # The count is the batch's own; above it only the null check
-                # reads the batch, and a clip before the flag drops the close.
-                body = method_body(source, POLL_SIG)
-                head = body[: body.find(COUNT_LINE)]
-                self.assertEqual(head.count("batch.commands"), 1, "only the null check reads the batch")
-                loop = _poll_loop_source(source, flag)
-                clipped = loop.replace(
+                # A clip of the count, or a discard by size before it, loses the close.
+                clipped = full.replace(
                     COUNT_LINE,
                     COUNT_LINE + "\n\t\tif (count > MAX_POLL_RESULTS)\n\t\t{\n\t\t\tcount = MAX_POLL_RESULTS;\n\t\t}",
                     1,
                 )
-                self.assertNotEqual(clipped, loop)
-                ns_clip = self._bind(source, flag, loop_source=clipped)
-                self._poll(ns_clip, cmds)
+                self.assertNotEqual(clipped, full)
+                ns_clip = self._bind(source, flag, poll_source=clipped)
+                self._poll_answer(ns_clip, cmds)
                 clip_pending: PendingArray = ns_clip["m_Pending"]
                 clip_total = len(ns_clip["_dispatched"]) + clip_pending.Count() + len(ns_clip["_errors"])
                 self.assertEqual(clip_total, 64, "a count clipped to MAX_POLL_RESULTS")
                 self.assertNotIn(close_id, [command.id for command in clip_pending])
+                discarded = full.replace("if (!parsed)", "if (!parsed || dataSize > MAX_POLL_RESULTS)", 1)
+                self.assertNotEqual(discarded, full)
+                ns_discard = self._bind(source, flag, poll_source=discarded)
+                self._poll_answer(ns_discard, cmds)
+                discard_total = (
+                    len(ns_discard["_dispatched"]) + ns_discard["m_Pending"].Count() + len(ns_discard["_errors"])
+                )
+                self.assertEqual(discard_total, 0, "an answer discarded by its size")
+                self.assertEqual(ns_discard["_failures"], ["parse_failed"])
 
                 ns_slot = self._bind(source, flag)
                 for ident in range(max_pending - 1):
@@ -376,37 +503,44 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                     expression = CLIENT_GUARD
                 guard = "if (" + expression + ")"
                 self.assertIn(guard, poll)
-                translated = (
-                    expression.replace("m_CallbackRefs.Count()", "callbacks")
-                    .replace("m_Pending.Count()", "pending")
-                    .replace("m_Jobs.Count()", "jobs")
-                    .replace("OutstandingWork()", "callbacks + pending + jobs")
-                )
-                for outstanding, expect_block in ((63, False), (64, True)):
-                    blocked = eval(
-                        translated,
-                        {"__builtins__": {}},
-                        dict(
-                            callbacks=outstanding,
-                            pending=0,
-                            jobs=0,
-                            MAX_CALLBACK_REFS=cap,
-                            MAX_POLL_RESULTS=batch,
-                        ),
-                    )
-                    self.assertEqual(blocked, expect_block, f"outstanding {outstanding}")
-                blocked_over = eval(
-                    translated,
-                    {"__builtins__": {}},
-                    dict(
-                        callbacks=64,
-                        pending=0,
-                        jobs=0,
-                        MAX_CALLBACK_REFS=cap,
-                        MAX_POLL_RESULTS=batch,
-                    ),
-                )
-                self.assertTrue(blocked_over, "64 live callbacks refuse a 65-POST batch")
+                # The real guard, and on the client the real OutstandingWork():
+                # 63 outstanding admit a poll and 64 refuse it, whichever
+                # terms make them up.
+                admits = self._admits(peer)
+                for terms in ((63, 0, 0), (0, 63, 0), (0, 0, 63), (21, 21, 21)):
+                    self.assertTrue(admits(*terms), f"outstanding {terms} admits a poll")
+                for terms in ((64, 0, 0), (0, 64, 0), (0, 0, 64), (21, 21, 22)):
+                    self.assertFalse(admits(*terms), f"outstanding {terms} refuses a poll")
+
+                # A count that loses a term, or returns the wrong value, admits 64.
+                if peer == "client":
+                    work = method_body(source, OUTSTANDING_SIG)
+                    variants = [(work.replace("return total;", "return 0;", 1), (64, 0, 0))]
+                    for term, terms in (
+                        ("m_CallbackRefs.Count()", (64, 0, 0)),
+                        ("m_Pending.Count()", (0, 64, 0)),
+                        ("m_JobRunner.Count()", (0, 0, 64)),
+                    ):
+                        variants.append((work.replace("total = total + " + term + ";", "", 1), terms))
+                    for variant, terms in variants:
+                        self.assertNotEqual(variant, work)
+                        self.assertTrue(
+                            self._admits(peer, outstanding_source=variant)(*terms),
+                            f"a wrong OutstandingWork() admits {terms}",
+                        )
+                else:
+                    gate = _gate_source(source, guard)
+                    for term, terms in (
+                        ("m_CallbackRefs.Count() + ", (64, 0, 0)),
+                        (" + m_Pending.Count()", (0, 64, 0)),
+                        (" + m_Jobs.Count()", (0, 0, 64)),
+                    ):
+                        dropped = gate.replace(term, "", 1)
+                        self.assertNotEqual(dropped, gate)
+                        self.assertTrue(
+                            self._admits(peer, gate_source=dropped)(*terms),
+                            f"a guard without {term.strip(' +')} admits {terms}",
+                        )
 
 
 if __name__ == "__main__":
