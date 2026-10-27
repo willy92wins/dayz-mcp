@@ -1,8 +1,8 @@
-<!-- CABECERA DE LA REVISIÓN 7 — leer antes que el cuerpo -->
+<!-- CABECERA DE LA REVISIÓN 8 — leer antes que el cuerpo -->
 
-# PR del transporte: el fin del lease espera al juego (diseño, revisión 7)
+# PR del transporte: el fin del lease espera al juego (diseño, revisión 8)
 
-**Qué es esto.** Es la revisión 7 del diseño, sobre `465a42a` (la base del código sigue siendo main `75b5d16`). Responde a la revisión r6 de Codex Sol, RED con los hallazgos H1 a H5 (P1 en H1 a H3, P2 en H4, P3 en H5), y a sus precisiones. El cuerpo, en inglés, cambia solo lo que esos H y esas precisiones piden. Donde discrepen, manda esta cabecera.
+**Qué es esto.** Es la revisión 8 del diseño, sobre `ce3601e` (la base del código sigue siendo main `75b5d16`). Responde a la revisión r7 de Codex Sol, RED con los hallazgos H1 a H4 (P1 en H1 y H2, P3 en H3 y H4). El cuerpo, en inglés, cambia solo lo que esos H piden. Donde discrepen, manda esta cabecera.
 
 **Decisión de Guillermo (2026-10-24 10:07Z):** «PR aparte». Lo revisa Codex Sol y lo mergea Guillermo, porque toca el PBO.
 
@@ -15,13 +15,12 @@
 - Un cierre ya entregado solo suelta copias y peticiones con id ≤ F o ≤ W **de esa conexión**. Un release de otra generación no suelta el move ni sube el suelo. No hay valla de admisión por destino.
 - `cleanup_owner` ya no encola `vehicle_release`, `bot_stop` ni `action_hold_cancel`. Los releases del abandono se quedan. Las filas se registran en el coordinator **antes** del hook.
 
-**Mapa H1–H5 de la r6 → secciones:**
-- **H1** (causa nueva del release, P1): el cierre cliente pasa `"shutdown"` en los pasos 4, 5, 8 y 9, la causa que ya pasa `Shutdown` y que ya está en los conjuntos cerrados de Python y en sus tests, en vez de `"lease_close"`. No cambia ningún enum, descripción ni test, y B sabe del cierre por el `lease_end` del grant (K21). §2.6.
-- **H2** (release de tres campos, P1): §5.4 nombra las expectativas de `test_player_move.py` que comparan el release `[[udt, False, 5]]` y el doble del cuerpo sin generación; el doble gana una generación G, las expectativas la incluyen y los pins nuevos comparan la secuencia exacta de campos. §5.4.
-- **H3** (K25, P1): el positivo pasa a 63 callbacks vivos + un poll de 64 + el cierre = 128; con 64 pendientes no se admite. K25.
-- **H4** (G7, P2): lo inyectado es válido en todo salvo la generación (start por encima de lastId, un release con el id de B y otro mayor, raise/fire por encima de W); todo se rechaza con `conn_gen_mismatch`, y un mutante sin la comparación de generación debe fallar. G7.
-- **H5** (precisiones, P3): el cuerpo atribuye la ruta de cámara a #263 y describe recovery como un consumidor que ignora la ronda cuando `_releasing` ya se limpió; las coordenadas del recibo de Grok de la r6 eran históricas. Las precisiones de la r6 van en §2.5, §2.6, §2.13, §4, §5.4 y G2(d).
-- El mapa H1–H6 de la r5 está en `465a42a`.
+**Mapa H1–H4 de la r7 → secciones:**
+- **H1** (contrato público de `conn_gen_unknown`, P1): la migración cubre cada verbo cuyo camino cliente puede devolver el rechazo (`player_move`, `weapon_raise`, `weapon_fire`): SendStart / FlushServerRelease / DispatchPlayerMove, SendRaiseRequest / SendFireRequest y sus llamadores, BRIDGE_CODES, el extractor con SEND_START, las tres descripciones, `server.py` fuera de Unchanged, y el positivo más el pin de fuente. §2.5, §2.17, §5.4.
+- **H2** (resultado del hold, P1): el paso 8 dice lo que hace `MCPHoldControl.Shutdown` sin cambiarlo: `cancel`/`shutdown` solo si aún no hay terminal ni timeout; un hold ya publicado conserva su observación. K16 mide los dos casos y el mutante que reescribe el terminal. §2.6 paso 8, K16, G2(d).
+- **H3** (prefijo de los pins, P3): los tres pins de conjuntos llevan commit y ruta completa. §2.6 paso 4.
+- **H4** (redacción de consumidores, P3): ninguna rama distingue `shutdown` del cierre de un lease; otras causas sí ramifican. El resumen nombra revisión 8. §2.6, §0.
+- El mapa H1–H5 de la r6 está en `ce3601e`.
 
 **Condiciones de las preguntas (r2 §1) y citas del §4:** Q1 en §2.12; Q2 en §2.11 y §6 G6; Q7 en §2.10; Q11 en §2.6 y K31; Q13 en §2.1 y §2.5; Q15 en §2.3 y §2.8. Citas de la r2 (sus líneas): D:561 → §2.16; D:648-649 → §4 #266; D:501 y D:509-510 → §2.12 y §2.13; D:754-755 → §5.4; D:604 → S1 y §4; D:366-370 → §2.7; D:443-448 → §2.10.
 
@@ -45,17 +44,16 @@
 - El PR de seguimiento de H7 r1 no bloquea el merge de este. Bloquea que el cuerpo o el CHANGELOG den por cumplida la regla de los jobs (la compuerta de arriba).
 - El release del cliente ya lleva hoy el id del movimiento (4_World/MCP_PlayerMove.c:605-609, 794-798 y 935-952); `conn_gen` es [DESIGN]: con él, un release de otra generación no suelta la copia ni sube el suelo (§2.5).
 
-**Respuestas a las preguntas de la r6 (para la r7):**
-1. Si el `PlayerBase` cliente es otro objeto tras reconectar no se puede concluir con las fuentes leídas (r6 §7.1): V130 enseña el camino del servidor (V130/5_mission/mission/missionserver.c:380-392 y 633-639) y las superficies de selección (:499-507; V130/4_world/entities/manbase/playerbase.c:6298-6323), no la vida de la réplica cliente. Se mide en el juego (positivo de G7 tras reconectar). Mientras tanto el servidor falla cerrado: una generación cliente vieja se rechaza y deja la deuda, no se acepta como actual.
-2. El servidor tiene eventos y estado local de desconexión (V130/5_mission/mission/missionserver.c:395-410, 641-688 y 690-723; V130/4_world/entities/manbase/playerbase.c:2633-2640 y 7647-7665), pero no está probado que sean un terminal causal: no dicen que no queden RPC, input predictivo ni callbacks con efecto (r6 §7.2). Esta r7 no los adopta; S6 sigue hasta la salida del proceso servidor.
+**Respuestas a las preguntas de la r7 (para la r8):**
+1. La instrumentación del cuerpo cliente (constructor, destructor, selección y recepción de `MCP_RPC_CONN_GEN`) observa el lifetime en las corridas concretas. No acredita por sí sola G7 ni una garantía universal; G7 lo dice (r7 §6; G7).
+2. Ningún consumidor distingue `shutdown` del cierre de un lease (r7 §2; MCPClientBridge.c:4929-4947 y :4953-4969; 4_World/MCP_PlayerMove.c:585-588). La segunda pregunta queda cerrada.
 
-**Preguntas para la revisión 8:**
-1. Para G7: ¿basta instrumentar en el cliente el constructor, el destructor, la selección y la recepción de `MCP_RPC_CONN_GEN`, con la identidad del objeto y la generación anterior y la nueva, en una reconexión del mismo proceso y en una sustitución del cliente? `PlayerBase.OnReconnect` (V130/4_world/entities/manbase/playerbase.c:7638-7645) lo llama el servidor (V130/5_mission/mission/missionserver.c:633-639; el método no tiene guarda) y solo resetea datos de construcción.
-2. H1: ¿hay algún consumidor de `released_by` o de `stop_reason` que distinga `shutdown` del cierre de un lease? Esta r7 no encontró ninguno que ramifique por el valor.
+**Preguntas para la revisión 9:**
+Ninguna: las dos de la r7 quedan respondidas; no aparece otra frontera abierta en las fuentes leídas.
 
 ---
 
-# Lease-end close: design (revision 7)
+# Lease-end close: design (revision 8)
 
 **Base:** main `75b5d16`. Citation conventions:
 - A bare `file:line` is at `2e844c5`. Python files are under `tools/dayz_mcp/` and tests under
@@ -81,7 +79,7 @@ that runs late (H5), overwritten `lease_end_unconfirmed` (H6), infected debt cle
 the registry (H7), close routing (H8), holds after instance replace (H9), deletion jobs (H10),
 samplers (H11), a pinned spawn assertion (H12) and recovery during releasing (H13).
 
-Design D (revision 6) does four things:
+Design D (revision 8) does four things:
 1. **Stop, then prove.** At lease end every known peer has one close obligation. A reachable
    destination gets one internal close; an unreachable one is OWED with no command (§2.4).
    Its dispatch stops every controller its bridge owns (§3). Its answer is a census of the
@@ -403,8 +401,11 @@ Rules:
   (the same object the helper targeted). `SendStart` / `FlushServerRelease` /
   `SendFireRequest` / `SendRaiseRequest` read that member on `GetGame().GetPlayer()` cast to `PlayerBase` (it returns a `DayZPlayer`, V130/3_game/global/game.c:944; 75b5d16 4_World/MCP_PlayerMove.c:689 and 4_World/MCP_Weapon.c:363 already cast it).
   If it is unset, the **client** refuses the command with `conn_gen_unknown`
-  [DESIGN] and does not write the input; `SendStart`'s caller handles only `input_busy` today (MCPClientBridge.c:2836-2844), so the new refusal must reach it before `Begin`. A release with no known generation is not sent: the local overrides still go off, `ReleaseAll` (4_World/MCP_PlayerMove.c:575-609) leaves `s_ServerReleasePending` set, and the retry (:769-800) sends it once the generation is known; `conn_gen_unknown` never counts as a sent release or a clean close. If a message still arrives without a
-  matching generation, the **server** refuses it (`conn_gen_mismatch` [DESIGN])
+  [DESIGN] and does not write the input. The public migration of that refusal (r7 H1) is the whole client path that can return it, not only `player_move`:
+  - **player_move.** `SendStart` (75b5d16 4_World/MCP_PlayerMove.c:725-763) checks generation right after the three `unavailable` exits (:728-739) and before `FlushServerRelease` (:740): with no known generation it returns `conn_gen_unknown`, so a start with a pending release and no generation does not answer `input_busy` (:741-744). `FlushServerRelease` also does not send without a generation and keeps the pending (this paragraph). In `DispatchPlayerMove`, as today's `input_busy` (MCPClientBridge.c:2836-2844): `if (serverRequest == "conn_gen_unknown")` with `result.ok = false; result.error = "conn_gen_unknown"; return true;` before `Begin`, with the literal written, not the variable.
+  - **weapon_raise and weapon_fire.** `SendRaiseRequest` and `SendFireRequest` (4_World/MCP_Weapon.c:634-680) also read the generation; without it they return `conn_gen_unknown` after the `IsClient` exit and before `CanStoreInputUserData`. Their callers already propagate the value by variable: MCPClientBridge.c:2147-2152 (`result.error = requestError`) and 4_World/MCP_Weapon.c:617-621 (`s_FireReason = refusal`). No other client message that writes generation reaches a tool: `FlushServerRelease` returns nothing (75b5d16 4_World/MCP_PlayerMove.c:769), and the client census travels in `lease_close_client`, which stays out of the public whitelist (§2.16).
+  - **Release with no known generation** is not sent: the local overrides still go off, `ReleaseAll` (4_World/MCP_PlayerMove.c:575-609) leaves `s_ServerReleasePending` set, and the retry (:769-800) sends it once the generation is known; `conn_gen_unknown` never counts as a sent release or a clean close.
+  If a message still arrives without a matching generation, the **server** refuses it (`conn_gen_mismatch` [DESIGN])
   without raising lastId or releasing a copy. V130 `PlayerBase.OnReconnect`
   (V130/4_world/entities/manbase/playerbase.c:7638-7645) is called by the server (V130/5_mission/mission/missionserver.c:633-639; the method itself has no guard) and
   only resets construction data; it does not say whether the client PlayerBase
@@ -460,7 +461,7 @@ and without the bridge teardown [DESIGN].
    `timed_out` (MCPDialogController.c:428-432) [DESIGN, Q11].
 2. The UI preview root is unlinked (as 7365-7369).
 3. `MCPCarDrive.Clear()` (4_World/MCP_CarScript.c:47-63).
-4. `MCPInputTriggerControl.ReleaseAll("shutdown")` (MCPClientBridge.c:337). Steps 4, 5, 8 and 9 pass `"shutdown"`, as `Shutdown` does (MCPClientBridge.c:7382-7405; 4_World/MCP_PlayerMove.c:621), not a new cause (r6 H1): the closed sets are 75b5d16 bridge_errors.py:406-408 and 443-445, player_move.py:47-49 and player_trace.py:45-55 (checked at :122), and 75b5d16 tools/tests/test_player_move.py:53, test_fb_e1ae_input_trigger.py:82 and test_player_trace.py:1457 (:1440 at 2e844c5) pin them. No consumer branches on the value, so no enum, description or test changes; B learns of the close from the grant's `lease_end` (K21).
+4. `MCPInputTriggerControl.ReleaseAll("shutdown")` (MCPClientBridge.c:337). Steps 4, 5, 8 and 9 pass `"shutdown"`, as `Shutdown` does (MCPClientBridge.c:7382-7405; 4_World/MCP_PlayerMove.c:621), not a new cause (r6 H1): the closed sets are 75b5d16 bridge_errors.py:406-408 and 443-445, player_move.py:47-49 and player_trace.py:45-55 (checked at :122), and 75b5d16 tools/tests/test_player_move.py:53, 75b5d16 tools/tests/test_fb_e1ae_input_trigger.py:82 and 75b5d16 tools/tests/test_player_trace.py:1457 (2e844c5 tools/tests/test_player_trace.py:1440) pin them. No branch distinguishes `shutdown` from a lease-end close; other causes do branch (MCPClientBridge.c:4929-4947 and :4953-4969; 4_World/MCP_PlayerMove.c:585-588). No enum, description or test of those cause sets changes; B learns of the close from the grant's `lease_end` (K21).
 5. `MCPPlayerMoveControl.ReleaseAll("shutdown")` (4_World/MCP_PlayerMove.c:568-611). It sends
    the server release, or leaves it to the per-tick retry (605-610, 769-800; `OnTick` 611). It is
    not `ShutdownRelease` (619-624), which drops an unsent release.
@@ -468,8 +469,7 @@ and without the bridge teardown [DESIGN].
    runs, controls and HUD, focus.
 7. `ReleaseCamera()` (7073-7108). An active owned camera starts the 10-tick handoff (430,
    7083-7089). Otherwise the cameras are switched off and deleted now.
-8. `MCPHoldControl.Shutdown("shutdown")` (4_World/MCP_ActionHold.c:524-550), so the hold's own
-   result carries step 4's cause.
+8. `MCPHoldControl.Shutdown("shutdown")` (4_World/MCP_ActionHold.c:524-550). `Shutdown` is unchanged (R25). It sets `cancel` with cause `shutdown` only if the hold still has no terminal and no timeout cause (:531-535). A hold that already had a terminal or a published observation keeps it (`finished`/`natural` at :239-243; `Publish` and `Take` at :368-386 and :414-448), and the post takes that observation (MCPClientBridge.c:4207-4219).
 9. Sampler abort, as `Shutdown` does (7382-7384) and as `DispatchVehicleRelease` already does
    for vehicle trace (2623-2625): `MCPVehicleTrace.Abort("shutdown")`,
    `MCPAnimTimeline.Abort("shutdown")`, `MCPPlayerTrace.Abort("shutdown")`. This keeps
@@ -924,10 +924,12 @@ it runs.
   4_World/MCP_PlayerMove.c, 4_World/MCP_Weapon.c,
   4_World/MCP_ActionHold.c and 4_World/MCP_InventoryMove.c.
 - **Python:** loopback.py, session_coordination.py, process_lifecycle.py, daemon.py, core.py,
-  bridge_readiness.py, ui_dialog.py and product-spec.md (six dialog states; H5
+  bridge_readiness.py, ui_dialog.py, server.py (`conn_gen_unknown` in the
+  `player_move`, `weapon_raise` and `weapon_fire` descriptions, 75b5d16
+  tools/dayz_mcp/server.py:8864-8869, :7478 and :7546) and product-spec.md (six dialog states; H5
   release/expiry uses the aggregated close, r3 H12; vehicle_trace cleanup unchanged
   in meaning).
-- **Unchanged:** control_client.py, dayz_test_tool.py, server.py and
+- **Unchanged:** control_client.py, dayz_test_tool.py and
   4_World/MCP_CarScript.c.
 - **Tests:** two new files (§5) and the changes in §5.4.
 
@@ -1065,7 +1067,7 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | K13 | Restart (H4) | seeded run → first grant degraded (`daemon_restart`); `note_processes_gone(run, None)` → next grant clean; recovered fault: seed after manifest restore and before lifting, including `clear_lifecycle_recovery_fault` (6461-6463) and complete (6554-6556), covering kept live runs (process_lifecycle.py:7625-7631, 7677-7692) | a lease end while the run is unbound → rows OWED (`not_bound`), debt stays; construction order of setter vs `_lock`/`_bindings` (2020, 2039-2045) both attach |
 | K14 | Retirement and late results (H13) | queued close at `retire_role` → `binding_retired`, its late result → 200 `discarded`; delivered close → late result 409 `binding_retired`; the retired instance's own hold result → 200 and reconciles | the lifecycle write fails, `note_processes_gone` is not called → row stays OWED |
 | K15 | Quarantine | quarantine at lease end → no close, rows OWED (`retail_quarantine`), grant degraded at once; hold path as today | quarantine after the close was queued → delivery discards it (4672-4673) → OWED |
-| K16 | Holds (H2, H5, H9, r4 H1) | (a) delivered hold, both sides clean, hold result lost → next `action_hold` on that instance admitted; (b) both-sides-clean close before the hold result → result is a no-op; (c) at lease end no `action_hold_cancel` is queued and A's `pending_commands` is 0; (f) instance replaced: old exact holds become `hold_server_unverified`, new instance holds admitted; (j) START with vanilla ack whose recorded id matches `SJ_ACTION_ACK_*` → **that input row** may clear, never the hold fence | (d) residue client or server action → next hold on that instance 409 `hold_unreconciled`, grant degraded; (e) a clean close from another instance → fence stays; (g) interrupt is not sent from the **server** close; a late interrupt can still arrive under a degraded grant; a hold player missing from floors → `hold_server_unchecked`; (h) own result `cleanup_complete=true` first while server helper still busy → fence stays; (i) START without ack, interrupt, or END in flight, both helpers idle → `action_input_in_flight`, debt until client process exit; no "unacked send" shortcut |
+| K16 | Holds (H2, H5, H9, r4 H1, r7 H2) | (a) delivered hold, both sides clean, hold result lost → next `action_hold` on that instance admitted; (b) both-sides-clean close before the hold result → result is a no-op; (c) at lease end no `action_hold_cancel` is queued and A's `pending_commands` is 0; (f) instance replaced: old exact holds become `hold_server_unverified`, new instance holds admitted; (j) START with vanilla ack whose recorded id matches `SJ_ACTION_ACK_*` → **that input row** may clear, never the hold fence; **(k)** active hold with no terminal: close → `Shutdown` ends it, result `cancel`/`shutdown`; **(l)** hold with `finished`/`natural` (or `timeout`/`timeout`, `rejected`/`server_rejected`) published and not yet taken when close enters: result stays that observation | (d) residue client or server action → next hold on that instance 409 `hold_unreconciled`, grant degraded; (e) a clean close from another instance → fence stays; (g) interrupt is not sent from the **server** close; a late interrupt can still arrive under a degraded grant; a hold player missing from floors → `hold_server_unchecked`; (h) own result `cleanup_complete=true` first while server helper still busy → fence stays; (i) START without ack, interrupt, or END in flight, both helpers idle → `action_input_in_flight`, debt until client process exit; no "unacked send" shortcut; **(m)** a mutant in which `Shutdown` rewrites an existing terminal must fail |
 | K17 | Move and weapon floors (H1, H2, Q15, r3 H11) | client F=7 W=4 matching named `conn_gen` (equals body's `m_MCPConnGen`, even if lastId is 0) → server close carries both, reports ≥ → both rows clear; late clean while still CLOSING → clear; late clean after OWED whose identity (close id, instance, `conn_gen`, F/W) still matches, atomic → **clears** | server first reports F=5 then client F=7 → OWED `player_move_floor_unapplied`; same for W → `weapon_floor_unapplied`; missing or other `conn_gen` on the close → OWED `player_move_conn_gen_unapplied` / `weapon_conn_gen_unapplied`; start/raise/fire/release with no generation or another generation → refused; other-gen release does not free B's copy or raise lastId; superseded or identity-mismatch late result stays OWED; unresolved player → OWED; issued grant is never rewritten |
 | K18 | Order across peers | the server close is published only after the client close settles | client silent → server close published at + 10 s, not earlier |
 | K19 | Interleavings and locks | (i) no poll between publish and report sees the close; (ii) expiry from `record_poll` → that same poll answer carries the client close; (iii) status and acquire during a blocked hook return; (iv) an outcome of round 1 flushed after round 2 opened → ignored | a mutant hook that waits for the game → the poll answer in (ii) comes only after the hook's timeout; start/release with no `conn_gen` or another generation → refused (same identity negatives as K8/K17) |
@@ -1106,7 +1108,7 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | K5–K7, K13–K14 | Both construction/attach orders; offline → two peers; role replace; persist fail; recovered fault that keeps other live runs. | Confirm surviving process identities and seed/clear of their debt. A binding change does not prove exit. |
 | K8, K17–K19 | Interleavings with a close **delivered** before timeout and dispatch after the grant; results after 40 s; supersession; atomic floor check; reconnect `conn_gen` match (old F after B's first accepted start; F=1 in flight on a fresh connection); missing `conn_gen` is OWED; start/release/raise/fire with no generation or another generation refused; other-gen release does not free B's copy. | Delay **only** that delivered close's DrainPending (G7 hook); B's input still ticks. Inject a previous-generation start **and** release at the server reader; they are refused. A Python queue test does not measure this. `/set_poll_delay` is 5 s (loopback.py:5412-5419) and is not this instrument. |
 | K9–K12, K15, K21 | Combine each failure with other warnings and keep `lease_end_unconfirmed`. Cover late callback, hook that publishes, hook that never publishes. Full queue plus close. | Separate POST attempt, received result and settlement. Measure both clocks; a Python deadline does not prove 25 s of simulation. |
-| K16, K26–K29; G2–G3 | Independent doubles of local and server state; START/interrupt/END in flight; own result before server helper; replaced-instance hold; RPC with job gone; notify register; late weapon start; rejected bot stop with idle vs not-idle. | Observe availability and rest on **both** sides. Camera and controls need readback; native channels need rejection of old activity. |
+| K16, K26–K29; G2–G3 | Independent doubles of local and server state; START/interrupt/END in flight; own result before server helper; replaced-instance hold; close on an active hold vs a published-and-untaken observation (K16(k)(l)(m)); RPC with job gone; notify register; late weapon start; rejected bot stop with idle vs not-idle. | Observe availability and rest on **both** sides. Camera and controls need readback; native channels need rejection of old activity. |
 | K27, K30; G5 | Drop positives that treat the next round as clean because the registry/job was emptied. Keep refs and obligations until resolved. Combine X/Y and job-timeout-then-RPC stay owed. | Infected probe (follow-up) isolates override effect. Deletions are watched until gone; reading the native declaration is not enough. |
 | K20 | Public consumers with a round during releasing — expected conflict — and after release — recovery allowed; abandon releases still attributed to the owner. | Distinguish session-transition end from pending physical cleanup. |
 | K22–K25; G4 | Both bridges, exact order, old pending, spawn at head, new batch, queue pressure; server 64 callbacks + close in the 128 budget; **client** admission edge with refusals; update the `test_task9` literal and keep a FIFO-independent negative. | Keep the single-batch proof and filter expected ids. For the chosen one-shot commands, `result posted` order proves FIFO inside the tick. |
@@ -1114,6 +1116,7 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | G6 | Mechanical bounds; separate definitive residue from observed proof; keep grace, releasing and audit. | Measure idle, handoff, pending proof and degradation separately. 0.5/2 s targets depend on load and do not replace a close guarantee. |
 
 ### 5.3 Findings to criteria
+r7 H1: §2.5, §2.17, §5.4. r7 H2: §2.6 step 8, K16(k)(l)(m), G2(d). r7 H3: §2.6 step 4. r7 H4: §2.6 step 4, §0.
 r5 H1: §5.4. r5 H2: G2, K26, §2.9. r5 H3: S6, K27, K30, §2.7. r5 H4: §2.5, K8, K17–K19, G7. r5 H5: §2.5, C3, S3, G7. r5 H6: cabecera, §2.7, §2.10, K16, K25, §5.4.
 r4 H1: K16, K27. r4 H2: K27. r4 H3: K25. r4 H4: §5.4. r4 H5: K8, K17, G7, §2.5. r4 H6: cabecera, §2.4, S9.
 r4 H7: K27, K30. r4 H8: G7. r4 H9: §2.17. r4 H10: §2.3, §2.6, §2.14, G6.
@@ -1192,6 +1195,24 @@ r1 H14: K20, K16. r1 H15: K32 for the gates; K26 checks state, not jobs.
   order: super then `MCPGodmode.OnBodyReady`) and :1865-1872 (vanilla connect
   events). MissionServer conn-gen send after vanilla must keep that order or
   update the pin.
+- 75b5d16 tools/tests/test_player_move.py:54-60 `BRIDGE_CODES` gains
+  `conn_gen_unknown`. The extractor `_bridge_codes` (:308-319) gains `SEND_START`
+  (:136) in the return sweep, discarding exactly `sent` and `unavailable`, the
+  two statuses that are not errors (75b5d16 4_World/MCP_PlayerMove.c:730-762), so
+  the oracle sees the code even when it travels by variable. The `player_move`
+  (75b5d16 tools/dayz_mcp/server.py:8864-8869), `weapon_raise` (:7478) and
+  `weapon_fire` (:7546) descriptions name `conn_gen_unknown`; `server.py` leaves
+  Unchanged for that bounded change. The description test
+  (75b5d16 tools/tests/test_player_move.py:1982-1987) covers it with no extra
+  assertion. 75b5d16 tools/tests/test_fb_0063_weapon_actions.py:363 and :520-532,
+  which pin `input_busy`, gain the new literal.
+- Offline positive and independent source pin (r7 H1): a no-game test with the
+  body double lacking generation walks `DispatchPlayerMove` and gets
+  `conn_gen_unknown` with no `Begin`, no written message and no overrides; a
+  source pin, apart from the extractor, that in `DispatchPlayerMove` the
+  literal branch sits before `Begin`. A mutant without that branch, or that
+  leaves it after `Begin`, fails both. For raise and fire, the same positive
+  (no message, no override) and the pin of the literal.
 - Independent negatives (not the pins above): conn_gen missing/mismatch (K8/K17);
   start/release/raise/fire of another generation refused; other-gen release
   does not free B's copy; floors applied with lastId still 0; client admission
@@ -1239,7 +1260,8 @@ protocol: lease, lifecycle guard, no direct kills, `session_status` before each 
   dialog;
 - (d) a 10 s `action_hold`, released in the middle → Shutdown sends interrupt
   (4_World/MCP_ActionHold.c:538-546); that interrupt is debt while the sending
-  client process lives. B's `action_hold` on **that** instance gets 409
+  client process lives. This is K16(k): the hold was active with no terminal,
+  so the posted result is `cancel`/`shutdown`. B's `action_hold` on **that** instance gets 409
   `hold_unreconciled`, B's grant is degraded, and B's client close is **not**
   settled. After replace-role, B's hold on the **new** instance is admitted.
 - Pass, (a)–(c): B's grant lists the client close as settled. Release → grant
@@ -1296,6 +1318,15 @@ protocol: lease, lifecycle guard, no direct kills, `session_status` before each 
   INCONCLUSO, never a closed hypothesis. In-game positive after reconnect:
   the client learns the new generation (RPC on the body) and then a start
   with that `conn_gen` is accepted and the player moves.
+- **Client-body probe (r7 §6), observation only.** The client logs the `PlayerBase`
+  constructor, destructor and selection (the surfaces r7 §6 lists) and the reception of
+  `MCP_RPC_CONN_GEN`, with object identity, process, and the generation before and after
+  the RPC, in a same-process reconnect and in a client replacement. It observes the
+  lifetime in those runs; it does not accredit G7 by itself, nor any universal guarantee.
+  G7 passes only when the run also correlates the server body's current generation, the
+  RPC's target body with the locally selected one, the generation that start, release,
+  raise, fire and the census actually write, and the exact refusal of the previous value
+  with the current one accepted (the injection and the in-game positive above).
 
 **G6. Latency budgets (H12),** from A's release reply to B's grant reply:
 - no work (read-only commands only): no close in either log, at most 0.5 s;
