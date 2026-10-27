@@ -16,11 +16,13 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp import process_lifecycle
 from dayz_mcp.input_activity import InputSample
 from dayz_mcp.process_lifecycle import (
     INPUT_SIGNAL_STALE_S,
@@ -31,6 +33,7 @@ from dayz_mcp.process_lifecycle import (
 from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import INST_SERVER
+from tests.lease_helpers import FakeClock
 from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
     IDENTITY_A,
@@ -97,6 +100,63 @@ class ArmedLock:
         self._lock.release()
 
     def __enter__(self) -> "ArmedLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
+class ContentionProbe:
+    """Stands in for the manifest lock. The first acquire after arm() first
+    tries without waiting, and records whether another thread held the lock."""
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._armed = False
+        self.tried = threading.Event()
+        self.was_held: bool | None = None
+
+    def arm(self) -> None:
+        self._armed = True
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._armed:
+            self._armed = False
+            free = self._lock.acquire(False)
+            self.was_held = not free
+            self.tried.set()
+            if free:
+                return True
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "ContentionProbe":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
+class RecordingLock:
+    """Stands in for a lock and records how each acquire asked to wait."""
+
+    def __init__(self, lock, name: str, calls: list) -> None:
+        self._lock = lock
+        self._name = name
+        self._calls = calls
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self._calls.append((self._name, blocking, timeout))
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "RecordingLock":
         self.acquire()
         return self
 
@@ -393,11 +453,108 @@ class HumanInputHolderTest(unittest.TestCase):
         failed = self.assert_block_shape(failed)
         self.assertEqual(failed["signal"], "unavailable")
 
+    def test_t2_clock_is_read_with_both_locks_held(self) -> None:
+        # The last good sample is at 1000, and the production clock reads
+        # 1001.99 until the report takes _activity_lock. Read there, the
+        # sample is 1.99 s old and the signal ok; if the clock moves to
+        # 1002.03 while the lock is taken, a reading made with both locks
+        # held finds it 2.03 s old.
+        self.add_run(owner="A")
+        self.sample(1000.0, tick=100, foreground=CLIENT_PID)
+        clock = [1001.99]
+        armed = ArmedLock(self.lifecycle._activity_lock)
+        self.lifecycle._activity_lock = armed  # type: ignore[assignment]
+        with mock.patch.object(process_lifecycle.time, "time", lambda: clock[0]):
+            steady = self.lifecycle.human_input_block("A", "lease-A")
+            armed.arm(lambda: clock.__setitem__(0, 1002.03))
+            crossed = self.lifecycle.human_input_block("A", "lease-A")
+        self.assertEqual(steady["signal"], "ok")
+        self.assertEqual(crossed["signal"], "unavailable")
+        self.assertEqual([row["run_id"] for row in crossed["runs"]], ["run-x"])
+
+    def test_t9_the_report_never_waits_for_a_lock(self) -> None:
+        # Deterministic, unlike the busy-lock HTTP test: each lock the report
+        # takes is asked with blocking=False, so no wait budget is spent.
+        self.add_run(owner="A")
+        last_at = self.credit_three_verified()
+        calls: list[tuple[str, bool, float]] = []
+        self.store._lock = RecordingLock(self.store._lock, "manifest", calls)
+        self.lifecycle._activity_lock = RecordingLock(  # type: ignore[assignment]
+            self.lifecycle._activity_lock, "activity", calls
+        )
+        block = self.lifecycle.human_input_block("A", "lease-A", now=last_at + 0.5)
+        self.assertEqual([row["count"] for row in block["runs"]], [3])
+        self.assertEqual(calls, [("manifest", False, -1), ("activity", False, -1)])
+
+        condition = self.coordinator._condition
+        self.coordinator._condition = RecordingLock(condition, "coordinator", calls)
+        try:
+            lease_id = self.coordinator.active_lease_id(
+                IDENTITY_A, self.token_a, blocking=False
+            )
+        finally:
+            self.coordinator._condition = condition
+        self.assertEqual(lease_id, "lease-A")
+        self.assertEqual(calls[-1], ("coordinator", False, -1))
+
+        # Another thread holding a lock gives the fallback, without waiting.
+        for name, lock in (
+            ("manifest", self.store._lock),
+            ("activity", self.lifecycle._activity_lock),
+        ):
+            with self.subTest(lock=name):
+                held = threading.Event()
+                done = threading.Event()
+
+                def hold(lock=lock, held=held, done=done) -> None:
+                    with lock:
+                        held.set()
+                        done.wait(5.0)
+
+                holder = threading.Thread(target=hold, daemon=True)
+                holder.start()
+                self.assertTrue(held.wait(5.0))
+                try:
+                    busy = self.lifecycle.human_input_block(
+                        "A", "lease-A", now=last_at + 0.5
+                    )
+                finally:
+                    done.set()
+                    holder.join(5.0)
+                self.assertEqual(busy, UNAVAILABLE)
+
+    def test_t8_an_expired_lease_names_no_holder(self) -> None:
+        clock = FakeClock()
+        coordinator = SessionCoordinator(
+            time_fn=clock,
+            token_fn=lambda: "token-E",
+            id_fn=lambda: "lease-E",
+            audit=AuditSink(),
+        )
+        status, acquired = coordinator.acquire(IDENTITY_A, "lifecycle")
+        self.assertEqual(status, 200)
+        token = acquired["lease_token"]
+        lease = coordinator._active
+        expires_at = lease.effective_expiry()
+        clock.value = expires_at - 0.001
+        self.assertEqual(coordinator.active_lease_id(IDENTITY_A, token), "lease-E")
+        clock.value = expires_at
+        self.assertIsNone(coordinator.active_lease_id(IDENTITY_A, token))
+        self.assertIsNone(
+            coordinator.active_lease_id(IDENTITY_A, token, blocking=False)
+        )
+        # The check reads the clock only: the lease is neither renewed nor
+        # ended, which _expire_due does on the next call that runs it.
+        self.assertIs(coordinator._active, lease)
+        self.assertEqual(lease.effective_expiry(), expires_at)
+
     def test_t9_owner_and_counts_come_from_one_snapshot(self) -> None:
         self.add_run(owner="A")
         last_at = self.credit_three_verified()
         armed = ArmedLock(self.lifecycle._activity_lock)
         self.lifecycle._activity_lock = armed  # type: ignore[assignment]
+        probe = ContentionProbe(self.store._lock)
+        self.store._lock = probe
 
         def retire() -> None:
             # The order of _commit_retirement: persist EXITED, then drop the
@@ -418,20 +575,21 @@ class HumanInputHolderTest(unittest.TestCase):
             self.lifecycle._seal_terminal("run-x", last_at + 1.0)
 
         worker = threading.Thread(target=retire, daemon=True)
-        retired_during_read: list[bool] = []
 
         def race() -> None:
-            # Runs when the block asks for the counters. A retirement that can
-            # land here would publish the RUNNING run with its counters gone.
+            # Runs when the block asks for the counters. The retirement's
+            # first try at the manifest lock must find it held: one that
+            # could land here would publish the RUNNING run with its
+            # counters gone. The wait is only a bound on a hung worker.
+            probe.arm()
             worker.start()
-            worker.join(0.3)
-            retired_during_read.append(not worker.is_alive())
+            self.assertTrue(probe.tried.wait(5.0), "the worker never asked")
 
         armed.arm(race)
         block = self.lifecycle.human_input_block("A", "lease-A", now=last_at + 0.5)
-        worker.join(2.0)
+        worker.join(5.0)
         self.assertFalse(worker.is_alive())
-        self.assertEqual(retired_during_read, [False])
+        self.assertIs(probe.was_held, True)
         self.assertEqual(
             [(row["run_id"], row["count"]) for row in block["runs"]],
             [("run-x", 3)],
@@ -658,15 +816,25 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         status, pending = self.post_await(pending_enq["id"], token)
         self.assertEqual(status, 200)
         self.assertEqual(pending, {"status": "pending"})
-        status, refused = _http(
-            self.base,
-            "POST",
-            "/await",
-            self.key,
-            {"identity": {}},
-            {"id": str(pending_enq["id"]), "remove": "1"},
-        )
-        self.assertEqual((status, refused), (400, {"error": "invalid_identity"}))
+        for identity in (
+            {},
+            dict(IDENTITY_PAYLOAD, platform=[]),
+            dict(IDENTITY_PAYLOAD, platform={}),
+        ):
+            with self.subTest(identity=identity):
+                status, refused = self.answered(
+                    lambda identity=identity: _http(
+                        self.base,
+                        "POST",
+                        "/await",
+                        self.key,
+                        {"identity": identity},
+                        {"id": str(pending_enq["id"]), "remove": "1"},
+                    )
+                )
+                self.assertEqual(
+                    (status, refused), (400, {"error": "invalid_identity"})
+                )
 
     def test_t8_only_the_live_holder_gets_the_block(self) -> None:
         token, acquired = self.acquire()
@@ -709,12 +877,34 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(body["status"], "done")
         self.assertNotIn("human_input", body)
 
+    def test_t8_an_expired_holder_gets_no_block(self) -> None:
+        token, acquired = self.acquire()
+        self.add_owned_run(acquired["lease_id"])
+        self.credit_one()
+        command_id = self.enqueue_done(token)
+        status, body = self.post_await(command_id, token, remove="0")
+        self.assertEqual(status, 200)
+        self.assertIn("human_input", body)
+        lease = self.coordinator._active
+        expiry = lease.effective_expiry()
+        # Past its expiry, before any call that runs _expire_due: the lease
+        # is still active in memory, and still gets no block.
+        self.coordinator._time_fn = lambda: expiry + 1.0
+        status, body = self.post_await(command_id, token, remove="0")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "done")
+        self.assertNotIn("human_input", body)
+        self.assertIs(self.coordinator._active, lease)
+
     def test_t9_a_busy_lock_does_not_delay_the_answer(self) -> None:
         token, acquired = self.acquire()
         self.add_owned_run(acquired["lease_id"])
         self.credit_one()
         beat = {"identity": IDENTITY_PAYLOAD, "lease_token": token}
-        # This thread holds the lock; the daemon's handler thread cannot take it.
+        # This thread holds the lock for the whole request, so a report that
+        # waited for it without a bound would answer after the request's
+        # timeout, which answered() fails. That a bounded wait is not asked
+        # for either is pinned by test_t9_the_report_never_waits_for_a_lock.
         for name, lock in (
             ("manifest", self.manifest._lock),
             ("activity", self.lifecycle._activity_lock),
@@ -722,39 +912,43 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
             with self.subTest(lock=name):
                 command_id = self.enqueue_done(token)
                 with lock:
-                    started = time.monotonic()
                     beat_status, beat_body = self.answered(
                         lambda: self.request("/session/heartbeat", beat)
                     )
                     done_status, done = self.answered(
                         lambda: self.post_await(command_id, token)
                     )
-                    elapsed = time.monotonic() - started
                 self.assertEqual(beat_status, 200)
                 self.assertEqual(beat_body.get("human_input"), UNAVAILABLE)
                 self.assertEqual(done_status, 200)
                 self.assertEqual(done["status"], "done")
                 self.assertEqual(done["result"]["ok"], 1)
                 self.assertEqual(done.get("human_input"), UNAVAILABLE)
-                self.assertLess(elapsed, 1.5)
 
-        # The coordinator lock: no lease check in time, so no block. remove=0,
-        # because consuming a leased result waits on that lock in main too.
+        # The coordinator lock: the lease check does not wait for it, so no
+        # block. remove=0, because consuming a leased result waits on that
+        # lock in main too (finish_operation_exact).
+        asked: list[dict] = []
+        check = self.coordinator.active_lease_id
+
+        def spy(*args, **kwargs):
+            asked.append(dict(kwargs))
+            return check(*args, **kwargs)
+
+        self.coordinator.active_lease_id = spy  # type: ignore[method-assign]
         command_id = self.enqueue_done(token)
         with self.coordinator._condition:
-            started = time.monotonic()
             status, done = self.answered(
                 lambda: self.post_await(command_id, token, remove="0")
             )
-            elapsed = time.monotonic() - started
         self.assertEqual(status, 200)
         self.assertEqual(done["status"], "done")
         self.assertNotIn("human_input", done)
-        self.assertLess(elapsed, 1.5)
         status, done = self.post_await(command_id, token)
         self.assertEqual(status, 200)
         self.assertIn("human_input", done)
         self.assertEqual(done["human_input"]["runs"][0]["count"], 1)
+        self.assertEqual(asked, [{"blocking": False}, {"blocking": False}])
 
     def answered(self, call):
         # M9: an exception that escapes the handler drops the connection, and a
@@ -774,6 +968,16 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
             raise RuntimeError("inbox-6310-boom")
 
         self.lifecycle.human_input_block = boom  # type: ignore[method-assign]
+        # The failure line is written after the answer, so the test waits
+        # for it instead of reading the log as the answer arrives.
+        failure_logged = threading.Event()
+
+        def sink(message: str) -> None:
+            self.logs.append(message)
+            if "human_input_block failed" in message:
+                failure_logged.set()
+
+        self.httpd.log_sink = sink
         self.logs.clear()
         status, beat = self.answered(
             lambda: self.request(
@@ -784,6 +988,7 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("human_input", beat)
         self.assertEqual(beat["human_input"], UNAVAILABLE)
+        self.assertTrue(failure_logged.wait(5.0))
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
@@ -791,28 +996,66 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
 
         command_id = self.enqueue_done(token)
         self.logs.clear()
+        failure_logged.clear()
         status, done = self.answered(lambda: self.post_await(command_id, token))
         self.assertEqual(status, 200)
         self.assertEqual(done["status"], "done")
         self.assertEqual(done["result"]["state"]["pos"], [1.0, 2.0, 3.0])
         self.assertEqual(done.get("human_input"), UNAVAILABLE)
+        self.assertTrue(failure_logged.wait(5.0))
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
         )
 
-        # A log sink that raises too: remove=1 already consumed the result, so
-        # the answer must still come whole.
-        def broken_sink(_message: str) -> None:
-            raise OSError("inbox-6310-sink")
+        # A sink that blocks on the failure line, as a write to a stderr pipe
+        # nobody reads can, then one that raises on it: both answers still
+        # come, the consumed result whole, since the line goes after them.
+        release = threading.Event()
+        stuck = threading.Event()
+        raised = threading.Event()
 
-        command_id = self.enqueue_done(token)
-        self.httpd.log_sink = broken_sink
-        status, done = self.answered(lambda: self.post_await(command_id, token))
-        self.assertEqual(status, 200)
-        self.assertEqual(done["status"], "done")
-        self.assertEqual(done["result"]["state"]["pos"], [1.0, 2.0, 3.0])
-        self.assertEqual(done.get("human_input"), UNAVAILABLE)
+        def stuck_sink(message: str) -> None:
+            if "human_input_block failed" in message:
+                stuck.set()
+                release.wait(5.0)
+
+        def broken_sink(message: str) -> None:
+            if "human_input_block failed" in message:
+                raise OSError("inbox-6310-sink")
+
+        def heartbeat() -> tuple[int, dict]:
+            return self.request(
+                "/session/heartbeat",
+                {"identity": IDENTITY_PAYLOAD, "lease_token": token},
+            )
+
+        def await_done() -> tuple[int, dict]:
+            return self.post_await(command_id, token)
+
+        # socketserver reports the raise once the answer is written; this
+        # keeps its traceback out of the test output.
+        self.httpd.handle_error = lambda _request, _address: raised.set()  # type: ignore[method-assign]
+        for log_sink, logged in ((stuck_sink, stuck), (broken_sink, raised)):
+            self.httpd.log_sink = log_sink
+            for call in (heartbeat, await_done):
+                with self.subTest(sink=log_sink.__name__, route=call.__name__):
+                    if call is await_done:
+                        command_id = self.enqueue_done(token)
+                    release.clear()
+                    logged.clear()
+                    try:
+                        status, answer = self.answered(call)
+                    finally:
+                        release.set()
+                    self.assertEqual(status, 200)
+                    self.assertEqual(answer.get("human_input"), UNAVAILABLE)
+                    if call is await_done:
+                        self.assertEqual(answer["status"], "done")
+                        self.assertEqual(
+                            answer["result"]["state"]["pos"], [1.0, 2.0, 3.0]
+                        )
+                    self.assertTrue(logged.wait(5.0))
 
 
 class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):

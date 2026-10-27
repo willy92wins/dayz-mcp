@@ -112,10 +112,6 @@ RUN_IDLE_CUT_S = 600.0
 # 250f (plan residue C1): with no good input sample for this long, the signal
 # is unknown and a run with a live client reads use_state unknown.
 INPUT_SIGNAL_STALE_S = 2.0
-# inbox 6310: the human_input report waits at most this long for each lock it
-# takes. A persist or an fsync that holds one longer gives an unavailable
-# report, not a later answer.
-HUMAN_INPUT_LOCK_WAIT_S = 0.05
 _ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
 _ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
 _ACTIVE_RUN_TAKEOVER_HINT = (
@@ -1911,15 +1907,13 @@ class RunManifestStore:
         with self._lock:
             return [self._clone(self._runs[key]) for key in sorted(self._runs)]
 
-    def read_runs(
-        self, read: Callable[[list[RunRecord]], _T], *, timeout_s: float
-    ) -> _T | None:
+    def read_runs(self, read: Callable[[list[RunRecord]], _T]) -> _T | None:
         """inbox 6310: read(the runs, as list_runs gives them) under the lock.
 
-        None, without calling read, when the lock stays held for timeout_s.
-        replace holds it while it persists.
+        None, without calling read, when another thread holds the lock: this
+        never waits for it. replace holds it while it persists.
         """
-        if not self._lock.acquire(timeout=timeout_s):
+        if not self._lock.acquire(blocking=False):
             return None
         try:
             return read([self._clone(self._runs[key]) for key in sorted(self._runs)])
@@ -6813,28 +6807,28 @@ class ProcessLifecycle:
     ) -> dict[str, object]:
         """inbox 6310: cumulative input counts for this lease's RUNNING runs.
 
-        One clock reading. The counters are read with the manifest lock held:
-        an owner change or a retirement persists under that lock before it
-        drops a counter, so neither lands between the owner test and the
-        counts. Each lock is waited on for at most HUMAN_INPUT_LOCK_WAIT_S,
-        and one still held gives signal unavailable and no rows. Empty or
-        non-string ids yield runs=[] and still report whether the sampler
-        signal is fresh.
+        The counters are read with the manifest lock held: an owner change or
+        a retirement persists under that lock before it drops a counter, so
+        neither lands between the owner test and the counts. Neither lock is
+        waited for, since the answer this goes on may carry a result that
+        /await?remove=1 already consumed: one that another thread holds gives
+        signal unavailable and no rows. The clock is read once, with both
+        locks held. Empty or non-string ids yield runs=[] and still report
+        whether the sampler signal is fresh.
         """
 
-        clock = time.time() if now is None else float(now)
-
         def read(runs: list[RunRecord]) -> dict[str, object] | None:
-            if not self._activity_lock.acquire(timeout=HUMAN_INPUT_LOCK_WAIT_S):
+            if not self._activity_lock.acquire(blocking=False):
                 return None
             try:
+                clock = time.time() if now is None else float(now)
                 return self._human_input_block_locked(
                     runs, session_id, lease_id, clock
                 )
             finally:
                 self._activity_lock.release()
 
-        block = self.manifest.read_runs(read, timeout_s=HUMAN_INPUT_LOCK_WAIT_S)
+        block = self.manifest.read_runs(read)
         if block is None:
             return {"signal": "unavailable", "runs": []}
         return block
