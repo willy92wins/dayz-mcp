@@ -120,7 +120,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # scene_entities timeout_s, scene_clear timeout_s; scene_id is a string
         # and items a list, not in this census).
         # 177 before either batch, plus both additions.
-        self.assertEqual(len(rows), 211)
+        # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
+        self.assertEqual(len(rows), 212)
+        self.assertIn(("vehicle_telemetry", "pos", "vector"), rows)
         self.assertIn(("player_view_set", "timeout_s", "float"), rows)
         for tool in ("loadout_get", "loadout_apply"):
             self.assertIn((tool, "object_id", "int"), rows)
