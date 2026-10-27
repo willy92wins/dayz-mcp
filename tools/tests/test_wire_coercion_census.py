@@ -307,6 +307,10 @@ COERCIBLE_ALLOWLIST.update(
         ("inventory_give", "dest"): _ENUM_LIKE_STR,
         ("inventory_give", "uid"): "free text player id, empty means first human",
         ("lease_acquire", "purpose"): "free text purpose",
+        ("loadout_apply", "loadout"): (
+            "object: any JSON value arrives unconverted, and the tool answers "
+            "bad_args with its path for all but a loadout object"
+        ),
         ("logs_since", "marker"): (
             "str | dict cursor; a bool is rejected, but the bare-str arm "
             "keeps this key coercible so a numeric branch cannot hide"

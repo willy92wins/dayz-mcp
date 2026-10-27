@@ -1,7 +1,10 @@
 """Reply shaping for world reads: the world_time clock and the entities_query rows.
 
 Moved out of server.py unchanged (backlog 71fc); server.py imports every name
-back, so dayz_mcp.server.<name> is the same object.
+back, so dayz_mcp.server.<name> is the same object. The server_perf rates and
+the nav_path_query points were added here later (2427, 0131). The
+world_spawn_batch, scene_entities and scene_clear replies (7f5d, 165a, 5a21)
+are shaped here too.
 """
 
 from __future__ import annotations
@@ -198,4 +201,146 @@ def _annotate_entities_reliability(
     # A missing or non-list field is reported as remote_unverified without a reason.
     if isinstance(players_raw, list) and not players_raw:
         result["reason"] = "no_player_connected"
+    return result
+
+
+# server_perf: with insufficient_samples the bridge leaves avg_fps and min_fps
+# unwritten, the flat MCPResult still sends their 0 defaults, and result_prune
+# keeps an owned scalar for its owner whatever the value (inbox 2427). The
+# reply then carries no rate at all, never a 0 that reads as a measure.
+def _server_perf_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Drop avg_fps and min_fps from a server_perf answer with insufficient_samples."""
+    if not isinstance(result, dict) or not result.get("insufficient_samples"):
+        return result
+    return {
+        key: value for key, value in result.items() if key not in ("avg_fps", "min_fps")
+    }
+
+
+# nav_path_query: the bridge sends FindPath's waypoints flattened, x0, y0, z0,
+# x1, ..., in MCPResult.points (MCPMessages.c), and the reply regroups them as
+# one [x, y, z] per waypoint (inbox 0131). A list whose length is not a
+# multiple of 3 is left as it arrived.
+def _nav_path_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Regroup a nav_path_query answer's flat points into [x, y, z] waypoints."""
+    if not isinstance(result, dict):
+        return result
+    points = result.get("points")
+    if not isinstance(points, list) or len(points) % 3 != 0:
+        return result
+    response = dict(result)
+    response["points"] = [points[index : index + 3] for index in range(0, len(points), 3)]
+    return response
+
+
+def _wire_bool(value: object) -> bool:
+    # An Enforce bool arrives as 0 or 1, the way `ok` does.
+    return value is True or (
+        isinstance(value, int) and not isinstance(value, bool) and value != 0
+    )
+
+
+# 7f5d: the error on the rows of a world_spawn_batch group that was never sent,
+# because a group before it failed or the call's timeout_s ran out.
+SPAWN_BATCH_NOT_SENT = "not_sent"
+
+
+def _spawn_batch_failed_rows(
+    items: list[dict[str, Any]], offset: int, error: str
+) -> list[dict[str, Any]]:
+    """The rows of a group the bridge never confirmed: one per item, with error."""
+    return [
+        {"index": offset + position, "ok": False, "error": error, "type": item["type"]}
+        for position, item in enumerate(items)
+    ]
+
+
+def _spawn_batch_group_rows(
+    result: dict[str, Any], items: list[dict[str, Any]], offset: int
+) -> list[dict[str, Any]]:
+    """Publish one group's rows with only the keys true of them, indexed in the call.
+
+    The bridge answers one MCPSpawnBatchRow per item of the command, in order, and
+    sends every field on every row: ok as 0/1, object_id 0 and error "" where they
+    do not apply. A created item becomes {index, ok: true, object_id}; a refused
+    one {index, ok: false, error, type}, type being the class the item asked for.
+    index counts from the call's first item (offset is the group's first). A
+    position the bridge sent no row for is missing_row: nothing confirms it.
+    """
+    batch = result.get("world_spawn_batch") if isinstance(result, dict) else None
+    rows = batch.get("items") if isinstance(batch, dict) else None
+    if not isinstance(rows, list):
+        rows = []
+    shaped: list[dict[str, Any]] = []
+    for position, item in enumerate(items):
+        row = rows[position] if position < len(rows) else None
+        index = offset + position
+        if isinstance(row, dict) and _wire_bool(row.get("ok")):
+            shaped.append({"index": index, "ok": True, "object_id": row.get("object_id")})
+        else:
+            error = row.get("error") if isinstance(row, dict) else "missing_row"
+            shaped.append({"index": index, "ok": False, "error": error, "type": item["type"]})
+    return shaped
+
+
+def _spawn_batch_reply(
+    base: dict[str, Any], rows: list[dict[str, Any]], items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The world_spawn_batch reply: one row per item of the call, in input order.
+
+    rows are those of the groups that were sent; every item after them gets
+    not_sent. created counts the objects the bridge confirmed and failed every
+    other row; status is ok when every item was created, partial otherwise. The
+    other keys are base's, the last answered command's reply.
+    """
+    merged = list(rows)
+    if len(merged) < len(items):
+        merged.extend(
+            _spawn_batch_failed_rows(items[len(merged):], len(merged), SPAWN_BATCH_NOT_SENT)
+        )
+    created = sum(1 for row in merged if row.get("ok") is True)
+    reply = dict(base)
+    reply["world_spawn_batch"] = {
+        "status": "ok" if created == len(merged) else "partial",
+        "created": created,
+        "failed": len(merged) - created,
+        "items": merged,
+    }
+    return reply
+
+
+def _scene_entities_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Publish deleted as a bool on every scene_entities row.
+
+    A row whose object is gone has no position to read: the bridge leaves its
+    pos empty, and the row goes out without pos. No row is dropped.
+    """
+    if not isinstance(result, dict):
+        return result
+    rows = result.get("scene_entities")
+    if not isinstance(rows, list):
+        return result
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row["deleted"] = _wire_bool(row.get("deleted"))
+        if row["deleted"]:
+            row.pop("pos", None)
+    return result
+
+
+# 5a21: what the bridge sets on scene_clear only when it refuses with
+# scene_shared (MCPSceneClear); the error text carries them, so a reply that
+# succeeded goes out without them.
+_SCENE_SHARED_KEYS = ("carrier_id", "carrier_scene_id", "carried_id", "carried_scene_id")
+
+
+def _scene_clear_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """Publish the scene_clear counts without the scene_shared pair."""
+    if not isinstance(result, dict):
+        return result
+    report = result.get("scene_clear")
+    if isinstance(report, dict):
+        for key in _SCENE_SHARED_KEYS:
+            report.pop(key, None)
     return result
