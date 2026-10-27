@@ -229,6 +229,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"from": [0.0, 0.0, 0.0], "to": [1.0, 0.0, 1.0], "snap_radius": 2.0}
     if cmd == "players_visibility":
         return {"pos": [0.0, 0.0, 0.0], "radius": 0.0}
+    if cmd == "object_set_health":
+        return {"object_id": 1, "health01": 0.0}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

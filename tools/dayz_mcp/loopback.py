@@ -95,6 +95,7 @@ SERVER_COMMANDS = {
     "loadout_clear",
     "object_inspect",
     "object_resolve",
+    "object_set_health",
     "object_doors",
     "infected_drive",
     "entities_query",
@@ -1108,6 +1109,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "bot_start",
     "bot_stop",
     "object_resolve",
+    "object_set_health",
     "action_cursor_ids",
     "hands_attach",
     "loadout_get",
@@ -1481,6 +1483,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "object_id": _integer_in_range(minimum=1),
                 "want": _is_non_empty_string_list,
+            },
+        ),
+    ),
+    "object_set_health": _command_schema(
+        _schema_variant(
+            required=("object_id", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
             },
         ),
     ),

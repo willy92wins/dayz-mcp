@@ -71,6 +71,7 @@ PRUNABLE_FIELDS = (
     "normal",
     "inventory_attach",
     "inspect",
+    "object_health",
     "entities",
     "ui",
     "ui_request",

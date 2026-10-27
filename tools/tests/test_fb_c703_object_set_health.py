@@ -1,0 +1,623 @@
+"""object_set_health: set one object's Health and read it back (inbox c703).
+
+These tests pin the wire contract, the lease partition, the admission of an
+older PBO, the prune contract and the Enforce source the game will compile.
+They do not launch DayZ or compile the addon.
+
+Engine calls checked read-only against the DayZ 1.30 vanilla scripts
+(P:\\scripts):
+
+- Object.SetHealth01: 3_game/entities/object.c:1100
+  void SetHealth01(string zoneName, string healthType, float coef)
+- Object.GetHealth01: 3_game/entities/object.c:1001
+  proto native float GetHealth01(string zoneName, string healthType)
+- Object.GetMaxHealth: 3_game/entities/object.c:1008
+  proto native float GetMaxHealth(string zoneName, string healthType)
+- Object.GetHealthLevel: 3_game/entities/object.c:1171
+  proto native int GetHealthLevel(string zone = "")
+- InventorySlots.GetSlotIdFromString: 3_game/systems/inventory/inventoryslots.c:42
+  static proto native int GetSlotIdFromString(string slot_name)
+- InventorySlots.IsSlotIdValid: 3_game/systems/inventory/inventoryslots.c:59
+  static proto native bool IsSlotIdValid(int slotId)
+- GameInventory.HasAttachmentSlot: 3_game/systems/inventory/inventory.c:188
+  bool HasAttachmentSlot(int slotId)
+- GameInventory.FindAttachment: 3_game/systems/inventory/inventory.c:224
+  proto native EntityAI FindAttachment(int slot)
+- Object.IsMan: 3_game/entities/object.c:523
+  bool IsMan()
+- CarWheel.EEHealthLevelChanged: 4_world/entities/core/inherited/inventoryitem.c:220
+  override void EEHealthLevelChanged(int oldLevel, int newLevel, string zone)
+"""
+from __future__ import annotations
+
+import json
+import math
+import re
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+from dayz_mcp import bridge_errors, loopback, result_prune, server
+from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.server import (
+    DEFAULT_TOOL_TIMEOUT_S,
+    LEASE_TOOL_LINE,
+    ServerConfig,
+    ToolError,
+    _BRIDGE_COMMAND_TOOLS,
+    build_app,
+)
+from dayz_mcp.session_coordination import (
+    READ_ONLY_COMMANDS,
+    SessionCoordinator,
+    command_requires_lease,
+)
+from tests._addon_paths import addon_root
+from tests.fence_helpers import INST_SERVER, PID_SERVER, bind_both_peers, bound_queue
+from tests.mcp_helpers import _content_json
+
+
+COMMAND = "object_set_health"
+DISPATCHER = "DispatchObjectSetHealth"
+WIRE_OBJECT_ID = {"object_id": 7, "health01": 0.0}
+WIRE_SLOT_ZONE = {
+    "object_id": 7,
+    "health01": 0.0,
+    "slot": "Wheel_1_1",
+    "zone": "Engine",
+}
+WIRE_TYPE = {
+    "type": "LFQuad_Wheel_Front",
+    "pos": [10.0, 5.0, 20.0],
+    "health01": 0.5,
+}
+OBJECT_HEALTH = {
+    "type": "LFQuad_Wheel_Front",
+    "zone": "",
+    "slot": "",
+    "health01_requested": 0.0,
+    "health01_before": 1.0,
+    "health01_after": 0.0,
+    "health_level_before": 0,
+    "health_level_after": 4,
+}
+SCRIPTS = addon_root() / "scripts"
+BRIDGE_PATH = SCRIPTS / "5_Mission" / "MCPBridge.c"
+MESSAGES_PATH = SCRIPTS / "5_Mission" / "MCPMessages.c"
+CENSUS_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json"
+)
+DISPATCH_CHAIN = "protected void Dispatch(MCPCommand command)"
+PREVIOUS_ARG_CONTRACT_HASH = "d0b2a66a36c7078f"
+IDENTITY = {
+    "platform": "codex",
+    "pid": 12,
+    "ppid": 1,
+    "started_at_utc": "2026-10-24T00:00:00Z",
+    "session_id": "R",
+    "task_label": "health",
+}
+
+_COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
+_MEMBER_RE = re.compile(
+    r"(?m)(?<![A-Za-z0-9_>])(?P<type>(?:ref\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*<[^;{}]+>)?)"
+    r"\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+_SERVER_CAPS = re.compile(
+    r'protected const string SERVER_CAPABILITIES = ((?:"[^"\n]*"(?: \+ )?)+);'
+)
+_LOCAL_DECLARATION = re.compile(
+    r"^\s*(?:int|bool|float|string|vector|Object|EntityAI|GameInventory|"
+    r"MCPObjectHealth)\s+(\w+)\s*;\s*$"
+)
+
+
+def _block_after(source: str, start: int) -> str:
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1 : index]
+    raise AssertionError(f"unterminated block at offset {start}")
+
+
+def _without_comments(source: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        text = match.group(0)
+        return text if text.startswith('"') else re.sub(r"[^\n]", " ", text)
+
+    return _COMMENT_OR_STRING.sub(replace, source)
+
+
+def _method_code(source: str, name: str) -> str:
+    clean = _without_comments(source)
+    found = list(re.finditer(rf"\bprotected\s+[\w<>]+\s+{re.escape(name)}\(", clean))
+    if len(found) != 1:
+        raise AssertionError(f"{name} is declared {len(found)} times")
+    return _block_after(clean, found[0].end())
+
+
+def _if_body(code: str, condition: str) -> str:
+    needle = f"if ({condition})"
+    if code.count(needle) != 1:
+        raise AssertionError(f"{needle!r} occurs {code.count(needle)} times")
+    return _block_after(code, code.index(needle))
+
+
+def _class_members(source: str, class_name: str) -> list[tuple[str, str]]:
+    clean = _without_comments(source)
+    match = re.search(rf"\bclass\s+{re.escape(class_name)}\b", clean)
+    if match is None:
+        raise AssertionError(f"class {class_name} is absent")
+    body = _block_after(clean, match.end())
+    return [(m.group("type"), m.group("name")) for m in _MEMBER_RE.finditer(body)]
+
+
+def _server_capabilities(source: str) -> list[str]:
+    declaration = _SERVER_CAPS.search(source)
+    if declaration is None:
+        raise AssertionError("SERVER_CAPABILITIES declaration not found")
+    return "".join(re.findall(r'"([^"\n]*)"', declaration.group(1))).split(",")
+
+
+def _in_order(testcase: unittest.TestCase, code: str, tokens: tuple[str, ...]) -> None:
+    positions = []
+    for token in tokens:
+        testcase.assertEqual(code.count(token), 1, token)
+        positions.append(code.index(token))
+    testcase.assertEqual(positions, sorted(positions))
+
+
+def _locals_on_top(body: str) -> list[str]:
+    names: list[str] = []
+    statement_seen = False
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line in ("{", "}"):
+            continue
+        match = _LOCAL_DECLARATION.match(raw)
+        if match is None:
+            statement_seen = True
+            continue
+        if statement_seen:
+            raise AssertionError(f"declaration after a statement: {line}")
+        names.append(match.group(1))
+    return names
+
+
+def _announce_server(
+    state: loopback.ServerState, commands: list[str], ach: str | None
+) -> None:
+    state.daemon_generation = "gen-health"
+    state._peer_caps["server"] = {
+        "generation": state.daemon_generation,
+        "commands": list(commands),
+        "reason": "ok",
+        "arg_contract_hash": ach,
+        "announced_at": state._now(),
+        "instance": INST_SERVER,
+    }
+
+
+def _server_commands() -> list[str]:
+    return sorted(_BRIDGE_COMMAND_TOOLS["server"])
+
+
+def _bound_state(**kwargs: object) -> loopback.ServerState:
+    state = loopback.ServerState(key="k", **kwargs)  # type: ignore[arg-type]
+    state.install_bound_peer(
+        instance=INST_SERVER, role="server", pid=PID_SERVER, run_id="health-run"
+    )
+    return state
+
+
+class ObjectSetHealthToolTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.app, self.runtime = build_app(
+            ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+
+    async def _call(self, bridge_answer: dict[str, object], **arguments: object):
+        call = AsyncMock(return_value=bridge_answer)
+        with patch.object(self.runtime, "call_bridge", new=call):
+            result = _content_json(await self.app.call_tool(COMMAND, dict(arguments)))
+        return result, call
+
+    async def _refused(self, arguments: dict[str, object]) -> str:
+        with patch.object(self.runtime, "call_bridge", new=AsyncMock()) as call:
+            try:
+                await self.app.call_tool(COMMAND, dict(arguments))
+            except ToolError as error:
+                self.assertFalse(call.await_count)
+                return str(error)
+        self.fail("expected ToolError")
+
+    async def test_p1_object_id_path_sends_only_the_named_keys(self) -> None:
+        # P1
+        _result, call = await self._call({"ok": 1, "object_health": OBJECT_HEALTH}, object_id=7, health01=0.0)
+        call.assert_awaited_once_with(COMMAND, WIRE_OBJECT_ID, "server", DEFAULT_TOOL_TIMEOUT_S)
+        self.assertEqual(call.await_args.args[1], {"object_id": 7, "health01": 0.0})
+        _result, call = await self._call(
+            {"ok": 1, "object_health": OBJECT_HEALTH},
+            object_id=7,
+            health01=0.0,
+            slot="Wheel_1_1",
+            zone="Engine",
+        )
+        call.assert_awaited_once_with(COMMAND, WIRE_SLOT_ZONE, "server", DEFAULT_TOOL_TIMEOUT_S)
+        self.assertEqual(set(call.await_args.args[1]), {"object_id", "health01", "slot", "zone"})
+
+    async def test_p1_empty_slot_is_not_sent(self) -> None:
+        # P1 (mutant: the tool sending an empty slot)
+        _result, call = await self._call(
+            {"ok": 1, "object_health": OBJECT_HEALTH},
+            object_id=7,
+            health01=0.0,
+            slot="",
+            zone="",
+        )
+        self.assertEqual(call.await_args.args[1], WIRE_OBJECT_ID)
+        self.assertNotIn("slot", call.await_args.args[1])
+        self.assertNotIn("zone", call.await_args.args[1])
+
+    async def test_p2_type_path_sends_exactly_type_pos_health01(self) -> None:
+        # P2
+        _result, call = await self._call(
+            {"ok": 1, "object_health": OBJECT_HEALTH},
+            type="LFQuad_Wheel_Front",
+            pos=[10.0, 5.0, 20.0],
+            health01=0.5,
+        )
+        call.assert_awaited_once_with(COMMAND, WIRE_TYPE, "server", DEFAULT_TOOL_TIMEOUT_S)
+        self.assertEqual(call.await_args.args[1], WIRE_TYPE)
+
+    async def test_n1_health01_is_a_finite_unit_real(self) -> None:
+        # N1. The handler: a number out of [0, 1] or not finite is bad_args.
+        for value in (-0.01, 1.01, math.nan, math.inf):
+            with self.subTest(health01=value):
+                text = await self._refused({"object_id": 7, "health01": value})
+                self.assertIn("bad_args", text)
+                self.assertIn("health01", text)
+        # The typed schema (StrictFloat): a bool or a string fails FastMCP's
+        # validation before the handler runs, without bad_args, as server_perf's
+        # window_s does.
+        for value in (True, "0"):
+            with self.subTest(health01=value):
+                text = await self._refused({"object_id": 7, "health01": value})
+                self.assertIn("validation error for object_set_healthArguments", text)
+                self.assertIn("health01", text)
+                self.assertNotIn("bad_args", text)
+
+    async def test_n2_target_shape_is_object_id_or_type_and_pos(self) -> None:
+        # N2. The target contract object_inspect and object_anim use
+        # (_object_target_args): bad_args naming the field.
+        cases = (
+            ({"health01": 0.0}, "type"),
+            ({"health01": 0.0, "object_id": -1}, "object_id"),
+            ({"health01": 0.0, "type": " LFQuad ", "pos": [1.0, 2.0, 3.0]}, "type"),
+        )
+        for arguments, field in cases:
+            with self.subTest(arguments=arguments):
+                text = await self._refused(arguments)
+                self.assertIn("bad_args", text)
+                self.assertIn(field, text)
+        # A pos that is not three numbers is the helper's public bad_pos.
+        text = await self._refused(
+            {"health01": 0.0, "type": "LFQuad_Wheel_Front", "pos": [1.0, 2.0]}
+        )
+        self.assertTrue(text.endswith(": bad_pos"), text)
+        # StrictInt: a bool object_id fails FastMCP's validation first.
+        text = await self._refused({"health01": 0.0, "object_id": True})
+        self.assertIn("validation error for object_set_healthArguments", text)
+        self.assertIn("object_id", text)
+        self.assertNotIn("bad_args", text)
+
+
+class ObjectSetHealthIngressTest(unittest.TestCase):
+    def test_n3_ingress_refuses_range_zero_id_unknown_key_empty_strings_and_client(self) -> None:
+        # N3
+        self.assertEqual(
+            loopback.validate_command_args(COMMAND, {"object_id": 7, "health01": -0.01}),
+            (False, "bad_args"),
+        )
+        self.assertEqual(
+            loopback.validate_command_args(COMMAND, {"object_id": 7, "health01": 1.01}),
+            (False, "bad_args"),
+        )
+        self.assertEqual(
+            loopback.validate_command_args(COMMAND, {"object_id": 0, "health01": 0.0}),
+            (False, "bad_args"),
+        )
+        self.assertEqual(
+            loopback.validate_command_args(
+                COMMAND, {"object_id": 7, "health01": 0.0, "extra": 1}
+            ),
+            (False, "bad_args"),
+        )
+        self.assertEqual(
+            loopback.validate_command_args(
+                COMMAND, {"object_id": 7, "health01": 0.0, "slot": ""}
+            ),
+            (False, "bad_args"),
+        )
+        self.assertEqual(
+            loopback.validate_command_args(
+                COMMAND, {"object_id": 7, "health01": 0.0, "zone": ""}
+            ),
+            (False, "bad_args"),
+        )
+        self.assertEqual(loopback.peer_for_command(COMMAND), "server")
+        self.assertNotIn(COMMAND, loopback.CLIENT_COMMANDS)
+        state = loopback.ServerState("test-key")
+        bind_both_peers(state)
+        self.assertEqual(
+            state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), peer="client"),
+            (400, {"error": "bad_peer"}),
+        )
+
+    def test_n4_without_a_lease_is_lease_required(self) -> None:
+        # N4
+        self.assertNotIn(COMMAND, READ_ONLY_COMMANDS)
+        self.assertTrue(command_requires_lease(COMMAND))
+        state = loopback.ServerState("test-key")
+        bind_both_peers(state)
+        _announce_server(state, _server_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        state.coordination = SessionCoordinator(
+            token_fn=lambda: "token",
+            id_fn=lambda: "lease",
+            audit=lambda event: True,
+            cleanup=lambda session, lease, reason, active: state.cleanup_owner(
+                session, lease, reason, active
+            ),
+        )
+        self.assertEqual(
+            state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), "server", identity_payload=IDENTITY),
+            (423, {"error": "lease_required"}),
+        )
+
+
+class ObjectSetHealthAdmissionTest(unittest.TestCase):
+    def test_p3_a_full_census_queues_the_wire_args_on_the_server_peer(self) -> None:
+        # P3
+        state = _bound_state()
+        _announce_server(state, _server_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        status, body = state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), peer="server")
+        self.assertEqual(status, 200, body)
+        queued = [
+            {key: value for key, value in item.items() if key != "_broker_pin"}
+            for item in bound_queue(state, "server")
+        ]
+        self.assertEqual(
+            queued, [{"id": body["id"], "cmd": COMMAND, "args": WIRE_OBJECT_ID}]
+        )
+        self.assertEqual(bound_queue(state, "client"), [])
+
+    def test_n5_missing_capability_and_previous_hash_refuse_before_an_id(self) -> None:
+        # N5
+        state = _bound_state()
+        reduced = [name for name in _server_commands() if name != COMMAND]
+        _announce_server(state, reduced, EXPECTED_SERVER_ARG_CONTRACT_HASH)
+        before = state._next_id
+        status, body = state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), peer="server")
+        self.assertEqual((status, body["error"]), (409, "bridge_capability_missing"))
+        self.assertEqual(state._next_id, before)
+        self.assertEqual(bound_queue(state, "server"), [])
+
+        state = _bound_state()
+        _announce_server(state, _server_commands(), PREVIOUS_ARG_CONTRACT_HASH)
+        before = state._next_id
+        status, body = state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), peer="server")
+        self.assertEqual((status, body["error"]), (409, "arg_contract_mismatch"))
+        self.assertEqual(state._next_id, before)
+
+
+class ObjectSetHealthPruneTest(unittest.TestCase):
+    def test_p4_ok_and_health_not_applied_keep_object_health(self) -> None:
+        # P4
+        filled = {"ok": 1, "object_health": dict(OBJECT_HEALTH), "inspect": {}}
+        kept = result_prune.prune_unfilled_fields(COMMAND, dict(filled))
+        self.assertEqual(kept["object_health"], OBJECT_HEALTH)
+        self.assertNotIn("inspect", kept)
+        refused = result_prune.prune_unfilled_fields(
+            COMMAND,
+            {"ok": 0, "error": "health_not_applied", "object_health": dict(OBJECT_HEALTH)},
+        )
+        self.assertEqual(refused["object_health"], OBJECT_HEALTH)
+        self.assertEqual(refused["error"], "health_not_applied")
+
+    def test_n6_health_not_applied_carries_observed_read_back_only(self) -> None:
+        # N6
+        wire = {
+            "ok": 0,
+            "error": "health_not_applied",
+            "object_health": {
+                "type": "LFQuad_Wheel_Front",
+                "zone": "Engine",
+                "slot": "Wheel_1_1",
+                "health01_requested": 0.0,
+                "health01_before": 1.0,
+                "health01_after": 0.25,
+                "health_level_before": 0,
+                "health_level_after": 3,
+            },
+        }
+        message = str(server._bridge_error(dict(wire), COMMAND))
+        self.assertEqual(
+            message,
+            "health_not_applied; observed=health01_after=0.25 health_level_after=3",
+        )
+        self.assertIn("observed=health01_after=", message)
+        self.assertIn("health_level_after=", message)
+        self.assertNotIn("health01_requested", message)
+        self.assertNotIn("Wheel_1_1", message)
+        self.assertNotIn("Engine", message)
+        self.assertNotIn("LFQuad", message)
+        self.assertEqual(
+            str(server._bridge_error(dict(wire), "object_anim")),
+            "health_not_applied",
+        )
+
+
+class ObjectSetHealthCensusTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = BRIDGE_PATH.read_text(encoding="utf-8")
+
+    def test_c1_caps_dispatch_daemon_map_and_fixture_name_the_verb_once(self) -> None:
+        # C1
+        caps = _server_capabilities(self.source)
+        self.assertEqual(caps.count(COMMAND), 1)
+        self.assertEqual(caps, sorted(caps))
+        dispatch = _without_comments(_block_after(self.source, self.source.index(DISPATCH_CHAIN)))
+        fixture = json.loads(CENSUS_FIXTURE.read_text(encoding="utf-8"))
+        branch = _if_body(dispatch, f'command.cmd == "{COMMAND}"')
+        self.assertEqual(branch.strip(), f"postNow = {DISPATCHER}(command, result);")
+        self.assertEqual(_BRIDGE_COMMAND_TOOLS["server"].get(COMMAND), COMMAND)
+        self.assertNotIn(COMMAND, _BRIDGE_COMMAND_TOOLS["client"])
+        self.assertEqual(fixture["peers"]["server"].get(COMMAND), COMMAND)
+        self.assertEqual(list(caps).count(COMMAND), 1)
+        self.assertEqual(
+            list(_BRIDGE_COMMAND_TOOLS["server"]).count(COMMAND), 1
+        )
+
+    def test_c2_the_arg_contract_gains_the_verb_and_the_version_stays(self) -> None:
+        # C2
+        self.assertEqual(
+            server.SERVER_ARG_CONTRACT[COMMAND],
+            ("health01", "object_id", "pos", "slot", "type", "zone"),
+        )
+        canonical = server.server_arg_contract_canonical()
+        self.assertIn(
+            "object_set_health=health01,object_id,pos,slot,type,zone", canonical
+        )
+        self.assertLess(
+            canonical.index("object_resolve=pos,radius,type"),
+            canonical.index("object_set_health=health01,object_id,pos,slot,type,zone"),
+        )
+        self.assertLess(
+            canonical.index("object_set_health=health01,object_id,pos,slot,type,zone"),
+            canonical.index("player_kill=uid"),
+        )
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55")
+        self.assertNotEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, PREVIOUS_ARG_CONTRACT_HASH)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "0401bed390754a55"', self.source)
+        messages = MESSAGES_PATH.read_text(encoding="utf-8")
+        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
+
+
+class ObjectSetHealthEnforceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.messages = MESSAGES_PATH.read_text(encoding="utf-8")
+        self.code = _method_code(self.source, DISPATCHER)
+
+    def test_e1_dispatch_posts_in_the_same_tick_with_no_job(self) -> None:
+        # E1
+        dispatch = _without_comments(
+            _block_after(self.source, self.source.index(DISPATCH_CHAIN))
+        )
+        branch = _if_body(dispatch, f'command.cmd == "{COMMAND}"')
+        self.assertEqual(branch.strip(), f"postNow = {DISPATCHER}(command, result);")
+        self.assertNotIn("job", self.code.lower())
+        self.assertNotIn("CallLater", self.code)
+        self.assertNotIn("AddJob", self.code)
+
+    def test_e2_the_steps_run_in_d2_order(self) -> None:
+        # E2
+        _in_order(
+            self,
+            self.code,
+            (
+                "!IsFiniteFloat(command.args.health01)",
+                "ResolveCommandObject(command.args, error)",
+                'result.error = "slot_empty"',
+                'result.error = "target_is_player"',
+                'GetMaxHealth(zone, "Health")',
+                "report.health01_before = target.GetHealth01(zone, \"Health\")",
+                "report.health_level_before = target.GetHealthLevel(zone)",
+                'SetHealth01(zone, "Health", health01)',
+                'result.error = "target_gone"',
+                "report.health01_after = target.GetHealth01(zone, \"Health\")",
+                "report.health_level_after = target.GetHealthLevel(zone)",
+                'result.error = "health_not_applied"',
+            ),
+        )
+        self.assertIn('result.error = "slot_not_found"', self.code)
+        self.assertLess(
+            self.code.index("ResolveCommandObject(command.args, error)"),
+            self.code.index('result.error = "slot_not_found"'),
+        )
+        self.assertLess(
+            self.code.index('result.error = "slot_not_found"'),
+            self.code.index('result.error = "target_is_player"'),
+        )
+        self.assertLess(
+            self.code.index("health01_before"),
+            self.code.index('SetHealth01(zone, "Health", health01)'),
+        )
+        self.assertLess(
+            self.code.index('SetHealth01(zone, "Health", health01)'),
+            self.code.index("health01_after"),
+        )
+        self.assertLess(
+            self.code.index('GetMaxHealth(zone, "Health")'),
+            self.code.index('SetHealth01(zone, "Health", health01)'),
+        )
+
+    def test_e3_one_sethealth01_with_the_health_literal(self) -> None:
+        # E3
+        self.assertEqual(self.code.count("SetHealth01("), 1)
+        self.assertIn('SetHealth01(zone, "Health", health01)', self.code)
+        self.assertEqual(re.findall(r"\bSetHealth\(", self.code), [])
+        self.assertNotIn("ObjectDelete", self.code)
+        self.assertNotIn('"Blood"', self.code)
+
+    def test_e4_message_classes_hold_d3_primitives(self) -> None:
+        # E4
+        self.assertEqual(
+            _class_members(self.messages, "MCPObjectHealth"),
+            [
+                ("string", "type"),
+                ("string", "zone"),
+                ("string", "slot"),
+                ("float", "health01_requested"),
+                ("float", "health01_before"),
+                ("float", "health01_after"),
+                ("int", "health_level_before"),
+                ("int", "health_level_after"),
+            ],
+        )
+        for member_type, _name in _class_members(self.messages, "MCPObjectHealth"):
+            self.assertFalse(member_type.startswith("ref"), member_type)
+        args = _class_members(self.messages, "MCPArgs")
+        self.assertIn(("float", "health01"), args)
+        self.assertIn(("string", "zone"), args)
+        result = _class_members(self.messages, "MCPResult")
+        self.assertEqual(result.count(("ref MCPObjectHealth", "object_health")), 1)
+
+    def test_e5_locals_are_declared_on_top(self) -> None:
+        # E5
+        names = _locals_on_top(self.code)
+        self.assertIn("error", names)
+        self.assertIn("target", names)
+        self.assertIn("report", names)
+        self.assertGreater(len(names), 0)
+
+
+class ObjectSetHealthDescriptionTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.app, self.runtime = build_app(
+            ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+
+    async def test_the_description_is_the_d1_text(self) -> None:
+        tool = self.app._tool_manager.get_tool(COMMAND)
+        self.assertTrue(tool.description.startswith(LEASE_TOOL_LINE))
+        self.assertIn("set one object's health on the server", tool.description)
+        self.assertIn("target_is_player", tool.description)
+        self.assertIn("player_heal", tool.description)
+        self.assertIn("telemetry_read", tool.description)

@@ -70,12 +70,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "d0b2a66a36c7078f";
+	protected const string SERVER_ARG_CONTRACT_HASH = "0401bed390754a55";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -663,6 +663,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "object_resolve")
 		{
 			postNow = DispatchObjectResolve(command, result);
+		}
+		else if (command.cmd == "object_set_health")
+		{
+			postNow = DispatchObjectSetHealth(command, result);
 		}
 		else if (command.cmd == "world_time_set")
 		{
@@ -5150,6 +5154,119 @@ class MCPBridge : Managed
 		result.type = match.GetType();
 		result.pos_real = new array<float>();
 		VectorToArray(match.GetPosition(), result.pos_real);
+		result.ok = true;
+		return true;
+	}
+
+	// object_set_health (inbox c703). One object's Health in one tick: SetHealth01
+	// then the same-tick read-back. Answers in the dispatch tick and queues no job.
+	protected bool DispatchObjectSetHealth(MCPCommand command, MCPResult result)
+	{
+		string error;
+		string zone;
+		string slot;
+		float health01;
+		float appliedDelta;
+		Object target;
+		EntityAI host;
+		EntityAI attached;
+		int slotId;
+		MCPObjectHealth report;
+
+		if (!command.args || !IsFiniteFloat(command.args.health01) || command.args.health01 < 0.0 || command.args.health01 > 1.0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		error = "";
+		health01 = command.args.health01;
+		zone = command.args.zone;
+		slot = command.args.slot;
+		target = ResolveCommandObject(command.args, error);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		if (slot != "")
+		{
+			host = EntityAI.Cast(target);
+			if (!host || !host.GetInventory())
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			slotId = InventorySlots.GetSlotIdFromString(slot);
+			if (!InventorySlots.IsSlotIdValid(slotId) || !host.GetInventory().HasAttachmentSlot(slotId))
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			attached = host.GetInventory().FindAttachment(slotId);
+			if (!attached)
+			{
+				result.ok = false;
+				result.error = "slot_empty";
+				return true;
+			}
+			target = attached;
+		}
+
+		if (target.IsMan())
+		{
+			result.ok = false;
+			result.error = "target_is_player";
+			return true;
+		}
+
+		if (target.GetMaxHealth(zone, "Health") <= 0)
+		{
+			result.ok = false;
+			result.error = "no_health";
+			result.type = target.GetType();
+			return true;
+		}
+
+		report = new MCPObjectHealth();
+		report.type = target.GetType();
+		report.zone = zone;
+		report.slot = slot;
+		report.health01_requested = health01;
+		report.health01_before = target.GetHealth01(zone, "Health");
+		report.health_level_before = target.GetHealthLevel(zone);
+		target.SetHealth01(zone, "Health", health01);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = "target_gone";
+			result.object_health = report;
+			result.type = report.type;
+			return true;
+		}
+
+		report.health01_after = target.GetHealth01(zone, "Health");
+		report.health_level_after = target.GetHealthLevel(zone);
+		result.object_health = report;
+		result.type = report.type;
+		result.object_id = RuntimeObjectId(target);
+		appliedDelta = report.health01_after - health01;
+		if (appliedDelta < 0.0)
+		{
+			appliedDelta = -appliedDelta;
+		}
+		if (appliedDelta > 0.001)
+		{
+			result.ok = false;
+			result.error = "health_not_applied";
+			return true;
+		}
+
 		result.ok = true;
 		return true;
 	}
