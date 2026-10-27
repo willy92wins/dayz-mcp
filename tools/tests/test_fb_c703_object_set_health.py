@@ -4,8 +4,9 @@ These tests pin the wire contract, the lease partition, the admission of an
 older PBO, the prune contract and the Enforce source the game will compile.
 They do not launch DayZ or compile the addon.
 
-Engine calls checked read-only against the DayZ 1.30 vanilla scripts
-(P:\\scripts):
+Engine calls the handler decides with, checked read-only against the DayZ
+1.30 vanilla scripts (P:\\scripts); the EntityAI cast and Object.GetType,
+which only names the class in the reply, are left out:
 
 - Object.SetHealth01: 3_game/entities/object.c:1100
   void SetHealth01(string zoneName, string healthType, float coef)
@@ -15,6 +16,8 @@ Engine calls checked read-only against the DayZ 1.30 vanilla scripts
   proto native float GetMaxHealth(string zoneName, string healthType)
 - Object.GetHealthLevel: 3_game/entities/object.c:1171
   proto native int GetHealthLevel(string zone = "")
+- EntityAI.GetInventory: 3_game/entities/entityai.c:1884
+  proto native GameInventory GetInventory()
 - InventorySlots.GetSlotIdFromString: 3_game/systems/inventory/inventoryslots.c:42
   static proto native int GetSlotIdFromString(string slot_name)
 - InventorySlots.IsSlotIdValid: 3_game/systems/inventory/inventoryslots.c:59
@@ -60,6 +63,22 @@ from tests.mcp_helpers import _content_json
 
 COMMAND = "object_set_health"
 DISPATCHER = "DispatchObjectSetHealth"
+D1_DESCRIPTION = (
+    "set one object's health on the server and read it back in the same "
+    "tick. Target by object_id (world_spawn, object_resolve, "
+    "inventory_give.object_id, inventory_attach.item_object_id) or by "
+    "exact classname within 25 m of pos. With slot, the target is the item "
+    "attached to that object in that inventory slot (telemetry_read "
+    "object_at lists the slot names in declared_slots). health01 is a "
+    "fraction of the zone's maximum Health; an empty zone is the global "
+    "health. The reply, object_health, gives health01 and the health level "
+    "the object reports (vanilla's usual scale: 0 pristine to 4 ruined), "
+    "read before and after the call. A player is refused: use player_heal "
+    "or player_kill (target_is_player). An item the game replaces when it "
+    "is ruined (a 1.30 car wheel becomes its _Ruined class) is replaced by "
+    "the game, not by this tool: read the vehicle again with "
+    "telemetry_read object_at to see what sits in the slot."
+)
 WIRE_OBJECT_ID = {"object_id": 7, "health01": 0.0}
 WIRE_SLOT_ZONE = {
     "object_id": 7,
@@ -404,7 +423,7 @@ class ObjectSetHealthAdmissionTest(unittest.TestCase):
         _announce_server(state, reduced, EXPECTED_SERVER_ARG_CONTRACT_HASH)
         before = state._next_id
         status, body = state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), peer="server")
-        self.assertEqual((status, body["error"]), (409, "bridge_capability_missing"))
+        self.assertEqual((status, body.get("error")), (409, "bridge_capability_missing"))
         self.assertEqual(state._next_id, before)
         self.assertEqual(bound_queue(state, "server"), [])
 
@@ -412,7 +431,7 @@ class ObjectSetHealthAdmissionTest(unittest.TestCase):
         _announce_server(state, _server_commands(), PREVIOUS_ARG_CONTRACT_HASH)
         before = state._next_id
         status, body = state.enqueue_command(COMMAND, dict(WIRE_OBJECT_ID), peer="server")
-        self.assertEqual((status, body["error"]), (409, "arg_contract_mismatch"))
+        self.assertEqual((status, body.get("error")), (409, "arg_contract_mismatch"))
         self.assertEqual(state._next_id, before)
 
 
@@ -487,7 +506,7 @@ class ObjectSetHealthCensusTest(unittest.TestCase):
     def test_c2_the_arg_contract_gains_the_verb_and_the_version_stays(self) -> None:
         # C2
         self.assertEqual(
-            server.SERVER_ARG_CONTRACT[COMMAND],
+            server.SERVER_ARG_CONTRACT.get(COMMAND),
             ("health01", "object_id", "pos", "slot", "type", "zone"),
         )
         canonical = server.server_arg_contract_canonical()
@@ -525,6 +544,8 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         self.assertNotIn("job", self.code.lower())
         self.assertNotIn("CallLater", self.code)
         self.assertNotIn("AddJob", self.code)
+        # Every exit answers true, so Dispatch posts the result in this tick.
+        self.assertNotIn("return false", self.code)
 
     def test_e2_the_steps_run_in_d2_order(self) -> None:
         # E2
@@ -533,6 +554,8 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
             self.code,
             (
                 "!IsFiniteFloat(command.args.health01)",
+                "zone = command.args.zone;",
+                "slot = command.args.slot;",
                 "ResolveCommandObject(command.args, error)",
                 'result.error = "slot_empty"',
                 'result.error = "target_is_player"',
@@ -616,8 +639,4 @@ class ObjectSetHealthDescriptionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_description_is_the_d1_text(self) -> None:
         tool = self.app._tool_manager.get_tool(COMMAND)
-        self.assertTrue(tool.description.startswith(LEASE_TOOL_LINE))
-        self.assertIn("set one object's health on the server", tool.description)
-        self.assertIn("target_is_player", tool.description)
-        self.assertIn("player_heal", tool.description)
-        self.assertIn("telemetry_read", tool.description)
+        self.assertEqual(tool.description, f"{LEASE_TOOL_LINE} {D1_DESCRIPTION}")
