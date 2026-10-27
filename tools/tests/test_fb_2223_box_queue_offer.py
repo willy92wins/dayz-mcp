@@ -1638,6 +1638,18 @@ class _ExitsAfterTheFirstWait(_BoxHarness):
         return result
 
 
+class _DayzExitsPortStaysHeld(_BoxHarness):
+    """The foreign DayZ leaves at the first FIFO wait; another process keeps 2302."""
+
+    def handle_box(self, identity, **kwargs: object) -> dict[str, object]:
+        result = super().handle_box(identity, **kwargs)
+        if kwargs.get("wait"):
+            self.occupied = False
+            self.foreign = []
+            self.foreign_ports = [2302]
+        return result
+
+
 class Fb88feForeignDayzQueueTest(unittest.IsolatedAsyncioTestCase):
     """fb-20261026-203149-88fe: a port held while a foreign DayZ occupies the box."""
 
@@ -1673,6 +1685,44 @@ class Fb88feForeignDayzQueueTest(unittest.IsolatedAsyncioTestCase):
         execute.assert_awaited_once()
         self.assertEqual(payload.get("status"), "succeeded")
         self.assertEqual(payload.get("run_id"), _LAUNCH_OK["run_id"])
+
+    async def test_on_busy_queue_ends_when_the_box_frees_with_the_port_still_held(
+        self,
+    ) -> None:
+        runtime, app = _build()
+        harness = _DayzExitsPortStaysHeld(
+            runs=[],
+            foreign=[{"port": 2402, "mods": ["@DayZ_MCP"], "profiles": "profiles-130"}],
+            foreign_ports=[2302, 2402, 2404],
+        )
+        harness.bind(runtime)
+        execute = AsyncMock(side_effect=AssertionError("must not launch"))
+        try:
+            with (
+                patch.object(server.dayz_test_tool, "execute_dayz_test_run", execute),
+                _fast_box_wait(),
+            ):
+                payload = _content_json(
+                    await app.call_tool(
+                        "dayz_test_run",
+                        {
+                            "project": "ExampleMod",
+                            "mode": "server",
+                            "on_busy": "queue",
+                            "wait_for_box_s": 5.0,
+                            "port": 2302,
+                        },
+                    )
+                )
+        except BaseException as exc:
+            _fail_product(self, exc)
+        self.assertTrue(any(call.get("wait") for call in harness.box_calls))
+        execute.assert_not_awaited()
+        self.assertEqual(payload.get("reason"), "port_in_use_foreign")
+        self.assertEqual(payload.get("port"), 2302)
+        self.assertIsNone(payload.get("queue_offer"))
+        self.assertEqual(harness.coordinator.box_queue_public(), [])
+        self.assertEqual(harness.done, ["ticket-1"])
 
 
 if __name__ == "__main__":
