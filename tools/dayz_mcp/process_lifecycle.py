@@ -5129,6 +5129,50 @@ class ProcessLifecycle:
                 and actual.get("exit_code") == 4
             )
 
+        def _reused_parent_reason(
+            pid: int, ppid: int, parent: ProcessRecord, holder: dict[str, object]
+        ) -> str | None:
+            # The parent's pid names another process now (inbox 7417, r4 H4).
+            # A reporter made before the parent or after that process is not
+            # the parent's; one made between them may be, so it is unverified
+            # while it lives.
+            try:
+                child = self.guard.snapshot(pid)
+            except Exception:
+                return "child_scan_unknown"
+            if _process_not_found(child):
+                return None
+            if (
+                not isinstance(child, dict)
+                or child.get("identity_complete") is not True
+            ):
+                return "child_scan_unknown"
+            if (
+                str(child.get("executable_sha256", "")).casefold()
+                != expected_exe.casefold()
+            ):
+                return None
+            child_stamp = _utc_epoch(str(child.get("creation_time_utc") or ""))
+            holder_stamp = _utc_epoch(str(holder.get("creation_time_utc") or ""))
+            parent_stamp = _utc_epoch(parent.creation_time_utc)
+            if (
+                child_stamp is not None
+                and holder_stamp is not None
+                and parent_stamp is not None
+                and (child_stamp > holder_stamp or child_stamp < parent_stamp)
+            ):
+                return None
+            self._audit(
+                "crash_reporter_parent_unverified",
+                None,
+                "identity_unverified",
+                "denied",
+                run_id=run.run_id,
+                pid=pid,
+                ppid=ppid,
+            )
+            return "crash_reporter_parent_unverified"
+
         try:
             for row in rows:
                 pid = int(row["pid"])
@@ -5191,6 +5235,9 @@ class ProcessLifecycle:
                 elif self._identity_matches(parent, parent_snap):
                     pass
                 elif parent_snap.get("identity_complete") is True:
+                    reused = _reused_parent_reason(pid, ppid, parent, parent_snap)
+                    if reused is not None:
+                        scan_reason = reused
                     continue
                 else:
                     scan_reason = "parent_scan_unknown"
@@ -5245,6 +5292,12 @@ class ProcessLifecycle:
                         if not self._identity_matches(parent, again):
                             if again.get("identity_complete") is not True:
                                 scan_reason = "parent_scan_unknown"
+                            else:
+                                reused = _reused_parent_reason(
+                                    pid, ppid, parent, again
+                                )
+                                if reused is not None:
+                                    scan_reason = reused
                             continue
                     try:
                         child_snap = self.guard.snapshot(pid)
