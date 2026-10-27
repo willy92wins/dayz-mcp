@@ -1283,11 +1283,25 @@ class SessionCoordinator:
             return 200, payload
 
     def active_lease_id(
-        self, client: ClientIdentity, lease_token: str | None
+        self,
+        client: ClientIdentity,
+        lease_token: str | None,
+        *,
+        timeout_s: float | None = None,
     ) -> str | None:
-        """Lease id for a token that would pass authorize, without renewing it."""
-        with self._condition:
+        """Lease id for a token that would pass authorize, without renewing it.
+
+        With timeout_s, also None when the lock stays held that long
+        (inbox 6310: a report must not wait on it).
+        """
+        if timeout_s is None:
+            self._condition.acquire()
+        elif not self._condition.acquire(timeout=timeout_s):
+            return None
+        try:
             lease, _error = self._validate_token_locked(client, lease_token)
+        finally:
+            self._condition.release()
         if lease is None:
             return None
         return lease.lease_id

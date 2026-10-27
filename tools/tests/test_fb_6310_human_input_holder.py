@@ -1,15 +1,17 @@
 """inbox 6310: human_input counts on the lease holder's heartbeat and /await.
 
 The 250f sampler already stamps the latest input per run. These tests pin the
-cumulative counts and the report block that heartbeat and done /await answers
-carry, using fake InputSamples, FakeGuard, and an in-process loopback. They
-do not call a real Windows API or start a real process.
+cumulative counts and the report block that heartbeat and POST /await answers
+carry for the lease holder, using fake InputSamples, FakeGuard, and an
+in-process loopback. They do not call a real Windows API or start a real
+process.
 """
 
 from __future__ import annotations
 
 import http.client
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -27,7 +29,7 @@ from dayz_mcp.process_lifecycle import (
     RunRecord,
 )
 from dayz_mcp.runtime_state import RuntimePaths
-from dayz_mcp.session_coordination import SessionCoordinator
+from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import INST_SERVER
 from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
@@ -55,8 +57,10 @@ IDENTITY_PAYLOAD = {
     "session_id": "A",
     "task_label": "test",
 }
+STRANGER_PAYLOAD = dict(IDENTITY_PAYLOAD, session_id="B", pid=12)
 BLOCK_KEYS = {"signal", "runs"}
 ROW_KEYS = {"run_id", "count", "uncertain_count", "last_age_s"}
+UNAVAILABLE = {"signal": "unavailable", "runs": []}
 
 
 class FakeBindings:
@@ -71,6 +75,33 @@ class FakeBindings:
 
     def unfence_runs(self, run_ids: list[str]) -> None:
         return None
+
+
+class ArmedLock:
+    """Stands in for _activity_lock. The first acquire after arm() runs a hook."""
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._hook = None
+
+    def arm(self, hook) -> None:
+        self._hook = hook
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        hook, self._hook = self._hook, None
+        if hook is not None:
+            hook()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "ArmedLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
 
 
 class HumanInputHolderTest(unittest.TestCase):
@@ -264,6 +295,20 @@ class HumanInputHolderTest(unittest.TestCase):
             [key for key in self.lifecycle._uncertain_input_count if key[1] == "run-x"]
         )
 
+    def test_t1_equal_epoch_counts_once(self) -> None:
+        # Both later samples put the input at 1001 (at minus idle): the second
+        # does not move the stamp, so it does not count either.
+        self.add_run(owner="A")
+        self.sample(1000.0, tick=100, foreground=CLIENT_PID)
+        self.sample(1001.0, tick=200, foreground=CLIENT_PID)
+        self.sample(1002.0, tick=300, foreground=CLIENT_PID, idle_ms=1000)
+        block = self.lifecycle.human_input_block("A", "lease-A", now=1002.5)
+        block = self.assert_block_shape(block)
+        self.assertEqual(
+            [(row["count"], row["last_age_s"]) for row in block["runs"]],
+            [(1, 1.5)],
+        )
+
     def test_t2_block_filters_owner_and_signal(self) -> None:
         self.add_run(owner="A")
         last_at = self.credit_three_verified()
@@ -274,6 +319,19 @@ class HumanInputHolderTest(unittest.TestCase):
         self.assertEqual(len(owned["runs"]), 1)
         self.assertEqual(owned["runs"][0]["run_id"], "run-x")
         self.assertEqual(owned["runs"][0]["count"], 3)
+        # ok from 0 s to INPUT_SIGNAL_STALE_S after the last good sample, both
+        # ends included; a clock before that sample is not ok.
+        for offset, expected in (
+            (-0.001, "unavailable"),
+            (0.0, "ok"),
+            (INPUT_SIGNAL_STALE_S, "ok"),
+            (INPUT_SIGNAL_STALE_S + 0.001, "unavailable"),
+        ):
+            with self.subTest(offset=offset):
+                edge = self.lifecycle.human_input_block(
+                    "A", "lease-A", now=last_at + offset
+                )
+                self.assertEqual(edge["signal"], expected)
 
         self.assertEqual(
             self.lifecycle.human_input_block("A", "lease-B", now=clock)["runs"],
@@ -334,6 +392,52 @@ class HumanInputHolderTest(unittest.TestCase):
         failed = self.lifecycle.human_input_block("A", "lease-A", now=failed_clock)
         failed = self.assert_block_shape(failed)
         self.assertEqual(failed["signal"], "unavailable")
+
+    def test_t9_owner_and_counts_come_from_one_snapshot(self) -> None:
+        self.add_run(owner="A")
+        last_at = self.credit_three_verified()
+        armed = ArmedLock(self.lifecycle._activity_lock)
+        self.lifecycle._activity_lock = armed  # type: ignore[assignment]
+
+        def retire() -> None:
+            # The order of _commit_retirement: persist EXITED, then drop the
+            # run's counters.
+            self.store.replace(
+                RunRecord(
+                    "run-x",
+                    None,
+                    None,
+                    "EXITED",
+                    "label",
+                    "@Mod",
+                    "profiles",
+                    "mission",
+                    [],
+                )
+            )
+            self.lifecycle._seal_terminal("run-x", last_at + 1.0)
+
+        worker = threading.Thread(target=retire, daemon=True)
+        retired_during_read: list[bool] = []
+
+        def race() -> None:
+            # Runs when the block asks for the counters. A retirement that can
+            # land here would publish the RUNNING run with its counters gone.
+            worker.start()
+            worker.join(0.3)
+            retired_during_read.append(not worker.is_alive())
+
+        armed.arm(race)
+        block = self.lifecycle.human_input_block("A", "lease-A", now=last_at + 0.5)
+        worker.join(2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(retired_during_read, [False])
+        self.assertEqual(
+            [(row["run_id"], row["count"]) for row in block["runs"]],
+            [("run-x", 3)],
+        )
+        after = self.lifecycle.human_input_block("A", "lease-A", now=last_at + 1.5)
+        self.assertEqual(after["runs"], [])
 
 
 class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
@@ -462,34 +566,67 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("human_input", plain)
 
+    def enqueue_done(self, token: str | None = None) -> int:
+        """query_player_state, enqueued under the lease when token is given, done."""
+        payload: dict[str, object] = {
+            "identity": IDENTITY_PAYLOAD,
+            "cmd": "query_player_state",
+            "args": {},
+            "peer": "server",
+        }
+        if token is not None:
+            payload["lease_token"] = token
+        status, enqueued = self.request("/enqueue", payload)
+        self.assertEqual(status, 200, enqueued)
+        command_id = enqueued["id"]
+        wire = {
+            "id": command_id,
+            "ok": 1,
+            "cmd": "query_player_state",
+            "state": {"pos": [1.0, 2.0, 3.0]},
+        }
+        stored_status, stored = self.state.store_result(wire, instance=INST_SERVER)
+        self.assertEqual(stored_status, 200, stored)
+        self.assertNotIn("discarded", stored)
+        return command_id
+
+    def post_await(
+        self,
+        command_id: int,
+        token: str | None,
+        *,
+        identity: dict = IDENTITY_PAYLOAD,
+        remove: str = "1",
+    ) -> tuple[int, dict]:
+        payload: dict[str, object] = {"identity": identity}
+        if token is not None:
+            payload["lease_token"] = token
+        return _http(
+            self.base,
+            "POST",
+            "/await",
+            self.key,
+            payload,
+            {"id": str(command_id), "remove": remove},
+        )
+
     def test_t4_await_adds_block_only_for_owned_done(self) -> None:
         token, acquired = self.acquire()
         lease_id = acquired["lease_id"]
         self.add_owned_run(lease_id)
         self.credit_one()
-        status, enqueued = self.request(
-            "/enqueue",
-            {
-                "identity": IDENTITY_PAYLOAD,
-                "lease_token": token,
-                "cmd": "query_player_state",
-                "args": {},
-                "peer": "server",
-            },
-        )
-        self.assertEqual(status, 200)
-        command_id = enqueued["id"]
-        wire = {"id": command_id, "ok": 1, "cmd": "query_player_state", "state": {"pos": [1.0, 2.0, 3.0]}}
-        stored_status, stored = self.state.store_result(wire, instance=INST_SERVER)
-        self.assertEqual(stored_status, 200, stored)
-        self.assertNotIn("discarded", stored)
-        status, done = _http(
+        command_id = self.enqueue_done(token)
+        # GET /await names no caller, so it never carries the block.
+        status, plain = _http(
             self.base,
             "GET",
             "/await",
             self.key,
-            query={"id": str(command_id), "remove": "1"},
+            query={"id": str(command_id), "remove": "0"},
         )
+        self.assertEqual(status, 200)
+        self.assertEqual(set(plain), {"status", "result"})
+        status, done = self.post_await(command_id, token)
         self.assertEqual(status, 200)
         self.assertEqual(set(done), {"status", "result", "human_input"})
         self.assertEqual(done["status"], "done")
@@ -501,32 +638,11 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(len(block["runs"]), 1)
         self.assertEqual(block["runs"][0]["count"], 1)
 
-        status, foreign = self.request(
-            "/enqueue",
-            {
-                "identity": IDENTITY_PAYLOAD,
-                "cmd": "query_player_state",
-                "args": {},
-                "peer": "server",
-            },
-        )
-        self.assertEqual(status, 200)
-        foreign_id = foreign["id"]
-        self.state.store_result(
-            {"id": foreign_id, "ok": 1, "cmd": "query_player_state"},
-            instance=INST_SERVER,
-        )
-        status, no_owner = _http(
-            self.base,
-            "GET",
-            "/await",
-            self.key,
-            query={"id": str(foreign_id), "remove": "1"},
-        )
+        foreign_id = self.enqueue_done()
+        status, no_owner = self.post_await(foreign_id, token)
         self.assertEqual(status, 200)
         self.assertEqual(set(no_owner), {"status", "result"})
         self.assertEqual(no_owner["status"], "done")
-        self.assertNotIn("human_input", no_owner)
 
         status, pending_enq = self.request(
             "/enqueue",
@@ -539,19 +655,111 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        status, pending = _http(
-            self.base,
-            "GET",
-            "/await",
-            self.key,
-            query={"id": str(pending_enq["id"]), "remove": "1"},
-        )
+        status, pending = self.post_await(pending_enq["id"], token)
         self.assertEqual(status, 200)
         self.assertEqual(pending, {"status": "pending"})
+        status, refused = _http(
+            self.base,
+            "POST",
+            "/await",
+            self.key,
+            {"identity": {}},
+            {"id": str(pending_enq["id"]), "remove": "1"},
+        )
+        self.assertEqual((status, refused), (400, {"error": "invalid_identity"}))
+
+    def test_t8_only_the_live_holder_gets_the_block(self) -> None:
+        token, acquired = self.acquire()
+        self.add_owned_run(acquired["lease_id"])
+        self.credit_one()
+        command_id = self.enqueue_done(token)
+        for identity, presented in (
+            (STRANGER_PAYLOAD, None),
+            (STRANGER_PAYLOAD, token),
+            (IDENTITY_PAYLOAD, None),
+            (IDENTITY_PAYLOAD, "not-this-lease"),
+        ):
+            with self.subTest(session=identity["session_id"], token=presented):
+                status, body = self.post_await(
+                    command_id, presented, identity=identity, remove="0"
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["status"], "done")
+                self.assertNotIn("human_input", body)
+        # The holder gets it on every read that keeps the result.
+        for _ in range(2):
+            status, body = self.post_await(command_id, token, remove="0")
+            self.assertEqual(status, 200)
+            self.assertIn("human_input", body)
+            self.assertEqual(body["human_input"]["runs"][0]["count"], 1)
+
+        status, released = self.request(
+            "/session/release",
+            {"identity": IDENTITY_PAYLOAD, "lease_token": token},
+        )
+        self.assertEqual(status, 200, released)
+        status, body = self.post_await(command_id, token, remove="0")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "done")
+        self.assertNotIn("human_input", body)
+        # The next lease's token does not name the lease the command came with.
+        next_token, _acquired = self.acquire()
+        status, body = self.post_await(command_id, next_token)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "done")
+        self.assertNotIn("human_input", body)
+
+    def test_t9_a_busy_lock_does_not_delay_the_answer(self) -> None:
+        token, acquired = self.acquire()
+        self.add_owned_run(acquired["lease_id"])
+        self.credit_one()
+        beat = {"identity": IDENTITY_PAYLOAD, "lease_token": token}
+        # This thread holds the lock; the daemon's handler thread cannot take it.
+        for name, lock in (
+            ("manifest", self.manifest._lock),
+            ("activity", self.lifecycle._activity_lock),
+        ):
+            with self.subTest(lock=name):
+                command_id = self.enqueue_done(token)
+                with lock:
+                    started = time.monotonic()
+                    beat_status, beat_body = self.answered(
+                        lambda: self.request("/session/heartbeat", beat)
+                    )
+                    done_status, done = self.answered(
+                        lambda: self.post_await(command_id, token)
+                    )
+                    elapsed = time.monotonic() - started
+                self.assertEqual(beat_status, 200)
+                self.assertEqual(beat_body.get("human_input"), UNAVAILABLE)
+                self.assertEqual(done_status, 200)
+                self.assertEqual(done["status"], "done")
+                self.assertEqual(done["result"]["ok"], 1)
+                self.assertEqual(done.get("human_input"), UNAVAILABLE)
+                self.assertLess(elapsed, 1.5)
+
+        # The coordinator lock: no lease check in time, so no block. remove=0,
+        # because consuming a leased result waits on that lock in main too.
+        command_id = self.enqueue_done(token)
+        with self.coordinator._condition:
+            started = time.monotonic()
+            status, done = self.answered(
+                lambda: self.post_await(command_id, token, remove="0")
+            )
+            elapsed = time.monotonic() - started
+        self.assertEqual(status, 200)
+        self.assertEqual(done["status"], "done")
+        self.assertNotIn("human_input", done)
+        self.assertLess(elapsed, 1.5)
+        status, done = self.post_await(command_id, token)
+        self.assertEqual(status, 200)
+        self.assertIn("human_input", done)
+        self.assertEqual(done["human_input"]["runs"][0]["count"], 1)
 
     def answered(self, call):
-        # M9: an exception that escapes the handler drops the connection. That
-        # is the failure T7 is for, so it fails as an assertion, not an error.
+        # M9: an exception that escapes the handler drops the connection, and a
+        # handler stuck on a lock lets the request time out. Both fail the test
+        # as an assertion, not an error.
         try:
             return call()
         except (OSError, http.client.HTTPException) as exc:
@@ -575,48 +783,36 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertIn("human_input", beat)
-        self.assertEqual(set(beat["human_input"]), BLOCK_KEYS)
-        self.assertEqual(beat["human_input"]["signal"], "unavailable")
-        self.assertEqual(beat["human_input"]["runs"], [])
+        self.assertEqual(beat["human_input"], UNAVAILABLE)
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
         )
 
-        status, enqueued = self.request(
-            "/enqueue",
-            {
-                "identity": IDENTITY_PAYLOAD,
-                "lease_token": token,
-                "cmd": "query_player_state",
-                "args": {},
-                "peer": "server",
-            },
-        )
-        self.assertEqual(status, 200)
-        self.state.store_result(
-            {"id": enqueued["id"], "ok": 1, "cmd": "query_player_state"},
-            instance=INST_SERVER,
-        )
+        command_id = self.enqueue_done(token)
         self.logs.clear()
-        status, done = self.answered(
-            lambda: _http(
-                self.base,
-                "GET",
-                "/await",
-                self.key,
-                query={"id": str(enqueued["id"]), "remove": "1"},
-            )
-        )
+        status, done = self.answered(lambda: self.post_await(command_id, token))
         self.assertEqual(status, 200)
         self.assertEqual(done["status"], "done")
-        self.assertIn("human_input", done)
-        self.assertEqual(done["human_input"]["signal"], "unavailable")
-        self.assertEqual(done["human_input"]["runs"], [])
+        self.assertEqual(done["result"]["state"]["pos"], [1.0, 2.0, 3.0])
+        self.assertEqual(done.get("human_input"), UNAVAILABLE)
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
         )
+
+        # A log sink that raises too: remove=1 already consumed the result, so
+        # the answer must still come whole.
+        def broken_sink(_message: str) -> None:
+            raise OSError("inbox-6310-sink")
+
+        command_id = self.enqueue_done(token)
+        self.httpd.log_sink = broken_sink
+        status, done = self.answered(lambda: self.post_await(command_id, token))
+        self.assertEqual(status, 200)
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(done["result"]["state"]["pos"], [1.0, 2.0, 3.0])
+        self.assertEqual(done.get("human_input"), UNAVAILABLE)
 
 
 class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
@@ -627,6 +823,16 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
 
         runtime = object.__new__(ClientRuntime)
         runtime._time_fn = time.monotonic
+        runtime.identity = ClientIdentity.from_payload(IDENTITY_PAYLOAD)
+        # Commands 1, 3 and 4 were admitted under a lease; command 2 was not.
+        runtime._broker_admits = {
+            command_id: {"generation": "", "lease_token": "token-A"}
+            for command_id in (1, 3, 4)
+        }
+        holder = {
+            "identity": runtime.identity.to_payload(),
+            "lease_token": "token-A",
+        }
         block = {
             "signal": "ok",
             "runs": [
@@ -639,8 +845,10 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
             ],
         }
         wire = {"ok": 1, "clicked": 0, "handler": "", "user_id": 0, "y": 12.5}
+        calls: list[tuple] = []
 
-        def _call_with_block(*_args, **_kwargs):
+        def _call_with_block(method, path, payload=None, query=None, *_args):
+            calls.append((method, path, payload, query))
             return 200, {
                 "status": "done",
                 "result": dict(wire),
@@ -649,16 +857,22 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
 
         runtime._call = _call_with_block
         waited = await runtime._await_result("surface_query", 1, "server", 1.0)
+        self.assertEqual(
+            calls, [("POST", "/await", holder, {"id": "1", "remove": "1"})]
+        )
         self.assertEqual(waited["y"], 12.5)
         self.assertNotIn("clicked", waited)
         self.assertIn("human_input", waited)
         self.assertEqual(waited["human_input"], block)
 
-        def _call_plain(*_args, **_kwargs):
+        def _call_plain(method, path, payload=None, query=None, *_args):
+            calls.append((method, path, payload, query))
             return 200, {"status": "done", "result": dict(wire)}
 
+        calls.clear()
         runtime._call = _call_plain
         plain = await runtime._await_result("surface_query", 2, "server", 1.0)
+        self.assertEqual(calls, [("GET", "/await", None, {"id": "2", "remove": "1"})])
         self.assertNotIn("human_input", plain)
         self.assertEqual(plain["y"], 12.5)
 
@@ -672,6 +886,30 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
         runtime._call = _call_error
         with self.assertRaises(ToolError):
             await runtime._await_result("surface_query", 3, "server", 1.0)
+
+        # A daemon from before this change answers POST /await with 404: the
+        # client reads the same command with GET instead.
+        def _call_old_daemon(method, path, payload=None, query=None, *_args):
+            calls.append((method, path, payload, query))
+            if method == "POST":
+                return 404, {"error": "not_found"}
+            return 200, {"status": "done", "result": dict(wire)}
+
+        calls.clear()
+        runtime._call = _call_old_daemon
+        try:
+            old = await runtime._await_result("surface_query", 4, "server", 1.0)
+        except ToolError as exc:
+            self.fail(f"the 404 did not fall back to GET: {exc!r}")
+        self.assertEqual(
+            calls,
+            [
+                ("POST", "/await", holder, {"id": "4", "remove": "1"}),
+                ("GET", "/await", None, {"id": "4", "remove": "1"}),
+            ],
+        )
+        self.assertEqual(old["y"], 12.5)
+        self.assertNotIn("human_input", old)
 
     async def test_t6_tools_return_call_bridge_row(self) -> None:
         from dayz_mcp.server import ServerConfig, build_app
@@ -708,11 +946,11 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
                 "object_delete", {"object_id": 7, "timeout_s": 1.0}
             )
         )
-        self.assertEqual(deleted["human_input"], block)
+        self.assertEqual(deleted.get("human_input"), block)
         focused = _content_json(
             await app.call_tool("ui_focus", {"path": "root", "timeout_s": 1.0})
         )
-        self.assertEqual(focused["human_input"], block)
+        self.assertEqual(focused.get("human_input"), block)
 
 
 if __name__ == "__main__":

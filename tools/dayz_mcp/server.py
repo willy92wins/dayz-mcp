@@ -2496,6 +2496,15 @@ class ClientRuntime:
     ) -> dict[str, Any]:
         if deadline is None:
             deadline = self._time_fn() + timeout_s
+        # inbox 6310: a command admitted under a lease is read with POST /await,
+        # which names the caller and that lease's token, so the daemon can add
+        # human_input when the lease is still this caller's.
+        admits = getattr(self, "_broker_admits", None)
+        admit = admits.get(command_id) if isinstance(admits, dict) else None
+        lease_token = admit.get("lease_token") if isinstance(admit, dict) else None
+        holder: dict[str, Any] | None = None
+        if isinstance(lease_token, str):
+            holder = {"identity": self.identity.to_payload(), "lease_token": lease_token}
         while True:
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
@@ -2503,15 +2512,19 @@ class ClientRuntime:
             try:
                 status, payload = await asyncio.to_thread(
                     self._call,
-                    "GET",
+                    "GET" if holder is None else "POST",
                     "/await",
-                    None,
+                    holder,
                     {"id": str(command_id), "remove": "1"},
                     remaining,
                     deadline,
                 )
             except _CallBudgetExpired:
                 break
+            if status == 404 and holder is not None:
+                # A daemon from before inbox 6310 has no POST /await.
+                holder = None
+                continue
             if status == 200 and payload.get("status") == "done":
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.

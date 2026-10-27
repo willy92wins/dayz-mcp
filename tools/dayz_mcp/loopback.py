@@ -5903,6 +5903,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_abandon()
             return
 
+        if parsed.path == "/await":
+            self.state.touch_client()
+            self._handle_await_post(qs)
+            return
+
         session_action = SESSION_ROUTES.get(parsed.path)
         if session_action is not None:
             self.state.touch_client()
@@ -6010,8 +6015,43 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return lifecycle.human_input_block(session_id, lease_id)
         except Exception:
-            self._log("human_input_block failed")
+            # The log is best effort too: a sink that raises here would lose
+            # an answer whose result /await?remove=1 already consumed.
+            try:
+                self._log("human_input_block failed")
+            except Exception:
+                pass
             return {"signal": "unavailable", "runs": []}
+
+    def _holder_human_input(
+        self,
+        client: ClientIdentity,
+        lease_token: object,
+        owner_lease_id: str,
+    ) -> dict[str, object] | None:
+        """inbox 6310: the block for a caller that holds the command's lease.
+
+        The caller's token must still be the live token of the lease that
+        enqueued the command, for this caller's identity. The check does not
+        renew the lease, and gives no block when the coordinator lock stays
+        held past the wait.
+        """
+        from dayz_mcp.process_lifecycle import HUMAN_INPUT_LOCK_WAIT_S
+
+        if not isinstance(lease_token, str) or not lease_token:
+            return None
+        coordination = self.state.coordination
+        if coordination is None:
+            return None
+        try:
+            lease_id = coordination.active_lease_id(
+                client, lease_token, timeout_s=HUMAN_INPUT_LOCK_WAIT_S
+            )
+        except Exception:
+            return None
+        if lease_id != owner_lease_id:
+            return None
+        return self._human_input_payload(client.session_id, lease_id)
 
     def _clear_request_renewed_lease(self) -> None:
         """Drop a lease id left on this thread by an earlier request.
@@ -6572,7 +6612,26 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, result)
 
 
-    def _handle_await(self, qs: dict[str, list[str]]) -> None:
+    def _handle_await_post(self, qs: dict[str, list[str]]) -> None:
+        """inbox 6310: GET /await plus who asks, so the holder gets human_input.
+
+        The body is {"identity", "lease_token"}; the query is GET's.
+        """
+        body = self._read_json()
+        if body is None:
+            return
+        try:
+            client = ClientIdentity.from_payload(body.get("identity"))
+        except ValueError:
+            self._json(400, {"error": "invalid_identity"})
+            return
+        self._handle_await(qs, holder=(client, body.get("lease_token")))
+
+    def _handle_await(
+        self,
+        qs: dict[str, list[str]],
+        holder: tuple[ClientIdentity, object] | None = None,
+    ) -> None:
         try:
             command_id = int(qs.get("id", [""])[0])
         except ValueError:
@@ -6583,15 +6642,16 @@ class Handler(BaseHTTPRequestHandler):
         # leak one _results entry per command in the shared daemon. Default keeps
         # the non-destructive read for back-compat with the harness.
         remove = qs.get("remove", ["0"])[0] == "1"
-        owner = self.state.command_owner(command_id)
+        # take_result with remove=1 pops the owner, so it is read first.
+        owner = None if holder is None else self.state.command_owner(command_id)
         result = self.state.take_result(command_id, remove=remove)
         if result is None:
             self._json(200, {"status": "pending"})
             return
 
         body: dict[str, object] = {"status": "done", "result": result}
-        if owner is not None:
-            block = self._human_input_payload(owner[0].session_id, owner[1])
+        if holder is not None and owner is not None:
+            block = self._holder_human_input(holder[0], holder[1], owner[1])
             if block is not None:
                 body["human_input"] = block
         self._json(200, body)

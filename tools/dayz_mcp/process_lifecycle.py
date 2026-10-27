@@ -112,6 +112,10 @@ RUN_IDLE_CUT_S = 600.0
 # 250f (plan residue C1): with no good input sample for this long, the signal
 # is unknown and a run with a live client reads use_state unknown.
 INPUT_SIGNAL_STALE_S = 2.0
+# inbox 6310: the human_input report waits at most this long for each lock it
+# takes. A persist or an fsync that holds one longer gives an unavailable
+# report, not a later answer.
+HUMAN_INPUT_LOCK_WAIT_S = 0.05
 _ACTIVE_RUN_STOP_HINT = "stop it with dayz_test_stop(run_id={run_id})"
 _ACTIVE_RUN_WAIT_HINT = "retry with wait_for_box_s=<n>"
 _ACTIVE_RUN_TAKEOVER_HINT = (
@@ -1906,6 +1910,21 @@ class RunManifestStore:
     def list_runs(self) -> list[RunRecord]:
         with self._lock:
             return [self._clone(self._runs[key]) for key in sorted(self._runs)]
+
+    def read_runs(
+        self, read: Callable[[list[RunRecord]], _T], *, timeout_s: float
+    ) -> _T | None:
+        """inbox 6310: read(the runs, as list_runs gives them) under the lock.
+
+        None, without calling read, when the lock stays held for timeout_s.
+        replace holds it while it persists.
+        """
+        if not self._lock.acquire(timeout=timeout_s):
+            return None
+        try:
+            return read([self._clone(self._runs[key]) for key in sorted(self._runs)])
+        finally:
+            self._lock.release()
 
     def _note_storage_observation_locked(self, run: RunRecord) -> None:
         """Keep a measured rotation after the EXITED row is pruned.
@@ -6794,55 +6813,83 @@ class ProcessLifecycle:
     ) -> dict[str, object]:
         """inbox 6310: cumulative input counts for this lease's RUNNING runs.
 
-        One clock reading. Empty or non-string ids yield runs=[] and still
-        report whether the sampler signal is fresh.
+        One clock reading. The counters are read with the manifest lock held:
+        an owner change or a retirement persists under that lock before it
+        drops a counter, so neither lands between the owner test and the
+        counts. Each lock is waited on for at most HUMAN_INPUT_LOCK_WAIT_S,
+        and one still held gives signal unavailable and no rows. Empty or
+        non-string ids yield runs=[] and still report whether the sampler
+        signal is fresh.
         """
 
         clock = time.time() if now is None else float(now)
-        runs = self.manifest.list_runs()
-        with self._activity_lock:
-            good_at = self._input_good_at
-            signal_ok = (
-                good_at is not None
-                and 0.0 <= clock - good_at <= INPUT_SIGNAL_STALE_S
-            )
-            rows: list[dict[str, object]] = []
-            if (
-                isinstance(session_id, str)
-                and session_id
-                and isinstance(lease_id, str)
-                and lease_id
-            ):
-                # list_runs gives the runs sorted by run_id.
-                owned = [
-                    run
-                    for run in runs
-                    if run.state == "RUNNING"
-                    and run.owner_session_id == session_id
-                    and run.owner_lease_id == lease_id
-                ]
-                for run in owned:
-                    key = self._activity_key(run.run_id)
-                    human_at = self._human_input_at.get(key)
-                    if human_at is not None and human_at > clock:
-                        human_at = None
-                    last_age_s = (
-                        round(clock - human_at, 3) if human_at is not None else None
-                    )
-                    rows.append(
-                        {
-                            "run_id": run.run_id,
-                            "count": self._human_input_count.get(key, 0),
-                            "uncertain_count": self._uncertain_input_count.get(
-                                key, 0
-                            ),
-                            "last_age_s": last_age_s,
-                        }
-                    )
-            return {
-                "signal": "ok" if signal_ok else "unavailable",
-                "runs": rows,
-            }
+
+        def read(runs: list[RunRecord]) -> dict[str, object] | None:
+            if not self._activity_lock.acquire(timeout=HUMAN_INPUT_LOCK_WAIT_S):
+                return None
+            try:
+                return self._human_input_block_locked(
+                    runs, session_id, lease_id, clock
+                )
+            finally:
+                self._activity_lock.release()
+
+        block = self.manifest.read_runs(read, timeout_s=HUMAN_INPUT_LOCK_WAIT_S)
+        if block is None:
+            return {"signal": "unavailable", "runs": []}
+        return block
+
+    def _human_input_block_locked(
+        self,
+        runs: list[RunRecord],
+        session_id: object,
+        lease_id: object,
+        clock: float,
+    ) -> dict[str, object]:
+        """Caller holds the manifest lock and _activity_lock."""
+
+        good_at = self._input_good_at
+        signal_ok = (
+            good_at is not None
+            and 0.0 <= clock - good_at <= INPUT_SIGNAL_STALE_S
+        )
+        rows: list[dict[str, object]] = []
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and isinstance(lease_id, str)
+            and lease_id
+        ):
+            # read_runs gives the runs sorted by run_id.
+            owned = [
+                run
+                for run in runs
+                if run.state == "RUNNING"
+                and run.owner_session_id == session_id
+                and run.owner_lease_id == lease_id
+            ]
+            for run in owned:
+                key = self._activity_key(run.run_id)
+                human_at = self._human_input_at.get(key)
+                if human_at is not None and human_at > clock:
+                    human_at = None
+                last_age_s = (
+                    round(clock - human_at, 3) if human_at is not None else None
+                )
+                rows.append(
+                    {
+                        "run_id": run.run_id,
+                        "count": self._human_input_count.get(key, 0),
+                        "uncertain_count": self._uncertain_input_count.get(
+                            key, 0
+                        ),
+                        "last_age_s": last_age_s,
+                    }
+                )
+        return {
+            "signal": "ok" if signal_ok else "unavailable",
+            "runs": rows,
+        }
 
     def launcher_request_at(self, run_id: str) -> float | None:
         with self._activity_lock:
