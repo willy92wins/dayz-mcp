@@ -6354,9 +6354,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return (dx * dx) + (dy * dy) + (dz * dz) <= (eps * eps);
 	}
 
-	// Apply vs observe: after seated camera_set, compare the observed
-	// GetCurrentCameraTransform to the requested pose. Matching pose is the
-	// only scripted PASS. An unmoved cabin stays view=vehicle and fails.
+	// Apply vs observe: after seated camera_set with no mounted camera (a
+	// mounted one already reads as scripted, 2277), compare the observed
+	// GetCurrentCameraTransform to the requested pose. An unmoved cabin stays
+	// view=vehicle and fails.
 	protected void ObserveSeatedCameraApply(MCPCamera camera, MCPArgs args)
 	{
 		if (!camera || camera.view != "vehicle")
@@ -6401,16 +6402,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PlayerBase seatedPlayer = PlayerBase.Cast(GetGame().GetPlayer());
 		if (ResolveLiveSeatedTransport(seatedPlayer))
 		{
-			if (FillSeatedCameraView(camera, seatedPlayer))
+			// fb-20261026-152109-2277: a camera this bridge mounted renders while the
+			// player sits, and the cabin transform does not follow it. Read it as
+			// off a vehicle, from m_ActiveCam below; the cabin only without one.
+			if (m_ActiveCam && m_ActiveCam.IsActive())
 			{
+				cameraError = "";
+			}
+			else
+			{
+				if (FillSeatedCameraView(camera, seatedPlayer))
+				{
+					return camera;
+				}
+
+				camera.ok = false;
+				camera.viewport_moved = false;
+				camera.view = "";
+				camera.error = cameraError;
 				return camera;
 			}
-
-			camera.ok = false;
-			camera.viewport_moved = false;
-			camera.view = "";
-			camera.error = cameraError;
-			return camera;
 		}
 
 		if (CameraErrorIsMissingScripted(cameraError))
