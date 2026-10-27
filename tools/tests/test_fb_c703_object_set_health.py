@@ -132,13 +132,17 @@ _LOCAL_DECLARATION = re.compile(
 )
 _DOT_SPACES = re.compile(r"\s*\.\s*")
 _NAME_BEFORE_PAREN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
-_HEALTH_VALUE_APIS = (
-    "GetMaxHealth",
-    "GetHealth01",
-    "GetHealthLevel",
-    "SetHealth01",
-    "GetSlotIdFromString",
-)
+_RECEIVER_BEFORE_NAME = re.compile(r"(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\.$")
+# Each call a read local may sit in, with its receiver: the Object target, or
+# vanilla's InventorySlots, whose methods take these arguments by value (the
+# docstring's cites). A bare name would reach an MCPBridge helper instead.
+_HEALTH_VALUE_APIS = {
+    "GetMaxHealth": "target",
+    "GetHealth01": "target",
+    "GetHealthLevel": "target",
+    "SetHealth01": "target",
+    "GetSlotIdFromString": "InventorySlots",
+}
 _DISPATCH_CMD_LITERAL = r'command\s*\.\s*cmd\s*==\s*("(?:\\.|[^"\\\n])*")'
 _DISPATCH_CMD_IF = re.compile(r"if\s*\(\s*" + _DISPATCH_CMD_LITERAL + r"\s*\)")
 _DISPATCH_CMD_ELSE_IF = re.compile(
@@ -239,6 +243,18 @@ def _braced_block(source: str, start: int, what: str) -> tuple[int, int]:
     return _block_span(source, brace)
 
 
+def _dispatch_body(source: str) -> str:
+    # Dispatch is the one declaration of its signature outside comments and
+    # strings, so a copy of the signature cannot hand over another block.
+    bare = _without_comments_and_strings(source)
+    count = bare.count(DISPATCH_CHAIN)
+    if count != 1:
+        raise AssertionError(f"{DISPATCH_CHAIN!r} is declared {count} times")
+    start = bare.index(DISPATCH_CHAIN) + len(DISPATCH_CHAIN)
+    inner_start, inner_end = _braced_block(source, start, "Dispatch")
+    return _without_comments(source)[inner_start:inner_end]
+
+
 def _paren_pairs(source: str) -> list[tuple[int, int]]:
     stack: list[int] = []
     pairs: list[tuple[int, int]] = []
@@ -283,6 +299,12 @@ def _health_locals_unmutated(testcase: unittest.TestCase, bare: str) -> None:
                 if api is None:
                     continue
                 testcase.assertIn(api.group(0), _HEALTH_VALUE_APIS, name)
+                receiver = _RECEIVER_BEFORE_NAME.search(prefix[: api.start()])
+                testcase.assertIsNotNone(receiver, f"{name} in {api.group(0)}")
+                assert receiver is not None
+                testcase.assertEqual(
+                    receiver.group(1), _HEALTH_VALUE_APIS[api.group(0)], name
+                )
 
 
 def _class_members(source: str, class_name: str) -> list[tuple[str, str]]:
@@ -608,7 +630,7 @@ class ObjectSetHealthCensusTest(unittest.TestCase):
         caps = _server_capabilities(self.source)
         self.assertEqual(caps.count(COMMAND), 1)
         self.assertEqual(caps, sorted(caps))
-        dispatch = _without_comments(_block_after(self.source, self.source.index(DISPATCH_CHAIN)))
+        dispatch = _dispatch_body(self.source)
         fixture = json.loads(CENSUS_FIXTURE.read_text(encoding="utf-8"))
         branch = _if_body(dispatch, f'command.cmd == "{COMMAND}"')
         self.assertEqual(branch.strip(), f"postNow = {DISPATCHER}(command, result);")
@@ -654,16 +676,15 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
     def test_e1_dispatch_posts_in_the_same_tick_with_no_job(self) -> None:
         # E1. Every return in the method is the literal true (return (true);
         # is rejected on purpose). The final return true; is its own outer
-        # statement, so no path falls off the end. Dispatch's preamble is the
-        # null-command return and the MCPResult setup; for object_set_health
-        # it takes only that verb's branch (each branch is command.cmd == a
-        # distinct string literal, chained with else, and each condition and
-        # the final else open their block at once) and calls PostResult in
-        # that tick. PostResult serializes and leaves the send asynchronous
-        # (MCPBridge.c:7611).
-        dispatch = _without_comments(
-            _block_after(self.source, self.source.index(DISPATCH_CHAIN))
-        )
+        # statement, so no path falls off the end. Dispatch, the one
+        # declaration of its signature outside comments and strings, has a
+        # preamble that is the null-command return and the MCPResult setup;
+        # for object_set_health it takes only that verb's branch (each branch
+        # is command.cmd == a distinct string literal, chained with else, and
+        # each condition and the final else open their block at once) and
+        # calls PostResult in that tick. PostResult serializes and leaves the
+        # send asynchronous (MCPBridge.c:7611).
+        dispatch = _dispatch_body(self.source)
         head = _DISPATCH_CMD_IF.search(dispatch)
         self.assertIsNotNone(head, "Dispatch has no command.cmd chain")
         assert head is not None
@@ -737,9 +758,10 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         # E2. Each of health01, zone and slot is assigned only at its read,
         # is never followed by a member access or an index, and sits inside
         # no call but GetMaxHealth, GetHealth01, GetHealthLevel, SetHealth01
-        # and GetSlotIdFromString. An if condition and plain parentheses are
-        # not calls; any other name before a parenthesis is, while and switch
-        # included, and so is a call around an allowed one.
+        # and GetSlotIdFromString, each on its receiver (target, or
+        # InventorySlots for GetSlotIdFromString). An if condition and plain
+        # parentheses are not calls; any other name before a parenthesis is,
+        # while and switch included, and so is a call around an allowed one.
         _in_order(
             self,
             self.code,
@@ -749,6 +771,7 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
                 "zone = command.args.zone;",
                 "slot = command.args.slot;",
                 "ResolveCommandObject(command.args, error)",
+                "slotId = InventorySlots.GetSlotIdFromString(slot);",
                 'result.error = "slot_empty"',
                 'result.error = "target_is_player"',
                 'GetMaxHealth(zone, "Health")',
