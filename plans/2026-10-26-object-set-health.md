@@ -1,6 +1,6 @@
 # object_set_health: set one object's health and read it back (inbox c703)
 
-Base: main `75b5d16`; round 2 merges main `2f6b433` (#276) and `90de679` (#275). Bridge and Python: a new server verb, so this PR changes the PBO and Guillermo merges it. Bridge version stays 12. No sealed module changes.
+Base: main `75b5d16`; round 2 merges main `2f6b433` (#276) and `90de679` (#275), and round 3 merges `0d18401` (#277). Bridge and Python: a new server verb, so this PR changes the PBO and Guillermo merges it. Bridge version stays 12. No sealed module changes.
 
 ## The ticket (fb-20261026-150310-c703, LFQuad, request)
 
@@ -28,15 +28,15 @@ Description, after `LEASE_TOOL_LINE` (house style, sentences kept short): set on
 In this order, locals declared at the top as the file does:
 
 1. `command.args` null, or `health01` not finite or outside `[0, 1]`: `bad_args`.
-2. `target = ResolveCommandObject(command.args, error)` (`MCPBridge.c:5062`), unchanged; null answers its error (`object_id_unknown`, `object_id_stale`, `object_not_found`, `ambiguous_object`, `bad_args`).
-3. When `slot != ""`: the target must be an `EntityAI` with an inventory; `InventorySlots.GetSlotIdFromString(slot)` must be valid (`IsSlotIdValid`) and `HasAttachmentSlot` true, or `slot_not_found` (the checks `inventory_attach` makes, `MCPBridge.c:4050-4063`); `FindAttachment(slotId)` null is `slot_empty`; otherwise the attachment becomes the target.
-4. A target that is a `Man` is `target_is_player`. Players have their own verbs, and `player_kill` keeps the godmode bookkeeping (`MCPBridge.c:3455-3460`).
-5. `target.GetMaxHealth(zone, "Health") <= 0` is `no_health` with the type filled, and nothing changes. What `GetMaxHealth` reads for an unknown zone, or for the global health of an object without a damage system, is not documented in the 1.30 scripts; in-game step 5 measures it.
+2. `target = ResolveCommandObject(command.args, error)` (`MCPBridge.c:5066`), unchanged; null answers its error (`object_id_unknown`, `object_id_stale`, `object_not_found`, `ambiguous_object`, `bad_args`).
+3. When `slot != ""`: the target must be an `EntityAI` with an inventory; `InventorySlots.GetSlotIdFromString(slot)` must be valid (`IsSlotIdValid`) and `HasAttachmentSlot` true, or `slot_not_found` (the checks `inventory_attach` makes, `MCPBridge.c:4056-4068`); `FindAttachment(slotId)` null is `slot_empty`; otherwise the attachment becomes the target.
+4. A target that is a `Man` is `target_is_player`. Players have their own verbs, and `player_kill` keeps the godmode bookkeeping (`MCPBridge.c:3464`).
+5. `target.GetMaxHealth(zone, "Health") <= 0` is `no_health` with the type filled, and nothing changes. What `GetMaxHealth` reads for an unknown zone, or for the global health of an object without a damage system, is not documented in the 1.30 scripts; in-game step 5 measures both.
 6. Fill `MCPObjectHealth`: `type`, `zone`, `slot`, `health01_requested`, `health01_before = GetHealth01(zone, "Health")`, `health_level_before = GetHealthLevel(zone)`.
 7. `target.SetHealth01(zone, "Health", health01)`: the only health write in the method.
-8. If `target` reads null now: `target_gone`, with the before fields kept. Not expected, since ObjectDelete defers to the next frame (`MCPBridge.c:4247-4248`), but it keeps a null out of the reads.
+8. If `target` reads null now: `target_gone`, with the before fields kept. Not expected: `Object.Delete` queues its `ObjectDelete` call rather than deleting in place (`P:\scripts\3_game\entities\object.c:82`, noted at `MCPBridge.c:4250-4251`), but it keeps a null out of the reads.
 9. `health01_after`, `health_level_after` read the same way.
-10. `result.object_health`, `result.type`, `result.object_id = RuntimeObjectId(target)` (`MCPBridge.c:2618`; 0 for an attachment nobody registered).
+10. `result.object_health`, `result.type`, `result.object_id = RuntimeObjectId(target)` (`MCPBridge.c:2622`; 0 for an attachment nobody registered).
 11. `|health01_after - health01| > 0.001` is `health_not_applied` (ok false, report kept). Otherwise ok.
 
 `SERVER_CAPABILITIES` (`MCPBridge.c:73`) gains `object_set_health` after `object_resolve`. `SERVER_ARG_CONTRACT_HASH` (`:78`) takes the new hash (D4).
@@ -90,15 +90,15 @@ Census and contract:
 - C2 the canonical contract in `test_arg_contract_hash.py` gains `object_set_health=health01,object_id,pos,slot,type,zone`; the Enforce constant equals the Python hash; `MCP_BRIDGE_VERSION` stays `"12"`.
 
 Enforce source (read from `MCPBridge.c` and `MCPMessages.c`):
-- E1 the dispatch branch calls `DispatchObjectSetHealth` and posts in the same tick: the method inserts no job and calls no `CallLater`.
-- E2 the steps run in D2's order: the `health01` check before `ResolveCommandObject`; the slot checks give `slot_not_found` and `slot_empty`; `target_is_player` after the slot branch; `GetMaxHealth(zone, "Health")` before any write; both before reads before the write; the null guard and both after reads after it; the tolerance check last.
+- E1 the dispatch branch calls `DispatchObjectSetHealth` and posts in the same tick: the method inserts no job and calls no `CallLater`, every `return` in it returns `true`, and it ends on one.
+- E2 the steps run in D2's order: the `health01` check, then the reads of `health01`, `zone` and `slot`, each local assigned only there, before `ResolveCommandObject`; the slot checks give `slot_not_found` and `slot_empty`; `target_is_player` after the slot branch; `GetMaxHealth(zone, "Health")` before any write; both before reads before the write; the null guard and both after reads after it; the tolerance check last.
 - E3 exactly one `SetHealth01(` in the method, with the `"Health"` literal; no `SetHealth(`, no `ObjectDelete`.
 - E4 `MCPObjectHealth` holds primitives only, with D3's members; `MCPResult.object_health` and `MCPArgs.health01` and `zone` exist.
 - E5 the method's locals are declared at its top.
 
-Mutants, each in a copy of the tree and each turning at least one of these tests red: the write before the before reads; the after reads taken from the before values; no `GetMaxHealth` check; `"Blood"` for `"Health"`; no tolerance check; no `slot_empty` check; no `Man` refusal; the verb left out of `SERVER_CAPABILITIES`; the contract entry left out; the tool sending an empty `slot`. Round 2 adds: the zone ignored (`zone = ""` where the method reads it), success answering false (`return false` after `result.ok = true`), and a sentence of the description dropped.
+Mutants, each in a copy of the tree and each turning at least one of these tests red: the write before the before reads; the after reads taken from the before values; no `GetMaxHealth` check; `"Blood"` for `"Health"`; no tolerance check; no `slot_empty` check; no `Man` refusal; the verb left out of `SERVER_CAPABILITIES`; the contract entry left out; the tool sending an empty `slot`. Round 2 adds: the zone ignored (`zone = ""` where the method reads it), success answering false (`return false` after `result.ok = true`), and a sentence of the description dropped. Round 3 adds: `slot_empty` answering `return result.ok;`, an exit answering `return  false;` (two spaces), `zone = "";`, `slot = "";` or `health01 = 0.0;` written after the reads, `health01` read as a constant, and the final `return true;` dropped.
 
-Suite: the whole `tools/tests` tree fails the same test ids as main `75b5d16` and no others; in round 2, as main `90de679`.
+Suite: the whole `tools/tests` tree fails the same test ids as main `75b5d16` and no others; in round 2, as main `90de679`; in round 3, as main `0d18401`.
 
 ## In-game steps (final round)
 
@@ -106,4 +106,4 @@ Suite: the whole `tools/tests` tree fails the same test ids as main `75b5d16` an
 2. `world_spawn` `LFQuad_base` (the ticket's flags), `telemetry_read` `object_at` for its `declared_slots`, then `object_set_health(object_id=<car>, slot=<a front wheel slot>, health01=0)`: ok, `health_level_after` 4. One second later `telemetry_read` `object_at` lists `LFQuad_Wheel_Front_Ruined` among `attachment_items`; no script error in the RPT.
 3. Control: the same on `CivilianSedan`, which gives `CivSedanWheel_Ruined`.
 4. `health01=0.5` on a loose item: ok, `health01_after` 0.5.
-5. Refusals: zone `Bogus` (`no_health`, or `health_not_applied` with the health unchanged), a player (`target_is_player`), an empty slot (`slot_empty`).
+5. Refusals and unknowns: zone `Bogus`, and the global health (empty zone) of an object whose config has no `DamageSystem` (the round picks one and notes its class), each expected to answer `no_health`, or `health_not_applied` with the health unchanged; a player (`target_is_player`); an empty slot (`slot_empty`). For `Bogus` and for the object without a damage system, the round records the answer it got (its error, or `health01_before` and `health01_after`) apart from the expected one.

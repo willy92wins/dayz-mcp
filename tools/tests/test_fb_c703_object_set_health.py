@@ -544,8 +544,12 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         self.assertNotIn("job", self.code.lower())
         self.assertNotIn("CallLater", self.code)
         self.assertNotIn("AddJob", self.code)
-        # Every exit answers true, so Dispatch posts the result in this tick.
-        self.assertNotIn("return false", self.code)
+        # Every exit answers true, so Dispatch posts the result in this tick:
+        # each return in the method returns true, and the method ends on one.
+        returns = re.findall(r"\breturn\b([^;]*);", self.code)
+        self.assertGreater(len(returns), 0)
+        self.assertEqual([value.strip() for value in returns], ["true"] * len(returns))
+        self.assertTrue(self.code.rstrip().endswith("return true;"))
 
     def test_e2_the_steps_run_in_d2_order(self) -> None:
         # E2
@@ -554,6 +558,7 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
             self.code,
             (
                 "!IsFiniteFloat(command.args.health01)",
+                "health01 = command.args.health01;",
                 "zone = command.args.zone;",
                 "slot = command.args.slot;",
                 "ResolveCommandObject(command.args, error)",
@@ -569,6 +574,10 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
                 'result.error = "health_not_applied"',
             ),
         )
+        # Each argument's local is assigned once, by its read above, and never again.
+        for name in ("health01", "zone", "slot"):
+            writes = re.findall(rf"(?<![\w.]){name}\b\s*[-+*/]?=(?!=)", self.code)
+            self.assertEqual(len(writes), 1, name)
         self.assertIn('result.error = "slot_not_found"', self.code)
         self.assertLess(
             self.code.index("ResolveCommandObject(command.args, error)"),
