@@ -1,0 +1,1619 @@
+"""Stage 2a lease-end coordinator criteria (K4, K9, K11-K13, K17, K19, K21).
+
+The broker, cleanup_owner, daemon and bridges are not under test yet: this
+module drives SessionCoordinator as the broker will, through the memory-only
+API, so those criteria fail on f547a47 and pass once the coordinator rows,
+rounds, grant fence and payloads exist.
+"""
+from __future__ import annotations
+
+import sys
+import threading
+import time
+import unittest
+from pathlib import Path
+
+_TOOLS_DIR = Path(__file__).resolve().parents[1]
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+from tests.lease_helpers import AuditSink, FakeClock, SequentialIds, _identity
+
+
+def _floor(
+    net_low: int,
+    net_high: int,
+    *,
+    conn_gen: object,
+    move_id: int,
+    weapon_id: int,
+) -> dict[str, object]:
+    return {
+        "net_low": net_low,
+        "net_high": net_high,
+        "conn_gen": conn_gen,
+        "move_id": move_id,
+        "weapon_id": weapon_id,
+    }
+
+
+class LeaseCloseBrokerStage2aTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.ids = SequentialIds("id")
+        self.tokens = SequentialIds("token")
+        self.audit = AuditSink()
+        self.cleanup_fn = lambda *_args: {}
+        self.a = _identity("a")
+        self.b = _identity("b")
+        self.c = _identity("c")
+        self.coordinator = self._make_coordinator()
+
+    def _make_coordinator(self, **overrides: object) -> SessionCoordinator:
+        kwargs: dict[str, object] = {
+            "time_fn": self.clock,
+            "token_fn": self.tokens,
+            "id_fn": self.ids,
+            "audit": self.audit,
+            "cleanup": lambda *args: self.cleanup_fn(*args),
+        }
+        kwargs.update(overrides)
+        return SessionCoordinator(**kwargs)
+
+    def _join(self, thread: threading.Thread, timeout: float = 2.0) -> None:
+        thread.join(timeout=timeout)
+        self.assertFalse(thread.is_alive(), f"{thread.name} did not finish")
+
+    def _wait_handoff(self) -> None:
+        with self.coordinator._condition:
+            self.assertTrue(
+                self.coordinator._condition.wait_for(
+                    lambda: not self.coordinator._handoff_pending,
+                    timeout=2.0,
+                ),
+                "handoff_pending did not clear",
+            )
+
+    def _bind(self, run_id: str = "run-1") -> None:
+        self.coordinator.note_peer_bound(run_id, "server", f"{run_id}-server")
+        self.coordinator.note_peer_bound(run_id, "client", f"{run_id}-client")
+
+    def _commit_work(
+        self,
+        client: ClientIdentity,
+        command: str = "vehicle_trace",
+        command_id: int = 1,
+    ) -> dict[str, object]:
+        status, payload = self.coordinator.acquire(client, "trace")
+        self.assertEqual(status, 200, "acquire did not grant")
+        decision = self.coordinator.authorize(
+            client, payload["lease_token"], command
+        )
+        self.assertTrue(decision.allowed, "authorize refused")
+        self.assertTrue(
+            self.coordinator.commit_authorization(
+                client.session_id,
+                decision.lease_id,
+                decision.reservation_id,
+                command_id,
+                command,
+                {"mode": "start"},
+            )
+        )
+        claimed = self.coordinator.claim_dispatch(
+            client.session_id, decision.lease_id, command_id, command
+        )
+        self.assertTrue(claimed, "claim_dispatch did not mark work")
+        payload["lease_id"] = decision.lease_id
+        return payload
+
+    def _publishing_hook(
+        self,
+        *,
+        action: str = "published",
+        reason: str = "not_bound",
+        carried: list[dict[str, object]] | None = None,
+        close_prefix: str = "close",
+    ):
+        seq = SequentialIds(close_prefix)
+
+        def cleanup(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            if info is None:
+                return {}
+            reports = []
+            for row in info["rows"]:
+                close_id = seq()
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": action,
+                        "close_id": close_id,
+                        "reason": reason,
+                        "carried_floors": list(carried or []),
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        return cleanup
+
+    def _close_outcome(
+        self,
+        round_id: int,
+        run_id: str,
+        peer: str,
+        close_id: str,
+        kind: str,
+        *,
+        reasons: list[str] | None = None,
+        error: str = "",
+        reason: str = "",
+        floor: dict[str, object] | None = None,
+        reported_floors: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "round": round_id,
+            "run_id": run_id,
+            "peer": peer,
+            "close_id": close_id,
+            "kind": kind,
+            "reasons": list(reasons or []),
+            "error": error,
+            "reason": reason,
+            "floor": floor,
+            "reported_floors": list(reported_floors or []),
+        }
+
+    def _closing_ids(self, session_id: str, lease_id: str) -> dict[tuple[str, str], str]:
+        info = self.coordinator.lease_end_round(session_id, lease_id)
+        self.assertIsNotNone(info, "expected an open round")
+        assert info is not None
+        rows = info["rows"]
+        self.assertGreaterEqual(len(rows), 1, "round had no pending rows")
+        reports = []
+        ids: dict[tuple[str, str], str] = {}
+        seq = SequentialIds("close")
+        for row in rows:
+            close_id = seq()
+            ids[(row["run_id"], row["peer"])] = close_id
+            reports.append(
+                {
+                    "run_id": row["run_id"],
+                    "peer": row["peer"],
+                    "action": "published",
+                    "close_id": close_id,
+                    "reason": "",
+                    "carried_floors": [],
+                }
+            )
+        accepted = self.coordinator.note_close_round(info["round"], reports)
+        self.assertEqual(len(accepted), len(rows), "not every pending row was accepted")
+        return ids
+
+    def _published_round(
+        self,
+        carried_server: list[dict[str, object]],
+        *,
+        peers: tuple[str, ...] = ("server", "client"),
+    ) -> tuple[int, dict[str, str]]:
+        """Bind run-1's peers, end a lease that delivered work and publish
+        every row of its round; the server close carries carried_server."""
+        for peer in peers:
+            self.coordinator.note_peer_bound("run-1", peer, f"run-1-{peer}")
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"pub-{row['peer']}"
+                captured[row["peer"]] = close_id
+                carried = carried_server if row["peer"] == "server" else []
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [dict(item) for item in carried],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        round_id = int(captured.pop("round"))
+        return round_id, {peer: str(close) for peer, close in captured.items()}
+
+    def _owed(self) -> list[tuple[str, list[str]]]:
+        body = self.coordinator.status(self.a).get("lease_end", {"unconfirmed": []})
+        return [(row["peer"], row["reasons"]) for row in body["unconfirmed"]]
+
+    def test_k4_no_work_no_debt_no_round(self) -> None:
+        self._bind()
+        status, lease = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200)
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        self.assertIsNone(
+            self.coordinator.lease_end_round(
+                self.a.session_id, lease["lease_id"]
+            )
+        )
+        status_b, grant = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.assertNotIn("lease_end", grant)
+
+    def test_k4_owed_debt_opens_round_and_blocks(self) -> None:
+        self._bind()
+        self.coordinator.seed_restart_debt([("run-1", None)])
+        status, lease = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200)
+        self.cleanup_fn = self._publishing_hook()
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        info = self.coordinator.lease_end_round(
+            self.a.session_id, lease["lease_id"]
+        )
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(len(info["rows"]), 0, "published rows stay closing")
+        status_b, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 202)
+        self.assertEqual(queued["status"], "queued")
+
+    def test_k4_delivered_work_opens_round(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        self.cleanup_fn = self._publishing_hook()
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        info = self.coordinator.lease_end_round(
+            self.a.session_id, lease["lease_id"]
+        )
+        self.assertIsNotNone(info, "delivered work must open a round")
+        status_b, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 202)
+
+    def test_k9_hook_publish_rows_closing(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        self.cleanup_fn = self._publishing_hook()
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        info = self.coordinator.lease_end_round(
+            self.a.session_id, lease["lease_id"]
+        )
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(len(info["rows"]), 0, "published rows are no longer pending")
+        body = self.coordinator.status(self.b)
+        self.assertIn("lease_end", body)
+        self.assertEqual(body["lease_end"]["outstanding"], 2)
+
+    def test_k9_saturation_marks_owed_at_once(self) -> None:
+        blocked = threading.Event()
+        self.addCleanup(blocked.set)
+        started = threading.Event()
+
+        def blocking(*_args: object) -> dict:
+            started.set()
+            blocked.wait(2.0)
+            return {}
+
+        self.coordinator = self._make_coordinator(
+            cleanup=blocking, cleanup_timeout_s=0.05
+        )
+        for index in range(4):
+            status, lease = self.coordinator.acquire(self.a, f"fill-{index}")
+            self.assertEqual(status, 200)
+            released = self.coordinator.release(self.a, lease["lease_token"])[1]
+            self.assertIn("cleanup_timeout", released["cleanup_degraded"])
+        self._bind()
+        work = self._commit_work(self.b)
+        released = self.coordinator.release(self.b, work["lease_token"])[1]
+        self.assertIn("cleanup_worker_saturated", released["cleanup_degraded"])
+        body = self.coordinator.status(self.b)
+        unconfirmed = body["lease_end"]["unconfirmed"]
+        self.assertEqual(len(unconfirmed), 2, "both peers must be owed")
+        for row in unconfirmed:
+            self.assertEqual(row["reasons"], ["cleanup_worker_saturated"])
+
+    def test_k9_hook_raises_cleanup_failed(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+
+        def boom(*_args: object) -> dict:
+            raise RuntimeError("cleanup exploded")
+
+        self.cleanup_fn = boom
+        released = self.coordinator.release(self.a, lease["lease_token"])[1]
+        self.assertIn("cleanup_failed", released["cleanup_degraded"])
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(unconfirmed), 2, "both pending rows become owed")
+        for row in unconfirmed:
+            self.assertEqual(row["reasons"], ["cleanup_failed"])
+
+    def test_k9_unreported_close_not_reported(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        self.cleanup_fn = lambda *_args: {"cleanup_degraded": ["cleanup_fenced"]}
+        self.coordinator.release(self.a, lease["lease_token"])
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(unconfirmed), 2, "unreported pending rows become owed")
+        for row in unconfirmed:
+            self.assertEqual(row["reasons"], ["close_not_reported"])
+
+    def test_k9_timeout_report_before_deadline_closing(self) -> None:
+        reported = threading.Event()
+        self.addCleanup(reported.set)
+
+        def late_report(session_id: str, lease_id: str, *_rest: object) -> dict:
+            time.sleep(0.08)
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            if info is not None:
+                reports = [
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": f"late-{row['peer']}",
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                    for row in info["rows"]
+                ]
+                self.coordinator.note_close_round(info["round"], reports)
+            reported.set()
+            return {}
+
+        self.coordinator = self._make_coordinator(cleanup_timeout_s=0.03)
+        self.cleanup_fn = late_report
+        self._bind()
+        lease = self._commit_work(self.a)
+        released = self.coordinator.release(self.a, lease["lease_token"])[1]
+        self.assertIn("cleanup_timeout", released["cleanup_degraded"])
+        self.assertTrue(reported.wait(1.0), "late report did not run")
+        info = self.coordinator.lease_end_round(
+            self.a.session_id, lease["lease_id"]
+        )
+        self.assertIsNotNone(info)
+        assert info is not None
+        self.assertEqual(len(info["rows"]), 0, "late report before deadline is closing")
+        self.assertEqual(
+            self.coordinator.status(self.a)["lease_end"]["outstanding"], 2
+        )
+
+    def test_k9_report_after_deadline_rejected(self) -> None:
+        release_hook = threading.Event()
+        self.addCleanup(release_hook.set)
+        self.coordinator = self._make_coordinator(
+            lease_end_bound_s=0.05, cleanup_timeout_s=0.03
+        )
+        self.cleanup_fn = lambda *_args: (release_hook.wait(2.0), {})[1]
+        self._bind()
+        lease = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease["lease_token"])
+        self.clock.advance(0.06)
+        self.coordinator.status(self.a)
+        info = self.coordinator.lease_end_round(
+            self.a.session_id, lease["lease_id"]
+        )
+        self.assertIsNotNone(info)
+        assert info is not None
+        reports = [
+            {
+                "run_id": "run-1",
+                "peer": "server",
+                "action": "published",
+                "close_id": "too-late",
+                "reason": "",
+                "carried_floors": [],
+            }
+        ]
+        accepted = self.coordinator.note_close_round(info["round"], reports)
+        self.assertEqual(len(accepted), 0, "late report after deadline is not accepted")
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertGreaterEqual(len(unconfirmed), 1, "owed rows remain")
+        self.assertTrue(
+            any("close_timeout" in row["reasons"] for row in unconfirmed)
+        )
+
+    def test_k11_wait_wakes_at_bound(self) -> None:
+        blocked = threading.Event()
+        self.addCleanup(blocked.set)
+
+        def hang(*_args: object) -> dict:
+            blocked.wait(2.0)
+            return {}
+
+        coordinator = SessionCoordinator(
+            time_fn=time.monotonic,
+            token_fn=SequentialIds("token"),
+            id_fn=SequentialIds("id"),
+            audit=AuditSink(),
+            cleanup=hang,
+            cleanup_timeout_s=0.05,
+            lease_end_bound_s=0.2,
+        )
+        self.coordinator = coordinator
+        self._bind()
+        a = _identity("a", session_id="session-a-k11")
+        b = _identity("b", session_id="session-b-k11")
+        lease = self._commit_work(a)
+        coordinator.release(a, lease["lease_token"])
+        status_b, queued = coordinator.acquire(b, "trace")
+        self.assertEqual(status_b, 202)
+        started = time.monotonic()
+        result: list[tuple[int, dict]] = []
+
+        def waiter() -> None:
+            result.append(coordinator.wait(b, queued["ticket"], 1.0))
+
+        thread = threading.Thread(target=waiter, name="k11-wait")
+        thread.start()
+        self._join(thread, timeout=1.5)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.35, f"wait took {elapsed:.3f}s")
+        self.assertEqual(len(result), 1, "wait returned once")
+        status, payload = result[0]
+        self.assertEqual(status, 200)
+        self.assertIn("lease_end_unconfirmed", payload.get("cleanup_degraded", []))
+
+    def test_k12_residue_then_clean_debt_round(self) -> None:
+        self._bind()
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            if info is None:
+                return {}
+            captured["round"] = info["round"]
+            captured["ids"] = {}
+            reports = []
+            for row in info["rows"]:
+                close_id = f"{lease_id[:6]}-{row['peer']}"
+                captured["ids"][(row["run_id"], row["peer"])] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        lease_a = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease_a["lease_token"])
+        self._wait_handoff()
+        round_a = int(captured["round"])
+        ids_a = dict(captured["ids"])
+        self.assertEqual(len(ids_a), 2, "A published both peers")
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_a, run_id, peer, close_id, "residue",
+                    reasons=["vehicle_drive"],
+                )
+                for (run_id, peer), close_id in ids_a.items()
+            ]
+        )
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.assertIn("lease_end_unconfirmed", grant_b["cleanup_degraded"])
+        reasons = [
+            item
+            for row in grant_b["lease_end"]["unconfirmed"]
+            for item in row["reasons"]
+        ]
+        self.assertIn("vehicle_drive", reasons)
+        self.coordinator.release(self.b, grant_b["lease_token"])
+        self._wait_handoff()
+        self.assertIsNotNone(
+            self.coordinator.lease_end_round(
+                self.b.session_id, grant_b["lease_id"]
+            ),
+            "owed debt must open B's round",
+        )
+        round_b = int(captured["round"])
+        ids_b = dict(captured["ids"])
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(round_b, run_id, peer, close_id, "clean")
+                for (run_id, peer), close_id in ids_b.items()
+            ]
+        )
+        status_c, grant_c = self.coordinator.acquire(self.c, "trace")
+        self.assertEqual(status_c, 200)
+        self.assertIn("lease_end", grant_c)
+        self.assertEqual(len(grant_c["lease_end"]["unconfirmed"]), 0, "C must be clean")
+        self.assertGreaterEqual(len(grant_c["lease_end"]["settled"]), 1)
+        self.assertNotIn("cleanup_degraded", grant_c)
+
+    def test_k12_residue_again_degrades_c(self) -> None:
+        self._bind()
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            if info is None:
+                return {}
+            captured["round"] = info["round"]
+            captured["ids"] = {}
+            reports = []
+            for row in info["rows"]:
+                close_id = f"{lease_id[:6]}-{row['peer']}"
+                captured["ids"][(row["run_id"], row["peer"])] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        lease_a = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease_a["lease_token"])
+        self._wait_handoff()
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    int(captured["round"]), run_id, peer, close_id, "residue",
+                    reasons=["stuck"],
+                )
+                for (run_id, peer), close_id in dict(captured["ids"]).items()
+            ]
+        )
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.coordinator.release(self.b, grant_b["lease_token"])
+        self._wait_handoff()
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    int(captured["round"]), run_id, peer, close_id, "residue",
+                    reasons=["stuck-again"],
+                )
+                for (run_id, peer), close_id in dict(captured["ids"]).items()
+            ]
+        )
+        status_c, grant_c = self.coordinator.acquire(self.c, "trace")
+        self.assertEqual(status_c, 200)
+        self.assertIn("lease_end_unconfirmed", grant_c.get("cleanup_degraded", []))
+
+    def test_k13_restart_debt_then_gone(self) -> None:
+        self.coordinator.seed_restart_debt([("run-1", None)])
+        status, grant = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200)
+        self.assertIn("lease_end_unconfirmed", grant["cleanup_degraded"])
+        reasons = [
+            item
+            for row in grant["lease_end"]["unconfirmed"]
+            for item in row["reasons"]
+        ]
+        self.assertIn("daemon_restart", reasons)
+        self.coordinator.note_processes_gone("run-1", None)
+        self.coordinator.release(self.a, grant["lease_token"])
+        self._wait_handoff()
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.assertNotIn("lease_end", grant_b)
+
+    def test_k13_unbound_not_bound_keeps_debt(self) -> None:
+        self.coordinator.seed_restart_debt([("run-1", None)])
+        lease = self._commit_work(self.a)
+        self.cleanup_fn = self._publishing_hook(
+            action="unreachable", reason="not_bound"
+        )
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        unconfirmed = self.coordinator.status(self.b)["lease_end"]["unconfirmed"]
+        self.assertGreaterEqual(len(unconfirmed), 1, "unbound close stays owed")
+        self.assertTrue(
+            any("not_bound" in row["reasons"] for row in unconfirmed)
+        )
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.assertIn("lease_end_unconfirmed", grant_b["cleanup_degraded"])
+
+    def test_k17_matching_floors_clear(self) -> None:
+        self._bind()
+        floor = _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"k17-{row['peer']}"
+                captured[row["peer"]] = close_id
+                carried = [dict(floor)] if row["peer"] == "server" else []
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": carried,
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        round_id = int(captured["round"])
+        results = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id, "run-1", "client", str(captured["client"]), "clean",
+                    floor=floor,
+                ),
+                self._close_outcome(
+                    round_id, "run-1", "server", str(captured["server"]), "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
+                    ],
+                ),
+            ]
+        )
+        self.assertEqual(results, ["applied", "applied"])
+        body = self.coordinator.status(self.b)
+        self.assertNotIn("lease_end", body)
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        settled = grant_b["lease_end"]["settled"]
+        self.assertEqual(len(settled), 2, "both closes settle")
+        named = {(item["peer"], item["close_id"]) for item in settled}
+        self.assertIn(("client", captured["client"]), named)
+        self.assertIn(("server", captured["server"]), named)
+
+    def test_k17_late_clean_still_closing(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"late-{row['peer']}"
+                captured[row["peer"]] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        round_id = int(captured["round"])
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id, "run-1", "client", str(captured["client"]), "clean"
+                )
+            ]
+        )
+        self.assertEqual(
+            self.coordinator.status(self.a)["lease_end"]["outstanding"], 1
+        )
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id, "run-1", "server", str(captured["server"]), "clean"
+                )
+            ]
+        )
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_late_clean_after_timeout_clears(self) -> None:
+        self.coordinator = self._make_coordinator(lease_end_bound_s=1.0)
+        self._bind()
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"to-{row['peer']}"
+                captured[row["peer"]] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        self.clock.advance(1.1)
+        self.coordinator.status(self.a)
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertTrue(
+            any("close_timeout" in row["reasons"] for row in unconfirmed)
+        )
+        results = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    int(captured["round"]),
+                    "run-1",
+                    "client",
+                    str(captured["client"]),
+                    "clean",
+                ),
+                self._close_outcome(
+                    int(captured["round"]),
+                    "run-1",
+                    "server",
+                    str(captured["server"]),
+                    "clean",
+                ),
+            ]
+        )
+        self.assertEqual(results, ["applied", "applied"])
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_floor_negatives(self) -> None:
+        self._bind()
+        client_floor = _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"neg-{row['peer']}"
+                captured[row["peer"]] = close_id
+                carried = (
+                    [_floor(10, 20, conn_gen="g", move_id=5, weapon_id=4)]
+                    if row["peer"] == "server"
+                    else []
+                )
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": carried,
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        round_id = int(captured["round"])
+        server_close = str(captured["server"])
+        client_close = str(captured["client"])
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    server_close,
+                    "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="g", move_id=5, weapon_id=4)
+                    ],
+                )
+            ]
+        )
+        status_mid, grant_mid = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_mid, 202)
+        # client F=7 after server settled at 5
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    client_close,
+                    "clean",
+                    floor=client_floor,
+                )
+            ]
+        )
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(unconfirmed), 1, "server row returns owed")
+        self.assertEqual(unconfirmed[0]["peer"], "server")
+        self.assertIn("player_move_floor_unapplied", unconfirmed[0]["reasons"])
+        ignored = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(99, "run-1", "server", server_close, "clean"),
+                self._close_outcome(
+                    round_id, "run-1", "server", "other-close", "clean"
+                ),
+            ]
+        )
+        self.assertEqual(ignored, ["ignored", "ignored"])
+        still = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(still), 1, "ignored outcomes must not change the row")
+        # The row the client's floor brought back needs that floor: a clean
+        # of the same close at move_id 5 leaves it, one at 7 clears it.
+        low = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    server_close,
+                    "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="g", move_id=5, weapon_id=4)
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(low, ["applied"])
+        self.assertEqual(
+            self._owed(), [("server", ["player_move_floor_unapplied"])]
+        )
+        high = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    server_close,
+                    "clean",
+                    reported_floors=[dict(client_floor)],
+                )
+            ]
+        )
+        self.assertEqual(high, ["applied"])
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_closing_client_floor_blocks_low_late_clean(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"cl-{row['peer']}"
+                captured[row["peer"]] = close_id
+                carried = (
+                    [_floor(10, 20, conn_gen="g", move_id=0, weapon_id=0)]
+                    if row["peer"] == "server"
+                    else []
+                )
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": carried,
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        round_id = int(captured["round"])
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    str(captured["client"]),
+                    "clean",
+                    floor=_floor(10, 20, conn_gen="g", move_id=7, weapon_id=0),
+                )
+            ]
+        )
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(unconfirmed), 1, "closing server becomes owed")
+        self.assertIn("player_move_floor_unapplied", unconfirmed[0]["reasons"])
+        low = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    str(captured["server"]),
+                    "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="g", move_id=5, weapon_id=0)
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(low, ["applied"])
+        still = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(still), 1, "move_id 5 must not clear required 7")
+        high = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    str(captured["server"]),
+                    "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="g", move_id=7, weapon_id=0)
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(high, ["applied"])
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_conn_gen_and_missing_player(self) -> None:
+        carried = _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
+        no_gen = _floor(10, 20, conn_gen=None, move_id=7, weapon_id=4)
+        conn_gen = ["player_move_conn_gen_unapplied", "weapon_conn_gen_unapplied"]
+        floors = ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+        cases = (
+            (
+                "reported_other_gen",
+                carried,
+                [_floor(10, 20, conn_gen="other", move_id=7, weapon_id=4)],
+                conn_gen,
+            ),
+            ("carried_no_gen", no_gen, [dict(no_gen)], conn_gen),
+            (
+                "player_missing",
+                carried,
+                [_floor(30, 40, conn_gen="g", move_id=7, weapon_id=4)],
+                floors,
+            ),
+        )
+        for name, carried_floor, reported, expected in cases:
+            with self.subTest(name):
+                # Each case starts from its own CLOSING server row.
+                self.coordinator = self._make_coordinator()
+                round_id, ids = self._published_round([carried_floor])
+                results = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "server",
+                            ids["server"],
+                            "clean",
+                            reported_floors=reported,
+                        )
+                    ]
+                )
+                self.assertEqual(results, ["applied"])
+                self.assertEqual(self._owed(), [("server", expected)])
+        # Decision 11: a clean of that same close that fails the floors
+        # again leaves the OWED row as it was; one that passes clears it.
+        again = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="other", move_id=7, weapon_id=4)
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(again, ["applied"])
+        self.assertEqual(self._owed(), [("server", floors)])
+        passing = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[dict(carried)],
+                )
+            ]
+        )
+        self.assertEqual(passing, ["applied"])
+        self.assertEqual(self._owed(), [])
+
+    def test_k17_client_floor_without_server_row(self) -> None:
+        # A run whose round has no server row: the client's floor brings
+        # none back (decision 11 checks only a server row cleared here).
+        round_id, ids = self._published_round([], peers=("client",))
+        results = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    ids["client"],
+                    "clean",
+                    floor=_floor(10, 20, conn_gen="g", move_id=7, weapon_id=4),
+                )
+            ]
+        )
+        self.assertEqual(results, ["applied"])
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_gone_server_floor_is_not_checked(self) -> None:
+        reported = _floor(10, 20, conn_gen="g", move_id=5, weapon_id=4)
+        round_id, ids = self._published_round([reported])
+        cleared = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    ids["server"],
+                    "clean",
+                    reported_floors=[dict(reported)],
+                )
+            ]
+        )
+        self.assertEqual(cleared, ["applied"])
+        self.coordinator.note_processes_gone("run-1", "server")
+        results = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    ids["client"],
+                    "clean",
+                    floor=_floor(10, 20, conn_gen="g", move_id=7, weapon_id=4),
+                )
+            ]
+        )
+        self.assertEqual(results, ["applied"])
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_late_owed_server_clean_keeps_its_floors(self) -> None:
+        # A late clean of an owed server row stores the floors it reported:
+        # a client floor at them brings no row back, one above them does.
+        floor = _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
+        cases = (
+            ("at_floor", dict(floor), []),
+            (
+                "above_floor",
+                _floor(10, 20, conn_gen="g", move_id=8, weapon_id=4),
+                [("server", ["player_move_floor_unapplied"])],
+            ),
+        )
+        for name, client_floor, expected in cases:
+            with self.subTest(name):
+                self.coordinator = self._make_coordinator()
+                round_id, ids = self._published_round([floor])
+                self.clock.advance(41.0)
+                self.assertEqual(
+                    self._owed(),
+                    [("client", ["close_timeout"]), ("server", ["close_timeout"])],
+                )
+                server = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "server",
+                            ids["server"],
+                            "clean",
+                            reported_floors=[dict(floor)],
+                        )
+                    ]
+                )
+                self.assertEqual(server, ["applied"])
+                self.assertEqual(self._owed(), [("client", ["close_timeout"])])
+                client = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "client",
+                            ids["client"],
+                            "clean",
+                            floor=client_floor,
+                        )
+                    ]
+                )
+                self.assertEqual(client, ["applied"])
+                if expected:
+                    self.assertEqual(self._owed(), expected)
+                else:
+                    self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+    def test_k17_weapon_floor_unapplied(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"w-{row['peer']}"
+                captured[row["peer"]] = close_id
+                carried = (
+                    [_floor(10, 20, conn_gen="g", move_id=7, weapon_id=1)]
+                    if row["peer"] == "server"
+                    else []
+                )
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": carried,
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        round_id = int(captured["round"])
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "server",
+                    str(captured["server"]),
+                    "clean",
+                    reported_floors=[
+                        _floor(10, 20, conn_gen="g", move_id=7, weapon_id=1)
+                    ],
+                ),
+                self._close_outcome(
+                    round_id,
+                    "run-1",
+                    "client",
+                    str(captured["client"]),
+                    "clean",
+                    floor=_floor(10, 20, conn_gen="g", move_id=7, weapon_id=4),
+                ),
+            ]
+        )
+        unconfirmed = self.coordinator.status(self.a)["lease_end"]["unconfirmed"]
+        self.assertEqual(len(unconfirmed), 1, "server row returns owed on W")
+        self.assertIn("weapon_floor_unapplied", unconfirmed[0]["reasons"])
+
+    def test_k17_issued_grant_not_rewritten(self) -> None:
+        self._bind()
+        self.coordinator.seed_restart_debt([("run-1", None)])
+        status, grant = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200)
+        before = grant["lease_end"]
+        self.coordinator.note_processes_gone("run-1", None)
+        status2, again = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status2, 200)
+        self.assertEqual(again["lease_end"], before)
+
+    def test_k19_status_and_acquire_during_blocked_hook(self) -> None:
+        entered = threading.Event()
+        resume = threading.Event()
+        self.addCleanup(resume.set)
+
+        def hang(*_args: object) -> dict:
+            entered.set()
+            resume.wait(2.0)
+            return {}
+
+        self.coordinator = self._make_coordinator(cleanup=hang, cleanup_timeout_s=1.0)
+        self._bind()
+        lease = self._commit_work(self.a)
+        releaser_done: list[object] = []
+
+        def releaser() -> None:
+            releaser_done.append(
+                self.coordinator.release(self.a, lease["lease_token"])
+            )
+
+        release_thread = threading.Thread(target=releaser, name="k19-release")
+        release_thread.start()
+        self.assertTrue(entered.wait(1.0), "hook did not start")
+        started = time.monotonic()
+        status_body = self.coordinator.status(self.b)
+        acquire_status, _queued = self.coordinator.acquire(self.b, "trace")
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.5, f"status/acquire blocked for {elapsed:.3f}s")
+        self.assertIn("lease_end", status_body)
+        self.assertIn(acquire_status, (200, 202))
+        resume.set()
+        self._join(release_thread)
+
+    def test_k19_stale_round_outcome_ignored(self) -> None:
+        self._bind()
+        self.cleanup_fn = self._publishing_hook(close_prefix="r1")
+        lease_a = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease_a["lease_token"])
+        self._wait_handoff()
+        info1 = self.coordinator.lease_end_round(
+            self.a.session_id, lease_a["lease_id"]
+        )
+        self.assertIsNotNone(info1)
+        assert info1 is not None
+        round1 = info1["round"]
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(round1, "run-1", "client", "r1-1", "residue", reasons=["old"]),
+                self._close_outcome(round1, "run-1", "server", "r1-2", "residue", reasons=["old"]),
+                self._close_outcome(round1, "run-1", "client", "r1-2", "residue", reasons=["old"]),
+                self._close_outcome(round1, "run-1", "server", "r1-1", "residue", reasons=["old"]),
+            ]
+        )
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.cleanup_fn = self._publishing_hook(close_prefix="r2")
+        self.coordinator.release(self.b, grant_b["lease_token"])
+        self._wait_handoff()
+        info2 = self.coordinator.lease_end_round(
+            self.b.session_id, grant_b["lease_id"]
+        )
+        self.assertIsNotNone(info2)
+        assert info2 is not None
+        before = self.coordinator.status(self.c).get("lease_end")
+        ignored = self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(round1, "run-1", "client", "r1-1", "clean"),
+            ]
+        )
+        self.assertEqual(ignored, ["ignored"])
+        after = self.coordinator.status(self.c).get("lease_end")
+        self.assertEqual(after, before)
+
+    def test_k21_settled_names_close_ids_and_status_keeps_degraded_empty(self) -> None:
+        self._bind()
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"set-{row['peer']}"
+                captured[row["peer"]] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        lease = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        during = self.coordinator.status(self.b)
+        self.assertIn("lease_end", during)
+        self.assertEqual(during["cleanup_degraded"], [])
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    int(captured["round"]),
+                    "run-1",
+                    "client",
+                    str(captured["client"]),
+                    "clean",
+                ),
+                self._close_outcome(
+                    int(captured["round"]),
+                    "run-1",
+                    "server",
+                    str(captured["server"]),
+                    "clean",
+                ),
+            ]
+        )
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        settled_ids = {item["close_id"] for item in grant_b["lease_end"]["settled"]}
+        self.assertEqual(settled_ids, {captured["client"], captured["server"]})
+
+    def test_k21_merge_unconfirmed_with_cleanup_failed_on_acquire(self) -> None:
+        def boom(*_args: object) -> dict:
+            raise RuntimeError("hook fail")
+
+        self.cleanup_fn = boom
+        self._bind()
+        lease = self._commit_work(self.a)
+        self.clock.advance(120.0)
+        status, grant = self.coordinator.acquire(self.b, "trace")
+        if status == 202:
+            self._wait_handoff()
+            status, grant = self.coordinator.wait(self.b, grant["ticket"], 1.0)
+        self.assertEqual(status, 200)
+        degraded = grant.get("cleanup_degraded", [])
+        self.assertGreaterEqual(len(degraded), 2, "both warnings must be present")
+        self.assertEqual(degraded[0], "lease_end_unconfirmed")
+        self.assertIn("cleanup_failed", degraded)
+        self.assertEqual(self.coordinator.status(self.b)["cleanup_degraded"], [])
+
+    def test_k21_merge_unconfirmed_with_cleanup_failed_on_wait(self) -> None:
+        def boom(*_args: object) -> dict:
+            raise RuntimeError("hook fail")
+
+        self.cleanup_fn = boom
+        self._bind()
+        lease = self._commit_work(self.a)
+        self.clock.advance(10.0)
+        status_b, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 202)
+        self.clock.advance(110.5)
+        status, grant = self.coordinator.wait(self.b, queued["ticket"], 1.0)
+        self.assertEqual(status, 200)
+        degraded = grant.get("cleanup_degraded", [])
+        self.assertGreaterEqual(len(degraded), 2, "wait merge needs both warnings")
+        self.assertEqual(degraded[0], "lease_end_unconfirmed")
+        self.assertIn("cleanup_failed", degraded)
+        self.assertEqual(self.coordinator.status(self.b)["cleanup_degraded"], [])
+
+    def test_inert_empty_registry_delivered_work_no_round(self) -> None:
+        lease = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        self.assertIsNone(
+            self.coordinator.lease_end_round(
+                self.a.session_id, lease["lease_id"]
+            )
+        )
+        status_b, grant = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.assertNotIn("lease_end", grant)
+        self.assertNotIn("lease_end", self.coordinator.status(self.b))
+
+    def test_mw1_pending_blocks_until_settled(self) -> None:
+        self._bind()
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"mw1-{row['peer']}"
+                captured[row["peer"]] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        lease = self._commit_work(self.a)
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        status_b, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 202)
+        result: list[tuple[int, dict]] = []
+
+        def waiter() -> None:
+            result.append(self.coordinator.wait(self.b, queued["ticket"], 2.0))
+
+        thread = threading.Thread(target=waiter, name="mw1-wait")
+        thread.start()
+        self.coordinator.note_close_outcomes(
+            [
+                self._close_outcome(
+                    int(captured["round"]),
+                    "run-1",
+                    "client",
+                    str(captured["client"]),
+                    "clean",
+                ),
+                self._close_outcome(
+                    int(captured["round"]),
+                    "run-1",
+                    "server",
+                    str(captured["server"]),
+                    "clean",
+                ),
+            ]
+        )
+        self._join(thread)
+        self.assertEqual(len(result), 1, "wait returned")
+        self.assertEqual(result[0][0], 200)
+
+    def test_mw4_reacquire_merges_existing_unconfirmed(self) -> None:
+        self.audit.fail_events.add("ticket_cancelled")
+        self.coordinator.seed_restart_debt([("run-1", None)])
+        status, grant = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200)
+        self.assertIn("lease_end_unconfirmed", grant["cleanup_degraded"])
+        queued_status, _queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(queued_status, 202)
+        self.clock.advance(1.0)
+        self.coordinator.heartbeat(self.a, grant["lease_token"])
+        self.clock.advance(119.0)
+        status2, again = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status2, 200)
+        degraded = again.get("cleanup_degraded", [])
+        self.assertIn("lease_end_unconfirmed", degraded)
+        self.assertEqual(degraded[0], "lease_end_unconfirmed")
+        self.assertIn("audit_failed", degraded)
+
+    def test_mw9_grant_photo_stable_after_late_clean(self) -> None:
+        self._bind()
+        self.coordinator.seed_restart_debt([("run-1", None)])
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {}
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            if info is None:
+                return {}
+            captured["round"] = info["round"]
+            reports = []
+            for row in info["rows"]:
+                close_id = f"photo-{row['peer']}"
+                captured[row["peer"]] = close_id
+                reports.append(
+                    {
+                        "run_id": row["run_id"],
+                        "peer": row["peer"],
+                        "action": "published",
+                        "close_id": close_id,
+                        "reason": "",
+                        "carried_floors": [],
+                    }
+                )
+            self.coordinator.note_close_round(info["round"], reports)
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        self.clock.advance(40.0)
+        self.coordinator.status(self.a)
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        before = grant_b["lease_end"]
+        if captured.get("round") is not None:
+            self.coordinator.note_close_outcomes(
+                [
+                    self._close_outcome(
+                        int(captured["round"]),
+                        "run-1",
+                        "client",
+                        str(captured.get("client", "")),
+                        "clean",
+                    ),
+                    self._close_outcome(
+                        int(captured["round"]),
+                        "run-1",
+                        "server",
+                        str(captured.get("server", "")),
+                        "clean",
+                    ),
+                ]
+            )
+        status2, again = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status2, 200)
+        self.assertEqual(again["lease_end"], before)
+
+    def test_reports_are_checked_before_any_row_changes(self) -> None:
+        self._bind()
+        lease = self._commit_work(self.a)
+        captured: dict[str, object] = {"errors": []}
+        good = {
+            "run_id": "run-1",
+            "peer": "client",
+            "action": "published",
+            "close_id": "chk-client",
+            "reason": "",
+            "carried_floors": [],
+        }
+
+        def hook(session_id: str, lease_id: str, *_rest: object) -> dict:
+            info = self.coordinator.lease_end_round(session_id, lease_id)
+            assert info is not None
+            for bad in (
+                {"peer": "observer"},
+                {"run_id": ""},
+                {"peer": "server", "close_id": ""},
+            ):
+                try:
+                    self.coordinator.note_close_round(
+                        info["round"], [dict(good), {**good, **bad}]
+                    )
+                except ValueError as exc:
+                    captured["errors"].append(str(exc))
+            after = self.coordinator.lease_end_round(session_id, lease_id)
+            assert after is not None
+            captured["pending"] = [row["peer"] for row in after["rows"]]
+            return {}
+
+        self.cleanup_fn = hook
+        self.coordinator.release(self.a, lease["lease_token"])
+        self._wait_handoff()
+        self.assertEqual(
+            captured["errors"],
+            ["invalid_peer", "invalid_run_id", "invalid_close_id"],
+        )
+        self.assertEqual(captured["pending"], ["client", "server"])
+        with self.assertRaisesRegex(ValueError, "invalid_close_id"):
+            self.coordinator.note_close_published(1, "run-1", "server", "", [])
+
+    def test_restart_pairs_are_checked_before_any_row(self) -> None:
+        for pairs, error in (
+            ([("run-1", None), ("", None)], "invalid_run_id"),
+            ([("run-1", None), ("run-2", "observer")], "invalid_role"),
+        ):
+            with self.subTest(error):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.coordinator.seed_restart_debt(pairs)
+                self.assertNotIn("lease_end", self.coordinator.status(self.a))

@@ -13,6 +13,7 @@ from typing import Callable
 
 
 SESSION_TTL_S = 120.0
+LEASE_END_BOUND_S = 40.0
 LEASE_GRACE_S = 90.0
 MAX_PREF_RENEWALS = 1
 BOX_CLAIM_TTL_S = 600.0
@@ -233,6 +234,8 @@ class _Lease:
     )
     committed_commands: dict[int, str] = dataclasses.field(default_factory=dict)
     operation_pins: dict[int, float] = dataclasses.field(default_factory=dict)
+    delivered_work: bool = False
+    lease_end: dict | None = None
 
     def pinned_until(self) -> float:
         deadlines = [
@@ -245,6 +248,34 @@ class _Lease:
 
     def effective_expiry(self) -> float:
         return max(self.expires_at, self.pinned_until())
+
+
+@dataclass
+class _LeaseEndRow:
+    run_id: str
+    peer: str
+    instance: str
+    state: str
+    round_id: int
+    deadline: float
+    close_id: str | None = None
+    reported: bool = False
+    reasons: list[str] = dataclasses.field(default_factory=list)
+    owed_since: float | None = None
+    required_floors: dict[tuple[object, object], dict[str, object]] = (
+        dataclasses.field(default_factory=dict)
+    )
+
+
+@dataclass
+class _LeaseEndRound:
+    round_id: int
+    session_id: str
+    lease_id: str
+    settled: list[dict[str, object]] = dataclasses.field(default_factory=list)
+    server_floors: dict[str, dict[str, object]] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -279,6 +310,7 @@ class SessionCoordinator:
         audit: AuditCallback | None = None,
         cleanup: CleanupCallback | None = None,
         cleanup_timeout_s: float = 30.0,
+        lease_end_bound_s: float = LEASE_END_BOUND_S,
         recovered_audit_fault: dict[str, object] | None = None,
         recovered_lifecycle_fault: dict[str, object] | None = None,
         fault_id_fn: Callable[[], str] | None = None,
@@ -322,6 +354,14 @@ class SessionCoordinator:
         ):
             raise ValueError("invalid_cleanup_timeout")
         self._cleanup_timeout_s = float(cleanup_timeout_s)
+        if (
+            isinstance(lease_end_bound_s, bool)
+            or not isinstance(lease_end_bound_s, (int, float))
+            or not math.isfinite(float(lease_end_bound_s))
+            or float(lease_end_bound_s) <= 0.0
+        ):
+            raise ValueError("invalid_lease_end_bound")
+        self._lease_end_bound_s = float(lease_end_bound_s)
         self._condition = threading.Condition()
         # The request thread that just renewed a lease. Handlers read it back
         # onto the wire; it is cleared at the start of every authorize and of
@@ -355,6 +395,10 @@ class SessionCoordinator:
         )
         self._cleanup_worker_active = 0
         self._cleanup_worker_saturated = 0
+        self._lease_end_rows: dict[tuple[str, str], _LeaseEndRow] = {}
+        self._peer_registry: dict[tuple[str, str], str] = {}
+        self._lease_end_round: _LeaseEndRound | None = None
+        self._lease_end_round_seq = 0
         self._release_audit_worker_slots = threading.BoundedSemaphore(
             MAX_RELEASE_AUDIT_WORKERS
         )
@@ -468,7 +512,7 @@ class SessionCoordinator:
                         {"error": "coordination_changed"}, degraded
                     )
                 return 200, self._payload_with_degradation(
-                    self._active_payload_locked(lease), degraded
+                    self._grant_payload_locked(lease), degraded
                 )
 
             for position, ticket in enumerate(self._queue, start=1):
@@ -511,6 +555,7 @@ class SessionCoordinator:
                     or self._grant_inflight is not None
                     or self._wal_marker is not None
                     or self._handoff_pending
+                    or self._lease_end_blocks_locked()
                     or self._lifecycle_recovery_fault is not None
                 ):
                     remaining = grant_deadline - time.monotonic()
@@ -531,6 +576,7 @@ class SessionCoordinator:
                 and self._grant_inflight is None
                 and self._wal_marker is None
                 and not self._handoff_pending
+                and not self._lease_end_blocks_locked()
                 and self._lifecycle_recovery_fault is None
             )
             queue_empty = not self._queue and not self._queue_reservations
@@ -739,9 +785,9 @@ class SessionCoordinator:
                     self._bump_revision_locked()
                     self._condition.notify_all()
                     self._consume_expiry_grace_locked(client)
-                    payload = self._active_payload_locked(lease)
+                    payload = self._grant_payload_locked(lease)
                     if degraded:
-                        payload["cleanup_degraded"] = degraded
+                        payload = self._merge_cleanup_degraded(payload, degraded)
                     return 200, payload
 
             if self._queue_capacity_locked() >= MAX_SESSION_QUEUE:
@@ -834,7 +880,7 @@ class SessionCoordinator:
             self._condition.notify_all()
             payload = self._ticket_payload_locked(ticket, len(self._queue))
             if degraded:
-                payload["cleanup_degraded"] = degraded
+                payload = self._merge_cleanup_degraded(payload, degraded)
             return 202, payload
 
     def enqueue(
@@ -1083,7 +1129,9 @@ class SessionCoordinator:
                         {"error": "coordination_changed"}, degraded
                     )
                 if degraded:
-                    active_payload["cleanup_degraded"] = degraded
+                    active_payload = self._merge_cleanup_degraded(
+                        active_payload, degraded
+                    )
                 return 200, active_payload
 
             ticket = self._find_ticket_locked(ticket_id)
@@ -1135,7 +1183,9 @@ class SessionCoordinator:
                             {"error": "coordination_changed"}, degraded
                         )
                     if degraded:
-                        active_payload["cleanup_degraded"] = self._unique(degraded)
+                        active_payload = self._merge_cleanup_degraded(
+                            active_payload, self._unique(degraded)
+                        )
                     return 200, active_payload
 
                 ticket = self._find_ticket_locked(ticket_id)
@@ -1153,7 +1203,9 @@ class SessionCoordinator:
                         )
                     body: dict[str, object] = {"error": "ticket_expired"}
                     if degraded:
-                        body["cleanup_degraded"] = self._unique(degraded)
+                        body = self._merge_cleanup_degraded(
+                            body, self._unique(degraded)
+                        )
                     return 410, body
 
                 slot_idle = (
@@ -1162,6 +1214,7 @@ class SessionCoordinator:
                     and self._grant_inflight is None
                     and self._wal_marker is None
                     and not self._handoff_pending
+                    and not self._lease_end_blocks_locked()
                     and not self._grant_audit_failed
                     and self._lifecycle_recovery_fault is None
                 )
@@ -1184,7 +1237,9 @@ class SessionCoordinator:
                     )
                     if claim_outcome == "granted" and claim_payload is not None:
                         if degraded:
-                            claim_payload["cleanup_degraded"] = self._unique(degraded)
+                            claim_payload = self._merge_cleanup_degraded(
+                                claim_payload, self._unique(degraded)
+                            )
                         return 200, claim_payload
                     if claim_outcome == "audit_failed":
                         # The claim returns the audit_failed body, audit_stage
@@ -1206,7 +1261,9 @@ class SessionCoordinator:
                     if claim_outcome == "busy":
                         payload = self._ticket_payload_locked(ticket, 1)
                         if degraded:
-                            payload["cleanup_degraded"] = self._unique(degraded)
+                            payload = self._merge_cleanup_degraded(
+                                payload, self._unique(degraded)
+                            )
                         return 202, payload
 
                 real_remaining = real_deadline - time.monotonic()
@@ -1239,7 +1296,9 @@ class SessionCoordinator:
                         )
                     payload = self._ticket_payload_locked(ticket, position)
                     if degraded:
-                        payload["cleanup_degraded"] = self._unique(degraded)
+                        payload = self._merge_cleanup_degraded(
+                            payload, self._unique(degraded)
+                        )
                     return 202, payload
 
                 now = self._time_fn()
@@ -1250,6 +1309,9 @@ class SessionCoordinator:
                 elif self._grace_blocks_stranger_locked(ticket.client):
                     owner_remaining = self._grace_remaining_locked()
                 wait_for = min(real_remaining, ticket_remaining, owner_remaining)
+                lease_end_remaining = self._lease_end_wait_remaining_locked()
+                if lease_end_remaining is not None:
+                    wait_for = min(wait_for, lease_end_remaining)
                 if wait_for <= 0.0:
                     continue
                 self._condition.wait(wait_for)
@@ -1283,7 +1345,7 @@ class SessionCoordinator:
                 self._bump_revision_locked()
             payload = self._active_payload_locked(lease)
             if degraded:
-                payload["cleanup_degraded"] = degraded
+                payload = self._merge_cleanup_degraded(payload, degraded)
             return 200, payload
 
     def active_lease_id(
@@ -1536,12 +1598,223 @@ class SessionCoordinator:
 
         with self._condition:
             lease = self._active
-            return bool(
+            claimed = bool(
                 lease is not None
                 and lease.client.session_id == owner_session_id
                 and lease.lease_id == lease_id
                 and lease.committed_commands.get(command_id) == command
             )
+            if claimed:
+                lease.delivered_work = True
+            return claimed
+
+    def note_peer_bound(self, run_id: str, peer: str, instance: str) -> None:
+        run_id = self._require_lease_end_id(run_id, "run_id")
+        peer = self._require_peer(peer)
+        instance = self._require_lease_end_id(instance, "instance")
+        with self._condition:
+            self._expire_rows_locked()
+            self._peer_registry[(run_id, peer)] = instance
+            self._condition.notify_all()
+
+    def note_processes_gone(self, run_id: str, role: str | None) -> None:
+        run_id = self._require_lease_end_id(run_id, "run_id")
+        peers = self._peers_for_role(role)
+        with self._condition:
+            self._expire_rows_locked()
+            changed = False
+            for peer in peers:
+                key = (run_id, peer)
+                if key in self._lease_end_rows:
+                    del self._lease_end_rows[key]
+                    changed = True
+                if key in self._peer_registry:
+                    del self._peer_registry[key]
+                    changed = True
+            # A gone server takes the floors its cleared close reported, so
+            # a later client floor cannot bring its row back.
+            current = self._lease_end_round
+            if "server" in peers and current is not None:
+                current.server_floors.pop(run_id, None)
+            if changed:
+                self._condition.notify_all()
+
+    def seed_restart_debt(self, pairs: list[tuple[str, str | None]]) -> None:
+        # Every pair is checked before any row is seeded, so a bad pair
+        # raises with nothing changed.
+        keys = [
+            (self._require_lease_end_id(run_id, "run_id"), peer)
+            for run_id, role in pairs
+            for peer in self._peers_for_role(role)
+        ]
+        with self._condition:
+            self._expire_rows_locked()
+            changed = False
+            now = self._time_fn()
+            for key in keys:
+                if key in self._lease_end_rows:
+                    continue
+                run_id, peer = key
+                instance = self._peer_registry.get(key, "")
+                self._lease_end_rows[key] = _LeaseEndRow(
+                    run_id=run_id,
+                    peer=peer,
+                    instance=instance,
+                    state="owed",
+                    round_id=0,
+                    deadline=now,
+                    reasons=["daemon_restart"],
+                    owed_since=now,
+                )
+                changed = True
+            if changed:
+                self._condition.notify_all()
+
+    def lease_end_round(
+        self, session_id: str, lease_id: str
+    ) -> dict[str, object] | None:
+        session_id = self._require_lease_end_id(session_id, "session_id")
+        lease_id = self._require_lease_end_id(lease_id, "lease_id")
+        with self._condition:
+            self._expire_rows_locked()
+            current = self._lease_end_round
+            if (
+                current is None
+                or current.session_id != session_id
+                or current.lease_id != lease_id
+            ):
+                return None
+            rows = [
+                {
+                    "run_id": row.run_id,
+                    "peer": row.peer,
+                    "instance": row.instance,
+                }
+                for row in self._sorted_rows_locked()
+                if row.round_id == current.round_id
+                and row.state == "pending"
+                and not row.reported
+            ]
+            return {
+                "round": current.round_id,
+                "generation": self._daemon_generation,
+                "lease_id": current.lease_id,
+                "rows": rows,
+            }
+
+    def note_close_round(
+        self, round_id: int, reports: list[dict[str, object]]
+    ) -> set[tuple[str, str]]:
+        round_id = self._require_round_id(round_id)
+        # Every report is checked before any row changes, so a bad report
+        # raises with nothing applied; a published close needs its id.
+        checked: list[tuple[tuple[str, str], dict[str, object]]] = []
+        for report in reports:
+            key = (
+                self._require_lease_end_id(report.get("run_id"), "run_id"),
+                self._require_peer(report.get("peer")),
+            )
+            if report.get("action") == "published":
+                self._require_lease_end_id(report.get("close_id"), "close_id")
+            checked.append((key, report))
+        accepted: set[tuple[str, str]] = set()
+        with self._condition:
+            self._expire_rows_locked()
+            current = self._lease_end_round
+            if current is None or current.round_id != round_id:
+                return accepted
+            for key, report in checked:
+                peer = key[1]
+                action = report.get("action")
+                row = self._lease_end_rows.get(key)
+                if (
+                    row is None
+                    or row.round_id != round_id
+                    or row.state != "pending"
+                    or row.reported
+                ):
+                    continue
+                if action == "published":
+                    row.state = "closing"
+                    row.close_id = str(report.get("close_id") or "")
+                    row.reported = True
+                    row.required_floors = self._floors_by_key(
+                        report.get("carried_floors")
+                    )
+                    accepted.add(key)
+                elif action == "deferred":
+                    if peer != "server":
+                        continue
+                    row.reported = True
+                    accepted.add(key)
+                elif action == "unreachable":
+                    reason = str(report.get("reason") or "unreachable")
+                    self._set_row_owed_locked(row, [reason])
+                    accepted.add(key)
+                else:
+                    continue
+            if accepted:
+                self._condition.notify_all()
+        return accepted
+
+    def note_close_published(
+        self,
+        round_id: int,
+        run_id: str,
+        peer: str,
+        close_id: str,
+        carried_floors: object,
+    ) -> bool:
+        round_id = self._require_round_id(round_id)
+        run_id = self._require_lease_end_id(run_id, "run_id")
+        peer = self._require_peer(peer)
+        close_id = self._require_lease_end_id(close_id, "close_id")
+        with self._condition:
+            self._expire_rows_locked()
+            current = self._lease_end_round
+            row = self._lease_end_rows.get((run_id, peer))
+            if (
+                current is None
+                or current.round_id != round_id
+                or row is None
+                or row.round_id != round_id
+                or row.state != "pending"
+                or not row.reported
+            ):
+                return False
+            row.state = "closing"
+            row.close_id = str(close_id)
+            row.required_floors = self._floors_by_key(carried_floors)
+            self._condition.notify_all()
+            return True
+
+    def lease_close_deliverable(self, round_id: int) -> bool:
+        round_id = self._require_round_id(round_id)
+        with self._condition:
+            self._expire_rows_locked()
+            current = self._lease_end_round
+            return (
+                self._active is None
+                and self._grant_inflight is None
+                and current is not None
+                and current.round_id == round_id
+            )
+
+    def note_close_outcomes(
+        self, outcomes: list[dict[str, object]]
+    ) -> list[str]:
+        results: list[str] = []
+        with self._condition:
+            self._expire_rows_locked()
+            changed = False
+            for outcome in outcomes:
+                applied = self._apply_close_outcome_locked(outcome)
+                results.append("applied" if applied else "ignored")
+                if applied:
+                    changed = True
+            if changed:
+                self._condition.notify_all()
+        return results
 
     def reservation_active(
         self,
@@ -2027,6 +2300,7 @@ class SessionCoordinator:
                 "operation_tombstones": self._operation_tombstone_status_locked(),
                 "cleanup_degraded": self._unique(degraded),
                 "grace": self._public_grace_locked(),
+                **self._status_lease_end_locked(),
             }
 
     def box_queue_public(self) -> list[dict[str, object]]:
@@ -2452,6 +2726,7 @@ class SessionCoordinator:
         }
 
     def _expire_due(self, protect_ticket_id: str | None = None) -> list[str]:
+        self._expire_rows_locked()
         self._purge_operation_tombstones_locked()
         self._purge_box_locked()
         self._purge_expiry_grace_locked()
@@ -2518,6 +2793,7 @@ class SessionCoordinator:
             attached_at_expiry = self._probe_attached_run_locked(lease)
         self._active = None
         self._releasing = lease
+        self._open_lease_end_round_locked(lease)
         self._bump_revision_locked()
         self._remember_invalid_token_locked(
             lease, "lease_expired" if reason == "lease_expired" else "lease_invalid"
@@ -2557,6 +2833,7 @@ class SessionCoordinator:
         if not cleanup_slot:
             self._cleanup_worker_saturated += 1
             degraded.append("cleanup_worker_saturated")
+            self._owe_round_pending_locked(["cleanup_worker_saturated"])
         else:
             self._cleanup_worker_active += 1
             cleanup_thread = threading.Thread(
@@ -2586,7 +2863,9 @@ class SessionCoordinator:
             degraded.append("cleanup_timeout")
         elif "error" in cleanup_box:
             degraded.append("cleanup_failed")
+            self._owe_round_pending_locked(["cleanup_failed"], include_reported=True)
         else:
+            self._owe_unreported_pending_locked()
             raw_result = cleanup_box.get("result")
             if isinstance(raw_result, CleanupDisposition):
                 if not raw_result.fence_required:
@@ -2891,6 +3170,7 @@ class SessionCoordinator:
                 and self._active is None
                 and self._releasing is None
                 and not self._handoff_pending
+                and not self._lease_end_blocks_locked()
                 and not self._grant_audit_failed
                 and not self._operation_tombstoned_locked(
                     ticket.client, ticket.operation_id
@@ -3131,7 +3411,7 @@ class SessionCoordinator:
             self._bump_revision_locked()
             self._condition.notify_all()
             self._consume_expiry_grace_locked(lease.client)
-            return "granted", self._active_payload_locked(lease)
+            return "granted", self._grant_payload_locked(lease)
         finally:
             self._audit_gate.release()
 
@@ -3146,7 +3426,7 @@ class SessionCoordinator:
         now = self._time_fn()
         token = self._token_fn()
         lease_id = self._id_fn()
-        return _Lease(
+        lease = _Lease(
             client,
             purpose,
             token,
@@ -3156,6 +3436,8 @@ class SessionCoordinator:
             source_ticket_id=source_ticket_id,
             source_operation_id=source_operation_id,
         )
+        lease.lease_end = self._lease_end_photo_locked()
+        return lease
 
     def _identity_collision_locked(self, client: ClientIdentity) -> bool:
         identities = [
@@ -3377,7 +3659,7 @@ class SessionCoordinator:
             and self._active.client == client
             and self._active.source_operation_id == operation_id
         ):
-            return 200, self._active_payload_locked(self._active)
+            return 200, self._grant_payload_locked(self._active)
         for position, ticket in enumerate(self._queue, start=1):
             if ticket.client == client and ticket.operation_id == operation_id:
                 return 202, self._ticket_payload_locked(ticket, position)
@@ -3461,6 +3743,7 @@ class SessionCoordinator:
             or self._lifecycle_recovery_fault is not None
             or self._repair_fence
             or self._handoff_pending
+            or self._lease_end_blocks_locked()
             or self._handoff_audit_failed
             or self._grant_audit_failed
             or self._releasing is not None
@@ -3844,7 +4127,7 @@ class SessionCoordinator:
             and self._active.client == client
             and self._active.source_ticket_id == ticket_id
         ):
-            return self._active_payload_locked(self._active)
+            return self._grant_payload_locked(self._active)
         return None
 
     def _validate_token_locked(
@@ -4174,9 +4457,7 @@ class SessionCoordinator:
     ) -> dict[str, object]:
         if not degraded:
             return payload
-        result = dict(payload)
-        result["cleanup_degraded"] = self._unique(list(degraded))
-        return result
+        return self._merge_cleanup_degraded(payload, degraded)
 
     @staticmethod
     def _bounded_operation_timeout(value: object) -> float:
@@ -4195,6 +4476,425 @@ class SessionCoordinator:
             isinstance(value, (int, float)) and value != 0
             for value in args.values()
         )
+
+    def _grant_payload_locked(self, lease: _Lease) -> dict[str, object]:
+        payload = self._active_payload_locked(lease)
+        if lease.lease_end is None:
+            return payload
+        payload["lease_end"] = copy.deepcopy(lease.lease_end)
+        unconfirmed = lease.lease_end.get("unconfirmed")
+        if isinstance(unconfirmed, list) and unconfirmed:
+            payload = self._merge_cleanup_degraded(
+                payload, ["lease_end_unconfirmed"]
+            )
+        return payload
+
+    def _merge_cleanup_degraded(
+        self,
+        payload: dict[str, object],
+        extra: list[str] | tuple[str, ...],
+    ) -> dict[str, object]:
+        existing = payload.get("cleanup_degraded")
+        prior: list[str] = []
+        if isinstance(existing, list):
+            prior = [str(item) for item in existing]
+        merged = self._unique(prior + [str(item) for item in extra])
+        if not merged:
+            return payload
+        result = dict(payload)
+        result["cleanup_degraded"] = merged
+        return result
+
+    def _lease_end_blocks_locked(self) -> bool:
+        now = self._time_fn()
+        for row in self._lease_end_rows.values():
+            if (
+                row.state in {"pending", "closing"}
+                and now < row.deadline
+            ):
+                return True
+        return False
+
+    def _lease_end_wait_remaining_locked(self) -> float | None:
+        now = self._time_fn()
+        remainings: list[float] = []
+        for row in self._lease_end_rows.values():
+            if row.state in {"pending", "closing"} and now < row.deadline:
+                remainings.append(row.deadline - now)
+        if not remainings:
+            return None
+        return min(remainings)
+
+    def _expire_rows_locked(self) -> None:
+        now = self._time_fn()
+        changed = False
+        for row in self._lease_end_rows.values():
+            if row.state in {"pending", "closing"} and now >= row.deadline:
+                self._set_row_owed_locked(row, ["close_timeout"])
+                changed = True
+        if changed:
+            self._condition.notify_all()
+
+    def _open_lease_end_round_locked(self, lease: _Lease) -> None:
+        self._expire_rows_locked()
+        owed_keys = {
+            key
+            for key, row in self._lease_end_rows.items()
+            if row.state == "owed"
+        }
+        if not lease.delivered_work and not owed_keys:
+            self._lease_end_round = None
+            self._condition.notify_all()
+            return
+        keys = set(self._peer_registry) | owed_keys
+        if not keys:
+            self._lease_end_round = None
+            self._condition.notify_all()
+            return
+        self._lease_end_round_seq += 1
+        round_id = self._lease_end_round_seq
+        now = self._time_fn()
+        deadline = now + self._lease_end_bound_s
+        for key in keys:
+            run_id, peer = key
+            existing = self._lease_end_rows.get(key)
+            instance = self._peer_registry.get(key, "")
+            if not instance and existing is not None:
+                instance = existing.instance
+            owed_since = existing.owed_since if existing is not None else None
+            self._lease_end_rows[key] = _LeaseEndRow(
+                run_id=run_id,
+                peer=peer,
+                instance=instance,
+                state="pending",
+                round_id=round_id,
+                deadline=deadline,
+                owed_since=owed_since,
+            )
+        self._lease_end_round = _LeaseEndRound(
+            round_id=round_id,
+            session_id=lease.client.session_id,
+            lease_id=lease.lease_id,
+        )
+        self._condition.notify_all()
+
+    def _owe_round_pending_locked(
+        self, reasons: list[str], *, include_reported: bool = False
+    ) -> None:
+        current = self._lease_end_round
+        if current is None:
+            return
+        for row in self._lease_end_rows.values():
+            if row.round_id != current.round_id or row.state != "pending":
+                continue
+            if row.reported and not include_reported:
+                continue
+            self._set_row_owed_locked(row, reasons)
+
+    def _owe_unreported_pending_locked(self) -> None:
+        self._owe_round_pending_locked(["close_not_reported"])
+
+    def _set_row_owed_locked(self, row: _LeaseEndRow, reasons: list[str]) -> None:
+        row.state = "owed"
+        row.reasons = list(reasons)
+        if row.owed_since is None:
+            row.owed_since = self._time_fn()
+        row.reported = False
+
+    def _sorted_rows_locked(self) -> list[_LeaseEndRow]:
+        return sorted(
+            self._lease_end_rows.values(),
+            key=lambda row: (row.run_id, row.peer),
+        )
+
+    def _unconfirmed_list_locked(self) -> list[dict[str, object]]:
+        now = self._time_fn()
+        items: list[dict[str, object]] = []
+        for row in self._sorted_rows_locked():
+            if row.state != "owed":
+                continue
+            since = 0.0
+            if row.owed_since is not None:
+                since = max(0.0, now - row.owed_since)
+            items.append(
+                {
+                    "run_id": row.run_id,
+                    "peer": row.peer,
+                    "reasons": list(row.reasons),
+                    "since_s": since,
+                }
+            )
+        return items
+
+    def _lease_end_photo_locked(self) -> dict[str, object] | None:
+        owed = any(row.state == "owed" for row in self._lease_end_rows.values())
+        current = self._lease_end_round
+        if current is None and not owed:
+            return None
+        settled = sorted(
+            (dict(item) for item in (current.settled if current is not None else [])),
+            key=lambda item: (str(item.get("run_id")), str(item.get("peer"))),
+        )
+        return {
+            "round": current.round_id if current is not None else None,
+            "settled": settled,
+            "unconfirmed": self._unconfirmed_list_locked(),
+        }
+
+    def _status_lease_end_locked(self) -> dict[str, object]:
+        if not self._lease_end_rows:
+            return {}
+        remaining = self._lease_end_wait_remaining_locked()
+        outstanding = 0
+        now = self._time_fn()
+        for row in self._lease_end_rows.values():
+            if row.state in {"pending", "closing"} and now < row.deadline:
+                outstanding += 1
+        return {
+            "lease_end": {
+                "outstanding": outstanding,
+                "deadline_in_s": remaining,
+                "unconfirmed": self._unconfirmed_list_locked(),
+            }
+        }
+
+    def _apply_close_outcome_locked(self, outcome: dict[str, object]) -> bool:
+        current = self._lease_end_round
+        try:
+            round_id = self._require_round_id(outcome.get("round"))
+            run_id = self._require_lease_end_id(outcome.get("run_id"), "run_id")
+            peer = self._require_peer(outcome.get("peer"))
+        except ValueError:
+            return False
+        if current is None or current.round_id != round_id:
+            return False
+        row = self._lease_end_rows.get((run_id, peer))
+        close_id = str(outcome.get("close_id") or "")
+        kind = str(outcome.get("kind") or "")
+        if row is None or row.close_id != close_id:
+            return False
+        if row.state == "closing":
+            applied = self._apply_closing_outcome_locked(row, kind, outcome)
+        elif row.state == "owed" and kind == "clean":
+            applied = self._apply_owed_clean_locked(row, outcome)
+        else:
+            return False
+        if applied and peer == "client" and outcome.get("floor") is not None:
+            self._late_floor_check_locked(run_id, outcome.get("floor"))
+        return applied
+
+    def _apply_closing_outcome_locked(
+        self, row: _LeaseEndRow, kind: str, outcome: dict[str, object]
+    ) -> bool:
+        if kind == "clean":
+            return self._clear_or_owe_clean_locked(row, outcome)
+        if kind == "residue":
+            reasons = [str(item) for item in list(outcome.get("reasons") or [])]
+            self._set_row_owed_locked(row, reasons)
+            return True
+        if kind == "rejected":
+            error = str(outcome.get("error") or "")
+            self._set_row_owed_locked(row, [f"close_rejected:{error}"])
+            return True
+        if kind == "discarded":
+            reason = str(outcome.get("reason") or "")
+            self._set_row_owed_locked(row, [f"close_discarded:{reason}"])
+            return True
+        return False
+
+    def _apply_owed_clean_locked(
+        self, row: _LeaseEndRow, outcome: dict[str, object]
+    ) -> bool:
+        if row.peer == "server":
+            reasons = self._server_clean_reasons_locked(row, outcome)
+            if reasons:
+                return True
+            self._remember_server_floors_locked(row, outcome)
+        self._settle_row_locked(row)
+        return True
+
+    def _clear_or_owe_clean_locked(
+        self, row: _LeaseEndRow, outcome: dict[str, object]
+    ) -> bool:
+        if row.peer != "server":
+            self._settle_row_locked(row)
+            return True
+        reasons = self._server_clean_reasons_locked(row, outcome)
+        if reasons:
+            self._set_row_owed_locked(row, reasons)
+            return True
+        self._remember_server_floors_locked(row, outcome)
+        self._settle_row_locked(row)
+        return True
+
+    def _server_clean_reasons_locked(
+        self, row: _LeaseEndRow, outcome: dict[str, object]
+    ) -> list[str]:
+        reported = self._floors_by_key(outcome.get("reported_floors"))
+        reasons: list[str] = []
+        for key, required in row.required_floors.items():
+            reasons.extend(self._floor_gap(required, reported.get(key)))
+        return self._unique(reasons)
+
+    def _remember_server_floors_locked(
+        self, row: _LeaseEndRow, outcome: dict[str, object]
+    ) -> None:
+        current = self._lease_end_round
+        if current is None:
+            return
+        current.server_floors[row.run_id] = {
+            "close_id": row.close_id,
+            "instance": row.instance,
+            "floors": self._floors_by_key(outcome.get("reported_floors")),
+        }
+
+    def _settle_row_locked(self, row: _LeaseEndRow) -> None:
+        key = (row.run_id, row.peer)
+        self._lease_end_rows.pop(key, None)
+        current = self._lease_end_round
+        if current is None:
+            return
+        current.settled = [
+            item
+            for item in current.settled
+            if not (
+                item.get("run_id") == row.run_id and item.get("peer") == row.peer
+            )
+        ]
+        current.settled.append(
+            {
+                "run_id": row.run_id,
+                "peer": row.peer,
+                "close_id": row.close_id,
+            }
+        )
+
+    def _late_floor_check_locked(self, run_id: str, floor: object) -> None:
+        if not isinstance(floor, dict):
+            return
+        current = self._lease_end_round
+        if current is None:
+            return
+        key = (run_id, "server")
+        server_row = self._lease_end_rows.get(key)
+        floor_key = self._floor_pair(floor)
+        if server_row is None:
+            # Only a server row this round cleared clean is checked: a run
+            # with no server row, or one note_processes_gone removed, has no
+            # entry in server_floors.
+            stored = current.server_floors.get(run_id)
+            if stored is None:
+                return
+            close_id = stored.get("close_id")
+            reasons = self._floor_gap(floor, stored["floors"].get(floor_key))
+            if not reasons:
+                return
+            self._lease_end_rows[key] = _LeaseEndRow(
+                run_id=run_id,
+                peer="server",
+                instance=str(stored.get("instance") or ""),
+                state="owed",
+                round_id=current.round_id,
+                deadline=self._time_fn(),
+                close_id=str(close_id) if close_id is not None else None,
+                reasons=reasons,
+                owed_since=self._time_fn(),
+                # As in the CLOSING case below: a late clean of that close
+                # clears the row only if it reaches the client's floor.
+                required_floors={floor_key: dict(floor)},
+            )
+            current.settled = [
+                item
+                for item in current.settled
+                if not (
+                    item.get("run_id") == run_id and item.get("peer") == "server"
+                )
+            ]
+            return
+        if server_row.state == "closing":
+            carried = server_row.required_floors.get(floor_key)
+            baseline = carried or {
+                "conn_gen": floor.get("conn_gen"),
+                "move_id": 0,
+                "weapon_id": 0,
+            }
+            reasons: list[str] = []
+            if int(floor.get("move_id") or 0) > int(baseline.get("move_id") or 0):
+                reasons.append("player_move_floor_unapplied")
+            if int(floor.get("weapon_id") or 0) > int(
+                baseline.get("weapon_id") or 0
+            ):
+                reasons.append("weapon_floor_unapplied")
+            if reasons:
+                server_row.required_floors[floor_key] = dict(floor)
+                self._set_row_owed_locked(server_row, reasons)
+            return
+        if server_row.state == "owed":
+            server_row.required_floors[floor_key] = dict(floor)
+
+    @staticmethod
+    def _floor_pair(floor: dict[str, object]) -> tuple[object, object]:
+        return (floor.get("net_low"), floor.get("net_high"))
+
+    def _floors_by_key(
+        self, floors: object
+    ) -> dict[tuple[object, object], dict[str, object]]:
+        mapping: dict[tuple[object, object], dict[str, object]] = {}
+        if not isinstance(floors, list):
+            return mapping
+        for item in floors:
+            if not isinstance(item, dict):
+                continue
+            mapping[self._floor_pair(item)] = dict(item)
+        return mapping
+
+    @staticmethod
+    def _floor_gap(
+        required: dict[str, object], reported: dict[str, object] | None
+    ) -> list[str]:
+        if reported is None:
+            return ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+        required_gen = required.get("conn_gen")
+        reported_gen = reported.get("conn_gen")
+        if required_gen is None or required_gen != reported_gen:
+            return [
+                "player_move_conn_gen_unapplied",
+                "weapon_conn_gen_unapplied",
+            ]
+        reasons: list[str] = []
+        if int(reported.get("move_id") or 0) < int(required.get("move_id") or 0):
+            reasons.append("player_move_floor_unapplied")
+        if int(reported.get("weapon_id") or 0) < int(
+            required.get("weapon_id") or 0
+        ):
+            reasons.append("weapon_floor_unapplied")
+        return reasons
+
+    @staticmethod
+    def _require_lease_end_id(value: object, name: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"invalid_{name}")
+        return value
+
+    @staticmethod
+    def _require_peer(value: object) -> str:
+        if value not in {"server", "client"}:
+            raise ValueError("invalid_peer")
+        return str(value)
+
+    @staticmethod
+    def _require_round_id(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("invalid_round_id")
+        return value
+
+    @staticmethod
+    def _peers_for_role(role: str | None) -> tuple[str, ...]:
+        if role is None or role == "offline":
+            return ("server", "client")
+        if role in {"server", "client"}:
+            return (role,)
+        raise ValueError("invalid_role")
 
     @staticmethod
     def _unique(values: list[str]) -> list[str]:
