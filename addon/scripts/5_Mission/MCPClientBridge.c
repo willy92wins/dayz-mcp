@@ -410,9 +410,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int MAX_PENDING = 16;
 	protected const int PENDING_POLL_THRESHOLD = 8;
 	protected const int MAX_CALLBACK_REFS = 128;
-	// One poll accepts at most MAX_DISPATCH_PER_TICK dispatched plus MAX_PENDING
-	// queued; QueuePendingOrFail refuses the rest. Reserve exactly that much.
-	protected const int MAX_POLL_RESULTS = 20;
+	// Reserve the daemon ingress cap (loopback.py MAX_QUEUE) per poll, as the
+	// server does: a QueuePendingOrFail refusal POSTs too.
+	protected const int MAX_POLL_RESULTS = 64;
 	protected const float CAMERA_JOB_TIMEOUT_S = 5.0;
 	protected const float CAMERA_SETTLE_STEP_S = 0.05;
 	protected const int CAMERA_DEFAULT_SETTLE_TICKS = 3;
@@ -840,7 +840,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// Pause admission only. OnTick ticks jobs and drains pending above the poll
 		// decision, so the count keeps falling while polling is held.
-		if (OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
+		// Leave room for a whole batch and, on top of it, a lease close.
+		if (OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1)
 		{
 			return;
 		}
@@ -934,11 +935,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			Log("client poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
 		}
 
+		// Defer the new batch when work is already waiting, so it cannot overtake.
+		bool deferBehindPending = m_Pending.Count() > 0;
 		int i = 0;
 		while (i < count)
 		{
 			MCPCommand command = batch.commands.Get(i);
-			if (i < MAX_DISPATCH_PER_TICK)
+			if (deferBehindPending)
+			{
+				QueuePendingOrFail(command);
+			}
+			else if (i < MAX_DISPATCH_PER_TICK)
 			{
 				DispatchMeasured(command);
 			}
@@ -1081,7 +1088,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		while (m_Pending.Count() > 0 && dispatched < MAX_DISPATCH_PER_TICK)
 		{
 			MCPCommand command = m_Pending.Get(0);
-			m_Pending.Remove(0);
+			m_Pending.RemoveOrdered(0);
 			DispatchMeasured(command);
 			dispatched = dispatched + 1;
 		}
@@ -1094,7 +1101,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		if (m_Pending.Count() >= MAX_PENDING)
+		// The last slot is kept for a lease close.
+		int limit = MAX_PENDING - 1;
+		if (command.cmd == "lease_close_client")
+		{
+			limit = MAX_PENDING;
+		}
+		if (m_Pending.Count() >= limit)
 		{
 			PostCommandError(command, "client_bridge_queue_full");
 			return;

@@ -158,7 +158,8 @@ MARKERS = (
 # A1 wraps the same synchronous dispatch to measure work; the deferral branches
 # and their order stay frozen. Counter behavior is covered by test_a1_load_counters.
 WORLD_SPAWN_DEFERRAL = """\
-\t\tbool deferFromWorldSpawn = false;
+\t\t// Defer the new batch when work is already waiting, so it cannot overtake.
+\t\tbool deferFromWorldSpawn = m_Pending.Count() > 0;
 \t\tint i = 0;
 \t\twhile (i < count)
 \t\t{
@@ -219,9 +220,18 @@ class Task9SpawnPhaseMarkerTests(unittest.TestCase):
     def test_world_spawn_and_following_batch_commands_are_deferred_fifo(self) -> None:
         self.assertEqual(self.bridge_text.count(WORLD_SPAWN_DEFERRAL), 1)
         self.assertIn(WORLD_SPAWN_DEFERRAL, self.poll_block)
-        self.assertEqual(self.poll_block.count("bool deferFromWorldSpawn = false;"), 1)
+        self.assertEqual(self.poll_block.count("bool deferFromWorldSpawn = m_Pending.Count() > 0;"), 1)
         self.assertEqual(self.poll_block.count("deferFromWorldSpawn = true;"), 1)
         self.assertEqual(self.poll_block.count("if (deferFromWorldSpawn)"), 1)
+
+    def test_world_spawn_poll_arm_does_not_dispatch(self) -> None:
+        # FIFO-independent: the world_spawn arm never Dispatches, and the callback never drains.
+        arm_head = 'if (command && command.cmd == "world_spawn")'
+        self.assertIn(arm_head, self.poll_block)
+        arm = self.poll_block[self.poll_block.index(arm_head):]
+        arm = arm[: arm.index("if (deferFromWorldSpawn)")]
+        self.assertNotIn("Dispatch(", arm)
+        self.assertNotIn("DrainPending();", self.poll_block)
 
     def test_on_tick_drains_deferred_spawn_before_starting_another_poll(self) -> None:
         self.assertLess(self.tick_block.index("DrainPending();"), self.tick_block.index("StartPoll();"))
