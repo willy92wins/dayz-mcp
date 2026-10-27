@@ -246,14 +246,15 @@ class CarBrakesSourceContractTest(unittest.TestCase):
     def test_fb_3cc4_throttle_steering_and_gear_still_wait_for_the_engine(self) -> None:
         on_input = _on_input()
         ready = _block(_block(on_input, APPLY_CONTROL), ENGINE_READY)
-        for call in (
-            "SetThrottle(throttle);",
-            "SetSteering(MCPCarDrive.s_Steer);",
-            "ShiftUp();",
-            "ShiftTo(CarGear.FIRST);",
+        for call, count in (
+            ("SetThrottle(throttle);", 1),
+            ("SetSteering(MCPCarDrive.s_Steer);", 1),
+            # The manual upshift at the redline and the automatic one to D (3efe).
+            ("ShiftUp();", 2),
+            ("ShiftTo(CarGear.FIRST);", 1),
         ):
-            self.assertEqual(on_input.count(call), 1, call)
-            self.assertIn(call, ready)
+            self.assertEqual(on_input.count(call), count, call)
+            self.assertEqual(ready.count(call), count, call)
 
     def test_fb_48bc_clear_restores_driverless_brake_before_dropping_the_car(self) -> None:
         self._assert_clear_restores_driverless_brake(_drive_clear())
