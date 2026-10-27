@@ -4446,7 +4446,7 @@ def _failed_active_run_result(
     port: int | None = None,
 ) -> dict[str, Any]:
     extra = occupancy_error_fields(box, caller_session=caller_session)
-    extra.update(_port_conflict_fields(box, port))
+    extra.update(_port_conflict_fields(box, port, caller_session=caller_session))
     return _attach_queue_offer(
         _apply_takeover_required(
             {
