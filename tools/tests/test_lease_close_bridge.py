@@ -68,11 +68,14 @@ class Command:
     def __init__(self, ident: int, cmd: str = "work") -> None:
         self.id = ident
         self.cmd = _LogString.of(cmd)
+        # MCPCommand's ref MCPArgs args, null when the JSON has none.
+        self.args = None
 
 
 class Batch:
     def __init__(self, commands: PendingArray | None = None) -> None:
-        self.commands = commands
+        # MCPCommandBatch's constructor makes an empty array.
+        self.commands = commands if commands is not None else PendingArray()
 
 
 class _Serializer:
@@ -455,6 +458,18 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                     self.assertEqual(item[1], err_code)
                 self.assertEqual(pending.Get(pending.Count() - 1).id, close_id)
                 self.assertEqual(pending.Get(pending.Count() - 1).cmd, _LogString.of(close_cmd))
+
+                # After a failed poll the backoff is positive (OnPollFail): the
+                # next good answer is still read whole, and it resets the backoff.
+                ns_back = self._bind(source, flag, poll_source=full)
+                ns_back["m_Backoff"] = 1.0
+                self._poll_answer(ns_back, cmds)
+                back_pending: PendingArray = ns_back["m_Pending"]
+                self.assertEqual(ns_back["_failures"], [])
+                back_total = len(ns_back["_dispatched"]) + back_pending.Count() + len(ns_back["_errors"])
+                self.assertEqual(back_total, 65, "a positive backoff drops nothing")
+                self.assertEqual(back_pending.Get(back_pending.Count() - 1).id, close_id)
+                self.assertEqual(ns_back["m_Backoff"], 0.0, "a good answer resets the backoff")
 
                 # A clip of the count, or a discard by size before it, loses the close.
                 clipped = full.replace(
