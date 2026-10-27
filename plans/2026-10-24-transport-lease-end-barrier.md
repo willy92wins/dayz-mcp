@@ -20,7 +20,7 @@
 - **H2** (resultado propio vs ambos lados): la nota no liquida el fence sin prueba servidor. §2.9, K16.
 - **H3** (protocolo terminal RPC): alta antes de send, ids, receptor fuera del job. §2.7, S6, K27.
 - **H4** (timeout de borrado antes del close): registro desde el dispatch. §2.7, S5, K30.
-- **H5** (F/W de otra conexión): `conn_gen` en suelos; OnReconnect. §2.5, §2.8, K8.
+- **H5** (F/W de otra conexión): el cierre lleva el `conn_gen` del censo del cliente; el servidor aplica F y W solo si coincide con el del cuerpo, se haya aceptado algo o no; sin nombre, OWED. §2.5, §2.8, K8.
 - **H6** (`notify_players` fuera del censo): RPC en S6; deuda hasta salida si no hay acuse. §2.7, S6, §3.
 - **H7** (callbacks 64+close): presupuesto que cuenta todos los POST del lote. §2.10, K25.
 - **H8** (stop de bot rechazado): readback idle; no siempre `bot_stop_rejected`. §2.7, S1, K27.
@@ -45,7 +45,7 @@
 
 **Decididas aquí (Claude, sobre lo que Grok dejó como pregunta):**
 - El id de arma lleva su propio contador del cliente, siempre creciente, no el de `player_move`: F y W se informan por separado y compartirlo no aporta nada (§2.6).
-- `weapon_floor` va por jugador con la misma identidad que `move_floor`, más la generación de conexión: `floors[{net_low, net_high, conn_gen, move_id, weapon_id}]` (§2.16).
+- `weapon_floor` va por jugador con la misma identidad que `move_floor`, más el `conn_gen` que el cliente nombra (el del cuerpo, recibido por RPC): `floors[{net_low, net_high, conn_gen, move_id, weapon_id}]`. El servidor aplica F/W solo si ese `conn_gen` es el actual del cuerpo; si el cliente no lo nombra, la fila queda OWED (§2.5, §2.8, §2.16).
 - El registro de RPC vive en Enforce, en el bridge que envía el RPC, por id de petición; Python solo ve las filas del censo (§2.7).
 - Los 25 s son el tope del observador, no una prueba: lo que siga vivo queda como residuo `deletion_pending` y lo miran los cierres siguientes (H10). La duración real de `ObjectDelete` se mide en la ronda final.
 - El PR de seguimiento de H7 r1 no bloquea el merge de este. Bloquea que el cuerpo o el CHANGELOG den por cumplida la regla de los jobs (la compuerta de arriba).
@@ -59,6 +59,7 @@
 **Preguntas para la revisión 5:**
 1. Hands take/attach hoy solo registran un log local en `input_busy` (4_World/MCP_Weapon.c:1280-1283, 1460-1463). El protocolo de r4 añade RPCs de rechazo/confirmación. ¿Basta ese acuse, o hace falta un readback nativo de manos/inventario que hoy no existe en el bridge?
 2. `RPC_SEND_NOTIFICATION_EXTENDED` no tiene acuse (V130 notificationsystem.c:141-150). La r4 deja esa fila hasta la salida del proceso. ¿Hay un canal vanilla de invalidación que no hayamos leído?
+3. El RPC de `conn_gen` al dueño (ScriptRPC.Send con `recipient` = `GetIdentity()`, V130/3_game/gameplay.c:117; patrón de 4_World/MCP_Weapon.c:1046-1067), que se manda donde se fija el valor (en `InvokeOnConnect` y en `OnReconnect`, §2.5), ¿llega al censo del cliente antes del primer cierre de esa conexión, y en `OnReconnect` ya devuelve `GetIdentity()` la identidad que reconecta, o hace falta también `RegisterNetSyncVariableInt` (V130/4_world/entities/manbase/playerbase.c:565)? Si el cliente aún no nombra la conexión, la fila queda OWED: no se pregunta si aplicar F/W a ciegas.
 
 ---
 
@@ -94,10 +95,13 @@ Design D (revision 4) does four things:
 2. **Debt that persists.** The coordinator keeps one row per (run, peer). Only a clean close or the
    process exiting clears a row. Every grant while a row is owed says `lease_end_unconfirmed`.
    Degradations merge; they never overwrite the marker.
-3. **Order and identity.** Both bridges dispatch HTTP in delivery order. A delivered close only
-   releases move copies with id ≤ F and weapon requests with id ≤ W **of that
-   connection's `conn_gen`**. Raise/fire carry a monotonically increasing client id.
-   There is no per-destination admission fence for B.
+3. **Order and identity.** Both bridges dispatch HTTP in delivery order. A delivered close
+   names the `conn_gen` of the client census that produced F and W. It releases move
+   copies with id ≤ F and weapon requests with id ≤ W **only when that `conn_gen` is
+   the body's current connection**, whether or not that connection has accepted a
+   start. A close that cannot name the connection leaves the row OWED. Raise/fire
+   carry a monotonically increasing client id. There is no per-destination admission
+   fence for B.
 4. **Census covers the leftover channels.** Weapon floors, ActionManager helper plus
    in-flight START/interrupt debt, RPC-in-flight including `notify_players`, deletion
    refs from dispatch, sampler abort, infected debt until process exit.
@@ -244,9 +248,10 @@ but it was not re-run there [UNVERIFIED].
 - **Close identity:** daemon generation, round, ending lease id, instance, peer, the binding's
   epoch and the close id.
 - **Args:** `close_generation` and `close_lease_id`; the server close also takes `close_floors`
-  (move F, weapon W and `conn_gen` per player, §2.8).
+  (move F, weapon W and the client-named `conn_gen` per player, §2.8).
 - **Result:** the census echoes generation, lease id and peer. The client census also reports
-  `move_floor` F and `weapon_floor` W.
+  `move_floor` F, `weapon_floor` W and `conn_gen` (the body's generation last received
+  on the owner client, §2.5). Missing `conn_gen` is not a clean client census.
 - **Clean settle** needs all of these:
   - the close id is the row's current close;
   - the presented instance is the sealed one (the fence, loopback.py:4932-4966);
@@ -323,7 +328,13 @@ Rules:
   bridge runs after an older close already delivered there. Only other channels can overtake:
   `player_move` start by input (MCPClientBridge.c:2835-2844) and weapon raise/fire. The server
   close releases only the move copy whose id is ≤ F, and only weapon requests whose id is ≤ W,
-  **and only when `conn_gen` matches the body's current connection generation**.
+  **and only when the close's `conn_gen` equals the body's current `m_MCPConnGen`**.
+  That match is the gate: it does not wait for an accepted start on this connection.
+  A close with no `conn_gen` does not raise floors or release copies, and its row is
+  OWED (`player_move_conn_gen_unapplied` / `weapon_conn_gen_unapplied`), never a
+  clean no-op. A close that names a `conn_gen` that is not the body's current one
+  also does not raise floors or release copies (K8 reconnect skip); if that close
+  is still the row's current close, the row is OWED, not a clean skip of F/W.
   **Reject** a per-destination admission fence for new mutations while an
   older close is still executable: it would block B [DESIGN]. The client release already carries the move id: `ReleaseAll`
   stores the move's generation as the release id and `FlushServerRelease` writes it
@@ -332,14 +343,32 @@ Rules:
   **Connection generation (r3 H5).** `OnReconnect` already releases the old copy and resets
   `m_MCPMoveLastId` (4_World/MCP_PlayerMove.c:880-885, 1140-1147). A new client process
   counts ids from 1 again. Python never sees that reset. [DESIGN] the body keeps
-  `m_MCPConnGen` (incremented in that same `OnReconnect`) and `m_MCPLastAcceptGen`
-  (written on every accepted start/raise/fire, cleared with lastId on reconnect).
+  `m_MCPConnGen`: 1 on first connect (`InvokeOnConnect` after vanilla,
+  5_Mission/MissionServer.c:41-45, which vanilla calls at
+  `V130/5_mission/mission/missionserver.c:336` for a new body and at `:357` for a loaded
+  one; `MCPGodmode.OnBodyReady` already runs there, 4_World/MCP_PlayerCare.c:88-105), and
+  incremented in the same `OnReconnect` that resets lastId (4_World/MCP_PlayerMove.c:1143-1148),
+  which vanilla reaches through `OnClientReconnectEvent`
+  (`V130/5_mission/mission/missionserver.c:392`, :633-637). Each time it is set, in those
+  two places, the owner client is told the value by a ScriptRPC on the body to that identity
+  (`GetIdentity()`, then `rpc.Send(this, MCP_RPC_CONN_GEN, true, identity)`
+  [DESIGN]; `ScriptRPC.Send` is `V130/3_game/gameplay.c:117`; the same
+  `GetIdentity` + `Send(..., identity)` shape as 4_World/MCP_Weapon.c:1046-1067,
+  with the recipient filled so it is not broadcast). The client stores the last
+  value received and reports it on its census. Move start, raise and fire do not
+  carry it [DESIGN]: after a reconnect, until the RPC lands, they would name the
+  previous generation and the server would refuse B's own starts. The gate is on
+  the close only.
   `MCPMoveCloseServer` / `MCPWeaponCloseServer` raise the floor and release copies
-  **only while `m_MCPLastAcceptGen == m_MCPConnGen`**. After reconnect those fields
-  disagree (or lastAccept is 0), so an old F=100 is a no-op on B's id=1. Same
-  connection after the client already released its copy: lastAccept still equals
-  conn_gen, so F/W still rise and in-flight ids ≤ F are refused. Census `floors`
-  echo `conn_gen` so K8 can assert the skip. K8 covers reconnect, not only `id > F`.
+  **only while the close's `conn_gen` equals `m_MCPConnGen`**, including when
+  nothing has been accepted yet (`m_MCPMoveLastId` still 0 after reconnect). An
+  old delivered close with F=100 of a previous generation is then a no-op on
+  B's id=1 **and** does not raise B's floor, even if B already accepted a start
+  on the new connection. Same connection: F/W still rise and in-flight ids ≤ F
+  are refused, including B's own F=1 with start id=1 still in flight. Census
+  `floors` echo the body's `m_MCPConnGen`; the **client** census is what names
+  the generation the close carries. K8 covers both reconnect holes, not only
+  `id > F`.
 - **At delivery** the broker marks the close delivered and captures the hold records of that
   instance that are open or fenced (`_holds`, 5138-5173) [DESIGN].
 - **Results.** The fence runs first (4932-4981). A close id then takes its own branch before the
@@ -410,8 +439,10 @@ it runs.
   apart; `Begin` of the weapon path adopts it after the send, as move does [DESIGN, H1];
 - live RPC-in-flight entries as residue `rpc_in_flight:<kind>` (§2.7);
 - the local player's network id (`GetNetworkID`, as 4_World/MCP_PlayerTrace.c:199);
-- `conn_gen` is echoed from the server body in the server census, not counted on the client
-  (§2.5).
+- `conn_gen`: the last body generation the owner client received on the conn-gen RPC
+  (§2.5). The close carries **this** value as the identity of F and W. A client
+  census without it is not clean (row OWED). The server census still echoes the
+  body's `m_MCPConnGen` after step 3 so K8 can compare.
 
 ### 2.7 The server close (`lease_close`)
 1. `MCPBotControl.ShutdownAll(this)` (MCP_BotControl.c:100-123). Emptying `s_Running` and sending
@@ -432,17 +463,20 @@ it runs.
    by emptying the registry. K27 and G5 forbid a clean grant on the next round from an empty
    registry. A native probe is follow-up and may shorten the debt.
 3. **Each player** (`GetPlayers`, as `BuildAllPlayers` does, 5443-5455):
-   - `MCPMoveCloseServer(floor)`, new in 4_World/MCP_PlayerMove.c beside `MCPMoveServerRelease`
-     (1097-1120). If `m_MCPLastAcceptGen == m_MCPConnGen` (§2.5), it raises `m_MCPMoveLastId`
-     (885) to F, then releases an active copy whose id is ≤ F. From then on a start at or
-     below F is refused (1011-1022). Otherwise no-op;
-   - `MCPWeaponCloseServer(weapon_floor)`, new in 4_World/MCP_Weapon.c beside
+   - `MCPMoveCloseServer(floor, conn_gen)`, new in 4_World/MCP_PlayerMove.c beside `MCPMoveServerRelease`
+     (1097-1120). If the close's `conn_gen` equals `m_MCPConnGen` (§2.5), it raises `m_MCPMoveLastId`
+     (885) to F, then releases an active copy whose id is ≤ F, **even when lastId is still 0**.
+     From then on a start at or below F is refused (1011-1022). A mismatch or a missing
+     `conn_gen` does not change lastId or the copy, and is residue
+     `player_move_conn_gen_unapplied`, not a clean no-op;
+   - `MCPWeaponCloseServer(weapon_floor, conn_gen)`, new in 4_World/MCP_Weapon.c beside
      `MCPServerReleaseRaise` (945-959). The server readers, `MCPReadFireRequest` (723-737) and
      `MCPReadRaiseRequest` (739-760), store the last id per player and refuse an equal or lower
      one, as move does (4_World/MCP_PlayerMove.c:1011-1022). `MCPServerApplyFire` (963-998)
      applies only an accepted request. The
      close raises that floor to W, then clears pending requests with id ≤ W and releases an
-     armed raise. Only after that;
+     armed raise, **only on the same `conn_gen` match**, including when nothing has been
+     accepted yet. Mismatch or missing `conn_gen` is `weapon_conn_gen_unapplied`. Only after that;
    - **Hold, no interrupt (H2, r3 H1).** `m_PendingAction` and `m_CurrentActionData` are
      `protected` (V130/4_world/classes/useractionscomponent/actionmanagerserver.c:3;
      V130/4_world/classes/useractionscomponent/actionmanagerbase.c:61). The census uses a
@@ -515,13 +549,16 @@ it runs.
   step 5 ends the local move and sends the release (with the move id), and its step 6 drops the
   client weapon override.
 - The client census reports move floor F, weapon floor W and `conn_gen` (§2.6). The server
-  close carries F, W and `conn_gen` for that player and reports them after applying.
-- The server row is clean only if, on a matching connection (`m_MCPLastAcceptGen ==
-  m_MCPConnGen`), its reported move floor is at least F and its reported weapon floor is at
-  least W. Then every start the client ever sent **on that connection**, and every raise/fire
-  at or below W, is refused from then on (4_World/MCP_PlayerMove.c:1011-1022;
-  4_World/MCP_Weapon.c:723-760, 963-998), even one still in flight. A reconnect skip is a
-  no-op on the new connection and does not OWED B (§2.5).
+  close carries F, W and **that client-named** `conn_gen` for that player and reports them after applying.
+- The server row is clean only if the close's `conn_gen` equals the body's `m_MCPConnGen`
+  (whether or not a start has been accepted) **and** its reported move floor is at least F
+  and its reported weapon floor is at least W. Then every start the client ever sent **on
+  that connection**, and every raise/fire at or below W, is refused from then on
+  (4_World/MCP_PlayerMove.c:1011-1022; 4_World/MCP_Weapon.c:723-760, 963-998), even one
+  still in flight. A close of a previous `conn_gen` is a no-op on the new connection's
+  floors and copies, so B's move and weapon state stay as they are; the row of that
+  stale close is OWED while it is the row's current close (§2.5), and so is the row of a
+  close that names no generation.
 - If the server close went first (the 10 s rule) and the client then reports an F or W above the
   server's reported floor, the server row becomes OWED (`player_move_floor_unapplied` or
   `weapon_floor_unapplied`). That happens before any grant (§2.3).
@@ -531,7 +568,9 @@ it runs.
   B's move continues. (b) replace/reconnect: body kept, `OnReconnect` resets last id
   (4_World/MCP_PlayerMove.c:1140-1147); B starts at id=1 with a new `conn_gen`; the old
   delivered close with F=100 of the previous `conn_gen` does not release or raise the
-  new copy.
+  new copy, **even if B's first start on the new connection was already accepted**.
+  (c) fresh connection, nothing accepted yet: B's close names the new `conn_gen` with
+  F=1 while start id=1 is still in flight; after the close, that id=1 is refused.
 
 ### 2.9 Holds (H5)
 - **Lease end.** `cleanup_owner` still forgets a delivered hold's row and fences the hold, as the
@@ -728,7 +767,8 @@ it runs.
   - `MCPArgs` gains `close_generation`, `close_lease_id` and `close_floors`;
   - `MCPResult` (1044) gains `ref MCPLeaseCloseCensus lease_close`, with `generation`,
     `lease_id`, `peer`, `state`, `entries[{name, state, reason}]`, `move_floor`, `weapon_floor`,
-    `net_low`, `net_high` and `floors[{net_low, net_high, conn_gen, move_id, weapon_id}]`;
+    `conn_gen` (client census: last received body generation), `net_low`, `net_high` and
+    `floors[{net_low, net_high, conn_gen, move_id, weapon_id}]`;
   - no constructor defaults (test_messages_contract.py:201-206).
 - **The names stay internal.**
   - They are not in `SERVER_COMMANDS` or `CLIENT_COMMANDS` (loopback.py:65, 102-138), so
@@ -784,8 +824,8 @@ step and any observer wait.
 |---|---|---|---|---|---|
 | S1 | Bots (`bot_start`) | `MCPBotControl.ShutdownAll`; keep object until FSM readback | `s_Running` not empty, or helper not idle / unread | idle FSM state, not only empty registry; reject+not-idle is residue; idle after reject may clear | MCP_BotControl.c:15, 100-123, 260-281, 360-375; V130/4_world/systems/bot/bot.c:331-341, 383-394; V130/3_game/systems/hfsmbase.c:393-395, 544-568 |
 | S2 | Infected overrides (`infected_drive`) | release each recorded infected (new registry) | unverified debt until process exit | none provable by reading; empty registry is not clean | MCPBridge.c:3091-3173; V130/3_game/entities/dayzcreatureaiinputcontroller.c:3-9 |
-| S3 | Move server copy (client `player_move`) | `MCPMoveCloseServer(floor)` (new); only if `m_MCPLastAcceptGen == m_MCPConnGen`, copies with id ≤ F | `m_MCPMoveActive` set, or floor below the client's on this connection | copy released, older starts refused; reconnect skip is a no-op | 4_World/MCP_PlayerMove.c:872, 885, 935-952, 1011-1022, 1097-1120, 1140-1147 |
-| S4 | Weapon server copy (client `weapon_*`) | `MCPWeaponCloseServer(W)` (new); refuse id ≤ last; then clear ≤ W | armed raise, pending request, or floor below W | last id stored; older raise/fire refused | 4_World/MCP_Weapon.c:696-703, 723-760, 795-812, 945-959, 963-998 |
+| S3 | Move server copy (client `player_move`) | `MCPMoveCloseServer(floor, conn_gen)` (new); only if close `conn_gen` equals `m_MCPConnGen` (accepted or not), copies with id ≤ F | `m_MCPMoveActive` set, or floor below the client's on this connection | copy released, older starts refused; other-gen close is a no-op; missing gen is OWED | 4_World/MCP_PlayerMove.c:872, 885, 935-952, 1011-1022, 1097-1120, 1140-1147 |
+| S4 | Weapon server copy (client `weapon_*`) | `MCPWeaponCloseServer(W, conn_gen)` (new); same `conn_gen` match, including last id 0; then refuse id ≤ last; then clear ≤ W | armed raise, pending request, or floor below W | last id stored; older raise/fire refused; missing gen is OWED | 4_World/MCP_Weapon.c:696-703, 723-760, 795-812, 945-959, 963-998 |
 | S5 | Jobs: spawn, seat, `inventory_move`; deletion refs of `loadout_clear`, `scene_clear` | register refs at dispatch; every timeout path transfers them before dropping the job | `m_Jobs` minus kept kinds and the observer; `deletion_pending` | timeout post plus register empty or residue | MCPBridge.c:71; 75b5d16 MCPBridge.c:4300-4311, 4486, 4805-4815, 6936-6941, 7308-7312; :2168-2196, 2312-2328, 2334-2364, 7294-7299 |
 | S6 | RPC in flight: `hands_take`, `hands_attach`, `inventory_move`, `notify_players` | none recalled; register by request id before send | register not empty | confirm, refuse, native settlement of that id, or process exit; notify until process exit | MCPBridge.c:896-901, 1726-1735, 1861-1870; 75b5d16 MCPBridge.c:1660-1683, 2778-2807; 4_World/MCP_Weapon.c:1067, 1252-1320, 1456, 1460-1463; 4_World/MCP_InventoryMove.c:101-114, 314-340; V130/3_game/client/notifications/notificationsystem.c:141-150 |
 | S7 | `server_perf` | kept | not censused | it only reads | 75b5d16 MCPBridge.c:5276-5300, 6967-6969, 7141-7144 |
@@ -881,7 +921,7 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | K5 | Every known peer | a server-only lease → a client close too, published first | client binding AMBIGUOUS (4746-4750) → client row OWED (`not_bound`), server close published at once |
 | K6 | Offline binding | one offline binding → two closes on one instance queue; each poll takes only its own (4613-4615); census reads ActionManagerClient (`m_PendingActionData`, V130 actionmanagerclient.c:804-814), not a cast to Server | a server poll never returns `lease_close_client` |
 | K7 | Identity | exact echo → clear | wrong generation, lease or peer → ignored, row CLOSING; another instance → `discarded`, row CLOSING; epoch bumped and re-BOUND → OWED (`binding_epoch_changed`) |
-| K8 | Delivery gate (H5) | close queued, no lease → delivered; delivered close, round times out, B degraded grant, B starts move by input with id > F **same `conn_gen`**, old close then runs → B's move continues; reconnect: body kept, new `conn_gen`, B id=1, old close F=100 of previous `conn_gen` does not apply | deadline passes, B granted degraded, next poll of a still-queued close → `lease_close_stale`; round 1's queued close when round 2 publishes → `lease_close_superseded`; a per-destination admission fence for B is not added |
+| K8 | Delivery gate (H5) | close queued, no lease → delivered; delivered close, round times out, B degraded grant, B starts move by input with id > F **same `conn_gen`**, old close then runs → B's move continues; reconnect: body kept, new `conn_gen`, B id=1, old close F=100 of previous `conn_gen` does not apply **even after B's first start on the new connection is accepted** (B's move continues, new floor unchanged); fresh connection, nothing accepted: B's close names the new `conn_gen` with F=1 while start id=1 is in flight → that id=1 is refused | deadline passes, B granted degraded, next poll of a still-queued close → `lease_close_stale`; round 1's queued close when round 2 publishes → `lease_close_superseded`; a per-destination admission fence for B is not added; close with no `conn_gen` → OWED, not a clean no-op |
 | K9 | Hook failures (H6) | normal hook → rows CLOSING | slots exhausted → OWED (`cleanup_worker_saturated`) at once; hook raises → OWED (`cleanup_failed`); hook returns `cleanup_fenced` → OWED (`close_not_reported`); hook past `cleanup_timeout_s` reports before the deadline → CLOSING, after it → stays OWED |
 | K10 | Past `MAX_QUEUE` (H6) | client queue holds `MAX_QUEUE` internal releases → the close is still published and delivered | at that queue `_publish_release_locked` refuses a release with `queue_full` (4296-4300), which proves the queue was full |
 | K11 | The waiter wakes (H9) | real clock, bound 0.2 s (constructor override): a thread in `wait` returns 200 with `lease_end_unconfirmed` within 0.35 s, with no other call | wake term removed (mutant) → it returns only at its own wait limit (1 s), so the POS assertion fails |
@@ -890,7 +930,7 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | K14 | Retirement and late results (H13) | queued close at `retire_role` → `binding_retired`, its late result → 200 `discarded`; delivered close → late result 409 `binding_retired`; the retired instance's own hold result → 200 and reconciles | the lifecycle write fails, `note_processes_gone` is not called → row stays OWED |
 | K15 | Quarantine | quarantine at lease end → no close, rows OWED (`retail_quarantine`), grant degraded at once; hold path as today | quarantine after the close was queued → delivery discards it (4672-4673) → OWED |
 | K16 | Holds (H2, H5, H9) | (a) delivered hold, both sides clean, hold result lost → next `action_hold` on that instance admitted; (b) both-sides-clean close before the hold result → result is a no-op; (c) at lease end no `action_hold_cancel` is queued and A's `pending_commands` is 0; (f) instance replaced: old exact holds become `hold_server_unverified`, new instance holds admitted | (d) residue client or server action → next hold on that instance 409 `hold_unreconciled`, grant degraded; (e) a clean close from another instance → fence stays; (g) interrupt is not sent from the **server** close; a hold player missing from floors → `hold_server_unchecked`; (h) own result `cleanup_complete=true` first while server helper still busy → fence stays; (i) START in flight, both helpers idle → `action_input_in_flight`, not clean |
-| K17 | Move and weapon floors (H1, H2, Q15, r3 H11) | client F=7 W=4 matching `conn_gen` → server close carries both, reports ≥ → both rows clear; late clean while still CLOSING → clear; late clean after OWED whose identity (close id, instance, `conn_gen`, F/W) still matches, atomic → **clears** | server first reports F=5 then client F=7 → OWED `player_move_floor_unapplied`; same for W → `weapon_floor_unapplied`; superseded or identity-mismatch late result stays OWED; unresolved player → OWED; issued grant is never rewritten |
+| K17 | Move and weapon floors (H1, H2, Q15, r3 H11) | client F=7 W=4 matching named `conn_gen` (equals body's `m_MCPConnGen`, even if lastId is 0) → server close carries both, reports ≥ → both rows clear; late clean while still CLOSING → clear; late clean after OWED whose identity (close id, instance, `conn_gen`, F/W) still matches, atomic → **clears** | server first reports F=5 then client F=7 → OWED `player_move_floor_unapplied`; same for W → `weapon_floor_unapplied`; missing or other `conn_gen` → OWED `player_move_conn_gen_unapplied` / `weapon_conn_gen_unapplied`; superseded or identity-mismatch late result stays OWED; unresolved player → OWED; issued grant is never rewritten |
 | K18 | Order across peers | the server close is published only after the client close settles | client silent → server close published at + 10 s, not earlier |
 | K19 | Interleavings and locks | (i) no poll between publish and report sees the close; (ii) expiry from `record_poll` → that same poll answer carries the client close; (iii) status and acquire during a blocked hook return; (iv) an outcome of round 1 flushed after round 2 opened → ignored | a mutant hook that waits for the game → the poll answer in (ii) comes only after the hook's timeout |
 | K21 | Payloads (H6) | grant `lease_end.settled` names the close ids; during a round status shows `lease_end` and `cleanup_degraded == []` | with an owed row the grant has `lease_end_unconfirmed` merged with another warning (direct wait assigns at 1095, 1124-1125, 1173-1174, 4141-4150); status `cleanup_degraded` stays `[]` |
@@ -928,7 +968,7 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 |---|---|---|
 | K1–K4; G1 | Keep the in-memory broker/coordinator repros; check the accumulated delivery mark after result and abandon. | Prove X was **delivered**, not only queued before timeout. If not, G1 is inconclusive. Name the object and the grant's close ids. |
 | K5–K7, K13–K14 | Both construction/attach orders; offline → two peers; role replace; persist fail; recovered fault that keeps other live runs. | Confirm surviving process identities and seed/clear of their debt. A binding change does not prove exit. |
-| K8, K17–K19 | Interleavings with a close **delivered** before timeout and dispatch after the grant; results after 40 s; supersession; atomic floor check; reconnect `conn_gen`. | Delay **only** that delivered close's DrainPending (G7 hook); B's input still ticks. A Python queue test does not measure this. `/set_poll_delay` is 5 s (loopback.py:5412-5419) and is not this instrument. |
+| K8, K17–K19 | Interleavings with a close **delivered** before timeout and dispatch after the grant; results after 40 s; supersession; atomic floor check; reconnect `conn_gen` match (old F after B's first accepted start; F=1 in flight on a fresh connection); missing `conn_gen` is OWED. | Delay **only** that delivered close's DrainPending (G7 hook); B's input still ticks. A Python queue test does not measure this. `/set_poll_delay` is 5 s (loopback.py:5412-5419) and is not this instrument. |
 | K9–K12, K15, K21 | Combine each failure with other warnings and keep `lease_end_unconfirmed`. Cover late callback, hook that publishes, hook that never publishes. Full queue plus close. | Separate POST attempt, received result and settlement. Measure both clocks; a Python deadline does not prove 25 s of simulation. |
 | K16, K26–K29; G2–G3 | Independent doubles of local and server state; START/interrupt in flight; own result before server helper; replaced-instance hold; RPC with job gone; notify register; late weapon start; rejected bot stop with idle vs not-idle. | Observe availability and rest on **both** sides. Camera and controls need readback; native channels need rejection of old activity. |
 | K27, K30; G5 | Drop positives that treat the next round as clean because the registry/job was emptied. Keep refs and obligations until resolved. | Infected probe (follow-up) isolates override effect. Deletions are watched until gone; reading the native declaration is not enough. |
@@ -1039,10 +1079,14 @@ protocol: lease, lifecycle guard, no direct kills, `session_status` before each 
   caps at 5 s and delays a poll, not this dispatch; it is not the instrument.
 - Send: deliver the server close, hold its DrainPending > 40 s; A's round times out; B gets a
   degraded grant and starts a `player_move` by input with id > F (same `conn_gen`); then
-  release the hold so the old close runs. Second run: reconnect, new `conn_gen`, B id=1,
-  old close F of the previous gen.
-- Pass: B's move continues in both runs. The close log does not release B's id. Without the
-  DrainPending hold the row is INCONCLUSO. A Python queue test is inconclusive.
+  release the hold so the old close runs. Second run: reconnect, new `conn_gen`, B's first
+  start accepted, **then** the old close F=100 of the previous gen runs. Third run:
+  reconnect, nothing accepted yet, B's close with F=1 of the new `conn_gen` while start
+  id=1 is in flight.
+- Pass: first two runs, B's move continues and the new floor is unchanged by the old
+  close. Third run, start id=1 is refused after the close. The close log does not
+  release B's id in the first two. Without the DrainPending hold the row is
+  INCONCLUSO. A Python queue test is inconclusive.
 
 **G6. Latency budgets (H12),** from A's release reply to B's grant reply:
 - no work (read-only commands only): no close in either log, at most 0.5 s;
