@@ -1853,6 +1853,78 @@ class DoctorTest(unittest.TestCase):
             ],
         )
 
+    def test_t22_crash_reporter_unknown_snapshot_and_identity_mismatch(self) -> None:
+        reporter = {
+            "pid": 40784,
+            "creation_time_utc": "2026-07-15T00:01:00.0000000Z",
+            "executable_sha256": "a" * 64,
+            "command_line_sha256": "b" * 64,
+            "role": "crash_reporter",
+            "identity_scheme": "psutil-argv-v2",
+        }
+        run = {
+            "run_id": "run-1",
+            "owner_session_id": None,
+            "owner_lease_id": None,
+            "state": "RUNNING_IDLE",
+            "label": "fixture",
+            "mod": "@Fixture",
+            "profiles": "profiles",
+            "mission": "mission",
+            "processes": [reporter],
+        }
+        (self.runtime / "runs.json").write_text(
+            json.dumps({"version": 1, "runs": [run]}), encoding="utf-8"
+        )
+
+        def failed_crash(names: list[str]) -> dict[str, object]:
+            if "CrashReporter.exe" in names:
+                return {"known": False, "processes": []}
+            return {"known": True, "processes": []}
+
+        payload, _exit_code = self.execute(
+            process_snapshot=failed_crash,
+            process_identity=lambda pid: {**reporter, "identity_complete": True},
+        )
+        self.assertNotEqual(payload.get("error"), "diagnostic_failure")
+        scan_failed = [
+            item
+            for item in payload["findings"]
+            if item["code"] == "PROCESS_SCAN_FAILED"
+            and item.get("scope") == "crash_reporter"
+        ]
+        self.assertEqual(len(scan_failed), 1)
+        stale = [
+            item
+            for item in payload["findings"]
+            if item["code"] == "RUN_STALE" and item.get("pid") == 40784
+        ]
+        self.assertEqual(stale, [])
+
+        def live_snapshot(names: list[str]) -> dict[str, object]:
+            if "CrashReporter.exe" in names:
+                return {
+                    "known": True,
+                    "processes": [{"pid": 40784, "name": "CrashReporter.exe"}],
+                }
+            return {"known": True, "processes": []}
+
+        other = {
+            **reporter,
+            "identity_complete": True,
+            "creation_time_utc": "2099-01-01T00:00:00.0000000Z",
+        }
+        payload, _exit_code = self.execute(
+            process_snapshot=live_snapshot,
+            process_identity=lambda pid: dict(other),
+        )
+        mismatch = [
+            item
+            for item in payload["findings"]
+            if item["code"] == "RUN_IDENTITY_MISMATCH" and item.get("pid") == 40784
+        ]
+        self.assertEqual(len(mismatch), 1)
+
 
 class NativeBundleExternalsTests(unittest.TestCase):
     def test_all_matching_externals_emit_ok_finding(self) -> None:

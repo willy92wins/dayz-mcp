@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -228,6 +230,8 @@ class CrashReporter7417Test(unittest.TestCase):
         writes_before = self.store.paths.runs_path.read_bytes()
         reaped = self.lifecycle.reap_dead_runs()
         self.assertEqual(reaped, [])
+        pins = [self.anchors.tokens[40784], self.anchors.tokens[51036]]
+        self.assertEqual(self.anchors.closed, pins)
         stored = self.store.get(RUN_ID)
         reporters = [item for item in stored.processes if item.role == "crash_reporter"]
         self.assertEqual(sorted(item.pid for item in reporters), [40784, 51036])
@@ -254,7 +258,8 @@ class CrashReporter7417Test(unittest.TestCase):
             [40784, 51036],
         )
         self.assertEqual(closed_before_gone, [])
-        self.assertEqual(len(self.anchors.closed), 2)
+        parents = [self.anchors.tokens[server.pid], self.anchors.tokens[client.pid]]
+        self.assertCountEqual(self.anchors.closed, pins + parents)
 
     def test_t3_negative_rows_are_not_registered(self) -> None:
         server = process(57116, "server")
@@ -544,7 +549,7 @@ class CrashReporter7417Test(unittest.TestCase):
     def test_t7_live_matching_parent_needs_no_anchor(self) -> None:
         server = process(57116, "server")
         self.add_run(server)
-        self.lifecycle.parent_anchor = None
+        self.anchors.refuse.add(server.pid)
         self.guard.snapshots[server.pid] = snapshot(server)
         self.guard.snapshots[40784] = self.reporter_snapshot(
             40784, "2026-07-15T00:01:00.0000000Z"
@@ -556,6 +561,8 @@ class CrashReporter7417Test(unittest.TestCase):
             [item.role for item in stored.processes if item.role == "crash_reporter"],
             ["crash_reporter"],
         )
+        self.assertEqual(self.lifecycle._parent_anchors, {})
+        self.assertIn(40784, self.anchors.opened)
 
     def test_t9_crash_reporter_is_not_a_parent(self) -> None:
         server = process(57116, "server")
@@ -840,8 +847,14 @@ class CrashReporter7417Test(unittest.TestCase):
     def test_t13_second_loop_handles_pid_and_creation_time(self) -> None:
         server = process(57116, "server")
         client = process(53904, "client")
+        self.anchors.refuse.add(server.pid)
         self.add_run(server, client)
         self.anchor_alive(server, client)
+        self.assertNotIn(
+            (RUN_ID, server.pid, server.creation_time_utc),
+            self.lifecycle._parent_anchors,
+        )
+        self.anchors.refuse.discard(server.pid)
         self.guard.snapshots[server.pid] = snapshot(server)
         self.guard.snapshots[client.pid] = dict(GONE)
         reused = self.reporter_snapshot(server.pid, "2026-07-15T00:02:00.0000000Z")
@@ -866,6 +879,7 @@ class CrashReporter7417Test(unittest.TestCase):
             [record.pid for record in self.guard.terminate_calls],
             [server.pid, server.pid],
         )
+        self.assertIn(server.pid, self.anchors.opened)
 
     def test_t14_second_loop_process_not_found_is_gone(self) -> None:
         server = process(57116, "server")
@@ -895,6 +909,416 @@ class CrashReporter7417Test(unittest.TestCase):
         self.assertEqual(stopped.get("state"), "EXITED")
         self.assertEqual(stopped.get("terminated"), 1)
         self.assertEqual(stopped.get("stop_method"), "forced_kill")
+
+    def test_t15_second_walk_ppid_change_and_pin_none(self) -> None:
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchors.refuse.add(server.pid)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.guard.snapshots[40784] = self.reporter_snapshot(
+            40784, "2026-07-15T00:01:00.0000000Z"
+        )
+        walks = {"n": 0}
+
+        def probe() -> dict[str, object]:
+            walks["n"] += 1
+            if walks["n"] == 1:
+                return {
+                    "known": True,
+                    "processes": [self.reporter_row(40784, server.pid)],
+                }
+            return {
+                "known": True,
+                "processes": [self.reporter_row(40784, 1)],
+            }
+
+        self.lifecycle.child_probe = probe
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        stored = self.store.get(RUN_ID)
+        self.assertNotIn("crash_reporter", [item.role for item in stored.processes])
+        self.assertEqual(self.guard.terminate_calls, [])
+        self.assertIn(40784, self.anchors.opened)
+        self.assertIn(self.anchors.tokens[40784], self.anchors.closed)
+
+        self.anchors.refuse.add(40784)
+        walks["n"] = 0
+
+        def same_walk() -> dict[str, object]:
+            return {
+                "known": True,
+                "processes": [self.reporter_row(40784, server.pid)],
+            }
+
+        self.lifecycle.child_probe = same_walk
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "child_scan_unknown")
+
+        self.anchors.refuse.discard(40784)
+        walks["n"] = 0
+
+        def missing_later() -> dict[str, object]:
+            walks["n"] += 1
+            if walks["n"] == 1:
+                return {
+                    "known": True,
+                    "processes": [self.reporter_row(40784, server.pid)],
+                }
+            return {"known": True, "processes": []}
+
+        self.lifecycle.child_probe = missing_later
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        stored = self.store.get(RUN_ID)
+        self.assertNotIn("crash_reporter", [item.role for item in stored.processes])
+        self.assertNotEqual(stored.state, "EXITED")
+
+    def test_t16_gate_zero_registered_reporter_survives_restart(self) -> None:
+        server = process(57116, "server")
+        reporter = ProcessRecord(
+            40784,
+            "2026-07-15T00:01:00.0000000Z",
+            self.reporter_hash,
+            "c" * 64,
+            "crash_reporter",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.add_run(server, reporter)
+        self.guard.snapshots[server.pid] = dict(GONE)
+        self.guard.snapshots[reporter.pid] = self.reporter_snapshot(
+            reporter.pid, reporter.creation_time_utc
+        )
+        self.guard.snapshots[51036] = self.reporter_snapshot(
+            51036, "2026-07-15T00:01:02.0000000Z"
+        )
+        self.child_rows = [
+            self.reporter_row(reporter.pid, server.pid),
+            self.reporter_row(51036, server.pid),
+        ]
+        fresh = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
+            coordinator=self.coordinator,
+            manifest=self.store,
+            audit=self.audit,
+            guard=self.guard,
+            retail_probe=lambda: {"known": True, "processes": []},
+            diag_probe=lambda: {"known": True, "processes": []},
+            game_path=self.game,
+            launcher=self.launcher,
+            id_fn=lambda: "run-1",
+            child_probe=lambda: {"known": True, "processes": list(self.child_rows)},
+            parent_anchor=(self.anchors.open, self.anchors.close),
+        )
+        refused = fresh.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(refused.get("error"), "crash_reporter_parent_unverified")
+        self.child_rows = [self.reporter_row(reporter.pid, server.pid)]
+        adopted = fresh.adopt_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(adopted.get("ok"), True)
+        self.guard.terminate_calls.clear()
+        stopped = fresh.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("ok"), True)
+        self.assertEqual(stopped.get("state"), "EXITED")
+        self.assertEqual(
+            [record.pid for record in self.guard.terminate_calls],
+            [reporter.pid],
+        )
+        self.assertNotEqual(stopped.get("error"), "crash_reporter_parent_unverified")
+
+        only = ProcessRecord(
+            40784,
+            "2026-07-15T00:01:00.0000000Z",
+            self.reporter_hash,
+            "c" * 64,
+            "crash_reporter",
+            identity_scheme="psutil-argv-v2",
+        )
+        idle = RunRecord(
+            "run-idle-reporter",
+            None,
+            None,
+            "UNRECONCILED",
+            "same",
+            "@SameMod",
+            "profiles",
+            "mission",
+            [only],
+        )
+        self.store.add(idle)
+        self.guard.snapshots[only.pid] = self.reporter_snapshot(
+            only.pid, only.creation_time_utc
+        )
+        self.lifecycle.diag_probe = lambda: {"known": True, "processes": []}
+        reconciled = self.lifecycle.admin_reconcile(
+            "run-idle-reporter", only.pid, "incident"
+        )
+        self.assertEqual(reconciled.get("reconciled"), True)
+        stored = self.store.get("run-idle-reporter")
+        self.assertEqual(stored.state, "RUNNING_IDLE")
+        self.assertEqual([item.role for item in stored.processes], ["crash_reporter"])
+
+    def test_t17_unknown_parent_snapshot_is_parent_scan_unknown(self) -> None:
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchor_alive(server)
+        self.guard.snapshots[server.pid] = {"error": "identity_unavailable"}
+        self.guard.snapshots[40784] = self.reporter_snapshot(
+            40784, "2026-07-15T00:01:00.0000000Z"
+        )
+        self.child_rows = [self.reporter_row(40784, server.pid)]
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+        stored = self.store.get(RUN_ID)
+        self.assertNotEqual(stored.state, "EXITED")
+        self.assertNotIn("crash_reporter", [item.role for item in stored.processes])
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "parent_scan_unknown")
+        self.guard.snapshots[server.pid] = dict(GONE)
+        self.assertEqual(self.lifecycle.reap_dead_runs(), [])
+
+    def test_t18_quarantine_and_warden_partial_keep_parents(self) -> None:
+        server = process(57116, "server")
+        reporter = ProcessRecord(
+            40784,
+            "2026-07-15T00:01:00.0000000Z",
+            self.reporter_hash,
+            "c" * 64,
+            "crash_reporter",
+            identity_scheme="psutil-argv-v2",
+        )
+        self.add_run(server, reporter)
+        self.anchor_alive(server)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.guard.snapshots[reporter.pid] = self.reporter_snapshot(
+            reporter.pid, reporter.creation_time_utc
+        )
+        original = self.guard.terminate
+        hits = {"n": 0}
+
+        def terminate_then_quarantine(record: ProcessRecord) -> dict[str, object]:
+            result = original(record)
+            hits["n"] += 1
+            if hits["n"] == 1:
+                self.lifecycle.retail_probe = lambda: {
+                    "known": True,
+                    "processes": [{"pid": 1, "name": "DayZ_x64.exe"}],
+                }
+            return result
+
+        self.guard.terminate = terminate_then_quarantine  # type: ignore[method-assign]
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (reporter.pid, "crash_reporter")],
+        )
+
+        self.lifecycle.retail_probe = lambda: {"known": True, "processes": []}
+        run = self.store.get(RUN_ID)
+        run.state = "RUNNING"
+        run.owner_session_id = "A"
+        run.owner_lease_id = "lease-A"
+        run.processes = [server, reporter]
+        self.store.replace(run)
+        self.guard.terminate = original  # type: ignore[method-assign]
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.guard.snapshots[reporter.pid] = self.reporter_snapshot(
+            reporter.pid, reporter.creation_time_utc
+        )
+        guard = {
+            "operation": "stop",
+            "session_id": IDENTITY_A.session_id,
+            "run_id": RUN_ID,
+            "expected": tuple(),
+            "allow_gone": False,
+            "settings_path": self.root / "idle.json",
+            "wall": 0.0,
+        }
+        boundaries = {"n": 0}
+
+        def boundary(*_args, **_kwargs):
+            boundaries["n"] += 1
+            if boundaries["n"] == 1:
+                return None
+            return ("operation", "warden_disabled")
+
+        with patch.object(self.lifecycle, "_warden_idle_guard", return_value=guard), patch.object(
+            self.lifecycle, "_idle_switch_on", return_value=True
+        ), patch.object(
+            self.lifecycle, "_idle_anchors_changed", return_value=False
+        ), patch.object(
+            self.lifecycle, "_idle_destruction_refusal", return_value=None
+        ), patch.object(
+            self.lifecycle, "_idle_effect_boundary", side_effect=boundary
+        ):
+            partial = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(partial.get("error"), "partial_stop")
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (reporter.pid, "crash_reporter")],
+        )
+
+    def test_t19_warden_stop_scans_after_kills(self) -> None:
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchor_alive(server)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        created = "2026-07-15T00:01:00.0000000Z"
+        self.guard.snapshots[40784] = self.reporter_snapshot(40784, created)
+        scans = {"n": 0}
+
+        def probe() -> dict[str, object]:
+            scans["n"] += 1
+            if scans["n"] < 2:
+                return {"known": True, "processes": []}
+            return {
+                "known": True,
+                "processes": [self.reporter_row(40784, server.pid)],
+            }
+
+        self.lifecycle.child_probe = probe
+        guard = {
+            "operation": "stop",
+            "session_id": IDENTITY_A.session_id,
+            "run_id": RUN_ID,
+            "expected": tuple(),
+            "allow_gone": False,
+            "settings_path": self.root / "idle.json",
+            "wall": 0.0,
+        }
+        with patch.object(self.lifecycle, "_warden_idle_guard", return_value=guard), patch.object(
+            self.lifecycle, "_idle_switch_on", return_value=True
+        ), patch.object(
+            self.lifecycle, "_idle_anchors_changed", return_value=False
+        ), patch.object(
+            self.lifecycle, "_idle_destruction_refusal", return_value=None
+        ), patch.object(
+            self.lifecycle, "_idle_effect_boundary", return_value=None
+        ):
+            stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("error"), "partial_cleanup")
+        self.assertEqual(stopped.get("reason"), "crash_reporter_left")
+        self.assertEqual(
+            [record.pid for record in self.guard.terminate_calls],
+            [server.pid],
+        )
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(stored.state, "UNRECONCILED")
+        self.assertEqual(
+            [(item.pid, item.role) for item in stored.processes],
+            [(server.pid, "server"), (40784, "crash_reporter")],
+        )
+
+        run = self.store.get(RUN_ID)
+        run.state = "RUNNING"
+        run.owner_session_id = "A"
+        run.owner_lease_id = "lease-A"
+        run.processes = [server]
+        self.store.replace(run)
+        self.guard.snapshots[server.pid] = snapshot(server)
+        self.guard.terminate_calls.clear()
+        self.lifecycle.child_probe = lambda: {"known": True, "processes": []}
+        with patch.object(self.lifecycle, "_warden_idle_guard", return_value=guard), patch.object(
+            self.lifecycle, "_idle_switch_on", return_value=True
+        ), patch.object(
+            self.lifecycle, "_idle_anchors_changed", return_value=False
+        ), patch.object(
+            self.lifecycle, "_idle_destruction_refusal", return_value=None
+        ), patch.object(
+            self.lifecycle, "_idle_effect_boundary", return_value=None
+        ):
+            clean = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(clean.get("ok"), True)
+        self.assertEqual(clean.get("state"), "EXITED")
+
+    def test_t20_recover_launch_intent_anchors_the_record(self) -> None:
+        profiles = self.root / "profiles"
+        profiles.mkdir()
+        instance = str(uuid.uuid4())
+        (profiles / "dayz_mcp.json").write_text(
+            json.dumps({"instance": instance}), encoding="utf-8"
+        )
+        exe = str(self.game / "DayZDiag_x64.exe")
+        argv = [exe, f"-profiles={profiles}"]
+        hashes = identity_hashes(exe, argv)
+        created = "2026-07-15T00:00:10.0000000Z"
+        pid = 9001
+        self.guard.snapshots[pid] = {
+            "pid": pid,
+            "creation_time_utc": created,
+            "executable_sha256": hashes["executable_sha256"],
+            "command_line_sha256": hashes["command_line_sha256"],
+            "identity_scheme": "psutil-argv-v2",
+            "identity_complete": True,
+        }
+        self.lifecycle.diag_probe = lambda: {
+            "known": True,
+            "processes": [{"pid": pid, "name": "DayZDiag_x64.exe"}],
+        }
+        run = RunRecord(
+            RUN_ID,
+            "A",
+            "lease-A",
+            "STARTING",
+            "same",
+            "@SameMod",
+            "profiles",
+            "mission",
+            [],
+        )
+        self.store.add(run)
+        stamp_launcher(self.lifecycle, run.run_id, IDENTITY_A)
+        intent_path = self.store.paths.runs_path.with_name("launch-intent.json")
+        intent_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "run_id": RUN_ID,
+                    "role": "client",
+                    "instance": instance,
+                    "profiles": str(profiles),
+                    "command_line_sha256": hashes["command_line_sha256"],
+                    "owner_session_id": "A",
+                    "owner_lease_id": "lease-A",
+                    "not_before_utc": created,
+                }
+            ),
+            encoding="utf-8",
+        )
+        outcome = self.lifecycle.recover_launch_intent()
+        self.assertEqual(outcome.get("launch_intent"), "recovered", outcome)
+        stored = self.store.get(RUN_ID)
+        key = (RUN_ID, stored.processes[0].pid, stored.processes[0].creation_time_utc)
+        self.assertIn(key, self.lifecycle._parent_anchors)
+        closed_before = list(self.anchors.closed)
+        self.guard.snapshots[pid] = dict(GONE)
+        stopped = self.lifecycle.stop_run(IDENTITY_A, self.token_a, RUN_ID)
+        self.assertEqual(stopped.get("ok"), True)
+        self.assertEqual(self.lifecycle._parent_anchors, {})
+        self.assertGreater(len(self.anchors.closed), len(closed_before))
+
+    def test_t21_gone_child_snapshot_is_skipped(self) -> None:
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchor_alive(server)
+        self.guard.snapshots[server.pid] = dict(GONE)
+        self.guard.snapshots[40784] = dict(GONE)
+        self.child_rows = [self.reporter_row(40784, server.pid)]
+        reaped = self.lifecycle.reap_dead_runs()
+        self.assertEqual(reaped, [RUN_ID])
+        stored = self.store.get(RUN_ID)
+        self.assertEqual(stored.state, "EXITED")
+        self.assertEqual(stored.processes, [])
+
+    def test_t23_repair_manifest_recovery_releases_anchors(self) -> None:
+        server = process(57116, "server")
+        self.add_run(server)
+        self.anchor_alive(server)
+        self.assertTrue(self.lifecycle._parent_anchors)
+        raw = b'{"version":1,"runs":[]}'
+        result = self.lifecycle.repair_manifest_recovery(raw)
+        self.assertEqual(result.get("terminal_safe"), True)
+        self.assertEqual(self.lifecycle._parent_anchors, {})
+        self.assertTrue(self.anchors.closed)
 
 
 class DaemonWiring7417Test(unittest.TestCase):

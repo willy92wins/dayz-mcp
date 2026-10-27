@@ -127,4 +127,4 @@ Plus the suites that cover the lifecycle (`test_run_reaper`, `test_bug104_reap_u
 ## Docs
 
 - CHANGELOG, Fixed: what C1 to C4 change for a caller, with the inbox id, including that a reporter registered before a daemon restart is still stopped and that the warden's stop leaves a reporter it finds for a later stop.
-- `tools/README-mcp.md`, Troubleshooting: a DayZ crash can leave `CrashReporter.exe` holding the run's ports; `dayz_test_stop` on that run closes it. A run retired before this release, and a reporter answered `crash_reporter_parent_unverified`, are closed by hand: the audit row names the reporter's pid and ppid.
+- `tools/README-mcp.md`, Troubleshooting: a DayZ crash can leave `CrashReporter.exe` holding the run's ports; `dayz_test_stop` on that run kills it. The reporters of a run retired before this release, which have no record, and a reporter refused as `crash_reporter_parent_unverified`, whose pid and ppid its audit row names, are closed by hand, after checking that the process with that pid is this install's `CrashReporter.exe` started after the run's launch.

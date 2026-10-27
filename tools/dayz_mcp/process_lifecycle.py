@@ -5097,86 +5097,166 @@ class ProcessLifecycle:
         ]
         added: list[tuple[ProcessRecord, int]] = []
         scan_reason: str | None = None
-        for row in rows:
-            if str(row["name"]).casefold() != "crashreporter.exe":
-                continue
-            pid = int(row["pid"])
-            ppid = int(row["ppid"])
-            parent = next((record for record in parents if record.pid == ppid), None)
-            if parent is None:
-                continue
-            try:
-                parent_snap = self.guard.snapshot(ppid)
-            except Exception:
-                continue
-            if not isinstance(parent_snap, dict):
-                continue
-            parent_gone = (
-                parent_snap.get("error") == "process_not_found"
-                and parent_snap.get("exit_code") == 4
+        pins: list[tuple[int, int, object, ProcessRecord]] = []
+
+        def _process_not_found(actual: object) -> bool:
+            return (
+                isinstance(actual, dict)
+                and actual.get("error") == "process_not_found"
+                and actual.get("exit_code") == 4
             )
-            if parent_gone:
-                if not self._parent_is_anchored(run, parent):
-                    self._audit(
-                        "crash_reporter_parent_unverified",
-                        None,
-                        "identity_unverified",
-                        "denied",
-                        run_id=run.run_id,
-                        pid=pid,
-                        ppid=ppid,
-                    )
-                    scan_reason = "crash_reporter_parent_unverified"
+
+        try:
+            for row in rows:
+                pid = int(row["pid"])
+                ppid = int(row["ppid"])
+                existing = [
+                    record
+                    for record in run.processes
+                    if record.role == "crash_reporter" and record.pid == pid
+                ]
+                if existing:
+                    # Gate 0 (inbox 7417, H2): a row that still is the
+                    # registered reporter is skipped before any parent gate.
+                    try:
+                        known = self.guard.snapshot(pid)
+                    except Exception:
+                        scan_reason = "child_scan_unknown"
+                        continue
+                    if _process_not_found(known):
+                        continue
+                    if any(
+                        self._identity_matches(record, known) for record in existing
+                    ):
+                        continue
+                    if (
+                        not isinstance(known, dict)
+                        or known.get("identity_complete") is not True
+                    ):
+                        scan_reason = "child_scan_unknown"
+                        continue
+                if str(row["name"]).casefold() != "crashreporter.exe":
                     continue
-            elif not self._identity_matches(parent, parent_snap):
-                continue
-            try:
-                child_snap = self.guard.snapshot(pid)
-            except Exception:
-                scan_reason = "child_scan_unknown"
-                continue
-            if not isinstance(child_snap, dict):
-                scan_reason = "child_scan_unknown"
-                continue
-            if (
-                child_snap.get("error") == "process_not_found"
-                and child_snap.get("exit_code") == 4
-            ):
-                continue
-            if child_snap.get("identity_complete") is not True:
-                scan_reason = "child_scan_unknown"
-                continue
-            if (
-                str(child_snap.get("executable_sha256", "")).casefold()
-                != expected_exe.casefold()
-            ):
-                continue
-            child_stamp = _utc_epoch(str(child_snap.get("creation_time_utc") or ""))
-            parent_stamp = _utc_epoch(parent.creation_time_utc)
-            if child_stamp is None or parent_stamp is None or child_stamp < parent_stamp:
-                continue
-            creation = child_snap.get("creation_time_utc")
-            exe = child_snap.get("executable_sha256")
-            cmd = child_snap.get("command_line_sha256")
-            scheme = child_snap.get("identity_scheme", "psutil-argv-v2")
-            if any(
-                record.pid == pid and record.creation_time_utc == creation
-                for record in run.processes
-            ):
-                continue
-            try:
-                record = ProcessRecord(
-                    pid,
-                    creation,
-                    exe,
-                    cmd,
-                    "crash_reporter",
-                    identity_scheme=scheme if isinstance(scheme, str) else "psutil-argv-v2",
+                parent = next(
+                    (record for record in parents if record.pid == ppid), None
                 )
-                record.validate()
-            except Exception:
-                continue
-            added.append((record, ppid))
+                if parent is None:
+                    continue
+                try:
+                    parent_snap = self.guard.snapshot(ppid)
+                except Exception:
+                    scan_reason = "parent_scan_unknown"
+                    continue
+                if not isinstance(parent_snap, dict):
+                    scan_reason = "parent_scan_unknown"
+                    continue
+                parent_gone = _process_not_found(parent_snap)
+                if parent_gone:
+                    if not self._parent_is_anchored(run, parent):
+                        self._audit(
+                            "crash_reporter_parent_unverified",
+                            None,
+                            "identity_unverified",
+                            "denied",
+                            run_id=run.run_id,
+                            pid=pid,
+                            ppid=ppid,
+                        )
+                        scan_reason = "crash_reporter_parent_unverified"
+                        continue
+                elif self._identity_matches(parent, parent_snap):
+                    pass
+                elif parent_snap.get("identity_complete") is True:
+                    continue
+                else:
+                    scan_reason = "parent_scan_unknown"
+                    continue
+                pair = self.parent_anchor
+                if pair is None:
+                    scan_reason = "child_scan_unknown"
+                    continue
+                open_fn, _close_fn = pair
+                try:
+                    token = open_fn(pid)
+                except Exception:
+                    scan_reason = "child_scan_unknown"
+                    continue
+                if token is None:
+                    scan_reason = "child_scan_unknown"
+                    continue
+                pins.append((pid, ppid, token, parent))
+            if pins:
+                later_reason, later_rows = self._crash_reporter_probe_rows()
+                if later_reason is not None or later_rows is None:
+                    return later_reason or "child_scan_unknown"
+                listed = {
+                    int(item["pid"]): int(item["ppid"]) for item in later_rows
+                }
+                for pid, ppid, _token, parent in pins:
+                    if listed.get(pid) != ppid:
+                        continue
+                    try:
+                        child_snap = self.guard.snapshot(pid)
+                    except Exception:
+                        scan_reason = "child_scan_unknown"
+                        continue
+                    if not isinstance(child_snap, dict):
+                        scan_reason = "child_scan_unknown"
+                        continue
+                    if _process_not_found(child_snap):
+                        continue
+                    if child_snap.get("identity_complete") is not True:
+                        scan_reason = "child_scan_unknown"
+                        continue
+                    if (
+                        str(child_snap.get("executable_sha256", "")).casefold()
+                        != expected_exe.casefold()
+                    ):
+                        continue
+                    child_stamp = _utc_epoch(
+                        str(child_snap.get("creation_time_utc") or "")
+                    )
+                    parent_stamp = _utc_epoch(parent.creation_time_utc)
+                    if (
+                        child_stamp is None
+                        or parent_stamp is None
+                        or child_stamp < parent_stamp
+                    ):
+                        continue
+                    creation = child_snap.get("creation_time_utc")
+                    exe = child_snap.get("executable_sha256")
+                    cmd = child_snap.get("command_line_sha256")
+                    scheme = child_snap.get("identity_scheme", "psutil-argv-v2")
+                    if any(
+                        record.pid == pid and record.creation_time_utc == creation
+                        for record in run.processes
+                    ):
+                        continue
+                    try:
+                        record = ProcessRecord(
+                            pid,
+                            creation,
+                            exe,
+                            cmd,
+                            "crash_reporter",
+                            identity_scheme=(
+                                scheme
+                                if isinstance(scheme, str)
+                                else "psutil-argv-v2"
+                            ),
+                        )
+                        record.validate()
+                    except Exception:
+                        continue
+                    added.append((record, ppid))
+        finally:
+            close_fn = None if self.parent_anchor is None else self.parent_anchor[1]
+            for _pid, _ppid, token, _parent in pins:
+                if close_fn is not None:
+                    try:
+                        close_fn(token)
+                    except Exception:
+                        pass
         if added:
             for record, _ppid in added:
                 run.processes.append(record)
@@ -5675,7 +5755,9 @@ class ProcessLifecycle:
                         run.owner_session_id = None
                         run.owner_lease_id = None
                         run.state = "UNRECONCILED"
-                        run.processes = list(survivors)
+                        run.processes = self._kept_after_partial_stop(
+                            run, list(survivors), keep_parents=False
+                        )
                         degraded: list[str] = []
                         try:
                             self.manifest.replace(run)
@@ -5973,11 +6055,60 @@ class ProcessLifecycle:
                         terminated += 1
                         acted_pids.append(record.pid)
                         handled.add((record.pid, record.creation_time_utc))
+                if stop_guard is not None:
+                    before_warden_scan = {
+                        (item.pid, item.creation_time_utc)
+                        for item in run.processes
+                    }
+                    warden_scan = self._register_crash_reporters_locked(run)
+                    fresh = [
+                        item
+                        for item in run.processes
+                        if (item.pid, item.creation_time_utc)
+                        not in before_warden_scan
+                    ]
+                    if warden_scan is not None or fresh:
+                        run.owner_session_id = None
+                        run.owner_lease_id = None
+                        run.state = "UNRECONCILED"
+                        run.processes = self._kept_after_partial_stop(
+                            run, list(survivors) + fresh, keep_parents=True
+                        )
+                        degraded = []
+                        try:
+                            self.manifest.replace(run)
+                        except Exception:
+                            degraded.append("manifest_failed")
+                        else:
+                            self._invalidate_box_cache()
+                        self.clear_idle_retirement(run_id)
+                        warden_reason = warden_scan or "crash_reporter_left"
+                        response: dict[str, object] = {
+                            "error": "partial_cleanup",
+                            "reason": warden_reason,
+                            "terminated": terminated,
+                            "run_id": run_id,
+                            "_http_status": 409,
+                        }
+                        if degraded:
+                            response["cleanup_degraded"] = degraded
+                        return self._terminal_outcome(
+                            response,
+                            "lifecycle_stop_outcome",
+                            client,
+                            reason=warden_reason,
+                            decision="partial_cleanup",
+                            run_id=run_id,
+                            state="UNRECONCILED",
+                            terminated=terminated,
+                        )
                 if stop_guard is not None and acted_pids and untouched_reasons:
                     run.owner_session_id = None
                     run.owner_lease_id = None
                     run.state = "UNRECONCILED"
-                    run.processes = list(survivors)
+                    run.processes = self._kept_after_partial_stop(
+                        run, list(survivors), keep_parents=False
+                    )
                     degraded_partial: list[str] = []
                     try:
                         self.manifest.replace(run)
@@ -8088,6 +8219,7 @@ class ProcessLifecycle:
             except Exception:
                 return {"terminal_safe": False, "error": "manifest_drift"}
             self.manifest = restored
+            self._release_parent_anchors_locked()
             self._invalidate_box_cache()
             for run in restored.list_runs():
                 if (
@@ -8851,7 +8983,11 @@ class ProcessLifecycle:
                 if survivor_error is not None:
                     return self._error(survivor_error, survivor_status)
                 diag_ok, diag_error = self._diag_snapshot_registered(
-                    {record.pid for record in survivors}
+                    {
+                        record.pid
+                        for record in survivors
+                        if record.role in _CRASH_REPORTER_PARENT_ROLES
+                    }
                 )
                 if not diag_ok:
                     return self._error(diag_error, 409)
@@ -8880,7 +9016,11 @@ class ProcessLifecycle:
                 if survivor_error is not None:
                     return self._error(survivor_error, survivor_status)
                 diag_ok, diag_error = self._diag_snapshot_registered(
-                    {record.pid for record in survivors}
+                    {
+                        record.pid
+                        for record in survivors
+                        if record.role in _CRASH_REPORTER_PARENT_ROLES
+                    }
                 )
                 if not diag_ok:
                     return self._error(diag_error, 409)
