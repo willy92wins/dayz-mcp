@@ -2383,10 +2383,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PlayerBase player;
 		HumanCommandVehicle vehicleCommand;
 		Transport transport;
+		Transport seatedTransport;
 		CarScript car;
 		PlayerIdentity ownerIdentity;
 		int lowBits = 0;
 		int highBits = 0;
+		bool usePos = false;
 
 		result.ok = true;
 		result.found = false;
@@ -2395,21 +2397,46 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.type = "";
 		result.classname = "";
 
+		if (command.args && command.args.pos && command.args.pos.Count() > 0)
+		{
+			if (command.args.pos.Count() != 3 || !IsFiniteFloat(command.args.pos.Get(0)) || !IsFiniteFloat(command.args.pos.Get(1)) || !IsFiniteFloat(command.args.pos.Get(2)) || command.args.pos.Get(0) * 0.0 != 0.0 || command.args.pos.Get(1) * 0.0 != 0.0 || command.args.pos.Get(2) * 0.0 != 0.0)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+
+			usePos = true;
+		}
+
 		player = PlayerBase.Cast(GetGame().GetPlayer());
 		if (!player)
 		{
 			return true;
 		}
 
-		transport = ResolveLiveSeatedTransport(player);
+		seatedTransport = ResolveLiveSeatedTransport(player);
+		if (usePos)
+		{
+			transport = FindTransportNearClient(Vector(command.args.pos.Get(0), command.args.pos.Get(1), command.args.pos.Get(2)));
+		}
+		else
+		{
+			transport = seatedTransport;
+		}
+
 		if (!transport)
 		{
 			return true;
 		}
 
 		result.found = true;
-		result.seated = true;
-		result.seat = "unknown";
+		result.seated = transport == seatedTransport;
+		result.seat = "";
+		if (result.seated)
+		{
+			result.seat = "unknown";
+		}
 		result.type = transport.GetType();
 		result.classname = transport.ClassName();
 		// Same vector as vehicle_trace direction_x/y/z (Object.GetDirection, object.c:320).
@@ -2417,7 +2444,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		VectorToArray(transport.GetDirection(), result.direction);
 
 		vehicleCommand = player.GetCommand_Vehicle();
-		if (vehicleCommand && vehicleCommand.GetTransport() == transport)
+		if (result.seated && vehicleCommand && vehicleCommand.GetTransport() == transport)
 		{
 			result.seat = VehicleTelemetrySeatToken(vehicleCommand.GetVehicleSeat());
 		}
@@ -2430,6 +2457,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		result.speedo_max = car.GetSpeedometer();
 		result.gear = car.GetGear();
+		// Transport.LightIsOn: true when lights are on (transport.c:229-230).
+		result.lights_on_client = car.LightIsOn();
 		result.engine_on_server = car.EngineIsOn();
 		result.net_strategy = EncodeNetworkMoveStrategy(car.GetNetworkMoveStrategy());
 		result.pos_real = new array<float>();
@@ -6354,9 +6383,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return (dx * dx) + (dy * dy) + (dz * dz) <= (eps * eps);
 	}
 
-	// Apply vs observe: after seated camera_set, compare the observed
-	// GetCurrentCameraTransform to the requested pose. Matching pose is the
-	// only scripted PASS. An unmoved cabin stays view=vehicle and fails.
+	// Apply vs observe: after seated camera_set with no mounted camera (a
+	// mounted one already reads as scripted, 2277), compare the observed
+	// GetCurrentCameraTransform to the requested pose. An unmoved cabin stays
+	// view=vehicle and fails.
 	protected void ObserveSeatedCameraApply(MCPCamera camera, MCPArgs args)
 	{
 		if (!camera || camera.view != "vehicle")
@@ -6401,16 +6431,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PlayerBase seatedPlayer = PlayerBase.Cast(GetGame().GetPlayer());
 		if (ResolveLiveSeatedTransport(seatedPlayer))
 		{
-			if (FillSeatedCameraView(camera, seatedPlayer))
+			// fb-20261026-152109-2277: a camera this bridge mounted renders while the
+			// player sits, and the cabin transform does not follow it. Read it as
+			// off a vehicle, from m_ActiveCam below; the cabin only without one.
+			if (m_ActiveCam && m_ActiveCam.IsActive())
 			{
+				cameraError = "";
+			}
+			else
+			{
+				if (FillSeatedCameraView(camera, seatedPlayer))
+				{
+					return camera;
+				}
+
+				camera.ok = false;
+				camera.viewport_moved = false;
+				camera.view = "";
+				camera.error = cameraError;
 				return camera;
 			}
-
-			camera.ok = false;
-			camera.viewport_moved = false;
-			camera.view = "";
-			camera.error = cameraError;
-			return camera;
 		}
 
 		if (CameraErrorIsMissingScripted(cameraError))

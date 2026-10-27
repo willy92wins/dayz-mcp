@@ -1848,7 +1848,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # (tests/test_ingress_schema_coherence.py).
     "query_player_state": _command_schema(_schema_variant()),
     "query_all_players": _command_schema(_schema_variant()),
-    "vehicle_telemetry": _command_schema(_schema_variant()),
+    "vehicle_telemetry": _command_schema(_schema_variant(optional=("pos",), validators={"pos": _is_real_vector3})),
     "vehicle_release": _command_schema(_schema_variant()),
     # flags goes through the same ECE mask policy as the tool
     # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.

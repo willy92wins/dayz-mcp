@@ -7,6 +7,9 @@ class MCPBridge : Managed
 	// Reserve the existing daemon ingress cap (loopback.py MAX_QUEUE) per poll.
 	protected const int MAX_POLL_RESULTS = 64;
 	protected const float JOB_TIMEOUT_S = 5.0;
+	// fb-20261026-150310-9582: how long vehicle_prepare_fixture waits for a car that
+	// does not read ready in the tick that called its OnDebugSpawn.
+	protected const float VEHICLE_FIXTURE_WAIT_S = 1.0;
 	protected const int VEHICLE_SEARCH_RADIUS = 4;
 	// 8 m covers a truck-length hull around the subject's origin after ECE_TRACE snap.
 	protected const float SPAWN_READY_RADIUS = 8.0;
@@ -3152,16 +3155,28 @@ class MCPBridge : Managed
 			car.OnDebugSpawn();
 		}
 
-		PopulateTelemetryObject(car, telemetry);
-		result.telemetry = telemetry;
-		result.vehicle_fixture_ready = IsVehicleFixtureReady(car);
-		if (!result.vehicle_fixture_ready)
+		// fb-20261026-150310-9582: a Fill that OnDebugSpawn calls can read 0 in this
+		// tick and full a moment later. A car still not ready is answered by a job
+		// that only reads it, ok once ready, fixture_not_ready after the wait.
+		if (!IsVehicleFixtureReady(car))
 		{
-			result.ok = false;
-			result.error = "fixture_not_ready";
-			return true;
+			MCPJob job = new MCPJob();
+			job.id = command.id;
+			job.kind = "vehicle_fixture";
+			job.args = command.args;
+			job.subject = car;
+			job.deadline_s = m_ElapsedS + VEHICLE_FIXTURE_WAIT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_Jobs.Insert(job.id, job);
+			Log("job queued id=" + job.id + " kind=vehicle_fixture deadline_s=" + job.deadline_s);
+			return false;
 		}
 
+		PopulateTelemetryObject(car, telemetry);
+		result.telemetry = telemetry;
+		result.vehicle_fixture_ready = true;
 		result.ok = true;
 		return true;
 	}
@@ -6451,6 +6466,8 @@ class MCPBridge : Managed
 			telemetry.speedo = car.GetSpeedometer();
 			telemetry.wheel_count = car.WheelCountPresent();
 			telemetry.fuel_fraction = car.GetFluidFraction(CarFluid.FUEL);
+			// Transport.LightIsOn: true when lights are on (transport.c:229-230).
+			telemetry.lights_on_server = car.LightIsOn();
 		}
 	}
 
@@ -7089,6 +7106,10 @@ class MCPBridge : Managed
 		{
 			return IsSceneClearDone(job);
 		}
+		else if (job.kind == "vehicle_fixture")
+		{
+			return IsVehicleFixtureReady(CarScript.Cast(job.subject));
+		}
 
 		return false;
 	}
@@ -7254,6 +7275,11 @@ class MCPBridge : Managed
 			MCPPostInventoryMove(job, true, "");
 			return;
 		}
+		if (job.kind == "vehicle_fixture")
+		{
+			PostVehicleFixture(job, true);
+			return;
+		}
 
 		if (job.kind == "server_perf")
 		{
@@ -7394,6 +7420,39 @@ class MCPBridge : Managed
 		}
 	}
 
+	// fb-20261026-150310-9582: the answer of a fixture that waited, with what the car
+	// reads now. A car deleted during the wait has nothing to read.
+	protected void PostVehicleFixture(MCPJob job, bool ready)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		MCPTelemetry telemetry = new MCPTelemetry();
+		telemetry.mode = job.args.mode;
+		result.telemetry = telemetry;
+		CarScript car = CarScript.Cast(job.subject);
+		if (!car)
+		{
+			telemetry.found = false;
+			result.ok = false;
+			result.error = "fixture_not_found";
+			PostResult(result);
+			return;
+		}
+
+		PopulateTelemetryObject(car, telemetry);
+		result.vehicle_fixture_ready = ready;
+		result.ok = ready;
+		if (!ready)
+		{
+			result.error = "fixture_not_ready";
+		}
+
+		PostResult(result);
+	}
+
 	protected void PostJobFailure(MCPJob job)
 	{
 		MCPResult result = new MCPResult();
@@ -7419,6 +7478,11 @@ class MCPBridge : Managed
 		if (job.kind == "inventory_move")
 		{
 			MCPPostInventoryMove(job, false, "timeout");
+			return;
+		}
+		if (job.kind == "vehicle_fixture")
+		{
+			PostVehicleFixture(job, false);
 			return;
 		}
 		MCPResult result = new MCPResult();

@@ -6660,7 +6660,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "attachment_items,cargo_count,cargo_items,items,items_total,"
         "items_truncated}}; item arrays are classnames with a 16-entry cap per "
         "array, counts uncapped, immediate inventory only; cars additionally "
-        "populate engine_on_server,speedo,wheel_count,fuel_fraction (defaults on "
+        "populate engine_on_server,speedo,wheel_count,fuel_fraction,lights_on_server (defaults on "
         "non-cars are not measurements); zero matches is a successful return with "
         "found:false. Multiple exact-type matches raise ToolError("
         "ambiguous_fixture); that is an MCP tool error, not a returned dict. "
@@ -9249,14 +9249,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Read owner-side vehicle telemetry (speed, gear, engine, pos, "
-            "ownership). direction is the seated transport's GetDirection as "
+            "ownership). direction is the read transport's GetDirection as "
             "[x, y, z], the same vector vehicle_trace stores. It is omitted "
-            "when the player is not in a transport."
+            "when no transport is read. lights_on_client is "
+            "LightIsOn of the local replica (default false outside a CarScript, "
+            "which is not a measurement). pos reads the nearest Transport to pos "
+            "within 4 m whether or not the player is seated; seated says whether "
+            "the local player is seated in it; seat is empty when they are not. "
+            "pos takes 3 finite numbers: another count, NaN or an infinity is "
+            "ToolError(bad_pos). Without pos nothing changes."
         )
     )
-    async def vehicle_telemetry(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_telemetry(
+        pos: list[StrictFloat] | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args: dict[str, Any] = {}
+        if pos is not None:
+            args = {"pos": _require_vec3(pos, "pos")}
         async with runtime.tool_lock:
-            return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))
+            return await runtime.call_bridge("vehicle_telemetry", args, "client", _timeout(timeout_s))
 
     @app.tool(
         description=(
