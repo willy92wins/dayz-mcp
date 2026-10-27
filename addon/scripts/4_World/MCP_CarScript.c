@@ -808,6 +808,22 @@ modded class CarScript
 						ShiftTo(CarGear.FIRST);
 					}
 				}
+				// fb-20261026-142708-3efe: an automatic keeps its mode (P, R, N, D,
+				// car.c:56-63) until shifted. In P, R or N it shifts up behind the same
+				// settle interval and is asked for no throttle, so it gets throttle only
+				// once the mode reads D. That ShiftUp walks the modes in that order, and
+				// that the car then moves, is native: the in-game round checks both.
+				else if (throttle > 0.0 && GearboxGetMode() != CarAutomaticGearboxMode.D)
+				{
+					float modeNowS = GetGame().GetTickTime();
+					if (MCPCarDrive.s_LastAutoShiftS < 0.0 || modeNowS < MCPCarDrive.s_LastAutoShiftS || modeNowS - MCPCarDrive.s_LastAutoShiftS >= MCPCarDrive.AUTO_SHIFT_SETTLE_S)
+					{
+						ShiftUp();
+						MCPCarDrive.s_LastAutoShiftS = modeNowS;
+					}
+
+					throttle = 0.0;
+				}
 
 				// SetThrottle is future; GetThrottle is actual (car.c).
 				SetThrottle(throttle);
