@@ -839,7 +839,8 @@ class SceneBridgeSourceTest(unittest.TestCase):
         self.assertIn("entries = m_Scenes.Get(command.args.scene_id);", clear)
         self.assertIn(
             "if (m_RuntimeObjects.Get(entry.object_id) == entry.obj) "
-            "{ MCPBotControl.OnObjectGone(this, entry.object_id); m_RuntimeObjects.Remove(entry.object_id); }",
+            "{ MCPBotControl.OnObjectGone(this, entry.object_id); MCPSurvivorDrive.OnObjectGone(this, entry.object_id); "
+            "m_RuntimeObjects.Remove(entry.object_id); }",
             clear,
         )
         self.assertIn("GetGame().ObjectDelete(deleteNow.Get(index));", clear)
@@ -1119,6 +1120,7 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         self.logs: list[str] = []
         self.posted: list[Any] = []
         self.gone: list[int] = []
+        self.drive_gone: list[int] = []
         ns: dict[str, Any] = {"_S": _LogString, "array": EnforceArray, "map": EnforceMap}
         for name in _MESSAGE_FAKES:
             fake_class(self.messages, name, ns, constants={"MCP_ARG_FLOAT_UNSET": _FLOAT_MAX})
@@ -1133,6 +1135,9 @@ class SceneBridgeExecutionTest(unittest.TestCase):
                 "Log": lambda line: self.logs.append(line.text),
                 "PostResult": self.posted.append,
                 "MCPBotControl": SimpleNamespace(OnObjectGone=lambda _bridge, object_id: self.gone.append(object_id)),
+                "MCPSurvivorDrive": SimpleNamespace(
+                    OnObjectGone=lambda _bridge, object_id: self.drive_gone.append(object_id)
+                ),
                 "this": object(),
                 "EntityAI": SimpleNamespace(
                     Cast=lambda obj: obj if isinstance(obj, _Entity) and obj.entity else None
@@ -1421,6 +1426,7 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         # Nothing was deleted, released or queued.
         self.assertEqual(self.game.deleted, [])
         self.assertEqual(self.gone, [])
+        self.assertEqual(self.drive_gone, [])
         self.assertEqual(self.ns["m_RuntimeObjects"].Count(), 4)
         self.assertEqual(self.ns["m_Jobs"].Count(), 0)
         self.assertIn("scene clear refused scene_shared carrier_id=1000000000 carried_id=1000000001", self.logs)
@@ -1443,6 +1449,7 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         # What the car holds goes with it: the call deletes the car and the sign.
         self.assertEqual(self.game.deleted, [car, sign])
         self.assertEqual(self.gone, [1000000000, 1000000001, 1000000002, 1000000003])
+        self.assertEqual(self.drive_gone, self.gone)
         self.assertEqual(self.ns["m_RuntimeObjects"].Count(), 0)
         self.assertEqual(self.logs[-1], "job queued id=51 kind=scene_clear pending=4 delete=2")
         self._engine_removes(car, battery, sign, can)

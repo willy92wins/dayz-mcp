@@ -120,7 +120,7 @@ class MCPSurvivorDrive
 		return true;
 	}
 
-	// object_delete, before the object goes.
+	// object_delete and scene_clear, before the object goes.
 	static void OnObjectGone(MCPBridge bridge, int objectId)
 	{
 		Release(bridge, objectId);

@@ -847,6 +847,17 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
             "m_RuntimeObjects.Remove(objectId);",
             "GetGame().ObjectDelete(target);",
         )
+        # scene_clear drops the drive of each entry it removes, the same way.
+        clear = _method_body(
+            self.bridge, "protected bool DispatchSceneClear(MCPCommand command, MCPResult result)"
+        )
+        _in_order(
+            self,
+            clear,
+            "MCPSurvivorDrive.OnObjectGone(this, entry.object_id);",
+            "m_RuntimeObjects.Remove(entry.object_id);",
+            "GetGame().ObjectDelete(deleteNow.Get(index));",
+        )
         shutdown = _method_body(self.bridge, "void Shutdown()")
         self.assertIn("MCPSurvivorDrive.ShutdownAll(this);", shutdown)
 

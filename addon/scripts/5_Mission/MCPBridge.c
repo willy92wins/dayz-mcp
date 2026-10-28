@@ -2194,6 +2194,7 @@ class MCPBridge : Managed
 					if (m_RuntimeObjects.Get(entry.object_id) == entry.obj)
 					{
 						MCPBotControl.OnObjectGone(this, entry.object_id);
+						MCPSurvivorDrive.OnObjectGone(this, entry.object_id);
 						m_RuntimeObjects.Remove(entry.object_id);
 					}
 
