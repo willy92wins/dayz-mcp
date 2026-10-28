@@ -1,6 +1,8 @@
 # Human input on a leased run reaches the lease holder (inbox 6310)
 
-Base: main `4c4e52c`. Python only: no sealed module, no PBO, no bridge change, no new Win32 read.
+Base: main `9713894`; revisions 1 to 4 were drawn on `4c4e52c`. Python only: no sealed module, no PBO, no bridge change, no new Win32 read.
+
+Revision 6: after Codex Sol's fourth review, of `2326538` (revision 5), GREEN with four test issues and one plan issue (r4 H1 to H5). T7 joins the diagnostic thread that wrote a line before it waits for the next one, since the sink's event comes before that thread frees its slot (r4 H1). T7b counts the HTTP worker slots and waits after each answer until every slot is back, so the next request finds a free worker and every handler has started its diagnostic before the test joins those threads. With the sink still held, it checks that the workers are back and that the sink runs on the diagnostic thread, and after the release that the test released the sink, not its own bound (r4 H2 and H4). A new T7c makes the first diagnostic thread fail to start, and checks that the slot comes back and the next line is written (r4 H3). Two new mutants go with them: M38 writes the line on the HTTP worker once it has the slot, and M39 keeps the slot when the thread fails to start. The base and the suite's comparison are `9713894`, the main this was tested on (r4 H5). The 2 s bound of the shared HTTP helper and the tests' 10, 30 and 60 s bounds stay: they keep a stuck run from hanging, and a runner paused past one fails the test (r4 H4).
 
 Revision 5: after Codex Sol's third review, of `19e79ab` (revision 4), which found four issues (r3 H1 to H4). The failure line is logged off the HTTP worker: at most one diagnostic thread waits on the sink, and the line is dropped if that slot is taken or the server has no semaphore (`Handler._log_human_input_block_failed`, r3 H1). The docs follow the code: a tool that returns the bridge row, including `entities_query`, carries the block; `wait_for` and `ui_dialog` do not (r3 H2). A new T8 records that a pin past the TTL still names the lease until `effective_expiry` (r3 H3). Calls that wait while a lock is held use a 30 s bound, the unit T9 lock is released when the test sets done or after 30 s, and the T7 calls in front of the stuck sink wait 10 s against its 60 s (r3 H4). r1's H8 and H9 stay out of scope (see «Out of scope»). Like revisions 1 to 4, this follows the card's recommended option (27/10 ~17:45Z), «En cada resultado», which Guillermo has not answered yet. With «Solo heartbeat», D4 and what tests it drop out: T4, T5, T6, T8, the `/await` halves of T7, T7b and T9, and M7, M8, M12, M13, M16, M16b, M16c, M22, M23, M25, M26, M27, M29, M31, M35, M36 and M37.
 
@@ -134,8 +136,9 @@ No test calls a real Windows API or starts or snapshots a real process. The test
   - an `ok: 0` row still raises the bridge error;
   - a 404 on the POST is followed by a GET of the same command, which returns its row.
 - **T6 (D4, tools).** With a fake runtime whose `call_bridge` returns a row with the block, `query_player_state`, `object_delete` and `ui_focus` return it as it is. `entities_query` returns the block of its `entities_query` call, not of `query_all_players`. `notify_players` with a non-empty players list returns the block of its `notify_players` call. `wait_for` `players_at_least` with value 0, satisfied on the first probe, has no `human_input`.
-- **T7 (exception).** If `human_input_block` raises, the heartbeat and `POST /await` still answer 200, with `{"signal": "unavailable", "runs": []}`, and one log line follows each answer. With a sink that blocks on that line, and then with one that raises on it, both answers still come, the `/await` one with its consumed row whole. A dropped connection, which is what an escaping exception gives, and a request that times out both fail the test as an assertion. The raise is swallowed by the diagnostic thread, so the test checks that the sink received the line. The stuck sink holds the line up to 60 s and the calls in front of it wait 10 s, so a line written before the answer fails the test as a timeout; after each join the thread is dead.
-- **T7b (exception, workers).** The same construction failure as T7. `_http_workers` is a `BoundedSemaphore(3)` for the whole test, set before its first request. For heartbeat and `POST /await?remove=0` of a kept result, separately: with the sink held on the failure line, four failing requests answer 200 with the fallback block, then `GET /status` answers too, and the sink was entered once. After `release` and joining `mcp-human-input-diagnostic` threads, one more failing request writes the line again. With a sink that raises, after joining its thread the next failing request writes the line too.
+- **T7 (exception).** If `human_input_block` raises, the heartbeat and `POST /await` still answer 200, with `{"signal": "unavailable", "runs": []}`, and one log line follows each answer. With a sink that blocks on that line, and then with one that raises on it, both answers still come, the `/await` one with its consumed row whole. A dropped connection, which is what an escaping exception gives, and a request that times out both fail the test as an assertion. The raise is swallowed by the diagnostic thread, so the test checks that the sink received the line. The stuck sink holds the line up to 60 s and the calls in front of it wait 10 s, so a line written before the answer fails the test as a timeout; after each join the thread is dead. Before it waits for the next line, the test joins the diagnostic thread that wrote the last one: the sink's event comes before that thread frees the slot.
+- **T7b (exception, workers).** The same construction failure as T7. `_http_workers` is a counting `BoundedSemaphore(3)` (`CountingWorkers`) for the whole test, set before its first request. After each answer the test waits until every slot is back, since an answer can arrive before its worker ends. For heartbeat and `POST /await?remove=0` of a kept result, separately: with the sink held on the failure line, four failing requests answer 200 with the fallback block and their workers come back, then `GET /status` answers too. The sink was entered once, on the `mcp-human-input-diagnostic` thread, and still holds the line. After `release`, the sink returned because the test released it, and after joining `mcp-human-input-diagnostic` threads one more failing request writes the line again, on that thread. With a sink that raises, after joining its thread the next failing request writes the line too.
+- **T7c (exception, start).** With `threading.Thread` patched so that the first `mcp-human-input-diagnostic` thread fails to start, `Handler._log_human_input_block_failed` gives the slot back (a `blocking=False` acquire gets it) and the next call writes the line.
 - **T8, pin (D4, unit).** `acquire` then, at the same instant `c0`, `authorize` of a command that needs a lease with `operation_timeout_s=180`: `expires_at` is `c0 + 120` and the pending deadline is `c0 + 180`. At `c0 + 130`, `active_lease_id` names the lease with `blocking` true or false. At `c0 + 180` and `c0 + 180.5` it names none. `_active` is still that lease.
 
 Mutants are applied one at a time on a copy. Each is killed by the test named, as an AssertionError:
@@ -166,20 +169,22 @@ Mutants are applied one at a time on a copy. Each is killed by the test named, a
 - M25, M26: an expired lease still naming its holder, or still naming it at exactly its effective expiry (T8).
 - M27: only `ValueError` caught on `POST /await` (T4).
 - M28, M29: the failure line written with `self._log` before the answer, on the heartbeat or on `/await` (T7).
-- M30: the heartbeat failure line written with `self._log` on the HTTP worker (T7b, heartbeat).
-- M31: the `/await` failure line written with `self._log` on the HTTP worker (T7b, `/await`).
+- M30: the heartbeat failure line written with `self._log` on the HTTP worker (T7b, heartbeat: that worker is not back while the sink holds the line).
+- M31: the `/await` failure line written with `self._log` on the HTTP worker (T7b, `/await`: the same).
 - M32: no diagnostic semaphore, so one thread per line (T7b, sink entered once while held).
 - M33: the diagnostic semaphore not released after the sink (T7b, the next failing request writes the line again).
-- M34: the diagnostic semaphore acquired with `blocking=True` (T7b, fourth failing request or `GET /status`).
+- M34: the diagnostic semaphore acquired with `blocking=True` (T7b: the second failing request's worker waits for the slot and is not back).
 - M35: `entities_query` dropping `human_input` from its answer (T6).
 - M36: `entities_query` taking the block of `query_all_players` (T6).
 - M37: `active_lease_id` comparing against `lease.expires_at` instead of `effective_expiry()` (T8, pin, at `c0 + 130`).
+- M38: the line written on the HTTP worker once it has the slot (T7b: that worker is not back while the sink holds the line).
+- M39: a diagnostic thread that fails to start keeping the slot (T7c).
 
 Pass criteria (R26):
 
 - The new module passes on Linux with 3.13 and the shim, and on Windows CI with 3.11 and 3.14, both fast and full.
 - Every mutant fails its test with an AssertionError, and the copy without mutants passes.
-- The whole `tools/tests` suite on Linux fails the same ids as main `4c4e52c` (804) and adds no new failure. On Windows CI it is green.
+- The whole `tools/tests` suite on Linux fails the same ids as main `9713894` (804) and adds no new failure. On Windows CI it is green.
 - The diff touches only `process_lifecycle.py`, `loopback.py`, `server.py`, `session_coordination.py`, the new test module, the docs below and this plan.
 
 ## Docs

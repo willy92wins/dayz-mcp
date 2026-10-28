@@ -13,6 +13,7 @@ import http.client
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,7 +23,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import process_lifecycle
+from dayz_mcp import loopback, process_lifecycle
 from dayz_mcp.input_activity import InputSample
 from dayz_mcp.process_lifecycle import (
     INPUT_SIGNAL_STALE_S,
@@ -162,6 +163,35 @@ class RecordingLock:
 
     def __exit__(self, *_exc: object) -> None:
         self.release()
+
+
+class CountingWorkers(threading.BoundedSemaphore):
+    """`_http_workers` that can wait until every slot taken is back.
+
+    The server gives a slot back when its worker ends, after the answer.
+    """
+
+    def __init__(self, value: int) -> None:
+        super().__init__(value)
+        self._idle = threading.Condition()
+        self._taken = 0
+
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        taken = super().acquire(blocking, timeout)
+        if taken:
+            with self._idle:
+                self._taken += 1
+        return taken
+
+    def release(self, n: int = 1) -> None:
+        super().release(n)
+        with self._idle:
+            self._taken -= n
+            self._idle.notify_all()
+
+    def wait_idle(self, timeout: float) -> bool:
+        with self._idle:
+            return self._idle.wait_for(lambda: self._taken == 0, timeout)
 
 
 class HumanInputHolderTest(unittest.TestCase):
@@ -1054,6 +1084,8 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertIn("human_input", beat)
         self.assertEqual(beat["human_input"], UNAVAILABLE)
         self.assertTrue(failure_logged.wait(30.0))
+        # The sink sets the event before its thread frees the slot.
+        self._join_human_input_diagnostics()
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
@@ -1068,6 +1100,7 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(done["result"]["state"]["pos"], [1.0, 2.0, 3.0])
         self.assertEqual(done.get("human_input"), UNAVAILABLE)
         self.assertTrue(failure_logged.wait(30.0))
+        self._join_human_input_diagnostics()
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
@@ -1133,7 +1166,8 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
     def test_t7b_failure_line_does_not_hold_a_worker(self) -> None:
         # Before the first request: a worker releases the semaphore it finds
         # when it ends, so a swap after a request could take that release.
-        self.httpd._http_workers = threading.BoundedSemaphore(3)
+        workers = CountingWorkers(3)
+        self.httpd._http_workers = workers
         token, acquired = self.acquire()
         lease_id = acquired["lease_id"]
         self.add_owned_run(lease_id)
@@ -1162,9 +1196,19 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         def status_get() -> tuple[int, dict]:
             return _http(self.base, "GET", "/status", self.key, timeout=30.0)
 
+        def failing(call) -> None:
+            status, body = self.answered(call)
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("human_input"), UNAVAILABLE)
+            # An answer can arrive before its worker ends; once every slot
+            # is back, each handler has also started its diagnostic.
+            self.assertTrue(workers.wait_idle(30.0), "an HTTP worker is busy")
+
         for route, call in (("heartbeat", heartbeat), ("await", await_kept)):
             with self.subTest(route=route):
                 entered = 0
+                threads: list[str] = []
+                waits: list[bool] = []
                 saw = threading.Event()
                 again = threading.Event()
                 release = threading.Event()
@@ -1174,30 +1218,34 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
                     if "human_input_block failed" not in message:
                         return
                     entered += 1
+                    threads.append(threading.current_thread().name)
                     saw.set()
                     if entered > 1:
                         again.set()
-                    release.wait(30.0)
+                    waits.append(release.wait(30.0))
 
                 self.httpd.log_sink = held_sink
                 try:
                     for _index in range(4):
-                        status, body = self.answered(call)
-                        self.assertEqual(status, 200)
-                        self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                        failing(call)
                     status, _health = self.answered(status_get)
                     self.assertEqual(status, 200)
+                    self.assertTrue(workers.wait_idle(30.0), "an HTTP worker is busy")
                     self.assertTrue(saw.wait(30.0))
+                    # Every worker is back while the sink still holds the
+                    # line, on the diagnostic thread.
                     self.assertEqual(entered, 1)
+                    self.assertEqual(threads, ["mcp-human-input-diagnostic"])
+                    self.assertEqual(waits, [])
                 finally:
                     release.set()
                 self._join_human_input_diagnostics()
-                status, body = self.answered(call)
-                self.assertEqual(status, 200)
-                self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                self.assertEqual(waits, [True], "the sink gave up on its own")
+                failing(call)
                 self.assertTrue(again.wait(30.0))
-                self.assertEqual(entered, 2)
                 self._join_human_input_diagnostics()
+                self.assertEqual(entered, 2)
+                self.assertEqual(threads, ["mcp-human-input-diagnostic"] * 2)
 
                 written = threading.Event()
 
@@ -1211,17 +1259,46 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
                     lambda _request, _address: None
                 )
                 written.clear()
-                status, body = self.answered(call)
-                self.assertEqual(status, 200)
-                self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                failing(call)
                 self.assertTrue(written.wait(30.0))
                 self._join_human_input_diagnostics()
                 written.clear()
-                status, body = self.answered(call)
-                self.assertEqual(status, 200)
-                self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                failing(call)
                 self.assertTrue(written.wait(30.0))
                 self._join_human_input_diagnostics()
+
+    def test_t7c_failed_start_frees_the_diagnostic_slot(self) -> None:
+        lines: list[str] = []
+        written = threading.Event()
+
+        def sink(message: str) -> None:
+            lines.append(message)
+            written.set()
+
+        self.httpd.log_sink = sink
+        slot = self.httpd._human_input_diagnostic
+        handler = types.SimpleNamespace(server=self.httpd)
+        real_thread = threading.Thread
+        refused: list[str] = []
+
+        class FirstStartFails(real_thread):
+            def start(self) -> None:
+                if self.name == "mcp-human-input-diagnostic" and not refused:
+                    refused.append(self.name)
+                    raise RuntimeError("inbox-6310-start")
+                super().start()
+
+        with mock.patch.object(loopback.threading, "Thread", FirstStartFails):
+            loopback.Handler._log_human_input_block_failed(handler)
+            self.assertEqual(refused, ["mcp-human-input-diagnostic"])
+            self.assertTrue(
+                slot.acquire(blocking=False), "the failed start kept the slot"
+            )
+            slot.release()
+            loopback.Handler._log_human_input_block_failed(handler)
+            self.assertTrue(written.wait(30.0))
+        self._join_human_input_diagnostics()
+        self.assertEqual(lines, ["human_input_block failed"])
 
 
 class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
