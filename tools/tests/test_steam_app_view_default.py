@@ -41,22 +41,29 @@ _PRINT_OBSERVER = (
 
 
 class _RecordingProvider:
-    """Stands in for WindowsSteamPreflightProvider: records each build and each read, and reads nothing."""
+    """Stands in for WindowsSteamPreflightProvider: records each build and each
+    call of read_active_process, which the observation reads first, and reads
+    nothing."""
 
     built: list[dict[str, object]] = []
-    reads: list[tuple[bool, str]] = []
+    reads: list[str] = []
 
     def __init__(self, **kwargs: object) -> None:
-        self._real_registry = bool(kwargs.get("real_registry"))
+        self._view = "real" if kwargs.get("real_registry") else "app"
         type(self).built.append(dict(kwargs))
 
-    def __getattr__(self, name: str) -> object:
-        type(self).reads.append((self._real_registry, name))
-        raise AssertionError(f"a real provider read {name}")
+    def read_active_process(self) -> object:
+        type(self).reads.append(self._view)
+        raise AssertionError(f"the {self._view} provider read ActiveProcess")
 
 
 class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
+    join_s = 30.0
+
     def setUp(self) -> None:
+        self.observers: list[threading.Thread] = []
+        self.patchers: list = []
+        self.addCleanup(self.restore)
         config = ServerConfig(
             mode="client",
             key="fixture",
@@ -81,24 +88,66 @@ class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
 
     def enter(self, patcher) -> None:
         patcher.start()
-        self.addCleanup(patcher.stop)
+        self.patchers.append(patcher)
+
+    def restore(self) -> None:
+        # While an observation thread of the test runs, the patches stay:
+        # restored, the provider it builds next would be the real one.
+        if any(thread.is_alive() for thread in self.observers):
+            raise AssertionError("an observation thread is still running, so the patches stay")
+        while self.patchers:
+            self.patchers.pop().stop()
 
     async def call(self, tool: str) -> dict:
-        # The call observes from an expired cache, and the observation thread
-        # it started has finished before anything is checked or restored.
+        # Called outside any subtest, so a call that fails ends the test: no
+        # other tool runs while its observation does. It observes from an
+        # expired cache, and the observation threads it started are joined
+        # even when it raises.
         server._steam_app_view_cache["expires"] = 0.0
         _RecordingProvider.built = []
         _RecordingProvider.reads = []
         before = set(threading.enumerate())
-        result = _content_json(await self.app.call_tool(tool, _TOOLS[tool]))
-        for thread in set(threading.enumerate()) - before:
-            if thread.name == _OBSERVER:
-                thread.join(30.0)
-                self.assertFalse(thread.is_alive(), f"{tool}: its observation is still running")
+        try:
+            result = _content_json(await self.app.call_tool(tool, _TOOLS[tool]))
+        finally:
+            started = [
+                thread
+                for thread in set(threading.enumerate()) - before
+                if thread.name == _OBSERVER
+            ]
+            self.observers.extend(started)
+            for thread in started:
+                thread.join(self.join_s)
+        self.assertFalse(
+            any(thread.is_alive() for thread in started),
+            f"{tool}: its observation is still running",
+        )
         self.assertGreater(
             server._steam_app_view_cache["expires"], 0.0, f"{tool} did not observe"
         )
         return result
+
+    def stall(self) -> threading.Event:
+        """A view that runs until the event is set, a tool that does not wait
+        for it and a join that does not either."""
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.join_s = 0.0
+        self.enter(
+            patch.object(server, "observe_app_steam_view", lambda: release.wait(30.0) and None)
+        )
+        self.enter(patch.object(server, "_STEAM_APP_VIEW_WAIT_S", 0.0))
+        return release
+
+    def assert_the_patches_stay_until(self, release: threading.Event) -> None:
+        self.assertEqual(len(self.observers), 1)
+        with self.assertRaisesRegex(AssertionError, "still running"):
+            self.restore()
+        self.assertIs(sp.WindowsSteamPreflightProvider, _RecordingProvider)
+        release.set()
+        self.observers[0].join(30.0)
+        self.restore()
+        self.assertIsNot(sp.WindowsSteamPreflightProvider, _RecordingProvider)
 
     def test_the_suite_installs_a_view_that_agrees(self) -> None:
         self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
@@ -107,25 +156,35 @@ class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_session_tool_observes_and_builds_no_provider(self) -> None:
         for tool in _TOOLS:
+            result = await self.call(tool)
             with self.subTest(tool=tool):
-                result = await self.call(tool)
                 self.assertEqual(_RecordingProvider.built, [])
                 self.assertEqual(_RecordingProvider.reads, [])
                 self.assertNotIn("steam_app_view", result)
 
     async def test_the_real_observation_reads_a_real_registry_provider_for_each_tool(self) -> None:
         # The negative control: with the real observation back, each call
-        # builds a real-registry provider and reads it.
+        # builds a real-registry provider and calls its read_active_process.
         with patch.object(server, "observe_app_steam_view", sp.observe_app_steam_view):
             for tool in _TOOLS:
+                await self.call(tool)
                 with self.subTest(tool=tool):
-                    await self.call(tool)
                     self.assertIn({"real_registry": True}, _RecordingProvider.built)
-                    self.assertTrue(
-                        any(real for real, _name in _RecordingProvider.reads),
-                        _RecordingProvider.reads,
-                    )
+                    self.assertIn("real", _RecordingProvider.reads)
         self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
+
+    async def test_an_observation_still_running_fails_its_call_and_keeps_the_patches(self) -> None:
+        release = self.stall()
+        with self.assertRaisesRegex(AssertionError, "still running"):
+            await self.call("session_status")
+        self.assert_the_patches_stay_until(release)
+
+    async def test_a_call_that_raises_keeps_the_patches_while_its_observation_runs(self) -> None:
+        release = self.stall()
+        self.runtime.session_status.side_effect = RuntimeError("fixture")
+        with self.assertRaisesRegex(Exception, "fixture"):
+            await self.call("session_status")
+        self.assert_the_patches_stay_until(release)
 
 
 @slow_test
