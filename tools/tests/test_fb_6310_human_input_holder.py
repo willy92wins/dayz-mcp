@@ -507,20 +507,24 @@ class HumanInputHolderTest(unittest.TestCase):
                 done = threading.Event()
 
                 def hold(lock=lock, held=held, done=done) -> None:
-                    with lock:
+                    lock.acquire()
+                    try:
                         held.set()
-                        done.wait(5.0)
+                        done.wait(30.0)
+                    finally:
+                        lock.release()
 
                 holder = threading.Thread(target=hold, daemon=True)
                 holder.start()
-                self.assertTrue(held.wait(5.0))
+                self.assertTrue(held.wait(30.0))
                 try:
                     busy = self.lifecycle.human_input_block(
                         "A", "lease-A", now=last_at + 0.5
                     )
                 finally:
                     done.set()
-                    holder.join(5.0)
+                    holder.join(30.0)
+                self.assertFalse(holder.is_alive())
                 self.assertEqual(busy, UNAVAILABLE)
 
     def test_t8_an_expired_lease_names_no_holder(self) -> None:
@@ -547,6 +551,41 @@ class HumanInputHolderTest(unittest.TestCase):
         # ended, which _expire_due does on the next call that runs it.
         self.assertIs(coordinator._active, lease)
         self.assertEqual(lease.effective_expiry(), expires_at)
+
+    def test_t8_a_pin_past_ttl_still_names_the_lease(self) -> None:
+        # EX1: active_lease_id compares against effective_expiry, not expires_at.
+        clock = FakeClock()
+        coordinator = SessionCoordinator(
+            time_fn=clock,
+            token_fn=lambda: "token-E",
+            id_fn=lambda: "lease-E",
+            audit=AuditSink(),
+        )
+        status, acquired = coordinator.acquire(IDENTITY_A, "lifecycle")
+        self.assertEqual(status, 200)
+        token = acquired["lease_token"]
+        c0 = clock.value
+        coordinator.authorize(
+            IDENTITY_A, token, "notify_players", operation_timeout_s=180
+        )
+        lease = coordinator._active
+        self.assertEqual(lease.expires_at, c0 + 120.0)
+        pending = lease.pending_authorizations
+        self.assertEqual(len(pending), 1, f"pending authorizations: {pending!r}")
+        self.assertEqual(pending[0].deadline, c0 + 180.0)
+        clock.value = c0 + 130
+        self.assertEqual(coordinator.active_lease_id(IDENTITY_A, token), "lease-E")
+        self.assertEqual(
+            coordinator.active_lease_id(IDENTITY_A, token, blocking=False),
+            "lease-E",
+        )
+        clock.value = c0 + 180
+        self.assertIsNone(coordinator.active_lease_id(IDENTITY_A, token))
+        clock.value = c0 + 180.5
+        self.assertIsNone(
+            coordinator.active_lease_id(IDENTITY_A, token, blocking=False)
+        )
+        self.assertIs(coordinator._active, lease)
 
     def test_t9_owner_and_counts_come_from_one_snapshot(self) -> None:
         self.add_run(owner="A")
@@ -583,11 +622,11 @@ class HumanInputHolderTest(unittest.TestCase):
             # counters gone. The wait is only a bound on a hung worker.
             probe.arm()
             worker.start()
-            self.assertTrue(probe.tried.wait(5.0), "the worker never asked")
+            self.assertTrue(probe.tried.wait(30.0), "the worker never asked")
 
         armed.arm(race)
         block = self.lifecycle.human_input_block("A", "lease-A", now=last_at + 0.5)
-        worker.join(5.0)
+        worker.join(30.0)
         self.assertFalse(worker.is_alive())
         self.assertIs(probe.was_held, True)
         self.assertEqual(
@@ -755,6 +794,7 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         *,
         identity: dict = IDENTITY_PAYLOAD,
         remove: str = "1",
+        timeout: float = 2.0,
     ) -> tuple[int, dict]:
         payload: dict[str, object] = {"identity": identity}
         if token is not None:
@@ -766,7 +806,21 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
             self.key,
             payload,
             {"id": str(command_id), "remove": remove},
+            timeout=timeout,
         )
+
+    def _join_human_input_diagnostics(self) -> None:
+        living = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == "mcp-human-input-diagnostic"
+        ]
+        for thread in living:
+            thread.join(30.0)
+            self.assertFalse(
+                thread.is_alive(),
+                f"{thread.name} still running",
+            )
 
     def test_t4_await_adds_block_only_for_owned_done(self) -> None:
         token, acquired = self.acquire()
@@ -913,10 +967,19 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
                 command_id = self.enqueue_done(token)
                 with lock:
                     beat_status, beat_body = self.answered(
-                        lambda: self.request("/session/heartbeat", beat)
+                        lambda: _http(
+                            self.base,
+                            "POST",
+                            "/session/heartbeat",
+                            self.key,
+                            beat,
+                            timeout=30.0,
+                        )
                     )
                     done_status, done = self.answered(
-                        lambda: self.post_await(command_id, token)
+                        lambda: self.post_await(
+                            command_id, token, timeout=30.0
+                        )
                     )
                 self.assertEqual(beat_status, 200)
                 self.assertEqual(beat_body.get("human_input"), UNAVAILABLE)
@@ -939,7 +1002,9 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         command_id = self.enqueue_done(token)
         with self.coordinator._condition:
             status, done = self.answered(
-                lambda: self.post_await(command_id, token, remove="0")
+                lambda: self.post_await(
+                    command_id, token, remove="0", timeout=30.0
+                )
             )
         self.assertEqual(status, 200)
         self.assertEqual(done["status"], "done")
@@ -988,7 +1053,7 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("human_input", beat)
         self.assertEqual(beat["human_input"], UNAVAILABLE)
-        self.assertTrue(failure_logged.wait(5.0))
+        self.assertTrue(failure_logged.wait(30.0))
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
@@ -1002,7 +1067,7 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         self.assertEqual(done["status"], "done")
         self.assertEqual(done["result"]["state"]["pos"], [1.0, 2.0, 3.0])
         self.assertEqual(done.get("human_input"), UNAVAILABLE)
-        self.assertTrue(failure_logged.wait(5.0))
+        self.assertTrue(failure_logged.wait(30.0))
         self.assertEqual(
             sum(1 for line in self.logs if "human_input_block failed" in line),
             1,
@@ -1018,24 +1083,31 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
         def stuck_sink(message: str) -> None:
             if "human_input_block failed" in message:
                 stuck.set()
-                release.wait(5.0)
+                release.wait(60.0)
 
         def broken_sink(message: str) -> None:
             if "human_input_block failed" in message:
+                raised.set()
                 raise OSError("inbox-6310-sink")
 
+        # A line written before the answer would hold it for the sink's 60 s,
+        # far past these 10 s (M28, M29).
         def heartbeat() -> tuple[int, dict]:
-            return self.request(
+            return _http(
+                self.base,
+                "POST",
                 "/session/heartbeat",
+                self.key,
                 {"identity": IDENTITY_PAYLOAD, "lease_token": token},
+                timeout=10.0,
             )
 
         def await_done() -> tuple[int, dict]:
-            return self.post_await(command_id, token)
+            return self.post_await(command_id, token, timeout=10.0)
 
-        # socketserver reports the raise once the answer is written; this
-        # keeps its traceback out of the test output.
-        self.httpd.handle_error = lambda _request, _address: raised.set()  # type: ignore[method-assign]
+        # The diagnostic thread swallows a sink raise; this still keeps a
+        # leaked handler traceback out of the test output.
+        self.httpd.handle_error = lambda _request, _address: None  # type: ignore[method-assign]
         for log_sink, logged in ((stuck_sink, stuck), (broken_sink, raised)):
             self.httpd.log_sink = log_sink
             for call in (heartbeat, await_done):
@@ -1055,7 +1127,101 @@ class HumanInputHttpTest(SessionLoopback, unittest.TestCase):
                         self.assertEqual(
                             answer["result"]["state"]["pos"], [1.0, 2.0, 3.0]
                         )
-                    self.assertTrue(logged.wait(5.0))
+                    self.assertTrue(logged.wait(30.0))
+                    self._join_human_input_diagnostics()
+
+    def test_t7b_failure_line_does_not_hold_a_worker(self) -> None:
+        # Before the first request: a worker releases the semaphore it finds
+        # when it ends, so a swap after a request could take that release.
+        self.httpd._http_workers = threading.BoundedSemaphore(3)
+        token, acquired = self.acquire()
+        lease_id = acquired["lease_id"]
+        self.add_owned_run(lease_id)
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("inbox-6310-boom")
+
+        self.lifecycle.human_input_block = boom  # type: ignore[method-assign]
+        command_id = self.enqueue_done(token)
+
+        def heartbeat() -> tuple[int, dict]:
+            return _http(
+                self.base,
+                "POST",
+                "/session/heartbeat",
+                self.key,
+                {"identity": IDENTITY_PAYLOAD, "lease_token": token},
+                timeout=30.0,
+            )
+
+        def await_kept() -> tuple[int, dict]:
+            return self.post_await(
+                command_id, token, remove="0", timeout=30.0
+            )
+
+        def status_get() -> tuple[int, dict]:
+            return _http(self.base, "GET", "/status", self.key, timeout=30.0)
+
+        for route, call in (("heartbeat", heartbeat), ("await", await_kept)):
+            with self.subTest(route=route):
+                entered = 0
+                saw = threading.Event()
+                again = threading.Event()
+                release = threading.Event()
+
+                def held_sink(message: str) -> None:
+                    nonlocal entered
+                    if "human_input_block failed" not in message:
+                        return
+                    entered += 1
+                    saw.set()
+                    if entered > 1:
+                        again.set()
+                    release.wait(30.0)
+
+                self.httpd.log_sink = held_sink
+                try:
+                    for _index in range(4):
+                        status, body = self.answered(call)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                    status, _health = self.answered(status_get)
+                    self.assertEqual(status, 200)
+                    self.assertTrue(saw.wait(30.0))
+                    self.assertEqual(entered, 1)
+                finally:
+                    release.set()
+                self._join_human_input_diagnostics()
+                status, body = self.answered(call)
+                self.assertEqual(status, 200)
+                self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                self.assertTrue(again.wait(30.0))
+                self.assertEqual(entered, 2)
+                self._join_human_input_diagnostics()
+
+                written = threading.Event()
+
+                def broken_sink(message: str) -> None:
+                    if "human_input_block failed" in message:
+                        written.set()
+                        raise OSError("inbox-6310-sink")
+
+                self.httpd.log_sink = broken_sink
+                self.httpd.handle_error = (  # type: ignore[method-assign]
+                    lambda _request, _address: None
+                )
+                written.clear()
+                status, body = self.answered(call)
+                self.assertEqual(status, 200)
+                self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                self.assertTrue(written.wait(30.0))
+                self._join_human_input_diagnostics()
+                written.clear()
+                status, body = self.answered(call)
+                self.assertEqual(status, 200)
+                self.assertEqual(body.get("human_input"), UNAVAILABLE)
+                self.assertTrue(written.wait(30.0))
+                self._join_human_input_diagnostics()
 
 
 class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
@@ -1172,10 +1338,58 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
+        block_entities = {
+            "signal": "ok",
+            "runs": [
+                {
+                    "run_id": "run-eq",
+                    "count": 1,
+                    "uncertain_count": 0,
+                    "last_age_s": 0.1,
+                }
+            ],
+        }
+        block_players = {
+            "signal": "ok",
+            "runs": [
+                {
+                    "run_id": "run-players",
+                    "count": 9,
+                    "uncertain_count": 0,
+                    "last_age_s": 0.2,
+                }
+            ],
+        }
+        block_notify = {
+            "signal": "ok",
+            "runs": [
+                {
+                    "run_id": "run-notify",
+                    "count": 4,
+                    "uncertain_count": 0,
+                    "last_age_s": 0.3,
+                }
+            ],
+        }
+        blocks = {
+            "query_player_state": block,
+            "object_delete": block,
+            "ui_focus": block,
+            "entities_query": block_entities,
+            "query_all_players": block_players,
+            "notify_players": block_notify,
+        }
+
         async def fake_call_bridge(cmd, args, peer, timeout_s, expected_fence=None):
-            row = {"ok": 1, "cmd": cmd, "human_input": block}
+            row = {"ok": 1, "cmd": cmd, "human_input": blocks[cmd]}
             if cmd == "object_delete":
                 row["deleted"] = 1
+            if cmd == "entities_query":
+                row["entities"] = []
+            if cmd == "query_all_players":
+                row["players"] = [{"id": 1, "pos": [0.0, 0.0, 0.0]}]
+            if cmd == "notify_players":
+                row["sent"] = 1
             return row
 
         runtime.call_bridge = fake_call_bridge
@@ -1194,6 +1408,31 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool("ui_focus", {"path": "root", "timeout_s": 1.0})
         )
         self.assertEqual(focused.get("human_input"), block)
+        queried = _content_json(
+            await app.call_tool(
+                "entities_query",
+                {"pos": [0.0, 0.0, 0.0], "radius": 10.0, "timeout_s": 1.0},
+            )
+        )
+        self.assertEqual(queried.get("human_input"), block_entities)
+        notified = _content_json(
+            await app.call_tool(
+                "notify_players",
+                {"show_time": 1.0, "title": "n", "timeout_s": 1.0},
+            )
+        )
+        self.assertEqual(notified.get("human_input"), block_notify)
+        waited = _content_json(
+            await app.call_tool(
+                "wait_for",
+                {
+                    "condition": "players_at_least",
+                    "value": 0,
+                    "timeout_s": 1.0,
+                },
+            )
+        )
+        self.assertNotIn("human_input", waited)
 
 
 if __name__ == "__main__":

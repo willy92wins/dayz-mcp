@@ -2,7 +2,7 @@
 
 Base: main `4c4e52c`. Python only: no sealed module, no PBO, no bridge change, no new Win32 read.
 
-Revision 4: after Codex Sol's second review, of `c10934c` (revision 3), which found eight issues (r2 H1 to H8). The report waits for no lock now: it tries each lock it takes once, and one that another thread holds gives `unavailable` at once (r2 H1, H8). The owner of a done command is read in the lock section that takes its result, and the failure line is logged after the answer is written (r2 H2). A lease past its effective expiry names no holder (r2 H3), an identity whose platform cannot be hashed gets the 400 (r2 H4), and the clock is read with both locks held (r2 H5). The README's renewal sentence now says what the tool descriptions say (r2 H6). The snapshot test checks that the retirement's first try at the manifest lock finds it held, instead of timing a join (r2 H7), and a new test records how each lock is asked (r2 H8). r1's H8 and H9 stay out of scope (see «Out of scope»). Like revisions 1 to 3, this follows the card's recommended option (27/10 ~17:45Z), «En cada resultado», which Guillermo has not answered yet. With «Solo heartbeat», D4 and what tests it drop out: T4, T5, T6, T8, the `/await` halves of T7 and T9, and M7, M8, M12, M13, M16, M16b, M16c, M22, M23, M25, M26, M27 and M29.
+Revision 5: after Codex Sol's third review, of `19e79ab` (revision 4), which found four issues (r3 H1 to H4). The failure line is logged off the HTTP worker: at most one diagnostic thread waits on the sink, and the line is dropped if that slot is taken or the server has no semaphore (`Handler._log_human_input_block_failed`, r3 H1). The docs follow the code: a tool that returns the bridge row, including `entities_query`, carries the block; `wait_for` and `ui_dialog` do not (r3 H2). A new T8 records that a pin past the TTL still names the lease until `effective_expiry` (r3 H3). Calls that wait while a lock is held use a 30 s bound, the unit T9 lock is released when the test sets done or after 30 s, and the T7 calls in front of the stuck sink wait 10 s against its 60 s (r3 H4). r1's H8 and H9 stay out of scope (see «Out of scope»). Like revisions 1 to 4, this follows the card's recommended option (27/10 ~17:45Z), «En cada resultado», which Guillermo has not answered yet. With «Solo heartbeat», D4 and what tests it drop out: T4, T5, T6, T8, the `/await` halves of T7, T7b and T9, and M7, M8, M12, M13, M16, M16b, M16c, M22, M23, M25, M26, M27, M29, M31, M35, M36 and M37.
 
 ## What happened (fb-20261027-173606-6310, LFSkateboard F3a run 4)
 
@@ -66,6 +66,7 @@ The block is a report. No verb is refused or retried because of it, and the brid
 - In `_handle_session`, action `heartbeat`, a 200 answer gets `payload["human_input"] = lifecycle.human_input_block(client.session_id, payload["lease_id"])` when the state has a lifecycle.
 - Error answers are unchanged.
 - Both client paths pass the payload through as they receive it (main `control_client.py:740-751`, `server.py:2024-2029` and `5197-5204`).
+- If building the block fails, the answer still goes out with `{"signal": "unavailable", "runs": []}`, and the failure line is logged by `Handler._log_human_input_block_failed` after `_json`. That call takes the sink as `_log` does, tries a one-slot semaphore without waiting, and starts a daemon thread named `mcp-human-input-diagnostic` only if the slot is free. If the slot is taken, or the server has no semaphore (a plain `ThreadingHTTPServer`), the line is dropped: no wait, no retry, no queue. The thread swallows a sink exception and releases the slot in `finally`; a failed `start` releases it and drops the line. The SESSION log on heartbeat still waits on the sink in the worker.
 
 ### D4. Verb results (`loopback.py`, `server.py`, `session_coordination.py`)
 
@@ -74,7 +75,8 @@ The block is a report. No verb is refused or retried because of it, and the brid
 - **The holder check.** The handler reads the command's owner in the lock section that takes the result (`ServerState.take_result_with_owner`), which pops both with `remove=1`; `GET /await` still calls `take_result`. A done answer gets the block only when `SessionCoordinator.active_lease_id(identity, token, blocking=False)` returns the lease id the command was enqueued with. That call does not renew the lease and runs no cleanup. It gives None when another thread holds the coordinator lock, and for a lease whose effective expiry has passed (`>=`, the test `_expire_due` uses to end it, r2 H3). The block is then built for that session and lease. So another caller, a missing or wrong token, a released or expired lease and the next lease's token all give no block.
 - **No owner, no block.** GET never carries the block. Neither does a command with no owner: one enqueued without a lease, or one discarded before dispatch, such as a queued command cancelled when its lease is released (`cancel_owner_pending`, then `_mark_discarded`, which keeps an error result and drops the owner). The client raises such an error result as a `ToolError` anyway.
 - **Copy on the tool result.** `ClientRuntime._await_result` copies `human_input` onto the result after `prune_unfilled_fields`. So `call_bridge` returns it, and every tool that returns the bridge result as it is carries it. A tool error carries none: the client raises an `ok: 0` row before it copies the block. Over raw HTTP, a done answer to the holder carries the block whatever its row says, `ok: 0` included.
-- **Composite tools.** Tools that build their own payload from bridge results keep their shape; one example is `entities_query` (main `server.py:8007-8016`). So does `ClientRuntime.probe_bridge_result` (main `server.py:2684-2711`, used only by `ui_dialog`), which reads `GET /await?remove=1` itself and returns the pruned row without the block. The next heartbeat or plain verb carries counts that include it.
+- **Composite tools.** The block travels on the row `call_bridge` returns. A tool's answer carries it when that answer is that row or a copy of it, as-is or with fields added or changed; a tool that makes several calls carries the block of the call whose row it returns. `notify_players` and `player_teleport` return the row of their last call; `entities_query` returns the row of its first call, passed through `_normalize_entities_cargo` and `_annotate_entities_reliability`, which return the same dict; `restore_gameplay` and `loadout_apply` copy the row with `dict()`. A tool that builds a new answer does not carry it: `wait_for` (`_wait_for_response`) and `ui_dialog` (which reads with GET via `probe_bridge_result`).
+- **Failure line on `/await`.** Same diagnostic as D3: after `_json`, `Handler._log_human_input_block_failed`, so the worker does not wait on the sink.
 - **Embedded mode.** It has no leases (`_client_runtime`, main `server.py:5058-5061`), so nothing changes there.
 
 ## Out of scope
@@ -82,7 +84,7 @@ The block is a report. No verb is refused or retried because of it, and the brid
 - Refusing or pausing a verb on human input, and a `wait_for` condition for it (the ticket's other example). The counts let the caller decide; this change adds no behavior.
 - Exact human contact. The counts are credited input: a step between two samples counts for the runs in front at either end (`input_activity.py:196-208`). So input typed in another window right after the client was in front can count, a focus excursion between two samples can go unseen, and a gap over 2 s between good samples credits nothing (`:184-185`).
 - Two inherited limits of the sampler that the counters make visible (ER1 H8, H9), both in main and noted in the bug ledger: the sampler and the idle warden can hand samples to the attributor out of order, which can credit one input twice; and a retired run's mark is kept for the last 256 retirements only, so a sample held back longer could recreate its stamp and counter.
-- Composite tools that rebuild their payload (D4).
+- Tools that build a new answer, such as `wait_for` and `ui_dialog` (D4).
 - Embedded mode.
 - `session_status`: it keeps `human_input_age_s` as it is and gains no counts.
 
@@ -121,18 +123,20 @@ No test calls a real Windows API or starts or snapshots a real process. The test
   - after A releases L there is no block, and the next lease's token gives none;
   - a second HTTP test: once L's effective expiry has passed, with L still active because nothing has run `_expire_due`, A with L's token gets done with no block, and L is still the active lease.
 - **T8, expiry (D4, unit).** `active_lease_id` names the lease 0.001 s before its effective expiry and names none at it, with `blocking` true or false; the lease is neither renewed nor ended.
-- **T9, busy locks (D2, D4).** The test thread holds one lock while the daemon answers.
+- **T9, busy locks (D2, D4).** The test thread holds one lock while the daemon answers. HTTP calls that wait while the lock is held use a 30 s timeout; the unit holder thread releases the lock when the test sets `done`, in a `finally` after the read returns, or after 30 s. Safety joins use 30 s and then assert the thread is dead.
   - With the manifest lock or `_activity_lock` held, a heartbeat and a `POST /await` both answer 200 with `{"signal": "unavailable", "runs": []}`, and the `/await` answer is done with its bridge row.
   - With the coordinator lock held, a `POST /await?remove=0` answers done with no block. `remove=0`, because consuming a leased result waits on that lock in main too.
-  - A handler that waited for the lock would not answer within the client's 2 s timeout, which fails the test as an assertion. A spy shows the handler asks the coordinator with `blocking=False`.
+  - A handler that waited for the lock would not answer within the client's 30 s timeout, which fails the test as an assertion. A spy shows the handler asks the coordinator with `blocking=False`.
   - Once the locks are free, the block comes back with `count` 1.
 - **T5 (D4, client).** `ClientRuntime._await_result` with a fake `_call`:
   - a command admitted under a lease is read with `POST /await` and the identity and token, and a done answer with `human_input` returns the pruned row plus the block;
   - a command with no admit record is read with GET, and an answer without the block returns no key;
   - an `ok: 0` row still raises the bridge error;
   - a 404 on the POST is followed by a GET of the same command, which returns its row.
-- **T6 (D4, tools).** With a fake runtime whose `call_bridge` returns a row with the block, `query_player_state`, `object_delete` and `ui_focus` return it as it is.
-- **T7 (exception).** If `human_input_block` raises, the heartbeat and `POST /await` still answer 200, with `{"signal": "unavailable", "runs": []}`, and one log line follows each answer. With a sink that blocks on that line, and then with one that raises on it, both answers still come, the `/await` one with its consumed row whole. A dropped connection, which is what an escaping exception gives, and a request that times out both fail the test as an assertion.
+- **T6 (D4, tools).** With a fake runtime whose `call_bridge` returns a row with the block, `query_player_state`, `object_delete` and `ui_focus` return it as it is. `entities_query` returns the block of its `entities_query` call, not of `query_all_players`. `notify_players` with a non-empty players list returns the block of its `notify_players` call. `wait_for` `players_at_least` with value 0, satisfied on the first probe, has no `human_input`.
+- **T7 (exception).** If `human_input_block` raises, the heartbeat and `POST /await` still answer 200, with `{"signal": "unavailable", "runs": []}`, and one log line follows each answer. With a sink that blocks on that line, and then with one that raises on it, both answers still come, the `/await` one with its consumed row whole. A dropped connection, which is what an escaping exception gives, and a request that times out both fail the test as an assertion. The raise is swallowed by the diagnostic thread, so the test checks that the sink received the line. The stuck sink holds the line up to 60 s and the calls in front of it wait 10 s, so a line written before the answer fails the test as a timeout; after each join the thread is dead.
+- **T7b (exception, workers).** The same construction failure as T7. `_http_workers` is a `BoundedSemaphore(3)` for the whole test, set before its first request. For heartbeat and `POST /await?remove=0` of a kept result, separately: with the sink held on the failure line, four failing requests answer 200 with the fallback block, then `GET /status` answers too, and the sink was entered once. After `release` and joining `mcp-human-input-diagnostic` threads, one more failing request writes the line again. With a sink that raises, after joining its thread the next failing request writes the line too.
+- **T8, pin (D4, unit).** `acquire` then, at the same instant `c0`, `authorize` of a command that needs a lease with `operation_timeout_s=180`: `expires_at` is `c0 + 120` and the pending deadline is `c0 + 180`. At `c0 + 130`, `active_lease_id` names the lease with `blocking` true or false. At `c0 + 180` and `c0 + 180.5` it names none. `_active` is still that lease.
 
 Mutants are applied one at a time on a copy. Each is killed by the test named, as an AssertionError:
 
@@ -161,7 +165,15 @@ Mutants are applied one at a time on a copy. Each is killed by the test named, a
 - M24: the clock read before the locks are taken, as revision 3 did (T2, clock).
 - M25, M26: an expired lease still naming its holder, or still naming it at exactly its effective expiry (T8).
 - M27: only `ValueError` caught on `POST /await` (T4).
-- M28, M29: the failure line written before the answer, on the heartbeat or on `/await` (T7).
+- M28, M29: the failure line written with `self._log` before the answer, on the heartbeat or on `/await` (T7).
+- M30: the heartbeat failure line written with `self._log` on the HTTP worker (T7b, heartbeat).
+- M31: the `/await` failure line written with `self._log` on the HTTP worker (T7b, `/await`).
+- M32: no diagnostic semaphore, so one thread per line (T7b, sink entered once while held).
+- M33: the diagnostic semaphore not released after the sink (T7b, the next failing request writes the line again).
+- M34: the diagnostic semaphore acquired with `blocking=True` (T7b, fourth failing request or `GET /status`).
+- M35: `entities_query` dropping `human_input` from its answer (T6).
+- M36: `entities_query` taking the block of `query_all_players` (T6).
+- M37: `active_lease_id` comparing against `lease.expires_at` instead of `effective_expiry()` (T8, pin, at `c0 + 130`).
 
 Pass criteria (R26):
 

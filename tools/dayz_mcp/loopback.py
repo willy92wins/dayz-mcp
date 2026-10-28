@@ -6034,6 +6034,31 @@ class Handler(BaseHTTPRequestHandler):
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
         sink(message)
 
+    def _log_human_input_block_failed(self) -> None:
+        # After the answer: at most one diagnostic thread waits on the sink.
+        sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
+        slot = getattr(self.server, "_human_input_diagnostic", None)
+        if slot is None:
+            return
+        if not slot.acquire(blocking=False):
+            return
+
+        def emit() -> None:
+            try:
+                sink("human_input_block failed")
+            except Exception:
+                pass
+            finally:
+                slot.release()
+
+        worker = threading.Thread(
+            target=emit, name="mcp-human-input-diagnostic", daemon=True
+        )
+        try:
+            worker.start()
+        except Exception:
+            slot.release()
+
     def _human_input_payload(
         self, session_id: object, lease_id: object
     ) -> tuple[dict[str, object] | None, bool]:
@@ -6419,7 +6444,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, payload)
         if block_failed:
             # After the answer: a sink that raises or blocks cannot lose it.
-            self._log("human_input_block failed")
+            self._log_human_input_block_failed()
 
     def _persist_coordination(self, payload: dict) -> dict:
         coordination = self.state.coordination
@@ -6692,7 +6717,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, body)
         if block_failed:
             # After the answer, whose result remove=1 may have consumed.
-            self._log("human_input_block failed")
+            self._log_human_input_block_failed()
 
     def _handle_status(self) -> None:
         # Authenticated health/status read used by client bridge_status and by the
@@ -7062,6 +7087,7 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        self._human_input_diagnostic = threading.BoundedSemaphore(1)
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
