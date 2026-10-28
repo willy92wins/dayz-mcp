@@ -444,6 +444,65 @@ Rules:
   after the lock is released, as `finish_operation_exact` (5022-5036) and `_finish_operations`
   (4726) are.
 
+- **Stage 2b implementation note.** The broker half of §2.2, §2.4, §2.5 and §2.15 is in
+  `tools/dayz_mcp/loopback.py`. The coordinator grows only `note_close_unreachable`
+  (`session_coordination.py` 1796-1819). Production still does not call `note_peer_bound` or
+  `seed_restart_debt`, so `lease_end_round` stays None and `cleanup_owner` keeps its old
+  vehicle, bot and hold paths. Criteria: `LeaseCloseBrokerStage2bTest`, which drives a real
+  `ServerState` and a coordinator, each on a fake clock of its own; every census in it answers a
+  close that a poll delivered.
+  - Names: `LEASE_CLOSE_PEERS` (298-301) is consulted by `peer_for_command` (305-311) before
+    `CLIENT_COMMANDS`. The names stay out of the public sets, so `/enqueue` is still
+    `not_whitelisted`, internal or not (§2.16).
+  - Ledger: `_lease_closes` and `_deferred_server_closes` (2339-2340) are memory only. Close
+    ids come from `_next_id` as releases do.
+  - Reachable: `_close_destination_locked` (4605-4624) needs a BOUND binding that covers the
+    peer, its queue, a broker that is not stopping and a pin with a complete identity; anything
+    else is `not_bound`. An instance whose last poll was version-blocked (the set the poll writes
+    at 5164-5169, cleared by its next passing poll) is `version_blocked`. Quarantine is the
+    reading `cleanup_owner` already took (6005); it wins over the binding.
+  - Publish: `_publish_close_locked` (4631-4699) runs in the lock section that found the
+    destination reachable. It pins, seals and records `_enqueued_at`, with no `MAX_QUEUE`
+    check, no owner and no fire-and-forget. A queued close of the same instance and peer is
+    discarded as `lease_close_superseded` first (§2.4). `_command_exempt_from_fence`
+    (2910-2916) keeps a close through drain and fenced polls.
+  - `cleanup_owner` (6041-6169) rechecks authority, asks `lease_end_round`, reports in row
+    order (client first; server deferred when that run's client was published in the same
+    call), then calls `note_close_round` and only then enqueues the published keys it accepted.
+    It sets `lease_close_enqueued` only when a round existed.
+  - Deferred server closes (`_publish_due_deferred_closes_locked`, 4701-4746, with
+    `LEASE_CLOSE_SERVER_DELAY_S` at 302) go once the client row has an outcome of any kind
+    (4596-4603) or at +10 s of `_now`, and carry the client's floor only when that outcome is a
+    clean census with an int `conn_gen`. They are checked at the start of each poll (5076) and
+    each result (5598), and after a close result (5662). An unreachable destination calls
+    `note_close_unreachable` instead.
+  - Delivery skips `claim_dispatch` (5308-5317); quarantine and `lease_close_deliverable`
+    discard, the latter as `lease_close_stale`, and a delivered close's ledger row turns
+    `delivered` (5352-5358). The poll's expiry runs outside the lock and can run a cleanup that
+    replaces the queue's list, so the poll then re-reads the live list (5206-5218) and starts
+    over, and a close that cleanup published reaches that same answer (K19). On main the poll
+    delivered from the list it read before the expiry: a command that survived
+    `cancel_owner_pending` there went out in that answer and again in the next.
+  - Results (5650-5662): the result of a close that no poll delivered is discarded and counted
+    in `_lease_close_ignored`, and the close stays queued. A delivered close's result drops its
+    ledger row, keeping the fence, and `_close_outcome_from_result_locked` (4809-4895) reads it:
+    another binding epoch gives residue `binding_epoch_changed`; `ok` not true, rejected; a
+    malformed census, residue `census_malformed`; a census that names another generation, lease
+    or peer is counted in `_lease_close_ignored` and gives no outcome, so its row stays
+    outstanding and a later echo of that id is discarded; clean with every entry clean or
+    stopped, clean, except a client census without an int `conn_gen`, which is residue
+    `conn_gen_unknown`; not clean with residue entries, residue with their reasons; anything
+    else, `census_malformed`.
+  - Retirement (2892-2898) owes a delivered close as `binding_retired` and keeps its fence, so a
+    late result gets 409. `_mark_discarded` (5491-5499) owes a queued close and drops it from
+    `_lease_closes`.
+  - Flush: `_flush_close_outcomes` (4561-4569) runs after the broker lock on poll, result,
+    retirement, cleanup and `cancel_pending`, and takes the lock again only to count `ignored`.
+    Embedded (`coordination` None) publishes nothing.
+  - Locks: under the broker lock the broker also calls `note_close_published` and
+    `note_close_unreachable`; like the calls in §2.15, they are memory-only and expire only rows,
+    never through `_expire_due`.
+
 ### 2.6 The client close (`lease_close_client`)
 
 The close passes the existing not-in-game gate first (MCPClientBridge.c:1098-1104). A client that

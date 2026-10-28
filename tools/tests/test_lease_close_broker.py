@@ -1,9 +1,11 @@
-"""Stage 2a lease-end coordinator criteria (K4, K9, K11-K13, K17, K19, K21).
+"""Lease-end close criteria of stages 2a and 2b.
 
-The broker, cleanup_owner, daemon and bridges are not under test yet: this
-module drives SessionCoordinator as the broker will, through the memory-only
-API, so those criteria fail on f547a47 and pass once the coordinator rows,
-rounds, grant fence and payloads exist.
+Stage 2a (K4, K9, K11-K13, K17, K19, K21) drives SessionCoordinator as the
+broker does, through the memory-only API: the coordinator rows, rounds,
+grant fence and payloads. Stage 2b (K1, K2, K4-K10, K14, K15, K18, K19,
+K32) drives a real loopback ServerState, which publishes and settles the
+closes through cleanup_owner, its polls and its results. The daemon and
+the bridges are not under test here.
 """
 from __future__ import annotations
 
@@ -19,11 +21,20 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import session_coordination
+from dayz_mcp import loopback, session_coordination
 from dayz_mcp.session_coordination import (
     LEASE_END_BOUND_S,
+    SESSION_TTL_S,
     ClientIdentity,
     SessionCoordinator,
+)
+from tests.fence_helpers import (
+    INST_CLIENT,
+    INST_SERVER,
+    PID_CLIENT,
+    PID_SERVER,
+    bind_both_peers,
+    poll_census_query,
 )
 from tests.lease_helpers import MID, AuditSink, FakeClock, SequentialIds, _identity
 
@@ -2865,3 +2876,655 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     self.coordinator.seed_restart_debt(pairs)
                 self.assertNotIn("lease_end", self.coordinator.status(self.a))
+
+
+def _identity_payload(client: ClientIdentity) -> dict[str, object]:
+    return {
+        "platform": client.platform,
+        "pid": client.pid,
+        "ppid": client.ppid,
+        "started_at_utc": client.started_at_utc,
+        "session_id": client.session_id,
+        "task_label": client.task_label,
+    }
+
+
+_CLOSE_NAMES = {"server": "lease_close", "client": "lease_close_client"}
+_DROP = object()
+
+
+class LeaseCloseBrokerStage2bTest(unittest.TestCase):
+    """Stage 2b broker criteria (K1, K2, K4-K10, K14, K15, K18, K19, K32).
+
+    A real ServerState publishes and settles the closes through
+    cleanup_owner, its polls and its results, against a SessionCoordinator
+    on a fake clock of its own. Every census answers a close a poll
+    delivered.
+    """
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.broker_clock = FakeClock()
+        self.ids = SequentialIds("lease")
+        self.tokens = SequentialIds("token")
+        self.audit = AuditSink()
+        self.a = _identity("a")
+        self.b = _identity("b")
+        self._build()
+
+    def _build(self, *, offline: bool = False, version_validator=None) -> None:
+        self.state = loopback.ServerState(
+            "test-key",
+            version_validator=version_validator,
+            time_fn=self.broker_clock,
+        )
+        if offline:
+            self.state.install_bound_peer(
+                instance=INST_SERVER, role="offline", pid=PID_SERVER, run_id="test-run"
+            )
+            self.instances = {"server": INST_SERVER, "client": INST_SERVER}
+            self.pids = {"server": PID_SERVER, "client": PID_SERVER}
+        else:
+            bind_both_peers(self.state)
+            self.instances = {"server": INST_SERVER, "client": INST_CLIENT}
+            self.pids = {"server": PID_SERVER, "client": PID_CLIENT}
+        self.coordinator = SessionCoordinator(
+            time_fn=self.clock,
+            token_fn=self.tokens,
+            id_fn=self.ids,
+            audit=self.audit,
+            cleanup=lambda *args: self.state.cleanup_owner(*args),
+        )
+        self.state.coordination = self.coordinator
+        self.state.retail_probe = lambda: {"known": True, "processes": []}
+        for peer in ("server", "client"):
+            self.coordinator.note_peer_bound("test-run", peer, self.instances[peer])
+            self.assertEqual(self._poll(peer), [])
+
+    def _poll(
+        self, peer: str, *, pid: int | None = None, version: str = "12~1.29"
+    ) -> list[dict]:
+        query = poll_census_query(peer)
+        status, body = self.state.record_poll(
+            peer,
+            version,
+            instance=self.instances[peer],
+            source_pid=self.pids[peer] if pid is None else pid,
+            caps=query["caps"],
+            ach=query.get("ach"),
+        )
+        self.assertEqual(status, 200, body)
+        return list(body.get("commands") or [])
+
+    @staticmethod
+    def _cmds(commands: list[dict]) -> list[str]:
+        return [str(command.get("cmd")) for command in commands]
+
+    def _queued(self, peer: str) -> list[str]:
+        queue = self.state._bound_queues.get(self.instances[peer], [])
+        return [
+            name
+            for name in self._cmds(queue)
+            if loopback.peer_for_command(name) == peer
+        ]
+
+    def _acquire(self, client: ClientIdentity) -> dict:
+        status, lease = self.coordinator.acquire(client, "trace")
+        self.assertEqual(status, 200, lease)
+        return lease
+
+    def _enqueue(
+        self,
+        client: ClientIdentity,
+        lease: dict,
+        cmd: str,
+        args: dict[str, object],
+        peer: str,
+    ) -> tuple[int, dict]:
+        return self.state.enqueue_command(
+            cmd,
+            args,
+            peer=peer,
+            identity_payload=_identity_payload(client),
+            lease_token=lease["lease_token"],
+            operation_timeout_s=30.0,
+        )
+
+    def _deliver_work(self, client: ClientIdentity, lease: dict) -> int:
+        status, body = self._enqueue(
+            client, lease, "object_delete", {"object_id": 1}, "server"
+        )
+        self.assertEqual(status, 200, body)
+        command_id = int(body["id"])
+        self.assertEqual([item["id"] for item in self._poll("server")], [command_id])
+        return command_id
+
+    def _work(self) -> tuple[dict, int]:
+        lease = self._acquire(self.a)
+        return lease, self._deliver_work(self.a, lease)
+
+    def _release(self, client: ClientIdentity, lease: dict) -> None:
+        status, body = self.coordinator.release(client, lease["lease_token"])
+        self.assertEqual(status, 200, body)
+        with self.coordinator._condition:
+            self.assertTrue(
+                self.coordinator._condition.wait_for(
+                    lambda: not self.coordinator._handoff_pending,
+                    timeout=30.0,
+                ),
+                "handoff_pending did not clear",
+            )
+
+    def _ended_lease(self) -> tuple[dict, int]:
+        lease, command_id = self._work()
+        self._release(self.a, lease)
+        return lease, command_id
+
+    def _deliver_close(self, peer: str) -> dict:
+        commands = self._poll(peer)
+        self.assertEqual(self._cmds(commands), [_CLOSE_NAMES[peer]], commands)
+        return commands[0]
+
+    def _census(self, peer: str, close: dict, /, **fields: object) -> dict[str, object]:
+        census: dict[str, object] = {
+            "generation": close["args"]["close_generation"],
+            "lease_id": close["args"]["close_lease_id"],
+            "peer": peer,
+            "state": "clean",
+        }
+        if peer == "client":
+            census.update(
+                entries=[{"name": "action", "state": "clean"}],
+                move_floor=7,
+                weapon_floor=4,
+                net_low=10,
+                net_high=20,
+                conn_gen=1,
+            )
+        else:
+            census.update(
+                entries=[{"name": "bots", "state": "clean"}],
+                floors=[_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+            )
+        census.update(fields)
+        return {key: value for key, value in census.items() if value is not _DROP}
+
+    def _settle(
+        self, peer: str, close: dict, /, *, instance: str | None = None, **fields: object
+    ) -> tuple[int, dict]:
+        return self.state.store_result(
+            {"id": close["id"], "ok": True, "lease_close": self._census(peer, close, **fields)},
+            instance=instance or self.instances[peer],
+        )
+
+    def _accepted(self, result: tuple[int, dict]) -> None:
+        status, body = result
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("discarded", body)
+
+    def _discarded(self, result: tuple[int, dict]) -> None:
+        status, body = result
+        self.assertEqual((status, body.get("discarded")), (200, True), body)
+
+    def _photo(self) -> dict:
+        return self.coordinator.status(self.a).get("lease_end", {})
+
+    def _owed(self) -> dict[str, list[str]]:
+        return {
+            row["peer"]: list(row["reasons"])
+            for row in self._photo().get("unconfirmed", [])
+        }
+
+    def _settled_ids(self, grant: dict) -> set[str]:
+        return {str(item["close_id"]) for item in grant["lease_end"]["settled"]}
+
+    def _record_outcomes(self) -> list[tuple[str, str, str]]:
+        seen: list[tuple[str, str, str]] = []
+        note = self.coordinator.note_close_outcomes
+
+        def recording(outcomes: list[dict[str, object]]) -> list[str]:
+            statuses = note(outcomes)
+            for outcome, status in zip(outcomes, statuses):
+                seen.append((str(outcome["kind"]), str(outcome["reason"]), status))
+            return statuses
+
+        self.coordinator.note_close_outcomes = recording
+        return seen
+
+    def _degraded_grant(self) -> dict:
+        """B queues behind A's round, then gets the lease once the rows time out."""
+        status, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status, 202, queued)
+        self.clock.advance(LEASE_END_BOUND_S)
+        status, grant = self.coordinator.wait(self.b, queued["ticket"], 30.0)
+        self.assertEqual(status, 200, grant)
+        self.assertIn("lease_end_unconfirmed", grant["cleanup_degraded"])
+        return grant
+
+    def test_k1_abandoned_delivery_waits_for_both_closes(self) -> None:
+        lease, command_id = self._work()
+        self.state.abandon_command(command_id, "tool_timeout")
+        self._release(self.a, lease)
+        status, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status, 202, queued)
+        client_close = self._deliver_close("client")
+        self._accepted(self._settle("client", client_close))
+        server_close = self._deliver_close("server")
+        self._accepted(self._settle("server", server_close))
+        status, grant = self.coordinator.wait(self.b, queued["ticket"], 30.0)
+        self.assertEqual(status, 200, grant)
+        self.assertEqual(
+            self._settled_ids(grant), {str(client_close["id"]), str(server_close["id"])}
+        )
+        self.assertNotIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
+        self._discarded(
+            self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
+        )
+
+    def test_k1_server_census_from_another_instance_is_discarded(self) -> None:
+        lease, command_id = self._work()
+        self.state.abandon_command(command_id, "tool_timeout")
+        self._release(self.a, lease)
+        status, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status, 202, queued)
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        server_close = self._deliver_close("server")
+        self._discarded(self._settle("server", server_close, instance=INST_CLIENT))
+        self.assertEqual((self._photo()["outstanding"], self._owed()), (1, {}))
+        self.assertEqual(self.coordinator.acquire(self.b, "trace")[0], 202)
+        self._accepted(self._settle("server", server_close))
+        status, grant = self.coordinator.wait(self.b, queued["ticket"], 30.0)
+        self.assertEqual(status, 200, grant)
+        self.assertNotIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
+
+    def test_k2_unanswered_delivery_waits_for_both_closes(self) -> None:
+        lease, command_id = self._ended_lease()
+        status, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status, 202, queued)
+        client_close = self._deliver_close("client")
+        self._accepted(self._settle("client", client_close))
+        server_close = self._deliver_close("server")
+        self._accepted(self._settle("server", server_close))
+        status, grant = self.coordinator.wait(self.b, queued["ticket"], 30.0)
+        self.assertEqual(status, 200, grant)
+        self.assertEqual(
+            self._settled_ids(grant), {str(client_close["id"]), str(server_close["id"])}
+        )
+        # The result arrives once the 30 s its tool waited are over.
+        self.broker_clock.advance(30.0)
+        self._discarded(
+            self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
+        )
+
+    def test_k4_lease_without_work_publishes_no_close(self) -> None:
+        for read in (False, True):
+            with self.subTest(read=read):
+                lease = self._acquire(self.a)
+                if read:
+                    status, body = self._enqueue(
+                        self.a, lease, "query_player_state", {}, "server"
+                    )
+                    self.assertEqual(status, 200, body)
+                    self.assertEqual(
+                        self._cmds(self._poll("server")), ["query_player_state"]
+                    )
+                self._release(self.a, lease)
+                self.assertEqual((self._queued("server"), self._queued("client")), ([], []))
+                grant = self._acquire(self.b)
+                self.assertNotIn("lease_end", grant)
+                self._release(self.b, grant)
+
+    def test_k4_owed_row_opens_a_round_without_work(self) -> None:
+        self.coordinator.seed_restart_debt([("test-run", None)])
+        lease = self._acquire(self.a)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self.assertEqual(self.coordinator.acquire(self.b, "trace")[0], 202)
+
+    def test_k5_server_only_lease_closes_the_client_first(self) -> None:
+        self._ended_lease()
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self.assertEqual(self._queued("server"), [])
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_k5_ambiguous_client_owes_and_the_server_close_goes_at_once(self) -> None:
+        lease, _command_id = self._work()
+        self.assertEqual(self._poll("client", pid=PID_CLIENT + 1), [])
+        self._release(self.a, lease)
+        self.assertEqual(self._owed(), {"client": ["not_bound"]})
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_k6_offline_binding_hands_each_close_to_its_own_poll(self) -> None:
+        self._build(offline=True)
+        self._ended_lease()
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self.assertEqual(self._poll("server"), [])
+        self.broker_clock.value = 10.0
+        self.assertEqual(self._cmds(self._poll("server")), ["lease_close"])
+        self.assertEqual(self._cmds(self._poll("client")), ["lease_close_client"])
+
+    def test_k7_census_with_another_identity_is_ignored(self) -> None:
+        for field, value in (
+            ("generation", "another-generation"),
+            ("lease_id", "another-lease"),
+            ("peer", "server"),
+        ):
+            with self.subTest(field=field):
+                self._build()
+                self._ended_lease()
+                close = self._deliver_close("client")
+                ignored = self.state._lease_close_ignored
+                self._accepted(self._settle("client", close, **{field: value}))
+                self.assertEqual(self.state._lease_close_ignored, ignored + 1)
+                self.assertEqual((self._photo()["outstanding"], self._owed()), (2, {}))
+                self.assertEqual(self._queued("server"), [])
+                # That result used up the close, so its exact echo is late.
+                self._discarded(self._settle("client", close))
+                self.assertEqual((self._photo()["outstanding"], self._owed()), (2, {}))
+
+    def test_k7_census_from_another_instance_is_discarded(self) -> None:
+        self._ended_lease()
+        close = self._deliver_close("client")
+        self._discarded(self._settle("client", close, instance=INST_SERVER))
+        self.assertEqual((self._photo()["outstanding"], self._owed()), (2, {}))
+        self._accepted(self._settle("client", close))
+        self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_k7_census_after_the_epoch_changed_owes_the_row(self) -> None:
+        self._ended_lease()
+        close = self._deliver_close("client")
+        self.state.install_bound_peer(
+            instance=INST_CLIENT, role="client", pid=PID_CLIENT, run_id="test-run"
+        )
+        self._accepted(self._settle("client", close))
+        self.assertEqual(self._owed(), {"client": ["binding_epoch_changed"]})
+
+    def test_k8_queued_close_is_stale_once_b_holds_the_lease(self) -> None:
+        self._ended_lease()
+        grant = self._degraded_grant()
+        # No admission fence: B's command goes in behind A's queued close.
+        status, body = self._enqueue(self.b, grant, "key_press", {"dik": 1}, "client")
+        self.assertEqual(status, 200, body)
+        outcomes = self._record_outcomes()
+        self.assertEqual(self._cmds(self._poll("client")), ["key_press"])
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(outcomes, [("discarded", "lease_close_stale", "ignored")])
+        self.assertEqual(
+            self._owed(), {"client": ["close_timeout"], "server": ["close_timeout"]}
+        )
+
+    def test_k8_next_round_supersedes_a_queued_close(self) -> None:
+        self._ended_lease()
+        first = self.state._bound_queues[INST_CLIENT][0]["id"]
+        grant = self._degraded_grant()
+        self._deliver_work(self.b, grant)
+        outcomes = self._record_outcomes()
+        self._release(self.b, grant)
+        queue = self.state._bound_queues[INST_CLIENT]
+        self.assertEqual(self._cmds(queue), ["lease_close_client"])
+        self.assertNotEqual(queue[0]["id"], first)
+        self.assertEqual(outcomes, [("discarded", "lease_close_superseded", "ignored")])
+
+    def test_k9_server_close_carries_the_client_floor(self) -> None:
+        for reported, owed in ((7, {}), (5, {"server": ["player_move_floor_unapplied"]})):
+            with self.subTest(reported=reported):
+                self._build()
+                self._ended_lease()
+                self._accepted(self._settle("client", self._deliver_close("client")))
+                server_close = self._deliver_close("server")
+                self.assertEqual(
+                    server_close["args"]["close_floors"],
+                    [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+                )
+                floors = [_floor(10, 20, conn_gen=1, move_id=reported, weapon_id=4)]
+                self._accepted(self._settle("server", server_close, floors=floors))
+                self.assertEqual(self._owed(), owed)
+                grant = self._acquire(self.b)
+                self.assertEqual(
+                    str(server_close["id"]) in self._settled_ids(grant), not owed
+                )
+                self._release(self.b, grant)
+
+    def test_k9_client_census_without_conn_gen_owes_and_carries_no_floor(self) -> None:
+        self._ended_lease()
+        self._accepted(
+            self._settle("client", self._deliver_close("client"), conn_gen=_DROP)
+        )
+        self.assertEqual(self._owed(), {"client": ["conn_gen_unknown"]})
+        self.assertEqual(self._deliver_close("server")["args"]["close_floors"], [])
+
+    def test_k10_close_is_published_past_max_queue(self) -> None:
+        lease, _command_id = self._work()
+        row = {"pin": self.state._destination_pin_locked("client", INST_CLIENT)}
+        with self.state._lock:
+            published = [
+                self.state._publish_release_locked(dict(row), ("vehicle_release", {}), None)
+                for _ in range(loopback.MAX_QUEUE)
+            ]
+            refused = self.state._publish_release_locked(
+                dict(row), ("vehicle_release", {}), None
+            )
+        self.assertTrue(all(ok for ok, _reason, _id in published))
+        self.assertEqual(refused, (False, "queue_full", None))
+        self._release(self.a, lease)
+        commands = self._poll("client")
+        self.assertEqual(
+            self._cmds(commands),
+            ["vehicle_release"] * loopback.MAX_QUEUE + ["lease_close_client"],
+        )
+
+    def test_k14_retired_client_owes_its_close(self) -> None:
+        for delivered in (False, True):
+            with self.subTest(delivered=delivered):
+                self._build()
+                self._ended_lease()
+                if delivered:
+                    close = self._deliver_close("client")
+                else:
+                    close = self.state._bound_queues[INST_CLIENT][0]
+                self.state.retire_role("test-run", "client", "replace-role")
+                self.assertEqual(
+                    self._owed(), {"client": ["close_discarded:binding_retired"]}
+                )
+                result = self._settle("client", close)
+                if delivered:
+                    self.assertEqual(result, (409, {"error": "binding_retired"}))
+                else:
+                    self._discarded(result)
+
+    def test_k15_quarantine_at_lease_end_owes_every_row_at_once(self) -> None:
+        lease, _command_id = self._work()
+        self.state.retail_probe = lambda: {"known": True, "processes": [{"pid": 7}]}
+        self._release(self.a, lease)
+        self.assertEqual((self._queued("server"), self._queued("client")), ([], []))
+        self.assertEqual(
+            self._owed(),
+            {"server": ["retail_quarantine"], "client": ["retail_quarantine"]},
+        )
+        grant = self._acquire(self.b)
+        self.assertIn("lease_end_unconfirmed", grant["cleanup_degraded"])
+
+    def test_k15_quarantine_after_publishing_discards_the_close(self) -> None:
+        self._ended_lease()
+        self.state.retail_probe = lambda: {"known": True, "processes": [{"pid": 7}]}
+        self.assertEqual(self._poll("client"), [])
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(
+            self._owed(), {"client": ["close_discarded:retail_quarantine"]}
+        )
+
+    def test_k18_client_outcome_publishes_the_server_close(self) -> None:
+        self._ended_lease()
+        close = self._deliver_close("client")
+        self.assertEqual(self._queued("server"), [])
+        self._accepted(self._settle("client", close))
+        self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_k18_silent_client_lets_the_server_close_go_at_ten_seconds(self) -> None:
+        self._ended_lease()
+        self._deliver_close("client")
+        # The lease ended at 0 s on the broker's clock.
+        self.broker_clock.value = 9.9
+        self.assertEqual(self._poll("server"), [])
+        self.broker_clock.value = 10.0
+        self.assertEqual(self._cmds(self._poll("server")), ["lease_close"])
+
+    def test_k18_discarded_client_close_lets_the_server_close_go(self) -> None:
+        self._ended_lease()
+        self.state.retire_role("test-run", "client", "replace-role")
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._deliver_close("server")["args"]["close_floors"], [])
+
+    def test_k19_rows_are_reported_before_their_closes_are_queued(self) -> None:
+        lease, _command_id = self._work()
+        note = self.coordinator.note_close_round
+        queued_at_report: list[list[str]] = []
+
+        def report(round_id: int, reports: list[dict[str, object]]) -> set:
+            queued_at_report.append(self._queued("client") + self._queued("server"))
+            return note(round_id, [item for item in reports if item["peer"] != "client"])
+
+        self.coordinator.note_close_round = report
+        self._release(self.a, lease)
+        self.assertEqual(queued_at_report, [[]])
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._owed(), {"client": ["close_not_reported"]})
+
+    def test_k19_expiry_inside_a_poll_delivers_the_close_in_that_answer(self) -> None:
+        lease, _command_id = self._work()
+        status, body = self._enqueue(self.a, lease, "key_press", {"dik": 1}, "client")
+        self.assertEqual(status, 200, body)
+        status, body = self.state.enqueue_command(
+            "camera_get", {}, peer="client", internal=True
+        )
+        self.assertEqual(status, 200, body)
+        self.clock.advance(SESSION_TTL_S + 1.0)
+        self.assertEqual(
+            self._cmds(self._poll("client")), ["camera_get", "lease_close_client"]
+        )
+        self.assertEqual(self._poll("client"), [])
+
+    def test_k32_close_names_are_internal_only(self) -> None:
+        lease = self._acquire(self.a)
+        for peer, name in _CLOSE_NAMES.items():
+            with self.subTest(name=name):
+                self.assertEqual(loopback.peer_for_command(name), peer)
+                self.assertNotIn(name, loopback.WHITELISTED_COMMANDS)
+                args = {"close_generation": "g", "close_lease_id": "l"}
+                for internal in (False, True):
+                    status, body = self.state.enqueue_command(
+                        name,
+                        args,
+                        peer=peer,
+                        identity_payload=None if internal else _identity_payload(self.a),
+                        lease_token=None if internal else lease["lease_token"],
+                        operation_timeout_s=30.0,
+                        internal=internal,
+                    )
+                    self.assertEqual((status, body.get("error")), (400, "not_whitelisted"))
+        self.assertEqual((self._queued("server"), self._queued("client")), ([], []))
+
+    def test_run_fence_keeps_the_close_and_drains_the_rest(self) -> None:
+        lease, _command_id = self._work()
+        status, body = self.state.enqueue_command(
+            "camera_get", {}, peer="client", internal=True
+        )
+        self.assertEqual(status, 200, body)
+        self._release(self.a, lease)
+        self.state.lifecycle.manifest.get = lambda _run_id: SimpleNamespace(
+            state="RUNNING_IDLE"
+        )
+        self.assertEqual(self._cmds(self._poll("client")), ["lease_close_client"])
+        self.assertEqual(self.state._results[int(body["id"])]["error"], "run_not_owned")
+        self.assertEqual(self._queued("client"), [])
+
+    def test_version_blocked_client_owes_until_a_passing_poll(self) -> None:
+        self._build(
+            version_validator=lambda version: (
+                "version_mismatch" if version == "11~1.29" else "ok"
+            )
+        )
+        lease, _command_id = self._work()
+        self.assertEqual(self._poll("client", version="11~1.29"), [])
+        self._release(self.a, lease)
+        self.assertEqual(self._owed(), {"client": ["version_blocked"]})
+        self.assertEqual(self._queued("client"), [])
+        self._accepted(self._settle("server", self._deliver_close("server")))
+        self.assertEqual(self._poll("client"), [])
+        grant = self._acquire(self.b)
+        self._release(self.b, grant)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+
+    def test_incomplete_pin_is_unreachable(self) -> None:
+        lease, _command_id = self._work()
+        self.state._bindings[INST_CLIENT].creation_time_utc = None
+        self._release(self.a, lease)
+        self.assertEqual(self._owed(), {"client": ["not_bound"]})
+        self.assertEqual(self._queued("client"), [])
+
+    def test_unreachable_server_at_its_deferred_publish_owes_its_row(self) -> None:
+        self._ended_lease()
+        close = self._deliver_close("client")
+        self.assertEqual(self._poll("server", pid=PID_SERVER + 1), [])
+        self._accepted(self._settle("client", close))
+        self.assertEqual(self._owed(), {"server": ["not_bound"]})
+        self.assertEqual(self._queued("server"), [])
+
+    def test_note_close_unreachable_owes_only_a_deferred_row(self) -> None:
+        lease, _command_id = self._ended_lease()
+        info = self.coordinator.lease_end_round(self.a.session_id, lease["lease_id"])
+        self.assertIsNotNone(info)
+        assert info is not None
+        round_id = int(info["round"])
+        unreachable = self.coordinator.note_close_unreachable
+        self.assertFalse(unreachable(round_id, "test-run", "client", "not_bound"))
+        self.assertFalse(unreachable(round_id + 1, "test-run", "server", "not_bound"))
+        self.assertTrue(unreachable(round_id, "test-run", "server", "not_bound"))
+        self.assertFalse(unreachable(round_id, "test-run", "server", "version_blocked"))
+        self.assertEqual(self._owed(), {"server": ["not_bound"]})
+
+    def test_census_that_is_not_clean_owes_the_row(self) -> None:
+        residue = [
+            {"name": "one", "state": "active", "reason": "held"},
+            {"name": "two", "state": "active", "reason": "held"},
+            {"name": "vehicle_drive", "state": "active"},
+        ]
+        cases = (
+            ("rejected", False, "client_not_in_game", None, ["close_rejected:client_not_in_game"]),
+            ("failed", False, None, None, ["close_rejected:close_failed"]),
+            ("no census", True, None, None, ["census_malformed"]),
+            (
+                "clean with an active entry",
+                True,
+                None,
+                {"entries": [{"name": "action", "state": "active"}]},
+                ["census_malformed"],
+            ),
+            ("residue", True, None, {"state": "residue", "entries": residue}, ["held", "vehicle_drive"]),
+        )
+        for name, ok, error, census, owed in cases:
+            with self.subTest(name):
+                self._build()
+                self._ended_lease()
+                close = self._deliver_close("client")
+                body: dict[str, object] = {"id": close["id"], "ok": ok}
+                if error is not None:
+                    body["error"] = error
+                if census is not None:
+                    body["lease_close"] = self._census("client", close, **census)
+                self._accepted(self.state.store_result(body, instance=INST_CLIENT))
+                self.assertEqual(self._owed(), {"client": owed})
+
+    def test_result_of_an_undelivered_close_is_ignored(self) -> None:
+        self._ended_lease()
+        queued = self.state._bound_queues[INST_CLIENT][0]
+        ignored = self.state._lease_close_ignored
+        self._discarded(self._settle("client", queued))
+        self.assertEqual(self.state._lease_close_ignored, ignored + 1)
+        self.assertEqual((self._photo()["outstanding"], self._owed()), (2, {}))
+        close = self._deliver_close("client")
+        self.assertEqual(close["id"], queued["id"])
+        self._accepted(self._settle("client", close))
+        self.assertEqual(self._queued("server"), ["lease_close"])
