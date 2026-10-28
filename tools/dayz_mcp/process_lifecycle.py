@@ -1907,6 +1907,19 @@ class RunManifestStore:
         with self._lock:
             return [self._clone(self._runs[key]) for key in sorted(self._runs)]
 
+    def read_runs(self, read: Callable[[list[RunRecord]], _T]) -> _T | None:
+        """inbox 6310: read(the runs, as list_runs gives them) under the lock.
+
+        None, without calling read, when another thread holds the lock: this
+        never waits for it. replace holds it while it persists.
+        """
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return read([self._clone(self._runs[key]) for key in sorted(self._runs)])
+        finally:
+            self._lock.release()
+
     def _note_storage_observation_locked(self, run: RunRecord) -> None:
         """Keep a measured rotation after the EXITED row is pruned.
 
@@ -2196,6 +2209,9 @@ class ProcessLifecycle:
         self._ownerless_since: dict[tuple[str, str], float] = {}
         self._human_input_at: dict[tuple[str, str], float] = {}
         self._uncertain_input_at: dict[tuple[str, str], float] = {}
+        # inbox 6310: how many samples updated each stamp this generation.
+        self._human_input_count: dict[tuple[str, str], int] = {}
+        self._uncertain_input_count: dict[tuple[str, str], int] = {}
         self._launched_by: dict[tuple[str, str], ClientIdentity] = {}
         # 250f PR 3. Launcher requests restart the idle clock (§3.2). Closing
         # is the warden's countdown. A failed warning stays idle_waiting until
@@ -2904,9 +2920,13 @@ class ProcessLifecycle:
                 if key in self._retired_use_keys:
                     continue
                 table = self._human_input_at if verified else self._uncertain_input_at
+                counters = (
+                    self._human_input_count if verified else self._uncertain_input_count
+                )
                 current = table.get(key)
                 if current is None or epoch > current:
                     table[key] = epoch
+                    counters[key] = counters.get(key, 0) + 1
                 credited.append(run_id)
                 self._invalidate_pending_adoption_locked(
                     run_id, "human" if verified else "uncertain"
@@ -3004,6 +3024,8 @@ class ProcessLifecycle:
                 self._ownerless_since,
                 self._human_input_at,
                 self._uncertain_input_at,
+                self._human_input_count,
+                self._uncertain_input_count,
                 self._launched_by,
             ):
                 for key in [key for key in table if key[1] == run_id]:
@@ -6775,6 +6797,93 @@ class ProcessLifecycle:
     def human_input_at(self, run_id: str) -> float | None:
         with self._activity_lock:
             return self._human_input_at.get(self._activity_key(run_id))
+
+    def human_input_block(
+        self,
+        session_id: object,
+        lease_id: object,
+        *,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """inbox 6310: cumulative input counts for this lease's RUNNING runs.
+
+        The counters are read with the manifest lock held: an owner change or
+        a retirement persists under that lock before it drops a counter, so
+        neither lands between the owner test and the counts. Neither lock is
+        waited for, since the answer this goes on may carry a result that
+        /await?remove=1 already consumed: one that another thread holds gives
+        signal unavailable and no rows. The clock is read once, with both
+        locks held. Empty or non-string ids yield runs=[] and still report
+        whether the sampler signal is fresh.
+        """
+
+        def read(runs: list[RunRecord]) -> dict[str, object] | None:
+            if not self._activity_lock.acquire(blocking=False):
+                return None
+            try:
+                clock = time.time() if now is None else float(now)
+                return self._human_input_block_locked(
+                    runs, session_id, lease_id, clock
+                )
+            finally:
+                self._activity_lock.release()
+
+        block = self.manifest.read_runs(read)
+        if block is None:
+            return {"signal": "unavailable", "runs": []}
+        return block
+
+    def _human_input_block_locked(
+        self,
+        runs: list[RunRecord],
+        session_id: object,
+        lease_id: object,
+        clock: float,
+    ) -> dict[str, object]:
+        """Caller holds the manifest lock and _activity_lock."""
+
+        good_at = self._input_good_at
+        signal_ok = (
+            good_at is not None
+            and 0.0 <= clock - good_at <= INPUT_SIGNAL_STALE_S
+        )
+        rows: list[dict[str, object]] = []
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and isinstance(lease_id, str)
+            and lease_id
+        ):
+            # read_runs gives the runs sorted by run_id.
+            owned = [
+                run
+                for run in runs
+                if run.state == "RUNNING"
+                and run.owner_session_id == session_id
+                and run.owner_lease_id == lease_id
+            ]
+            for run in owned:
+                key = self._activity_key(run.run_id)
+                human_at = self._human_input_at.get(key)
+                if human_at is not None and human_at > clock:
+                    human_at = None
+                last_age_s = (
+                    round(clock - human_at, 3) if human_at is not None else None
+                )
+                rows.append(
+                    {
+                        "run_id": run.run_id,
+                        "count": self._human_input_count.get(key, 0),
+                        "uncertain_count": self._uncertain_input_count.get(
+                            key, 0
+                        ),
+                        "last_age_s": last_age_s,
+                    }
+                )
+        return {
+            "signal": "ok" if signal_ok else "unavailable",
+            "runs": rows,
+        }
 
     def launcher_request_at(self, run_id: str) -> float | None:
         with self._activity_lock:
