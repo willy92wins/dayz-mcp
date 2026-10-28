@@ -815,46 +815,74 @@ it runs.
   in later stages. The criteria are `tools/tests/test_lease_close_broker.py`.
   - State: `LEASE_END_BOUND_S` (16), `_Lease.delivered_work` and `lease_end` (233-234), the row
     and the round (250-274), the bound's check (353-360) and the coordinator's fields (394-397).
-    `claim_dispatch` marks delivered work (1590).
-  - The API is 1593-1799. Each method first turns expired rows into OWED (`_expire_rows_locked`,
-    4532-4541), and so does `_expire_due` (2711).
-  - The round opens right after `_releasing` is set (2778; 4543-4584). A saturated hook owes the
-    round's pending rows at once (2835), one that raises owes the reported ones too (2866), and
-    one that returns owes the rows it did not name (2868).
-  - `_lease_end_blocks_locked` (4508-4517) joins the grant checks at 555, 576, 1215, 3173 and
-    3746, and `wait` wakes at the earliest deadline (1310-1312). `_new_lease_locked` takes the
-    grant's photo (3439); `_grant_payload_locked` (4480-4490) copies it at 512, 785, 3414, 3662
-    and 4130, and `_merge_cleanup_degraded` (4492-4506) keeps the debt's warning on every payload
-    path. Status adds `lease_end` (2285; 4657-4672).
-  - Outcomes go through `_apply_close_outcome_locked` (4674-4697) and its helpers (to 4857); the
-    floors are compared by `_floor_gap` (4876-4895).
-  - Restart debt has instance "" (1640): no peer is bound yet at daemon start (§2.12), and the
-    stage 2b broker reports such a row unreachable.
+    `claim_dispatch` marks delivered work (1595).
+  - The API is 1598-1804. Each method, on entering its locked section, turns expired rows into
+    OWED (`_expire_rows_locked`, 4540-4549), and so does `_expire_due` (2716).
+  - The round opens right after `_releasing` is set (2783; 4551-4592). A saturated hook owes the
+    round's pending rows at once (2840), one that raises owes the reported ones too (2871), and
+    one that returns owes the rows it did not name (2873).
+  - `_lease_end_blocks_locked` (4513-4522) joins the grant checks at 555, 581, 1220, 3178 and
+    3751. `wait` wakes at the earliest deadline (1315-1317), and so does the preferential
+    reacquire (561-565). `_new_lease_locked` takes the grant's photo (3444);
+    `_grant_payload_locked` (4485-4495) copies it at 512, 790, 3419, 3667 and 4135, and
+    `_merge_cleanup_degraded` (4497-4511) keeps the debt's warning on every payload path. Status
+    adds `lease_end` (2290; 4668-4684), from one clock reading.
+  - Outcomes go through `_apply_close_outcome_locked` (4686-4709) and its helpers (to 4870); the
+    floors are compared by `_floor_gap` (4889-4908).
+  - Restart debt takes the registry's instance for its run and peer, or "" when none is bound
+    (1645). No peer is bound yet at daemon start (§2.12), and the stage 2b broker reports such a
+    row unreachable.
   - Only a server close may be deferred (§2.3). A client `deferred` report is not accepted, so
     that row ends `close_not_reported` when the hook returns.
   - A late clean of an OWED server row whose floors fall short answers `applied` and changes
     nothing: it is the row's current close, so it is not `ignored`, and the row keeps its
     reasons. One whose floors pass clears the row and stores them.
-  - Reports and restart pairs are all checked before any row changes, so a bad one raises with
-    nothing applied, and a published close needs a `close_id` (1627-1631, 1694-1700, 1753).
+  - The ids in every report and restart pair are checked before any row changes, so a bad id
+    raises with nothing applied, and a published close needs a `close_id` (1632-1636, 1699-1705,
+    1758).
   - After a cleared server row, a client floor is compared only with the floors that row's clean
-    stored in this round (4785-4857). A run with no server row brings none back, and neither does
-    one `note_processes_gone` removed, which also drops its stored floors (1616-1620). The row a
+    stored in this round (4797-4870). A run with no server row brings none back, and neither does
+    one `note_processes_gone` removed, which also drops its stored floors (1621-1625). The row a
     client floor brings back requires that floor, as a CLOSING one does.
-  - H1. A late hook finish stores `round_id` at 2779-2783; `invoke_cleanup`'s `finally` (2812-2828)
-    sets `finished` and, if `abandoned`, owes that round (`cleanup_failed` with `include_reported`
-    if it raised, else `close_not_reported`). The timeout branch sets `abandoned` when `finished`
-    is unset (2860-2863). `_owe_round_pending_locked` takes `round_id` (4586-4605).
-  - H2. A client floor of another `conn_gen` while the server is CLOSING uses the two conn_gen
-    reasons from `_floor_gap`, without comparing ids (4827-4855).
-  - H3. `_expire_rows_locked` accepts `now` (4532-4534). `_lease_end_blocks_locked` expires with
-    that same reading (4508-4510). `_lease_end_wait_remaining_locked` returns 0.0 when a pending
-    or closing row is already due (4519-4527).
-  - H4. `acquire` (433-434) and `enqueue` (901-902) merge `degraded` onto an `operation_id` retry.
-  - H5. Tests pin deferred-then-published and `finish_operation_exact` leaving `delivered_work`.
-    Since H3 the grant fence expires rows itself, so a status with a recovery fault armed, which
-    skips the fence (`_claimable_locked`, 3740-3752), is the path that still needs
-    `_expire_due`'s expiry (2711); a test pins it.
+  - r1 H1 to H5 are the findings of Codex Sol's first review of stage 2a, which round 2 fixed;
+    r2 H1 to H5 are those of its second review, which round 3 fixes.
+  - r1 H1. A late hook finish stores `round_id` at 2784-2788; `invoke_cleanup`'s `finally`
+    (2817-2833) sets `finished` and, if `abandoned`, owes that round (`cleanup_failed` with
+    `include_reported` if it raised, else `close_not_reported`). The timeout branch sets
+    `abandoned` when `finished` is unset (2865-2868). `_owe_round_pending_locked` takes
+    `round_id` (4594-4613).
+  - r1 H2. When the CLOSING row carries a floor for that player, a client floor of another
+    `conn_gen` owes the two conn_gen reasons, in `_floor_gap`'s order, without comparing ids
+    (4839-4868).
+  - r1 H3. For the grant and `wait`: `_expire_rows_locked` accepts `now` (4540-4542).
+    `_lease_end_blocks_locked` expires with that same reading (4513-4515).
+    `_lease_end_wait_remaining_locked` returns 0.0 when a pending or closing row is already due
+    (4524-4535).
+  - r1 H4. `acquire` (433-434) and `enqueue` (906-907) merge `degraded` onto an `operation_id`
+    retry.
+  - r1 H5. Tests pin deferred-then-published and `finish_operation_exact` leaving
+    `delivered_work`.
+  - r2 H1. When the CLOSING row carries no floor for that player, it now keeps the client's floor
+    as a requirement, ids 0 included (4864-4865), and the server clean compares its floors with
+    it (`_server_clean_reasons_locked`, 4755-4762): another `conn_gen` owes the two conn_gen
+    reasons, and a player missing from the server census owes the two floor reasons. When the
+    server reports first, the row the client floor brings back already owed the same reasons.
+  - r2 H2. K9's deferred-then-published test now applies cleans after the publication: one with
+    the deferred report's close id is `ignored`, one with the published id clears the row, and the
+    next grant's `settled` names that id.
+  - r2 H3. Status reads the clock once (4671): it expires the rows with that reading and computes
+    `outstanding`, `deadline_in_s` and `unconfirmed` from it (4672-4684), so a deadline that
+    crosses inside status cannot show a row as neither outstanding nor owed.
+    `_lease_end_wait_remaining_locked` and `_unconfirmed_list_locked` take `now` (4524-4528,
+    4631-4635). Status no longer needs `_expire_due`'s expiry. A queued `wait` during a long
+    cleanup still does (2716), because its loop skips the fence while `_releasing` is set
+    (1216-1220); a test pins it.
+  - r2 H4. The preferential reacquire expires the rows and caps its wait with the rows' term,
+    from one reading (561-565), as `wait` does.
+  - r2 H5. The tests order their phases with events and with the waits a recording condition
+    sees, not with sleeps. Every time bound left is 10 s or more: K19's 10 s, against a hook
+    that would hold status and acquire for 30 s, and bounds that only keep a stuck run from
+    hanging.
 
 ### 2.12 Known peers, retirement, restart (H4)
 - **Registry.** The coordinator keeps `(run_id, peer) → instance`. The broker feeds it with
@@ -1116,15 +1144,15 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | K6 | Offline binding | one offline binding → two closes on one instance queue; each poll takes only its own (4613-4615); census reads ActionManagerClient (`m_PendingActionData`, V130 actionmanagerclient.c:804-814), not a cast to Server | a server poll never returns `lease_close_client` |
 | K7 | Identity | exact echo → clear | wrong generation, lease or peer → ignored, row CLOSING; another instance → `discarded`, row CLOSING; epoch bumped and re-BOUND → OWED (`binding_epoch_changed`) |
 | K8 | Delivery gate (H5) | close queued, no lease → delivered; delivered close, round times out, B degraded grant, B starts move by input with id > F **same `conn_gen`**, old close then runs → B's move continues; reconnect: body kept, new `conn_gen`, B id=1, old close F=100 of previous `conn_gen` does not apply **even after B's first start on the new connection is accepted** (B's move continues, new floor unchanged); fresh connection, nothing accepted: B's close names the new `conn_gen` with F=1 while start id=1 is in flight → that id=1 is refused | deadline passes, B granted degraded, next poll of a still-queued close → `lease_close_stale`; round 1's queued close when round 2 publishes → `lease_close_superseded`; a per-destination admission fence for B is not added; close with no `conn_gen` → OWED, not a clean no-op; start or release with no `conn_gen` or another generation → refused; a release of another generation does not free B's copy or raise lastId |
-| K9 | Hook failures (H6) | normal hook → rows CLOSING | slots exhausted → OWED (`cleanup_worker_saturated`) at once; hook raises → OWED (`cleanup_failed`); hook returns `cleanup_fenced` → OWED (`close_not_reported`); hook past `cleanup_timeout_s` reports before the deadline → CLOSING, after it → stays OWED; a late hook return owes that round's PENDING (`close_not_reported`); a late raise owes them (`cleanup_failed`, including reported); neither touches another round's PENDING |
+| K9 | Hook failures (H6) | normal hook → rows CLOSING; a deferred server close published later → a clean with the published close id clears its row, and the next grant's `settled` names that id | a clean with the deferred report's close id → `ignored`; slots exhausted → OWED (`cleanup_worker_saturated`) at once; hook raises → OWED (`cleanup_failed`); hook returns `cleanup_fenced` → OWED (`close_not_reported`); hook past `cleanup_timeout_s` reports before the deadline → CLOSING, after it → stays OWED; a late hook return owes that round's PENDING (`close_not_reported`); a late raise owes them (`cleanup_failed`, including reported); neither touches another round's PENDING |
 | K10 | Past `MAX_QUEUE` (H6) | client queue holds `MAX_QUEUE` internal releases → the close is still published and delivered | at that queue `_publish_release_locked` refuses a release with `queue_full` (4296-4300), which proves the queue was full |
-| K11 | The waiter wakes (H9) | real clock, bound 0.2 s (constructor override): a thread in `wait` returns 200 with `lease_end_unconfirmed` within 0.35 s, with no other call; a deadline that crosses inside acquire or wait turns expired outstanding rows OWED (`close_timeout`) and wait returns 200 with `lease_end_unconfirmed` in under 0.5 s; status lists a row past its deadline as OWED (`close_timeout`), also with a recovery fault armed | wake term removed (mutant) → it returns only at its own wait limit (1 s), so the POS assertion fails |
+| K11 | The waiter wakes (H9) | real clock, bound 0.2 s (constructor override): a thread in `wait` with its own limit of 30 s returns 200 with `lease_end_unconfirmed`, with no other call, and none of its recorded waits is longer than 0.2 s; a deadline that crosses inside acquire or wait turns expired outstanding rows OWED (`close_timeout`), and wait returns 200 with `lease_end_unconfirmed` with no recorded wait longer than 0.01 s; status lists a row past its deadline as OWED (`close_timeout`), also with a recovery fault armed; a deadline that crosses inside status, with or without the fault, gives one photo: `outstanding` plus the `unconfirmed` rows is 2, and `deadline_in_s` is null exactly when `outstanding` is 0, positive otherwise; during a long cleanup, the preferential reacquire and a queued `wait` first wait no longer than the rows' term, never wait zero, and get 200 with `lease_end_unconfirmed` | wake term removed (mutant) → its first recorded wait is its own limit, so the POS assertion fails; the preferential loop without its expiry, or without both its expiry and the term, and `_expire_due` without its expiry (mutants) fail the long-cleanup cases |
 | K12 | A → B → C (H3) | A leaves residue → B degraded; B releases with no commands → a debt round → closes clean → C clean | B's round leaves residue again → C degraded too |
 | K13 | Restart (H4) | seeded run → first grant degraded (`daemon_restart`); `note_processes_gone(run, None)` → next grant clean; recovered fault: seed after manifest restore and before lifting, including `clear_lifecycle_recovery_fault` (6461-6463) and complete (6554-6556), covering kept live runs (process_lifecycle.py:7625-7631, 7677-7692) | a lease end while the run is unbound → rows OWED (`not_bound`), debt stays; construction order of setter vs `_lock`/`_bindings` (2020, 2039-2045) both attach |
 | K14 | Retirement and late results (H13) | queued close at `retire_role` → `binding_retired`, its late result → 200 `discarded`; delivered close → late result 409 `binding_retired`; the retired instance's own hold result → 200 and reconciles | the lifecycle write fails, `note_processes_gone` is not called → row stays OWED |
 | K15 | Quarantine | quarantine at lease end → no close, rows OWED (`retail_quarantine`), grant degraded at once; hold path as today | quarantine after the close was queued → delivery discards it (4672-4673) → OWED |
 | K16 | Holds (H2, H5, H9, r4 H1, r7 H2) | (a) delivered hold, both sides clean, hold result lost → next `action_hold` on that instance admitted; (b) both-sides-clean close before the hold result → result is a no-op; (c) at lease end no `action_hold_cancel` is queued and A's `pending_commands` is 0; (f) instance replaced: old exact holds become `hold_server_unverified`, new instance holds admitted; (j) START with vanilla ack whose recorded id matches `SJ_ACTION_ACK_*` → **that input row** may clear, never the hold fence; **(k)** active hold with no terminal: close → `Shutdown` ends it, result `cancel`/`shutdown`; **(l)** hold with `finished`/`natural` (or `timeout`/`timeout`, `rejected`/`server_rejected`) published and not yet taken when close enters: result stays that observation | (d) residue client or server action → next hold on that instance 409 `hold_unreconciled`, grant degraded; (e) a clean close from another instance → fence stays; (g) interrupt is not sent from the **server** close; a late interrupt can still arrive under a degraded grant; a hold player missing from floors → `hold_server_unchecked`; (h) own result `cleanup_complete=true` first while server helper still busy → fence stays; (i) START without ack, interrupt, or END in flight, both helpers idle → `action_input_in_flight`, debt until client process exit; no "unacked send" shortcut; **(m)** a mutant in which `Shutdown` rewrites an existing terminal must fail |
-| K17 | Move and weapon floors (H1, H2, Q15, r3 H11) | client F=7 W=4 matching named `conn_gen` (equals body's `m_MCPConnGen`, even if lastId is 0) → server close carries both, reports ≥ → both rows clear; late clean while still CLOSING → clear; late clean after OWED whose identity (close id, instance, `conn_gen`, F/W) still matches, atomic → **clears** | server first reports F=5 then client F=7 → OWED `player_move_floor_unapplied`; same for W → `weapon_floor_unapplied`; missing or other `conn_gen` on the close → OWED `player_move_conn_gen_unapplied` / `weapon_conn_gen_unapplied`; client floor of another `conn_gen` while the server is CLOSING, in either order → those two conn_gen reasons; start/raise/fire/release with no generation or another generation → refused; other-gen release does not free B's copy or raise lastId; superseded or identity-mismatch late result stays OWED; unresolved player → OWED; issued grant is never rewritten |
+| K17 | Move and weapon floors (H1, H2, Q15, r3 H11) | client F=7 W=4 matching named `conn_gen` (equals body's `m_MCPConnGen`, even if lastId is 0) → server close carries both, reports ≥ → both rows clear; late clean while still CLOSING → clear; late clean after OWED whose identity (close id, instance, `conn_gen`, F/W) still matches, atomic → **clears**; with no carried floor, a client floor with ids 0 and the server's `conn_gen` → both rows clear | server first reports F=5 then client F=7 → OWED `player_move_floor_unapplied`; same for W → `weapon_floor_unapplied`; missing or other `conn_gen` on the close → OWED `player_move_conn_gen_unapplied` / `weapon_conn_gen_unapplied`; client floor of another `conn_gen` while the server is CLOSING, in either order → those two conn_gen reasons; with no carried floor for that player, in either order, a client floor with ids 0 of another `conn_gen` → those two conn_gen reasons, and one for a player the server census lacks → `player_move_floor_unapplied` and `weapon_floor_unapplied`; start/raise/fire/release with no generation or another generation → refused; other-gen release does not free B's copy or raise lastId; superseded or identity-mismatch late result stays OWED; unresolved player → OWED; issued grant is never rewritten |
 | K18 | Order across peers | the server close is published only after the client close settles | client silent → server close published at + 10 s, not earlier |
 | K19 | Interleavings and locks | (i) no poll between publish and report sees the close; (ii) expiry from `record_poll` → that same poll answer carries the client close; (iii) status and acquire during a blocked hook return; (iv) an outcome of round 1 flushed after round 2 opened → ignored | a mutant hook that waits for the game → the poll answer in (ii) comes only after the hook's timeout; start/release with no `conn_gen` or another generation → refused (same identity negatives as K8/K17) |
 | K21 | Payloads (H6) | grant `lease_end.settled` names the close ids; during a round status shows `lease_end` and `cleanup_degraded == []` | with an owed row the grant has `lease_end_unconfirmed` merged with another warning (direct wait assigns at 1095, 1124-1125, 1173-1174, 4141-4150); an `operation_id` retry of `acquire` and of `enqueue` merges the same way; status `cleanup_degraded` stays `[]` |
