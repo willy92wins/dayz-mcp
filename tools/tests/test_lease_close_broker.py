@@ -1296,8 +1296,10 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
     ) -> None:
         # After A's cleanup and the handoff, only closing rows keep A's
         # preferential reacquire waiting. The deadline passes right after
-        # the loop's fence saw them outstanding: the loop expires them and
-        # decides again, instead of waiting out its own limit.
+        # the loop's fence saw them outstanding: the loop's body expires
+        # them and the loop decides again, instead of waiting out its own
+        # limit. That limit is on the real clock, so a run in which it ran
+        # out before the body fails here instead of passing.
         go = threading.Event()
         self.addCleanup(go.set)
         published = threading.Event()
@@ -1339,6 +1341,23 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             return blocks
 
         self.coordinator._lease_end_blocks_locked = fence_then_cross
+        expire = self.coordinator._expire_rows_locked
+        body_expiries: list[bool] = []
+
+        def expire_and_note(now: float | None = None) -> bool:
+            expired = expire(now)
+            # The loop's body is the one place acquire itself calls this;
+            # the fence, _expire_due and the round's API call it from their
+            # own frames.
+            if (
+                crossed.is_set()
+                and threading.current_thread().name == "k11-preferred"
+                and sys._getframe(1).f_code.co_name == "acquire"
+            ):
+                body_expiries.append(expired)
+            return expired
+
+        self.coordinator._expire_rows_locked = expire_and_note
         expiry = threading.Thread(
             target=self.coordinator.status, args=(self.b,), name="k11-expiry"
         )
@@ -1356,6 +1375,11 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self._join(expiry, timeout=40.0)
         self._join(preferred, timeout=40.0)
         self.assertTrue(crossed.is_set(), "the fence never saw the rows outstanding")
+        self.assertEqual(
+            body_expiries,
+            [True],
+            "the loop's body did not expire the rows after the crossing",
+        )
         self.assertEqual(
             recorder.waits_of("k11-preferred")[waits_at_cross[0]:],
             [],
