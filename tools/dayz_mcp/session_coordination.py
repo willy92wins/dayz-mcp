@@ -434,7 +434,8 @@ class SessionCoordinator:
             if operation_id is not None:
                 existing = self._operation_state_locked(client, operation_id)
                 if existing is not None:
-                    return existing
+                    status, payload = existing
+                    return status, self._payload_with_degradation(payload, degraded)
                 if self._operation_tombstoned_locked(client, operation_id):
                     return 409, {"error": "operation_cancelled"}
                 if (
@@ -901,7 +902,8 @@ class SessionCoordinator:
                 return 403, {"error": "identity_mismatch"}
             existing = self._operation_state_locked(client, operation_id)
             if existing is not None:
-                return existing
+                status, payload = existing
+                return status, self._payload_with_degradation(payload, degraded)
             if self._operation_tombstoned_locked(client, operation_id):
                 return 409, {"error": "operation_cancelled"}
             if (
@@ -2794,6 +2796,11 @@ class SessionCoordinator:
         self._active = None
         self._releasing = lease
         self._open_lease_end_round_locked(lease)
+        round_id = (
+            self._lease_end_round.round_id
+            if self._lease_end_round is not None
+            else None
+        )
         self._bump_revision_locked()
         self._remember_invalid_token_locked(
             lease, "lease_expired" if reason == "lease_expired" else "lease_invalid"
@@ -2823,12 +2830,24 @@ class SessionCoordinator:
                 cleanup_box["error"] = exc
             finally:
                 with self._condition:
+                    cleanup_box["finished"] = True
+                    if cleanup_box.get("abandoned") and round_id is not None:
+                        if "error" in cleanup_box:
+                            self._owe_round_pending_locked(
+                                ["cleanup_failed"],
+                                include_reported=True,
+                                round_id=round_id,
+                            )
+                        else:
+                            self._owe_round_pending_locked(
+                                ["close_not_reported"],
+                                round_id=round_id,
+                            )
                     self._cleanup_worker_active -= 1
                     self._cleanup_worker_slots.release()
                     self._condition.notify_all()
                 cleanup_done.set()
 
-        cleanup_finished = False
         cleanup_slot = self._cleanup_worker_slots.acquire(blocking=False)
         if not cleanup_slot:
             self._cleanup_worker_saturated += 1
@@ -2849,16 +2868,17 @@ class SessionCoordinator:
                 except Exception as exc:
                     start_error = exc
                 else:
-                    cleanup_finished = cleanup_done.wait(self._cleanup_timeout_s)
+                    cleanup_done.wait(self._cleanup_timeout_s)
             finally:
                 self._condition.acquire()
             if start_error is not None:
                 cleanup_box["error"] = start_error
-                cleanup_finished = True
+                cleanup_box["finished"] = True
                 self._cleanup_worker_active -= 1
                 self._cleanup_worker_slots.release()
 
-        if cleanup_slot and not cleanup_finished:
+        if cleanup_slot and not cleanup_box.get("finished"):
+            cleanup_box["abandoned"] = True
             cleanup_timed_out = True
             degraded.append("cleanup_timeout")
         elif "error" in cleanup_box:
@@ -4507,6 +4527,7 @@ class SessionCoordinator:
 
     def _lease_end_blocks_locked(self) -> bool:
         now = self._time_fn()
+        self._expire_rows_locked(now)
         for row in self._lease_end_rows.values():
             if (
                 row.state in {"pending", "closing"}
@@ -4519,14 +4540,18 @@ class SessionCoordinator:
         now = self._time_fn()
         remainings: list[float] = []
         for row in self._lease_end_rows.values():
-            if row.state in {"pending", "closing"} and now < row.deadline:
-                remainings.append(row.deadline - now)
+            if row.state not in {"pending", "closing"}:
+                continue
+            if now >= row.deadline:
+                return 0.0
+            remainings.append(row.deadline - now)
         if not remainings:
             return None
         return min(remainings)
 
-    def _expire_rows_locked(self) -> None:
-        now = self._time_fn()
+    def _expire_rows_locked(self, now: float | None = None) -> None:
+        if now is None:
+            now = self._time_fn()
         changed = False
         for row in self._lease_end_rows.values():
             if row.state in {"pending", "closing"} and now >= row.deadline:
@@ -4579,13 +4604,21 @@ class SessionCoordinator:
         self._condition.notify_all()
 
     def _owe_round_pending_locked(
-        self, reasons: list[str], *, include_reported: bool = False
+        self,
+        reasons: list[str],
+        *,
+        include_reported: bool = False,
+        round_id: int | None = None,
     ) -> None:
-        current = self._lease_end_round
-        if current is None:
-            return
+        if round_id is None:
+            current = self._lease_end_round
+            if current is None:
+                return
+            target = current.round_id
+        else:
+            target = round_id
         for row in self._lease_end_rows.values():
-            if row.round_id != current.round_id or row.state != "pending":
+            if row.round_id != target or row.state != "pending":
                 continue
             if row.reported and not include_reported:
                 continue
@@ -4813,18 +4846,29 @@ class SessionCoordinator:
             return
         if server_row.state == "closing":
             carried = server_row.required_floors.get(floor_key)
-            baseline = carried or {
-                "conn_gen": floor.get("conn_gen"),
-                "move_id": 0,
-                "weapon_id": 0,
-            }
             reasons: list[str] = []
-            if int(floor.get("move_id") or 0) > int(baseline.get("move_id") or 0):
-                reasons.append("player_move_floor_unapplied")
-            if int(floor.get("weapon_id") or 0) > int(
-                baseline.get("weapon_id") or 0
+            if (
+                carried is not None
+                and carried.get("conn_gen") != floor.get("conn_gen")
             ):
-                reasons.append("weapon_floor_unapplied")
+                reasons = [
+                    "player_move_conn_gen_unapplied",
+                    "weapon_conn_gen_unapplied",
+                ]
+            else:
+                baseline = carried or {
+                    "conn_gen": floor.get("conn_gen"),
+                    "move_id": 0,
+                    "weapon_id": 0,
+                }
+                if int(floor.get("move_id") or 0) > int(
+                    baseline.get("move_id") or 0
+                ):
+                    reasons.append("player_move_floor_unapplied")
+                if int(floor.get("weapon_id") or 0) > int(
+                    baseline.get("weapon_id") or 0
+                ):
+                    reasons.append("weapon_floor_unapplied")
             if reasons:
                 server_row.required_floors[floor_key] = dict(floor)
                 self._set_row_owed_locked(server_row, reasons)
