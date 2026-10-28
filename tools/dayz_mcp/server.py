@@ -165,6 +165,7 @@ from dayz_mcp.tool_catalog import (
     _INITIAL_READ_TOOL_NAMES,
     _LEASE_REVEAL_PREFIXES,
     _OPENER_FOR_CLOSER,
+    _admin_catalog,
     _bridge_success_candidates,
     _compact_description,
     _compact_initial_catalog,
@@ -10186,6 +10187,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     async def list_tools_progressive():
         tools = await _original_list_tools()
+        if getattr(config, "tool_pack", None) == "admin":
+            return _admin_catalog(tools)
         if not _progressive_disclosure_active(runtime):
             return tools
         return _compact_initial_catalog(tools)

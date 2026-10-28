@@ -567,7 +567,7 @@ def _configure_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--task-label", default="")
     parser.add_argument(
         "--tool-pack",
-        choices=("full", "local8b"),
+        choices=("full", "local8b", "admin"),
         default="full",
     )
     parser.add_argument(

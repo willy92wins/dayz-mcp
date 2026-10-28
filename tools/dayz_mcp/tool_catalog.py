@@ -97,6 +97,11 @@ def _runtime_holds_lease(runtime: Any) -> bool:
 
 def _progressive_disclosure_enabled(config: Any) -> bool:
     """True when this process lists the compact catalog while it holds no lease."""
+    # The admin pack (ticket C1) is a fixed catalog: it lists the same 22
+    # tools before and after the lease, so progressive disclosure never
+    # applies to it, whatever the platform or the opt-out flag says.
+    if getattr(config, "tool_pack", None) == "admin":
+        return False
     return (
         getattr(config, "mode", None) == "client"
         and getattr(config, "progressive_disclosure", True) is not False
@@ -172,6 +177,154 @@ def _compact_initial_catalog(tools: list[Any]) -> list[Any]:
         if getattr(tool, "outputSchema", None) is not None:
             updates["outputSchema"] = None
         compacted.append(tool.model_copy(update=updates) if updates else tool)
+    return compacted
+
+
+# One-sentence descriptions for the admin pack (ticket C2,
+# fb-20261028-131036-6edd). Only the listed catalog under
+# --tool-pack admin uses them: the registered tools keep their long
+# descriptions, so the full and local8b packs and the execution
+# contract (handler signatures and defaults) are unchanged. The long
+# text moves to on-demand help in a later batch (C3).
+ADMIN_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "bridge_status": "Check whether the bridge and daemon are ready.",
+    "session_acquire_wait": "Acquire the session lease or wait for it.",
+    "session_heartbeat": "Renew the active session lease.",
+    "session_release": "Release the active session lease.",
+    "session_status": "Read session and lease status.",
+    "query_all_players": "List every connected player.",
+    "query_player_state": "Read the connected player state.",
+    "world_time_get": "Read the server world time.",
+    "logs_since": "Read new log lines since a marker.",
+    "wait_for": "Wait until a condition is met.",
+    "surface_query": "Read terrain height at a position.",
+    "entities_query": "List entities near a position.",
+    "notify_players": "Send a notification to a player.",
+    "player_teleport": "Teleport a player to a position.",
+    "player_heal": "Heal a player.",
+    "player_godmode": "Switch a player godmode on or off.",
+    "world_time_set": "Set the server world time.",
+    "world_weather_set": "Set the server weather.",
+    "world_spawn": "Spawn an object in the world.",
+    "object_delete": "Delete a spawned object.",
+    "restore_gameplay": "Restore normal gameplay view and controls.",
+    "server_perf": "Measure server performance.",
+}
+
+
+def _flatten_admin_property(schema: Any) -> dict[str, Any] | None:
+    """Flatten one property to a plain type, or None to drop it.
+
+    Optional values lose their null branch, nested objects are dropped,
+    and titles, descriptions, defaults and limits are stripped.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "string"}
+    for combinator in ("anyOf", "oneOf"):
+        branches = schema.get(combinator)
+        if isinstance(branches, list):
+            for branch in branches:
+                if isinstance(branch, dict) and branch.get("type") == "null":
+                    continue
+                flat = _flatten_admin_property(branch)
+                if flat is not None:
+                    return flat
+            return None
+    if "$ref" in schema:
+        return None
+    if isinstance(schema.get("enum"), list):
+        return {
+            "type": str(schema.get("type") or "string"),
+            "enum": list(schema["enum"]),
+        }
+    prop_type = schema.get("type")
+    if isinstance(prop_type, list):
+        prop_type = next(
+            (item for item in prop_type if item != "null"), "string"
+        )
+    if prop_type == "object":
+        return None
+    if prop_type == "array":
+        items = _flatten_admin_property(schema.get("items"))
+        return {"type": "array", "items": items or {"type": "number"}}
+    if prop_type in ("string", "integer", "number", "boolean"):
+        return {"type": prop_type}
+    if prop_type is None:
+        if "properties" in schema or "additionalProperties" in schema:
+            return None
+        return {"type": "string"}
+    return {"type": str(prop_type)}
+
+
+def _flatten_admin_input_schema(schema: Any) -> dict[str, Any]:
+    """Flatten a registered input schema for the admin catalog.
+
+    A uid property is always listed as required with no default, so a
+    small model must name the player instead of falling back to the
+    first one; the handler itself keeps its current default.
+    """
+    if not isinstance(schema, dict):
+        schema = {}
+    raw_properties = schema.get("properties")
+    properties: dict[str, Any] = {}
+    if isinstance(raw_properties, dict):
+        for name, property_schema in raw_properties.items():
+            flat = _flatten_admin_property(property_schema)
+            if flat is not None:
+                properties[name] = flat
+    raw_required = schema.get("required")
+    required = [
+        name
+        for name in raw_required
+        if isinstance(name, str) and name in properties
+    ] if isinstance(raw_required, list) else []
+    if "uid" in properties and "uid" not in required:
+        required.append("uid")
+    flat_schema: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        flat_schema["required"] = required
+    return flat_schema
+
+
+def _admin_catalog(tools: list[Any]) -> list[Any]:
+    """The listed admin catalog: one sentence and a flat schema per tool.
+
+    Returns copies, as _compact_initial_catalog does, so the registered
+    tools (and with them call validation and the other packs) keep
+    their long descriptions and whole schemas. Output schemas are
+    dropped from the listing, as in the compact catalog.
+    """
+    compacted: list[Any] = []
+    for tool in tools:
+        name = getattr(tool, "name", "")
+        description = ADMIN_TOOL_DESCRIPTIONS.get(name)
+        if description is None:
+            continue
+        schema = getattr(tool, "inputSchema", None)
+        if not isinstance(schema, dict):
+            schema = getattr(tool, "parameters", None)
+        flat_schema = _flatten_admin_input_schema(schema)
+        if name == "wait_for":
+            # entity is a nested object, so it is not listed; the
+            # condition that needs it is not listed either.
+            condition = (flat_schema.get("properties") or {}).get("condition")
+            if isinstance(condition, dict) and isinstance(
+                condition.get("enum"), list
+            ):
+                condition["enum"] = [
+                    value
+                    for value in condition["enum"]
+                    if value != "entity_state"
+                ]
+        compacted.append(
+            tool.model_copy(
+                update={
+                    "description": description,
+                    "inputSchema": flat_schema,
+                    "outputSchema": None,
+                }
+            )
+        )
     return compacted
 
 
