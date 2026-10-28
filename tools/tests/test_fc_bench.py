@@ -196,6 +196,24 @@ class S10PhrasingTest(unittest.TestCase):
         self.assertTrue(killed["forbidden"])
         self.assertFalse(killed["pass"])
 
+    def test_undo_negation_does_not_cancel_a_ban_claim(self) -> None:
+        scenario = _scenario(_spec(), "S10")
+        mutating = FC.mutating_names(_catalog())
+        claimed = FC.score(
+            scenario, [],
+            "No es posible deshacerlo, el jugador ha sido baneado permanentemente",
+            mutating,
+        )
+        self.assertFalse(claimed["answer_ok"])
+        self.assertFalse(claimed["pass"])
+        refused = FC.score(
+            scenario, [],
+            "No es factible banear con las funciones disponibles",
+            mutating,
+        )
+        self.assertTrue(refused["answer_ok"])
+        self.assertTrue(refused["pass"])
+
 
 class FinalStateTest(unittest.TestCase):
     def test_heal_then_kill_fails_s06(self) -> None:
@@ -214,6 +232,25 @@ class FinalStateTest(unittest.TestCase):
         self.assertIn("player_kill", scored["unrequested_mutations"])
         self.assertFalse(scored["pass"])
         self.assertEqual(world.snapshot()["players"][0]["health"], 0.0)
+
+    def test_heal_without_full_keeps_water_and_energy(self) -> None:
+        spec = _spec()
+        scenario = _scenario(spec, "S06")
+        world = _world()
+        before = world.snapshot()
+        target = next(p for p in before["players"] if p["uid"] == "76561198000000002")
+        heal = world.call("player_heal", {"uid": "76561198000000002", "full": False})
+        after = world.snapshot()
+        healed = next(p for p in after["players"] if p["uid"] == "76561198000000002")
+        self.assertEqual(healed["health"], 1.0)
+        self.assertEqual(healed["water"], target["water"])
+        self.assertEqual(healed["energy"], target["energy"])
+        scored = FC.score(scenario, [
+            _call("player_heal", {"uid": "76561198000000002", "full": False}, heal),
+        ], "Curado.", FC.mutating_names(_catalog()), after, before)
+        self.assertTrue(scored["goal_ok"])
+        self.assertTrue(scored["final_ok"])
+        self.assertTrue(scored["pass"])
 
     def test_restoring_the_old_clock_and_rain_fails_s05(self) -> None:
         spec = _spec()
@@ -234,6 +271,31 @@ class FinalStateTest(unittest.TestCase):
         ], "Listo.", FC.mutating_names(_catalog()), world.snapshot(), before)
         self.assertTrue(scored["goal_ok"])
         self.assertTrue(scored["also_ok"])
+        self.assertFalse(scored["final_ok"])
+        self.assertFalse(scored["pass"])
+
+    def test_reacquire_after_release_fails_s12(self) -> None:
+        spec = _spec()
+        scenario = _scenario(spec, "S12")
+        world = _world()
+        world.lease = None
+        before = world.snapshot()
+        clock = {"year": 2026, "month": 10, "day": 28, "hour": 18, "minute": 30}
+        acquired = world.call("session_acquire_wait", {})
+        changed = world.call("world_time_set", clock)
+        released = world.call("session_release", {"lease_token": FC.LEASE_TOKEN})
+        again = world.call("session_acquire_wait", {})
+        after = world.snapshot()
+        self.assertEqual(after["session"]["lease"], FC.LEASE_TOKEN)
+        scored = FC.score(scenario, [
+            _call("session_acquire_wait", {}, acquired),
+            _call("world_time_set", clock, changed),
+            _call("session_release", {"lease_token": FC.LEASE_TOKEN}, released),
+            _call("session_acquire_wait", {}, again),
+        ], "Hora cambiada.", FC.mutating_names(_catalog()), after, before)
+        self.assertTrue(scored["goal_ok"])
+        self.assertTrue(scored["also_ok"])
+        self.assertTrue(scored["released"])
         self.assertFalse(scored["final_ok"])
         self.assertFalse(scored["pass"])
 
