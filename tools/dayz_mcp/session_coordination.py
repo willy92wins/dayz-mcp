@@ -1354,11 +1354,27 @@ class SessionCoordinator:
             return 200, payload
 
     def active_lease_id(
-        self, client: ClientIdentity, lease_token: str | None
+        self,
+        client: ClientIdentity,
+        lease_token: str | None,
+        *,
+        blocking: bool = True,
     ) -> str | None:
-        """Lease id for a token that would pass authorize, without renewing it."""
-        with self._condition:
+        """Lease id for a token that would pass authorize, without renewing it.
+
+        None once the lease's effective expiry has passed, which is when
+        _expire_due ends it; this reads the clock and runs no cleanup. With
+        blocking=False, also None when another thread holds the lock
+        (inbox 6310: a report must not wait on it).
+        """
+        if not self._condition.acquire(blocking=blocking):
+            return None
+        try:
             lease, _error = self._validate_token_locked(client, lease_token)
+            if lease is not None and self._time_fn() >= lease.effective_expiry():
+                lease = None
+        finally:
+            self._condition.release()
         if lease is None:
             return None
         return lease.lease_id

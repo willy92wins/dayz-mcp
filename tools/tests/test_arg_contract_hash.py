@@ -42,6 +42,7 @@ class ArgContractHashTest(unittest.TestCase):
             "loadout_get=object_id,uid\n"
             "nav_path_query=from,snap_radius,to\n"
             "object_resolve=pos,radius,type\n"
+            "object_set_health=health01,object_id,pos,slot,type,zone\n"
             "player_kill=uid\n"
             "players_visibility=pos,radius\n"
             "scene_clear=scene_id\n"
@@ -52,7 +53,7 @@ class ArgContractHashTest(unittest.TestCase):
             "world_spawn_batch=items,scene_id",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "d0b2a66a36c7078f"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),
