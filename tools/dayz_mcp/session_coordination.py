@@ -559,7 +559,9 @@ class SessionCoordinator:
                     if remaining <= 0.0:
                         break
                     now = self._time_fn()
-                    self._expire_rows_locked(now)
+                    if self._expire_rows_locked(now):
+                        # Those rows may have been all the loop waited for.
+                        continue
                     lease_end_remaining = self._lease_end_wait_remaining_locked(now)
                     if lease_end_remaining is not None:
                         remaining = min(remaining, lease_end_remaining)
@@ -2275,11 +2277,12 @@ class SessionCoordinator:
                     "lease_id": self._releasing.lease_id,
                     "position": 0,
                 }
+            now = self._time_fn()
             return {
                 "owner": owner,
                 "queue": queue,
                 "self": self_payload,
-                "claimable": self._claimable_locked(),
+                "claimable": self._claimable_locked(now),
                 "audit_fault": copy.deepcopy(self._audit_fault),
                 "lifecycle_recovery_fault": copy.deepcopy(
                     self._lifecycle_recovery_fault
@@ -2287,7 +2290,7 @@ class SessionCoordinator:
                 "operation_tombstones": self._operation_tombstone_status_locked(),
                 "cleanup_degraded": self._unique(degraded),
                 "grace": self._public_grace_locked(),
-                **self._status_lease_end_locked(),
+                **self._status_lease_end_locked(now),
             }
 
     def box_queue_public(self) -> list[dict[str, object]]:
@@ -3742,13 +3745,13 @@ class SessionCoordinator:
             self._bump_revision_locked()
             self._condition.notify_all()
 
-    def _claimable_locked(self) -> bool:
+    def _claimable_locked(self, now: float | None = None) -> bool:
         return not (
             self._audit_fault is not None
             or self._lifecycle_recovery_fault is not None
             or self._repair_fence
             or self._handoff_pending
-            or self._lease_end_blocks_locked()
+            or self._lease_end_blocks_locked(now)
             or self._handoff_audit_failed
             or self._grant_audit_failed
             or self._releasing is not None
@@ -4510,8 +4513,9 @@ class SessionCoordinator:
         result["cleanup_degraded"] = merged
         return result
 
-    def _lease_end_blocks_locked(self) -> bool:
-        now = self._time_fn()
+    def _lease_end_blocks_locked(self, now: float | None = None) -> bool:
+        if now is None:
+            now = self._time_fn()
         self._expire_rows_locked(now)
         for row in self._lease_end_rows.values():
             if (
@@ -4537,7 +4541,7 @@ class SessionCoordinator:
             return None
         return min(remainings)
 
-    def _expire_rows_locked(self, now: float | None = None) -> None:
+    def _expire_rows_locked(self, now: float | None = None) -> bool:
         if now is None:
             now = self._time_fn()
         changed = False
@@ -4547,6 +4551,7 @@ class SessionCoordinator:
                 changed = True
         if changed:
             self._condition.notify_all()
+        return changed
 
     def _open_lease_end_round_locked(self, lease: _Lease) -> None:
         self._expire_rows_locked()
@@ -4665,10 +4670,13 @@ class SessionCoordinator:
             "unconfirmed": self._unconfirmed_list_locked(),
         }
 
-    def _status_lease_end_locked(self) -> dict[str, object]:
+    def _status_lease_end_locked(
+        self, now: float | None = None
+    ) -> dict[str, object]:
         if not self._lease_end_rows:
             return {}
-        now = self._time_fn()
+        if now is None:
+            now = self._time_fn()
         self._expire_rows_locked(now)
         remaining = self._lease_end_wait_remaining_locked(now)
         outstanding = 0
