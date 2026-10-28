@@ -562,6 +562,11 @@ class SessionCoordinator:
                     remaining = grant_deadline - time.monotonic()
                     if remaining <= 0.0:
                         break
+                    now = self._time_fn()
+                    self._expire_rows_locked(now)
+                    lease_end_remaining = self._lease_end_wait_remaining_locked(now)
+                    if lease_end_remaining is not None:
+                        remaining = min(remaining, lease_end_remaining)
                     self._condition.wait(remaining)
                 if (
                     self._releasing is not None
@@ -4536,8 +4541,11 @@ class SessionCoordinator:
                 return True
         return False
 
-    def _lease_end_wait_remaining_locked(self) -> float | None:
-        now = self._time_fn()
+    def _lease_end_wait_remaining_locked(
+        self, now: float | None = None
+    ) -> float | None:
+        if now is None:
+            now = self._time_fn()
         remainings: list[float] = []
         for row in self._lease_end_rows.values():
             if row.state not in {"pending", "closing"}:
@@ -4640,8 +4648,11 @@ class SessionCoordinator:
             key=lambda row: (row.run_id, row.peer),
         )
 
-    def _unconfirmed_list_locked(self) -> list[dict[str, object]]:
-        now = self._time_fn()
+    def _unconfirmed_list_locked(
+        self, now: float | None = None
+    ) -> list[dict[str, object]]:
+        if now is None:
+            now = self._time_fn()
         items: list[dict[str, object]] = []
         for row in self._sorted_rows_locked():
             if row.state != "owed":
@@ -4677,9 +4688,10 @@ class SessionCoordinator:
     def _status_lease_end_locked(self) -> dict[str, object]:
         if not self._lease_end_rows:
             return {}
-        remaining = self._lease_end_wait_remaining_locked()
-        outstanding = 0
         now = self._time_fn()
+        self._expire_rows_locked(now)
+        remaining = self._lease_end_wait_remaining_locked(now)
+        outstanding = 0
         for row in self._lease_end_rows.values():
             if row.state in {"pending", "closing"} and now < row.deadline:
                 outstanding += 1
@@ -4687,7 +4699,7 @@ class SessionCoordinator:
             "lease_end": {
                 "outstanding": outstanding,
                 "deadline_in_s": remaining,
-                "unconfirmed": self._unconfirmed_list_locked(),
+                "unconfirmed": self._unconfirmed_list_locked(now),
             }
         }
 
@@ -4869,8 +4881,9 @@ class SessionCoordinator:
                     baseline.get("weapon_id") or 0
                 ):
                     reasons.append("weapon_floor_unapplied")
-            if reasons:
+            if reasons or carried is None:
                 server_row.required_floors[floor_key] = dict(floor)
+            if reasons:
                 self._set_row_owed_locked(server_row, reasons)
             return
         if server_row.state == "owed":
