@@ -261,7 +261,9 @@ def _flatten_admin_input_schema(schema: Any) -> dict[str, Any]:
 
     A uid property is always listed as required with no default, so a
     small model must name the player instead of falling back to the
-    first one; the handler itself keeps its current default.
+    first one. Under the admin pack the handler enforces that with
+    uid_required (server._require_admin_uid); the registered handler
+    keeps its current default, so the other packs are unchanged.
     """
     if not isinstance(schema, dict):
         schema = {}

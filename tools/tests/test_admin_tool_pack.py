@@ -16,7 +16,9 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from mcp.shared.memory import create_connected_server_and_client_session
 
 os.environ.setdefault(
     "LOCALAPPDATA", str(Path(tempfile.gettempdir()) / "dayz-mcp-localapp")
@@ -74,6 +76,22 @@ ADMIN_NAMES = frozenset(
     }
 )
 
+# The four tools whose bridge fallback is the first player; under admin
+# they must name a player (uid_required, fix1).
+UID_REQUIRED_TOOLS = frozenset(
+    {"notify_players", "player_teleport", "player_heal", "player_godmode"}
+)
+UID_TOOL_ARGS: dict[str, dict[str, object]] = {
+    "notify_players": {"show_time": 1.0, "title": "hi"},
+    "player_teleport": {
+        "pos": [1.0, 0.0, 3.0],
+        "skip_clearance_check": True,
+    },
+    "player_heal": {},
+    "player_godmode": {"on": True},
+}
+TEST_UID = "76561198000000000"
+
 # D7 working assumption: the whole listed catalog fits in 5000 tokens.
 CATALOG_TOKEN_BUDGET = 5000
 
@@ -86,6 +104,32 @@ def _catalog_tokens(tools: list[object]) -> int:
     ]
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     return math.ceil(len(text) / 4)
+
+
+def _spy_bridge(runtime: object, calls: list[str]) -> None:
+    """Replace runtime.call_bridge with a recording stub (no dispatch)."""
+
+    async def fake_call_bridge(
+        cmd: str, _args: dict, _peer: str, _timeout: object
+    ) -> dict[str, object]:
+        calls.append(cmd)
+        if cmd == "query_all_players":
+            return {"ok": True, "players": [{"uid": TEST_UID}]}
+        return {"ok": True}
+
+    runtime.call_bridge = fake_call_bridge  # type: ignore[attr-defined]
+    runtime.start_loopback = lambda: None  # type: ignore[attr-defined]
+    runtime.stop_loopback = lambda: None  # type: ignore[attr-defined]
+    runtime.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
+        return_value={}
+    )
+
+
+def _result_text(result: object) -> str:
+    content = getattr(result, "content", None) or []
+    return " ".join(
+        str(getattr(block, "text", "") or "") for block in content
+    )
 
 
 class _FakeClientRuntime:
@@ -212,6 +256,81 @@ class AdminToolPackTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(properties["uid"], {"type": "string"})
                     self.assertIn("uid", schema.get("required") or [])
         self.assertGreater(uid_tools, 0)
+
+    async def test_admin_catalog_explicitly_requires_uid_for_four_tools(
+        self,
+    ) -> None:
+        app, _runtime = build_app(
+            ServerConfig(tool_pack="admin", log_sink=lambda _message: None)
+        )
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        self.assertEqual(
+            UID_REQUIRED_TOOLS,
+            {"notify_players", "player_teleport", "player_heal",
+             "player_godmode"},
+        )
+        for name in sorted(UID_REQUIRED_TOOLS):
+            with self.subTest(tool=name):
+                tool = tools[name]
+                schema = tool.inputSchema or {}
+                properties = schema.get("properties") or {}
+                self.assertEqual(properties.get("uid"), {"type": "string"})
+                self.assertIn("uid", schema.get("required") or [])
+
+    async def test_admin_uid_required_over_mcp_transport(self) -> None:
+        for name in sorted(UID_REQUIRED_TOOLS):
+            with self.subTest(tool=name):
+                app, runtime = build_app(
+                    ServerConfig(
+                        tool_pack="admin",
+                        keyfile="dummy.key",
+                        log_sink=lambda _message: None
+                    )
+                )
+                calls: list[str] = []
+                _spy_bridge(runtime, calls)
+                args = dict(UID_TOOL_ARGS[name])
+                async with create_connected_server_and_client_session(
+                    app._mcp_server
+                ) as session:
+                    for rejected_args in (args, {**args, "uid": ""}):
+                        rejected = await session.call_tool(
+                            name, rejected_args
+                        )
+                        self.assertTrue(rejected.isError, rejected)
+                        self.assertIn("uid_required", _result_text(rejected))
+                    # Nothing was dispatched for either rejected call.
+                    self.assertEqual(calls, [])
+
+                    dispatched = await session.call_tool(
+                        name, {**args, "uid": TEST_UID}
+                    )
+                    self.assertFalse(dispatched.isError, dispatched)
+                    self.assertIn(name, calls)
+
+    async def test_full_pack_still_accepts_without_uid_over_mcp_transport(
+        self,
+    ) -> None:
+        for name in sorted(UID_REQUIRED_TOOLS):
+            with self.subTest(tool=name):
+                app, runtime = build_app(
+                    ServerConfig(
+                        tool_pack="full",
+                        keyfile="dummy.key",
+                        log_sink=lambda _message: None
+                    )
+                )
+                calls: list[str] = []
+                _spy_bridge(runtime, calls)
+                async with create_connected_server_and_client_session(
+                    app._mcp_server
+                ) as session:
+                    result = await session.call_tool(
+                        name, dict(UID_TOOL_ARGS[name])
+                    )
+                    self.assertFalse(result.isError, result)
+                    self.assertNotIn("uid_required", _result_text(result))
+                    self.assertIn(name, calls)
 
     async def test_full_catalog_keeps_long_descriptions_and_defaults(
         self,

@@ -36,8 +36,10 @@ LOCAL8B_TOOL_NAMES = frozenset(
 # heal, time/weather, spawn/remove and restore. The same set is listed
 # before and after the lease is taken (see tool_catalog: progressive
 # disclosure is disabled for this pack), so a host that never re-lists
-# after tools/list_changed still sees every verb. This is a catalog, not
-# access control: enforcement is ticket B4. Sizing assumes decision D7
+# after tools/list_changed still sees every verb. The pack removes the
+# tools it leaves out from the registry (a call by name returns
+# Unknown tool); that removal is not daemon authorization, which still
+# gates the tools that remain registered (ticket B4). Sizing assumes decision D7
 # as a working assumption (catalog at most 5000 tokens; see
 # tests/test_admin_tool_pack.py for the estimator). The listed catalog
 # carries one-sentence descriptions and flat schemas (ticket C2,
