@@ -109,19 +109,27 @@ C9 and C10 check that cleanup itself. They run a stalled call through unittest's
 result of their own, so the cleanup that `setUp` registered runs while the observation does, and
 then look at what it recorded and left. The stalled call also patches `threading.Thread.join` with
 a wrapper that joins and lists the thread, so the checks see the join the call made, not one the
-fixture says it made. The stalled view returns only when the outer test sets its event, with no
-timeout of its own. The outer test sets it in a `finally` around that run and its checks, so any
-exception that leaves them, `KeyboardInterrupt` included, sets it before the threads are joined and
-the patches restored; a process that ends without unwinding runs no `finally`, and the thread is a
-daemon.
+fixture says it made. The stalled test copies that list once the call has returned or raised,
+before any cleanup of its own runs, so a join left to a cleanup is not counted as the call's. The
+stalled view returns only when the outer test sets its event, with no timeout of its own. The outer
+test sets it in a `finally` around that run and its checks, so any exception that leaves them,
+`KeyboardInterrupt` included, sets it before the threads are joined and the patches restored; a
+process that ends without unwinding runs no `finally`, and the thread is a daemon. The outer test
+also registers that end as a cleanup, so an end that raises, its join interrupted or the thread
+still running after 30 s, is tried once more; after an end that finished, the second does nothing.
+If both fail, the patches stay, `Thread.join` included, and the test has failed. A
+`KeyboardInterrupt` leaves before unittest runs the cleanups, so then only the end in the `finally`
+runs. Each case takes the globals the stalled call patches as it finds them, and checks them apart
+against what the suite sets: the provider class and `Thread.join` of their own modules, the suite's
+view, and a wait above 0. Once the view has returned, `restore` must put back what the case found.
 
 | Id | Criterion | POS → expected | NEG → expected |
 |---|---|---|---|
 | C1 | The default is installed | `server.observe_app_steam_view` is `tests.no_steam_app_view`, not `steam_preflight.observe_app_steam_view`, and it returns None | M1 → C1 fails |
 | C2 | No session tool builds or reads a provider | for each tool, the call observed and, in a subtest per tool, the recorder lists no build and no read and the answer has no `steam_app_view` | M1, M2 → C2 fails for each tool; M3 → at `session_acquire`, which did not observe; M6 → at the first tool, whose observation outlives its join |
 | C3 | The recorder sees a real read | with the real `observe_app_steam_view` patched back, for each tool: a build with `real_registry=True` and a call of that provider's `read_active_process`; after the patch the default is back | M3 → C3 fails at `session_acquire`; M4 → for each tool, built and never read; M7 → for each tool, the method fetched and never called (C3 is also the negative control of C2) |
-| C9 | An observation still running fails its call, and the cleanup `setUp` registered keeps the patches | a stalled call through unittest's `run`: a view that returns only when the test sets its event, a tool that does not wait for it and a join of 0 s; the call fails as still running and joined its observation thread through `Thread.join`, the run records one failure, from that cleanup, and while the view runs each global the stalled call patches keeps its patch (the recorder, the stalled view, a wait of 0 s, the listing join); once it returns, `restore` puts back each one as the suite set it, and the cache's contents as the test found them | M8, M10, M11, M12 → C9 fails |
-| C10 | So does a call that raises, which joins first | the same with the runtime's `session_status` raising: the call raises the tool's error, it joined its observation thread through `Thread.join` before it raised, and the cleanup keeps the patches until the view returns | M8, M9, M10, M11, M12 → C10 fails |
+| C9 | An observation still running fails its call, and the cleanup `setUp` registered keeps the patches | when the case starts, each global the stalled call patches is the suite's (the provider class and `Thread.join` of their own modules, the suite's view, a wait above 0); a stalled call through unittest's `run`: a view that returns only when the test sets its event, a tool that does not wait for it and a join of 0 s; the call fails as still running, and had joined its observation thread through `Thread.join` when it failed, before any cleanup of its test; the run records one failure, from that cleanup, and while the view runs each global keeps its patch (the recorder, the stalled view, a wait of 0 s, the listing join); once it returns, `restore` puts back each one, and the cache's contents, as the case found them | M8, M10, M11, M12, M14, M15 → C9 fails |
+| C10 | So does a call that raises, which joins first | the same with the runtime's `session_status` raising: the call raises the tool's error, it had joined its observation thread through `Thread.join` when it raised, and the cleanup keeps the patches until the view returns | M8, M9, M10, M11, M12, M14, M15 → C10 fails |
 | C6 | A fixture child gets the view | a child with `PYTHONPATH` = the fixture site prints `tests.no_steam_app_view` | M1 → C6 fails |
 | C7 | A child without the fixture keeps the real observation | `PYTHONPATH` = `tools` → it prints `dayz_mcp.steam_preflight.observe_app_steam_view` | — (C7 is the negative control of C6) |
 | C8 | The modules that default `LOCALAPPDATA` load without it | a child without `LOCALAPPDATA` imports `tests.test_progressive_disclosure` and `tests.test_fn_p0_small_model_loops` with rc 0; in the same environment `from dayz_mcp import server` alone fails with `KeyError: 'LOCALAPPDATA'` | M5 → C8 fails |
@@ -151,6 +159,9 @@ Mutants, one at a time in a copy and restored:
 - M11: a call skips `Thread.join` when its join is 0 s.
 - M12: the stalled call's patch of `_STEAM_APP_VIEW_WAIT_S` starts without `enter`, so `restore`
   never stops it.
+- M14: the wait is 0.0 when the module is imported, as another module could leave it, with M12.
+- M15: a call registers its 0 s join with `addCleanup` instead of making it, so the join runs among
+  the test's cleanups.
 
 Exit criteria: the new module passes with 3.13 under pytest and with 3.11 under unittest, and its
 child tests pass in the harness under both; each mutant fails the new module where the table says,
@@ -208,3 +219,22 @@ with an AssertionError, under both versions; C4 and C5 as above.
 - H12 (P2): only the provider and the view were checked after `restore`, so a wait patch started
   without `enter` stayed at 0 s and passed. C9 and C10 now check each global the stalled call
   patches while the view runs and after `restore`, and the cache's contents after it (M12).
+
+## Round 6 (Codex Sol r5 on `c209978`: GREEN, three P2)
+
+- H13 (P2): round 5 dropped round 4's outer cleanup, so an end that raised, its join interrupted or
+  the thread still running after 30 s, left every patch in place, `Thread.join` included. The outer
+  test registers the end again as a cleanup, which does nothing after an end that finished. No test
+  makes the first end fail, so H13 has no mutant; a local probe whose first end sets the event and
+  raises leaves each global as the case found it, where `c209978` leaves them patched.
+- H14 (P2): the suite's globals were taken when the module was imported, so a wait another module
+  had left at 0.0 passed with M12, and a module imported under a temporary wait failed a correct
+  restore. Each case now takes them when it starts, checks them apart against what the suite sets,
+  and `restore` must put back what it found (M14). A local probe that imports the module under a
+  wait of 10.0, which ends before its tests run, fails both stalled-call tests on `c209978` and
+  passes here.
+- H15 (P2): the joins were read after the inner run, so a call that left its 0 s join to a cleanup
+  passed C9 and C10. The stalled test now copies them once the call has returned or raised, before
+  its cleanups run (M15).
+- On `c209978`, M14 and M15 pass the new module. M1 now fails C9 and C10 as well, at the check of
+  the suite's view.

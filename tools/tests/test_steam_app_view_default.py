@@ -168,17 +168,17 @@ def _patched_globals() -> dict[str, object]:
     }
 
 
-# As the suite sets them, before any test runs: the real provider class, the
-# suite's view, the server's wait and the real join.
-_SUITE_GLOBALS = _patched_globals()
-
-
 class StalledObservationTest(unittest.TestCase):
     """The cleanup that the fixture registers, run by unittest while an
     observation of the test still runs: it fails and keeps every patch the
     fixture started, and once the observation ends they go."""
 
     def run_a_stalled_call(self, *, raises: bool) -> None:
+        # restore must put back what this case found, which is checked apart
+        # against what the suite sets: a reference taken at import would take
+        # a patch another module left for the suite's.
+        found = _patched_globals()
+        self.assert_the_suites_globals(found)
         release = threading.Event()
         joins: list[threading.Thread] = []
         real_join = threading.Thread.join
@@ -195,6 +195,7 @@ class StalledObservationTest(unittest.TestCase):
 
         class StalledCall(_SessionToolsFixture):
             join_s = 0.0
+            joins_at_exit: list[threading.Thread] = []
 
             def setUp(self) -> None:
                 super().setUp()
@@ -210,10 +211,15 @@ class StalledObservationTest(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(AssertionError, "still running"):
                         await self.call("session_status")
+                # The joins the call made, before any cleanup of this test runs.
+                self.joins_at_exit = list(joins)
 
         cache = dict(server._steam_app_view_cache)
         inner = StalledCall("test_call")
         result = unittest.TestResult()
+        # end again if the one in the finally raises; after an end that
+        # finished, it does nothing.
+        self.addCleanup(self.end, inner, release)
         # The event is set in a finally, so whatever leaves the run or the
         # checks, KeyboardInterrupt included, lets the view return.
         try:
@@ -227,9 +233,9 @@ class StalledObservationTest(unittest.TestCase):
             self.assertEqual(len(inner.observers), 1)
             self.assertTrue(inner.observers[0].is_alive())
             self.assertEqual(
-                [thread for thread in joins if thread in inner.observers],
+                [thread for thread in inner.joins_at_exit if thread in inner.observers],
                 inner.observers,
-                "the call did not join its observation",
+                "the call did not join its observation before it returned or raised",
             )
             self.assertEqual(
                 _patched_globals(),
@@ -237,10 +243,22 @@ class StalledObservationTest(unittest.TestCase):
             )
         finally:
             self.end(inner, release)
-        # Once the view returned, restore put back each global as the suite
-        # set it, and the cache's contents as the test found them.
-        self.assertEqual(_patched_globals(), _SUITE_GLOBALS)
+        # Once the view returned, restore put back each global and the cache's
+        # contents as the test found them.
+        self.assertEqual(_patched_globals(), found)
         self.assertEqual(server._steam_app_view_cache, cache)
+
+    def assert_the_suites_globals(self, found: dict[str, object]) -> None:
+        # The provider class and the join from their own modules, the suite's
+        # view, and a server wait above the stalled call's 0.0.
+        for name, module, qualname in (
+            ("provider", sp.__name__, "WindowsSteamPreflightProvider"),
+            ("join", "threading", "Thread.join"),
+        ):
+            value = found[name]
+            self.assertEqual((value.__module__, value.__qualname__), (module, qualname), name)
+        self.assertIs(found["view"], tests.no_steam_app_view)
+        self.assertGreater(found["wait"], 0.0)
 
     @staticmethod
     def end(inner: _SessionToolsFixture, release: threading.Event) -> None:
