@@ -268,6 +268,7 @@ class _LeaseEndRound:
     round_id: int
     session_id: str
     lease_id: str
+    opened_at: float = 0.0
     settled: list[dict[str, object]] = dataclasses.field(default_factory=list)
     server_floors: dict[str, dict[str, object]] = dataclasses.field(
         default_factory=dict
@@ -1700,10 +1701,13 @@ class SessionCoordinator:
                 and row.state == "pending"
                 and not row.reported
             ]
+            # The round's age, not when it opened: the broker times the
+            # server close on its own clock (§2.4).
             return {
                 "round": current.round_id,
                 "generation": self._daemon_generation,
                 "lease_id": current.lease_id,
+                "age_s": max(0.0, self._time_fn() - current.opened_at),
                 "rows": rows,
             }
 
@@ -4634,6 +4638,7 @@ class SessionCoordinator:
             round_id=round_id,
             session_id=lease.client.session_id,
             lease_id=lease.lease_id,
+            opened_at=now,
         )
         self._condition.notify_all()
 

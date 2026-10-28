@@ -445,12 +445,15 @@ Rules:
   (4726) are.
 
 - **Stage 2b implementation note.** The broker half of §2.2, §2.4, §2.5 and §2.15 is in
-  `tools/dayz_mcp/loopback.py`. The coordinator grows only `note_close_unreachable`
-  (`session_coordination.py` 1796-1819). Production still does not call `note_peer_bound` or
-  `seed_restart_debt`, so `lease_end_round` stays None and `cleanup_owner` keeps its old
-  vehicle, bot and hold paths. Criteria: `LeaseCloseBrokerStage2bTest`, which drives a real
-  `ServerState` and a coordinator, each on a fake clock of its own; every census in it answers a
-  close that a poll delivered.
+  `tools/dayz_mcp/loopback.py`, except the capture of holds at delivery (below). The
+  coordinator grows only `note_close_unreachable` (`session_coordination.py` 1800-1823) and the
+  round's age: `_LeaseEndRound.opened_at` (271), set when the round opens (4641), and the
+  `age_s` that `lease_end_round` returns (1710). Production still does not call
+  `note_peer_bound` or `seed_restart_debt`, so `lease_end_round` stays None and `cleanup_owner`
+  keeps its old vehicle, bot and hold paths. Criteria: `LeaseCloseBrokerStage2bTest`, which
+  drives a real `ServerState` and a coordinator, each on a fake clock of its own. A census the
+  broker is meant to read answers a close a poll delivered; the negatives of an undelivered or
+  retired close send theirs without one. The line numbers below are round 2's.
   - Names: `LEASE_CLOSE_PEERS` (298-301) is consulted by `peer_for_command` (305-311) before
     `CLIENT_COMMANDS`. The names stay out of the public sets, so `/enqueue` is still
     `not_whitelisted`, internal or not (§2.16).
@@ -459,49 +462,120 @@ Rules:
   - Reachable: `_close_destination_locked` (4605-4624) needs a BOUND binding that covers the
     peer, its queue, a broker that is not stopping and a pin with a complete identity; anything
     else is `not_bound`. An instance whose last poll was version-blocked (the set the poll writes
-    at 5164-5169, cleared by its next passing poll) is `version_blocked`. Quarantine is the
-    reading `cleanup_owner` already took (6005); it wins over the binding.
+    at 5193-5199, cleared by its next passing poll) is `version_blocked`. Quarantine is the
+    reading `cleanup_owner` already took (6039); it wins over the binding.
   - Publish: `_publish_close_locked` (4631-4699) runs in the lock section that found the
     destination reachable. It pins, seals and records `_enqueued_at`, with no `MAX_QUEUE`
     check, no owner and no fire-and-forget. A queued close of the same instance and peer is
     discarded as `lease_close_superseded` first (§2.4). `_command_exempt_from_fence`
     (2910-2916) keeps a close through drain and fenced polls.
-  - `cleanup_owner` (6041-6169) rechecks authority, asks `lease_end_round`, reports in row
+  - `cleanup_owner` (6075-6206) rechecks authority, asks `lease_end_round`, reports in row
     order (client first; server deferred when that run's client was published in the same
     call), then calls `note_close_round` and only then enqueues the published keys it accepted.
-    It sets `lease_close_enqueued` only when a round existed.
-  - Deferred server closes (`_publish_due_deferred_closes_locked`, 4701-4746, with
+    It sets `lease_close_enqueued` only when a round existed. The loop names a destination's
+    reason `cause` (6106), so after the loop `reason` is still the hook's.
+  - Deferred server closes (`_publish_due_deferred_closes_locked`, 4724-4777, with
     `LEASE_CLOSE_SERVER_DELAY_S` at 302) go once the client row has an outcome of any kind
-    (4596-4603) or at +10 s of `_now`, and carry the client's floor only when that outcome is a
-    clean census with an int `conn_gen`. They are checked at the start of each poll (5076) and
-    each result (5598), and after a close result (5662). An unreachable destination calls
-    `note_close_unreachable` instead.
-  - Delivery skips `claim_dispatch` (5308-5317); quarantine and `lease_close_deliverable`
+    (4596-4603) or 10 s after the round opened. The broker does not compare the coordinator's
+    clock with its own: the deferred entry starts `age_s` before the hook on the broker's `_now`
+    (6146-6154). The entry keeps the outcome's kind, and the close carries the client's floor
+    only when that kind is clean and its `conn_gen` an int (4752); any other outcome still lets
+    it go, with no floor. Under quarantine it is not published: its row is owed as
+    `retail_quarantine` through `note_close_unreachable` (4739-4743), as an unreachable
+    destination's is with its reason. The quarantine is read before the broker lock
+    (`_deferred_close_quarantine`, 4705-4722), and only while a deferred close could go: on a
+    poll, one that is due or has its client outcome; on a result, any, since the result may
+    bring that outcome. A close it did not read for waits for a later poll or result. The
+    closes are checked at the start of each poll (5105) and as the last step of each result's
+    lock section (5733-5736), after that result's own outcome, so a close that is due when the
+    client's result arrives carries that result's floor
+    (`test_k18_client_result_past_ten_seconds_gives_its_floor`). Round 1 also checked at the
+    start of each result, and sent such a close without it.
+  - Delivery skips `claim_dispatch` (5339-5348); quarantine and `lease_close_deliverable`
     discard, the latter as `lease_close_stale`, and a delivered close's ledger row turns
-    `delivered` (5352-5358). The poll's expiry runs outside the lock and can run a cleanup that
-    replaces the queue's list, so the poll then re-reads the live list (5206-5218) and starts
-    over, and a close that cleanup published reaches that same answer (K19). On main the poll
-    delivered from the list it read before the expiry: a command that survived
+    `delivered` (5383-5389). That is all delivery does in 2b: the capture of the instance's open
+    or fenced holds (§2.5, "At delivery") goes with the only step that reads it, the settlement
+    of §2.9, into the holds stage. The poll's expiry runs outside the lock and can run a cleanup
+    that replaces the queue's list, so the poll then re-reads the live list (5237-5249) and
+    starts over, and a close that cleanup published reaches that same answer (K19). The poll
+    answers while that close is still unsettled, so the cleanup does not wait for the game. On
+    main the poll delivered from the list it read before the expiry: a command that survived
     `cancel_owner_pending` there went out in that answer and again in the next.
-  - Results (5650-5662): the result of a close that no poll delivered is discarded and counted
+  - Results (5680-5693): the result of a close that no poll delivered is discarded and counted
     in `_lease_close_ignored`, and the close stays queued. A delivered close's result drops its
-    ledger row, keeping the fence, and `_close_outcome_from_result_locked` (4809-4895) reads it:
-    another binding epoch gives residue `binding_epoch_changed`; `ok` not true, rejected; a
-    malformed census, residue `census_malformed`; a census that names another generation, lease
-    or peer is counted in `_lease_close_ignored` and gives no outcome, so its row stays
-    outstanding and a later echo of that id is discarded; clean with every entry clean or
-    stopped, clean, except a client census without an int `conn_gen`, which is residue
-    `conn_gen_unknown`; not clean with residue entries, residue with their reasons; anything
-    else, `census_malformed`.
+    ledger row, keeping the fence, and `_close_outcome_from_result_locked` (4840-4923) reads it
+    with the id `store_result` validated, so a body that carries the id as a string finds its
+    fence: another binding epoch gives residue `binding_epoch_changed`; `ok` not true, rejected;
+    a malformed census, residue `census_malformed` (an int field that holds a bool is
+    malformed); a census that names another generation, lease or peer is counted in
+    `_lease_close_ignored` and gives no outcome, so its row stays outstanding and a later echo of
+    that id is discarded; clean with every entry clean or stopped, clean, except a client census
+    without an int `conn_gen`, which is residue `conn_gen_unknown`; not clean with residue
+    entries, residue with their reasons; anything else, `census_malformed`.
   - Retirement (2892-2898) owes a delivered close as `binding_retired` and keeps its fence, so a
-    late result gets 409. `_mark_discarded` (5491-5499) owes a queued close and drops it from
+    late result gets 409. `_mark_discarded` (5522-5530) owes a queued close and drops it from
     `_lease_closes`.
-  - Flush: `_flush_close_outcomes` (4561-4569) runs after the broker lock on poll, result,
-    retirement, cleanup and `cancel_pending`, and takes the lock again only to count `ignored`.
-    Embedded (`coordination` None) publishes nothing.
+  - Flush: `_flush_close_outcomes` (4561-4569) runs after the broker lock on every poll answer,
+    result, retirement, cleanup and `cancel_pending`, and takes the lock again only to count
+    `ignored`. A version-blocked poll and a poll with no queue deliver nothing, but they leave
+    through the same epilogue as a delivering poll (5403-5413), since the sweep before them
+    (5112-5117) may have discarded closes. That epilogue also writes the exec audit lines and
+    calls `discard_committed` (`_finish_operations`, 5570-5592) for what the sweep discarded.
+    Main's two early answers skipped all three, so a command one of them discarded never
+    reached the coordinator. A result's returns before the end of its lock section publish
+    nothing, so they leave nothing to drain. Embedded (`coordination` None) publishes nothing.
   - Locks: under the broker lock the broker also calls `note_close_published` and
     `note_close_unreachable`; like the calls in §2.15, they are memory-only and expire only rows,
-    never through `_expire_due`.
+    never through `_expire_due`. The quarantine probe runs outside that lock.
+  - r1 H1 to H8 are the findings of Codex Sol's first review of stage 2b, which round 2 fixes.
+  - r1 H1 (P1). A residue census carried its floor to the server close: the reader took the
+    floor before it judged the census, and the deferred entry kept the floor but not the kind.
+    The entry now keeps the kind (4603); the coordinator still receives a residue's floor
+    (§2.8). `test_census_that_is_not_clean_owes_the_row` checks that the server close carries no
+    floor after each census that is not clean, and in the residue case the server row is owed
+    its two floors.
+  - r1 H2 (P1). The 10 s ran from the hook, not from the round: a round opened at 0 whose hook
+    ran at 8 published the server close at 18. `test_k18_ten_seconds_run_from_the_round_not_from_the_hook`
+    opens the round at 50 s on the coordinator's clock and 100 s on the broker's, runs the hook
+    8 s later on both, and finds no close at 109.9 s and the close at 110 s.
+  - r1 H3 (P1). A deferred close was published after a quarantine began, because its publisher
+    read no quarantine. `test_k15_quarantine_while_the_server_close_waits_owes_it` starts the
+    quarantine after the client close is delivered; then the client's clean result arrives, or
+    the 10 s pass, and in both the server close is not published and its row is owed as
+    `retail_quarantine`.
+  - r1 H4 (P1). A version-blocked poll, or one with no queue, returned before the drain, so an
+    outcome its sweep produced waited for some later flush. Two tests drive both answers after
+    only the broker's clock passes 30 s. In
+    `test_poll_that_delivers_nothing_settles_the_close_its_sweep_discarded` the sweep discards
+    the queued client close and its row is owed in that poll. In
+    `test_poll_that_delivers_nothing_finishes_what_its_sweep_discarded` it discards an owned
+    `key_press` whose tool limit is 60 s, and the audit has its `dispatch_discarded`: the side
+    effect named under Flush.
+  - r1 H5 (P1). The capture of holds at delivery is out of 2b, as Delivery says; nothing in 2b
+    reads it.
+  - r1 H6 (P1). The note, the class docstring and the commit message said every census answered
+    a delivered close. The negatives of an undelivered or retired close do not, and now say so.
+  - r1 H7 (P2). A bool as the client's move floor or `conn_gen`, or as a server floor's move id,
+    is `census_malformed`. `test_k19_poll_that_runs_the_expiry_answers_before_the_game_does` runs
+    the expiry from a poll in a thread of its own and needs that poll's answer within 1 s, before
+    the game settles the close. Building the mutant whose hook waits for the game on
+    `lease_expired` showed that the close loop rebound the hook's `reason`
+    (`reachable, reason = ...`), so the mutant's check read the last destination's reason and
+    never waited. Nothing read `reason` after the loop, and the loop's name is now `cause`.
+  - r1 H8 (P2). `store_result` accepts an id it can convert, a string included, but the reader
+    looked the fence up with the body's own value, so a string id gave `binding_epoch_changed`.
+    The reader now takes the validated id; `test_close_result_with_its_id_as_a_string_is_read`
+    gets a clean outcome and the floor carried.
+  - Round 2's mutants, each in a copy that is restored after it, fail the module under 3.13 and
+    3.11 with an AssertionError: the 22 of round 1, three of them re-anchored where round 2
+    moved their lines, and 14 new ones. The new ones are a floor carried for any kind (N1), an
+    entry that forgets the kind (N2), the 10 s from the hook (N3), an absolute time as the age
+    (N4), a round that forgets when it opened (N5), a publisher that ignores the quarantine
+    (N6), a result that also publishes at its start (N7), a result that reads the quarantine
+    only for a close already due (N8), a blocked poll and a poll with no queue that return
+    before the epilogue (N9, N10), a bool taken as an int (N11), a hook that waits 2 s on
+    `lease_expired` after its flush (N12), the fence looked up with the body's id (N13), and an
+    early answer that skips the finish (N14).
 
 ### 2.6 The client close (`lease_close_client`)
 
@@ -1294,10 +1368,10 @@ Each criterion has an offline positive (POS) and negative (NEG) fixture with its
 | K12 | A → B → C (H3) | A leaves residue → B degraded; B releases with no commands → a debt round → closes clean → C clean | B's round leaves residue again → C degraded too |
 | K13 | Restart (H4) | seeded run → first grant degraded (`daemon_restart`); `note_processes_gone(run, None)` → next grant clean; recovered fault: seed after manifest restore and before lifting, including `clear_lifecycle_recovery_fault` (6461-6463) and complete (6554-6556), covering kept live runs (process_lifecycle.py:7625-7631, 7677-7692) | a lease end while the run is unbound → rows OWED (`not_bound`), debt stays; construction order of setter vs `_lock`/`_bindings` (2020, 2039-2045) both attach |
 | K14 | Retirement and late results (H13) | queued close at `retire_role` → `binding_retired`, its late result → 200 `discarded`; delivered close → late result 409 `binding_retired`; the retired instance's own hold result → 200 and reconciles | the lifecycle write fails, `note_processes_gone` is not called → row stays OWED |
-| K15 | Quarantine | quarantine at lease end → no close, rows OWED (`retail_quarantine`), grant degraded at once; hold path as today | quarantine after the close was queued → delivery discards it (4672-4673) → OWED |
+| K15 | Quarantine | quarantine at lease end → no close, rows OWED (`retail_quarantine`), grant degraded at once; hold path as today | quarantine after the close was queued → delivery discards it (4672-4673) → OWED; quarantine while the server close is deferred → it is never published, and its row is OWED (`retail_quarantine`) |
 | K16 | Holds (H2, H5, H9, r4 H1, r7 H2) | (a) delivered hold, both sides clean, hold result lost → next `action_hold` on that instance admitted; (b) both-sides-clean close before the hold result → result is a no-op; (c) at lease end no `action_hold_cancel` is queued and A's `pending_commands` is 0; (f) instance replaced: old exact holds become `hold_server_unverified`, new instance holds admitted; (j) START with vanilla ack whose recorded id matches `SJ_ACTION_ACK_*` → **that input row** may clear, never the hold fence; **(k)** active hold with no terminal: close → `Shutdown` ends it, result `cancel`/`shutdown`; **(l)** hold with `finished`/`natural` (or `timeout`/`timeout`, `rejected`/`server_rejected`) published and not yet taken when close enters: result stays that observation | (d) residue client or server action → next hold on that instance 409 `hold_unreconciled`, grant degraded; (e) a clean close from another instance → fence stays; (g) interrupt is not sent from the **server** close; a late interrupt can still arrive under a degraded grant; a hold player missing from floors → `hold_server_unchecked`; (h) own result `cleanup_complete=true` first while server helper still busy → fence stays; (i) START without ack, interrupt, or END in flight, both helpers idle → `action_input_in_flight`, debt until client process exit; no "unacked send" shortcut; **(m)** a mutant in which `Shutdown` rewrites an existing terminal must fail |
 | K17 | Move and weapon floors (H1, H2, Q15, r3 H11) | client F=7 W=4 matching named `conn_gen` (equals body's `m_MCPConnGen`, even if lastId is 0) → server close carries both, reports ≥ → both rows clear; late clean while still CLOSING → clear; late clean after OWED whose identity (close id, instance, `conn_gen`, F/W) still matches, atomic → **clears**; with no carried floor, a client floor with ids 0 and the server's `conn_gen` → both rows clear | server first reports F=5 then client F=7 → OWED `player_move_floor_unapplied`; same for W → `weapon_floor_unapplied`; missing or other `conn_gen` on the close → OWED `player_move_conn_gen_unapplied` / `weapon_conn_gen_unapplied`; client floor of another `conn_gen` while the server is CLOSING, in either order → those two conn_gen reasons; with no carried floor for that player, in either order, a client floor with ids 0 of another `conn_gen` → those two conn_gen reasons, and one for a player the server census lacks → `player_move_floor_unapplied` and `weapon_floor_unapplied`; start/raise/fire/release with no generation or another generation → refused; other-gen release does not free B's copy or raise lastId; superseded or identity-mismatch late result stays OWED; unresolved player → OWED; issued grant is never rewritten |
-| K18 | Order across peers | the server close is published only after the client close settles | client silent → server close published at + 10 s, not earlier |
+| K18 | Order across peers | the server close is published only after the client close settles; one already due when the client's clean result arrives carries that result's floor | client silent → server close published at + 10 s of the round's opening, not earlier, also when the hook runs late; a client outcome that is not clean lets it go with no floor |
 | K19 | Interleavings and locks | (i) no poll between publish and report sees the close; (ii) expiry from `record_poll` → that same poll answer carries the client close; (iii) status and acquire during a blocked hook return; (iv) an outcome of round 1 flushed after round 2 opened → ignored | a mutant hook that waits for the game → the poll answer in (ii) comes only after the hook's timeout; start/release with no `conn_gen` or another generation → refused (same identity negatives as K8/K17) |
 | K21 | Payloads (H6) | grant `lease_end.settled` names the close ids; during a round status shows `lease_end` and `cleanup_degraded == []`; with the server row owed since 0, the client row CLOSING, and a clock that moves 0.25 s on every read, status's `since_s` for the owed row plus its `deadline_in_s` is the bound | with an owed row the grant has `lease_end_unconfirmed` merged with another warning (on main `75b5d16`, `wait` assigns the list itself at 1082, 1134, 1152, 1183, 1205 and 1238, and `_payload_with_degradation` at 4158); an `operation_id` retry of `acquire` and of `enqueue` merges the same way; status `cleanup_degraded` stays `[]`; `unconfirmed` aged from another clock reading than the photo's (mutant) → the sum is not the bound |
 
