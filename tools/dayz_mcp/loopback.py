@@ -2228,6 +2228,33 @@ class _BoundPeerRunning:
     state = "RUNNING"
 
 
+def _empty_peer_load() -> dict[str, int | float | None]:
+    return {
+        "init_attempts": None,
+        "polls": None,
+        "last_poll_interval_s": None,
+    }
+
+
+def _load_from_poll_query(
+    qs: dict[str, list[str]],
+) -> dict[str, int | float] | None:
+    """ia, pc and lpims travel together. A partial or junk triple is ignored."""
+    if "ia" not in qs or "pc" not in qs or "lpims" not in qs:
+        return None
+    counts = []
+    for key in ("ia", "pc", "lpims"):
+        raw = qs.get(key, [""])[0]
+        if not raw.isdigit():
+            return None
+        counts.append(int(raw))
+    return {
+        "init_attempts": counts[0],
+        "polls": counts[1],
+        "last_poll_interval_s": counts[2] / 1000.0,
+    }
+
+
 class ServerState:
     """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
 
@@ -2318,6 +2345,12 @@ class ServerState:
         self._poll_delay_ms = 0
         self._last_poll_at: dict[str, float | None] = {"server": None, "client": None}
         self._poll_versions: dict[str, str | None] = {"server": None, "client": None}
+        # Last load counters a poll announced (ia/pc/lpims). None until a poll
+        # carries all three; an older PBO leaves them None.
+        self._peer_load: dict[str, dict[str, int | float | None]] = {
+            "server": _empty_peer_load(),
+            "client": _empty_peer_load(),
+        }
         # Last session-driven (client) HTTP request; feeds the daemon idle watchdog
         # so a broker daemon with no game and no client traffic can reap itself.
         self._last_client_request_at: float | None = None
@@ -4679,6 +4712,7 @@ class ServerState:
         source_creation_time: str | None = None,
         caps: str | None = None,
         ach: str | None = None,
+        load: dict[str, int | float] | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -4781,6 +4815,12 @@ class ServerState:
             self._record_poll_caps_locked(
                 peer, caps, accredited, ach=ach, instance=token, now=now
             )
+            if load is not None:
+                self._peer_load[peer] = {
+                    "init_attempts": int(load["init_attempts"]),
+                    "polls": int(load["polls"]),
+                    "last_poll_interval_s": float(load["last_poll_interval_s"]),
+                }
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (
@@ -5704,6 +5744,7 @@ class ServerState:
                     "run_id": run_id,
                     "bound_last_poll_age_s": bound_age,
                     "capabilities": self._capabilities_view_locked(peer),
+                    "load": dict(self._peer_load[peer]),
                 }
                 identity = self._peer_identity_locked(peer)
                 peers[peer]["run_id"] = None if identity is None else identity[0]
@@ -6742,6 +6783,7 @@ class Handler(BaseHTTPRequestHandler):
         instance = inst_raw if inst_raw else None
         caps_raw = qs.get("caps", [""])[0]
         ach_raw = qs.get("ach", [""])[0]
+        load = _load_from_poll_query(qs)
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
         )
@@ -6752,6 +6794,7 @@ class Handler(BaseHTTPRequestHandler):
             source_pid=source_pid,
             caps=caps_raw,
             ach=ach_raw,
+            load=load,
         )
         if status != 200:
             self._json(status, payload)

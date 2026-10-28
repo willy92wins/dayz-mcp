@@ -100,6 +100,13 @@ class MCPBridge : Managed
 	protected bool m_PollInFlight;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	// A1 (fb-20261028-131233-a07f): frames that called TryInit, polls actually
+	// sent, seconds since the previous sent poll (0 on the first), and the
+	// accumulator for that gap. Announced on every poll as ia=, pc=, lpims=.
+	protected int m_InitAttempts;
+	protected int m_Polls;
+	protected float m_LastPollIntervalS;
+	protected float m_SincePollS;
 	protected bool m_ResultDropLogged;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref MCPPollCallback m_PollCallback;
@@ -132,6 +139,10 @@ class MCPBridge : Managed
 		m_PollInFlight = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_InitAttempts = 0;
+		m_Polls = 0;
+		m_LastPollIntervalS = 0.0;
+		m_SincePollS = 0.0;
 		m_ResultDropLogged = false;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_ResultCallbackPool = new array<ref MCPResultCallback>();
@@ -177,6 +188,7 @@ class MCPBridge : Managed
 	{
 		m_Tick = m_Tick + 1;
 		m_ElapsedS = m_ElapsedS + timeslice;
+		m_SincePollS = m_SincePollS + timeslice;
 		MCPBotControl.Tick(this, m_ElapsedS);
 
 		if (!m_Configured)
@@ -212,6 +224,7 @@ class MCPBridge : Managed
 
 	protected void TryInit()
 	{
+		m_InitAttempts = m_InitAttempts + 1;
 		RestApi api = GetRestApi();
 		if (!api)
 		{
@@ -288,6 +301,18 @@ class MCPBridge : Managed
 		Log("config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
 	}
 
+	// ia= init attempts, pc= polls sent, lpims= last gap in whole milliseconds.
+	protected string LoadCounterQuery()
+	{
+		int ms = m_LastPollIntervalS * 1000.0;
+		if (ms < 0)
+		{
+			ms = 0;
+		}
+
+		return "&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms;
+	}
+
 	protected void LogInitFailure(string reason)
 	{
 		if (m_InitFailureLogged)
@@ -311,6 +336,12 @@ class MCPBridge : Managed
 		m_Accum = 0.0;
 		m_PollInFlight = true;
 		m_TickPollSent = m_Tick;
+		if (m_Polls > 0)
+		{
+			m_LastPollIntervalS = m_SincePollS;
+		}
+		m_SincePollS = 0.0;
+		m_Polls = m_Polls + 1;
 
 		// Reuse across completed polls, as the client does. A native-retained
 		// RestCallback must not turn every successful poll into another object.
@@ -324,6 +355,7 @@ class MCPBridge : Managed
 		request = request + "&ver=" + GetPollVersion();
 		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
 		request = request + "&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
+		request = request + LoadCounterQuery();
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);

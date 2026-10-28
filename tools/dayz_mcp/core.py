@@ -118,6 +118,60 @@ def _peer_status(
         "bound_last_poll_age_s": peer_snapshot.get("bound_last_poll_age_s"),
         "run_id": peer_snapshot.get("run_id"),
         "binding_token": peer_snapshot.get("binding_token"),
+        "load": _peer_load(peer_snapshot.get("load")),
+    }
+
+
+def _peer_load(raw: Any) -> dict[str, int | float | None]:
+    """Load counters from the last poll that announced them.
+
+    Missing or malformed fields stay None. A peer that has never announced
+    them (no mod, an unconfigured bridge that never polls, or an older PBO)
+    is all None. This is not the four-state baseline: that round samples the
+    server process the same way in every state, and it is still unmeasured.
+    """
+    source = raw if isinstance(raw, dict) else {}
+    return {
+        "init_attempts": _load_count(source.get("init_attempts")),
+        "polls": _load_count(source.get("polls")),
+        "last_poll_interval_s": _load_seconds(source.get("last_poll_interval_s")),
+    }
+
+
+def _load_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _load_seconds(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    seconds = float(value)
+    if seconds < 0.0 or seconds != seconds or seconds == float("inf"):
+        return None
+    return seconds
+
+
+# The in-game round records these four states with one observer. The observer
+# is the server process CPU sample already attached to a launch
+# (user_100ns + kernel_100ns over one window). It is not server_perf's entity
+# census, which needs a configured bridge and cannot see "no mod".
+LOAD_BASELINE_STATES = (
+    "no_mod",
+    "loaded_unconfigured",
+    "configured_idle",
+    "admin_load",
+)
+LOAD_BASELINE_OBSERVER = "server_process_cpu"
+
+
+def empty_load_baseline_record() -> dict[str, Any]:
+    """Shape of the four-state record. Every state is unmeasured (None)."""
+    return {
+        "observer": LOAD_BASELINE_OBSERVER,
+        "states": {name: None for name in LOAD_BASELINE_STATES},
+        "measured": False,
     }
 
 

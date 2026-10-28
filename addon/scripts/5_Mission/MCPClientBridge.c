@@ -496,6 +496,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	// Same load counters as MCPBridge (A1). The client poll carries them too.
+	protected int m_InitAttempts;
+	protected int m_Polls;
+	protected float m_LastPollIntervalS;
+	protected float m_SincePollS;
 	protected bool m_Shutdown;
 	protected bool m_ShutdownReentryLogged;
 	protected bool m_RestoreNoGameLogged;
@@ -538,6 +543,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollInFlightS = 0.0;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_InitAttempts = 0;
+		m_Polls = 0;
+		m_LastPollIntervalS = 0.0;
+		m_SincePollS = 0.0;
 		m_Shutdown = false;
 		m_ShutdownReentryLogged = false;
 		m_RestoreNoGameLogged = false;
@@ -598,6 +607,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	void OnTick(float timeslice)
 	{
 		m_Tick = m_Tick + 1;
+		m_SincePollS = m_SincePollS + timeslice;
 		// Returns before any engine call while no weapon override is armed.
 		MCPWeaponControl.MaintainFromTick();
 		// Releases the input_trigger key when its phase, its TTL or the local
@@ -675,6 +685,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void TryInit()
 	{
+		m_InitAttempts = m_InitAttempts + 1;
 		RestApi api = GetRestApi();
 		if (!api)
 		{
@@ -751,6 +762,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		Log("client config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
 	}
 
+	protected string LoadCounterQuery()
+	{
+		int ms = m_LastPollIntervalS * 1000.0;
+		if (ms < 0)
+		{
+			ms = 0;
+		}
+
+		return "&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms;
+	}
+
 	protected void LogInitFailure(string reason)
 	{
 		if (m_InitFailureLogged)
@@ -803,6 +825,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollInFlight = true;
 		m_PollInFlightS = 0.0;
 		m_TickPollSent = m_Tick;
+		if (m_Polls > 0)
+		{
+			m_LastPollIntervalS = m_SincePollS;
+		}
+		m_SincePollS = 0.0;
+		m_Polls = m_Polls + 1;
 
 		EnsurePollCallback();
 		HoldPollCallback();
@@ -813,6 +841,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
 		request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);
+		request = request + LoadCounterQuery();
 		m_PollCtx.GET(m_PollCallback, request);
 	}
 
