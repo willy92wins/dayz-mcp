@@ -12,11 +12,14 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp import session_coordination
 from dayz_mcp.session_coordination import (
     LEASE_END_BOUND_S,
     ClientIdentity,
@@ -1291,15 +1294,15 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         for timeout in recorder.waits_of("k11-preferred"):
             self.assertGreater(timeout, 0.0)
 
-    def test_k11_preferential_reacquire_decides_again_when_the_rows_expire(
-        self,
-    ) -> None:
+    def _preferential_crossing(self, *, out_of_time: bool) -> list[bool]:
         # After A's cleanup and the handoff, only closing rows keep A's
-        # preferential reacquire waiting. The deadline passes right after
-        # the loop's fence saw them outstanding: the loop's body expires
-        # them and the loop decides again, instead of waiting out its own
-        # limit. That limit is on the real clock, so a run in which it ran
-        # out before the body fails here instead of passing.
+        # preferential reacquire waiting, and their deadline passes right
+        # after the loop's fence saw them outstanding. The loop's own limit
+        # reads the coordinator's time.monotonic, which here is a clock
+        # apart from the rows' that only the test moves: it keeps still, so
+        # no pause of the driver or of the reacquire runs it out, and with
+        # out_of_time it runs out at that crossing. Returns what each
+        # expiry by the loop's body returned after the crossing.
         go = threading.Event()
         self.addCleanup(go.set)
         published = threading.Event()
@@ -1316,6 +1319,15 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         )
         recorder = _RecordingCondition()
         self.coordinator._condition = recorder
+        budget = FakeClock()
+        held = patch.object(
+            session_coordination, "time", SimpleNamespace(monotonic=budget)
+        )
+        held.start()
+        self.addCleanup(held.stop)
+        # A reacquire still in the loop when the test ends runs out of time
+        # at its next look.
+        self.addCleanup(budget.advance, 3600.0)
         self.cleanup_fn = hook
         self._bind()
         self._commit_work(self.a)
@@ -1333,6 +1345,8 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 and not crossed.is_set()
             ):
                 self.clock.value = deadline + 0.001
+                if out_of_time:
+                    budget.advance(3600.0)
                 # Cleanup and handoff are over, so these rows were all the
                 # loop had left to wait for: any later wait fails at once.
                 waits_at_cross.append(len(recorder.waits_of("k11-preferred")))
@@ -1376,11 +1390,6 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self._join(preferred, timeout=40.0)
         self.assertTrue(crossed.is_set(), "the fence never saw the rows outstanding")
         self.assertEqual(
-            body_expiries,
-            [True],
-            "the loop's body did not expire the rows after the crossing",
-        )
-        self.assertEqual(
             recorder.waits_of("k11-preferred")[waits_at_cross[0]:],
             [],
             "the preferential reacquire waited after its rows expired",
@@ -1390,6 +1399,27 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self.assertIn("lease_end_unconfirmed", payload.get("cleanup_degraded", []))
         for timeout in recorder.waits_of("k11-preferred"):
             self.assertLessEqual(timeout, 5.0 + 1e-6)
+        return body_expiries
+
+    def test_k11_preferential_reacquire_decides_again_when_the_rows_expire(
+        self,
+    ) -> None:
+        # With its own limit left, the loop's body expires the rows and the
+        # loop decides again, instead of waiting out that limit.
+        self.assertEqual(
+            self._preferential_crossing(out_of_time=False),
+            [True],
+            "the loop's body did not expire the rows after the crossing",
+        )
+
+    def test_k11_preferential_reacquire_out_of_time_at_the_crossing(self) -> None:
+        # The loop's own limit runs out at the crossing: the loop leaves
+        # before its body, and the admission's fence expires the rows.
+        self.assertEqual(
+            self._preferential_crossing(out_of_time=True),
+            [],
+            "the loop's body ran after its own limit ran out",
+        )
 
     def test_k11_queued_wait_expires_rows_during_a_long_cleanup(self) -> None:
         # While A's cleanup still runs, B's wait does not reach the grant
