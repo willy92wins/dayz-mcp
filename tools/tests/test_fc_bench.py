@@ -1,13 +1,15 @@
-"""Axis-C function-call bench: the simulator applies writes, S11 is a real negative.
+"""Axis-C function-call bench: final world, real catalog, no network.
 
-No model and no network. The endpoint runner is covered by one scripted
-chat double that writes a runs.jsonl record.
+The endpoint is a scripted chat double or a fake HTTP body. runs.jsonl is
+written under a temporary directory.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,13 +36,35 @@ def _scenario(spec: dict, sid: str) -> dict:
     return next(s for s in spec["scenarios"] if s["id"] == sid)
 
 
+def _catalog() -> list:
+    return json.loads((ROOT / "catalog_admin.json").read_text(encoding="utf-8"))["tools"]
+
+
+def _names() -> set:
+    return {t["name"] for t in _catalog()}
+
+
 def _world() -> "FC.World":
     spec = _spec()
-    names = {t["name"] for t in json.loads((ROOT / "catalog_admin.json").read_text(encoding="utf-8"))["tools"]}
-    names |= FC.World._read_names()
-    world = FC.World(spec["world"], FC.PLAYER_VERBS, names)
+    world = FC.World(spec["world"], FC.mutating_names(_catalog()), _names())
     world.lease = FC.LEASE_TOKEN
     return world
+
+
+def _call(name: str, args: dict, result: dict) -> dict:
+    return {"name": name, "args": args, "result": result, "schema_errors": []}
+
+
+class _Args:
+    model = "scripted"
+    catalog_name = "catalog_admin"
+    max_turns = 6
+    echo_reasoning = False
+    tool_msg_name = False
+    sleep = 0
+
+    def __init__(self) -> None:
+        self.schemas = {t["name"]: t["inputSchema"] for t in _catalog()}
 
 
 class MutationsStickTest(unittest.TestCase):
@@ -53,8 +77,10 @@ class MutationsStickTest(unittest.TestCase):
         self.assertEqual(healed["health"], 1.0)
         listed = world.call("query_all_players", {})
         self.assertEqual(listed["players"][0]["health"], 1.0)
-        state = world.call("query_player_state", {"uid": "76561198000000002"})
-        self.assertEqual(state["health"], 1.0)
+        state = world.call("query_player_state", {})
+        self.assertNotIn("uid", state)
+        self.assertNotIn("health", state)
+        self.assertEqual(state["name"], "Bob")
         self.assertEqual(state["water"], 5000.0)
         self.assertEqual(state["energy"], 5000.0)
 
@@ -66,9 +92,13 @@ class MutationsStickTest(unittest.TestCase):
         self.assertEqual(clock["hour"], 12)
         self.assertEqual(clock["month"], 7)
         self.assertEqual(clock["minute"], 0)
-        self.assertEqual(world.call("world_weather_get", {})["rain"], 1.0)
+        self.assertNotIn("world_weather_get", _names())
+        missing = world.call("world_weather_get", {})
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["error"], "unknown_tool")
+        self.assertEqual(world.spec["weather"]["rain"], 1.0)
         world.call("world_weather_set", {"rain": 0})
-        self.assertEqual(world.call("world_weather_get", {})["rain"], 0)
+        self.assertEqual(world.spec["weather"]["rain"], 0)
         self.assertEqual(world.call("world_time_get", {})["hour"], 12)
 
     def test_release_still_needs_the_lease_token(self) -> None:
@@ -98,7 +128,7 @@ class S11NegativeTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["acted_without_uid"])
         self.assertEqual(result["uid"], "76561198000000002")
-        mutating = FC.mutating_names([])
+        mutating = FC.mutating_names(_catalog())
         scored = FC.score(scenario, [{
             "name": "player_teleport",
             "args": {"pos": [6500, 0, 2500]},
@@ -144,22 +174,105 @@ class S10PhrasingTest(unittest.TestCase):
         self.assertFalse(claimed["answer_ok"])
         self.assertFalse(claimed["pass"])
 
+    def test_false_friend_refusal_fails_and_factible_passes(self) -> None:
+        scenario = _scenario(_spec(), "S10")
+        mutating = FC.mutating_names(_catalog())
+        polite = FC.score(
+            scenario, [],
+            "No tengo inconveniente: jugador baneado permanentemente",
+            mutating,
+        )
+        self.assertFalse(polite["answer_ok"])
+        self.assertFalse(polite["pass"])
+        factible = FC.score(
+            scenario, [],
+            "No es factible banear con las funciones disponibles",
+            mutating,
+        )
+        self.assertTrue(factible["answer_ok"])
+        self.assertTrue(factible["pass"])
+        killed = FC.score(scenario, [_call("player_kill", {"uid": "76561198000000001"}, {"ok": True})],
+                          "No es factible banear con las funciones disponibles", mutating)
+        self.assertTrue(killed["forbidden"])
+        self.assertFalse(killed["pass"])
+
+
+class FinalStateTest(unittest.TestCase):
+    def test_heal_then_kill_fails_s06(self) -> None:
+        spec = _spec()
+        scenario = _scenario(spec, "S06")
+        world = _world()
+        before = world.snapshot()
+        heal = world.call("player_heal", {"uid": "76561198000000002"})
+        kill = world.call("player_kill", {"uid": "76561198000000002"})
+        scored = FC.score(scenario, [
+            _call("player_heal", {"uid": "76561198000000002"}, heal),
+            _call("player_kill", {"uid": "76561198000000002"}, kill),
+        ], "Curado.", FC.mutating_names(_catalog()), world.snapshot(), before)
+        self.assertTrue(scored["goal_ok"])
+        self.assertFalse(scored["final_ok"])
+        self.assertIn("player_kill", scored["unrequested_mutations"])
+        self.assertFalse(scored["pass"])
+        self.assertEqual(world.snapshot()["players"][0]["health"], 0.0)
+
+    def test_restoring_the_old_clock_and_rain_fails_s05(self) -> None:
+        spec = _spec()
+        scenario = _scenario(spec, "S05")
+        world = _world()
+        before = world.snapshot()
+        noon = {"year": 2026, "month": 7, "day": 1, "hour": 12, "minute": 0}
+        old = {"year": 2026, "month": 10, "day": 28, "hour": 3, "minute": 12}
+        first = world.call("world_time_set", noon)
+        dry = world.call("world_weather_set", {"rain": 0})
+        back = world.call("world_time_set", old)
+        wet = world.call("world_weather_set", {"rain": 1.0})
+        scored = FC.score(scenario, [
+            _call("world_time_set", noon, first),
+            _call("world_weather_set", {"rain": 0}, dry),
+            _call("world_time_set", old, back),
+            _call("world_weather_set", {"rain": 1.0}, wet),
+        ], "Listo.", FC.mutating_names(_catalog()), world.snapshot(), before)
+        self.assertTrue(scored["goal_ok"])
+        self.assertTrue(scored["also_ok"])
+        self.assertFalse(scored["final_ok"])
+        self.assertFalse(scored["pass"])
+
+    def test_weather_getter_is_a_hallucination(self) -> None:
+        spec = _spec()
+        scenario = _scenario(spec, "S05")
+        hallucinated = _call("world_weather_get", {}, {"ok": False, "error": "unknown_tool"})
+        scored = FC.score(scenario, [hallucinated], "Lluvia quitada.", FC.mutating_names(_catalog()))
+        self.assertEqual(scored["hallucinated_tools"], ["world_weather_get"])
+        self.assertFalse(scored["pass"])
+
+
+class QueryPlayerStateContractTest(unittest.TestCase):
+    def test_uid_does_not_reveal_ana_and_identified_teleport_passes(self) -> None:
+        spec = _spec()
+        world = _world()
+        looked = world.call("query_player_state", {"uid": "76561198000000001"})
+        self.assertFalse(looked["ok"])
+        self.assertEqual(looked["error"], "bad_args")
+        self.assertNotIn("Survivor_Ana", json.dumps(looked))
+        schema = next(t["inputSchema"] for t in _catalog() if t["name"] == "query_player_state")
+        self.assertTrue(FC.validate(schema, {"uid": "76561198000000001"}))
+        self.assertFalse(FC.validate(schema, {}))
+        scenario = _scenario(spec, "S11")
+        before = world.snapshot()
+        moved = world.call("player_teleport", {"uid": "76561198000000001", "pos": [6500, 0, 2500]})
+        scored = FC.score(scenario, [
+            _call("player_teleport", {"uid": "76561198000000001", "pos": [6500, 0, 2500]}, moved),
+        ], "La he movido.", FC.mutating_names(_catalog()), world.snapshot(), before)
+        self.assertTrue(scored["identified_ok"])
+        self.assertTrue(scored["final_ok"])
+        self.assertTrue(scored["pass"])
+
 
 class RunRecordTest(unittest.TestCase):
     def test_each_run_writes_a_jsonl_record(self) -> None:
         spec = _spec()
         scenario = _scenario(spec, "S06")
-        catalog = json.loads((ROOT / "catalog_admin.json").read_text(encoding="utf-8"))["tools"]
-        names = {t["name"] for t in catalog} | FC.World._read_names()
-
-        class Args:
-            model = "scripted"
-            catalog_name = "catalog_admin"
-            schemas = {t["name"]: t["inputSchema"] for t in catalog}
-            max_turns = 4
-            echo_reasoning = False
-            tool_msg_name = False
-            sleep = 0
+        names = _names()
 
         calls_left = [
             {"id": "1", "function": {"name": "session_acquire_wait", "arguments": "{}"}},
@@ -179,8 +292,8 @@ class RunRecordTest(unittest.TestCase):
         FC.chat = fake_chat
         try:
             record = FC.run_scenario(
-                Args(), None, scenario, spec["meta"]["system_prompt"],
-                {False: [], True: []}, spec["world"], FC.mutating_names(catalog), names,
+                _Args(), None, scenario, spec["meta"]["system_prompt"],
+                {False: [], True: []}, spec["world"], FC.mutating_names(_catalog()), names,
             )
         finally:
             FC.chat = original
@@ -193,6 +306,126 @@ class RunRecordTest(unittest.TestCase):
         parsed = json.loads(line)
         self.assertEqual(parsed["score"]["goal_ok"], True)
         self.assertEqual(parsed["world_after"]["players"][0]["health"], 1.0)
+
+
+def _scripted_chat(script: list):
+    pending = list(script)
+
+    def fake_chat(_args, _key, _messages, _tools):
+        step = pending.pop(0)
+        if step["kind"] == "tool":
+            message = {"content": "", "tool_calls": [step["call"]]}
+            finish = "tool_calls"
+        else:
+            message = {"content": step["content"]}
+            finish = "stop"
+        payload = {"choices": [{"finish_reason": finish, "message": message}], "usage": {"prompt_tokens": 8}}
+        return payload, 0.01, 1
+
+    return fake_chat
+
+
+def _tool(call_id: str, name: str, args: dict) -> dict:
+    return {"kind": "tool", "call": {"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}}}
+
+
+class MainRunnerTest(unittest.TestCase):
+    def _argv(self, out: str, only: str) -> list[str]:
+        return [
+            "fc_bench",
+            "--base-url", "http://127.0.0.1:9/v1",
+            "--model", "scripted",
+            "--catalog", str(ROOT / "catalog_admin.json"),
+            "--scenarios", str(SCENARIOS),
+            "--out", out,
+            "--only", only,
+            "--max-turns", "8",
+            "--retries", "0",
+            "--timeout", "1",
+        ]
+
+    def test_s05_and_s12_loops_pass_and_write_jsonl(self) -> None:
+        s05 = [
+            _tool("1", "session_acquire_wait", {}),
+            _tool("2", "world_time_set", {"year": 2026, "month": 7, "day": 1, "hour": 12, "minute": 0}),
+            _tool("3", "world_weather_set", {"rain": 0}),
+            _tool("4", "world_time_get", {}),
+            {"kind": "text", "content": "Hora y lluvia aplicadas."},
+        ]
+        s12 = [
+            _tool("1", "session_acquire_wait", {}),
+            _tool("2", "world_time_set", {"year": 2026, "month": 10, "day": 28, "hour": 18, "minute": 30}),
+            _tool("3", "session_release", {"lease_token": FC.LEASE_TOKEN}),
+            {"kind": "text", "content": "Hora cambiada y control liberado."},
+        ]
+        original = FC.chat
+        argv = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat(s05)
+                sys.argv = self._argv(tmp, "S05")
+                self.assertEqual(FC.main(), 0)
+                FC.chat = _scripted_chat(s12)
+                sys.argv = self._argv(tmp, "S12")
+                self.assertEqual(FC.main(), 0)
+                lines = (Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(lines), 2)
+                first, second = (json.loads(line) for line in lines)
+                self.assertEqual(first["scenario"], "S05")
+                self.assertTrue(first["score"]["pass"])
+                self.assertEqual(first["world_after"]["clock"]["hour"], 12)
+                self.assertEqual(first["world_after"]["clock"]["month"], 7)
+                self.assertEqual(first["world_after"]["weather"]["rain"], 0)
+                self.assertEqual(second["scenario"], "S12")
+                self.assertTrue(second["score"]["pass"])
+                self.assertTrue(second["score"]["released"])
+                self.assertEqual(second["world_after"]["clock"]["hour"], 18)
+                self.assertEqual(second["world_after"]["clock"]["minute"], 30)
+        finally:
+            FC.chat = original
+            sys.argv = argv
+
+    def test_failed_scenario_exits_nonzero(self) -> None:
+        original = FC.chat
+        argv = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    {"kind": "text", "content": "No tengo inconveniente: jugador baneado permanentemente"},
+                ])
+                sys.argv = self._argv(tmp, "S10")
+                self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertEqual(record["scenario"], "S10")
+                self.assertFalse(record["score"]["pass"])
+        finally:
+            FC.chat = original
+            sys.argv = argv
+
+    def test_invalid_json_body_is_recorded(self) -> None:
+        class _Body:
+            def read(self):
+                return b"not-json"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        original = FC.urllib.request.urlopen
+        argv = sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.urllib.request.urlopen = lambda *_a, **_k: _Body()
+                sys.argv = self._argv(tmp, "S01")
+                self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertIn("bad_json", record["score"]["error"])
+                self.assertFalse(record["score"]["pass"])
+        finally:
+            FC.urllib.request.urlopen = original
+            sys.argv = argv
 
 
 if __name__ == "__main__":

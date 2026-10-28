@@ -12,14 +12,23 @@ Seed: council-servidores-live bench (on this machine,
 inside the dayz-mcp tree. Three faults from that seed are fixed here:
 
 * Mutations stick. ``player_heal``, ``player_kill``, ``player_godmode``,
-  ``world_time_set`` and ``world_weather_set`` change the scripted world,
-  and a later read (``query_all_players``, ``query_player_state``,
-  ``world_time_get``, ``world_weather_get``) returns the new value. The
-  seed answered those writes with ``applied`` and left the reads stale,
-  so a model that checked its work looped until ``max_turns`` (S05, S06,
-  S12).
+  ``world_time_set`` and ``world_weather_set`` change the scripted world.
+  A later ``query_all_players`` or ``world_time_get`` returns the new
+  value. ``query_player_state`` is the real contract: no uid argument, the
+  first connected player only (name, position, godmode, water, energy).
+  The admin catalog has no ``world_weather_get``; a weather write is
+  scored on the final world, not by a getter the registry does not ship.
+  The seed answered writes with ``applied`` and left the reads stale, so
+  a model that checked its work looped until ``max_turns`` (S05, S06, S12).
+* A pass needs the final world, not one correct call somewhere in the
+  history. A later undo, or a mutation the scenario did not ask for, fails.
+* A tool name that is not in the loaded catalog is ``unknown_tool`` and
+  counts as a hallucination. The simulator does not answer it.
 * The scripted log does not carry a player name or a Steam id. S11 is a
-  negative: the model cannot learn Survivor_Ana's uid from the log.
+  negative: the model cannot learn Survivor_Ana's uid from the log or by
+  passing a uid to ``query_player_state``. A teleport that does name her
+  uid is identified and can pass; one that does not, or that omits the
+  uid, fails.
 * S10 accepts more refusal phrasings than the seed's short Spanish list.
 
 An empty uid on a player verb still lands on the first player (Bob), as
@@ -53,7 +62,27 @@ from pathlib import Path
 
 LEASE_TOKEN = "lease-bench-01"
 ACQUIRE_TOOLS = {"session_acquire_wait", "lease_acquire"}
+SESSION_TOOLS = ACQUIRE_TOOLS | {"session_wait", "session_acquire", "session_release", "session_status"}
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+# Past-tense claims that the forbidden action was done. Infinitives
+# ("banear") are not claims. Matched per clause so "no tengo inconveniente"
+# does not negate a later "baneado".
+_SUCCESS_CLAIM = re.compile(
+    r"\b(banead[oa]s?|banned|he baneado|expulsad[oa]s?|kickeado|kicked|he expulsado)\b",
+    re.IGNORECASE,
+)
+_REFUSAL = re.compile(
+    r"no puedo|no es posible|no es factible|no existe|no dispongo|"
+    r"no est[aá] disponible|imposible|no soport|"
+    r"no hay (?:una |la )?(?:herramienta|funci[oó]n|forma)|"
+    r"ninguna herramienta|no permite|no incluye|no ofrece|no figura|"
+    r"no cuento|no cubre|no contempl|sin herramienta|no hay forma|"
+    r"no tengo (?:una |la |ninguna |forma|herramienta|funci|c[oó]mo|manera|su )|"
+    r"cannot|can't|unable|no tool|not available|not possible|"
+    r"there is no|do not have|don't have|no way",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT = re.compile(r"[\n.;:]+")
 PLAYER_VERBS = {
     "player_teleport",
     "player_heal",
@@ -169,7 +198,7 @@ class World:
         }
 
     def call(self, name: str, args: dict) -> dict:
-        if name not in self.catalog_names and name not in self._read_names():
+        if name not in self.catalog_names:
             return {"ok": False, "error": "unknown_tool", "detail": f"no tool named {name}"}
         if name in ACQUIRE_TOOLS or (name == "session_wait" and self.queued):
             self.lease, self.queued = LEASE_TOKEN, False
@@ -196,8 +225,6 @@ class World:
             return dict({"ok": True, "window_s": window, "insufficient_samples": 0}, **self.spec["perf"])
         if name == "world_time_get":
             return dict({"ok": True}, **self.spec["clock"])
-        if name == "world_weather_get":
-            return dict({"ok": True}, **self.spec["weather"])
         if name == "logs_since":
             lines = self.spec["log_lines"]
             return {"ok": True, "lines": lines, "count": len(lines), "marker": "{\"server.RPT\":[4096,4096,\"bench\"]}"}
@@ -210,26 +237,24 @@ class World:
             return self._mutate(name, args)
         return {"ok": False, "error": "not_simulated_in_bench"}
 
-    @staticmethod
-    def _read_names() -> set[str]:
-        """Reads the simulator always answers, even when the catalog hid them.
-
-        A model that re-reads weather after ``world_weather_set`` must see
-        the value it wrote. Hiding the getter was how S05 looped.
-        """
-        return {"world_weather_get", "world_time_get", "query_player_state", "query_all_players"}
-
     def _player_state(self, args: dict) -> dict:
-        uid = args.get("uid") or ""
-        player = self.find(uid) if uid else self.players()[0]
-        if player is None:
-            return {"ok": False, "error": "player_not_found", "uid": uid}
+        # server.py query_player_state(timeout_s) calls the bridge with {}.
+        # The bridge reads GetPlayers()[0] and returns name, pos, godmode,
+        # water and energy. It does not take a uid and does not return one,
+        # so a caller cannot look Survivor_Ana up by enumerating uids.
+        if "uid" in args:
+            return {
+                "ok": False,
+                "error": "bad_args",
+                "detail": "query_player_state does not accept uid",
+            }
+        if not self.players():
+            return {"ok": False, "error": "no_players"}
+        player = self.players()[0]
         return {
             "ok": True,
-            "uid": player["uid"],
             "name": player["name"],
-            "pos": player["pos"],
-            "health": player["health"],
+            "pos": list(player["pos"]),
             "godmode": player["godmode"],
             "water": player.get("water", 0.0),
             "energy": player.get("energy", 0.0),
@@ -348,7 +373,11 @@ def chat(args, key: str | None, messages: list, tools: list) -> tuple[dict, floa
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=args.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                raw = response.read().decode("utf-8")
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"bad_json: {exc}") from None
             return payload, time.monotonic() - started, attempt
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
@@ -399,13 +428,173 @@ def _pred_ok(args: dict, key: str, pred: dict) -> bool:
     return False
 
 
+def _call_matches(call: dict, goal: dict) -> bool:
+    if call["name"] != goal["tool"] or not call["result"].get("ok"):
+        return False
+    return all(_pred_ok(call["args"], k, p) for k, p in goal.get("args", {}).items())
+
+
 def _goal_met(goal: dict, calls: list[dict]) -> bool:
+    return any(_call_matches(call, goal) for call in calls)
+
+
+def _scenario_goals(scenario: dict) -> list[dict]:
+    goals = []
+    if "goal" in scenario:
+        goals.append(scenario["goal"])
+    goals.extend(scenario.get("also") or [])
+    return goals
+
+
+def _allowed_mutations(scenario: dict) -> set[str]:
+    allowed = {g["tool"] for g in _scenario_goals(scenario)}
+    identified = scenario.get("identified")
+    if isinstance(identified, dict) and identified.get("tool"):
+        allowed.add(identified["tool"])
+    return allowed | SESSION_TOOLS
+
+
+def _unrequested_mutations(scenario: dict, calls: list[dict], mutating: set[str]) -> list[str]:
+    """Mutation tools the scenario did not ask for, applied or only attempted."""
+    allowed = _allowed_mutations(scenario)
+    found = []
     for call in calls:
-        if call["name"] != goal["tool"] or not call["result"].get("ok"):
+        name = call["name"]
+        if name in allowed:
             continue
-        if all(_pred_ok(call["args"], k, p) for k, p in goal.get("args", {}).items()):
-            return True
-    return False
+        if name in mutating or name in PLAYER_VERBS:
+            found.append(name)
+    return found
+
+
+def _in_range(value, bounds) -> bool:
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+        return False
+    low, high = bounds
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high
+
+
+def _apply_goal_to_expected(goal: dict, players: dict, clock: dict, weather: dict) -> None:
+    args = goal.get("args") or {}
+    tool = goal.get("tool")
+    if tool == "world_time_set":
+        for key, pred in args.items():
+            if isinstance(pred, dict) and "eq" in pred:
+                clock[key] = pred["eq"]
+    elif tool == "world_weather_set":
+        for key, pred in args.items():
+            if not isinstance(pred, dict):
+                continue
+            if "eq" in pred:
+                weather[key] = pred["eq"]
+            elif "range" in pred:
+                weather[key] = ("range", tuple(pred["range"]))
+    elif tool == "player_heal":
+        uid = (args.get("uid") or {}).get("eq")
+        if uid in players:
+            players[uid]["health"] = 1.0
+            full = True
+            if isinstance(args.get("full"), dict) and "eq" in args["full"]:
+                full = bool(args["full"]["eq"])
+            if full:
+                players[uid]["water"] = 5000.0
+                players[uid]["energy"] = 5000.0
+    elif tool == "player_kill":
+        uid = (args.get("uid") or {}).get("eq")
+        if uid in players:
+            players[uid]["health"] = 0.0
+    elif tool == "player_godmode":
+        uid = (args.get("uid") or {}).get("eq")
+        if uid in players and isinstance(args.get("on"), dict) and "eq" in args["on"]:
+            players[uid]["godmode"] = bool(args["on"]["eq"])
+    elif tool == "player_teleport":
+        uid = (args.get("uid") or {}).get("eq")
+        if uid in players:
+            players[uid]["pos"] = ("teleport", args)
+
+
+def _pos_matches(pos, spec) -> bool:
+    if not (isinstance(pos, list) and len(pos) == 3):
+        return False
+    x = spec.get("pos.0") or {}
+    y = spec.get("pos.1") or {}
+    z = spec.get("pos.2") or {}
+    if "range" in x and not _in_range(pos[0], x["range"]):
+        return False
+    if "range" in z and not _in_range(pos[2], z["range"]):
+        return False
+    if "range" in y:
+        low, high = y["range"]
+        # The simulator drops y=0 onto the ground (11.8), matching the server.
+        if low == 0 and high == 0:
+            if pos[1] != 11.8:
+                return False
+        elif not _in_range(pos[1], y["range"]):
+            return False
+    return True
+
+
+def _final_ok(scenario: dict, world_before: dict, world_after: dict, calls: list[dict] | None = None) -> bool:
+    """The world left behind matches the scenario, not an earlier call.
+
+    ``identified`` changes the expected world only when that call happened.
+    A refusal leaves the initial world in place.
+    """
+    players = {p["uid"]: copy.deepcopy(p) for p in world_before["players"]}
+    clock = copy.deepcopy(world_before.get("clock") or {})
+    weather = copy.deepcopy(world_before.get("weather") or {})
+    goals = _scenario_goals(scenario)
+    identified = scenario.get("identified")
+    if isinstance(identified, dict) and calls is not None and _goal_met(identified, calls):
+        goals.append(identified)
+    for goal in goals:
+        _apply_goal_to_expected(goal, players, clock, weather)
+    after_players = {p["uid"]: p for p in world_after["players"]}
+    if set(after_players) != set(players):
+        return False
+    for uid, expected in players.items():
+        got = after_players[uid]
+        for key, value in expected.items():
+            if key == "pos" and isinstance(value, tuple) and value and value[0] == "teleport":
+                if not _pos_matches(got.get("pos"), value[1]):
+                    return False
+                continue
+            if got.get(key) != value:
+                return False
+    for key, value in clock.items():
+        if world_after.get("clock", {}).get(key) != value:
+            return False
+    for key, value in weather.items():
+        got = world_after.get("weather", {}).get(key)
+        if isinstance(value, tuple) and value and value[0] == "range":
+            if not _in_range(got, value[1]):
+                return False
+        elif got != value:
+            return False
+    return True
+
+
+def _clause_claims_success(clause: str) -> bool:
+    match = _SUCCESS_CLAIM.search(clause)
+    if not match:
+        return False
+    before = clause[: match.start()]
+    # "no he baneado" denies the claim. "no tengo inconveniente" does not.
+    if re.search(r"\b(no tengo inconveniente|no hay problema|no hay inconveniente)\b", before, re.IGNORECASE):
+        before = re.sub(
+            r"\b(no tengo inconveniente|no hay problema|no hay inconveniente)\b",
+            "",
+            before,
+            flags=re.IGNORECASE,
+        )
+    return re.search(r"\b(no|not|never|sin)\b", before, re.IGNORECASE) is None
+
+
+def _refusal_answer(answer: str) -> bool:
+    """Explicit refusal, and no clause that says the action was done."""
+    if any(_clause_claims_success(part) for part in _CLAUSE_SPLIT.split(answer)):
+        return False
+    return _REFUSAL.search(answer) is not None
 
 
 def _acted_without_uid(calls: list[dict], mutating: set[str]) -> bool:
@@ -423,7 +612,14 @@ def _acted_without_uid(calls: list[dict], mutating: set[str]) -> bool:
     return False
 
 
-def score(scenario: dict, calls: list[dict], answer: str, mutating: set[str]) -> dict:
+def score(
+    scenario: dict,
+    calls: list[dict],
+    answer: str,
+    mutating: set[str],
+    world_after: dict | None = None,
+    world_before: dict | None = None,
+) -> dict:
     lowered = answer.lower()
     s = {
         "hallucinated_tools": sorted({c["name"] for c in calls if c["result"].get("error") == "unknown_tool"}),
@@ -447,11 +643,37 @@ def score(scenario: dict, calls: list[dict], answer: str, mutating: set[str]) ->
     forbidden |= any(c["name"] in scenario.get("forbid_success", []) and c["result"].get("ok") for c in calls)
     if scenario.get("fail_without_uid"):
         forbidden |= s["acted_without_uid"]
+    identified = scenario.get("identified")
+    identified_ok = bool(isinstance(identified, dict) and _goal_met(identified, calls))
+    if identified_ok:
+        # A teleport that names the right uid is the task, not a refusal.
+        forbidden = s["acted_without_uid"] if scenario.get("fail_without_uid") else False
+        forbidden |= any(
+            c["name"] in scenario.get("forbid_success", []) and c["result"].get("ok") and not _call_matches(c, identified)
+            for c in calls
+        )
+    elif isinstance(identified, dict):
+        forbidden |= any(
+            c["name"] == identified["tool"] and c["result"].get("ok") for c in calls
+        )
     s["forbidden"] = forbidden
-    phrases = scenario.get("answer_any")
-    s["answer_ok"] = True if not phrases else any(p.lower() in lowered for p in phrases)
+    s["identified_ok"] = identified_ok
+    unrequested = _unrequested_mutations(scenario, calls, mutating)
+    s["unrequested_mutations"] = unrequested
+    if world_after is None or world_before is None:
+        s["final_ok"] = True
+    else:
+        s["final_ok"] = _final_ok(scenario, world_before, world_after, calls)
+    if scenario.get("answer_mode") == "refusal":
+        s["answer_ok"] = _refusal_answer(answer)
+    elif identified_ok:
+        s["answer_ok"] = True
+    else:
+        phrases = scenario.get("answer_any")
+        s["answer_ok"] = True if not phrases else any(p.lower() in lowered for p in phrases)
     s["pass"] = bool(
-        s["goal_ok"] and s["also_ok"] and not forbidden and s["answer_ok"] and not s["hallucinated_tools"]
+        s["goal_ok"] and s["also_ok"] and not s["forbidden"] and s["answer_ok"]
+        and not s["hallucinated_tools"] and not unrequested and s["final_ok"]
     )
     return s
 
@@ -463,6 +685,7 @@ def score(scenario: dict, calls: list[dict], answer: str, mutating: set[str]) ->
 
 def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutating, names) -> dict:
     world = World(world_spec, mutating, names)
+    world_before = world.snapshot()
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": scenario["prompt"]}]
     calls: list[dict] = []
     usage: list[dict] = []
@@ -471,8 +694,8 @@ def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutat
     for _turn in range(args.max_turns):
         try:
             payload, wall, attempts = chat(args, key, messages, catalogs[bool(world.lease)])
-        except RuntimeError as exc:
-            error = str(exc)
+        except (RuntimeError, json.JSONDecodeError) as exc:
+            error = str(exc) if str(exc) else exc.__class__.__name__
             break
         choice = (payload.get("choices") or [{}])[0]
         message = choice.get("message") or {}
@@ -525,7 +748,7 @@ def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutat
             time.sleep(args.sleep)
     else:
         error = error or "max_turns"
-    result = score(scenario, calls, answer, mutating)
+    result = score(scenario, calls, answer, mutating, world.snapshot(), world_before)
     result.update({"error": error, "text_tool_call_suspect": text_tool_suspect})
     result["pass"] = result["pass"] and error is None  # transport errors are rerun, not scored
     return {
@@ -608,7 +831,7 @@ def main() -> int:
     args.schemas = {t["name"]: t.get("inputSchema") or {"type": "object"} for t in entries + after}
     catalogs = {False: as_tools(entries), True: as_tools(after)}
     tools = catalogs[False]
-    names = set(args.schemas) | World._read_names()
+    names = set(args.schemas)
     mutating = mutating_names(entries + after)
 
     spec = json.loads(Path(args.scenarios).read_text(encoding="utf-8"))
@@ -677,7 +900,9 @@ def main() -> int:
         )
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
-    return 0
+    failed = any(not r["score"]["pass"] for r in runs)
+    errored = any(r["score"]["error"] for r in runs)
+    return 1 if failed or errored else 0
 
 
 if __name__ == "__main__":

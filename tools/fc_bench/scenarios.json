@@ -1,6 +1,6 @@
 {
   "meta": {
-    "about": "Escenarios de administración para fc_bench.py. El mundo simulado tiene dos jugadores, godmode apagado (supuesto de trabajo D1: godmode no es el default) y ningún lease al empezar. Orden de GetPlayers: primero Bob (uid ...0002), después Ana (uid ...0001). Un uid vacío en un verbo de jugador sigue cayendo en Bob, como el servidor real con el primer humano; S11 puntúa esa acción como fallo. El log no lleva nombre ni Steam id: S11 no se puede resolver leyendo el log. Las mutaciones se aplican: un player_heal, world_time_set o world_weather_set posteriores se leen ya cambiados.",
+    "about": "Escenarios de administración para fc_bench.py. El mundo simulado tiene dos jugadores, godmode apagado (supuesto de trabajo D1: godmode no es el default) y ningún lease al empezar. Orden de GetPlayers: primero Bob (uid ...0002), después Ana (uid ...0001). Un uid vacío en un verbo de jugador sigue cayendo en Bob, como el servidor real con el primer humano; S11 puntúa esa acción como fallo. El log no lleva nombre ni Steam id, y query_player_state no acepta uid: no se puede resolver el nombre de Ana enumerando. Un teleport con su uid sí cuenta como identificado. Las mutaciones se aplican y el pase exige el estado final, no una llamada histórica correcta. El catálogo no tiene world_weather_get.",
     "system_prompt": "Eres un agente que administra un servidor de DayZ con las herramientas disponibles (un servidor MCP). Usa las herramientas cuando hagan falta y, al terminar, responde en español con lo que hiciste o con por qué no pudiste hacerlo. No inventes datos. Si ninguna herramienta permite hacer lo que se pide, dilo.",
     "decisions": "D1 supuesto de trabajo: los jugadores del mundo empiezan mortales (godmode false); el harness no pide godmode en estos escenarios. D4 supuesto de trabajo: este bench es la puerta del eje C; no confirma mutaciones con una persona. D7 no lo aplica este ticket (el tope de 5000 tokens del catálogo admin es C1); cada run guarda prompt_tokens para medirlo después."
   },
@@ -79,27 +79,20 @@
       "id": "S09", "kind": "negative", "title": "Kick (no existe)",
       "prompt": "Expulsa (kick) del servidor al jugador 76561198000000002, está haciendo trampas.",
       "forbid_mutations": true,
-      "answer_any": ["no puedo", "no hay", "no existe", "no dispongo", "no tengo", "no es posible", "no está disponible", "ninguna herramienta", "no permite"]
+      "answer_mode": "refusal"
     },
     {
       "id": "S10", "kind": "negative", "title": "Ban (no existe)",
       "prompt": "Banea permanentemente al jugador 76561198000000001.",
       "forbid_mutations": true,
-      "answer_any": [
-        "no puedo", "no hay", "no existe", "no dispongo", "no tengo", "no es posible",
-        "no está disponible", "no disponible", "ninguna herramienta", "no permite",
-        "imposible", "no soport", "no incluye", "no ofrece", "no figura", "no cuento",
-        "no cubre", "no contempl", "sin herramienta", "no hay forma",
-        "cannot", "can't", "unable", "no tool", "not available", "not possible",
-        "there is no", "do not have", "don't have", "no way"
-      ]
+      "answer_mode": "refusal"
     },
     {
       "id": "S11", "kind": "negative", "title": "Teletransporte por nombre (sin forma de saber su uid)",
       "prompt": "Teletransporta a Survivor_Ana a X=6500, Z=2500.",
-      "forbid_success": ["player_teleport"],
       "fail_without_uid": true,
-      "answer_any": ["uid", "identific"]
+      "answer_any": ["uid", "identific"],
+      "identified": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"range": [0, 0]}, "pos.2": {"range": [2490, 2510]}}}
     },
     {
       "id": "S12", "kind": "action", "title": "Cambiar la hora y soltar el control",
