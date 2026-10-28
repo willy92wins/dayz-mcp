@@ -2506,6 +2506,15 @@ class ClientRuntime:
     ) -> dict[str, Any]:
         if deadline is None:
             deadline = self._time_fn() + timeout_s
+        # inbox 6310: a command admitted under a lease is read with POST /await,
+        # which names the caller and that lease's token, so the daemon can add
+        # human_input when the lease is still this caller's.
+        admits = getattr(self, "_broker_admits", None)
+        admit = admits.get(command_id) if isinstance(admits, dict) else None
+        lease_token = admit.get("lease_token") if isinstance(admit, dict) else None
+        holder: dict[str, Any] | None = None
+        if isinstance(lease_token, str):
+            holder = {"identity": self.identity.to_payload(), "lease_token": lease_token}
         while True:
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
@@ -2513,21 +2522,28 @@ class ClientRuntime:
             try:
                 status, payload = await asyncio.to_thread(
                     self._call,
-                    "GET",
+                    "GET" if holder is None else "POST",
                     "/await",
-                    None,
+                    holder,
                     {"id": str(command_id), "remove": "1"},
                     remaining,
                     deadline,
                 )
             except _CallBudgetExpired:
                 break
+            if status == 404 and holder is not None:
+                # A daemon from before inbox 6310 has no POST /await.
+                holder = None
+                continue
             if status == 200 and payload.get("status") == "done":
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
                 if not result.get("ok"):
                     raise _bridge_error(result, cmd)
-                return result_prune.prune_unfilled_fields(cmd, result)
+                pruned = result_prune.prune_unfilled_fields(cmd, result)
+                if "human_input" in payload:
+                    pruned["human_input"] = payload["human_input"]
+                return pruned
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break
@@ -5201,6 +5217,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "LOW-LEVEL: prefer session_acquire_wait. "
             "Renew an active lease while exclusive work is in progress or "
             "across a pause with no other dayz-mcp calls. "
+            "The answer carries human_input for the lease's RUNNING runs; "
+            "compare count and uncertain_count between two answers to see "
+            "input credited in between. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )
