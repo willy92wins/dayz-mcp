@@ -1797,6 +1797,31 @@ class SessionCoordinator:
             self._condition.notify_all()
             return True
 
+    def note_close_unreachable(
+        self, round_id: int, run_id: str, peer: str, reason: str
+    ) -> bool:
+        round_id = self._require_round_id(round_id)
+        run_id = self._require_lease_end_id(run_id, "run_id")
+        peer = self._require_peer(peer)
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("invalid_reason")
+        with self._condition:
+            self._expire_rows_locked()
+            current = self._lease_end_round
+            row = self._lease_end_rows.get((run_id, peer))
+            if (
+                current is None
+                or current.round_id != round_id
+                or row is None
+                or row.round_id != round_id
+                or row.state != "pending"
+                or not row.reported
+            ):
+                return False
+            self._set_row_owed_locked(row, [reason])
+            self._condition.notify_all()
+            return True
+
     def lease_close_deliverable(self, round_id: int) -> bool:
         round_id = self._require_round_id(round_id)
         with self._condition:
