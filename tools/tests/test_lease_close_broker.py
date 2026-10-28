@@ -1180,6 +1180,63 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             self.assertIn((fault, 2), seen, "no k read the clock before D")
             self.assertIn((fault, 0), seen, "no k read the clock after D")
 
+    def test_k11_status_photo_ages_a_prior_debt_when_the_deadline_crosses(self) -> None:
+        # The server row is owed since t=0 and the client row is CLOSING, due
+        # at D, so the server row's age dates the photo's reading. While the
+        # client row is outstanding, its term plus that age is the bound and
+        # the slot is not claimable; once it is owed, the age is the bound at
+        # least and the slot is claimable. A claimable read from a later
+        # reading than the photo's shows the client row owed with the age
+        # short of the bound.
+        seen: set[int] = set()
+        for k in range(0, 41):
+            with self.subTest(status_k=k):
+                clock = _DeadlineCrossingClock()
+                self.clock = clock
+                self.ids = SequentialIds("id")
+                self.tokens = SequentialIds("token")
+                self.coordinator = self._make_coordinator(time_fn=clock)
+                carried = _floor(10, 20, conn_gen="g", move_id=7, weapon_id=4)
+                round_id, ids = self._published_round([carried])
+                lease_id = str(self.coordinator._lease_end_round.lease_id)
+                for thread in threading.enumerate():
+                    if thread.name == f"dayz-mcp-cleanup-{lease_id[:12]}":
+                        self._join(thread)
+                low = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "server",
+                            ids["server"],
+                            "clean",
+                            reported_floors=[
+                                _floor(10, 20, conn_gen="g", move_id=5, weapon_id=4)
+                            ],
+                        )
+                    ]
+                )
+                self.assertEqual(low, ["applied"])
+                clock.arm(k, clock.value + LEASE_END_BOUND_S)
+                status = self.coordinator.status(self.a)
+                body = status["lease_end"]
+                rows = {row["peer"]: row for row in body["unconfirmed"]}
+                age = rows["server"]["since_s"]
+                if body["outstanding"]:
+                    self.assertEqual(body["outstanding"], 1, body)
+                    self.assertEqual(sorted(rows), ["server"], body)
+                    self.assertFalse(status["claimable"], status)
+                    self.assertAlmostEqual(
+                        body["deadline_in_s"] + age, LEASE_END_BOUND_S, places=9, msg=body
+                    )
+                else:
+                    self.assertEqual(sorted(rows), ["client", "server"], body)
+                    self.assertIsNone(body["deadline_in_s"], body)
+                    self.assertTrue(status["claimable"], status)
+                    self.assertGreaterEqual(age, LEASE_END_BOUND_S, body)
+                seen.add(body["outstanding"])
+        self.assertEqual(seen, {0, 1}, "the deadline did not cross on both sides of the reading")
+
     def test_k11_preferential_reacquire_wakes_at_the_rows_deadline(self) -> None:
         # A's lease expires and its cleanup runs long. A's preferential
         # reacquire waits no longer than the rows' term, and a wakeup after
@@ -1263,6 +1320,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self.clock.advance(MID)
         deadline = self.clock.value + 5.0
         crossed = threading.Event()
+        waits_at_cross: list[int] = []
         fence = self.coordinator._lease_end_blocks_locked
 
         def fence_then_cross(now: float | None = None) -> bool:
@@ -1273,6 +1331,10 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 and not crossed.is_set()
             ):
                 self.clock.value = deadline + 0.001
+                # Cleanup and handoff are over, so these rows were all the
+                # loop had left to wait for: any later wait fails at once.
+                waits_at_cross.append(len(recorder.waits_of("k11-preferred")))
+                recorder.caps["k11-preferred"] = -1.0
                 crossed.set()
             return blocks
 
@@ -1294,6 +1356,11 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self._join(expiry, timeout=40.0)
         self._join(preferred, timeout=40.0)
         self.assertTrue(crossed.is_set(), "the fence never saw the rows outstanding")
+        self.assertEqual(
+            recorder.waits_of("k11-preferred")[waits_at_cross[0]:],
+            [],
+            "the preferential reacquire waited after its rows expired",
+        )
         status, payload = result[0]
         self.assertEqual(status, 200, payload)
         self.assertIn("lease_end_unconfirmed", payload.get("cleanup_degraded", []))
