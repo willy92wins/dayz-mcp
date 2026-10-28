@@ -95,20 +95,28 @@ recorder that lists each build and each call of its `read_active_process`, the m
 observation reads first (`steam_preflight.py:508`, `:419`), and fails the call. Each call runs
 outside any subtest, so a call that fails ends the test and no other tool runs while its
 observation does. It starts from an expired cache. Each observation thread it started is joined
-for up to 30 s, also when the call raises, and must have finished, and the cache's expiry must have
-moved forward: the call observed. The patches are restored in one cleanup, which keeps them all
-while an observation thread of the test still runs: restored, the provider it builds next would be
-the real one. They then stay for the rest of the run, so tests that need the real provider class
-fail too, as `test_steam_app_view.py` does under M6: the failure is loud, and no test reads the
-real registry.
+for up to 30 s, also when the call raises, and each join is listed; the thread must have finished,
+and the cache's expiry must have moved forward: the call observed. The patches the fixture starts
+are restored in one cleanup, which keeps them all while an observation thread of the test still
+runs: restored, the provider it builds next would be the real one. They then stay for the rest of
+the run, so later tests that need the real provider class can fail too, as `test_steam_app_view.py`
+did when it ran after this module under M6; in discover order it runs before, and
+`test_steampost_readiness.py` after (it builds the provider at `:235` and calls a method the
+recorder lacks at `:263`). The failure is loud, and no test reads the real registry through this
+view.
+
+C9 and C10 check that cleanup itself. They run a stalled call through unittest's own `run`, with a
+result of their own, so the cleanup that `setUp` registered runs while the observation does, and
+then look at what it recorded and left. The stalled view returns only when the outer test sets its
+event, with no timeout of its own, and the outer test's cleanup sets it on every path.
 
 | Id | Criterion | POS → expected | NEG → expected |
 |---|---|---|---|
 | C1 | The default is installed | `server.observe_app_steam_view` is `tests.no_steam_app_view`, not `steam_preflight.observe_app_steam_view`, and it returns None | M1 → C1 fails |
 | C2 | No session tool builds or reads a provider | for each tool, the call observed and, in a subtest per tool, the recorder lists no build and no read and the answer has no `steam_app_view` | M1, M2 → C2 fails for each tool; M3 → at `session_acquire`, which did not observe; M6 → at the first tool, whose observation outlives its join |
 | C3 | The recorder sees a real read | with the real `observe_app_steam_view` patched back, for each tool: a build with `real_registry=True` and a call of that provider's `read_active_process`; after the patch the default is back | M3 → C3 fails at `session_acquire`; M4 → for each tool, built and never read; M7 → for each tool, the method fetched and never called (C3 is also the negative control of C2) |
-| C9 | An observation still running fails its call and keeps the patches | a view that waits on an event, a tool that does not wait for it and a join of 0 s: the call fails as still running; the cleanup refuses while the view runs and `WindowsSteamPreflightProvider` is still the recorder; once the view returns, it restores the real class | M8 → C9 fails |
-| C10 | So does a call that raises | the same with the runtime's `session_status` raising: the call raises the tool's error, its observation thread is still registered, and the patches stay until the view returns | M8, M9 → C10 fails |
+| C9 | An observation still running fails its call, and the cleanup `setUp` registered keeps the patches | a stalled call through unittest's `run`: a view that returns only when the test sets its event, a tool that does not wait for it and a join of 0 s; the call fails as still running, the run records one failure, from that cleanup, and `WindowsSteamPreflightProvider` is still the recorder while the view runs; once it returns, `restore` puts back the real class and the suite's view | M8, M10 → C9 fails |
+| C10 | So does a call that raises, which joins first | the same with the runtime's `session_status` raising: the call raises the tool's error, it joined its observation thread before it raised, and the cleanup keeps the patches until the view returns | M8, M9, M10 → C10 fails |
 | C6 | A fixture child gets the view | a child with `PYTHONPATH` = the fixture site prints `tests.no_steam_app_view` | M1 → C6 fails |
 | C7 | A child without the fixture keeps the real observation | `PYTHONPATH` = `tools` → it prints `dayz_mcp.steam_preflight.observe_app_steam_view` | — (C7 is the negative control of C6) |
 | C8 | The modules that default `LOCALAPPDATA` load without it | a child without `LOCALAPPDATA` imports `tests.test_progressive_disclosure` and `tests.test_fn_p0_small_model_loops` with rc 0; in the same environment `from dayz_mcp import server` alone fails with `KeyError: 'LOCALAPPDATA'` | M5 → C8 fails |
@@ -131,7 +139,10 @@ Mutants, one at a time in a copy and restored:
 - M6: the installed view takes 35 s.
 - M7: the real observation gets the real-registry provider's `read_active_process` without calling it, and returns None (after `steam_preflight.py:544`).
 - M8: the cleanup restores the patches while an observation thread runs.
-- M9: a call joins its observation threads only when it returns.
+- M9: a call joins its observation threads only when it returns: the registration stays in the
+  `finally`, the join moves after it.
+- M10: `setUp` registers a cleanup that stops the patches without checking the observation threads;
+  `restore` is unchanged.
 
 Exit criteria: the new module passes with 3.13 under pytest and with 3.11 under unittest, and its
 child tests pass in the harness under both; each mutant fails the new module where the table says,
@@ -163,3 +174,16 @@ with an AssertionError, under both versions; C4 and C5 as above.
   the provider and the cache while the thread ran, and a call that raised skipped the join. Calls
   now run outside the subtests and join in a `finally`, and one cleanup keeps every patch while an
   observation thread runs (C9, C10; M8, M9).
+
+## Round 4 (Codex Sol r3 on `28f19ab`: RED, one P1 and two P2)
+
+- H7 (P1): with the registration kept in the `finally` and only the join moved after it, a call
+  that joined only when it returned passed C10, which then joined the thread itself. The fixture now
+  lists each join, and C10 checks that the call joined its observation before it raised (M9 is that
+  edit).
+- H8 (P2): C9 and C10 called `restore` by hand and emptied the patches before the cleanup `setUp`
+  registered ran, so a registered cleanup without the check passed. They now run the stalled call
+  through unittest's own `run` and check the failure that cleanup records and the patches it leaves
+  (M10).
+- H9 (P2): the stalled view waited 30 s at most, so a runner that held the test that long ended the
+  observation before the checks. It now returns only when the test sets its event.

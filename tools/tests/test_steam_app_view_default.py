@@ -57,11 +57,15 @@ class _RecordingProvider:
         raise AssertionError(f"the {self._view} provider read ActiveProcess")
 
 
-class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
+class _SessionToolsFixture(unittest.IsolatedAsyncioTestCase):
+    """The three session tools through build_app in client mode, with the
+    runtime's answers mocked and the recorder in place of the provider."""
+
     join_s = 30.0
 
     def setUp(self) -> None:
         self.observers: list[threading.Thread] = []
+        self.joined: list[threading.Thread] = []
         self.patchers: list = []
         self.addCleanup(self.restore)
         config = ServerConfig(
@@ -116,8 +120,7 @@ class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
                 if thread.name == _OBSERVER
             ]
             self.observers.extend(started)
-            for thread in started:
-                thread.join(self.join_s)
+            self.join_observers(started)
         self.assertFalse(
             any(thread.is_alive() for thread in started),
             f"{tool}: its observation is still running",
@@ -127,28 +130,15 @@ class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
         )
         return result
 
-    def stall(self) -> threading.Event:
-        """A view that runs until the event is set, a tool that does not wait
-        for it and a join that does not either."""
-        release = threading.Event()
-        self.addCleanup(release.set)
-        self.join_s = 0.0
-        self.enter(
-            patch.object(server, "observe_app_steam_view", lambda: release.wait(30.0) and None)
-        )
-        self.enter(patch.object(server, "_STEAM_APP_VIEW_WAIT_S", 0.0))
-        return release
+    def join_observers(self, threads: list[threading.Thread]) -> None:
+        # Each join is listed, so a test can tell whether a call that raised
+        # waited for its observation.
+        for thread in threads:
+            self.joined.append(thread)
+            thread.join(self.join_s)
 
-    def assert_the_patches_stay_until(self, release: threading.Event) -> None:
-        self.assertEqual(len(self.observers), 1)
-        with self.assertRaisesRegex(AssertionError, "still running"):
-            self.restore()
-        self.assertIs(sp.WindowsSteamPreflightProvider, _RecordingProvider)
-        release.set()
-        self.observers[0].join(30.0)
-        self.restore()
-        self.assertIsNot(sp.WindowsSteamPreflightProvider, _RecordingProvider)
 
+class SuiteSteamViewTest(_SessionToolsFixture):
     def test_the_suite_installs_a_view_that_agrees(self) -> None:
         self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
         self.assertIsNot(server.observe_app_steam_view, sp.observe_app_steam_view)
@@ -173,18 +163,69 @@ class SuiteSteamViewTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("real", _RecordingProvider.reads)
         self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
 
-    async def test_an_observation_still_running_fails_its_call_and_keeps_the_patches(self) -> None:
-        release = self.stall()
-        with self.assertRaisesRegex(AssertionError, "still running"):
-            await self.call("session_status")
-        self.assert_the_patches_stay_until(release)
 
-    async def test_a_call_that_raises_keeps_the_patches_while_its_observation_runs(self) -> None:
-        release = self.stall()
-        self.runtime.session_status.side_effect = RuntimeError("fixture")
-        with self.assertRaisesRegex(Exception, "fixture"):
-            await self.call("session_status")
-        self.assert_the_patches_stay_until(release)
+class StalledObservationTest(unittest.TestCase):
+    """The cleanup that the fixture registers, run by unittest while an
+    observation of the test still runs: it fails and keeps every patch the
+    fixture started, and once the observation ends they go."""
+
+    def run_a_stalled_call(self, *, raises: bool) -> None:
+        # The view returns only once this test sets the event: no timeout of
+        # its own ends the observation before the checks below.
+        release = threading.Event()
+
+        class StalledCall(_SessionToolsFixture):
+            join_s = 0.0
+
+            def setUp(self) -> None:
+                super().setUp()
+                self.enter(
+                    patch.object(server, "observe_app_steam_view", lambda: release.wait() and None)
+                )
+                self.enter(patch.object(server, "_STEAM_APP_VIEW_WAIT_S", 0.0))
+
+            async def test_call(self) -> None:
+                if raises:
+                    self.runtime.session_status.side_effect = RuntimeError("fixture")
+                    with self.assertRaisesRegex(Exception, "fixture"):
+                        await self.call("session_status")
+                else:
+                    with self.assertRaisesRegex(AssertionError, "still running"):
+                        await self.call("session_status")
+
+        inner = StalledCall("test_call")
+        self.addCleanup(self.end, inner, release)
+        result = unittest.TestResult()
+        inner.run(result)
+        # Its call failed as it should, and the cleanup its setUp registered
+        # failed after it: the observation still ran.
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.failures), 1, result.failures)
+        self.assertIn("still running, so the patches stay", result.failures[0][1])
+        self.assertEqual(len(inner.observers), 1)
+        self.assertEqual(inner.joined, inner.observers, "the call did not join its observation")
+        self.assertTrue(inner.observers[0].is_alive())
+        self.assertIs(sp.WindowsSteamPreflightProvider, _RecordingProvider)
+        self.end(inner, release)
+        self.assertIsNot(sp.WindowsSteamPreflightProvider, _RecordingProvider)
+        self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
+
+    @staticmethod
+    def end(inner: _SessionToolsFixture, release: threading.Event) -> None:
+        release.set()
+        for thread in inner.observers:
+            thread.join(30.0)
+        inner.restore()
+
+    def test_an_observation_still_running_fails_its_call_and_its_cleanup_keeps_the_patches(
+        self,
+    ) -> None:
+        self.run_a_stalled_call(raises=False)
+
+    def test_a_call_that_raises_joins_its_observation_and_its_cleanup_keeps_the_patches(
+        self,
+    ) -> None:
+        self.run_a_stalled_call(raises=True)
 
 
 @slow_test
