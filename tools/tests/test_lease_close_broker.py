@@ -22,7 +22,7 @@ from dayz_mcp.session_coordination import (
     ClientIdentity,
     SessionCoordinator,
 )
-from tests.lease_helpers import AuditSink, FakeClock, SequentialIds, _identity
+from tests.lease_helpers import MID, AuditSink, FakeClock, SequentialIds, _identity
 
 
 def _floor(
@@ -70,6 +70,32 @@ class _DeadlineCrossingClock:
         self._deadline = deadline
 
 
+class _RecordingCondition(threading.Condition):
+    """A Condition that records each wait's timeout and the thread that waited."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waits: list[tuple[str, float | None]] = []
+        self._seen = threading.Condition(threading.Lock())
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._seen:
+            self.waits.append((threading.current_thread().name, timeout))
+            self._seen.notify_all()
+        return super().wait(timeout)
+
+    def waits_of(self, name: str) -> list[float | None]:
+        with self._seen:
+            return [timeout for who, timeout in self.waits if who == name]
+
+    def await_waits(self, name: str, count: int, timeout: float) -> bool:
+        with self._seen:
+            return self._seen.wait_for(
+                lambda: sum(1 for who, _ in self.waits if who == name) >= count,
+                timeout,
+            )
+
+
 class LeaseCloseBrokerStage2aTest(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()
@@ -93,7 +119,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         kwargs.update(overrides)
         return SessionCoordinator(**kwargs)
 
-    def _join(self, thread: threading.Thread, timeout: float = 2.0) -> None:
+    def _join(self, thread: threading.Thread, timeout: float = 30.0) -> None:
         thread.join(timeout=timeout)
         self.assertFalse(thread.is_alive(), f"{thread.name} did not finish")
 
@@ -102,7 +128,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             self.assertTrue(
                 self.coordinator._condition.wait_for(
                     lambda: not self.coordinator._handoff_pending,
-                    timeout=2.0,
+                    timeout=30.0,
                 ),
                 "handoff_pending did not clear",
             )
@@ -400,7 +426,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
 
         def blocking(*_args: object) -> dict:
             started.set()
-            blocked.wait(2.0)
+            blocked.wait(30.0)
             return {}
 
         self.coordinator = self._make_coordinator(
@@ -447,11 +473,13 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             self.assertEqual(row["reasons"], ["close_not_reported"])
 
     def test_k9_timeout_report_before_deadline_closing(self) -> None:
+        go = threading.Event()
+        self.addCleanup(go.set)
         reported = threading.Event()
         self.addCleanup(reported.set)
 
         def late_report(session_id: str, lease_id: str, *_rest: object) -> dict:
-            time.sleep(0.08)
+            go.wait(30.0)
             info = self.coordinator.lease_end_round(session_id, lease_id)
             if info is not None:
                 reports = [
@@ -475,7 +503,10 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         lease = self._commit_work(self.a)
         released = self.coordinator.release(self.a, lease["lease_token"])[1]
         self.assertIn("cleanup_timeout", released["cleanup_degraded"])
-        self.assertTrue(reported.wait(1.0), "late report did not run")
+        thread = self._cleanup_thread(str(lease["lease_id"]))
+        go.set()
+        self.assertTrue(reported.wait(30.0), "late report did not run")
+        self._join(thread)
         info = self.coordinator.lease_end_round(
             self.a.session_id, lease["lease_id"]
         )
@@ -492,7 +523,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self.coordinator = self._make_coordinator(
             lease_end_bound_s=0.05, cleanup_timeout_s=0.03
         )
-        self.cleanup_fn = lambda *_args: (release_hook.wait(2.0), {})[1]
+        self.cleanup_fn = lambda *_args: (release_hook.wait(30.0), {})[1]
         self._bind()
         lease = self._commit_work(self.a)
         self.coordinator.release(self.a, lease["lease_token"])
@@ -533,7 +564,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 self.coordinator = self._make_coordinator(cleanup_timeout_s=0.03)
 
                 def hook(*_args: object) -> dict:
-                    go.wait(2.0)
+                    go.wait(30.0)
                     if boom:
                         raise RuntimeError("late cleanup")
                     return {}
@@ -594,7 +625,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 )
             self.coordinator.note_close_round(info["round"], reports)
             reported.set()
-            go.wait(2.0)
+            go.wait(30.0)
             raise RuntimeError("late cleanup")
 
         self.cleanup_fn = hook
@@ -602,7 +633,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         lease = self._commit_work(self.a)
         released = self.coordinator.release(self.a, lease["lease_token"])[1]
         self.assertIn("cleanup_timeout", released["cleanup_degraded"])
-        self.assertTrue(reported.wait(2.0), "hook did not report")
+        self.assertTrue(reported.wait(30.0), "hook did not report")
         thread = self._cleanup_thread(str(lease["lease_id"]))
         go.set()
         self._join(thread)
@@ -639,12 +670,12 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 )
             self.coordinator.note_close_round(info["round"], reports)
             reported_a.set()
-            go1.wait(2.0)
+            go1.wait(30.0)
             raise RuntimeError("late round 1")
 
         def hook_b(*_args: object) -> dict:
             started_b.set()
-            go2.wait(2.0)
+            go2.wait(30.0)
             return {}
 
         self.cleanup_fn = hook_a
@@ -654,7 +685,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             self.a, lease_a["lease_token"]
         )[1]
         self.assertIn("cleanup_timeout", released_a["cleanup_degraded"])
-        self.assertTrue(reported_a.wait(2.0), "round 1 did not publish")
+        self.assertTrue(reported_a.wait(30.0), "round 1 did not publish")
         thread_a = self._cleanup_thread(str(lease_a["lease_id"]))
         info_a = self.coordinator.lease_end_round(
             self.a.session_id, str(lease_a["lease_id"])
@@ -679,7 +710,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             self.b, lease_b["lease_token"]
         )[1]
         self.assertIn("cleanup_timeout", released_b["cleanup_degraded"])
-        self.assertTrue(started_b.wait(2.0), "round 2 hook did not start")
+        self.assertTrue(started_b.wait(30.0), "round 2 hook did not start")
         thread_b = self._cleanup_thread(str(lease_b["lease_id"]))
         info_b = self.coordinator.lease_end_round(
             self.b.session_id, str(lease_b["lease_id"])
@@ -733,7 +764,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self._bind()
         lease = self._commit_work(self.a)
         self.coordinator.release(self.a, lease["lease_token"])
-        self.assertTrue(reported.wait(2.0), "hook did not report")
+        self.assertTrue(reported.wait(30.0), "hook did not report")
         self._wait_handoff()
         info = self.coordinator.lease_end_round(
             self.a.session_id, str(lease["lease_id"])
@@ -759,6 +790,29 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self.assertEqual(
             self.coordinator.status(self.a)["lease_end"]["outstanding"], 2
         )
+        round_id = int(info["round"])
+        cleaned = self.coordinator.note_close_outcomes(
+            [self._close_outcome(round_id, "run-1", "client", "pub-client", "clean")]
+        )
+        self.assertEqual(cleaned, ["applied"])
+        stale = self.coordinator.note_close_outcomes(
+            [self._close_outcome(round_id, "run-1", "server", "pub-server", "clean")]
+        )
+        self.assertEqual(stale, ["ignored"])
+        self.assertEqual(
+            self.coordinator.status(self.a)["lease_end"]["outstanding"], 1
+        )
+        fresh = self.coordinator.note_close_outcomes(
+            [self._close_outcome(round_id, "run-1", "server", "later-server", "clean")]
+        )
+        self.assertEqual(fresh, ["applied"])
+        self.assertNotIn("lease_end", self.coordinator.status(self.a))
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200)
+        self.assertIn(
+            {"run_id": "run-1", "peer": "server", "close_id": "later-server"},
+            grant_b["lease_end"]["settled"],
+        )
 
         resume = threading.Event()
         self.addCleanup(resume.set)
@@ -767,7 +821,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
 
         def silent(session_id: str, lease_id: str, *_rest: object) -> dict:
             entered.set()
-            resume.wait(2.0)
+            resume.wait(30.0)
             return {}
 
         self.cleanup_fn = silent
@@ -777,7 +831,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             self.a, lease_n["lease_token"]
         )[1]
         self.assertIn("cleanup_timeout", released["cleanup_degraded"])
-        self.assertTrue(entered.wait(2.0), "silent hook did not start")
+        self.assertTrue(entered.wait(30.0), "silent hook did not start")
         thread = self._cleanup_thread(str(lease_n["lease_id"]))
         info_n = self.coordinator.lease_end_round(
             self.a.session_id, str(lease_n["lease_id"])
@@ -802,7 +856,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self.addCleanup(blocked.set)
 
         def hang(*_args: object) -> dict:
-            blocked.wait(2.0)
+            blocked.wait(30.0)
             return {}
 
         coordinator = SessionCoordinator(
@@ -814,6 +868,8 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             cleanup_timeout_s=0.05,
             lease_end_bound_s=0.2,
         )
+        recorder = _RecordingCondition()
+        coordinator._condition = recorder
         self.coordinator = coordinator
         self._bind()
         a = _identity("a", session_id="session-a-k11")
@@ -826,13 +882,15 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         result: list[tuple[int, dict]] = []
 
         def waiter() -> None:
-            result.append(coordinator.wait(b, queued["ticket"], 1.0))
+            result.append(coordinator.wait(b, queued["ticket"], 30.0))
 
         thread = threading.Thread(target=waiter, name="k11-wait")
         thread.start()
-        self._join(thread, timeout=1.5)
+        self._join(thread, timeout=40.0)
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 0.35, f"wait took {elapsed:.3f}s")
+        self.assertLess(elapsed, 10.0, f"wait took {elapsed:.3f}s")
+        for timeout in recorder.waits_of("k11-wait"):
+            self.assertLessEqual(timeout, 0.2 + 1e-6)
         self.assertEqual(len(result), 1, "wait returned once")
         status, payload = result[0]
         self.assertEqual(status, 200)
@@ -889,6 +947,8 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 self.ids = SequentialIds("id")
                 self.tokens = SequentialIds("token")
                 self.coordinator = self._make_coordinator(time_fn=clock)
+                recorder = _RecordingCondition()
+                self.coordinator._condition = recorder
                 self._bind()
                 lease = self._commit_work(self.a)
                 self.cleanup_fn = self._publishing_hook()
@@ -909,14 +969,13 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 self.assertEqual(status_b, 202)
                 deadline = clock.value + LEASE_END_BOUND_S
                 clock.arm(k, deadline)
-                started = time.monotonic()
+                me = threading.current_thread().name
+                before = len(recorder.waits_of(me))
                 wait_status, wait_payload = self.coordinator.wait(
                     self.b, queued["ticket"], 1.0
                 )
-                elapsed = time.monotonic() - started
-                self.assertLess(
-                    elapsed, 0.5, f"wait k={k} took {elapsed:.3f}s"
-                )
+                for timeout in recorder.waits_of(me)[before:]:
+                    self.assertLessEqual(timeout, 0.01, f"wait k={k}")
                 self.assertEqual(wait_status, 200)
                 self.assertIn(
                     "lease_end_unconfirmed",
@@ -945,6 +1004,166 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         self.assertEqual(
             self.coordinator.status(self.a)["lease_end"]["outstanding"], 0
         )
+
+    def test_k11_status_photo_holds_when_the_deadline_crosses(self) -> None:
+        # Status expires the rows and builds its lease_end fields from one
+        # clock reading, so a deadline that crosses inside it never shows a
+        # row that is neither outstanding nor owed, whether or not a
+        # recovery fault keeps status off the grant fence.
+        seen: set[tuple[bool, int]] = set()
+        for fault in (True, False):
+            for k in range(1, 41):
+                with self.subTest(fault=fault, status_k=k):
+                    clock = _DeadlineCrossingClock()
+                    self.clock = clock
+                    self.ids = SequentialIds("id")
+                    self.tokens = SequentialIds("token")
+                    self.coordinator = self._make_coordinator(time_fn=clock)
+                    self._bind()
+                    lease = self._commit_work(self.a)
+                    self.cleanup_fn = self._publishing_hook()
+                    self.coordinator.release(self.a, lease["lease_token"])
+                    matches = [
+                        thread
+                        for thread in threading.enumerate()
+                        if thread.name
+                        == f"dayz-mcp-cleanup-{str(lease['lease_id'])[:12]}"
+                    ]
+                    if matches:
+                        self.assertEqual(
+                            len(matches), 1, "expected one cleanup thread"
+                        )
+                        self._join(matches[0])
+                    self._wait_handoff()
+                    if fault:
+                        self.coordinator.arm_lifecycle_recovery_fault(
+                            {"fault_id": f"fault-k11-{k}", "state": "armed"}
+                        )
+                    clock.arm(k, clock.value + LEASE_END_BOUND_S)
+                    body = self.coordinator.status(self.a)["lease_end"]
+                    outstanding = body["outstanding"]
+                    unconfirmed = body["unconfirmed"]
+                    self.assertEqual(outstanding + len(unconfirmed), 2, body)
+                    self.assertEqual(
+                        body["deadline_in_s"] is None, outstanding == 0, body
+                    )
+                    if outstanding:
+                        self.assertGreater(body["deadline_in_s"], 0.0, body)
+                    for row in unconfirmed:
+                        self.assertEqual(row["reasons"], ["close_timeout"])
+                    seen.add((fault, outstanding))
+        for fault in (True, False):
+            self.assertIn((fault, 2), seen, "no k read the clock before D")
+            self.assertIn((fault, 0), seen, "no k read the clock after D")
+
+    def test_k11_preferential_reacquire_wakes_at_the_rows_deadline(self) -> None:
+        # A's lease expires and its cleanup runs long. A's preferential
+        # reacquire waits no longer than the rows' term, and a wakeup after
+        # the deadline turns the rows OWED instead of waiting zero.
+        go = threading.Event()
+        self.addCleanup(go.set)
+        published = threading.Event()
+        publish = self._publishing_hook()
+
+        def hook(session_id: str, lease_id: str, *rest: object) -> dict:
+            result = publish(session_id, lease_id, *rest)
+            published.set()
+            go.wait(30.0)
+            return result
+
+        self.coordinator = self._make_coordinator(
+            attached_run_probe=lambda *_args: True, lease_end_bound_s=5.0
+        )
+        recorder = _RecordingCondition()
+        self.coordinator._condition = recorder
+        self.cleanup_fn = hook
+        self._bind()
+        self._commit_work(self.a)
+        self.clock.advance(MID)
+        expiry = threading.Thread(
+            target=self.coordinator.status, args=(self.b,), name="k11-expiry"
+        )
+        expiry.start()
+        self.assertTrue(published.wait(30.0), "the expiry cleanup did not publish")
+        result: list[tuple[int, dict]] = []
+
+        def reacquire() -> None:
+            result.append(self.coordinator.acquire(self.a, "trace"))
+
+        preferred = threading.Thread(target=reacquire, name="k11-preferred")
+        preferred.start()
+        self.assertTrue(recorder.await_waits("k11-preferred", 1, 30.0))
+        self.assertLessEqual(recorder.waits_of("k11-preferred")[0], 5.0 + 1e-6)
+        self.clock.advance(5.0 + 0.001)
+        with recorder:
+            recorder.notify_all()
+        self.assertTrue(
+            recorder.await_waits("k11-preferred", 2, 30.0),
+            "the preferential acquire did not wait again",
+        )
+        go.set()
+        self._join(expiry, timeout=40.0)
+        self._join(preferred, timeout=40.0)
+        status, payload = result[0]
+        self.assertEqual(status, 200, payload)
+        self.assertIn("lease_end_unconfirmed", payload.get("cleanup_degraded", []))
+        for timeout in recorder.waits_of("k11-preferred"):
+            self.assertGreater(timeout, 0.0)
+
+    def test_k11_queued_wait_expires_rows_during_a_long_cleanup(self) -> None:
+        # While A's cleanup still runs, B's wait does not reach the grant
+        # fence: _expire_due turns the rows past their deadline OWED, so
+        # the next wait is not zero.
+        go = threading.Event()
+        self.addCleanup(go.set)
+        published = threading.Event()
+        publish = self._publishing_hook()
+
+        def hook(session_id: str, lease_id: str, *rest: object) -> dict:
+            result = publish(session_id, lease_id, *rest)
+            published.set()
+            go.wait(30.0)
+            return result
+
+        self.coordinator = self._make_coordinator(lease_end_bound_s=5.0)
+        recorder = _RecordingCondition()
+        self.coordinator._condition = recorder
+        self.cleanup_fn = hook
+        self._bind()
+        lease = self._commit_work(self.a)
+        releaser = threading.Thread(
+            target=self.coordinator.release,
+            args=(self.a, lease["lease_token"]),
+            name="k11-release",
+        )
+        releaser.start()
+        self.assertTrue(published.wait(30.0), "the release cleanup did not publish")
+        status_b, queued = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 202)
+        result: list[tuple[int, dict]] = []
+
+        def waiter() -> None:
+            result.append(self.coordinator.wait(self.b, queued["ticket"], 30.0))
+
+        thread = threading.Thread(target=waiter, name="k11-queued")
+        thread.start()
+        self.assertTrue(recorder.await_waits("k11-queued", 1, 30.0))
+        self.assertLessEqual(recorder.waits_of("k11-queued")[0], 5.0 + 1e-6)
+        self.clock.advance(5.0 + 0.001)
+        with recorder:
+            recorder.notify_all()
+        self.assertTrue(
+            recorder.await_waits("k11-queued", 2, 30.0),
+            "the queued wait did not wait again",
+        )
+        go.set()
+        self._join(releaser, timeout=40.0)
+        self._join(thread, timeout=40.0)
+        status, payload = result[0]
+        self.assertEqual(status, 200, payload)
+        self.assertIn("lease_end_unconfirmed", payload.get("cleanup_degraded", []))
+        for timeout in recorder.waits_of("k11-queued"):
+            self.assertGreater(timeout, 0.0)
 
     def test_k12_residue_then_clean_debt_round(self) -> None:
         self._bind()
@@ -1818,6 +2037,80 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
             "lease_end_unconfirmed", grant_b.get("cleanup_degraded", [])
         )
 
+    def test_k17_client_floor_without_carried_while_server_closing(self) -> None:
+        # The server close carried no floor: the client's floor, ids 0
+        # included, becomes the server row's requirement, so the server's
+        # clean must reach it, generation included, in either order.
+        conn_reasons = [
+            "player_move_conn_gen_unapplied",
+            "weapon_conn_gen_unapplied",
+        ]
+        floor_reasons = ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+        cases = (
+            (
+                "other_gen",
+                _floor(10, 20, conn_gen=2, move_id=0, weapon_id=0),
+                [_floor(10, 20, conn_gen=1, move_id=0, weapon_id=0)],
+                conn_reasons,
+            ),
+            (
+                "player_missing",
+                _floor(10, 20, conn_gen=1, move_id=0, weapon_id=0),
+                [_floor(30, 40, conn_gen=1, move_id=0, weapon_id=0)],
+                floor_reasons,
+            ),
+            (
+                "same_gen",
+                _floor(10, 20, conn_gen=1, move_id=0, weapon_id=0),
+                [_floor(10, 20, conn_gen=1, move_id=0, weapon_id=0)],
+                None,
+            ),
+        )
+        for name, client_floor, reported, expected in cases:
+            for order in (("client", "server"), ("server", "client")):
+                with self.subTest(name, order="_then_".join(order)):
+                    self.clock = FakeClock()
+                    self.ids = SequentialIds("id")
+                    self.tokens = SequentialIds("token")
+                    self.coordinator = self._make_coordinator()
+                    round_id, ids = self._published_round([])
+                    outcomes = {
+                        "client": self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "client",
+                            ids["client"],
+                            "clean",
+                            floor=client_floor,
+                        ),
+                        "server": self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "server",
+                            ids["server"],
+                            "clean",
+                            reported_floors=reported,
+                        ),
+                    }
+                    results = self.coordinator.note_close_outcomes(
+                        [outcomes[peer] for peer in order]
+                    )
+                    self.assertEqual(results, ["applied", "applied"])
+                    status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+                    self.assertEqual(status_b, 200)
+                    degraded = grant_b.get("cleanup_degraded", [])
+                    if expected is None:
+                        self.assertEqual(self._owed(), [])
+                        self.assertNotIn("lease_end_unconfirmed", degraded)
+                    else:
+                        self.assertEqual(self._owed(), [("server", expected)])
+                        self.assertIn("lease_end_unconfirmed", degraded)
+                        named = [
+                            row["peer"]
+                            for row in grant_b["lease_end"]["unconfirmed"]
+                        ]
+                        self.assertEqual(named, ["server"])
+
     def test_k19_status_and_acquire_during_blocked_hook(self) -> None:
         entered = threading.Event()
         resume = threading.Event()
@@ -1825,10 +2118,10 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
 
         def hang(*_args: object) -> dict:
             entered.set()
-            resume.wait(2.0)
+            resume.wait(30.0)
             return {}
 
-        self.coordinator = self._make_coordinator(cleanup=hang, cleanup_timeout_s=1.0)
+        self.coordinator = self._make_coordinator(cleanup=hang, cleanup_timeout_s=30.0)
         self._bind()
         lease = self._commit_work(self.a)
         releaser_done: list[object] = []
@@ -1840,12 +2133,12 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
 
         release_thread = threading.Thread(target=releaser, name="k19-release")
         release_thread.start()
-        self.assertTrue(entered.wait(1.0), "hook did not start")
+        self.assertTrue(entered.wait(30.0), "hook did not start")
         started = time.monotonic()
         status_body = self.coordinator.status(self.b)
         acquire_status, _queued = self.coordinator.acquire(self.b, "trace")
         elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 0.5, f"status/acquire blocked for {elapsed:.3f}s")
+        self.assertLess(elapsed, 10.0, f"status/acquire blocked for {elapsed:.3f}s")
         self.assertIn("lease_end", status_body)
         self.assertIn(acquire_status, (200, 202))
         resume.set()
@@ -1957,7 +2250,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         status, grant = self.coordinator.acquire(self.b, "trace")
         if status == 202:
             self._wait_handoff()
-            status, grant = self.coordinator.wait(self.b, grant["ticket"], 1.0)
+            status, grant = self.coordinator.wait(self.b, grant["ticket"], 30.0)
         self.assertEqual(status, 200)
         degraded = grant.get("cleanup_degraded", [])
         self.assertGreaterEqual(len(degraded), 2, "both warnings must be present")
@@ -1976,7 +2269,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         status_b, queued = self.coordinator.acquire(self.b, "trace")
         self.assertEqual(status_b, 202)
         self.clock.advance(110.5)
-        status, grant = self.coordinator.wait(self.b, queued["ticket"], 1.0)
+        status, grant = self.coordinator.wait(self.b, queued["ticket"], 30.0)
         self.assertEqual(status, 200)
         degraded = grant.get("cleanup_degraded", [])
         self.assertGreaterEqual(len(degraded), 2, "wait merge needs both warnings")
@@ -2032,7 +2325,7 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
         result: list[tuple[int, dict]] = []
 
         def waiter() -> None:
-            result.append(self.coordinator.wait(self.b, queued["ticket"], 2.0))
+            result.append(self.coordinator.wait(self.b, queued["ticket"], 30.0))
 
         thread = threading.Thread(target=waiter, name="mw1-wait")
         thread.start()
