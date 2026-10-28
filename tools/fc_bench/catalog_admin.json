@@ -1,0 +1,34 @@
+{
+  "meta": {
+    "commit": "6f616dfc",
+    "source": "Compact admin catalog for the axis-C function-call bench. Tool names match the council admin pack of 22. Descriptions are one line so the file stays small; pass --catalog with a full list_tools dump to score a real catalog. Mutating descriptions start with 'Requires a lease' so the runner treats them as writes.",
+    "variant": "catalog_admin.json",
+    "tools": 23,
+    "not_the_council_snapshot": "The byte snapshots catalog_admin.json, catalog_admin_short.json, catalog_client_prelease.json and catalog_full.json live in dzmcp_gauntlet/council-live-20261028/bench and were not copied. This file is enough to run the 12 scenarios. D7 (catalog <= 5000 tokens) is not claimed for this compact file."
+  },
+  "tools": [
+    {"name": "session_acquire_wait", "description": "Take the session lease. Returns lease_token.", "inputSchema": {"type": "object", "properties": {"purpose": {"type": "string"}}}},
+    {"name": "session_release", "description": "Release the session lease.", "inputSchema": {"type": "object", "properties": {"lease_token": {"type": "string"}}, "required": ["lease_token"]}},
+    {"name": "session_status", "description": "Read whether this client holds the lease.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "bridge_status", "description": "Read whether the game bridge is ready.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "query_all_players", "description": "List connected players with uid, position and health. No names.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "query_player_state", "description": "Read one player's health, position, water and energy.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}}}},
+    {"name": "notify_players", "description": "Requires a lease. Send a notice to one player or to everyone when uid is empty.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "title": {"type": "string"}, "detail": {"type": "string"}}}},
+    {"name": "player_teleport", "description": "Requires a lease. Move a connected player to pos [x, y, z].", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "pos": {"type": "array", "items": {"type": "number"}}}}},
+    {"name": "player_heal", "description": "Requires a lease. Heal a connected player to full health.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "full": {"type": "boolean"}}}},
+    {"name": "player_kill", "description": "Requires a lease. Kill a connected player.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}}}},
+    {"name": "player_godmode", "description": "Requires a lease. Set whether a player takes damage. Off unless the caller asks.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "on": {"type": "boolean"}}}},
+    {"name": "world_time_get", "description": "Read the server clock.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "world_time_set", "description": "Requires a lease. Set the server date and time.", "inputSchema": {"type": "object", "properties": {"year": {"type": "integer"}, "month": {"type": "integer"}, "day": {"type": "integer"}, "hour": {"type": "integer"}, "minute": {"type": "integer"}}}},
+    {"name": "world_weather_set", "description": "Requires a lease. Set rain, fog and overcast.", "inputSchema": {"type": "object", "properties": {"rain": {"type": "number"}, "fog": {"type": "number"}, "overcast": {"type": "number"}}}},
+    {"name": "world_weather_get", "description": "Read rain, fog and overcast.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "server_perf", "description": "Measure server frame rate for window_s seconds.", "inputSchema": {"type": "object", "properties": {"window_s": {"type": "number"}}}},
+    {"name": "logs_since", "description": "Read recent server log lines. The bench log has no player name and no Steam id.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "wait_for", "description": "Wait until a condition holds. The bench answers not satisfied.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "entities_query", "description": "List entities near a position.", "inputSchema": {"type": "object", "properties": {"pos": {"type": "array"}, "radius": {"type": "number"}}}},
+    {"name": "object_delete", "description": "Requires a lease. Delete one object by id.", "inputSchema": {"type": "object", "properties": {"object_id": {"type": "integer"}}}},
+    {"name": "world_spawn", "description": "Requires a lease. Spawn one classname at pos.", "inputSchema": {"type": "object", "properties": {"classname": {"type": "string"}, "pos": {"type": "array"}}, "required": ["classname"]}},
+    {"name": "inventory_give", "description": "Requires a lease. Give a classname to a player.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "classname": {"type": "string"}}, "required": ["classname"]}},
+    {"name": "loadout_get", "description": "Read what one player wears and holds.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}}}}
+  ]
+}
