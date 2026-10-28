@@ -65,7 +65,6 @@ class _SessionToolsFixture(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         self.observers: list[threading.Thread] = []
-        self.joined: list[threading.Thread] = []
         self.patchers: list = []
         self.addCleanup(self.restore)
         config = ServerConfig(
@@ -120,7 +119,8 @@ class _SessionToolsFixture(unittest.IsolatedAsyncioTestCase):
                 if thread.name == _OBSERVER
             ]
             self.observers.extend(started)
-            self.join_observers(started)
+            for thread in started:
+                thread.join(self.join_s)
         self.assertFalse(
             any(thread.is_alive() for thread in started),
             f"{tool}: its observation is still running",
@@ -129,13 +129,6 @@ class _SessionToolsFixture(unittest.IsolatedAsyncioTestCase):
             server._steam_app_view_cache["expires"], 0.0, f"{tool} did not observe"
         )
         return result
-
-    def join_observers(self, threads: list[threading.Thread]) -> None:
-        # Each join is listed, so a test can tell whether a call that raised
-        # waited for its observation.
-        for thread in threads:
-            self.joined.append(thread)
-            thread.join(self.join_s)
 
 
 class SuiteSteamViewTest(_SessionToolsFixture):
@@ -164,25 +157,50 @@ class SuiteSteamViewTest(_SessionToolsFixture):
         self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
 
 
+def _patched_globals() -> dict[str, object]:
+    # The globals that the stalled call patches, as they stand now; the
+    # cache's contents are checked apart.
+    return {
+        "provider": sp.WindowsSteamPreflightProvider,
+        "view": server.observe_app_steam_view,
+        "wait": server._STEAM_APP_VIEW_WAIT_S,
+        "join": threading.Thread.join,
+    }
+
+
+# As the suite sets them, before any test runs: the real provider class, the
+# suite's view, the server's wait and the real join.
+_SUITE_GLOBALS = _patched_globals()
+
+
 class StalledObservationTest(unittest.TestCase):
     """The cleanup that the fixture registers, run by unittest while an
     observation of the test still runs: it fails and keeps every patch the
     fixture started, and once the observation ends they go."""
 
     def run_a_stalled_call(self, *, raises: bool) -> None:
-        # The view returns only once this test sets the event: no timeout of
-        # its own ends the observation before the checks below.
         release = threading.Event()
+        joins: list[threading.Thread] = []
+        real_join = threading.Thread.join
+
+        def stall() -> None:
+            # Returns only once this test sets the event: no timeout of its
+            # own ends the observation before the checks below.
+            release.wait()
+
+        def join(thread: threading.Thread, timeout: float | None = None) -> None:
+            # Each join made is listed, so the checks see the call's own.
+            real_join(thread, timeout)
+            joins.append(thread)
 
         class StalledCall(_SessionToolsFixture):
             join_s = 0.0
 
             def setUp(self) -> None:
                 super().setUp()
-                self.enter(
-                    patch.object(server, "observe_app_steam_view", lambda: release.wait() and None)
-                )
+                self.enter(patch.object(server, "observe_app_steam_view", stall))
                 self.enter(patch.object(server, "_STEAM_APP_VIEW_WAIT_S", 0.0))
+                self.enter(patch.object(threading.Thread, "join", join))
 
             async def test_call(self) -> None:
                 if raises:
@@ -193,22 +211,36 @@ class StalledObservationTest(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "still running"):
                         await self.call("session_status")
 
+        cache = dict(server._steam_app_view_cache)
         inner = StalledCall("test_call")
-        self.addCleanup(self.end, inner, release)
         result = unittest.TestResult()
-        inner.run(result)
-        # Its call failed as it should, and the cleanup its setUp registered
-        # failed after it: the observation still ran.
-        self.assertEqual(result.errors, [])
-        self.assertEqual(len(result.failures), 1, result.failures)
-        self.assertIn("still running, so the patches stay", result.failures[0][1])
-        self.assertEqual(len(inner.observers), 1)
-        self.assertEqual(inner.joined, inner.observers, "the call did not join its observation")
-        self.assertTrue(inner.observers[0].is_alive())
-        self.assertIs(sp.WindowsSteamPreflightProvider, _RecordingProvider)
-        self.end(inner, release)
-        self.assertIsNot(sp.WindowsSteamPreflightProvider, _RecordingProvider)
-        self.assertIs(server.observe_app_steam_view, tests.no_steam_app_view)
+        # The event is set in a finally, so whatever leaves the run or the
+        # checks, KeyboardInterrupt included, lets the view return.
+        try:
+            inner.run(result)
+            # Its call failed as it should, and the cleanup its setUp
+            # registered failed after it: the observation still ran, and
+            # every patch stays.
+            self.assertEqual(result.errors, [])
+            self.assertEqual(len(result.failures), 1, result.failures)
+            self.assertIn("still running, so the patches stay", result.failures[0][1])
+            self.assertEqual(len(inner.observers), 1)
+            self.assertTrue(inner.observers[0].is_alive())
+            self.assertEqual(
+                [thread for thread in joins if thread in inner.observers],
+                inner.observers,
+                "the call did not join its observation",
+            )
+            self.assertEqual(
+                _patched_globals(),
+                {"provider": _RecordingProvider, "view": stall, "wait": 0.0, "join": join},
+            )
+        finally:
+            self.end(inner, release)
+        # Once the view returned, restore put back each global as the suite
+        # set it, and the cache's contents as the test found them.
+        self.assertEqual(_patched_globals(), _SUITE_GLOBALS)
+        self.assertEqual(server._steam_app_view_cache, cache)
 
     @staticmethod
     def end(inner: _SessionToolsFixture, release: threading.Event) -> None:
