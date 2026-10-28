@@ -2898,8 +2898,9 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
 
     A real ServerState publishes and settles the closes through
     cleanup_owner, its polls and its results, against a SessionCoordinator
-    on a fake clock of its own. Every census answers a close a poll
-    delivered.
+    on a fake clock of its own. A census the broker is meant to read answers
+    a close a poll delivered; the negatives of an undelivered or retired
+    close send theirs without one.
     """
 
     def setUp(self) -> None:
@@ -3355,6 +3356,24 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             self._owed(), {"client": ["close_discarded:retail_quarantine"]}
         )
 
+    def test_k15_quarantine_while_the_server_close_waits_owes_it(self) -> None:
+        for path in ("client outcome", "ten seconds"):
+            with self.subTest(path=path):
+                self._build()
+                self._ended_lease()
+                close = self._deliver_close("client")
+                self.state.retail_probe = lambda: {
+                    "known": True,
+                    "processes": [{"pid": 7}],
+                }
+                if path == "client outcome":
+                    self._accepted(self._settle("client", close))
+                else:
+                    self.broker_clock.value = 10.0
+                    self.assertEqual(self._poll("server"), [])
+                self.assertEqual(self._queued("server"), [])
+                self.assertEqual(self._owed(), {"server": ["retail_quarantine"]})
+
     def test_k18_client_outcome_publishes_the_server_close(self) -> None:
         self._ended_lease()
         close = self._deliver_close("client")
@@ -3370,6 +3389,39 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(self._poll("server"), [])
         self.broker_clock.value = 10.0
         self.assertEqual(self._cmds(self._poll("server")), ["lease_close"])
+
+    def test_k18_ten_seconds_run_from_the_round_not_from_the_hook(self) -> None:
+        # The round opens at 50 s on the coordinator's clock and 100 s on the
+        # broker's, and the hook runs 8 s later on both.
+        self.clock.value = 50.0
+        self.broker_clock.value = 100.0
+        cleanup_owner = self.state.cleanup_owner
+
+        def late_hook(*args: object) -> object:
+            self.clock.advance(8.0)
+            self.broker_clock.advance(8.0)
+            return cleanup_owner(*args)
+
+        self.coordinator._cleanup = late_hook
+        self._ended_lease()
+        self._deliver_close("client")
+        self.broker_clock.value = 109.9
+        self.assertEqual(self._poll("server"), [])
+        self.broker_clock.value = 110.0
+        self.assertEqual(self._cmds(self._poll("server")), ["lease_close"])
+
+    def test_k18_client_result_past_ten_seconds_gives_its_floor(self) -> None:
+        # Nothing reaches the broker between the ten seconds and the client's
+        # result, so the server close goes with that result and carries the
+        # floor it brings.
+        self._ended_lease()
+        close = self._deliver_close("client")
+        self.broker_clock.value = 10.0
+        self._accepted(self._settle("client", close))
+        self.assertEqual(
+            self._deliver_close("server")["args"]["close_floors"],
+            [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+        )
 
     def test_k18_discarded_client_close_lets_the_server_close_go(self) -> None:
         self._ended_lease()
@@ -3405,6 +3457,43 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             self._cmds(self._poll("client")), ["camera_get", "lease_close_client"]
         )
         self.assertEqual(self._poll("client"), [])
+
+    def test_k19_poll_that_runs_the_expiry_answers_before_the_game_does(self) -> None:
+        lease, _command_id = self._work()
+        status, body = self._enqueue(self.a, lease, "key_press", {"dik": 1}, "client")
+        self.assertEqual(status, 200, body)
+        self.clock.advance(SESSION_TTL_S + 1.0)
+        query = poll_census_query("client")
+        answers: list[tuple[int, dict]] = []
+        answered = threading.Event()
+
+        def poll() -> None:
+            answers.append(
+                self.state.record_poll(
+                    "client",
+                    "12~1.29",
+                    instance=INST_CLIENT,
+                    source_pid=PID_CLIENT,
+                    caps=query["caps"],
+                    ach=query.get("ach"),
+                )
+            )
+            answered.set()
+
+        thread = threading.Thread(target=poll, name="k19-poll")
+        thread.start()
+        try:
+            # The game answers the close only once the poll has answered, so
+            # a hook that waited for the game would hold this answer.
+            self.assertTrue(answered.wait(1.0), "the poll waited for the game")
+        finally:
+            thread.join(30.0)
+        status, body = answers[0]
+        self.assertEqual(status, 200, body)
+        commands = list(body["commands"])
+        self.assertEqual(self._cmds(commands), ["lease_close_client"])
+        self._accepted(self._settle("client", commands[0]))
+        self.assertEqual(self._queued("server"), ["lease_close"])
 
     def test_k32_close_names_are_internal_only(self) -> None:
         lease = self._acquire(self.a)
@@ -3457,6 +3546,67 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self._release(self.b, grant)
         self.assertEqual(self._queued("client"), ["lease_close_client"])
 
+    def test_poll_that_delivers_nothing_settles_the_close_its_sweep_discarded(
+        self,
+    ) -> None:
+        for answer in ("version blocked", "no queue"):
+            with self.subTest(answer=answer):
+                self._build(
+                    version_validator=lambda version: (
+                        "version_mismatch" if version == "11~1.29" else "ok"
+                    )
+                )
+                self._ended_lease()
+                # Only the broker's clock passes the queued close's 30 s.
+                self.broker_clock.advance(loopback.COMMAND_TTL_S + 1.0)
+                if answer == "version blocked":
+                    self.assertEqual(self._poll("client", version="11~1.29"), [])
+                else:
+                    self.assertEqual(self._poll("client", pid=PID_CLIENT + 1), [])
+                self.assertEqual(self._queued("client"), [])
+                self.assertEqual(
+                    self._owed(), {"client": ["close_discarded:stale_discarded"]}
+                )
+
+    def test_poll_that_delivers_nothing_finishes_what_its_sweep_discarded(
+        self,
+    ) -> None:
+        # On main these two answers left before the discard reached the
+        # coordinator.
+        for answer in ("version blocked", "no queue"):
+            with self.subTest(answer=answer):
+                self._build(
+                    version_validator=lambda version: (
+                        "version_mismatch" if version == "11~1.29" else "ok"
+                    )
+                )
+                self.audit.events.clear()
+                lease = self._acquire(self.a)
+                # Its tool limit outlasts the queue's 30 s, so the poll's
+                # sweep discards it, not the reaper.
+                status, body = self.state.enqueue_command(
+                    "key_press",
+                    {"dik": 1},
+                    peer="client",
+                    identity_payload=_identity_payload(self.a),
+                    lease_token=lease["lease_token"],
+                    operation_timeout_s=60.0,
+                )
+                self.assertEqual(status, 200, body)
+                self.broker_clock.advance(loopback.COMMAND_TTL_S + 1.0)
+                if answer == "version blocked":
+                    self.assertEqual(self._poll("client", version="11~1.29"), [])
+                else:
+                    self.assertEqual(self._poll("client", pid=PID_CLIENT + 1), [])
+                self.assertEqual(
+                    [
+                        event.get("command_id")
+                        for event in self.audit.events
+                        if event.get("decision") == "dispatch_discarded"
+                    ],
+                    [body["id"]],
+                )
+
     def test_incomplete_pin_is_unreachable(self) -> None:
         lease, _command_id = self._work()
         self.state._bindings[INST_CLIENT].creation_time_utc = None
@@ -3503,7 +3653,12 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
                 ["census_malformed"],
             ),
             ("residue", True, None, {"state": "residue", "entries": residue}, ["held", "vehicle_drive"]),
+            ("bool move floor", True, None, {"move_floor": True}, ["census_malformed"]),
+            ("bool conn_gen", True, None, {"conn_gen": True}, ["census_malformed"]),
         )
+        # A residue still gives the coordinator its floor, which the server
+        # close does not carry, so the server row owes it.
+        server_owed = {"residue": ["player_move_floor_unapplied", "weapon_floor_unapplied"]}
         for name, ok, error, census, owed in cases:
             with self.subTest(name):
                 self._build()
@@ -3515,7 +3670,35 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
                 if census is not None:
                     body["lease_close"] = self._census("client", close, **census)
                 self._accepted(self.state.store_result(body, instance=INST_CLIENT))
-                self.assertEqual(self._owed(), {"client": owed})
+                expected = {"client": owed}
+                if name in server_owed:
+                    expected["server"] = server_owed[name]
+                self.assertEqual(self._owed(), expected)
+                # The server close goes, but only a clean census carries a floor.
+                self.assertEqual(self._deliver_close("server")["args"]["close_floors"], [])
+
+    def test_bool_in_a_server_census_floor_is_malformed(self) -> None:
+        self._ended_lease()
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        floors = [_floor(10, 20, conn_gen=1, move_id=True, weapon_id=4)]
+        self._accepted(self._settle("server", self._deliver_close("server"), floors=floors))
+        self.assertEqual(self._owed(), {"server": ["census_malformed"]})
+
+    def test_close_result_with_its_id_as_a_string_is_read(self) -> None:
+        self._ended_lease()
+        close = self._deliver_close("client")
+        census = self._census("client", close)
+        self._accepted(
+            self.state.store_result(
+                {"id": str(close["id"]), "ok": True, "lease_close": census},
+                instance=INST_CLIENT,
+            )
+        )
+        self.assertEqual(self._owed(), {})
+        self.assertEqual(
+            self._deliver_close("server")["args"]["close_floors"],
+            [_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+        )
 
     def test_result_of_an_undelivered_close_is_ignored(self) -> None:
         self._ended_lease()
