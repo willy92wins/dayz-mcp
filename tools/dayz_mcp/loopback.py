@@ -26,6 +26,7 @@ from dayz_mcp import (
     anim_timeline,
     camera_path,
     daemon_credential,
+    loadout,
     orphan_guard,
     pinned_keyfile,
     player_move,
@@ -89,8 +90,13 @@ SERVER_COMMANDS = {
     "vehicle_door",
     "inventory_attach",
     "inventory_give",
+    "inventory_move",
+    "loadout_get",
+    "loadout_apply",
+    "loadout_clear",
     "object_inspect",
     "object_resolve",
+    "object_set_health",
     "object_doors",
     "infected_drive",
     "entities_query",
@@ -98,6 +104,14 @@ SERVER_COMMANDS = {
     "hands_attach",
     "weapon_state",
     "action_cursor_ids",
+    # Server reads: frame rate and entity counts, a navmesh path, and which
+    # players could see a point. None of them writes the world.
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
+    "world_spawn_batch",
+    "scene_entities",
+    "scene_clear",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -139,6 +153,7 @@ CLIENT_COMMANDS = {
     "action_cursor",
     "player_look_at",
     "player_look_at_release",
+    "player_view_set",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -818,6 +833,69 @@ _SAFE_SPAWN_LIFETIME = _reject_numeric_errors(
         minimum_inclusive=False,
     )
 )
+# 165a: a scene_id is 1 to SCENE_ID_MAX_CHARS characters from A-Z a-z 0-9 _ -.
+# Mirrors SCENE_ID_MAX_CHARS and IsValidSceneId in MCPBridge.c; a test keeps the
+# two rules equal.
+SCENE_ID_MAX_CHARS = 64
+_SCENE_ID_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{1,{SCENE_ID_MAX_CHARS}}}")
+
+
+def is_scene_id(value: object) -> bool:
+    return isinstance(value, str) and _SCENE_ID_PATTERN.fullmatch(value) is not None
+
+
+# 7f5d: the world_spawn_batch tool takes 1 to SPAWN_BATCH_ITEMS_MAX items and
+# sends them as commands of 1 to SPAWN_BATCH_PER_TICK_MAX items each, every one
+# created in the server tick that dispatches it. Only the per-command bound
+# reaches the wire; it mirrors SPAWN_BATCH_PER_TICK_MAX in MCPBridge.c, and a
+# test keeps the two equal.
+SPAWN_BATCH_ITEMS_MAX = 200
+SPAWN_BATCH_PER_TICK_MAX = 50
+# A batch item's rotation is an Enforce int (CreateObjectEx's RF_* flags).
+SPAWN_ROTATION_MIN = -2147483648
+SPAWN_ROTATION_MAX = 2147483647
+_SPAWN_BATCH_ITEM_REQUIRED = frozenset({"type", "pos", "flags", "rotation"})
+_SPAWN_BATCH_ITEM_OPTIONAL = frozenset({"ground", "ypr", "ypr_set"})
+_IS_SPAWN_ROTATION = _integer_in_range(
+    minimum=SPAWN_ROTATION_MIN, maximum=SPAWN_ROTATION_MAX
+)
+
+
+def _is_spawn_batch_item(value: object) -> bool:
+    # One item as the world_spawn_batch tool sends it: world_spawn's four keys,
+    # ground only as true (y given as null, resolved by the bridge), and ypr with
+    # ypr_set true, or neither, on an item whose rotation is 0. The bridge reads
+    # an absent key as 0 or false (fb-20260930-065425-8779).
+    if not isinstance(value, dict):
+        return False
+    keys = set(value)
+    if not _SPAWN_BATCH_ITEM_REQUIRED.issubset(keys):
+        return False
+    if keys - _SPAWN_BATCH_ITEM_REQUIRED - _SPAWN_BATCH_ITEM_OPTIONAL:
+        return False
+    if not _is_non_empty_string(value["type"]) or not _is_real_vector3(value["pos"]):
+        return False
+    if not _is_spawn_flags(value["flags"]) or not _IS_SPAWN_ROTATION(value["rotation"]):
+        return False
+    if "ground" in value and not _is_true(value["ground"]):
+        return False
+    if ("ypr" in value) != ("ypr_set" in value):
+        return False
+    if "ypr" in value:
+        if not _is_true(value["ypr_set"]) or not _is_real_vector3(value["ypr"]):
+            return False
+        if value["rotation"] != 0:
+            return False
+    return True
+
+
+def _is_spawn_batch_items(value: object) -> bool:
+    # One command's items: the tool sends a longer list as several commands.
+    return (
+        isinstance(value, list)
+        and 1 <= len(value) <= SPAWN_BATCH_PER_TICK_MAX
+        and all(_is_spawn_batch_item(item) for item in value)
+    )
 
 
 def _is_real_list(length: int) -> _FieldValidator:
@@ -1059,15 +1137,27 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "bot_start",
     "bot_stop",
     "object_resolve",
+    "object_set_health",
     "action_cursor_ids",
     "hands_attach",
+    "loadout_get",
+    "loadout_apply",
+    "loadout_clear",
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
+    "world_spawn_batch",
+    "scene_entities",
+    "scene_clear",
 })
 # Client verbs an older PBO must not be handed, each with the error it is
 # refused with. Checked on the census of the client bound to the run (no
 # server arg-contract hash) at enqueue, after the binding fence, and again at
 # delivery. With no client bound the fence answers first (legacy_unbound in
 # the plain case), so these codes mean a bound client whose census does not
-# name the verb, is stale or comes from another instance. camera_path_release
+# name the verb, is stale or comes from another instance. action_hold
+# keeps the hold_not_supported its tool publishes; any other verb is refused
+# with the server census code, bridge_capability_missing. camera_path_release
 # is internal: that spares it a live lease at owner cleanup, not this check.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
@@ -1075,12 +1165,24 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
+    "player_view_set": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
 # could not be sent camera_path_release is not handed a play (d026).
 _CLIENT_ANNOUNCED_WITH: dict[str, str] = {
     "camera_path_play": "camera_path_release",
 }
+
+
+def _requires_capability_admission(cmd: str, args: object) -> bool:
+    # A world_spawn that names a scene is admitted like a new verb (165a): an
+    # older PBO would create the object and never register it, and only the
+    # arg-contract hash tells the two world_spawn bridges apart.
+    if cmd in _CAPABILITY_ADMISSION_COMMANDS:
+        return True
+    return cmd == "world_spawn" and isinstance(args, Mapping) and "scene_id" in args
+
+
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
@@ -1435,6 +1537,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         ),
     ),
+    "object_set_health": _command_schema(
+        _schema_variant(
+            required=("object_id", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+    ),
     # Same target shapes as object_inspect, without want. A phase key is refused
     # so this read cannot be confused with object_anim's write.
     "object_doors": _command_schema(
@@ -1471,6 +1596,32 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # hands_attach is predictive like hands_take: the held item into one
     # attachment slot of a registered world entity (9608).
+    # inventory_move is predictive on authority=client: accepted is not the
+    # server read. The result waits until that read matches, or times out.
+    # Per-op rules (destination, slot) are applied in validate_command_args,
+    # the same rules as the public tool.
+    "inventory_move": _command_schema(
+        _schema_variant(
+            required=("item_object_id", "op"),
+            optional=("target_object_id", "slot", "authority", "uid"),
+            validators={
+                "item_object_id": _integer_in_range(minimum=1),
+                "op": _one_of(
+                    "to_cargo",
+                    "to_attachment",
+                    "to_hands",
+                    "to_inventory",
+                    "combine",
+                    "split_half",
+                    "split_to_hands",
+                ),
+                "target_object_id": _integer_in_range(minimum=0),
+                "slot": _is_string,
+                "authority": _one_of("client", "server"),
+                "uid": _is_string,
+            },
+        )
+    ),
     "hands_attach": _command_schema(
         _schema_variant(
             required=("object_id", "slot"),
@@ -1487,6 +1638,49 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             optional=("uid",),
             validators={"uid": _is_string},
         )
+    ),
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): the target is
+    # a connected player by uid (absent is the first human) or a survivor by
+    # object_id, never both. The rows always travel: the bridge reads an absent
+    # key as no rows (fb-20260930-065425-8779). They are the flat list
+    # loadout.py builds. loadout_clear is what the loadout_apply tool sends
+    # first for clear_first.
+    "loadout_get": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        ),
+    ),
+    "loadout_apply": _command_schema(
+        _schema_variant(
+            required=("loadout_items",),
+            optional=("uid",),
+            validators={
+                "loadout_items": loadout.is_wire_items,
+                "uid": _is_string,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "loadout_items"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "loadout_items": loadout.is_wire_items,
+            },
+        ),
+    ),
+    "loadout_clear": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        ),
     ),
     "notify_players": _command_schema(
         _schema_variant(
@@ -1705,25 +1899,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # (tests/test_ingress_schema_coherence.py).
     "query_player_state": _command_schema(_schema_variant()),
     "query_all_players": _command_schema(_schema_variant()),
-    "vehicle_telemetry": _command_schema(_schema_variant()),
+    "vehicle_telemetry": _command_schema(_schema_variant(optional=("pos",), validators={"pos": _is_real_vector3})),
     "vehicle_release": _command_schema(_schema_variant()),
     # flags goes through the same ECE mask policy as the tool
     # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.
     # lifetime_s travels with lifetime_s_set true, or neither travels: the bridge
     # reads an absent key as 0 or false (fb-20260930-065425-8779), so only the
     # flag asks for the economy lifetime override (fb-20260930-080543-bd28).
+    # scene_id travels only when the caller named a scene (165a).
     "world_spawn": _command_schema(
         _schema_variant(
             required=("type", "pos", "flags", "rotation"),
+            optional=("scene_id",),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
                 "flags": _is_spawn_flags,
                 "rotation": _integer_in_range(),
+                "scene_id": is_scene_id,
             },
         ),
         _schema_variant(
             required=("type", "pos", "flags", "rotation", "lifetime_s", "lifetime_s_set"),
+            optional=("scene_id",),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
@@ -1731,8 +1929,28 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "rotation": _integer_in_range(),
                 "lifetime_s": _SAFE_SPAWN_LIFETIME,
                 "lifetime_s_set": _is_true,
+                "scene_id": is_scene_id,
             },
         ),
+    ),
+    # 7f5d: one group of the items the world_spawn_batch tool has checked one by
+    # one, all created in the server tick that dispatches it.
+    "world_spawn_batch": _command_schema(
+        _schema_variant(
+            required=("items",),
+            optional=("scene_id",),
+            validators={
+                "items": _is_spawn_batch_items,
+                "scene_id": is_scene_id,
+            },
+        )
+    ),
+    # 165a / 5a21: the scene a read or a clear names.
+    "scene_entities": _command_schema(
+        _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
+    ),
+    "scene_clear": _command_schema(
+        _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
     ),
     "vehicle_enter": _command_schema(
         _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
@@ -1781,6 +1999,43 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # world_time_get reads the clock and takes no argument.
     "world_time_get": _command_schema(_schema_variant()),
+    # The bounds mirror server.py and MCPBridge.c (SERVER_PERF_WINDOW_MIN_S and
+    # _MAX_S, NAV_SNAP_RADIUS_MAX, VISIBILITY_RADIUS_MAX); a test tries each
+    # edge here with server.py's values. Every key travels: the bridge reads an
+    # absent one as 0.
+    "server_perf": _command_schema(
+        _schema_variant(
+            required=("window_s",),
+            validators={
+                "window_s": _reject_numeric_errors(
+                    _real_in_range(minimum=1.0, maximum=60.0)
+                ),
+            },
+        )
+    ),
+    "nav_path_query": _command_schema(
+        _schema_variant(
+            required=("from", "to", "snap_radius"),
+            validators={
+                "from": _is_real_vector3,
+                "to": _is_real_vector3,
+                "snap_radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
+                ),
+            },
+        )
+    ),
+    "players_visibility": _command_schema(
+        _schema_variant(
+            required=("pos", "radius"),
+            validators={
+                "pos": _is_real_vector3,
+                "radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=100.0)
+                ),
+            },
+        )
+    ),
     # time_multiplier travels with time_multiplier_set true, or neither travels:
     # the bridge reads an absent key as 0 or false (fb-20260930-065425-8779).
     "world_time_set": _command_schema(
@@ -1921,6 +2176,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
+    # player_view_set (854c): the local player's first or third person view.
+    "player_view_set": _command_schema(
+        _schema_variant(
+            required=("view",),
+            validators={"view": _one_of("first", "third")},
+        )
+    ),
     # d026, internal: the id of the camera_path_play whose path to stop.
     "camera_path_release": _command_schema(
         _schema_variant(
@@ -1946,6 +2208,20 @@ def _matches_schema_variant(
     return True
 
 
+def _inventory_move_op_rules(args: dict) -> tuple[bool, str | None]:
+    """Destination and slot rules shared with the public inventory_move tool."""
+    op = args.get("op")
+    target = args.get("target_object_id", 0)
+    slot = args.get("slot", "")
+    if op in {"to_cargo", "to_attachment", "combine"} and (
+        not isinstance(target, int) or isinstance(target, bool) or target <= 0
+    ):
+        return False, "bad_args"
+    if op == "to_attachment" and slot == "":
+        return False, "bad_args"
+    return True, None
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
     schema = _COMMAND_ARG_SCHEMAS.get(cmd)
     if schema is not None:
@@ -1955,6 +2231,8 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
 
         keys = set(args)
         if any(_matches_schema_variant(args, keys, variant) for variant in variants):
+            if cmd == "inventory_move":
+                return _inventory_move_op_rules(args)
             return True, None
         return False, "bad_args"
 
@@ -3354,16 +3632,21 @@ class ServerState:
         }
 
     def _capability_refusal_locked(
-        self, peer: str, cmd: str, instance: str | None = None
+        self,
+        peer: str,
+        cmd: str,
+        instance: str | None = None,
+        args: object = None,
     ) -> str | None:
         """None when this command may be queued or delivered. Caller holds the lock.
 
         A missing, stale, aged or foreign-binding census is
         bridge_capability_missing. An announced census with a missing or
         different arg-contract hash is arg_contract_mismatch, and that wins
-        over a missing command name.
+        over a missing command name. args matter only to world_spawn
+        (_requires_capability_admission).
         """
-        if cmd not in _CAPABILITY_ADMISSION_COMMANDS:
+        if not _requires_capability_admission(cmd, args):
             return None
         from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 
@@ -3401,9 +3684,10 @@ class ServerState:
         Caller holds the lock. A census from another instance, or one that
         does not name the command (or the command _CLIENT_ANNOUNCED_WITH
         pairs it with), refuses it with the command's code in
-        _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold).
-        Internal commands are checked too. Re-checked at delivery so a
-        destination change after enqueue cannot hand the verb to an older PBO.
+        _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold and
+        bridge_capability_missing for the other verbs). Internal commands are
+        checked too. Re-checked at delivery so a destination change after
+        enqueue cannot hand the verb to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
@@ -3616,7 +3900,7 @@ class ServerState:
         gate_pin: tuple[str, str, int, int | None, str | None] | None = None
         with self._lock:
             error, queue, fence_instance, gate_pin = self._admit_enqueue_locked(
-                peer, cmd, internal=internal, owner_session=owner_session
+                peer, cmd, internal=internal, owner_session=owner_session, args=args
             )
             if error is not None:
                 return error
@@ -3645,7 +3929,7 @@ class ServerState:
             )
             with self._lock:
                 error, queue, fence_instance, repin = self._admit_enqueue_locked(
-                    peer, cmd, internal=internal, owner_session=owner_session
+                    peer, cmd, internal=internal, owner_session=owner_session, args=args
                 )
                 if error is not None:
                     return error
@@ -3690,6 +3974,7 @@ class ServerState:
         *,
         internal: bool,
         owner_session: str | None,
+        args: object = None,
     ) -> tuple[
         tuple[int, dict] | None,
         list[dict] | None,
@@ -3716,7 +4001,7 @@ class ServerState:
             return self._fence_reject_response(code, peer=peer), None, None, None
         if self._peer_queue_len(peer) >= MAX_QUEUE:
             return (429, {"error": "queue_full"}), None, None, None
-        refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
+        refusal = self._capability_refusal_locked(peer, cmd, fence_instance, args)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
         client_refusal = self._client_announce_refusal_locked(
@@ -4756,11 +5041,13 @@ class ServerState:
                     refusal = None
                     if (
                         isinstance(command_name, str)
-                        and command_name in _CAPABILITY_ADMISSION_COMMANDS
+                        and _requires_capability_admission(
+                            command_name, command.get("args")
+                        )
                         and deliver_accredited
                     ):
                         refusal = self._capability_refusal_locked(
-                            peer, command_name, token
+                            peer, command_name, token, command.get("args")
                         )
                     if (
                         refusal is None

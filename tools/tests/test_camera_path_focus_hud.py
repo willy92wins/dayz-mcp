@@ -1590,7 +1590,7 @@ class CensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         for command in (*NEW_COMMANDS, "camera_path_release"):
             self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES))
 
 

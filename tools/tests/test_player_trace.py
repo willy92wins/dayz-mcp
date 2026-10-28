@@ -583,7 +583,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1216,9 +1216,28 @@ class PlayerTraceMessagesTest(unittest.TestCase):
         self.assertEqual(set(_entity()), {name for _type, name in EXPECTED_ENTITY_MEMBERS})
 
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
+        # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-7:],
-            (FIELD, "direction", "action_cursor", "look_at", "cursor_ids", "camera_path", "hud"),
+            result_prune.PRUNABLE_FIELDS[-17:],
+            (
+                FIELD,
+                "direction",
+                "action_cursor",
+                "look_at",
+                "cursor_ids",
+                "loadout",
+                "inventory_move",
+                "counts",
+                "points",
+                "from_snapped",
+                "to_snapped",
+                "players_visibility",
+                "world_spawn_batch",
+                "scene_entities",
+                "scene_clear",
+                "camera_path",
+                "hud",
+            ),
         )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)
         unfilled = result_prune.prune_unfilled_fields("vehicle_trace", {"ok": 1, FIELD: {}})

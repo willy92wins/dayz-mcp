@@ -33,6 +33,8 @@ def _minimal_args(cmd: str) -> dict:
         "weapon_fire",
         "world_time_get",
         "action_cursor",
+        "loadout_get",
+        "loadout_clear",
     }:
         return {}
 
@@ -165,6 +167,14 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1}
     if cmd == "hands_attach":
         return {"object_id": 1, "slot": "LargeBattery"}
+    if cmd == "loadout_apply":
+        return {"loadout_items": []}
+    if cmd == "inventory_move":
+        return {"item_object_id": 1, "op": "to_hands"}
+    if cmd == "world_spawn_batch":
+        return {"items": [{"type": "Item", "pos": [0.0, 0.0, 0.0], "flags": 0, "rotation": 0}]}
+    if cmd in {"scene_entities", "scene_clear"}:
+        return {"scene_id": "a"}
     if cmd == "weapon_raise":
         return {"raised": True, "hold_ttl_s": 3.0}
     if cmd == "weapon_aim":
@@ -223,10 +233,20 @@ def _minimal_args(cmd: str) -> dict:
         return {"pos": [0.0, 0.0, 0.0], "timeout_s": 0.1}
     if cmd == "player_look_at_release":
         return {"command_id": 1}
+    if cmd == "player_view_set":
+        return {"view": "third"}
     if cmd == "camera_path_release":
         return {"command_id": 1}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
+    if cmd == "server_perf":
+        return {"window_s": 10.0}
+    if cmd == "nav_path_query":
+        return {"from": [0.0, 0.0, 0.0], "to": [1.0, 0.0, 1.0], "snap_radius": 2.0}
+    if cmd == "players_visibility":
+        return {"pos": [0.0, 0.0, 0.0], "radius": 0.0}
+    if cmd == "object_set_health":
+        return {"object_id": 1, "health01": 0.0}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

@@ -853,76 +853,193 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lease_expired", str(raised.exception))
 
     async def test_f3_blocked_reader_is_stopped_joined_or_reported(self) -> None:
+        # Each part records the joins the server asks for on the reader
+        # thread through asyncio.to_thread, as _thread_bounded asks for them:
+        # the bound passed, when the join was asked for, and whether the
+        # reader was alive after it. A join made another way, such as a
+        # direct thread.join, is not recorded. The bounds are checked as
+        # passed rather than timed, so a slow runner cannot fail a join that
+        # kept to its bound, and a missing, unbounded or longer join fails.
+        # The server asks for the first join only while budget remains, so
+        # (a) and (c) also accept the grace join alone when it was asked for
+        # after the reader's deadline, and (d) takes that path on purpose.
+        joins: list = []
+        real_to_thread = asyncio.to_thread
+
+        async def recording_to_thread(fn, /, *args, **kwargs):
+            owner = getattr(fn, "__self__", None)
+            if not isinstance(owner, threading.Thread) or getattr(fn, "__name__", "") != "join":
+                return await real_to_thread(fn, *args, **kwargs)
+            asked_at = time.monotonic()
+            try:
+                return await real_to_thread(fn, *args, **kwargs)
+            finally:
+                joins.append((owner, args, owner.is_alive(), asked_at))
+
+        def reader_joins(thread: threading.Thread) -> list:
+            return [entry[1:] for entry in joins if entry[0] is thread]
+
+        def check_timeout_joins(found: list, deadline, grace: float, alive: bool) -> None:
+            # A first join within the 2 s budget, or none when the grace join
+            # was asked for after the deadline; then the grace join.
+            self.assertIn(len(found), (1, 2))
+            if len(found) == 2:
+                self.assertLessEqual(found[0][0][0], 2.0)
+            else:
+                self.assertIsNotNone(deadline)
+                self.assertGreaterEqual(found[0][2], deadline)
+            self.assertEqual(found[-1][:2], ((grace,), alive))
+
         # (a) A reader blocked on the stop signal ends when the deadline or
         # the cleanup fires. An injected exception cannot run inside the
         # blocking wait, so only the cooperative signal can end it, and the
-        # caller must join it before returning.
+        # caller must join it before returning: a reader given no signal waits
+        # on _StopDeaf, which never fires, and the caller's stop join finds it
+        # alive. The lock, heartbeat, run and profile checks come before the
+        # read, so (a) and (c) give the read their whole 2 s budget to begin.
+        # Once stopped, the fake sleeps 50 ms before it returns, so its result
+        # is stamped after the deadline even on a coarse clock, and the caller
+        # takes its timeout path: stop, bounded join, report. A result stamped
+        # at the deadline itself is delivered instead, and the caller drops
+        # the late match without that path. (a) and (b) raise the stop grace
+        # from the server's 50 ms (_THREAD_STOP_GRACE_S) to 2 s: a runner that
+        # gives the reader no CPU for 50 ms makes the server report it alive,
+        # as it should, and (c) checks that report.
         state: dict = {"started": threading.Event()}
 
         def blocked_on_stop(*_args, stop=None, **_kwargs):
             state["thread"] = threading.current_thread()
+            state["deadline"] = getattr(stop, "_deadline", None)
             state["started"].set()
             signal = stop if stop is not None else _StopDeaf()
             while not signal.stopped:
-                signal.wait(0.5)
+                signal.wait(5.0)
+            time.sleep(0.05)
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
-        with patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop):
-            began = time.monotonic()
+        with (
+            patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop),
+            patch.object(server, "_THREAD_STOP_GRACE_S", 2.0),
+            patch.object(asyncio, "to_thread", recording_to_thread),
+        ):
             result = await execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=0.05, poll_interval_s=0.5, lookback_lines=0,
+                timeout_s=2.0, poll_interval_s=0.5, lookback_lines=0,
             )
-            elapsed = time.monotonic() - began
+        self.assertTrue(state["started"].is_set())
         self.assertFalse(result["satisfied"])
+        self.assertNotIn("reader_alive_at_return", result["scanned"])
+        check_timeout_joins(reader_joins(state["thread"]), state["deadline"], 2.0, False)
         self.assertFalse(state["thread"].is_alive())
-        self.assertLess(elapsed, 1.0)
 
-        # (b) Cancelling the wait also stops and joins the reader.
+        # (b) Cancelling the wait also stops and joins the reader. Its budget
+        # is 60 s and its fake waits for the signal in waits of up to 60 s.
+        # The test checks that the cancel stopped this reader's signal, so a
+        # cancel that only injects the exception fails even when the
+        # injection ends the fake before it blocks, and that the grace join
+        # saw the reader end. The test waits up to 30 s for the read to begin
+        # before it cancels, and if that check fails, the finally still
+        # cancels the task and waits for it while the patches are in place.
         state2: dict = {"started": threading.Event()}
+        stopped: list = []
+        real_stop = server._ReadStop.stop
+
+        def recording_stop(signal) -> None:
+            stopped.append(signal)
+            real_stop(signal)
 
         def blocked_on_stop2(*_args, stop=None, **_kwargs):
             state2["thread"] = threading.current_thread()
+            state2["signal"] = stop
             state2["started"].set()
             signal = stop if stop is not None else _StopDeaf()
             while not signal.stopped:
-                signal.wait(0.5)
+                signal.wait(60.0)
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
-        with patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop2):
+        with (
+            patch.object(server, "_read_contained_handle", side_effect=blocked_on_stop2),
+            patch.object(server, "_THREAD_STOP_GRACE_S", 2.0),
+            patch.object(server._ReadStop, "stop", recording_stop),
+            patch.object(asyncio, "to_thread", recording_to_thread),
+        ):
             task = asyncio.create_task(execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=5.0, poll_interval_s=0.5, lookback_lines=0,
+                timeout_s=60.0, poll_interval_s=0.5, lookback_lines=0,
             ))
-            await asyncio.to_thread(state2["started"].wait, 2.0)
-            began = time.monotonic()
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            self.assertLess(time.monotonic() - began, 1.0)
+            try:
+                self.assertTrue(await asyncio.to_thread(state2["started"].wait, 30.0))
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(any(signal is state2["signal"] for signal in stopped))
+        b_joins = reader_joins(state2["thread"])
+        self.assertEqual(len(b_joins), 2)
+        self.assertLessEqual(b_joins[0][0][0], 60.0)
+        self.assertEqual(b_joins[1][:2], ((2.0,), False))
         self.assertFalse(state2["thread"].is_alive())
 
         # (c) A reader that ignores the stop signal is not claimed terminated:
-        # the scan diagnostics say it was still alive at return.
+        # after a join bounded by the server's own grace, the scan diagnostics
+        # say it was still alive at return. Its fake waits until the test
+        # releases it, which the finally always does, so it stays blocked
+        # until then unless 60 s pass first. That limit is only an emergency
+        # exit, so that a server that waits for it without a bound fails the
+        # test instead of hanging it: the fake notes, as it ends, whether the
+        # test had released it, and the finally fails the test if it had not,
+        # and checks that it ended, even when an earlier check has failed.
         state3: dict = {"started": threading.Event()}
         release = threading.Event()
 
         def ignores_stop(*_args, stop=None, **_kwargs):
             state3["thread"] = threading.current_thread()
-            state3["started"].set()
-            release.wait(5.0)
+            state3["deadline"] = getattr(stop, "_deadline", None)
+            try:
+                state3["started"].set()
+                release.wait(60.0)
+            finally:
+                state3["released"] = release.is_set()
             return {"state": "ok", "path": "x", "lines": ["READY"], "marker": None, "count": 1}
 
-        with patch.object(server, "_read_contained_handle", side_effect=ignores_stop):
-            result = await execute_wait_for(
-                self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=0.4, poll_interval_s=0.5, lookback_lines=0,
+        try:
+            with (
+                patch.object(server, "_read_contained_handle", side_effect=ignores_stop),
+                patch.object(asyncio, "to_thread", recording_to_thread),
+            ):
+                result = await execute_wait_for(
+                    self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
+                    timeout_s=2.0, poll_interval_s=0.5, lookback_lines=0,
+                )
+            self.assertTrue(state3["started"].is_set())
+            self.assertFalse(result["satisfied"])
+            self.assertTrue(result["scanned"].get("reader_alive_at_return"))
+            check_timeout_joins(
+                reader_joins(state3["thread"]), state3["deadline"],
+                server._THREAD_STOP_GRACE_S, True,
             )
-        self.assertFalse(result["satisfied"])
-        self.assertTrue(result["scanned"].get("reader_alive_at_return"))
-        release.set()
-        state3["thread"].join(6.0)
-        self.assertFalse(state3["thread"].is_alive())
+        finally:
+            release.set()
+            if "thread" in state3:
+                state3["thread"].join(10.0)
+                self.assertFalse(state3["thread"].is_alive())
+                self.assertTrue(
+                    state3.get("released"), "the reader ended before the test released it"
+                )
+
+        # (d) A read whose budget is already spent gets no first join: the
+        # server goes straight to the stop, the grace join and the timeout,
+        # the path (a) and (c) accept when their caller reaches the budget
+        # check after the deadline.
+        before = len(joins)
+        with patch.object(asyncio, "to_thread", recording_to_thread):
+            with self.assertRaises(TimeoutError):
+                await server._thread_bounded(lambda stop: None, time.monotonic() - 1.0)
+        self.assertEqual(
+            [entry[1] for entry in joins[before:]], [(server._THREAD_STOP_GRACE_S,)]
+        )
 
     async def test_f10_release_during_final_status_aborts(self) -> None:
         self.server_file.write_text("READY\n", encoding="utf-8")
