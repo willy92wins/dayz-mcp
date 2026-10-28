@@ -2496,6 +2496,15 @@ class ClientRuntime:
     ) -> dict[str, Any]:
         if deadline is None:
             deadline = self._time_fn() + timeout_s
+        # inbox 6310: a command admitted under a lease is read with POST /await,
+        # which names the caller and that lease's token, so the daemon can add
+        # human_input when the lease is still this caller's.
+        admits = getattr(self, "_broker_admits", None)
+        admit = admits.get(command_id) if isinstance(admits, dict) else None
+        lease_token = admit.get("lease_token") if isinstance(admit, dict) else None
+        holder: dict[str, Any] | None = None
+        if isinstance(lease_token, str):
+            holder = {"identity": self.identity.to_payload(), "lease_token": lease_token}
         while True:
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
@@ -2503,21 +2512,28 @@ class ClientRuntime:
             try:
                 status, payload = await asyncio.to_thread(
                     self._call,
-                    "GET",
+                    "GET" if holder is None else "POST",
                     "/await",
-                    None,
+                    holder,
                     {"id": str(command_id), "remove": "1"},
                     remaining,
                     deadline,
                 )
             except _CallBudgetExpired:
                 break
+            if status == 404 and holder is not None:
+                # A daemon from before inbox 6310 has no POST /await.
+                holder = None
+                continue
             if status == 200 and payload.get("status") == "done":
                 result = payload.get("result") or {}
                 # Bridge serializes ok as int 0/1; treat any falsy ok as an error.
                 if not result.get("ok"):
                     raise _bridge_error(result, cmd)
-                return result_prune.prune_unfilled_fields(cmd, result)
+                pruned = result_prune.prune_unfilled_fields(cmd, result)
+                if "human_input" in payload:
+                    pruned["human_input"] = payload["human_input"]
+                return pruned
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break
@@ -5191,6 +5207,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "LOW-LEVEL: prefer session_acquire_wait. "
             "Renew an active lease while exclusive work is in progress or "
             "across a pause with no other dayz-mcp calls. "
+            "The answer carries human_input for the lease's RUNNING runs; "
+            "compare count and uncertain_count between two answers to see "
+            "input credited in between. "
             f"{_lease_renewal_contract(config.session_ttl_s)}"
         )
     )
@@ -6660,7 +6679,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "attachment_items,cargo_count,cargo_items,items,items_total,"
         "items_truncated}}; item arrays are classnames with a 16-entry cap per "
         "array, counts uncapped, immediate inventory only; cars additionally "
-        "populate engine_on_server,speedo,wheel_count,fuel_fraction (defaults on "
+        "populate engine_on_server,speedo,wheel_count,fuel_fraction,lights_on_server (defaults on "
         "non-cars are not measurements); zero matches is a successful return with "
         "found:false. Multiple exact-type matches raise ToolError("
         "ambiguous_fixture); that is an MCP tool error, not a returned dict. "
@@ -7134,6 +7153,51 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["phase_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("object_anim", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} set one object's health on the server and "
+            "read it back in the same tick. Target by object_id (world_spawn, "
+            "object_resolve, inventory_give.object_id, inventory_attach.item_object_id) "
+            "or by exact classname within 25 m of pos. With slot, the target is "
+            "the item attached to that object in that inventory slot "
+            "(telemetry_read object_at lists the slot names in declared_slots). "
+            "health01 is a fraction of the zone's maximum Health; an empty zone "
+            "is the global health. The reply, object_health, gives health01 and "
+            "the health level the object reports (vanilla's usual scale: 0 "
+            "pristine to 4 ruined), read before and after the call. A player is "
+            "refused: use player_heal or player_kill "
+            "(target_is_player). An item the game replaces when it is ruined "
+            "(a 1.30 car wheel becomes its _Ruined class) is replaced by the "
+            "game, not by this tool: read the vehicle again with telemetry_read "
+            "object_at to see what sits in the slot."
+        )
+    )
+    async def object_set_health(
+        health01: StrictFloat,
+        object_id: StrictInt = 0,
+        type: str = "",
+        pos: list[StrictFloat] | None = None,
+        slot: str = "",
+        zone: str = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        health_value = _require_range(
+            health01,
+            0.0,
+            1.0,
+            _bad_args("health01", health01, "be a finite real in [0, 1]"),
+        )
+        args: dict[str, Any] = {"health01": health_value}
+        args.update(_object_target_args(type, pos, object_id))
+        if slot != "":
+            args["slot"] = slot
+        if zone != "":
+            args["zone"] = zone
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "object_set_health", args, "server", _timeout(timeout_s)
+            )
 
     # One car door through the server half of the vanilla door action
     # (MCPBridge.c DispatchVehicleDoor). The lease follows the command name, so
@@ -9204,14 +9268,26 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Read owner-side vehicle telemetry (speed, gear, engine, pos, "
-            "ownership). direction is the seated transport's GetDirection as "
+            "ownership). direction is the read transport's GetDirection as "
             "[x, y, z], the same vector vehicle_trace stores. It is omitted "
-            "when the player is not in a transport."
+            "when no transport is read. lights_on_client is "
+            "LightIsOn of the local replica (default false outside a CarScript, "
+            "which is not a measurement). pos reads the nearest Transport to pos "
+            "within 4 m whether or not the player is seated; seated says whether "
+            "the local player is seated in it; seat is empty when they are not. "
+            "pos takes 3 finite numbers: another count, NaN or an infinity is "
+            "ToolError(bad_pos). Without pos nothing changes."
         )
     )
-    async def vehicle_telemetry(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_telemetry(
+        pos: list[StrictFloat] | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args: dict[str, Any] = {}
+        if pos is not None:
+            args = {"pos": _require_vec3(pos, "pos")}
         async with runtime.tool_lock:
-            return await runtime.call_bridge("vehicle_telemetry", {}, "client", _timeout(timeout_s))
+            return await runtime.call_bridge("vehicle_telemetry", args, "client", _timeout(timeout_s))
 
     @app.tool(
         description=(

@@ -81,6 +81,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "object_doors",
     "object_inspect",
     "object_resolve",
+    "object_set_health",
     "player_godmode",
     "player_heal",
     "player_kill",

@@ -120,6 +120,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "vehicle_control",
     ),
     ("vehicle_telemetry", {}, "vehicle_telemetry"),
+    ("vehicle_telemetry", {"pos": _POS}, "vehicle_telemetry"),
     ("vehicle_release", {}, "vehicle_release"),
     # Edges of what the tools accept. A schema that is narrower than its tool
     # anywhere inside these ranges fails here (review R1 of this change: a
@@ -217,6 +218,18 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("object_doors", {"object_id": 1}, "object_doors"),
     # The verbs whose optional values travel with a presence flag
     # (fb-20260930-065425-8779): reads and writes, both target shapes.
+    ("object_set_health", {"object_id": 7, "health01": 0.0}, "object_set_health"),
+    (
+        "object_set_health",
+        {
+            "type": "LFQuad_Wheel_Front",
+            "pos": _POS,
+            "health01": 0.5,
+            "slot": "Wheel_1_1",
+            "zone": "Engine",
+        },
+        "object_set_health",
+    ),
     ("object_anim", {"object_id": 1, "source": "DoorsDriver"}, "object_anim"),
     ("object_anim", {"object_id": 1, "source": "DoorsDriver", "phase": 1.0}, "object_anim"),
     (

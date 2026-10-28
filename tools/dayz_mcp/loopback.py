@@ -95,6 +95,7 @@ SERVER_COMMANDS = {
     "loadout_clear",
     "object_inspect",
     "object_resolve",
+    "object_set_health",
     "object_doors",
     "infected_drive",
     "entities_query",
@@ -1108,6 +1109,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "bot_start",
     "bot_stop",
     "object_resolve",
+    "object_set_health",
     "action_cursor_ids",
     "hands_attach",
     "loadout_get",
@@ -1484,6 +1486,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         ),
     ),
+    "object_set_health": _command_schema(
+        _schema_variant(
+            required=("object_id", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+    ),
     # Same target shapes as object_inspect, without want. A phase key is refused
     # so this read cannot be confused with object_anim's write.
     "object_doors": _command_schema(
@@ -1823,7 +1848,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # (tests/test_ingress_schema_coherence.py).
     "query_player_state": _command_schema(_schema_variant()),
     "query_all_players": _command_schema(_schema_variant()),
-    "vehicle_telemetry": _command_schema(_schema_variant()),
+    "vehicle_telemetry": _command_schema(_schema_variant(optional=("pos",), validators={"pos": _is_real_vector3})),
     "vehicle_release": _command_schema(_schema_variant()),
     # flags goes through the same ECE mask policy as the tool
     # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.
@@ -5262,7 +5287,17 @@ class ServerState:
         return 200, response
 
     def take_result(self, command_id: int, remove: bool = False) -> dict | None:
+        return self.take_result_with_owner(command_id, remove)[0]
+
+    def take_result_with_owner(
+        self, command_id: int, remove: bool = False
+    ) -> tuple[dict | None, tuple[ClientIdentity, str] | None]:
+        """take_result, plus the lease that enqueued a done command (inbox 6310).
+
+        The owner is read in the lock section that pops it with remove=1.
+        """
         self.reap_expired_commands()
+        owner: tuple[ClientIdentity, str] | None = None
         owner_operation: tuple[ClientIdentity, str, int] | None = None
         with self._lock:
             if remove:
@@ -5280,13 +5315,15 @@ class ServerState:
                         owner_operation = (owner[0], owner[1], command_id)
             else:
                 result = self._results.get(command_id)
+                if result is not None:
+                    owner = self._command_owner.get(command_id)
         if owner_operation is not None:
             self.coordination.finish_operation_exact(
                 owner_operation[0].session_id,
                 owner_operation[1],
                 owner_operation[2],
             )
-        return result
+        return result, owner
 
     def cancel_owner_pending(
         self, session_id: str, reason: str, lease_id: str | None = None
@@ -5895,6 +5932,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_abandon()
             return
 
+        if parsed.path == "/await":
+            self.state.touch_client()
+            self._handle_await_post(qs)
+            return
+
         session_action = SESSION_ROUTES.get(parsed.path)
         if session_action is not None:
             self.state.touch_client()
@@ -5991,6 +6033,74 @@ class Handler(BaseHTTPRequestHandler):
     def _log(self, message: str) -> None:
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
         sink(message)
+
+    def _log_human_input_block_failed(self) -> None:
+        # After the answer: at most one diagnostic thread waits on the sink.
+        sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
+        slot = getattr(self.server, "_human_input_diagnostic", None)
+        if slot is None:
+            return
+        if not slot.acquire(blocking=False):
+            return
+
+        def emit() -> None:
+            try:
+                sink("human_input_block failed")
+            except Exception:
+                pass
+            finally:
+                slot.release()
+
+        worker = threading.Thread(
+            target=emit, name="mcp-human-input-diagnostic", daemon=True
+        )
+        try:
+            worker.start()
+        except Exception:
+            slot.release()
+
+    def _human_input_payload(
+        self, session_id: object, lease_id: object
+    ) -> tuple[dict[str, object] | None, bool]:
+        """inbox 6310: (the block or None, whether building it failed).
+
+        Report only: a failure never changes the verb or heartbeat.
+        """
+        lifecycle = self.state.lifecycle
+        if lifecycle is None or not hasattr(lifecycle, "human_input_block"):
+            return None, False
+        try:
+            return lifecycle.human_input_block(session_id, lease_id), False
+        except Exception:
+            return {"signal": "unavailable", "runs": []}, True
+
+    def _holder_human_input(
+        self,
+        client: ClientIdentity,
+        lease_token: object,
+        owner_lease_id: str,
+    ) -> tuple[dict[str, object] | None, bool]:
+        """inbox 6310: the block for a caller that holds the command's lease.
+
+        The caller's token must still be the live, unexpired token of the
+        lease that enqueued the command, for this caller's identity. The
+        check does not renew the lease and does not wait for the coordinator
+        lock: one that another thread holds gives no block.
+        """
+        if not isinstance(lease_token, str) or not lease_token:
+            return None, False
+        coordination = self.state.coordination
+        if coordination is None:
+            return None, False
+        try:
+            lease_id = coordination.active_lease_id(
+                client, lease_token, blocking=False
+            )
+        except Exception:
+            return None, False
+        if lease_id != owner_lease_id:
+            return None, False
+        return self._human_input_payload(client.session_id, lease_id)
 
     def _clear_request_renewed_lease(self) -> None:
         """Drop a lease id left on this thread by an earlier request.
@@ -6318,6 +6428,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._adopt_on_grant(client, payload)
 
         payload = self._persist_coordination(payload)
+        block_failed = False
+        if action == "heartbeat" and status == 200:
+            block, block_failed = self._human_input_payload(
+                client.session_id, payload.get("lease_id")
+            )
+            if block is not None:
+                payload["human_input"] = block
         self._log(
             "SESSION "
             f"event={action} status={status} "
@@ -6325,6 +6442,9 @@ class Handler(BaseHTTPRequestHandler):
             f"ticket={payload.get('ticket', '')}"
         )
         self._json(status, payload)
+        if block_failed:
+            # After the answer: a sink that raises or blocks cannot lose it.
+            self._log_human_input_block_failed()
 
     def _persist_coordination(self, payload: dict) -> dict:
         coordination = self.state.coordination
@@ -6545,7 +6665,27 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, result)
 
 
-    def _handle_await(self, qs: dict[str, list[str]]) -> None:
+    def _handle_await_post(self, qs: dict[str, list[str]]) -> None:
+        """inbox 6310: GET /await plus who asks, so the holder gets human_input.
+
+        The body is {"identity", "lease_token"}; the query is GET's.
+        """
+        body = self._read_json()
+        if body is None:
+            return
+        try:
+            client = ClientIdentity.from_payload(body.get("identity"))
+        except (TypeError, ValueError):
+            # TypeError: an unhashable platform, such as [] or {}.
+            self._json(400, {"error": "invalid_identity"})
+            return
+        self._handle_await(qs, holder=(client, body.get("lease_token")))
+
+    def _handle_await(
+        self,
+        qs: dict[str, list[str]],
+        holder: tuple[ClientIdentity, object] | None = None,
+    ) -> None:
         try:
             command_id = int(qs.get("id", [""])[0])
         except ValueError:
@@ -6556,12 +6696,28 @@ class Handler(BaseHTTPRequestHandler):
         # leak one _results entry per command in the shared daemon. Default keeps
         # the non-destructive read for back-compat with the harness.
         remove = qs.get("remove", ["0"])[0] == "1"
-        result = self.state.take_result(command_id, remove=remove)
+        if holder is None:
+            result, owner = self.state.take_result(command_id, remove=remove), None
+        else:
+            result, owner = self.state.take_result_with_owner(
+                command_id, remove=remove
+            )
         if result is None:
             self._json(200, {"status": "pending"})
             return
 
-        self._json(200, {"status": "done", "result": result})
+        body: dict[str, object] = {"status": "done", "result": result}
+        block_failed = False
+        if holder is not None and owner is not None:
+            block, block_failed = self._holder_human_input(
+                holder[0], holder[1], owner[1]
+            )
+            if block is not None:
+                body["human_input"] = block
+        self._json(200, body)
+        if block_failed:
+            # After the answer, whose result remove=1 may have consumed.
+            self._log_human_input_block_failed()
 
     def _handle_status(self) -> None:
         # Authenticated health/status read used by client bridge_status and by the
@@ -6931,6 +7087,7 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        self._human_input_diagnostic = threading.BoundedSemaphore(1)
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):

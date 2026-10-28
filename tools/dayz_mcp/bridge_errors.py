@@ -465,6 +465,24 @@ def _player_move_detail(result: dict[str, Any]) -> str:
 _PLAYER_VIEW_CAMERA_CLASS_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
 
 
+def _object_set_health_detail(result: dict[str, Any]) -> str:
+    # health_not_applied keeps the after read. Only those two numbers cross.
+    if str(result.get("error") or "") != "health_not_applied":
+        return ""
+    report = result.get("object_health")
+    if not isinstance(report, dict):
+        return ""
+    health01_after = report.get("health01_after")
+    health_level_after = report.get("health_level_after")
+    if isinstance(health01_after, bool) or not isinstance(health01_after, (int, float)):
+        return ""
+    if not math.isfinite(float(health01_after)):
+        return ""
+    if isinstance(health_level_after, bool) or not isinstance(health_level_after, int):
+        return ""
+    return f"observed=health01_after={health01_after} health_level_after={health_level_after}"
+
+
 def _player_view_set_detail(result: dict[str, Any]) -> str:
     if str(result.get("error") or "") != "view_not_applied":
         return ""
@@ -539,6 +557,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     scene_clear is the seventh: scene_shared carries the pair that blocked it,
     carrier_id and carrier_scene_id, then carried_id and carried_scene_id.
 
+    object_set_health is the eighth: health_not_applied carries
+    observed=health01_after=<v> health_level_after=<n>, the same-tick read-back.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -563,6 +584,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _player_view_set_detail(result)
     if cmd == "scene_clear" and str(result.get("error") or "") == "scene_shared":
         return _scene_shared_detail(result)
+    if cmd == "object_set_health":
+        return _object_set_health_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -603,7 +626,9 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # input_trigger, whose refusals carry reason= and observed=,
     # player_move, whose not_held and aborted carry observed=released_by=,
     # player_view_set, whose view_not_applied carries observed= with its read-back,
-    # and scene_clear/scene_shared, which carries the pair that blocked it.
+    # scene_clear/scene_shared, which carries the pair that blocked it,
+    # and object_set_health/health_not_applied, which carries observed= with its
+    # after read-back.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

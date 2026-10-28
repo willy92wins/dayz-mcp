@@ -268,6 +268,10 @@ class MCPArgs
 	// world_spawn_batch: the items of one command, all created in the tick that
 	// dispatches it. The tool sends a longer list as several commands.
 	ref array<ref MCPSpawnBatchItem> items;
+	// object_set_health (inbox c703). health01 is a fraction of the zone's
+	// maximum Health, in [0, 1]. An absent zone reads "" (global health).
+	float health01;
+	string zone;
 
 	void MCPArgs()
 	{
@@ -419,6 +423,7 @@ class MCPTelemetry
 	float speedo;
 	int wheel_count;
 	float fuel_fraction;
+	bool lights_on_server;
 	string path;
 	int line_count_read;
 	ref MCPTelemetryFixtureLine last_valid;
@@ -577,6 +582,19 @@ class MCPObjectInspect
 		has_bounding_center = false;
 		has_quantity = false;
 	}
+};
+
+// object_set_health reply (inbox c703). Health fraction and level before and after.
+class MCPObjectHealth
+{
+	string type;
+	string zone;
+	string slot;
+	float health01_requested;
+	float health01_before;
+	float health01_after;
+	int health_level_before;
+	int health_level_after;
 };
 
 // One widget in a client UI walk. text_readable is false when the proto has no getter.
@@ -1258,6 +1276,7 @@ class MCPResult
 	float speedo_max;
 	float pos_delta;
 	int gear;
+	bool lights_on_client;
 	int net_strategy;
 	bool is_owner;
 	string owner_identity;
@@ -1291,6 +1310,8 @@ class MCPResult
 	bool weapon_without_fsm;
 	// F3.6 object_inspect
 	ref MCPObjectInspect inspect;
+	// object_set_health read-back, also on health_not_applied and target_gone.
+	ref MCPObjectHealth object_health;
 	// entities_query: raw nearby objects, nearest-first, cut at args.limit.
 	int count_total;
 	ref array<ref MCPEntityHit> entities;
@@ -1356,9 +1377,9 @@ class MCPResult
 	ref MCPPlayerMove player_move;
 	// player_trace header and paged samples. Unassigned on other commands.
 	ref MCPPlayerTraceRead player_trace;
-	// vehicle_telemetry heading. GetDirection of the seated transport
-	// (object.c:320): [x, y, z], the same vector vehicle_trace stores as
-	// direction_x/y/z. Unassigned when that player is not in a transport.
+	// vehicle_telemetry heading. GetDirection of the transport read, the seated
+	// one or the nearest to pos (object.c:320): [x, y, z], the same vector
+	// vehicle_trace stores as direction_x/y/z. Unassigned when none is read.
 	ref array<float> direction;
 	// action_cursor snapshot. Unassigned on other commands.
 	ref MCPActionCursor action_cursor;

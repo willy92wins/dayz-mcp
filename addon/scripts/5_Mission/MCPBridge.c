@@ -7,6 +7,9 @@ class MCPBridge : Managed
 	// Reserve the existing daemon ingress cap (loopback.py MAX_QUEUE) per poll.
 	protected const int MAX_POLL_RESULTS = 64;
 	protected const float JOB_TIMEOUT_S = 5.0;
+	// fb-20261026-150310-9582: how long vehicle_prepare_fixture waits for a car that
+	// does not read ready in the tick that called its OnDebugSpawn.
+	protected const float VEHICLE_FIXTURE_WAIT_S = 1.0;
 	protected const int VEHICLE_SEARCH_RADIUS = 4;
 	// 8 m covers a truck-length hull around the subject's origin after ECE_TRACE snap.
 	protected const float SPAWN_READY_RADIUS = 8.0;
@@ -70,12 +73,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect,object_resolve,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "d0b2a66a36c7078f";
+	protected const string SERVER_ARG_CONTRACT_HASH = "0401bed390754a55";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -663,6 +666,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "object_resolve")
 		{
 			postNow = DispatchObjectResolve(command, result);
+		}
+		else if (command.cmd == "object_set_health")
+		{
+			postNow = DispatchObjectSetHealth(command, result);
 		}
 		else if (command.cmd == "world_time_set")
 		{
@@ -3148,16 +3155,28 @@ class MCPBridge : Managed
 			car.OnDebugSpawn();
 		}
 
-		PopulateTelemetryObject(car, telemetry);
-		result.telemetry = telemetry;
-		result.vehicle_fixture_ready = IsVehicleFixtureReady(car);
-		if (!result.vehicle_fixture_ready)
+		// fb-20261026-150310-9582: a Fill that OnDebugSpawn calls can read 0 in this
+		// tick and full a moment later. A car still not ready is answered by a job
+		// that only reads it, ok once ready, fixture_not_ready after the wait.
+		if (!IsVehicleFixtureReady(car))
 		{
-			result.ok = false;
-			result.error = "fixture_not_ready";
-			return true;
+			MCPJob job = new MCPJob();
+			job.id = command.id;
+			job.kind = "vehicle_fixture";
+			job.args = command.args;
+			job.subject = car;
+			job.deadline_s = m_ElapsedS + VEHICLE_FIXTURE_WAIT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_Jobs.Insert(job.id, job);
+			Log("job queued id=" + job.id + " kind=vehicle_fixture deadline_s=" + job.deadline_s);
+			return false;
 		}
 
+		PopulateTelemetryObject(car, telemetry);
+		result.telemetry = telemetry;
+		result.vehicle_fixture_ready = true;
 		result.ok = true;
 		return true;
 	}
@@ -5154,6 +5173,119 @@ class MCPBridge : Managed
 		return true;
 	}
 
+	// object_set_health (inbox c703). One object's Health in one tick: SetHealth01
+	// then the same-tick read-back. Answers in the dispatch tick and queues no job.
+	protected bool DispatchObjectSetHealth(MCPCommand command, MCPResult result)
+	{
+		string error;
+		string zone;
+		string slot;
+		float health01;
+		float appliedDelta;
+		Object target;
+		EntityAI host;
+		EntityAI attached;
+		int slotId;
+		MCPObjectHealth report;
+
+		if (!command.args || !IsFiniteFloat(command.args.health01) || command.args.health01 < 0.0 || command.args.health01 > 1.0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		error = "";
+		health01 = command.args.health01;
+		zone = command.args.zone;
+		slot = command.args.slot;
+		target = ResolveCommandObject(command.args, error);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = error;
+			return true;
+		}
+
+		if (slot != "")
+		{
+			host = EntityAI.Cast(target);
+			if (!host || !host.GetInventory())
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			slotId = InventorySlots.GetSlotIdFromString(slot);
+			if (!InventorySlots.IsSlotIdValid(slotId) || !host.GetInventory().HasAttachmentSlot(slotId))
+			{
+				result.ok = false;
+				result.error = "slot_not_found";
+				return true;
+			}
+			attached = host.GetInventory().FindAttachment(slotId);
+			if (!attached)
+			{
+				result.ok = false;
+				result.error = "slot_empty";
+				return true;
+			}
+			target = attached;
+		}
+
+		if (target.IsMan())
+		{
+			result.ok = false;
+			result.error = "target_is_player";
+			return true;
+		}
+
+		if (target.GetMaxHealth(zone, "Health") <= 0)
+		{
+			result.ok = false;
+			result.error = "no_health";
+			result.type = target.GetType();
+			return true;
+		}
+
+		report = new MCPObjectHealth();
+		report.type = target.GetType();
+		report.zone = zone;
+		report.slot = slot;
+		report.health01_requested = health01;
+		report.health01_before = target.GetHealth01(zone, "Health");
+		report.health_level_before = target.GetHealthLevel(zone);
+		target.SetHealth01(zone, "Health", health01);
+		if (!target)
+		{
+			result.ok = false;
+			result.error = "target_gone";
+			result.object_health = report;
+			result.type = report.type;
+			return true;
+		}
+
+		report.health01_after = target.GetHealth01(zone, "Health");
+		report.health_level_after = target.GetHealthLevel(zone);
+		result.object_health = report;
+		result.type = report.type;
+		result.object_id = RuntimeObjectId(target);
+		appliedDelta = report.health01_after - health01;
+		if (appliedDelta < 0.0)
+		{
+			appliedDelta = -appliedDelta;
+		}
+		if (appliedDelta > 0.001)
+		{
+			result.ok = false;
+			result.error = "health_not_applied";
+			return true;
+		}
+
+		result.ok = true;
+		return true;
+	}
+
 	// Resolve a single world object by classname near pos. Zero matches -> object_not_found;
 	// more than one -> ambiguous_object. Used by object_anim, object_inspect and object_doors.
 	protected Object FindUniqueObjectNearType(string typeName, vector pos, float radius, out string error)
@@ -6331,6 +6463,8 @@ class MCPBridge : Managed
 			telemetry.speedo = car.GetSpeedometer();
 			telemetry.wheel_count = car.WheelCountPresent();
 			telemetry.fuel_fraction = car.GetFluidFraction(CarFluid.FUEL);
+			// Transport.LightIsOn: true when lights are on (transport.c:229-230).
+			telemetry.lights_on_server = car.LightIsOn();
 		}
 	}
 
@@ -6969,6 +7103,10 @@ class MCPBridge : Managed
 		{
 			return IsSceneClearDone(job);
 		}
+		else if (job.kind == "vehicle_fixture")
+		{
+			return IsVehicleFixtureReady(CarScript.Cast(job.subject));
+		}
 
 		return false;
 	}
@@ -7134,6 +7272,11 @@ class MCPBridge : Managed
 			MCPPostInventoryMove(job, true, "");
 			return;
 		}
+		if (job.kind == "vehicle_fixture")
+		{
+			PostVehicleFixture(job, true);
+			return;
+		}
 
 		if (job.kind == "server_perf")
 		{
@@ -7274,6 +7417,39 @@ class MCPBridge : Managed
 		}
 	}
 
+	// fb-20261026-150310-9582: the answer of a fixture that waited, with what the car
+	// reads now. A car deleted during the wait has nothing to read.
+	protected void PostVehicleFixture(MCPJob job, bool ready)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		MCPTelemetry telemetry = new MCPTelemetry();
+		telemetry.mode = job.args.mode;
+		result.telemetry = telemetry;
+		CarScript car = CarScript.Cast(job.subject);
+		if (!car)
+		{
+			telemetry.found = false;
+			result.ok = false;
+			result.error = "fixture_not_found";
+			PostResult(result);
+			return;
+		}
+
+		PopulateTelemetryObject(car, telemetry);
+		result.vehicle_fixture_ready = ready;
+		result.ok = ready;
+		if (!ready)
+		{
+			result.error = "fixture_not_ready";
+		}
+
+		PostResult(result);
+	}
+
 	protected void PostJobFailure(MCPJob job)
 	{
 		MCPResult result = new MCPResult();
@@ -7299,6 +7475,11 @@ class MCPBridge : Managed
 		if (job.kind == "inventory_move")
 		{
 			MCPPostInventoryMove(job, false, "timeout");
+			return;
+		}
+		if (job.kind == "vehicle_fixture")
+		{
+			PostVehicleFixture(job, false);
 			return;
 		}
 		MCPResult result = new MCPResult();
