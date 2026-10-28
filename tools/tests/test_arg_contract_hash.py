@@ -37,14 +37,25 @@ class ArgContractHashTest(unittest.TestCase):
             "bot_start=action,bot_ttl_s,object_id\n"
             "bot_stop=object_id\n"
             "hands_attach=object_id,slot,uid\n"
+            "loadout_apply=loadout_items,object_id,uid\n"
+            "loadout_clear=object_id,uid\n"
+            "loadout_get=object_id,uid\n"
+            "nav_path_query=from,snap_radius,to\n"
             "object_resolve=pos,radius,type\n"
+            "object_set_health=health01,object_id,pos,slot,type,zone\n"
             "player_kill=uid\n"
+            "players_visibility=pos,radius\n"
+            "scene_clear=scene_id\n"
+            "scene_entities=scene_id\n"
+            "server_perf=window_s\n"
             "survivor_drive=heading,heading_set,mode,object_id,speed,speed_set\n"
             "survivor_drive_release=command_id,object_id\n"
-            "vehicle_prepare_fixture=mode,pos,radius,type",
+            "vehicle_prepare_fixture=mode,pos,radius,type\n"
+            "world_spawn=flags,lifetime_s,lifetime_s_set,pos,rotation,scene_id,type\n"
+            "world_spawn_batch=items,scene_id",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "f5c9d49336544bab"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

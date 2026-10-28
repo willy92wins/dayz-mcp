@@ -15,6 +15,10 @@ from dayz_mcp import server
 from tests._tiers import slow_test
 
 
+# Tools whose public argument "from" is the Python parameter from_pos.
+FROM_ALIASES = {("scene_raycast", "from_pos"), ("nav_path_query", "from_pos")}
+
+
 def numeric_shape(annotation):
     origin = get_origin(annotation)
     if origin is Annotated:
@@ -106,11 +110,44 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # component_index, pos, cursor_pos). action, classname and target are strings.
         # + 2 from 9608 (hands_attach object_id/timeout_s; slot and uid are strings).
         # + 1 from 8b1c (dayz_test_foreground hold_s; run_id is a string).
+        # + 1 from 854c (player_view_set timeout_s; view is a string).
+        # + 4 from fb99/220f (loadout_get and loadout_apply object_id/timeout_s;
+        # uid is a string, clear_first a bool and loadout an object).
+        # + 3 from 17fa (inventory_move item_object_id, target_object_id, timeout_s).
+        # + 9 from 2427/0131/33c5 (server_perf window_s/timeout_s, nav_path_query
+        # from_pos/to/snap_radius/timeout_s, players_visibility pos/radius/timeout_s).
+        # + 4 from 165a/5a21/7f5d (world_spawn_batch per_tick/timeout_s,
+        # scene_entities timeout_s, scene_clear timeout_s; scene_id is a string
+        # and items a list, not in this census).
         # + 2 from 36fa (actor_emote wait_s/timeout_s; emote is a string).
         # + 3 from c801 (survivor_drive object_id/heading/timeout_s; speed and
         # mode are strings).
         # 177 before either batch, plus both additions.
-        self.assertEqual(len(rows), 195)
+        # + 4 from c703 (object_set_health health01/object_id/pos/timeout_s).
+        # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
+        self.assertEqual(len(rows), 221)
+        self.assertIn(("object_set_health", "health01", "float"), rows)
+        self.assertIn(("object_set_health", "object_id", "int"), rows)
+        self.assertIn(("object_set_health", "pos", "vector"), rows)
+        self.assertIn(("object_set_health", "timeout_s", "float"), rows)
+        self.assertIn(("vehicle_telemetry", "pos", "vector"), rows)
+        self.assertIn(("player_view_set", "timeout_s", "float"), rows)
+        for tool in ("loadout_get", "loadout_apply"):
+            self.assertIn((tool, "object_id", "int"), rows)
+            self.assertIn((tool, "timeout_s", "float"), rows)
+        self.assertIn(("server_perf", "window_s", "float"), rows)
+        self.assertIn(("server_perf", "timeout_s", "float"), rows)
+        self.assertIn(("nav_path_query", "from_pos", "vector"), rows)
+        self.assertIn(("nav_path_query", "to", "vector"), rows)
+        self.assertIn(("nav_path_query", "snap_radius", "float"), rows)
+        self.assertIn(("nav_path_query", "timeout_s", "float"), rows)
+        self.assertIn(("players_visibility", "pos", "vector"), rows)
+        self.assertIn(("players_visibility", "radius", "float"), rows)
+        self.assertIn(("players_visibility", "timeout_s", "float"), rows)
+        self.assertIn(("world_spawn_batch", "per_tick", "int"), rows)
+        self.assertIn(("world_spawn_batch", "timeout_s", "float"), rows)
+        self.assertIn(("scene_entities", "timeout_s", "float"), rows)
+        self.assertIn(("scene_clear", "timeout_s", "float"), rows)
         self.assertIn(("actor_emote", "wait_s", "float"), rows)
         self.assertIn(("actor_emote", "timeout_s", "float"), rows)
         self.assertIn(("survivor_drive", "object_id", "int"), rows)
@@ -118,6 +155,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("survivor_drive", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
+        self.assertIn(("inventory_move", "item_object_id", "int"), rows)
+        self.assertIn(("inventory_move", "target_object_id", "int"), rows)
+        self.assertIn(("inventory_move", "timeout_s", "float"), rows)
         self.assertIn(("action_cursor", "timeout_s", "float"), rows)
         self.assertIn(("player_look_at", "pos", "vector"), rows)
         self.assertIn(("player_look_at", "timeout_s", "float"), rows)
@@ -176,7 +216,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_every_numeric_parameter_rejects_both_booleans_before_handler(self):
         for name, param, shape in self.rows:
-            wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param
+            wire_param = "from" if (name, param) in FROM_ALIASES else param
             for value in (False, True):
                 positions = range(3) if shape == "vector" else (None,)
                 for position in positions:
@@ -195,7 +235,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
     @slow_test
     async def test_every_numeric_parameter_accepts_real_numbers(self):
         for name, param, shape in self.rows:
-            wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param
+            wire_param = "from" if (name, param) in FROM_ALIASES else param
             values = ([0, 1, 2], [0.0, 1.25, 2.5]) if shape == "vector" else (0, 1) if shape == "int" else (0, 1, 1.25)
             for value in values:
                 with self.subTest(tool=name, param=param, value=value):
@@ -211,7 +251,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         for name, param, _shape in self.rows:
             tool = self.app._tool_manager.get_tool(name)
             props = tool.parameters["properties"]
-            wire_param = "from" if (name, param) == ("scene_raycast", "from_pos") else param
+            wire_param = "from" if (name, param) in FROM_ALIASES else param
             prop = props[wire_param]
             if not any(s.get("type") == "null" for s in prop.get("anyOf", [])):
                 continue

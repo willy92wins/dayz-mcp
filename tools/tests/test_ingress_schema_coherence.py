@@ -32,6 +32,8 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_state", {}, "weapon_state"),
     ("weapon_state", {"uid": "76561198000000000"}, "weapon_state"),
     ("hands_take", {"object_id": 1}, "hands_take"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "client"}, "inventory_move"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_hands", "authority": "server"}, "inventory_move"),
     ("hands_take", {"object_id": 4, "uid": "76561198000000000"}, "hands_take"),
     ("query_all_players", {}, "query_all_players"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS}, "world_spawn"),
@@ -118,6 +120,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "vehicle_control",
     ),
     ("vehicle_telemetry", {}, "vehicle_telemetry"),
+    ("vehicle_telemetry", {"pos": _POS}, "vehicle_telemetry"),
     ("vehicle_release", {}, "vehicle_release"),
     # Edges of what the tools accept. A schema that is narrower than its tool
     # anywhere inside these ranges fails here (review R1 of this change: a
@@ -128,6 +131,46 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 600}, "world_spawn"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 0.001}, "world_spawn"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 3888000.0}, "world_spawn"),
+    # scene_id and the scene verbs (165a, 5a21, 7f5d).
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "scene_id": "a" * 64}, "world_spawn"),
+    (
+        "world_spawn",
+        {"type": "CivilianSedan", "pos": _POS, "lifetime_s": 600, "scene_id": "take_1-B"},
+        "world_spawn",
+    ),
+    ("world_spawn", {"type": "CivilianSedan", "pos": _POS, "scene_id": ""}, "world_spawn"),
+    ("world_spawn_batch", {"items": [{"type": "Barrel_Green", "pos": _POS}]}, "world_spawn_batch"),
+    (
+        "world_spawn_batch",
+        {
+            "items": [
+                {"type": "Barrel_Green", "pos": [1, None, 3], "flags": 1060, "rotation": 2},
+                {"type": "ZmbM_CitizenASkinny", "pos": [1, 2, 3], "flags": 3108, "ypr": [90, -5, 0]},
+                {"type": "CivilianSedan", "pos": [1.5, 0, 3.5], "flags": 1028},
+            ],
+            "per_tick": 1,
+            "scene_id": "a",
+        },
+        "world_spawn_batch",
+    ),
+    (
+        "world_spawn_batch",
+        {"items": [{"type": "Barrel_Green", "pos": _POS}] * 200, "per_tick": 50},
+        "world_spawn_batch",
+    ),
+    (
+        "world_spawn_batch",
+        {
+            "items": [
+                {"type": "Barrel_Green", "pos": _POS, "rotation": -2147483648},
+                {"type": "Barrel_Green", "pos": _POS, "rotation": 2147483647},
+            ],
+            "per_tick": 1,
+        },
+        "world_spawn_batch",
+    ),
+    ("scene_entities", {"scene_id": "a"}, "scene_entities"),
+    ("scene_clear", {"scene_id": "Z" * 64}, "scene_clear"),
     (
         "camera_set",
         {
@@ -175,6 +218,18 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("object_doors", {"object_id": 1}, "object_doors"),
     # The verbs whose optional values travel with a presence flag
     # (fb-20260930-065425-8779): reads and writes, both target shapes.
+    ("object_set_health", {"object_id": 7, "health01": 0.0}, "object_set_health"),
+    (
+        "object_set_health",
+        {
+            "type": "LFQuad_Wheel_Front",
+            "pos": _POS,
+            "health01": 0.5,
+            "slot": "Wheel_1_1",
+            "zone": "Engine",
+        },
+        "object_set_health",
+    ),
     ("object_anim", {"object_id": 1, "source": "DoorsDriver"}, "object_anim"),
     ("object_anim", {"object_id": 1, "source": "DoorsDriver", "phase": 1.0}, "object_anim"),
     (
@@ -245,6 +300,57 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_sights", {"mode": "ironsights"}, "weapon_sights"),
     ("weapon_sights", {"mode": "optics"}, "weapon_sights"),
     ("weapon_sights", {"mode": "none"}, "weapon_sights"),
+    # Both target shapes of the loadout verbs, and the rows of every dest
+    # at the depth and count caps (fb99, 220f). clear_first sends loadout_clear
+    # before loadout_apply, and both payloads must pass; with neither target
+    # the apply goes by the uid the clear answered (#261 review Y11).
+    ("loadout_get", {}, "loadout_get"),
+    ("loadout_get", {"uid": "76561198000000000"}, "loadout_get"),
+    ("loadout_get", {"object_id": 3}, "loadout_get"),
+    ("loadout_apply", {"loadout": {}}, "loadout_apply"),
+    ("loadout_apply", {"loadout": {}, "clear_first": True}, "loadout_apply"),
+    (
+        "loadout_apply",
+        {"loadout": {}, "uid": "76561198000000000", "clear_first": True},
+        "loadout_clear",
+    ),
+    (
+        "loadout_apply",
+        {
+            "loadout": {
+                "attachments": [
+                    {
+                        "type": "AssaultBag_Black",
+                        "slot": "Back",
+                        "cargo": [
+                            {
+                                "type": "FirstAidKit",
+                                "cargo": [{"type": "Bandage", "cargo": [{"type": "Rag"}]}],
+                            }
+                        ],
+                    }
+                ],
+                "hands": {
+                    "type": "M4A1",
+                    "attachments": [{"type": "Mag_STANAG_30Rnd", "slot": "magazine"}],
+                },
+            },
+            "object_id": 9,
+            "clear_first": True,
+        },
+        "loadout_apply",
+    ),
+    (
+        "loadout_apply",
+        {
+            "loadout": {"attachments": [{"type": "Apple", "slot": f"Slot{n}"} for n in range(64)]},
+            "uid": "76561198000000000",
+        },
+        "loadout_apply",
+    ),
+    # Both views player_view_set sends (854c).
+    ("player_view_set", {"view": "first"}, "player_view_set"),
+    ("player_view_set", {"view": "third"}, "player_view_set"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and
@@ -252,6 +358,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
 _BRIDGE_ANSWERS: dict[str, dict[str, Any]] = {
     "surface_query": {"ok": 1, "y": 5.0},
     "scene_raycast": {"ok": 1, "hit": 1, "pos": [10.0, 5.0, 20.0]},
+    "loadout_clear": {"ok": 1, "deleted": 2, "cleanup_complete": 1, "uid": "76561198000000000"},
 }
 
 

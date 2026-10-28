@@ -18,7 +18,9 @@ from pathlib import Path
 
 
 MAX_TAIL_BYTES = 256 * 1024
-LOG_SUFFIXES = (".rpt", ".log")
+# .adm is the admin log. DayZDiag's file name is not pinned: any file
+# with that extension in the profile directory qualifies.
+LOG_SUFFIXES = (".rpt", ".log", ".adm")
 # Bytes hashed to identify the file. A rewrite in place keeps the path and can
 # keep or exceed the old size, so size alone cannot detect it.
 IDENTITY_PREFIX_BYTES = 512
@@ -213,7 +215,7 @@ def is_allowed_profiles_dir(value: object) -> bool:
 
 
 def resolve_log_files(profiles_dir: str) -> list[str]:
-    """Newest-last list of RPT/script logs in a profile directory."""
+    """Newest-last list of RPT, script and admin logs in a profile directory."""
     try:
         entries = [
             item

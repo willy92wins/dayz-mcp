@@ -25,7 +25,13 @@ from dayz_mcp.session_coordination import (
 )
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import _method_body
-from tests.enforce_subset_helpers import EnforceString, declared_fields, method_body, translate
+from tests.enforce_subset_helpers import (
+    EnforceString,
+    EnforceVector,
+    declared_fields,
+    method_body,
+    translate,
+)
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 from tests.lease_helpers import SequentialIds
 
@@ -960,6 +966,21 @@ class _Vector:
             raise AssertionError(f"vector index {index!r}")
 
 
+class _CopiedVector(EnforceVector):
+    """A vector local as the translator copies it on assignment (165a): the
+    copy of a _Vector, with the Coordinate and SetCoordinate that
+    _HANDLER_REWRITES writes for its v[i]."""
+
+    def __init__(self, value: object = (0.0, 0.0, 0.0)) -> None:
+        super().__init__(value.xyz if isinstance(value, _Vector) else value)  # type: ignore[arg-type]
+
+    def Coordinate(self, index: int) -> float:
+        return self[index]
+
+    def SetCoordinate(self, index: int, value: float) -> None:
+        self[index] = value
+
+
 class _Survivor:
     """A world_spawn survivor as the drive and its handler read it, facing
     north: no PlayerIdentity unless the test gives it one, alive, with its
@@ -1222,6 +1243,7 @@ class _HandlerModel(_DriveModel):
             "PENDING_POLL_THRESHOLD": int(threshold.group(1)),
             "NewFloats": _Array,
             "FloatQuotient": _float_quotient,
+            "_vector": _CopiedVector,
             "GetGame": lambda: game,
             "PlayerBase": self.namespace["PlayerBase"],
             # The bot's own hooks are called too; no bot moves here.

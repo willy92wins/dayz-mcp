@@ -270,6 +270,7 @@ class ModePathParityTest(unittest.TestCase):
             "width": 640,
             "height": 480,
             "navmesh_data_server": False,
+            "server_adminlog": False,
             "server_mods": [],
             "mode": mode,
             "instance_token": TOKEN,
@@ -457,21 +458,33 @@ class LogAndWaitTest(PinnedClosePolicy, unittest.IsolatedAsyncioTestCase):
                 tool_lock=asyncio.Lock(),
                 lifecycle_status=lifecycle_status,
             )
+            # seen and missed look for a line on the side its file is on, so the
+            # run's leaf decides them; other_side is the side check (inbox 33c3).
             seen = await execute_wait_for(
                 runtime,
                 "log_matches",
                 pattern="client-boot",
-                role="server",
+                role="client",
                 timeout_s=1.0,
                 poll_interval_s=0.2,
                 lookback_lines=20,
             )
             self.assertTrue(seen["satisfied"])
+            other_side = await execute_wait_for(
+                runtime,
+                "log_matches",
+                pattern="client-boot",
+                role="server",
+                timeout_s=0.3,
+                poll_interval_s=0.2,
+                lookback_lines=20,
+            )
+            self.assertFalse(other_side["satisfied"])
             missed = await execute_wait_for(
                 runtime,
                 "log_matches",
                 pattern="LEGACY-READY",
-                role="client",
+                role="server",
                 timeout_s=0.3,
                 poll_interval_s=0.2,
                 lookback_lines=50,
@@ -740,6 +753,39 @@ class CloseAndDiagnosisTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(rotated["graceful"])
         self.assertEqual(rotated["reason"], "rpt_rotated")
+
+    async def test_t8_close_skips_crash_reporter_role(self) -> None:
+        self._write(self.server_rpt, "boot\n" + CONNECT + LINK)
+        self._write(self.client_rpt, "boot client\n")
+        runtime = self._runtime(logout=True)
+        original_status = runtime.lifecycle_status
+
+        async def status_with_reporter():
+            payload = await original_status()
+            runs = payload.get("runs")
+            if isinstance(runs, list) and runs:
+                processes = list(runs[0].get("processes") or [])
+                processes.append({"role": "crash_reporter", "pid": 3})
+                runs[0]["processes"] = processes
+            return payload
+
+        closed: list[list[str]] = []
+        original_close_roles = runtime.lifecycle_close_roles
+
+        async def close_roles(run_id: str, roles: list[str]):
+            closed.append(list(roles))
+            return await original_close_roles(run_id, roles)
+
+        runtime.lifecycle_status = status_with_reporter
+        runtime.lifecycle_close_roles = close_roles
+        done = await dayz_test_tool.execute_dayz_test_close(
+            runtime, RUN_ID, graceful_timeout_s=2
+        )
+        self.assertEqual(closed, [["client"], ["server"]])
+        self.assertEqual(done.get("close_order"), ["client", "server"])
+        self.assertNotIn("crash_reporter", [item["role"] for item in done["roles"]])
+        self.assertNotEqual(done.get("reason"), "role_without_rpt")
+        self.assertNotIn("crash_reporter", str(done))
 
     def test_client_diagnosis_uses_named_roots_only(self) -> None:
         named = self.root / "_client" / LEAF

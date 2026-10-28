@@ -675,8 +675,8 @@ class HealGodmodeCensusTest(unittest.TestCase):
         for command in COMMANDS:
             with self.subTest(command=command):
                 self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "f5c9d49336544bab")
-        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "f5c9d49336544bab";', self.bridge)
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
+        self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "86e3c48a43e86b91";', self.bridge)
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
 
@@ -1437,7 +1437,7 @@ class HealGodmodeMessagesTest(unittest.TestCase):
         )
         self.assertEqual(
             _class_members(self.messages, "MCPPlayerState"),
-            [("string", "name"), ("ref array<float>", "pos"), ("bool", "godmode")],
+            [("string", "name"), ("ref array<float>", "pos"), ("bool", "godmode"), ("float", "water"), ("float", "energy")],
         )
 
     def test_both_reads_fill_godmode_from_the_server_body(self) -> None:

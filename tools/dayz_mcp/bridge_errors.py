@@ -21,6 +21,7 @@ from dayz_mcp.bridge_readiness import (
     _game_not_ready_reason,
     _target_peer_down,
 )
+from dayz_mcp.loopback import is_scene_id
 from dayz_mcp.session_coordination import public_audit_stage
 
 
@@ -457,6 +458,70 @@ def _player_move_detail(result: dict[str, Any]) -> str:
     return ""
 
 
+# player_view_set fills person_view and camera_class before view_not_applied
+# (MCPClientBridge.c PostPlayerViewSetJob). Only first or third and a plain
+# class-name token cross; anything else is omitted, not leaked. A null camera
+# reads back as camera_class "", which is omitted too, as the tool says.
+_PLAYER_VIEW_CAMERA_CLASS_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+def _object_set_health_detail(result: dict[str, Any]) -> str:
+    # health_not_applied keeps the after read. Only those two numbers cross.
+    if str(result.get("error") or "") != "health_not_applied":
+        return ""
+    report = result.get("object_health")
+    if not isinstance(report, dict):
+        return ""
+    health01_after = report.get("health01_after")
+    health_level_after = report.get("health_level_after")
+    if isinstance(health01_after, bool) or not isinstance(health01_after, (int, float)):
+        return ""
+    if not math.isfinite(float(health01_after)):
+        return ""
+    if isinstance(health_level_after, bool) or not isinstance(health_level_after, int):
+        return ""
+    return f"observed=health01_after={health01_after} health_level_after={health_level_after}"
+
+
+def _player_view_set_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") != "view_not_applied":
+        return ""
+    pairs: list[str] = []
+    person_view = result.get("person_view")
+    if person_view in ("first", "third"):
+        pairs.append(f"person_view={person_view}")
+    camera_class = result.get("camera_class")
+    if isinstance(camera_class, str) and _PLAYER_VIEW_CAMERA_CLASS_RE.fullmatch(camera_class):
+        pairs.append(f"camera_class={camera_class}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
+# scene_clear fills scene_clear with the pair that blocked it before refusing
+# with scene_shared (MCPBridge.c RefuseSceneShared): two registry ids and the
+# scene each was registered under. Only positive ints and scene ids cross.
+def _scene_shared_detail(result: dict[str, Any]) -> str:
+    report = result.get("scene_clear")
+    if not isinstance(report, dict):
+        return ""
+    pairs: list[str] = []
+    for id_key, scene_key in (
+        ("carrier_id", "carrier_scene_id"),
+        ("carried_id", "carried_scene_id"),
+    ):
+        object_id = report.get(id_key)
+        scene_id = report.get(scene_key)
+        if (
+            isinstance(object_id, int)
+            and not isinstance(object_id, bool)
+            and object_id > 0
+            and is_scene_id(scene_id)
+        ):
+            pairs.append(f"{id_key}={object_id} {scene_key}={scene_id}")
+    return " ".join(pairs)
+
+
 # actor_emote fills emote_state before its three refusals (MCPClientBridge.c
 # DispatchActorEmote, PostActorEmoteJob): rejected for emote_rejected and
 # no_emote_playing, timed_out for emote_timed_out. Only those two values
@@ -503,7 +568,18 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     player_move is the fifth: not_held and aborted carry observed=released_by=
     with a known release cause, and nothing else crosses.
 
-    actor_emote is the sixth: emote_rejected, no_emote_playing and
+    player_view_set is the sixth: view_not_applied carries observed= with the
+    person_view and camera_class it read back, so the caller sees which view
+    and camera the engine kept. An empty camera_class (a null camera) is left
+    out.
+
+    scene_clear is the seventh: scene_shared carries the pair that blocked it,
+    carrier_id and carrier_scene_id, then carried_id and carried_scene_id.
+
+    object_set_health is the eighth: health_not_applied carries
+    observed=health01_after=<v> health_level_after=<n>, the same-tick read-back.
+
+    actor_emote is the ninth: emote_rejected, no_emote_playing and
     emote_timed_out carry observed=emote_state= (rejected or timed_out).
 
     The decision is by VERB, never by key presence: MCPResult is one flat class
@@ -526,6 +602,12 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _input_trigger_detail(result)
     if cmd == "player_move":
         return _player_move_detail(result)
+    if cmd == "player_view_set":
+        return _player_view_set_detail(result)
+    if cmd == "scene_clear" and str(result.get("error") or "") == "scene_shared":
+        return _scene_shared_detail(result)
+    if cmd == "object_set_health":
+        return _object_set_health_detail(result)
     if cmd == "actor_emote":
         return _actor_emote_detail(result)
     if cmd not in _UI_ECHO_VERBS:
@@ -567,6 +649,10 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # vehicle_door/door_missing, which carries the empty slot,
     # input_trigger, whose refusals carry reason= and observed=,
     # player_move, whose not_held and aborted carry observed=released_by=,
+    # player_view_set, whose view_not_applied carries observed= with its read-back,
+    # scene_clear/scene_shared, which carries the pair that blocked it,
+    # object_set_health/health_not_applied, which carries observed= with its
+    # after read-back,
     # and actor_emote, whose refusals carry observed=emote_state=.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
