@@ -4811,7 +4811,7 @@ class ServerState:
                 (row.get("round"), row.get("run_id"))
             )
             if deferred is not None:
-                deferred["client_outcome"] = {"floor": floor}
+                deferred["client_outcome"] = {"kind": kind, "floor": floor}
 
     def _close_destination_locked(
         self, instance: object, peer: str
@@ -4909,18 +4909,49 @@ class ServerState:
             "close_id": str(close_id),
         }
 
-    def _publish_due_deferred_closes_locked(self) -> None:
+    @staticmethod
+    def _deferred_close_due(entry: dict[str, object], now: float) -> bool:
+        return now >= float(entry.get("since") or 0.0) + LEASE_CLOSE_SERVER_DELAY_S
+
+    def _deferred_close_quarantine(self, *, any_close: bool = False) -> bool | None:
+        # Read before the broker lock, and only while a deferred server close
+        # could go: one due or resolved, or any of them for a result, which
+        # may resolve one. None means not read.
+        if self.coordination is None:
+            return None
+        now = self._now()
+        with self._lock:
+            entries = list(self._deferred_server_closes.values())
+        if any_close:
+            waiting = bool(entries)
+        else:
+            waiting = any(
+                entry.get("client_outcome") is not None
+                or self._deferred_close_due(entry, now)
+                for entry in entries
+            )
+        return self._retail_quarantined() if waiting else None
+
+    def _publish_due_deferred_closes_locked(self, quarantined: bool | None) -> None:
+        # quarantined is the caller's _deferred_close_quarantine; a close it
+        # did not read for waits for a later call.
         coordination = self.coordination
         if coordination is None:
             return
         now = self._now()
         for key, entry in list(self._deferred_server_closes.items()):
             round_id, run_id = key
-            due = now >= float(entry.get("since") or 0.0) + LEASE_CLOSE_SERVER_DELAY_S
             outcome = entry.get("client_outcome")
-            if outcome is None and not due:
+            if outcome is None and not self._deferred_close_due(entry, now):
+                continue
+            if quarantined is None:
                 continue
             self._deferred_server_closes.pop(key, None)
+            if quarantined:
+                coordination.note_close_unreachable(
+                    round_id, run_id, "server", "retail_quarantine"
+                )
+                continue
             instance = entry.get("instance")
             reachable, reason = self._close_destination_locked(instance, "server")
             if not reachable:
@@ -4929,7 +4960,7 @@ class ServerState:
                 )
                 continue
             floors: list[dict[str, object]] = []
-            if isinstance(outcome, dict):
+            if isinstance(outcome, dict) and outcome.get("kind") == "clean":
                 floor = outcome.get("floor")
                 conn_gen = floor.get("conn_gen") if isinstance(floor, dict) else None
                 if self._is_plain_int(conn_gen) and isinstance(floor, dict):
@@ -5018,14 +5049,11 @@ class ServerState:
         return True
 
     def _close_outcome_from_result_locked(
-        self, body: dict, row: dict[str, object]
+        self, command_id: int, body: dict, row: dict[str, object]
     ) -> None:
-        command_id = body.get("id")
-        fence = (
-            self._command_fence.get(command_id)
-            if isinstance(command_id, int)
-            else None
-        )
+        # command_id is the id store_result validated; the body may carry it
+        # as a string.
+        fence = self._command_fence.get(command_id)
         instance = row.get("instance")
         binding = self._bindings.get(instance) if isinstance(instance, str) else None
         sealed_epoch = fence[1] if fence is not None else None
@@ -5281,11 +5309,12 @@ class ServerState:
         token, token_class = classify_instance_token(instance)
         if source_pid is not None and source_creation_time is None:
             source_creation_time = self._lookup_creation_time(source_pid)
+        deferred_quarantine = self._deferred_close_quarantine()
 
         with self._lock:
             now = self._now()
             if coordination is not None:
-                self._publish_due_deferred_closes_locked()
+                self._publish_due_deferred_closes_locked(deferred_quarantine)
             prev_poll = self._last_poll_at.get(peer)
             self._poll_versions[peer] = version
             self._last_poll_at[peer] = now
@@ -5389,19 +5418,21 @@ class ServerState:
             if version_state in {"legacy_blocked", "version_mismatch"}:
                 if token is not None:
                     self._version_blocked_instances.add(token)
-                return 200, {"commands": [], "delay_ms": 0, "bind": bind_label}
-            if token is not None:
-                self._version_blocked_instances.discard(token)
-
-            if queue is None:
-                return 200, {"commands": [], "delay_ms": 0, "bind": bind_label}
+                early = True
+            else:
+                if token is not None:
+                    self._version_blocked_instances.discard(token)
+                early = queue is None
 
             deliver_queue = queue
             deliver_accredited = accredited
 
         commands: list[dict] = []
         delay_ms = 0
-        while True:
+        # A blocked poll, or one with no queue, delivers nothing but still
+        # leaves through the epilogue below: the sweep above may have
+        # discarded closes and other commands.
+        while not early:
             with self._lock:
                 queue_ref = deliver_queue
                 bound = self._bindings.get(token) if token is not None else None
@@ -5818,9 +5849,8 @@ class ServerState:
         discarded = False
         close_handled = False
         coordination = self.coordination
+        deferred_quarantine = self._deferred_close_quarantine(any_close=True)
         with self._lock:
-            if coordination is not None:
-                self._publish_due_deferred_closes_locked()
             fence = self._command_fence.get(command_id)
             if fence is not None:
                 target_instance, target_epoch, _target_pid = fence
@@ -5882,9 +5912,9 @@ class ServerState:
                 else:
                     self._lease_closes.pop(command_id, None)
                     self._enqueued_at.pop(command_id, None)
-                    self._close_outcome_from_result_locked(stored, close_row)
-                    if coordination is not None:
-                        self._publish_due_deferred_closes_locked()
+                    self._close_outcome_from_result_locked(
+                        command_id, stored, close_row
+                    )
             if not close_handled:
                 deadline = self._operation_deadlines.get(command_id)
                 known = (
@@ -5925,6 +5955,10 @@ class ServerState:
                 self._note_hold_result_locked(
                     command_id, stored, discarded, instance or ""
                 )
+            if coordination is not None:
+                # Last in the section: the returns above publish nothing, and
+                # a server close this result's client outcome lets go goes now.
+                self._publish_due_deferred_closes_locked(deferred_quarantine)
             close_outcomes = self._drain_close_outcomes_locked()
 
         self._flush_close_outcomes(close_outcomes)
@@ -6294,7 +6328,7 @@ class ServerState:
                                     }
                                 )
                                 continue
-                            reachable, reason = self._close_destination_locked(
+                            reachable, cause = self._close_destination_locked(
                                 instance, peer
                             )
                             if not reachable:
@@ -6304,7 +6338,7 @@ class ServerState:
                                         "peer": peer,
                                         "action": "unreachable",
                                         "close_id": "",
-                                        "reason": reason,
+                                        "reason": cause,
                                         "carried_floors": [],
                                     }
                                 )
@@ -6334,11 +6368,14 @@ class ServerState:
                                         "carried_floors": [],
                                     }
                                 )
+                                # The 10 s run from the round's opening,
+                                # whose age the coordinator gives (§2.4).
                                 deferred[(run_id, peer)] = {
                                     "instance": instance,
                                     "generation": generation,
                                     "lease_id": lease_id,
-                                    "since": self._now(),
+                                    "since": self._now()
+                                    - float(info.get("age_s") or 0.0),
                                 }
                             else:
                                 close_id = self._reserve_close_id_locked()
