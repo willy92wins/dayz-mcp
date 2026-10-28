@@ -103,6 +103,9 @@ class MCPBridge : Managed
 	// A1 (fb-20261028-131233-a07f): frames that called TryInit, polls actually
 	// sent, seconds since the previous sent poll (0 on the first), and the
 	// accumulator for that gap. Announced on every poll as ia=, pc=, lpims=.
+	// Signed int32 wraps negative; a negative triple is dropped and the daemon
+	// keeps the previous reading. Saturate at this cap and stay there.
+	protected const int LOAD_COUNTER_CAP = 2000000000;
 	protected int m_InitAttempts;
 	protected int m_Polls;
 	protected float m_LastPollIntervalS;
@@ -222,9 +225,19 @@ class MCPBridge : Managed
 		StartPoll();
 	}
 
+	protected int NextLoadCounter(int value)
+	{
+		if (value < 0 || value >= LOAD_COUNTER_CAP)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+
+		return value + 1;
+	}
+
 	protected void TryInit()
 	{
-		m_InitAttempts = m_InitAttempts + 1;
+		m_InitAttempts = NextLoadCounter(m_InitAttempts);
 		RestApi api = GetRestApi();
 		if (!api)
 		{
@@ -341,7 +354,7 @@ class MCPBridge : Managed
 			m_LastPollIntervalS = m_SincePollS;
 		}
 		m_SincePollS = 0.0;
-		m_Polls = m_Polls + 1;
+		m_Polls = NextLoadCounter(m_Polls);
 
 		// Reuse across completed polls, as the client does. A native-retained
 		// RestCallback must not turn every successful poll into another object.
