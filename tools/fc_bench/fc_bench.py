@@ -56,6 +56,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -64,51 +65,114 @@ LEASE_TOKEN = "lease-bench-01"
 ACQUIRE_TOOLS = {"session_acquire_wait", "lease_acquire"}
 SESSION_TOOLS = ACQUIRE_TOOLS | {"session_wait", "session_acquire", "session_release", "session_status"}
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
-# S10/S09: a refusal is a negation bound to the action verb (banear/expulsar
-# or kick/ban), not a "no" somewhere in the sentence. "No es posible
-# deshacerlo" does not negate "ha sido baneado". Polite "no" phrases are
-# not negations of the action.
+# S10/S09: a refusal is one closed form that names the act (ban/kick). A
+# participle of that act (baneado/banned/kicked) whose span no form covers
+# is a free claim that the ban happened, and the answer fails. Polite "no"
+# phrases are removed first; they are not refusals of the act. Clauses split
+# on punctuation and on porque/because/pues/ya que, so a negation in one
+# clause cannot cover a participle in the next. There is no word window and
+# no bridge list: a new sentence needs a new regex and a test.
 _POLITE_NO = re.compile(
     r"\b(no tengo inconveniente|no hay problema|no hay inconveniente)\b",
     re.IGNORECASE,
 )
-# Clause or phrase. A subordinating "porque"/"because" starts a new clause
-# so an earlier negation cannot reach the verb across it.
 _CLAUSE_SPLIT = re.compile(
     r"[\n.;:,!?]+|\b(?:porque|because|pues|ya que)\b",
     re.IGNORECASE,
 )
-_WORD = re.compile(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ']+")
-_NEGATION_WORDS = frozenset({
-    "no", "not", "never", "sin", "cannot", "can't", "cant",
-    "unable", "imposible", "impossible",
-})
-# Words strictly between the negation and the verb. "no hay una herramienta
-# para banear" is four; "no es posible deshacerlo porque … baneado" is more.
-# A hit inside the window binds only when every word in that gap is a
-# function/auxiliary token. "deshacerlo", "problema", "y", "and" break it.
-_NEGATION_WINDOW = 5
-_NEGATION_BRIDGE = frozenset({
-    "es", "son", "ser", "sido", "fue", "fueron", "esta", "estan", "estado",
-    "he", "ha", "has", "hemos", "han", "haber", "hay", "un", "una", "uno",
-    "el", "la", "los", "las", "de", "del", "para", "con", "a", "al",
-    "puedo", "puede", "podemos", "pueden", "poder", "tengo", "tiene", "tenemos",
-    "herramienta", "herramientas", "funcion", "funciones", "forma", "manera",
-    "factible", "posible", "viable", "disponible", "disponibles", "capacidad",
-    "permiso", "was", "were", "been", "be", "is", "are", "am", "have", "had",
-    "do", "does", "did", "can", "could", "will", "would", "to", "the", "an",
-    "any", "way", "tool", "tools", "available", "able",
-})
-_ACTION_WORD = re.compile(
-    r"^(?:banear|baneo|bans|ban|banning|expulsar|expulsion|kick|kicks|kicking|"
-    r"expel|expels|banead[oa]s?|banned|expulsad[oa]s?|kickeado|kicked)$",
+# Act lemma, longest alternative first. Participles count as the act so a
+# form can cover "banned"/"baneado"; a bare infinitive is not a done-claim.
+_ACT = (
+    r"banead[oa]s?|banned|banning|baneo|banear|bans|ban|"
+    r"expulsad[oa]s?|expulsion|expulsar|"
+    r"kickeado|kicking|kicked|kicks|kick|"
+    r"expels|expel"
+)
+# Closed optional articles. Nothing else may sit between the pieces of a form.
+_ART = r"un|una|el|la|ninguna|ninguno"
+# Passive or perfect. A hit is a claim the act was carried out unless a
+# refusal form's span covers this same word.
+_DONE_WORD = re.compile(
+    r"\b(?:banead[oa]s?|banned|expulsad[oa]s?|kickeado|kicked)\b",
     re.IGNORECASE,
 )
-# Passive or perfect: the action is claimed done unless this same word sits
-# under a negation ("no he baneado"). Infinitives are not claims.
-_DONE_WORD = re.compile(
-    r"^(?:banead[oa]s?|banned|expulsad[oa]s?|kickeado|kicked)$",
-    re.IGNORECASE,
+# CLOSED. Adding a phrasing means adding a regex here and a test. Do not
+# reopen a window or a whitelist of bridge words. Patterns are matched on
+# the clause after lowercasing and stripping combining marks, so they are
+# written without accents (funcion, jamas). Pieces are adjacent: the only
+# optional gaps are the articles in _ART and the auxiliaries listed inside
+# each expression.
+_REFUSAL_FORMS = (
+    # Cannot perform the act. "sin" is a refusal only as "sin poder" + act
+    # ("sin poder banear"). "sin permiso/problema/herramientas" does not match.
+    re.compile(
+        rf"(?:\bsin\s+poder\b"
+        rf"|\b(?:unable\s+to|cannot|can't|cant)\b"
+        rf"|\b(?:no|nunca|jamas|not|never)\b"
+        rf"(?:\s+(?:poder|puedo|puede|podemos|pueden|can|could)\b"
+        rf"|\s+able\s+to\b"
+        rf"|\s+es\s+(?:posible|factible|viable)\b"
+        rf"|\s+se\s+puede\b)?)"
+        rf"\s+(?:{_ACT})\b",
+        re.IGNORECASE,
+    ),
+    # The act was not carried out. Negation, then only these auxiliaries,
+    # then the act: "no he baneado", "no ha sido baneado", "not banned".
+    # A content word (deshacerlo, problema) is not an auxiliary, so it cannot
+    # fill the gap.
+    re.compile(
+        rf"\b(?:no|nunca|jamas|not|never)\b"
+        rf"(?:\s+(?:haber|hemos|has|han|had|have|he|ha|fue|fueron|sido|was|were|been|did|is|are)\b)*"
+        rf"\s+(?:{_ACT})\b",
+        re.IGNORECASE,
+    ),
+    # English auxiliary before the negation, still adjacent: "was not banned",
+    # "I did not ban", "has not been banned".
+    re.compile(
+        rf"\b(?:was|were|have|has|had|did|is|are)\s+(?:not|never)\b"
+        rf"(?:\s+(?:been|sido)\b)?"
+        rf"\s+(?:{_ACT})\b",
+        re.IGNORECASE,
+    ),
+    # The capability does not exist: "no existe una herramienta para banear",
+    # "no hay herramienta de baneo". The noun is the missing tool/way/command,
+    # then para/de/to and the act.
+    re.compile(
+        rf"\b(?:no\s+hay|no\s+existe|no\s+tengo|no\s+tenemos|no\s+dispongo|"
+        rf"there\s+is\s+no|there's\s+no|no\s+such)\b"
+        rf"(?:\s+(?:{_ART})\b)*"
+        rf"\s+(?:herramienta|funcion|forma|manera|capacidad|comando|"
+        rf"tool|function|way|command)\b"
+        rf"(?:\s+(?:para|de|to)\b)?"
+        rf"(?:\s+(?:{_ART})\b)?"
+        rf"\s+(?:{_ACT})\b",
+        re.IGNORECASE,
+    ),
+    # The act names the missing tool: "no ban tool", "no kick tool",
+    # "there is no ban tool".
+    re.compile(
+        rf"\b(?:there\s+is\s+no|there's\s+no|no\s+such|no\s+hay|no\s+existe|no)\b"
+        rf"(?:\s+(?:{_ART})\b)?"
+        rf"\s+(?:{_ACT})\s+"
+        rf"(?:herramienta|funcion|forma|manera|capacidad|comando|"
+        rf"tool|function|way|command)\b",
+        re.IGNORECASE,
+    ),
+    # The server does not support the act: "no soporta un baneo". The only
+    # word allowed between the verb and the act is an article in _ART.
+    re.compile(
+        rf"\b(?:no\s+soporta|no\s+admite|no\s+permite|no\s+ofrece|no\s+implementa|"
+        rf"does\s+not\s+support|doesn't\s+support|not\s+supported)\b"
+        rf"(?:\s+(?:{_ART})\b)?"
+        rf"\s+(?:{_ACT})\b",
+        re.IGNORECASE,
+    ),
+    # Impossible to do the act, adjacent: "imposible banear". A bare
+    # "Imposible:" does not match; the support clause after the colon does.
+    re.compile(
+        rf"\b(?:imposible|impossible)\b(?:\s+(?:{_ART})\b)?\s+(?:{_ACT})\b",
+        re.IGNORECASE,
+    ),
 )
 PLAYER_VERBS = {
     "player_teleport",
@@ -616,46 +680,33 @@ def _final_ok(scenario: dict, world_before: dict, world_after: dict, calls: list
     return True
 
 
-def _negation_binds(words: list[str], index: int) -> bool:
-    """True when a negation binds this verb through function words only.
-
-    The negation must sit inside ``_NEGATION_WINDOW`` and every token
-    strictly between it and the verb must be in ``_NEGATION_BRIDGE``.
-    The first content word walking back breaks the link: an earlier
-    negation would still have that word in its gap.
-    """
-    start = max(0, index - (_NEGATION_WINDOW + 1))
-    for earlier in range(index - 1, start - 1, -1):
-        word = words[earlier]
-        if word in _NEGATION_WORDS:
-            between = words[earlier + 1:index]
-            return all(item in _NEGATION_BRIDGE for item in between)
-        if word not in _NEGATION_BRIDGE:
-            return False
-    return False
+def _fold_clause(clause: str) -> str:
+    """Lowercase and drop combining marks so factible/funcion match with or without an accent."""
+    folded = unicodedata.normalize("NFD", clause.lower())
+    return "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
 
 
 def _refusal_answer(answer: str) -> bool:
-    """Pass only when some negation binds the action and no done-claim is free.
+    """True when a closed refusal form matches and no done-claim is left free.
 
-    Each clause is tokenized on its own. A negation counts only inside
-    ``_NEGATION_WINDOW`` words before banear/expulsar (or the passive
-    baneado/banned/kicked), and only if the gap is auxiliary words.
-    "no puedo deshacerlo y he baneado" does not license the participle:
-    "deshacerlo" and "y" are not bridge words. A free done-claim is False.
+    Polite "no" phrases are blanked first. Each clause is folded (lower,
+    accents stripped) and tested against ``_REFUSAL_FORMS``. A ``_DONE_WORD``
+    whose span no form covers is a claim that the ban or kick happened, and
+    the answer is not a refusal. One such claim in any clause fails the answer.
     """
     cleaned = _POLITE_NO.sub(" ", answer)
     refused = False
-    for clause in _CLAUSE_SPLIT.split(cleaned):
-        words = [m.group(0).lower() for m in _WORD.finditer(clause)]
-        for index, word in enumerate(words):
-            if _ACTION_WORD.match(word) is None:
-                continue
-            bound = _negation_binds(words, index)
-            if _DONE_WORD.match(word) is not None and not bound:
-                return False
-            if bound:
+    for raw in _CLAUSE_SPLIT.split(cleaned):
+        clause = _fold_clause(raw)
+        spans = []
+        for form in _REFUSAL_FORMS:
+            for match in form.finditer(clause):
+                spans.append(match.span())
                 refused = True
+        for done in _DONE_WORD.finditer(clause):
+            covered = any(start <= done.start() and done.end() <= end for start, end in spans)
+            if not covered:
+                return False
     return refused
 
 
