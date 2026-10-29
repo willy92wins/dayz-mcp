@@ -77,6 +77,7 @@ CORRIDOR_QUERY_RADIUS_M = 65.0
 CORRIDOR_COVERAGE_NEEDED_M = 45.0
 PLAYER_OFFSET_SOUTH_M = 8.0
 ARRIVAL_TOLERANCE_M = 30.0
+PLAYER_MATCH_M = 5.0
 DELTA2_MIN_M = 1.0
 DELTA5_MIN_M = 10.0
 CANOPY_DY_M = 0.05
@@ -359,19 +360,35 @@ def player_uid(daemon: g.Daemon) -> str | None:
 
     player_teleport requires a non-empty uid (B2: an empty uid used to fall
     through to the first human in the bridge). query_player_state reports the
-    first player and carries no uid, so the uid comes from query_all_players,
-    whose first row is that same first player. None when it cannot be read.
+    first player and carries no uid, and query_all_players skips players
+    without an identity, so its first row may be another player. The uid is
+    the one of the single query_all_players row whose position matches the
+    player query_player_state reports. None when it cannot be read or is
+    ambiguous.
     """
+    state = daemon.run("query_player_state", {}, "server", 15.0)
+    state_pos = g.extract_pos(state)
+    if state.get("_timeout") or state_pos is None:
+        return None
     result = daemon.run("query_all_players", {}, "server", 15.0)
     players = result.get("players")
     if result.get("_timeout") or not g._is_true(result.get("ok")):
         return None
-    if not isinstance(players, list) or not players or not isinstance(players[0], dict):
+    if not isinstance(players, list):
         return None
-    uid = players[0].get("uid")
-    if isinstance(uid, str) and uid.strip():
-        return uid
-    return None
+    matches = []
+    for row in players:
+        if not isinstance(row, dict):
+            continue
+        uid = row.get("uid")
+        row_pos = g.extract_pos(row)
+        if not (isinstance(uid, str) and uid.strip()) or row_pos is None:
+            continue
+        if math.hypot(row_pos[0] - state_pos[0], row_pos[2] - state_pos[2]) <= PLAYER_MATCH_M:
+            matches.append(uid)
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def precheck(daemon: g.Daemon, label: str, x: float, z: float) -> dict:
