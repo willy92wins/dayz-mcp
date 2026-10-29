@@ -252,7 +252,7 @@ retiring a bound instance clears its reading. They are not process CPU usage.
 | --- | --- |
 | `cmds` | Non-null commands actually dispatched, including rejected commands. Queued commands count when drained, once per command, not per poll. |
 | `cmd_bytes` | Bytes of result JSON bodies submitted to asynchronous POST, measured by byte-string `Length()`. Includes error results and later job results; excludes HTTP overhead and does not confirm receipt. |
-| `busy_ms` | Sum of synchronous dispatch durations from `GetGame().GetTime()`, in whole mission milliseconds. Includes dispatch rejection and synchronous result serialization/submission; excludes later async jobs, HTTP waits and idle polling. A short dispatch can measure 0; this is elapsed time, not CPU time. |
+| `busy_ms` | Sum of synchronous dispatch durations from `TickCount` CPU ticks divided by 10000 (integer truncation), in whole milliseconds; not mission `GetGame().GetTime()`. Includes dispatch rejection and synchronous result serialization/submission; excludes later async jobs, HTTP waits and idle polling. A short dispatch can measure 0; this is elapsed time, not CPU time. |
 | `last_cmds_per_poll` | Command array size in the last successfully parsed non-empty poll. Retained across empty polls; a gauge, not a cumulative count. |
 | `init_attempts` | Calls to `TryInit`; initialization activity, not command load. |
 | `polls` | Poll requests sent; follows the poll clock even while idle. |
