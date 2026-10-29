@@ -43,6 +43,7 @@ class MCPBridge : Managed
 	protected const float SERVER_PERF_WINDOW_MIN_S = 1.0;
 	protected const float SERVER_PERF_WINDOW_MAX_S = 60.0;
 	protected const float NAV_SNAP_RADIUS_MAX = 50.0;
+	protected const int NAV_POLY_BIT_OFFSET = 1;
 	protected const float VISIBILITY_RADIUS_MAX = 100.0;
 	// players_visibility: the field of view either side of the heading, in
 	// degrees; the head bone; the head height over the position used when that
@@ -5533,15 +5534,20 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// The filter nav_path_query walks with: the engine's default PGFilter.
-	// No flags are set: PGFilter.SetFlags takes bitmasks but PGPolyFlags is a
-	// sequential enum that declares no bit values (aiworld.c:1-26 and :61), so
-	// ORing its members builds no meaningful mask. Doors and water are not
-	// guaranteed to be included or excluded. A measured filter is future work
-	// and needs an in-game round.
+	// Shared by both endpoint samples and FindPath; admit walking, reject water.
+	// Vanilla scripts/3_Game/ai/aiworld.c:1-26 declares sequential PGPolyFlags;
+	// :61-65 declares SetFlags(includeFlags, excludeFlags, exclusiveFlags) as masks.
+	// With bit = 1 << (flag - NAV_POLY_BIT_OFFSET), offset 1 maps WALK=1 -> 1,
+	// DOOR=3 -> 4, INSIDE=4 -> 8 (include 13); DISABLED=2 -> 2, SWIM=5 -> 16,
+	// SWIM_SEA=6 -> 32 (exclude 50). NONE=0 is never shifted.
+	// The native bit convention and sea rejection still need an in-game check;
+	// changing NAV_POLY_BIT_OFFSET to 0 selects the alternative 1 << flag.
 	protected PGFilter BuildNavWalkFilter()
 	{
 		PGFilter filter = new PGFilter();
+		int includeFlags = (1 << (PGPolyFlags.WALK - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.DOOR - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.INSIDE - NAV_POLY_BIT_OFFSET));
+		int excludeFlags = (1 << (PGPolyFlags.DISABLED - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM_SEA - NAV_POLY_BIT_OFFSET));
+		filter.SetFlags(includeFlags, excludeFlags, 0);
 		return filter;
 	}
 
