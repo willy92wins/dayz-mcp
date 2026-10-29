@@ -2396,6 +2396,10 @@ class ServerState:
         self._bound_queues: dict[str, list[dict]] = {}
         self._bindings: dict[str, Binding] = {}
         self._role_index: dict[tuple[str, str], str] = {}
+        # B1 fix3: profiles config this harness overwrote, per instance, and
+        # how many live instances share each config path. Restored on retire.
+        self._harness_config_by_instance: dict[str, Path] = {}
+        self._harness_config_refs: dict[str, int] = {}
         self._station_epoch = 0
         self._ever_bound = False
         self._seen_valid_inst_poll = False
@@ -2647,6 +2651,124 @@ class ServerState:
         if isinstance(command_id, int) and not isinstance(command_id, bool):
             self._broker_rows.pop(command_id, None)
 
+    @staticmethod
+    def _harness_backup_path(config_path: Path) -> Path:
+        return config_path.with_name(config_path.name + ".harness-backup")
+
+    @staticmethod
+    def _harness_config_key(config_path: Path) -> str:
+        return os.path.normcase(str(config_path))
+
+    def _capture_harness_config(self, config_path: Path) -> None:
+        """Snapshot pre-harness bytes to the sidecar before overwriting.
+
+        An existing sidecar is never overwritten: it holds the good
+        pre-harness bytes, possibly left by a crashed run whose config
+        already says profile=test. Empty sidecar means no config existed.
+        Never raises.
+        """
+        try:
+            backup = self._harness_backup_path(config_path)
+            if backup.exists():
+                return
+            if not config_path.is_file():
+                backup.write_bytes(b"")
+                return
+            raw = config_path.read_bytes()
+            data = raw
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("profile") == "test":
+                cleaned = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"profile", "instance"}
+                }
+                data = (
+                    json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                ).encode("utf-8")
+            try:
+                from dayz_mcp.runtime_state import atomic_write_bytes
+
+                atomic_write_bytes(backup, data)
+            except Exception:
+                try:
+                    backup.write_bytes(data)
+                except OSError:
+                    pass
+        except OSError:
+            return
+
+    def restore_harness_config(self, config_path: Path) -> None:
+        """Restore config from its sidecar, or strip profile=test without one.
+
+        Byte-exact when a sidecar exists; an empty sidecar deletes the
+        config (none existed before the harness). Idempotent, never raises.
+        """
+        try:
+            backup = self._harness_backup_path(config_path)
+            if backup.exists():
+                try:
+                    data = backup.read_bytes()
+                except OSError:
+                    return
+                try:
+                    if data == b"":
+                        try:
+                            config_path.unlink()
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        try:
+                            from dayz_mcp.runtime_state import atomic_write_bytes
+
+                            atomic_write_bytes(config_path, data)
+                        except Exception:
+                            config_path.write_bytes(data)
+                except OSError:
+                    return
+                try:
+                    backup.unlink()
+                except OSError:
+                    pass
+                return
+            if not config_path.is_file():
+                return
+            try:
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            if isinstance(payload, dict) and payload.get("profile") == "test":
+                payload.pop("profile", None)
+                try:
+                    from dayz_mcp.runtime_state import atomic_write_json
+
+                    atomic_write_json(config_path, payload)
+                except Exception:
+                    pass
+        except OSError:
+            return
+
+    def _track_harness_config(self, instance: str, config_path: Path) -> None:
+        self._harness_config_by_instance[instance] = config_path
+        key = self._harness_config_key(config_path)
+        self._harness_config_refs[key] = self._harness_config_refs.get(key, 0) + 1
+
+    def _release_harness_config(self, instance: str) -> None:
+        config_path = self._harness_config_by_instance.pop(instance, None)
+        if config_path is None:
+            return
+        key = self._harness_config_key(config_path)
+        remaining = self._harness_config_refs.get(key, 1) - 1
+        if remaining > 0:
+            self._harness_config_refs[key] = remaining
+            return
+        self._harness_config_refs.pop(key, None)
+        self.restore_harness_config(config_path)
+
     def _seed_bridge_config(self, config_path: Path) -> bool:
         """Write the bridge config a launched role needs when the deploy left none.
 
@@ -2663,6 +2785,7 @@ class ServerState:
             return False
         if isinstance(self.config_port, bool) or not config_path.parent.is_dir():
             return False
+        self._capture_harness_config(config_path)
         try:
             # The fields install_mcp.py writes, plus profile=test (B1): a
             # config this harness generates is a test run, so the addon
@@ -2789,6 +2912,7 @@ class ServerState:
         # B1: every launch this harness prepares is a test run, even on a
         # config the installer wrote without a profile, so godmode and its
         # refill stay on by default exactly as harness runs had them.
+        self._capture_harness_config(config_path)
         payload["profile"] = "test"
         payload["instance"] = minted
         atomic_write_json(config_path, payload)
@@ -2811,6 +2935,7 @@ class ServerState:
             )
             self._role_index[(run_id, role)] = minted
             self._bound_queues.setdefault(minted, [])
+            self._track_harness_config(minted, config_path)
             self._ever_bound = True
             # Forget leftover poll clocks from a dead pre-launch peer so
             # status ages are None until THIS generation polls
@@ -2991,6 +3116,7 @@ class ServerState:
         override = self._test_identity_override
         if override is not None:
             override.drop_instance(instance, retired_pid)
+        self._release_harness_config(instance)
         # Result fences of already-dispatched ids survive retirement (P12).
         # Queued commands drop their fence in _mark_discarded.
 

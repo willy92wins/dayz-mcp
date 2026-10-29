@@ -740,18 +740,32 @@ class LaunchIntentWriteTest(unittest.TestCase):
         self.assertTrue(self.box.intent_path(self.paths).exists())
 
     def test_an_intent_that_cannot_be_written_refuses_the_launch(self) -> None:
+        # B1 fix3: retirement restores the pre-harness config, so record the
+        # minted instance when it is tracked instead of reading it back.
+        bindings = self.lifecycle.bindings
+        tracked: list[str] = []
+        track = bindings._track_harness_config
+
+        def recording(instance, config_path):
+            tracked.append(instance)
+            return track(instance, config_path)
+
         with patch.object(
             self.lifecycle, "_write_launch_intent", side_effect=OSError("disk full")
-        ):
+        ), patch.object(bindings, "_track_harness_config", side_effect=recording):
             result = self._start()
 
         self.assertEqual(result.get("error"), "launch_intent_failed", result)
         self.assertEqual(self.box.launches, [])
         row = self.lifecycle.manifest.get(RUN_ID)
         self.assertEqual((row.state, [r.role for r in row.processes]), ("RUNNING", ["server"]))
-        minted = json.loads((self.profiles / "dayz_mcp.json").read_text(encoding="utf-8"))[
-            "instance"
-        ]
+        self.assertEqual(len(tracked), 1, tracked)
+        minted = tracked[0]
+        config = self.profiles / "dayz_mcp.json"
+        if config.exists():
+            self.assertNotEqual(
+                json.loads(config.read_text(encoding="utf-8")).get("profile"), "test"
+            )
         self.assertIn(minted, self.lifecycle.bindings._retired_instances)
 
     def test_no_intent_without_a_bridge_token(self) -> None:
