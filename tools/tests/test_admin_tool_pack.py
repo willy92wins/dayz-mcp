@@ -57,6 +57,7 @@ ADMIN_NAMES = frozenset(
         "session_release",
         "session_status",
         "query_all_players",
+        "player_find",
         "query_player_state",
         "world_time_get",
         "logs_since",
@@ -140,9 +141,9 @@ class _FakeClientRuntime:
 
 
 class AdminToolPackTest(unittest.IsolatedAsyncioTestCase):
-    def test_pack_is_closed_and_has_22_tools(self) -> None:
+    def test_pack_is_closed_and_has_23_tools(self) -> None:
         self.assertEqual(tool_pack.tool_names("admin"), ADMIN_NAMES)
-        self.assertEqual(len(ADMIN_NAMES), 22)
+        self.assertEqual(len(ADMIN_NAMES), 23)
         self.assertEqual(tool_pack.ADMIN_TOOL_NAMES, ADMIN_NAMES)
 
     def test_unknown_pack_still_rejected(self) -> None:
