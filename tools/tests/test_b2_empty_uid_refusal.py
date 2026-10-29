@@ -54,7 +54,12 @@ class EmptyUidToolRefusalTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_and_missing_uid_refused_before_bridge(self) -> None:
         for tool, (without_uid, _with_uid, _cmd) in TOOL_CASES.items():
-            for arguments in (without_uid, {**without_uid, "uid": ""}):
+            for arguments in (
+                without_uid,
+                {**without_uid, "uid": ""},
+                {**without_uid, "uid": "   "},
+                {**without_uid, "uid": "\t\n"},
+            ):
                 with self.subTest(tool=tool, arguments=arguments):
                     with patch.object(self.runtime, "call_bridge", new=AsyncMock(return_value={"ok": 1})) as call:
                         with self.assertRaises(Exception) as caught:
@@ -93,6 +98,8 @@ class EmptyUidDaemonRefusalTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(loopback.validate_command_args(cmd, without_uid), (False, "bad_args"))
                 self.assertEqual(loopback.validate_command_args(cmd, {**without_uid, "uid": ""}), (False, "bad_args"))
+                for blank in ("   ", "\t", " \n "):
+                    self.assertEqual(loopback.validate_command_args(cmd, {**without_uid, "uid": blank}), (False, "bad_args"))
                 ok, error = loopback.validate_command_args(cmd, with_uid)
                 self.assertTrue(ok, f"{cmd} with uid refused: {error}")
 
@@ -106,6 +113,16 @@ class EmptyUidDaemonRefusalTest(unittest.TestCase):
             {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "server"},
         )
         self.assertTrue(ok)
+
+    def test_unhashable_op_is_a_structured_refusal_not_a_crash(self) -> None:
+        for op in ([], {}):
+            with self.subTest(op=op):
+                ok, error = loopback.validate_command_args(
+                    "inventory_move",
+                    {"item_object_id": 1, "op": op, "authority": "server"},
+                )
+                self.assertFalse(ok)
+                self.assertEqual(error, "bad_args")
 
     def test_reads_and_broadcast_are_not_refused(self) -> None:
         ok, _ = loopback.validate_command_args("weapon_state", {})

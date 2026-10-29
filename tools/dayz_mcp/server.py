@@ -6913,7 +6913,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         _require_admin_uid(uid)
-        if uid == "":
+        if not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if not isinstance(skip_clearance_check, bool):
             raise ToolError(
@@ -6987,7 +6987,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         _require_admin_uid(uid)
-        if uid == "":
+        if not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if not isinstance(full, bool):
             raise ToolError(_bad_args("full", full, "be a bool"))
@@ -7028,7 +7028,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         _require_admin_uid(uid)
-        if uid == "":
+        if not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"godmode": on}
         if uid != "":
@@ -7057,7 +7057,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         uid: StrictStr,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        if not isinstance(uid, str) or uid == "":
+        if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args = {"uid": uid}
         async with runtime.tool_lock:
@@ -7358,7 +7358,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 _bad_args("dest", dest, "be one of 'hands' or 'inventory'")
             )
-        if not isinstance(uid, str) or uid == "":
+        if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"classname": classname, "dest": dest}
         if uid != "":
@@ -7395,7 +7395,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if object_id <= 0:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
-        if not isinstance(uid, str) or uid == "":
+        if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"object_id": object_id}
         if uid != "":
@@ -7437,7 +7437,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if not isinstance(slot, str) or slot == "":
             raise ToolError(_bad_args("slot", slot, "be a non-empty string"))
-        if not isinstance(uid, str) or uid == "":
+        if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"object_id": object_id, "slot": slot}
         if uid != "":
@@ -7526,7 +7526,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("authority", authority, "be client or server"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
-        if (authority == "client" or op in {"to_hands", "to_inventory", "split_half", "split_to_hands"}) and uid == "":
+        if (authority == "client" or op in {"to_hands", "to_inventory", "split_half", "split_to_hands"}) and not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if op == "to_attachment" and slot == "":
             raise ToolError(_bad_args("slot", slot, "be a non-empty string for to_attachment"))
@@ -7919,7 +7919,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             rows = loadout_contract.flatten_request(loadout)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
-        if not target:
+        if not target or ("uid" in target and not target["uid"].strip()):
             raise ToolError(_bad_args("uid", uid, "be a non-empty string, or object_id a survivor id above 0"))
         timeout = _timeout(timeout_s)
         args: dict[str, Any] = dict(target)

@@ -521,6 +521,10 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+def _is_uid(value: object) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
 _ACTION_HOLD_SELECTORS = frozenset({"world", "hands", "self", "door", "component"})
 _ACTION_HOLD_KEYS = frozenset(
     {
@@ -1263,7 +1267,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _schema_variant(
             required=("pos", "uid"),
             validators={
-                "uid": _is_non_empty_string,
+                "uid": _is_uid,
                 "pos": _is_real_vector3,
             },
         )
@@ -1277,7 +1281,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             required=("full", "uid"),
             validators={
                 "full": _is_strict_bool,
-                "uid": _is_non_empty_string,
+                "uid": _is_uid,
             },
         )
     ),
@@ -1286,7 +1290,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             required=("godmode", "uid"),
             validators={
                 "godmode": _is_strict_bool,
-                "uid": _is_non_empty_string,
+                "uid": _is_uid,
             },
         )
     ),
@@ -1295,7 +1299,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "player_kill": _command_schema(
         _schema_variant(
             required=("uid",),
-            validators={"uid": _is_non_empty_string},
+            validators={"uid": _is_uid},
         )
     ),
     "bot_start": _command_schema(
@@ -2170,16 +2174,16 @@ _INVENTORY_MOVE_PLAYER_OPS = frozenset({
 
 def _uid_refusal(cmd: str, args: dict) -> bool:
     if cmd in _PLAYER_UID_COMMANDS:
-        return not _is_non_empty_string(args.get("uid"))
+        return not _is_uid(args.get("uid"))
     if cmd == "inventory_move":
-        if args.get("authority", "client") == "client" or args.get("op") in _INVENTORY_MOVE_PLAYER_OPS:
-            return not _is_non_empty_string(args.get("uid"))
+        if args.get("authority", "client") == "client" or (isinstance(args.get("op"), str) and args["op"] in _INVENTORY_MOVE_PLAYER_OPS):
+            return not _is_uid(args.get("uid"))
         return False
     if cmd in {"loadout_apply", "loadout_clear"}:
         object_id = args.get("object_id")
         if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
             return False
-        return not _is_non_empty_string(args.get("uid"))
+        return not _is_uid(args.get("uid"))
     return False
 
 
