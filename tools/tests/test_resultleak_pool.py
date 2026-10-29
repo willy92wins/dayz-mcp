@@ -68,6 +68,13 @@ class Array:
         self.items.clear()
 
 
+class String(str):
+    """Serialized JSON with Enforce's byte-counting Length primitive."""
+
+    def Length(self):
+        return len(self.encode("utf-8"))
+
+
 class Rest:
     def __init__(self, bridge):
         self.bridge = bridge
@@ -114,7 +121,7 @@ def translate(text, name, parameters, method_names):
                 return word
             if word in {"null": "None", "true": "True", "false": "False", "this": "self"}:
                 return {"null": "None", "true": "True", "false": "False", "this": "self"}[word]
-            if (word.startswith("m_") or word.startswith("MAX_") or word in method_names) and (m.start() == 0 or value[m.start() - 1] != "."):
+            if (word.startswith("m_") or word.startswith("MAX_") or word == "LOAD_COUNTER_CAP" or word in method_names) and (m.start() == 0 or value[m.start() - 1] != "."):
                 return "self." + word
             return word
         value = re.sub(r'"(?:\\.|[^"\\])*"|\b[A-Za-z_]\w*\b', names, value)
@@ -168,6 +175,7 @@ def model(bridge=None, callbacks=None):
         ("RecycleResultCallback", "cb"), ("OnResultSuccess", "data, dataSize"),
         ("OnResultError", "errorCode"), ("OnResultTimeout", ""),
         ("ReleaseCallback", "cb"), ("Shutdown", ""),
+        ("AddLoadCounter", "value, amount"),
     ]
     cb_specs = [("MCPResultCallback", "bridge"), ("AttachBridge", "bridge"),
                 ("DetachBridge", ""), ("OnSuccess", "data, dataSize"),
@@ -176,7 +184,7 @@ def model(bridge=None, callbacks=None):
         names = {name for name, _ in specs}
         result = {}
         for name, args in specs:
-            match = re.search(r"\b(?:void|MCPResultCallback) " + name + r"\(", text)
+            match = re.search(r"\b(?:void|int|MCPResultCallback) " + name + r"\(", text)
             # Constructor has no return type.
             signature = match[0] if match else "void " + name + "("
             if signature not in text:
@@ -194,6 +202,11 @@ def model(bridge=None, callbacks=None):
     if "m_ResultCallbackPool = new array<ref MCPResultCallback>();" in body(bridge, "void MCPBridge()"):
         b.m_ResultCallbackPool = Array()
     b.MAX_CALLBACK_REFS = int(re.search(r"MAX_CALLBACK_REFS = (\d+);", bridge)[1])
+    # Optional for BEFORE sources; execute the real arithmetic when present.
+    load_cap = re.search(r"LOAD_COUNTER_CAP = (\d+);", bridge)
+    if load_cap:
+        b.LOAD_COUNTER_CAP = int(load_cap[1])
+        b.m_CmdBytes = 0
     b.m_Configured = True
     b.m_Key, b.m_PeerInstance = "test", ""
     b.m_Ctx = Rest(b)
@@ -206,7 +219,7 @@ def model(bridge=None, callbacks=None):
         return callback
     b._new_callback = allocate
     b._cast_callback = lambda value: value if isinstance(value, Callback) else None
-    b._serialize = lambda value: (b.serializable, json.dumps(vars(value)))
+    b._serialize = lambda value: (b.serializable, String(json.dumps(vars(value))))
     b.EncodeQueryValue = lambda value: value
     return b
 
