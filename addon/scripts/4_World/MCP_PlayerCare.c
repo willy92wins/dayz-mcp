@@ -43,6 +43,10 @@ class MCPGodmode
 	// profile=test config. No config, or a config without profile=test,
 	// leaves every player mortal and without the refill.
 	protected static bool s_DefaultOn;
+	// How many identities have an explicit on choice this mission. Kept by
+	// Remember (O(1) per choice) so switching off can cheaply tell whether
+	// any on choice remains, without scanning the map or costing per frame.
+	protected static int s_OnCount;
 	// True once any body has been switched on this mission. Tick reads it
 	// to leave at once when no body can need a top-up.
 	protected static bool s_AnyOn;
@@ -54,6 +58,7 @@ class MCPGodmode
 	{
 		s_Choice = new map<string, bool>();
 		s_DefaultOn = false;
+		s_OnCount = 0;
 		s_AnyOn = false;
 		s_Players = new array<Man>();
 		s_TopUpAccumS = 0.0;
@@ -67,6 +72,10 @@ class MCPGodmode
 		if (on)
 		{
 			s_AnyOn = true;
+		}
+		if (!on && s_OnCount == 0)
+		{
+			s_AnyOn = false;
 		}
 	}
 
@@ -223,11 +232,25 @@ class MCPGodmode
 
 	protected static void Remember(string plainId, bool on)
 	{
+		bool wasOn;
+		wasOn = false;
 		if (!s_Choice)
 		{
 			s_Choice = new map<string, bool>();
 		}
+		if (s_Choice.Contains(plainId))
+		{
+			wasOn = s_Choice.Get(plainId);
+		}
 		s_Choice.Set(plainId, on);
+		if (on && !wasOn)
+		{
+			s_OnCount = s_OnCount + 1;
+		}
+		if (!on && wasOn)
+		{
+			s_OnCount = s_OnCount - 1;
+		}
 	}
 
 	// The player's own damage switch, never its vehicle's. A body switched on is
@@ -243,6 +266,10 @@ class MCPGodmode
 		{
 			s_AnyOn = true;
 			TopUp(player);
+		}
+		if (!on && !s_DefaultOn && s_OnCount == 0)
+		{
+			s_AnyOn = false;
 		}
 	}
 

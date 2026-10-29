@@ -7789,9 +7789,16 @@ class MCPBridge : Managed
 	// an unreadable file, or any other profile value is false, so a server
 	// with the PBO and no harness config leaves players mortal. Read once
 	// per mission from MissionServer.OnMissionStart; it touches no client.
+	// LoadFile is the non-deprecated loader: static bool LoadFile(string,
+	// out T, out string) (3_game/tools/jsonfileloader.c:7), unused elsewhere
+	// in this addon; a false result or a null config is false here.
 	static bool ConfigIsTestProfile()
 	{
-		string path = "$profile:dayz_mcp.json";
+		string path;
+		MCPConfig cfg;
+		string loadError;
+		bool loaded;
+		path = "$profile:dayz_mcp.json";
 		if (!FileExist(path))
 		{
 			path = "$mission:dayz_mcp.json";
@@ -7800,8 +7807,17 @@ class MCPBridge : Managed
 		{
 			return false;
 		}
-		MCPConfig cfg = new MCPConfig();
-		JsonFileLoader<MCPConfig>.JsonLoadFile(path, cfg);
+		cfg = new MCPConfig();
+		loadError = "";
+		loaded = JsonFileLoader<MCPConfig>.LoadFile(path, cfg, loadError);
+		if (!loaded)
+		{
+			return false;
+		}
+		if (!cfg)
+		{
+			return false;
+		}
 		if (!cfg.profile || cfg.profile == "")
 		{
 			return false;

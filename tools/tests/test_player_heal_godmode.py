@@ -122,7 +122,7 @@ _MEMBER_RE = re.compile(
 # MCPGodmode's statics read through G, its `new` and template locals as calls and
 # plain names the translator can read.
 _GODMODE_REWRITES = (
-    (re.compile(r"(?<![\w.])(s_Choice|s_DefaultOn|s_AnyOn|s_Players|s_TopUpAccumS|TOPUP_INTERVAL_S|TOPUP_MARGIN)\b"), r"G.\1"),
+    (re.compile(r"(?<![\w.])(s_Choice|s_DefaultOn|s_OnCount|s_AnyOn|s_Players|s_TopUpAccumS|TOPUP_INTERVAL_S|TOPUP_MARGIN)\b"), r"G.\1"),
     (re.compile(r"new map<string, bool>\(\)"), "NewMap()"),
     (re.compile(r"new array<Man>\(\)"), "NewArray()"),
     (re.compile(r"PlayerStat<float>"), "PlayerStatF"),
@@ -354,6 +354,7 @@ class _Godmode:
         self.G = SimpleNamespace(
             s_Choice=None,
             s_DefaultOn=False,
+            s_OnCount=0,
             s_AnyOn=False,
             s_Players=None,
             s_TopUpAccumS=0.0,
