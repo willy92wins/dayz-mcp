@@ -1533,7 +1533,7 @@ class HealGodmodeMessagesTest(unittest.TestCase):
     def test_both_query_rows_add_godmode_after_their_fields(self) -> None:
         self.assertEqual(
             _class_members(self.messages, "MCPAllPlayer"),
-            [("string", "uid"), ("ref array<float>", "pos"), ("float", "health"), ("bool", "in_vehicle"), ("bool", "godmode")],
+            [("string", "uid"), ("string", "name"), ("ref array<float>", "pos"), ("float", "health"), ("bool", "in_vehicle"), ("bool", "godmode")],
         )
         self.assertEqual(
             _class_members(self.messages, "MCPPlayerState"),

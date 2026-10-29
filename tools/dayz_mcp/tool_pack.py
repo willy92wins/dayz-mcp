@@ -31,7 +31,7 @@ LOCAL8B_TOOL_NAMES = frozenset(
 )
 
 # Fixed live-admin catalog (ticket C1, fb-20261028-131018-d528): a closed
-# set of 22 tools for operating a live server with a small local model:
+# set of 23 tools for operating a live server with a small local model:
 # session/lease handling, lease-free reads, player warning, teleport and
 # heal, time/weather, spawn/remove and restore. The same set is listed
 # before and after the lease is taken (see tool_catalog: progressive
@@ -52,6 +52,7 @@ ADMIN_TOOL_NAMES = frozenset(
         "session_release",
         "session_status",
         "query_all_players",
+        "player_find",
         "query_player_state",
         "world_time_get",
         "logs_since",
