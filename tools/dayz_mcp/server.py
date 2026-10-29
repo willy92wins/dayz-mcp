@@ -165,6 +165,7 @@ from dayz_mcp.tool_catalog import (
     _INITIAL_READ_TOOL_NAMES,
     _LEASE_REVEAL_PREFIXES,
     _OPENER_FOR_CLOSER,
+    _admin_catalog,
     _bridge_success_candidates,
     _compact_description,
     _compact_initial_catalog,
@@ -5076,6 +5077,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("session_tools_require_client_mode")
         return runtime
 
+    def _require_admin_uid(uid: str) -> None:
+        # Admin pack only (fix1): the listed schema marks uid required, so
+        # enforce it before dispatch; other packs keep the first-player
+        # fallback (empty uid is omitted from the bridge args as before).
+        if config.tool_pack == "admin" and not uid.strip():
+            raise ToolError(
+                "uid_required: uid must name a player under --tool-pack admin"
+            )
+
     # Observed after build_app has finished registering, which is the only
     # moment the set is complete, and cached because it cannot change afterwards.
     _registered_tool_names: set[str] = set()
@@ -6548,6 +6558,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("icon", icon, "be a string"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        _require_admin_uid(uid)
         args: dict[str, Any] = {
             "show_time": show_time_value,
             "title": title,
@@ -6901,6 +6912,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        _require_admin_uid(uid)
         if not isinstance(skip_clearance_check, bool):
             raise ToolError(
                 _bad_args("skip_clearance_check", skip_clearance_check, "be a bool")
@@ -6972,6 +6984,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        _require_admin_uid(uid)
         if not isinstance(full, bool):
             raise ToolError(_bad_args("full", full, "be a bool"))
         args: dict[str, Any] = {"full": full}
@@ -7010,6 +7023,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("on", on, "be a bool"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        _require_admin_uid(uid)
         args: dict[str, Any] = {"godmode": on}
         if uid != "":
             args["uid"] = uid
@@ -10186,6 +10200,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     async def list_tools_progressive():
         tools = await _original_list_tools()
+        if getattr(config, "tool_pack", None) == "admin":
+            return _admin_catalog(tools)
         if not _progressive_disclosure_active(runtime):
             return tools
         return _compact_initial_catalog(tools)
