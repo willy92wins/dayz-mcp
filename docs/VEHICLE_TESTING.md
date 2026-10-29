@@ -210,7 +210,7 @@ server replica is.
    server-known position, or `object_inspect(object_id=<fixture id>,
    want=["inventory"])` and its `telemetry.pos`, the world position
    (`GetPosition`, `MCPBridge.c:3471`). `bounding_center` is model-local
-   (`MCPMessages.c:476`) and is not a position to compare. Client
+   (`MCPMessages.c:479`) and is not a position to compare. Client
    side: `vehicle_telemetry` `pos_real` and the `vehicle_trace` samples.
    This step checks position agreement only, not the server crew:
    `query_all_players` reports the server `in_vehicle` (`IsInTransport`,

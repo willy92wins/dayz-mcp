@@ -2664,13 +2664,16 @@ class ServerState:
         if isinstance(self.config_port, bool) or not config_path.parent.is_dir():
             return False
         try:
-            # The same three fields install_mcp.py writes (install_mcp.py:977-984).
+            # The fields install_mcp.py writes, plus profile=test (B1): a
+            # config this harness generates is a test run, so the addon
+            # keeps godmode and its water/energy refill on by default there.
             atomic_write_json(
                 config_path,
                 {
                     "url": "http://127.0.0.1:" + str(self.config_port) + "/",
                     "key": self.key,
                     "pollHz": 5,
+                    "profile": "test",
                 },
             )
         except OSError:
@@ -2783,6 +2786,10 @@ class ServerState:
         minted = str(uuid.uuid4())
         if not _valid_uuid4(minted):
             minted = str(uuid.uuid4())
+        # B1: every launch this harness prepares is a test run, even on a
+        # config the installer wrote without a profile, so godmode and its
+        # refill stay on by default exactly as harness runs had them.
+        payload["profile"] = "test"
         payload["instance"] = minted
         atomic_write_json(config_path, payload)
         try:

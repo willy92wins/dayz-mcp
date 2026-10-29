@@ -1669,8 +1669,10 @@ class MissingBridgeConfigRegressionTest(unittest.TestCase):
         self.assertEqual(written["url"], "http://127.0.0.1:8765/")
         self.assertEqual(written["pollHz"], 5)
         self.assertEqual(written["instance"], minted)
-        # Exactly the installer's shape plus the mint; the bridge reads no more.
-        self.assertEqual(set(written), {"url", "key", "pollHz", "instance"})
+        # Exactly the installer's shape plus the mint and the harness profile;
+        # the bridge reads no more.
+        self.assertEqual(written["profile"], "test")
+        self.assertEqual(set(written), {"url", "key", "pollHz", "instance", "profile"})
 
     def test_seeding_never_creates_the_profiles_directory(self) -> None:
         """A wrong dev_root still fails closed instead of receiving the key."""

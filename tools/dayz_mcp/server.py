@@ -430,13 +430,17 @@ WAIT_FOR_CONDITIONS = frozenset({
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
-# Godmode is on by default (inbox 3136). The descriptions of the tools that
-# launch a run, change godmode or report it carry this sentence, so the changed
-# default damage behaviour is stated where an agent reads it.
+# Godmode is off by default (B1, SUPUESTO D1 option a; inbox 3136 had it on).
+# It is on by default only in a harness test run, whose bridge config carries
+# profile=test. The descriptions of the tools that launch a run, change godmode
+# or report it carry this sentence, so the default damage behaviour is stated
+# where an agent reads it.
 GODMODE_DEFAULT_LINE = (
-    "Godmode is ON by default: in every run that loads DayZ_MCP the server makes "
-    "each player immune to damage (falls, hits, hunger and thirst) when it "
-    "connects or respawns; call player_godmode(on=false) to get vanilla damage back."
+    "Godmode is OFF by default: players take vanilla damage unless the run is a "
+    "harness test run (its MCP bridge config says profile=test), where each player "
+    "is immune to damage (falls, hits, hunger and thirst) when it connects or "
+    "respawns; player_godmode(on=true) switches godmode on explicitly for one "
+    "player and player_godmode(on=false) gives vanilla damage back."
 )
 
 # flags=0 stays the surface default. This mask is the example to add when
@@ -7084,7 +7088,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_heal", args, "server", _timeout(timeout_s))
 
-    # inbox 3136: godmode on by default for every player of a run, switchable.
+    # inbox 3136, B1: godmode off by default, on by default only under
+    # profile=test, and always switchable per player identity.
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Switch a connected player's godmode on the "
@@ -9097,8 +9102,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "same character-selection, death-screen, menu, and mission teardown sequence as "
         "vanilla InGameMenu.GameRespawn. ok/requested means the request was "
         "issued; observe player state separately for completion. The new "
-        "character keeps the player identity's godmode: on by default, off "
-        "when player_godmode(on=false) switched it off during this mission."
+        "character keeps the player identity's godmode: off by default (on by "
+        "default only in a harness test run with profile=test), or the choice "
+        "player_godmode made for that identity during this mission."
     ))
     async def player_respawn(
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,

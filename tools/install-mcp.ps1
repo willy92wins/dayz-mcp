@@ -984,6 +984,8 @@ if (-not $key) {
   throw "empty keyfile: $KeyFile"
 }
 
+# Real install: no "profile" on purpose (B1). Only the test harness
+# writes profile=test; without it the bridge leaves godmode off.
 $jsonConfig = @{
   url = "http://127.0.0.1:$Port/"
   key = $key
