@@ -354,6 +354,26 @@ def canopy_gate(daemon: g.Daemon, x: float, z: float) -> dict:
     return record
 
 
+def player_uid(daemon: g.Daemon) -> str | None:
+    """uid of the connected player the gate drives.
+
+    player_teleport requires a non-empty uid (B2: an empty uid used to fall
+    through to the first human in the bridge). query_player_state reports the
+    first player and carries no uid, so the uid comes from query_all_players,
+    whose first row is that same first player. None when it cannot be read.
+    """
+    result = daemon.run("query_all_players", {}, "server", 15.0)
+    players = result.get("players")
+    if result.get("_timeout") or not g._is_true(result.get("ok")):
+        return None
+    if not isinstance(players, list) or not players or not isinstance(players[0], dict):
+        return None
+    uid = players[0].get("uid")
+    if isinstance(uid, str) and uid.strip():
+        return uid
+    return None
+
+
 def precheck(daemon: g.Daemon, label: str, x: float, z: float) -> dict:
     record: dict[str, object] = {"status": "FAIL"}
 
@@ -369,9 +389,13 @@ def precheck(daemon: g.Daemon, label: str, x: float, z: float) -> dict:
         return record
 
     y_player = float(canopy_player["surface_y"])
+    uid = player_uid(daemon)
+    if uid is None:
+        record["reason"] = "player_uid_unavailable"
+        return record
     tp = daemon.run(
         "player_teleport",
-        {"pos": [x, y_player, z - PLAYER_OFFSET_SOUTH_M]},
+        {"pos": [x, y_player, z - PLAYER_OFFSET_SOUTH_M], "uid": uid},
         "server",
         30.0,
     )

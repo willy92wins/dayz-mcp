@@ -7935,15 +7935,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
                 try:
                     clear = loadout_contract.clear_reply(cleared)
-                    if not target:
-                        # The first human can change between the two commands:
-                        # the creates go by uid to the player the clear acted
-                        # on, and are refused if that player has left (#261
-                        # review Y11).
-                        args = {
-                            "uid": loadout_contract.cleared_uid(cleared),
-                            "loadout_items": args["loadout_items"],
-                        }
                 except ValueError as exc:
                     raise ToolError(str(exc)) from exc
             try:
