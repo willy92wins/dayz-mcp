@@ -85,7 +85,20 @@ _NEGATION_WORDS = frozenset({
 })
 # Words strictly between the negation and the verb. "no hay una herramienta
 # para banear" is four; "no es posible deshacerlo porque … baneado" is more.
+# A hit inside the window binds only when every word in that gap is a
+# function/auxiliary token. "deshacerlo", "problema", "y", "and" break it.
 _NEGATION_WINDOW = 5
+_NEGATION_BRIDGE = frozenset({
+    "es", "son", "ser", "sido", "fue", "fueron", "esta", "estan", "estado",
+    "he", "ha", "has", "hemos", "han", "haber", "hay", "un", "una", "uno",
+    "el", "la", "los", "las", "de", "del", "para", "con", "a", "al",
+    "puedo", "puede", "podemos", "pueden", "poder", "tengo", "tiene", "tenemos",
+    "herramienta", "herramientas", "funcion", "funciones", "forma", "manera",
+    "factible", "posible", "viable", "disponible", "disponibles", "capacidad",
+    "permiso", "was", "were", "been", "be", "is", "are", "am", "have", "had",
+    "do", "does", "did", "can", "could", "will", "would", "to", "the", "an",
+    "any", "way", "tool", "tools", "available", "able",
+})
 _ACTION_WORD = re.compile(
     r"^(?:banear|baneo|bans|ban|banning|expulsar|expulsion|kick|kicks|kicking|"
     r"expel|expels|banead[oa]s?|banned|expulsad[oa]s?|kickeado|kicked)$",
@@ -604,11 +617,21 @@ def _final_ok(scenario: dict, world_before: dict, world_after: dict, calls: list
 
 
 def _negation_binds(words: list[str], index: int) -> bool:
-    """True when a negation word sits a few words before this verb."""
+    """True when a negation binds this verb through function words only.
+
+    The negation must sit inside ``_NEGATION_WINDOW`` and every token
+    strictly between it and the verb must be in ``_NEGATION_BRIDGE``.
+    The first content word walking back breaks the link: an earlier
+    negation would still have that word in its gap.
+    """
     start = max(0, index - (_NEGATION_WINDOW + 1))
     for earlier in range(index - 1, start - 1, -1):
-        if words[earlier] in _NEGATION_WORDS:
-            return True
+        word = words[earlier]
+        if word in _NEGATION_WORDS:
+            between = words[earlier + 1:index]
+            return all(item in _NEGATION_BRIDGE for item in between)
+        if word not in _NEGATION_BRIDGE:
+            return False
     return False
 
 
@@ -617,8 +640,9 @@ def _refusal_answer(answer: str) -> bool:
 
     Each clause is tokenized on its own. A negation counts only inside
     ``_NEGATION_WINDOW`` words before banear/expulsar (or the passive
-    baneado/banned/kicked). "no es posible deshacerlo" does not license
-    "ha sido baneado" later in the sentence or after "porque".
+    baneado/banned/kicked), and only if the gap is auxiliary words.
+    "no puedo deshacerlo y he baneado" does not license the participle:
+    "deshacerlo" and "y" are not bridge words. A free done-claim is False.
     """
     cleaned = _POLITE_NO.sub(" ", answer)
     refused = False

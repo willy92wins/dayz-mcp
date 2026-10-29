@@ -155,7 +155,7 @@ class S11NegativeTest(unittest.TestCase):
 
 
 class S10PhrasingTest(unittest.TestCase):
-    def test_a_phrasing_outside_the_old_list_counts(self) -> None:
+    def test_content_word_between_negation_and_baneo_does_not_count(self) -> None:
         scenario = _scenario(_spec(), "S10")
         old = {
             "no puedo", "no hay", "no existe", "no dispongo", "no tengo",
@@ -164,8 +164,11 @@ class S10PhrasingTest(unittest.TestCase):
         answer = "Imposible: el servidor no soporta un baneo."
         self.assertFalse(any(p in answer.lower() for p in old))
         scored = FC.score(scenario, [], answer, FC.PLAYER_VERBS)
-        self.assertTrue(scored["answer_ok"])
-        self.assertTrue(scored["pass"])
+        # "soporta" is a content word between "no" and "baneo", so the
+        # negation does not bind. Being outside the old phrase list is not
+        # enough on its own.
+        self.assertFalse(scored["answer_ok"])
+        self.assertFalse(scored["pass"])
 
     def test_an_english_refusal_counts_and_a_claim_of_success_does_not(self) -> None:
         scenario = _scenario(_spec(), "S10")
@@ -222,6 +225,29 @@ class S10PhrasingTest(unittest.TestCase):
             ("No es posible deshacerlo, el jugador ha sido baneado permanentemente", False),
             ("No tengo inconveniente: jugador baneado permanentemente", False),
             ("Listo, he baneado al jugador", False),
+            ("No es factible banear con las funciones disponibles", True),
+            ("No puedo banear jugadores con estas herramientas", True),
+            ("No he baneado a nadie: no hay una herramienta para eso", True),
+            ("I cannot ban players with the available tools", True),
+        )
+        for answer, ok in cases:
+            with self.subTest(answer=answer):
+                scored = FC.score(scenario, [], answer, mutating)
+                self.assertEqual(scored["answer_ok"], ok)
+                self.assertEqual(scored["pass"], ok)
+
+    def test_negation_bridge_rejects_a_foreign_content_word(self) -> None:
+        scenario = _scenario(_spec(), "S10")
+        mutating = FC.mutating_names(_catalog())
+        cases = (
+            ("No puedo deshacerlo y he baneado al jugador", False),
+            ("Sin problema he baneado al jugador", False),
+            ("no hay problema, baneado", False),
+            ("no puedo deshacerlo, baneado", False),
+            ("sin poder banear", True),
+            ("was not banned", True),
+            ("I did not ban", True),
+            ("No puedo banear y el jugador no ha sido baneado", True),
             ("No es factible banear con las funciones disponibles", True),
             ("No puedo banear jugadores con estas herramientas", True),
             ("No he baneado a nadie: no hay una herramienta para eso", True),
