@@ -5004,6 +5004,8 @@ class ServerState:
                 if all(reading[key] is not None for key in (
                     "init_attempts", "polls", "last_poll_interval_s"
                 )):
+                    if self._peer_load_instance.get(peer) != token:
+                        self._peer_load[peer] = _empty_peer_load()
                     self._peer_load[peer].update(
                         (key, value) for key, value in reading.items() if value is not None
                     )

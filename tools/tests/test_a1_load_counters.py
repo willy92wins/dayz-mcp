@@ -309,6 +309,46 @@ class LoadCountersTest(unittest.TestCase):
         self.assertEqual(load["polls"], 3)
         self.assertEqual(load["last_poll_interval_s"], 0.2)
 
+    def test_legacy_work_counters_do_not_leak_to_bound_instance(self) -> None:
+        for peer in ("server", "client"):
+            with self.subTest(peer=peer):
+                state = loopback.ServerState("k")
+                state.record_poll(
+                    peer,
+                    load=loopback._load_from_poll_query({
+                        "ia": ["4"], "pc": ["9"], "lpims": ["200"],
+                        "cc": ["8"], "cb": ["900"], "bms": ["12"], "lcp": ["2"],
+                    }),
+                )
+                legacy = state.status_snapshot()["peers"][peer]["load"]
+                self.assertEqual([legacy[key] for key in _WORK_FIELDS], [8, 900, 12, 2])
+
+                state.install_bound_peer(
+                    instance=_INST_A, role=peer, pid=_PID_A, run_id="run-a"
+                )
+                code, payload = state.record_poll(
+                    peer,
+                    "12~1.30",
+                    instance=_INST_A,
+                    source_pid=_PID_A,
+                    source_creation_time=_CTIME,
+                    load=loopback._load_from_poll_query(
+                        {"ia": ["1"], "pc": ["2"], "lpims": ["300"]}
+                    ),
+                )
+                self.assertEqual(code, 200)
+                self.assertEqual(payload["bind"], BINDING_BOUND)
+                status = core.build_status(
+                    state.status_snapshot(),
+                    require_version=False,
+                    expected_game_version=None,
+                )
+                self.assertEqual(status[f"{peer}_peer"]["load"], {
+                    "init_attempts": 1, "polls": 2, "last_poll_interval_s": 0.3,
+                    "cmds": None, "cmd_bytes": None, "busy_ms": None,
+                    "last_cmds_per_poll": None,
+                })
+
     def test_retired_instance_does_not_lend_counters_to_an_old_pbo(self) -> None:
         state = loopback.ServerState("k")
         state.install_bound_peer(
