@@ -39,7 +39,7 @@ UID_REQUIRED = frozenset({
 class _Daemon:
     def __init__(self, players: dict, state: dict | None = None) -> None:
         self.players = players
-        self.state = {"ok": 1, "pos": [1.0, 2.0, 3.0]} if state is None else state
+        self.state = {"ok": 1, "name": "A", "pos": [1.0, 2.0, 3.0]} if state is None else state
         self.calls: list[tuple[str, dict]] = []
 
     def run(self, cmd, args, peer=None, timeout_s=0.0):
@@ -101,6 +101,11 @@ class SiteGateUidTest(unittest.TestCase):
             ("observed player moved away from the only row",
              {"ok": 1, "players": [_row(UID, (7.0, 2.0, 3.0))]}, None),
             ("row without pos", {"ok": 1, "players": [{"uid": UID}]}, None),
+            ("observed player has no identity (name empty)",
+             {"ok": 1, "players": [_row(OTHER_UID, (2.0, 2.0, 3.0))]},
+             {"ok": 1, "name": "", "pos": [1.0, 2.0, 3.0]}),
+            ("observed player has no name field",
+             {"ok": 1, "players": [_row()]}, {"ok": 1, "pos": [1.0, 2.0, 3.0]}),
             ("state unreadable", {"ok": 1, "players": [_row()]}, {"ok": 0}),
             ("state timeout", {"ok": 1, "players": [_row()]}, {"_timeout": True}),
         ):
@@ -127,12 +132,16 @@ def _uid_less_calls(source: str) -> list[tuple[int, str]]:
             assigned.setdefault(node.target.id, []).append(node.value)
 
     def lacks_uid(arg_dict: ast.Dict) -> bool:
+        # A duplicate key keeps the last value, so the last literal "uid" decides.
+        last = None
         for key, value in zip(arg_dict.keys, arg_dict.values):
             if isinstance(key, ast.Constant) and key.value == "uid":
-                return (
-                    isinstance(value, ast.Constant)
-                    and (not isinstance(value.value, str) or not value.value.strip())
-                )
+                last = value
+        if last is not None:
+            return (
+                isinstance(last, ast.Constant)
+                and (not isinstance(last.value, str) or not last.value.strip())
+            )
         return not any(key is None for key in arg_dict.keys)
 
     found: list[tuple[int, str]] = []
@@ -167,6 +176,7 @@ class ScanTest(unittest.TestCase):
             ("annotated variable dict", 'a: dict = {"pos": p}\nd.run("player_teleport", a)'),
             ("blank uid", 'd.run("inventory_give", {"uid": "", "item": 1})'),
             ("whitespace uid", 'd.run("hands_take", {"uid": "  "})'),
+            ("duplicate uid key, last one blank", 'd.run("hands_take", {"uid": "ok", "uid": ""})'),
             ("none uid", 'd.run("player_godmode", {"uid": None})'),
         ):
             with self.subTest(case=label):
@@ -174,6 +184,7 @@ class ScanTest(unittest.TestCase):
 
     def test_the_scan_accepts_calls_that_carry_a_uid_or_use_exempt_tools(self) -> None:
         for label, source in (
+            ("duplicate uid key, last one set", 'd.run("hands_take", {"uid": "", "uid": u})'),
             ("literal uid key", 'd.run("player_teleport", {"pos": p, "uid": u})'),
             ("variable with uid", 'a = {"pos": p, "uid": u}\nd.run("player_teleport", a)'),
             ("keyword with uid", 'run(cmd="player_heal", args={"uid": u})'),

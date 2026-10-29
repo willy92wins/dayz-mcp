@@ -365,15 +365,20 @@ def player_uid(daemon: g.Daemon) -> str | None:
     lists exactly one player and that player stands where query_player_state
     says the observed player stands. With several players connected it
     refuses (the uid cannot be tied to the observed player). Known limit: the
-    bridge omits a player without an identity from query_all_players, so a
-    just-joining identity-less first player next to a single identified
-    player within PLAYER_MATCH_M cannot be told apart; closing it needs
-    query_player_state to carry the uid (a PBO change). None when it cannot
-    be read.
+    bridge omits a player without an identity from query_all_players and
+    reports name "" for it in query_player_state, so a nameless observed
+    player is refused. Residual: a player that gains or loses its identity
+    between the two queries; closing it needs query_player_state to carry
+    the uid (a PBO change). None when it cannot be read.
     """
     state = daemon.run("query_player_state", {}, "server", 15.0)
     state_pos = g.extract_pos(state)
     if state.get("_timeout") or state_pos is None:
+        return None
+    body = state.get("state") if isinstance(state.get("state"), dict) else state
+    name = body.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        # The bridge reports name "" for a first player without identity.
         return None
     result = daemon.run("query_all_players", {}, "server", 15.0)
     players = result.get("players")
