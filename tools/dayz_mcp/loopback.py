@@ -56,6 +56,7 @@ from dayz_mcp.instance_fence import (
 )
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.session_coordination import (
+    READ_ONLY_COMMANDS,
     ClientIdentity,
     MAX_SESSION_QUEUE,
     SessionCoordinator,
@@ -160,6 +161,75 @@ CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+# B4 (fb-20261028-131107-9249): live profile the daemon enforces. The tool
+# catalog is not access control, so the closed list lives here, at the
+# enqueue every client command passes before it can reach the bridge (and
+# at Handler._handle_lifecycle, the route the dayz_test* tools pass).
+# Off by default; the daemon turns it on only from the environment below
+# (or an explicit ServerState argument). Working assumption D4, not
+# confirmed by the owner: reads and warnings alone, admin mutations only
+# when expressly enabled, after passing the bench.
+LIVE_PROFILE_ENV = "DAYZ_MCP_LIVE_PROFILE"
+LIVE_ADMIN_ENV = "DAYZ_MCP_LIVE_ADMIN"
+LIVE_PROFILE_REFUSED = "live_profile_refused"
+LIVE_PROFILE_ADMIN_DISABLED = "live_profile_admin_disabled"
+_LIVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "live"})
+# The only mutations the profile can ever allow, and only with admin
+# enabled: the player/world mutations the admin tool pack
+# (tool_pack.ADMIN_TOOL_NAMES) enqueues on the server bridge. Each name was
+# checked against SERVER_COMMANDS. The pack's world_spawn stays out (spawn
+# family) and its restore_gameplay stays out (camera/client family), as do
+# bot_*, player_move, weapon_fire, player_view_set, vehicle_* and every
+# other command, with or without admin.
+LIVE_ADMIN_COMMANDS = frozenset(
+    {
+        "player_teleport",
+        "player_heal",
+        "player_godmode",
+        "world_time_set",
+        "world_weather_set",
+        "object_delete",
+    }
+)
+# Reads the profile allows by default, plus notify_players, the warning:
+# only server-side state reads of server/player/world. Client reads that
+# consult UI, camera or input stay out (camera_get, ui_tree, input_describe,
+# action_cursor and its server correlate action_cursor_ids, and the client
+# vehicle_telemetry read). players_visibility stays out too: although it
+# runs on the server, it reads the player's camera/input heading
+# (GetInputController().GetHeadingAngle()), like action_cursor.
+LIVE_ALLOWED_COMMANDS = frozenset(
+    ((READ_ONLY_COMMANDS & SERVER_COMMANDS) | {"notify_players"})
+    - {"action_cursor_ids", "players_visibility"}
+)
+
+
+def live_profile_refusal(
+    cmd: object, *, enabled: bool, admin_enabled: bool
+) -> str | None:
+    """Named refusal for cmd under the live profile, or None when allowed."""
+    if not enabled:
+        return None
+    if not isinstance(cmd, str):
+        return LIVE_PROFILE_REFUSED
+    if cmd in LIVE_ALLOWED_COMMANDS:
+        return None
+    if cmd in LIVE_ADMIN_COMMANDS:
+        return None if admin_enabled else LIVE_PROFILE_ADMIN_DISABLED
+    return LIVE_PROFILE_REFUSED
+
+
+def live_profile_from_env(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[bool, bool]:
+    """(profile_enabled, admin_enabled) from the daemon's environment."""
+    environment = os.environ if environ is None else environ
+
+    def _on(name: str) -> bool:
+        value = environment.get(name)
+        return isinstance(value, str) and value.strip().lower() in _LIVE_TRUE_VALUES
+
+    return _on(LIVE_PROFILE_ENV), _on(LIVE_ADMIN_ENV)
 # Releases the broker publishes when it abandons a delivered command: (source
 # command, release command, builder of the release arguments from the source's
 # id and admitted arguments). ServerState uses this table unless a caller
@@ -530,6 +600,10 @@ def _is_string(value: object) -> bool:
 
 def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
+
+
+def _is_uid(value: object) -> bool:
+    return isinstance(value, str) and value.strip() != ""
 
 
 _ACTION_HOLD_SELECTORS = frozenset({"world", "hands", "self", "door", "component"})
@@ -1305,12 +1379,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    # B2 min (fb-20261028-131048-091a): uid is required and non-empty for
+    # every player mutation. An empty or missing uid used to fall through
+    # ResolvePlayer to the first human in the bridge; the daemon now refuses
+    # it here, before anything is queued for the bridge. player_kill already
+    # had this shape.
     "player_teleport": _command_schema(
         _schema_variant(
-            required=("pos",),
-            optional=("uid",),
+            required=("pos", "uid"),
             validators={
-                "uid": _is_string,
+                "uid": _is_uid,
                 "pos": _is_real_vector3,
             },
         )
@@ -1321,21 +1399,19 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # vanilla damage instead of the choice the caller made.
     "player_heal": _command_schema(
         _schema_variant(
-            required=("full",),
-            optional=("uid",),
+            required=("full", "uid"),
             validators={
                 "full": _is_strict_bool,
-                "uid": _is_string,
+                "uid": _is_uid,
             },
         )
     ),
     "player_godmode": _command_schema(
         _schema_variant(
-            required=("godmode",),
-            optional=("uid",),
+            required=("godmode", "uid"),
             validators={
                 "godmode": _is_strict_bool,
-                "uid": _is_string,
+                "uid": _is_uid,
             },
         )
     ),
@@ -1344,7 +1420,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "player_kill": _command_schema(
         _schema_variant(
             required=("uid",),
-            validators={"uid": _is_non_empty_string},
+            validators={"uid": _is_uid},
         )
     ),
     "bot_start": _command_schema(
@@ -1583,7 +1659,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     # hands_take is predictive: the daemon accepts the request, the client
-    # finishes it. uid empty selects the first human, same as inventory_give.
+    # finishes it. uid is required and non-empty (B2 min), same as inventory_give.
     "hands_take": _command_schema(
         _schema_variant(
             required=("object_id",),
@@ -1640,7 +1716,8 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     # loadout_get / loadout_apply / loadout_clear (fb99, 220f): the target is
-    # a connected player by uid (absent is the first human) or a survivor by
+    # a connected player by uid (loadout_get only: absent is the first human;
+    # apply and clear refuse a missing uid) or a survivor by
     # object_id, never both. The rows always travel: the bridge reads an absent
     # key as no rows (fb-20260930-065425-8779). They are the flat list
     # loadout.py builds. loadout_clear is what the loadout_apply tool sends
@@ -2222,7 +2299,42 @@ def _inventory_move_op_rules(args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+# B2 min (fb-20261028-131048-091a): commands that mutate one connected
+# player and whose bridge handler resolves that player from uid. Without a
+# non-empty uid the bridge fell back to the first human, so the daemon
+# refuses them before queueing. loadout_apply/loadout_clear are exempt only
+# when object_id > 0 names a survivor dummy instead of a connected player.
+# inventory_move is covered only where it needs a player: client authority,
+# or an op the bridge always resolves a player for (MCPInventoryMoveNeedsPlayer);
+# a server-authority world-to-world move (to_cargo/to_attachment/combine of
+# unrooted items) names no player and keeps its shape. Reads (weapon_state,
+# loadout_get) and notify_players (empty uid is its broadcast form) are out.
+_PLAYER_UID_COMMANDS = frozenset({
+    "inventory_give", "hands_take", "hands_attach",
+})
+_INVENTORY_MOVE_PLAYER_OPS = frozenset({
+    "to_hands", "to_inventory", "split_half", "split_to_hands",
+})
+
+
+def _uid_refusal(cmd: str, args: dict) -> bool:
+    if cmd in _PLAYER_UID_COMMANDS:
+        return not _is_uid(args.get("uid"))
+    if cmd == "inventory_move":
+        if args.get("authority", "client") == "client" or (isinstance(args.get("op"), str) and args["op"] in _INVENTORY_MOVE_PLAYER_OPS):
+            return not _is_uid(args.get("uid"))
+        return False
+    if cmd in {"loadout_apply", "loadout_clear"}:
+        object_id = args.get("object_id")
+        if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
+            return False
+        return not _is_uid(args.get("uid"))
+    return False
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
+    if isinstance(args, dict) and _uid_refusal(cmd, args):
+        return False, "bad_args"
     schema = _COMMAND_ARG_SCHEMAS.get(cmd)
     if schema is not None:
         variants, delegated = schema
@@ -2317,7 +2429,13 @@ class ServerState:
         coordination: SessionCoordinator | None = None,
         config_port: int | None = None,
         release_registry: tuple | None = None,
+        live_profile: bool = False,
+        live_admin_enabled: bool = False,
     ) -> None:
+        if type(live_profile) is not bool or type(live_admin_enabled) is not bool:
+            raise ValueError("invalid_live_profile")
+        self.live_profile = live_profile
+        self.live_admin_enabled = live_admin_enabled
         self.key = key
         # Loopback port this daemon owns. Only read to seed a bridge config
         # the deploy never wrote; None keeps prepare() failing closed.
@@ -2385,10 +2503,12 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
-        # d026: lease -> the last camera_path_play play that started under it
-        # and any delivered since without an answer (store_result prunes the
-        # rest). A path plays on after its play answers; cleanup_owner stops it.
+        # Delivered plays stay held until the client confirms their replacement
+        # or refusal, or their cleanup is queued. Command ids are not execution
+        # order: the client's pending array removes by swapping with its last.
         self._camera_path_play_by_lease: dict[str, set[int]] = {}
+        self._camera_path_active_by_lease: dict[str, int] = {}
+        self._camera_path_release_pending_leases: set[str] = set()
         self._holds: dict[str, dict[str, object]] = {}
         self._hold_by_command: dict[int, str] = {}
         self._hold_blocked_runs: set[str] = set()
@@ -2625,13 +2745,16 @@ class ServerState:
         if isinstance(self.config_port, bool) or not config_path.parent.is_dir():
             return False
         try:
-            # The same three fields install_mcp.py writes (install_mcp.py:977-984).
+            # The fields install_mcp.py writes, plus profile=test (B1): a
+            # config this harness generates is a test run, so the addon
+            # keeps godmode and its water/energy refill on by default there.
             atomic_write_json(
                 config_path,
                 {
                     "url": "http://127.0.0.1:" + str(self.config_port) + "/",
                     "key": self.key,
                     "pollHz": 5,
+                    "profile": "test",
                 },
             )
         except OSError:
@@ -2744,6 +2867,10 @@ class ServerState:
         minted = str(uuid.uuid4())
         if not _valid_uuid4(minted):
             minted = str(uuid.uuid4())
+        # B1: every launch this harness prepares is a test run, even on a
+        # config the installer wrote without a profile, so godmode and its
+        # refill stay on by default exactly as harness runs had them.
+        payload["profile"] = "test"
         payload["instance"] = minted
         atomic_write_json(config_path, payload)
         try:
@@ -3407,6 +3534,22 @@ class ServerState:
             "last_recovered_age_s": age if recent else None,
         }
 
+    def _live_profile_refusal(
+        self, cmd: object, *, internal: bool
+    ) -> tuple[int, dict] | None:
+        # Daemon-internal commands (owner cleanup, releases) are not a
+        # client sending a command, so the profile does not gate them.
+        if internal:
+            return None
+        refusal = live_profile_refusal(
+            cmd,
+            enabled=self.live_profile,
+            admin_enabled=self.live_admin_enabled,
+        )
+        if refusal is None:
+            return None
+        return 403, {"error": refusal}
+
     def enqueue_command(
         self,
         cmd: str,
@@ -3420,6 +3563,9 @@ class ServerState:
         expected_fence: object = _FENCE_OMITTED,
         lease_token_for_proof: str | None = None,
     ) -> tuple[int, dict]:
+        live_refusal = self._live_profile_refusal(cmd, internal=internal)
+        if live_refusal is not None:
+            return live_refusal
         if expected_fence is _FENCE_OMITTED:
             parsed_fence = None
         else:
@@ -3761,13 +3907,12 @@ class ServerState:
         self._camera_path_play_by_lease.setdefault(owner[1], set()).add(command_id)
 
     def _note_camera_path_result_locked(self, command_id: int, stored: dict) -> None:
-        """One play's answer prunes the plays its lease would release (d026).
+        """Prune only a play the client explicitly refused or replaced.
 
-        A play that started replaced every path before it, so the plays below
-        it need no release; a play that answered otherwise never started. A
-        discarded late answer counts the same way; one that store_result turns
-        away earlier (binding_retired, late_result_fenced) leaves the play
-        held. Caller holds the lock.
+        The echoed predecessor was inactive when this play started, regardless
+        of command or HTTP result order. Other unanswered plays may still run.
+        An older client without the echo leaves them held conservatively. Late
+        accepted results count too; fenced results never reach here. Lock held.
         """
 
         for lease_id, command_ids in self._camera_path_play_by_lease.items():
@@ -3781,20 +3926,29 @@ class ServerState:
             and not isinstance(ok_value, bool)
             and ok_value == 1
         ):
-            command_ids.difference_update(
-                [held for held in command_ids if held < command_id]
-            )
-        else:
+            path = stored.get("camera_path")
+            if (
+                isinstance(path, dict)
+                and type(path.get("command_id")) is int
+                and path["command_id"] == command_id
+                and path.get("state") == "playing"
+            ):
+                replaced = path.get("replaced_command_id")
+                if type(replaced) is int and replaced > 0 and replaced != command_id:
+                    command_ids.discard(replaced)
+                self._camera_path_active_by_lease[lease_id] = command_id
+        elif ok_value is False or (type(ok_value) is int and ok_value == 0):
             command_ids.discard(command_id)
         if not command_ids:
             del self._camera_path_play_by_lease[lease_id]
+            self._camera_path_active_by_lease.pop(lease_id, None)
 
     def enqueue_camera_path_releases_for_lease(self, lease_id: str) -> dict[str, int]:
         """camera_path_release for each play that lease still holds (d026).
 
-        That is the last play that started under it and any delivered since
-        without an answer: store_result drops a play that answered without
-        starting and every play below one that started.
+        Try the client-confirmed active play first, then newest delivered ids.
+        Failed enqueues remain held and are retried after a client poll drains
+        the queue or on another lease cleanup call; enqueue is not a stop ack.
 
         A path moves the camera every frame after its play has answered, so it
         must not outlive the lease that started it. The client stops a path
@@ -3810,7 +3964,9 @@ class ServerState:
         if not isinstance(lease_id, str) or not lease_id:
             return {"enqueued": 0, "failed": 0}
         with self._lock:
-            command_ids = sorted(self._camera_path_play_by_lease.pop(lease_id, set()))
+            held = self._camera_path_play_by_lease.get(lease_id, set())
+            active = self._camera_path_active_by_lease.get(lease_id)
+            command_ids = sorted(held, key=lambda value: (value == active, value), reverse=True)
             enqueued = 0
             failed = 0
             for command_id in command_ids:
@@ -3823,9 +3979,16 @@ class ServerState:
                 release_id = payload.get("id") if isinstance(payload, dict) else None
                 if status == 200 and isinstance(release_id, int):
                     self._fire_and_forget_ids.add(release_id)
+                    held.discard(command_id)
                     enqueued += 1
                 else:
                     failed += 1
+            if held:
+                self._camera_path_release_pending_leases.add(lease_id)
+            else:
+                self._camera_path_release_pending_leases.discard(lease_id)
+                self._camera_path_play_by_lease.pop(lease_id, None)
+                self._camera_path_active_by_lease.pop(lease_id, None)
         return {"enqueued": enqueued, "failed": failed}
 
     def _enqueue_command(
@@ -3842,6 +4005,9 @@ class ServerState:
         expected_fence: dict | None = None,
         lease_token: str | None = None,
     ) -> tuple[int, dict]:
+        live_refusal = self._live_profile_refusal(cmd, internal=internal)
+        if live_refusal is not None:
+            return live_refusal
         if cmd not in self.whitelisted_commands():
             return 400, {"error": "not_whitelisted"}
         if not isinstance(args, dict):
@@ -5139,6 +5305,16 @@ class ServerState:
                 pass
         self._finish_operations(finished_operations)
 
+        # Capacity has just been freed. Retry only cleanup already requested by
+        # a lease end, never plays held by a live lease. New releases leave on
+        # the next poll and pass the usual binding/census checks at delivery.
+        if peer == "client":
+            with self._lock:
+                retry_leases = tuple(self._camera_path_release_pending_leases)
+            if retry_leases and not self._retail_quarantined():
+                for lease_id in retry_leases:
+                    self.enqueue_camera_path_releases_for_lease(lease_id)
+
         return 200, {"commands": commands, "delay_ms": delay_ms, "bind": bind_label}
 
     def _note_poll_pid_locked(
@@ -5778,9 +5954,10 @@ class ServerState:
             if "retail_quarantine" not in values:
                 values.append("retail_quarantine")
             if pending_paths:
-                # No release goes out, so a path may play on until it ends.
+                # No release goes out now. Keep the obligation for a later
+                # drain after quarantine clears; no client confirmed a stop.
                 with self._lock:
-                    self._camera_path_play_by_lease.pop(lease_id, None)
+                    self._camera_path_release_pending_leases.add(lease_id)
                 values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
             return cleanup
@@ -6393,6 +6570,10 @@ class Handler(BaseHTTPRequestHandler):
         the grant response must arrive whole.
         """
 
+        # B4: adopting a run is a lifecycle delegation that bypasses
+        # /lifecycle/*; under the live profile it never happens.
+        if getattr(self.state, "live_profile", False):
+            return payload
         if payload.get("status") != "active":
             return payload
         token = payload.get("lease_token")
@@ -6653,6 +6834,14 @@ class Handler(BaseHTTPRequestHandler):
             return result
 
     def _handle_lifecycle(self, action: str) -> None:
+        # B4: the dayz_test* tools reach the lifecycle through these routes,
+        # never through enqueue_command, so the live profile refuses every
+        # /lifecycle/* route here, before any delegation, admin or not.
+        # Daemon-internal publications, owner cleanup and releases do not
+        # pass through this handler and stay unfiltered.
+        if getattr(self.state, "live_profile", False):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         self._clear_request_renewed_lease()
         body = self._read_json()
         if body is None:
@@ -6770,6 +6959,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid_op"})
 
     def _handle_admin(self, action: str) -> None:
+        # B4 round 2: /admin/reconcile and
+        # /admin/lifecycle-recovery-repair are external HTTP entry points
+        # into the lifecycle, so under the live profile they are refused
+        # here, before any delegation, admin or not -- same as
+        # /lifecycle/*. Daemon-internal cleanup paths that call
+        # lifecycle.admin_reconcile or _repair_lifecycle_recovery_fault
+        # directly do not pass through this handler and stay unfiltered.
+        if action in {"reconcile", "lifecycle-recovery-repair"} and getattr(
+            self.state, "live_profile", False
+        ):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         body = self._read_json()
         if body is None:
             return

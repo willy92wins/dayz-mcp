@@ -1083,6 +1083,8 @@ def install_runtime(
     )
 
     key = _load_or_create_key(options.keyfile, token_factory)
+    # Real install: no "profile" on purpose (B1). Only the test harness
+    # writes profile=test; without it the bridge leaves godmode off.
     config_payload = json.dumps(
         {
             "url": f"http://127.0.0.1:{options.port}/",

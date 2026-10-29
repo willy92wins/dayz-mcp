@@ -31,9 +31,9 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("query_player_state", {}, "query_player_state"),
     ("weapon_state", {}, "weapon_state"),
     ("weapon_state", {"uid": "76561198000000000"}, "weapon_state"),
-    ("hands_take", {"object_id": 1}, "hands_take"),
-    ("inventory_move", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "client"}, "inventory_move"),
-    ("inventory_move", {"item_object_id": 1, "op": "to_hands", "authority": "server"}, "inventory_move"),
+    ("hands_take", {"object_id": 1, "uid": "76561198000000000"}, "hands_take"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "client", "uid": "76561198000000000"}, "inventory_move"),
+    ("inventory_move", {"item_object_id": 1, "op": "to_hands", "authority": "server", "uid": "76561198000000000"}, "inventory_move"),
     ("hands_take", {"object_id": 4, "uid": "76561198000000000"}, "hands_take"),
     ("query_all_players", {}, "query_all_players"),
     ("world_spawn", {"type": "CivilianSedan", "pos": _POS}, "world_spawn"),
@@ -339,9 +339,10 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("player_move", {"phase": "press", "ttl_s": 1, "to": [0, 0, 0], "arrive_radius_m": 5}, "player_move"),
     ("player_move", {"phase": "release"}, "player_move"),
     # Both choices and the uid pass-through of the two server verbs (bef7, 3136).
-    ("player_heal", {}, "player_heal"),
+    # B2: uid is required and non-empty for both verbs.
+    ("player_heal", {"uid": "76561198000000000"}, "player_heal"),
     ("player_heal", {"full": False, "uid": "76561198000000000"}, "player_heal"),
-    ("player_godmode", {"on": False}, "player_godmode"),
+    ("player_godmode", {"on": False, "uid": "76561198000000000"}, "player_godmode"),
     ("player_godmode", {"on": True, "uid": "76561198000000000"}, "player_godmode"),
     ("player_trace", {"mode": "start"}, "player_trace"),
     ("player_trace", {"mode": "start", "sample_hz": 60, "max_samples": 8192}, "player_trace"),
@@ -361,13 +362,13 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("weapon_sights", {"mode": "none"}, "weapon_sights"),
     # Both target shapes of the loadout verbs, and the rows of every dest
     # at the depth and count caps (fb99, 220f). clear_first sends loadout_clear
-    # before loadout_apply, and both payloads must pass; with neither target
-    # the apply goes by the uid the clear answered (#261 review Y11).
+    # before loadout_apply, and both payloads must pass. B2: apply/clear need
+    # a non-empty uid or an object_id; neither target is refused.
     ("loadout_get", {}, "loadout_get"),
     ("loadout_get", {"uid": "76561198000000000"}, "loadout_get"),
     ("loadout_get", {"object_id": 3}, "loadout_get"),
-    ("loadout_apply", {"loadout": {}}, "loadout_apply"),
-    ("loadout_apply", {"loadout": {}, "clear_first": True}, "loadout_apply"),
+    ("loadout_apply", {"loadout": {}, "uid": "76561198000000000"}, "loadout_apply"),
+    ("loadout_apply", {"loadout": {}, "uid": "76561198000000000", "clear_first": True}, "loadout_apply"),
     (
         "loadout_apply",
         {"loadout": {}, "uid": "76561198000000000", "clear_first": True},
@@ -463,7 +464,7 @@ class IngressSchemaCoherenceTest(unittest.IsolatedAsyncioTestCase):
                     )
 
     async def test_player_teleport_clearance_raycast_passes_the_ingress(self) -> None:
-        calls = await _captured_calls("player_teleport", {"pos": [10.0, 0.0, 20.0]})
+        calls = await _captured_calls("player_teleport", {"pos": [10.0, 0.0, 20.0], "uid": "76561198000000000"})
         rays = [args for command, args, _peer in calls if command == "scene_raycast"]
         self.assertEqual(len(rays), 1, f"clearance raycast not sent: {calls!r}")
         for command, args, _peer in calls:

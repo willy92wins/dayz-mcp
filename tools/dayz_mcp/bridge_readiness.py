@@ -434,6 +434,10 @@ def _compare_bridge_capabilities(
         and mapping[item] not in registered_tools
     )
     announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
+    # A play without its lease-end release cannot be admitted by loopback.
+    # Report the same capability requirement here instead of a false match.
+    if peer == "client" and "camera_path_release" not in announced_set:
+        announced_tools.discard("camera_path_play")
     not_announced = sorted(
         tool for tool in registered_bridge_tools if tool not in announced_tools
     )

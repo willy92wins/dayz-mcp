@@ -35,7 +35,7 @@ class RunlossRetirementTest(unittest.IsolatedAsyncioTestCase):
 
     def refusal(self, peer="client"):
         cmd, args = ("camera_set", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}) if peer == "client" else (
-            "player_teleport", {"pos": [1.0, 2.0, 3.0]})
+            "player_teleport", {"uid": "player-1", "pos": [1.0, 2.0, 3.0]})
         status, payload = self.fx.state.enqueue_command(cmd, args, peer=peer)
         self.assertEqual(status, 409)
         self.assertEqual(payload["error"], "binding_retired")
@@ -138,7 +138,7 @@ class RunlossRetirementTest(unittest.IsolatedAsyncioTestCase):
         state.install_bound_peer(instance=fixtures.INST_OFF, role="offline", pid=900)
         state.retire_run("testrun", "reaped")
         for cmd, peer, args in (("camera_set", "client", {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0}),
-                                ("player_teleport", "server", {"pos": [1.0, 2.0, 3.0]})):
+                                ("player_teleport", "server", {"uid": "player-1", "pos": [1.0, 2.0, 3.0]})):
             status, payload = state.enqueue_command(cmd, args, peer=peer)
             self.assertEqual(status, 409)
             self.assertIn("all_processes_gone_or_foreign", server._public_enqueue_error(payload))

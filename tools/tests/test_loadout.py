@@ -366,9 +366,10 @@ def _announce_server(
 _WIRE_ARGS = {
     GET: {"uid": ""},
     APPLY: {
+        "uid": "76561198000000000",
         "loadout_items": [{"type": "TShirt_White", "slot": "Body", "dest": "attachment", "parent": -1}],
     },
-    CLEAR: {"uid": ""},
+    CLEAR: {"uid": "76561198000000000"},
 }
 
 
@@ -426,10 +427,10 @@ class LoadoutIngressTest(unittest.TestCase):
 
     def test_the_payloads_the_tool_builds_pass_the_ingress(self) -> None:
         for command, args in (
-            (APPLY, {"loadout_items": _rows(PRESET_8)}),
+            (APPLY, {"uid": "76561198000000000", "loadout_items": _rows(PRESET_8)}),
             (APPLY, {"object_id": 9, "loadout_items": _rows(PRESET_8)}),
             (APPLY, {"uid": "76561198000000000", "loadout_items": []}),
-            (CLEAR, {}),
+            (CLEAR, {"uid": "76561198000000000"}),
             (CLEAR, {"object_id": 9}),
             (CLEAR, {"uid": "76561198000000000"}),
         ):
@@ -1241,20 +1242,17 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("clear", result)
         self.assertIsNone(result["clear"])
 
-        _default, default_call = await self._call(APPLY, _flat_answer([]), loadout={})
+        _default, default_call = await self._call(APPLY, _flat_answer([]), loadout={}, uid="76561198000000000")
         default_call.assert_awaited_once_with(
-            APPLY, {"loadout_items": []}, "server", DEFAULT_TOOL_TIMEOUT_S
+            APPLY, {"uid": "76561198000000000", "loadout_items": []}, "server", DEFAULT_TOOL_TIMEOUT_S
         )
 
     async def test_clear_first_sends_the_clear_and_then_the_rows(self) -> None:
-        # With neither target the rows go by the uid the clear answered, the
-        # player it acted on (#261 review Y11); a uid or an object_id already
-        # names one target and goes out again as it is.
-        first_human = "76561198000000001"
+        # B2: a uid or an object_id already names one target and goes out
+        # again as it is; neither target is refused before the bridge.
         for target, cleared_uid, apply_target in (
             ({"object_id": 5}, "", {"object_id": 5}),
             ({"uid": "76561198000000000"}, "76561198000000000", {"uid": "76561198000000000"}),
-            ({}, first_human, {"uid": first_human}),
         ):
             with self.subTest(target=target):
                 result, sent = await self._run(
@@ -1295,6 +1293,7 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
             },
             loadout=tree,
             clear_first=True,
+            uid="76561198000000000",
         )
         self.assertEqual([command for command, *_rest in sent], [CLEAR, APPLY])
         self.assertEqual(result["clear"], {"deleted": 2, "cleanup_complete": False})
@@ -1322,24 +1321,23 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([command for command, *_rest in sent], [CLEAR])
 
     async def test_a_clear_without_the_uid_it_acted_on_sends_nothing_more(self) -> None:
-        # #261 review Y11: with neither target the rows need the clear's uid; a
-        # uid or an object_id is sent again as it is, uid or not.
+        # B2: with neither target (or an empty uid and no object_id) the
+        # apply is refused before the bridge, so nothing is sent at all.
         counts = {"ok": 1, "deleted": 2, "cleanup_complete": 1}
-        for label, answer in (
-            ("absent", dict(counts)),
-            ("empty", dict(counts, uid="")),
-            ("not_a_string", dict(counts, uid=76561198000000000)),
+        for label, target in (
+            ("neither", {}),
+            ("empty_uid", {"uid": ""}),
         ):
             with self.subTest(label):
                 text, sent = await self._run_refused(
-                    {CLEAR: answer, APPLY: _all_created(_rows(PRESET_8))},
+                    {CLEAR: dict(counts), APPLY: _all_created(_rows(PRESET_8))},
                     loadout=PRESET_8,
                     clear_first=True,
+                    **target,
                 )
-                self.assertIn(
-                    f"{loadout.INCOMPLETE}: loadout_clear answered without the uid", text
-                )
-                self.assertEqual([command for command, *_rest in sent], [CLEAR])
+                self.assertIn("bad_args", text)
+                self.assertIn("uid", text)
+                self.assertEqual(sent, [])
         for target in ({"uid": "76561198000000000"}, {"object_id": 5}):
             with self.subTest(target=target):
                 result, sent = await self._run(
@@ -1366,7 +1364,7 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(self.runtime, "call_bridge", new=call_bridge):
             task = asyncio.ensure_future(
-                self.app.call_tool(APPLY, {"loadout": PRESET_8, "clear_first": True})
+                self.app.call_tool(APPLY, {"loadout": PRESET_8, "clear_first": True, "uid": "76561198000000000"})
             )
             await asyncio.wait_for(waiting.wait(), 2.0)
             task.cancel()
@@ -1389,6 +1387,7 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
                     },
                     loadout=PRESET_8,
                     clear_first=True,
+                    uid="76561198000000000",
                 )
                 self.assertTrue(
                     text.endswith(
@@ -1399,7 +1398,7 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual([command for command, *_rest in sent], [CLEAR, APPLY])
         # Without clear_first a refusal carries no clear.
-        text, sent = await self._run_refused({APPLY: ToolError("busy")}, loadout=PRESET_8)
+        text, sent = await self._run_refused({APPLY: ToolError("busy")}, loadout=PRESET_8, uid="76561198000000000")
         self.assertTrue(text.endswith(": busy"), text)
         self.assertEqual([command for command, *_rest in sent], [APPLY])
 
@@ -1409,22 +1408,22 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
             {"type": "Jeans_Blue", "slot": "Legs"},
             {"type": "AthleticShoes_Black"},
         ]}
-        text = await self._refused(APPLY, loadout=missing_slot)
+        text = await self._refused(APPLY, loadout=missing_slot, uid="76561198000000000")
         self.assertIn("bad_args: loadout.attachments[2].slot", text)
         too_many = {"attachments": [{"type": "Rag", "slot": f"Slot{i}"} for i in range(65)]}
-        self.assertIn("at most 64 items", await self._refused(APPLY, loadout=too_many))
-        self.assertIn("nests at most 4", await self._refused(APPLY, loadout=_chain(5)))
+        self.assertIn("at most 64 items", await self._refused(APPLY, loadout=too_many, uid="76561198000000000"))
+        self.assertIn("nests at most 4", await self._refused(APPLY, loadout=_chain(5), uid="76561198000000000"))
         self.assertIn(
             "must not both be given",
             await self._refused(APPLY, loadout={}, object_id=2, uid="7656"),
         )
         for clear_first in (1, "true"):
             with self.subTest(clear_first=clear_first):
-                await self._refused(APPLY, loadout={}, clear_first=clear_first)
+                await self._refused(APPLY, loadout={}, clear_first=clear_first, uid="76561198000000000")
         # A bad loadout is refused before a clear is sent too.
         self.assertIn(
             "bad_args: loadout.attachments[2].slot",
-            await self._refused(APPLY, loadout=missing_slot, clear_first=True),
+            await self._refused(APPLY, loadout=missing_slot, clear_first=True, uid="76561198000000000"),
         )
 
     async def test_apply_refuses_a_loadout_that_is_not_an_object_with_its_path(self) -> None:
@@ -1433,7 +1432,7 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         for value in ([], None, "TShirt_White"):
             with self.subTest(value=value):
                 for clear_first in (False, True):
-                    text = await self._refused(APPLY, loadout=value, clear_first=clear_first)
+                    text = await self._refused(APPLY, loadout=value, clear_first=clear_first, uid="76561198000000000")
                     self.assertIn(
                         f"bad_args: loadout {value!r} must be an object with attachments and hands",
                         text,
@@ -1443,14 +1442,14 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
         for tree, path in _NULL_LISTS:
             for clear_first in (False, True):
                 with self.subTest(path=path, clear_first=clear_first):
-                    text = await self._refused(APPLY, loadout=tree, clear_first=clear_first)
+                    text = await self._refused(APPLY, loadout=tree, clear_first=clear_first, uid="76561198000000000")
                     self.assertIn(f"bad_args: {path} None must be a list of items", text)
 
     async def test_an_unreadable_read_after_the_apply_answers_and_does_not_raise(self) -> None:
         # #261 review Y16, through the tool: an attachment with no slot name.
         read = [{"type": "TShirt_White", "slot": "", "dest": "attachment", "parent": -1}]
-        result, call = await self._call(APPLY, _flat_answer(read), loadout={})
-        call.assert_awaited_once_with(APPLY, {"loadout_items": []}, "server", DEFAULT_TOOL_TIMEOUT_S)
+        result, call = await self._call(APPLY, _flat_answer(read), loadout={}, uid="76561198000000000")
+        call.assert_awaited_once_with(APPLY, {"uid": "76561198000000000", "loadout_items": []}, "server", DEFAULT_TOOL_TIMEOUT_S)
         self.assertEqual(result["ok"], 0)
         self.assertEqual(result["warnings"], [loadout.INCOMPLETE])
         self.assertNotIn("status", result)
@@ -1570,8 +1569,8 @@ class LoadoutToolTest(unittest.IsolatedAsyncioTestCase):
             "A clear that is refused, times out or is cancelled sends nothing more",
             "clear=deleted=N cleanup_complete=0 or 1",
             "A command the game was already handed still runs after the tool gave up on it",
-            "With clear_first and neither, the creates go by uid to the player the clear acted on",
-            "a first human who left in between answers player_not_found",
+            "uid is required and never falls back to the first human",
+            "give a non-empty uid or an object_id above 0, not both",
             "timeout_s is the wait for each of these game calls",
             "Created items get no registry ids",
             "Quantity, health and other item state are not set",
@@ -3111,12 +3110,13 @@ def _wire_answer(result: _Result) -> dict[str, Any]:
 
 
 class LoadoutClearFirstTargetTest(unittest.IsolatedAsyncioTestCase):
-    """#261 review Y11: clear_first with neither object_id nor uid, from the
-    tool down to the translated dispatches and main's player resolvers.
+    """B2: clear_first with an explicit uid, from the tool down to the
+    translated dispatches and main's player resolvers.
 
-    Player A is the first human and wears a shirt; B is connected too. Between
+    Player A is named by uid and wears a shirt; B is connected too. Between
     the clear and the creates, A leaves, or B becomes the first human. The
-    creates go to A or are refused; they never dress B."""
+    creates go to A or are refused; they never dress B. With neither target
+    the tool refuses before anything is sent."""
 
     A = "76561198000000001"
     B = "76561198000000002"
@@ -3172,7 +3172,7 @@ class LoadoutClearFirstTargetTest(unittest.IsolatedAsyncioTestCase):
         self.between = lambda: self.bridge.game.players.remove(self.a)
         with patch.object(self.runtime, "call_bridge", new=self._call_bridge):
             with self.assertRaises(ToolError) as raised:
-                await self.app.call_tool(APPLY, {"loadout": self.TREE, "clear_first": True})
+                await self.app.call_tool(APPLY, {"loadout": self.TREE, "clear_first": True, "uid": self.A})
         self.assertTrue(
             str(raised.exception).endswith(
                 "player_not_found; clear=deleted=1 cleanup_complete=1"
@@ -3181,7 +3181,7 @@ class LoadoutClearFirstTargetTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.sent,
-            [(CLEAR, {}), (APPLY, {"uid": self.A, "loadout_items": _rows(self.TREE)})],
+            [(CLEAR, {"uid": self.A}), (APPLY, {"uid": self.A, "loadout_items": _rows(self.TREE)})],
         )
         self.assertEqual(self.bridge.world.deleted, [self.shirt])
         self.assertEqual(self.bridge.world.created, [])
@@ -3191,16 +3191,28 @@ class LoadoutClearFirstTargetTest(unittest.IsolatedAsyncioTestCase):
         self.between = lambda: self.bridge.game.players.reverse()
         with patch.object(self.runtime, "call_bridge", new=self._call_bridge):
             result = _content_json(
-                await self.app.call_tool(APPLY, {"loadout": self.TREE, "clear_first": True})
+                await self.app.call_tool(APPLY, {"loadout": self.TREE, "clear_first": True, "uid": self.A})
             )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["clear"], {"deleted": 1, "cleanup_complete": True})
         self.assertEqual(_classes(result["loadout"]), _classes(self.TREE))
+        self.assertEqual(self.sent[0], (CLEAR, {"uid": self.A}))
         self.assertEqual(self.sent[1], (APPLY, {"uid": self.A, "loadout_items": _rows(self.TREE)}))
         self.assertEqual(
             [item.type.text for _slot, item in self.a.inventory.attachments], ["Jeans_Blue"]
         )
         self.assertEqual(self.a.hands.type.text, "Apple")
+        self._b_untouched()
+
+    async def test_clear_first_with_neither_target_is_refused_and_sends_nothing(self) -> None:
+        with patch.object(self.runtime, "call_bridge", new=self._call_bridge):
+            with self.assertRaises(ToolError) as raised:
+                await self.app.call_tool(APPLY, {"loadout": self.TREE, "clear_first": True})
+        self.assertIn("bad_args", str(raised.exception))
+        self.assertIn("uid", str(raised.exception))
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.bridge.world.deleted, [])
+        self.assertEqual(self.bridge.world.created, [])
         self._b_untouched()
 
 
@@ -3277,7 +3289,7 @@ class LoadoutRoundTripThroughThePollerTest(unittest.IsolatedAsyncioTestCase):
         self._peer("client")
         await self._ready()
         result = _content_json(
-            await self.app.call_tool(APPLY, {"loadout": PRESET_8, "timeout_s": 2.0})
+            await self.app.call_tool(APPLY, {"loadout": PRESET_8, "timeout_s": 2.0, "uid": "76561198000000000"})
         )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(result["items"]), 8)
@@ -3288,7 +3300,7 @@ class LoadoutRoundTripThroughThePollerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(pruned, result)
         sent = [command for command in server_peer.commands_seen if command["cmd"] in (CLEAR, APPLY)]
         self.assertEqual([command["cmd"] for command in sent], [APPLY])
-        self.assertEqual(sent[0]["args"], {"loadout_items": _rows(PRESET_8)})
+        self.assertEqual(sent[0]["args"], {"uid": "76561198000000000", "loadout_items": _rows(PRESET_8)})
 
     @slow_test
     async def test_clear_first_goes_out_as_the_clear_then_the_rows(self) -> None:
@@ -3310,26 +3322,20 @@ class LoadoutRoundTripThroughThePollerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cleanup_complete", result)
 
     @slow_test
-    async def test_clear_first_with_neither_target_sends_the_rows_to_the_cleared_uid(self) -> None:
-        # #261 review Y11 through the ingress and the prune: the clear's uid
-        # survives for loadout_clear, and the rows go out by it.
+    async def test_clear_first_with_neither_target_is_refused_and_sends_nothing(self) -> None:
+        # B2 through the ingress: neither target is refused before the
+        # bridge, so no CLEAR or APPLY is sent.
         server_peer = self._peer("server", self._answer)
         self._peer("client")
         await self._ready()
-        result = _content_json(
+        with self.assertRaises(Exception) as raised:
             await self.app.call_tool(
                 APPLY, {"loadout": PRESET_8, "clear_first": True, "timeout_s": 2.0}
             )
-        )
+        self.assertIn("bad_args", str(raised.exception))
+        self.assertIn("uid", str(raised.exception))
         sent = [command for command in server_peer.commands_seen if command["cmd"] in (CLEAR, APPLY)]
-        self.assertEqual([command["cmd"] for command in sent], [CLEAR, APPLY])
-        self.assertEqual(sent[0]["args"], {})
-        self.assertEqual(
-            sent[1]["args"], {"uid": self.FIRST_HUMAN, "loadout_items": _rows(PRESET_8)}
-        )
-        self.assertEqual(result["clear"], {"deleted": 3, "cleanup_complete": True})
-        self.assertEqual(result["status"], "ok")
-        self.assertNotIn("uid", result)
+        self.assertEqual(sent, [])
 
 
 if __name__ == "__main__":

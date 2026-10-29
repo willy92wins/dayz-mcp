@@ -34,9 +34,11 @@ def _minimal_args(cmd: str) -> dict:
         "world_time_get",
         "action_cursor",
         "loadout_get",
-        "loadout_clear",
     }:
         return {}
+
+    if cmd == "loadout_clear":
+        return {"uid": "player-1"}
 
     # The rest of the verbs that were schemaless before 6ce4.
     if cmd == "world_spawn":
@@ -133,11 +135,11 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "surface_query":
         return {"x": 0.0, "z": 0.0}
     if cmd == "player_teleport":
-        return {"pos": [0.0, 0.0, 0.0]}
+        return {"pos": [0.0, 0.0, 0.0], "uid": "player-1"}
     if cmd == "player_heal":
-        return {"full": True}
+        return {"full": True, "uid": "player-1"}
     if cmd == "player_godmode":
-        return {"godmode": False}
+        return {"godmode": False, "uid": "player-1"}
     if cmd == "infected_drive":
         return {
             "type": "Infected",
@@ -152,7 +154,7 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "vehicle_door":
         return {"object_id": 1, "source": "DoorsDriver", "mode": "read"}
     if cmd == "inventory_give":
-        return {"classname": "Item", "dest": "hands"}
+        return {"classname": "Item", "dest": "hands", "uid": "player-1"}
     if cmd == "inventory_attach":
         return {"object_id": 1, "classname": "Item", "dest": "cargo"}
     if cmd == "object_inspect":
@@ -164,13 +166,13 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "object_delete":
         return {"object_id": 1}
     if cmd == "hands_take":
-        return {"object_id": 1}
+        return {"object_id": 1, "uid": "player-1"}
     if cmd == "hands_attach":
-        return {"object_id": 1, "slot": "LargeBattery"}
+        return {"object_id": 1, "slot": "LargeBattery", "uid": "player-1"}
     if cmd == "loadout_apply":
-        return {"loadout_items": []}
+        return {"loadout_items": [], "uid": "player-1"}
     if cmd == "inventory_move":
-        return {"item_object_id": 1, "op": "to_hands"}
+        return {"item_object_id": 1, "op": "to_hands", "uid": "player-1"}
     if cmd == "world_spawn_batch":
         return {"items": [{"type": "Item", "pos": [0.0, 0.0, 0.0], "flags": 0, "rotation": 0}]}
     if cmd in {"scene_entities", "scene_clear"}:

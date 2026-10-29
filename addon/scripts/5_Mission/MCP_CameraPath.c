@@ -9,6 +9,15 @@
 // bad_args before the camera moves. The keys arrive as floats, so the
 // times are compared as this float holds them.
 
+// Execution identity belongs to the client, not to the order ids were queued.
+// A successful play echoes the prior path it replaced, even if that path's
+// result has not arrived yet. Other pending plays are not thereby superseded.
+modded class MCPCameraPathState
+{
+	int command_id;
+	int replaced_command_id;
+};
+
 class MCPCameraPath
 {
 	static const int KEYS_MIN = 2;

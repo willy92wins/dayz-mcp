@@ -1927,15 +1927,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
-	// camera_path_play (d026). Every mode answers here, at dispatch, and no
-	// job runs for any of them. play enters the scripted camera the way a
-	// camera_set apply does and puts the path's first key on it;
-	// TickCameraPath moves it from the next frame on. A play while a path
-	// plays is path_busy and that path goes on. A path_id given to state or
-	// stop must name the current or last path (path_not_found). Every refusal
-	// comes before anything changes.
+	// camera_path_play answers at dispatch: play applies its first key, then TickCameraPath moves it.
+	// Refused/busy plays change nothing. state/stop require a matching path_id when given.
 	protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)
 	{
+		int replacedCommandId;
 		MCPCameraPath candidate;
 		Object cameraObject;
 		Camera cam;
@@ -2016,12 +2012,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_ActiveCamOwned = true;
 			m_CameraPath = candidate;
 			m_CameraPathCam = cam;
+			replacedCommandId = m_CameraPathCommandId;
 			m_CameraPathCommandId = command.id;
 			m_CameraPathPlayTick = m_Tick;
 			Log("camera path playing id=" + command.id + " path_id=" + command.args.path_id + " duration_s=" + candidate.Duration());
 
 			result.camera_path = new MCPCameraPathState();
 			m_CameraPath.Fill(result.camera_path);
+			result.camera_path.command_id = m_CameraPathCommandId;
+			result.camera_path.replaced_command_id = replacedCommandId;
 			result.ok = true;
 			return true;
 		}
@@ -2053,6 +2052,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		result.camera_path = new MCPCameraPathState();
 		m_CameraPath.Fill(result.camera_path);
+		result.camera_path.command_id = m_CameraPathCommandId;
 		result.ok = true;
 		return true;
 	}

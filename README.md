@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 101 typed
+game, put the world into a state, act, and read back what the engine did — 102 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -38,13 +38,14 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 An agent that can call these can iterate on a mod the way it iterates on code: change,
 build, run, measure, fix — the way this repo itself was developed and gated.
 
-**Godmode is on by default.** In every run that loads DayZ_MCP, the server makes each
-player immune to damage when it connects or respawns: falls, hits, hunger and thirst
-do not hurt or kill it. This changes how damage behaves in the game you test. To test
-vanilla damage, call `player_godmode(on=false)`: the player takes damage again, and it
-stays that way for that player identity across `player_respawn` until the mission ends
-or you switch it back on. `query_all_players` and `query_player_state` report `godmode`
-for each player, and `player_heal` heals a player at once without moving it.
+**Godmode is off by default** (SUPUESTO D1, option a, not confirmed). Players take
+vanilla damage in every run that loads DayZ_MCP, unless the run is a harness test run
+whose MCP bridge config says `profile=test`: there each player is immune to damage
+when it connects or respawns. Call `player_godmode(on=true)` to switch godmode on
+explicitly for one player and `player_godmode(on=false)` to give vanilla damage back;
+the choice stays for that player identity across `player_respawn` until the mission
+ends. `query_all_players` and `query_player_state` report `godmode` for each player,
+and `player_heal` heals a player at once without moving it.
 
 For a custom terrain, `dayz_test_run(project, mode="server", navmesh_data_server=True, …)`
 starts the managed server with `-startNavmeshDataServer` for DayZ Tools NavMeshGenerator.
@@ -77,13 +78,13 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**101 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**102 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
 `action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_set`, `capture_screenshot`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
-`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `player_view_set`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
+`pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_find`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `player_view_set`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
 `query_player_state`, `restore_gameplay`, `scene_clear`, `scene_entities`, `scene_raycast`, `server_perf`, `session_acquire`,
 `session_acquire_wait`, `session_cancel`, `session_heartbeat`, `session_release`,
 `session_status`, `session_wait`, `surface_query`, `telemetry_read`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_reload_layout`,

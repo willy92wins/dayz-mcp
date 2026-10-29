@@ -22,7 +22,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
-from dayz_mcp import camera_path, loopback, result_prune, server
+from dayz_mcp import bridge_readiness, camera_path, loopback, result_prune, server
 from dayz_mcp.bridge_errors import _public_enqueue_error
 from dayz_mcp.server import ServerConfig, ToolError, build_app
 from dayz_mcp.session_coordination import (
@@ -319,7 +319,7 @@ def _function(
 
 def _constants(source: str) -> dict[str, Any]:
     found: dict[str, Any] = {}
-    for kind, name, value in _CONSTANT.findall(method_body(source, "class MCPCameraPath")):
+    for kind, name, value in _CONSTANT.findall(method_body(source, "class MCPCameraPath\n")):
         if kind == "int":
             found[name] = int(value)
         elif kind == "float":
@@ -429,12 +429,16 @@ def _state_block() -> SimpleNamespace:
 
 def _block(report: SimpleNamespace) -> dict[str, Any]:
     """A filled MCPCameraPathState as the wire carries it."""
-    return {
+    block = {
         "state": report.state.text,
         "t_s": float(report.t_s),
         "duration_s": float(report.duration_s),
         "path_id": report.path_id.text,
     }
+    for name in ("command_id", "replaced_command_id"):
+        if hasattr(report, name):
+            block[name] = getattr(report, name)
+    return block
 
 
 def _report(path: object) -> dict[str, Any]:
@@ -1539,6 +1543,23 @@ class OlderBridgeAdmissionTest(unittest.TestCase):
 
 
 class CensusTest(unittest.TestCase):
+    def test_readiness_requires_release_alongside_play(self) -> None:
+        census = set(announced_caps(_source(BRIDGE)))
+        registered = frozenset(
+            tool for tool in bridge_readiness._BRIDGE_COMMAND_TOOLS["client"].values() if tool
+        )
+        for release_present in (False, True):
+            with self.subTest(release_present=release_present):
+                commands = sorted(census if release_present else census - {"camera_path_release"})
+                result = bridge_readiness._compare_bridge_capabilities(
+                    "client", {"state": "announced", "announced_commands": commands}, registered
+                )
+                self.assertEqual(result["state"], "match" if release_present else "mismatch")
+                self.assertEqual(
+                    result["registered_without_announced_command"],
+                    [] if release_present else ["camera_path_play"],
+                )
+
     def test_the_client_announces_and_dispatches_each_command(self) -> None:
         source = _source(BRIDGE)
         announced = announced_caps(source)
@@ -1848,7 +1869,10 @@ class ExecutedDispatchTest(unittest.TestCase):
         answer = self.client.play(self._wire(), command_id=11)
         self.assertEqual((answer.done, answer.ok, answer.error.text), (True, True, ""))
         self.assertEqual(
-            _block(answer.camera_path), {"state": "playing", "t_s": 0.0, "duration_s": 6.0, "path_id": "line6"}
+            _block(answer.camera_path), {
+                "state": "playing", "t_s": 0.0, "duration_s": 6.0, "path_id": "line6",
+                "command_id": 11, "replaced_command_id": 0,
+            }
         )
         self.assertEqual(self.client.m_CameraPathCommandId, 11)
         self.assertTrue(camera.active)
@@ -2150,6 +2174,22 @@ class ExecutedDispatchTest(unittest.TestCase):
         self.assertEqual(delivered, [{"id": queued["id"], "cmd": "camera_path_play", "args": wire}])
         return delivered[0]
 
+    def _execute_path(self, command: dict) -> dict:
+        """Execute the actual .c dispatcher and serialize its reply, not an id-order model."""
+        self._new_camera()
+        answer = self.client.play(command["args"], command_id=command["id"])
+        self.assertTrue(answer.done)
+        body = {"id": command["id"], "ok": answer.ok, "error": answer.error.text}
+        if answer.camera_path is not None:
+            body["camera_path"] = _block(answer.camera_path)
+        return body
+
+    def _report_play(self, state: loopback.ServerState, command: dict, ok: object = True) -> tuple:
+        body = self._execute_path(command)
+        self.assertTrue(body["ok"], body)
+        body["ok"] = ok
+        return state.store_result(body, instance=INST_CLIENT)
+
     def test_releasing_the_lease_stops_the_path_it_played(self) -> None:
         state, coordinator, client, token = self._leased()
         play = self._deliver_play(state, token, "lease_case")
@@ -2190,7 +2230,7 @@ class ExecutedDispatchTest(unittest.TestCase):
 
     def test_a_lease_released_under_quarantine_leaves_the_path_unconfirmed(self) -> None:
         state, coordinator, client, token = self._leased()
-        self._deliver_play(state, token, "quarantined")
+        play = self._deliver_play(state, token, "quarantined")
         state.retail_probe = lambda: {"known": True, "processes": [{"name": "DayZ_x64.exe"}]}
         status, released = coordinator.release(client, token)
         self.assertEqual(status, 200, released)
@@ -2198,9 +2238,11 @@ class ExecutedDispatchTest(unittest.TestCase):
         self.assertIn("retail_quarantine", degraded)
         self.assertIn("camera_path_release_unconfirmed", degraded)
         self.assertNotIn("camera_path_release_enqueued", released["cleanup"])
-        self.assertEqual(state._camera_path_play_by_lease, {})
+        self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {play["id"]}})
+        self.assertEqual(self._poll(state)["commands"], [])  # still quarantined
         state.retail_probe = lambda: {"known": True, "processes": []}
-        self.assertEqual(self._poll(state)["commands"], [])
+        self.assertEqual(self._poll(state)["commands"], [])  # retry queues it
+        self.assertEqual(self._sent(state), self._releases(play["id"]))
 
     def test_a_lease_end_queues_no_release_the_client_does_not_announce(self) -> None:
         state, coordinator, client, token = self._leased()
@@ -2212,8 +2254,10 @@ class ExecutedDispatchTest(unittest.TestCase):
         self.assertEqual(status, 200, released)
         self.assertIn("camera_path_release_unconfirmed", released.get("cleanup_degraded") or [])
         self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 0)
-        self.assertEqual(state._camera_path_play_by_lease, {})
+        self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {play["id"]}})
         self.assertEqual(self._poll(state, ROUND_TWO_CENSUS)["commands"], [])
+        self.assertEqual(self._poll(state)["commands"], [])  # new census allows retry
+        self.assertEqual(self._sent(state), self._releases(play["id"]))
 
     def test_a_queued_release_is_checked_against_the_census_at_delivery(self) -> None:
         state, coordinator, client, token = self._leased()
@@ -2248,7 +2292,8 @@ class ExecutedDispatchTest(unittest.TestCase):
         play_ids = []
         for index in range(loopback.MAX_QUEUE + 5):
             play = self._deliver_play(state, token, f"take{index}")
-            state.store_result({"id": play["id"], "ok": True}, instance=INST_CLIENT)
+            self.client.play({"mode": "stop", "path_id": ""})
+            self._report_play(state, play)
             state.take_result(play["id"], remove=True)
             play_ids.append(play["id"])
         status, released = coordinator.release(client, token)
@@ -2281,9 +2326,10 @@ class ExecutedDispatchTest(unittest.TestCase):
     def test_the_lease_releases_its_started_play_and_one_unanswered(self) -> None:
         state, coordinator, client, token = self._leased()
         replaced = self._deliver_play(state, token, "replaced")
-        state.store_result({"id": replaced["id"], "ok": True}, instance=INST_CLIENT)
+        self._report_play(state, replaced)
+        self.client.play({"mode": "stop", "path_id": ""})
         started = self._deliver_play(state, token, "started")
-        state.store_result({"id": started["id"], "ok": True}, instance=INST_CLIENT)
+        self._report_play(state, started)
         # Its answer is not back when the lease ends, so it may be the one playing.
         unanswered = self._deliver_play(state, token, "unanswered")
         status, released = coordinator.release(client, token)
@@ -2295,11 +2341,12 @@ class ExecutedDispatchTest(unittest.TestCase):
         now = [100.0]
         state, coordinator, client, token = self._leased(clock=lambda: now[0])
         replaced = self._deliver_play(state, token, "replaced")
-        state.store_result({"id": replaced["id"], "ok": True}, instance=INST_CLIENT)
+        self._report_play(state, replaced)
+        self.client.play({"mode": "stop", "path_id": ""})
         late = self._deliver_play(state, token, "late", timeout_s=0.5)
         now[0] += 1.0
         # The loopback discards an answer past its deadline, but the path started.
-        status, stored = state.store_result({"id": late["id"], "ok": True}, instance=INST_CLIENT)
+        status, stored = self._report_play(state, late)
         self.assertEqual((status, stored.get("discarded")), (200, True), stored)
         status, released = coordinator.release(client, token)
         self.assertEqual(status, 200, released)
@@ -2323,13 +2370,112 @@ class ExecutedDispatchTest(unittest.TestCase):
     def test_an_ok_of_one_counts_as_a_started_play(self) -> None:
         state, coordinator, client, token = self._leased()
         first = self._deliver_play(state, token, "first")
-        state.store_result({"id": first["id"], "ok": 1}, instance=INST_CLIENT)
+        self._report_play(state, first, ok=1)
+        self.client.play({"mode": "stop", "path_id": ""})
         second = self._deliver_play(state, token, "second")
-        state.store_result({"id": second["id"], "ok": 1}, instance=INST_CLIENT)
+        self._report_play(state, second, ok=1)
         status, released = coordinator.release(client, token)
         self.assertEqual(status, 200, released)
         self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
         self.assertEqual(self._sent(state), self._releases(second["id"]))
+
+    def _release_after_path_order(self, order: tuple[int, ...]) -> None:
+        for reverse_results in (False, True):
+            with self.subTest(order=order, reverse_results=reverse_results):
+                self.client = _ClientBridge(self.bridge_source, self.Path)
+                state, coordinator, client, token = self._leased()
+                state._next_id = 6
+                for command_id in (6, 7, 8):
+                    wire = {"mode": "stop", "path_id": ""} if command_id == 7 else self._wire()
+                    status, queued = state.enqueue_command(
+                        "camera_path_play", wire, peer="client", identity_payload=_PATH_OWNER,
+                        lease_token=token, operation_timeout_s=30.0,
+                    )
+                    self.assertEqual((status, queued.get("id")), (200, command_id))
+                delivered = {command["id"]: command for command in self._poll(state)["commands"]}
+                self.assertEqual(set(delivered), {6, 7, 8})
+                replies = [self._execute_path(delivered[command_id]) for command_id in order]
+                self.assertTrue(all(reply["ok"] for reply in replies), replies)
+                self.assertEqual(replies[-1]["camera_path"]["replaced_command_id"], order[0])
+                self.assertEqual(self.client.m_CameraPathCommandId, order[-1])
+                for reply in reversed(replies) if reverse_results else replies:
+                    status, stored = state.store_result(reply, instance=INST_CLIENT)
+                    self.assertEqual(status, 200, stored)
+                self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {order[-1]}})
+                status, released = coordinator.release(client, token)
+                self.assertEqual(status, 200, released)
+                self.assertEqual(released["cleanup"]["camera_path_release_enqueued"], 1)
+                [release] = self._poll(state)["commands"]
+                self.assertEqual(release["args"], {"command_id": order[-1]})
+                answer = self.client.release(release["args"]["command_id"], release["id"])
+                self.assertTrue(answer.matched)
+                self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+
+    def test_lease_cleanup_tracks_execution_order_8_7_6(self) -> None:
+        self._release_after_path_order((8, 7, 6))
+
+    def test_lease_cleanup_tracks_plain_order_6_7_8(self) -> None:
+        self._release_after_path_order((6, 7, 8))
+
+    def test_new_play_does_not_drop_an_unexecuted_lower_id(self) -> None:
+        state, coordinator, client, token = self._leased()
+        pending = self._deliver_play(state, token, "pending")
+        started = self._deliver_play(state, token, "started")
+        self._report_play(state, started)
+        self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {pending["id"], started["id"]}})
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"]["camera_path_release_enqueued"], 2)
+        self.assertEqual(self._sent(state), self._releases(started["id"], pending["id"]))
+
+    def test_missing_or_invalid_execution_echo_keeps_other_plays(self) -> None:
+        for echo in (None, {}, {"command_id": True, "state": "playing", "replaced_command_id": 1}):
+            with self.subTest(echo=echo):
+                state, coordinator, client, token = self._leased()
+                first = self._deliver_play(state, token, "first")
+                second = self._deliver_play(state, token, "second")
+                state.store_result({"id": second["id"], "ok": True, "camera_path": echo}, instance=INST_CLIENT)
+                self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {first["id"], second["id"]}})
+                status, released = coordinator.release(client, token)
+                self.assertEqual(status, 200, released)
+                self.assertEqual(released["cleanup"]["camera_path_release_enqueued"], 2)
+                self.assertEqual(self._sent(state), self._releases(second["id"], first["id"]))
+
+    def test_65_plays_prioritize_active_or_newest_and_retry_full_queue(self) -> None:
+        self.assertEqual(loopback.MAX_QUEUE, 64)
+        for known_active in (False, True):
+            with self.subTest(known_active=known_active):
+                self.client = _ClientBridge(self.bridge_source, self.Path)
+                state, coordinator, client, token = self._leased()
+                plays = []
+                for index in range(65):
+                    play = self._deliver_play(state, token, f"take{index}")
+                    plays.append(play)
+                    if known_active and index == 0:
+                        self._report_play(state, play)
+                active = plays[0] if known_active else plays[-1]
+                if not known_active:
+                    self.assertTrue(self._execute_path(active)["ok"])  # reply not back yet
+                status, released = coordinator.release(client, token)
+                self.assertEqual(status, 200, released)
+                self.assertEqual(released["cleanup"]["camera_path_release_enqueued"], 64)
+                self.assertIn("camera_path_release_unconfirmed", released.get("cleanup_degraded", []))
+                expected = [active["id"]] + [play["id"] for play in reversed(plays) if play is not active]
+                self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {expected[-1]}})
+                # Another lease-end attempt while still full must neither lie nor forget it.
+                self.assertEqual(state.enqueue_camera_path_releases_for_lease("path-lease"), {"enqueued": 0, "failed": 1})
+                first_batch = self._poll(state)["commands"]
+                self.assertEqual([row["args"]["command_id"] for row in first_batch], expected[:64])
+                first = first_batch[0]
+                answer = self.client.release(first["args"]["command_id"], first["id"])
+                self.assertTrue(answer.matched)
+                self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+                # Draining the full queue queued the failed release for the next poll.
+                self.assertEqual(self._sent(state), self._releases(expected[-1]))
+                self.assertEqual(state._camera_path_play_by_lease, {})
+                self.assertEqual(state._camera_path_release_pending_leases, set())
+                self.assertEqual(state._camera_path_active_by_lease, {})
+                self.assertEqual(self._sent(state), [])
 
     def test_camera_set_applies_at_its_dispatch_and_its_job_only_settles(self) -> None:
         bridge = _CameraSetBridge(self.bridge_source)
@@ -2573,6 +2719,10 @@ class EnforceWiringTest(unittest.TestCase):
         self.assertEqual(
             _members(_class_body(self.messages, "MCPCameraPathState")),
             [("string", "state"), ("float", "t_s"), ("float", "duration_s"), ("string", "path_id")],
+        )
+        self.assertEqual(
+            _members(_class_body(self.path, "MCPCameraPathState")),
+            [("int", "command_id"), ("int", "replaced_command_id")],
         )
         self.assertEqual(
             _members(_class_body(self.messages, "MCPHudState")),

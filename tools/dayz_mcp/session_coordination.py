@@ -22,6 +22,10 @@ READ_ONLY_COMMANDS = frozenset(
     {
         "query_player_state",
         "query_all_players",
+        # B3: not a bridge command -- the player_find tool only calls
+        # query_all_players and filters its rows. Listed like logs_since so
+        # it stays read-only if ever routed through authorize().
+        "player_find",
         "scene_raycast",
         "telemetry_read",
         "query_get_in_condition",
