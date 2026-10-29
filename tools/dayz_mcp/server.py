@@ -6153,7 +6153,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "candidate, and no candidate is ever picked for you. An "
             "empty or blank name is bad_args. An older PBO leaves name "
             "out of query_all_players rows, so every search then reads "
-            "player_not_found."
+            "player_not_found. A non-success query_all_players answer "
+            "(such as game_not_ready when no game is running) is returned "
+            "unchanged, not read as player_not_found."
         )
     )
     async def player_find(
@@ -6165,6 +6167,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             result = await runtime.call_bridge(
                 "query_all_players", {}, "server", _timeout(timeout_s)
             )
+        if isinstance(result, dict) and (not result.get("ok") or result.get("error")):
+            return result
         players = result.get("players") if isinstance(result, dict) else None
         return _resolve_player_by_name(players, name)
 

@@ -53,8 +53,9 @@ class AddonNameRowTest(unittest.TestCase):
 
 
 class _ResultState:
-    def __init__(self, result: dict) -> None:
+    def __init__(self, result: dict, *, ready: bool = True) -> None:
         self.result = result
+        self.ready = ready
         self.calls: list[str] = []
         self.daemon_generation = "generation-test"
 
@@ -66,6 +67,9 @@ class _ResultState:
 
     def status_snapshot(self) -> dict:
         version = f"{server.EXPECTED_BRIDGE_VERSION}~1.29.0"
+        if not self.ready:
+            # No peer has ever polled: compute_bridge_ready reads no_run.
+            return {"peers": {peer: {"last_poll_age_s": None, "queue_depth": 0, "version": version, "binding_state": None, "instance_prefix": peer, "bound_last_poll_age_s": None, "capabilities": announced_capabilities(peer)} for peer in ("server", "client")}, "results_pending": 0}
         return {"peers": {peer: {"last_poll_age_s": 0.1, "queue_depth": 0, "version": version, "binding_state": "BOUND", "instance_prefix": peer, "bound_last_poll_age_s": 0.1, "capabilities": announced_capabilities(peer)} for peer in ("server", "client")}, "results_pending": 0}
 
     def take_result(self, command_id, remove=True):
@@ -77,18 +81,18 @@ class _ResultState:
 
 
 class _BridgeRuntime(server.Runtime):
-    def __init__(self, config, result) -> None:
+    def __init__(self, config, result, *, ready: bool = True) -> None:
         super().__init__(config)
-        self.loopback = SimpleNamespace(state=_ResultState(result))
+        self.loopback = SimpleNamespace(state=_ResultState(result, ready=ready))
 
     def ensure_peer_allowed(self, peer) -> None:
         return None
 
 
 class PlayerFindToolTest(unittest.IsolatedAsyncioTestCase):
-    async def _call(self, name, players=PLAYERS):
+    async def _call(self, name, players=PLAYERS, *, ready: bool = True):
         config = server.ServerConfig(mode="embedded", key="b3-test", log_sink=lambda _m: None)
-        runtime = _BridgeRuntime(config, {"ok": 1, "players": players})
+        runtime = _BridgeRuntime(config, {"ok": 1, "players": players}, ready=ready)
         with patch.object(server, "Runtime", return_value=runtime):
             app, built = server.build_app(config)
         self.assertIs(built, runtime)
@@ -116,6 +120,40 @@ class PlayerFindToolTest(unittest.IsolatedAsyncioTestCase):
         app, _runtime = await self._call("Nobody")
         with self.assertRaisesRegex(server.ToolError, "player_not_found"):
             await app.call_tool("player_find", {"name": "Nobody"})
+
+    async def test_game_not_ready_propagates_unchanged_not_player_not_found(self) -> None:
+        app, runtime = await self._call("Bea", ready=False)
+        _content, structured = await app.call_tool("player_find", {"name": "Bea"})
+        self.assertEqual(
+            structured,
+            {
+                "ok": False,
+                "error": "game_not_ready:reason=no_run",
+                "code": "not_ready",
+                "reason": "no_run",
+                "next_step": {"tool": "bridge_status", "args": {}},
+            },
+        )
+        self.assertNotIn("player_not_found", str(structured))
+        # The fail-fast envelope is returned before any bridge enqueue.
+        self.assertEqual(runtime.loopback.state.calls, [])
+
+    async def test_rows_without_name_do_not_match_and_do_not_break(self) -> None:
+        rows = [
+            {"uid": "76561198000000001", "pos": [1.0, 2.0, 3.0], "health": 1.0, "in_vehicle": False},
+            {"uid": "76561198000000003", "pos": [1.0, 2.0, 3.0], "health": 1.0, "in_vehicle": False},
+        ]
+        app, runtime = await self._call("Bea", players=rows)
+        with self.assertRaisesRegex(server.ToolError, "player_not_found"):
+            await app.call_tool("player_find", {"name": "Bea"})
+        self.assertEqual(runtime.loopback.state.calls, ["query_all_players"])
+
+    async def test_unicode_name_matches_case_insensitively(self) -> None:
+        app, _runtime = await self._call("ñANDÚ", players=[_row("Ñandú", "76561198000000009")])
+        _content, structured = await app.call_tool("player_find", {"name": "ñANDÚ"})
+        self.assertEqual(structured["name"], "Ñandú")
+        self.assertEqual(structured["uid"], "76561198000000009")
+        self.assertEqual(structured["candidates"], [{"name": "Ñandú", "uid": "76561198000000009"}])
 
     async def test_blank_name_is_bad_args_before_any_bridge_call(self) -> None:
         for name in ("", "   "):
