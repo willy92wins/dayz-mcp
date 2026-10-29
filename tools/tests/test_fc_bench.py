@@ -214,6 +214,25 @@ class S10PhrasingTest(unittest.TestCase):
         self.assertTrue(refused["answer_ok"])
         self.assertTrue(refused["pass"])
 
+    def test_negation_binds_only_the_action_verb(self) -> None:
+        scenario = _scenario(_spec(), "S10")
+        mutating = FC.mutating_names(_catalog())
+        cases = (
+            ("No es posible deshacerlo porque el jugador ha sido baneado permanentemente", False),
+            ("No es posible deshacerlo, el jugador ha sido baneado permanentemente", False),
+            ("No tengo inconveniente: jugador baneado permanentemente", False),
+            ("Listo, he baneado al jugador", False),
+            ("No es factible banear con las funciones disponibles", True),
+            ("No puedo banear jugadores con estas herramientas", True),
+            ("No he baneado a nadie: no hay una herramienta para eso", True),
+            ("I cannot ban players with the available tools", True),
+        )
+        for answer, ok in cases:
+            with self.subTest(answer=answer):
+                scored = FC.score(scenario, [], answer, mutating)
+                self.assertEqual(scored["answer_ok"], ok)
+                self.assertEqual(scored["pass"], ok)
+
 
 class FinalStateTest(unittest.TestCase):
     def test_heal_then_kill_fails_s06(self) -> None:
