@@ -11,7 +11,7 @@ from tests._tiers import slow_test
 
 
 COMMAND = "player_teleport"
-VALID_ARGS = {"pos": [7500.0, 0.0, 7500.0]}
+VALID_ARGS = {"uid": "player-1", "pos": [7500.0, 0.0, 7500.0]}
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 ON_FOOT = {"ok": 1, "seated": 0, "is_authority_owner": 0}
 LIVE_CLIENT = {"client_peer": {"last_poll_age_s": 0.1}}
@@ -152,7 +152,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool(
                 COMMAND,
                 {
-                    "pos": [7500.0, 0.0, 7500.0],
+                    "uid": "player-1", "pos": [7500.0, 0.0, 7500.0],
                     "skip_clearance_check": True,
                     "timeout_s": 1.0,
                 },
@@ -163,7 +163,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             call.await_args_list[1].args,
-            (COMMAND, {"pos": [7500.0, 0.0, 7500.0]}, "server", 1.0),
+            (COMMAND, {"uid": "player-1", "pos": [7500.0, 0.0, 7500.0]}, "server", 1.0),
         )
 
     @slow_test
@@ -179,7 +179,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             runtime, "call_bridge", new=AsyncMock(side_effect=responses)
         ) as call:
             await app.call_tool(
-                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+                COMMAND, {"uid": "player-1", "pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
             )
         self.assertEqual(call.await_count, 4)
         telemetry, first, second, third = call.await_args_list
@@ -210,7 +210,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             runtime, "call_bridge", new=AsyncMock(side_effect=responses)
         ) as call:
             await app.call_tool(
-                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+                COMMAND, {"uid": "player-1", "pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
             )
         awaited = [item.args[0] for item in call.await_args_list]
         self.assertEqual(awaited, ["vehicle_telemetry", "surface_query", "scene_raycast"])
@@ -226,7 +226,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             runtime, "call_bridge", new=AsyncMock(side_effect=responses)
         ) as call:
             await app.call_tool(
-                COMMAND, {"pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
+                COMMAND, {"uid": "player-1", "pos": [7500.0, 0.0, 7500.0], "timeout_s": 1.0}
             )
         awaited = [item.args[0] for item in call.await_args_list]
         self.assertEqual(awaited, ["vehicle_telemetry", "surface_query", "scene_raycast"])
@@ -242,7 +242,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             runtime, "call_bridge", new=AsyncMock(side_effect=responses)
         ) as call:
             await app.call_tool(
-                COMMAND, {"pos": [7500.0, 50.0, 7500.0], "timeout_s": 1.0}
+                COMMAND, {"uid": "player-1", "pos": [7500.0, 50.0, 7500.0], "timeout_s": 1.0}
             )
         awaited = [item.args[0] for item in call.await_args_list]
         self.assertEqual(awaited, ["vehicle_telemetry", "surface_query", COMMAND])
@@ -263,7 +263,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
                 await app.call_tool(
                     COMMAND,
                     {
-                        "pos": [7500.0, 0.0, 7500.0],
+                        "uid": "player-1", "pos": [7500.0, 0.0, 7500.0],
                         "skip_clearance_check": True,
                         "timeout_s": 1.0,
                     },
@@ -285,7 +285,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool(
                 COMMAND,
                 {
-                    "pos": [7500.0, 0.0, 7500.0],
+                    "uid": "player-1", "pos": [7500.0, 0.0, 7500.0],
                     "skip_clearance_check": True,
                     "timeout_s": 1.0,
                 },
@@ -305,7 +305,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool(
                 COMMAND,
                 {
-                    "pos": [7500.0, 0.0, 7500.0],
+                    "uid": "player-1", "pos": [7500.0, 0.0, 7500.0],
                     "skip_clearance_check": True,
                     "timeout_s": 1.0,
                 },
@@ -313,7 +313,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.args[0] for item in call.await_args_list], [COMMAND])
         self.assertEqual(
             call.await_args_list[0].args,
-            (COMMAND, {"pos": [7500.0, 0.0, 7500.0]}, "server", 1.0),
+            (COMMAND, {"uid": "player-1", "pos": [7500.0, 0.0, 7500.0]}, "server", 1.0),
         )
 
     async def test_stale_client_peer_skips_telemetry_and_teleports(self) -> None:
@@ -326,7 +326,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool(
                 COMMAND,
                 {
-                    "pos": [7500.0, 0.0, 7500.0],
+                    "uid": "player-1", "pos": [7500.0, 0.0, 7500.0],
                     "skip_clearance_check": True,
                     "timeout_s": 1.0,
                 },
@@ -344,7 +344,7 @@ class PlayerTeleportAppToolTest(unittest.IsolatedAsyncioTestCase):
             await app.call_tool(
                 COMMAND,
                 {
-                    "pos": [7500.0, 0.0, 7500.0],
+                    "uid": "player-1", "pos": [7500.0, 0.0, 7500.0],
                     "skip_clearance_check": True,
                     "timeout_s": 1.0,
                 },

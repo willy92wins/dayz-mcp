@@ -536,7 +536,7 @@ class HealGodmodeIngressTest(unittest.TestCase):
         bind_both_peers(self.state)
 
     def test_both_are_server_commands_that_need_a_lease(self) -> None:
-        for command, args in ((HEAL, {"full": True}), (GODMODE, {"godmode": False})):
+        for command, args in ((HEAL, {"full": True, "uid": "76561198000000001"}), (GODMODE, {"godmode": False, "uid": "76561198000000001"})):
             with self.subTest(command=command):
                 self.assertIn(command, loopback.SERVER_COMMANDS)
                 self.assertNotIn(command, loopback.CLIENT_COMMANDS)
@@ -550,46 +550,50 @@ class HealGodmodeIngressTest(unittest.TestCase):
                     (400, {"error": "bad_peer"}),
                 )
 
-    def test_one_exact_variant_each_with_an_optional_uid(self) -> None:
+    def test_one_exact_variant_each_with_a_required_uid(self) -> None:
         for command, choice in ((HEAL, "full"), (GODMODE, "godmode")):
             with self.subTest(command=command):
                 variants, delegated = loopback._COMMAND_ARG_SCHEMAS[command]
                 self.assertIsNone(delegated)
                 self.assertEqual(len(variants), 1)
                 required, optional, validators = variants[0]
-                self.assertEqual(required, frozenset({choice}))
-                self.assertEqual(optional, frozenset({"uid"}))
+                self.assertEqual(required, frozenset({choice, "uid"}))
+                self.assertEqual(optional, frozenset())
                 self.assertEqual(set(validators), {choice, "uid"})
 
     def test_the_choice_travels_as_a_json_boolean_and_nothing_else_travels(self) -> None:
         # fb-20260930-065425-8779: an absent key reaches Enforce as false, so the
         # choice is required, and 1, 0 and "true" are not booleans.
         accepted = {
-            HEAL: ({"full": True}, {"full": False}, {"full": True, "uid": "76561198000000001"}, {"full": False, "uid": ""}),
-            GODMODE: ({"godmode": True}, {"godmode": False}, {"godmode": False, "uid": "76561198000000001"}),
+            HEAL: ({"full": True, "uid": "76561198000000001"}, {"full": False, "uid": "76561198000000001"}, {"full": True, "uid": "76561198000000001"}, {"full": False, "uid": "76561198000000001"}),
+            GODMODE: ({"godmode": True, "uid": "76561198000000001"}, {"godmode": False, "uid": "76561198000000001"}, {"godmode": False, "uid": "76561198000000001"}),
         }
         refused = {
             HEAL: (
                 {},
                 {"uid": "76561198000000001"},
-                {"full": 1},
-                {"full": 0},
-                {"full": "true"},
-                {"full": None},
+                {"full": True},
+                {"full": False, "uid": ""},
+                {"full": 1, "uid": "76561198000000001"},
+                {"full": 0, "uid": "76561198000000001"},
+                {"full": "true", "uid": "76561198000000001"},
+                {"full": None, "uid": "76561198000000001"},
                 {"full": True, "uid": 7},
-                {"full": True, "godmode": True},
-                {"full": True, "pos": [0.0, 0.0, 0.0]},
+                {"full": True, "godmode": True, "uid": "76561198000000001"},
+                {"full": True, "pos": [0.0, 0.0, 0.0], "uid": "76561198000000001"},
             ),
             GODMODE: (
                 {},
                 {"uid": "76561198000000001"},
-                {"godmode": 1},
-                {"godmode": 0},
-                {"godmode": "off"},
-                {"godmode": None},
+                {"godmode": True},
+                {"godmode": False, "uid": ""},
+                {"godmode": 1, "uid": "76561198000000001"},
+                {"godmode": 0, "uid": "76561198000000001"},
+                {"godmode": "off", "uid": "76561198000000001"},
+                {"godmode": None, "uid": "76561198000000001"},
                 {"godmode": True, "uid": None},
-                {"godmode": True, "on": True},
-                {"on": False},
+                {"godmode": True, "on": True, "uid": "76561198000000001"},
+                {"on": False, "uid": "76561198000000001"},
             ),
         }
         for command in COMMANDS:
@@ -1568,14 +1572,14 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(tool, server._CLOSED_SCHEMA_TOOLS)
 
     async def test_player_heal_forwards_full_and_a_set_uid_only(self) -> None:
-        self.assertEqual(await self._forwarded(HEAL, {}), (HEAL, {"full": True}, "server", 15.0))
+        self.assertEqual(await self._forwarded(HEAL, {"uid": "76561198000000001"}), (HEAL, {"full": True, "uid": "76561198000000001"}, "server", 15.0))
         self.assertEqual(
             await self._forwarded(HEAL, {"full": False, "uid": "76561198000000001", "timeout_s": 2.0}),
             (HEAL, {"full": False, "uid": "76561198000000001"}, "server", 2.0),
         )
 
     async def test_player_godmode_forwards_the_choice_as_godmode(self) -> None:
-        self.assertEqual(await self._forwarded(GODMODE, {"on": False}), (GODMODE, {"godmode": False}, "server", 15.0))
+        self.assertEqual(await self._forwarded(GODMODE, {"on": False, "uid": "76561198000000001"}), (GODMODE, {"godmode": False, "uid": "76561198000000001"}, "server", 15.0))
         self.assertEqual(
             await self._forwarded(GODMODE, {"on": True, "uid": "76561198000000001"}),
             (GODMODE, {"godmode": True, "uid": "76561198000000001"}, "server", 15.0),
@@ -1594,7 +1598,7 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
             (HEAL, {"uid": 7}, ("\nuid\n", "valid string")),
             (HEAL, {"player": "76561198000000001"}, ("bad_args: unexpected arguments: player",)),
             (HEAL, {"timeout_s": True}, ("\ntimeout_s\n", "valid number")),
-            (HEAL, {"timeout_s": 0.0}, ("bad_timeout",)),
+            (HEAL, {"timeout_s": 0.0, "uid": "76561198000000001"}, ("bad_timeout",)),
         ):
             with self.subTest(tool=tool, arguments=arguments):
                 text = await self._refused(tool, arguments)
@@ -1708,10 +1712,10 @@ class HealGodmodeBridgePathTest(unittest.IsolatedAsyncioTestCase):
     @slow_test
     async def test_a_refusal_is_a_tool_error_naming_the_code(self) -> None:
         for tool, arguments, code in (
-            (HEAL, {}, "player_dead"),
+            (HEAL, {"uid": "76561198000000001"}, "player_dead"),
             (HEAL, {"uid": "x"}, "player_not_found"),
-            (GODMODE, {"on": False}, "no_identity"),
-            (GODMODE, {"on": True}, "no_players"),
+            (GODMODE, {"on": False, "uid": "76561198000000001"}, "no_identity"),
+            (GODMODE, {"on": True, "uid": "76561198000000001"}, "no_players"),
         ):
             with self.subTest(tool=tool, code=code):
                 with self.assertRaisesRegex(server.ToolError, code):
@@ -1721,10 +1725,10 @@ class HealGodmodeBridgePathTest(unittest.IsolatedAsyncioTestCase):
         reply = {"before": 1, "after": 0}
         (_content, structured), enqueued = await self._call(
             GODMODE,
-            {"on": False},
+            {"on": False, "uid": "76561198000000001"},
             {"ok": 1, "error": "", GODMODE: dict(reply), HEAL: {}, "players": [], "state": {}},
         )
-        self.assertEqual(enqueued, [(GODMODE, {"godmode": False}, "server")])
+        self.assertEqual(enqueued, [(GODMODE, {"godmode": False, "uid": "76561198000000001"}, "server")])
         self.assertEqual(structured[GODMODE], reply)
         for gone in (HEAL, "players", "state"):
             with self.subTest(gone=gone):

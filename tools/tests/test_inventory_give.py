@@ -9,7 +9,7 @@ from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_l
 
 
 COMMAND = "inventory_give"
-VALID_ARGS = {"classname": "AKM", "dest": "hands"}
+VALID_ARGS = {"classname": "AKM", "dest": "hands", "uid": "player-1"}
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 FSM_CAST = "Weapon_Base spawnedWeapon = Weapon_Base.Cast(spawned);"
@@ -49,7 +49,7 @@ class InventoryGiveIngressTest(unittest.TestCase):
         for dest in ("hands", "inventory"):
             with self.subTest(dest=dest):
                 status, body = self.state.enqueue_command(
-                    COMMAND, {"classname": "AKM", "dest": dest}
+                    COMMAND, {"classname": "AKM", "dest": dest, "uid": "player-1"}
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(body["peer"], "server")
@@ -62,6 +62,8 @@ class InventoryGiveIngressTest(unittest.TestCase):
             {"classname": "AKM", "dest": "ground"},
             {"classname": "AKM", "dest": "HANDS"},
             {"classname": "AKM", "dest": "hands", "extra": 1},
+            {"classname": "AKM", "dest": "hands"},
+            {"classname": "AKM", "dest": "hands", "uid": ""},
         ]
         for args in invalid:
             with self.subTest(args=args):
@@ -166,7 +168,8 @@ class InventoryGiveAppToolTest(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value={"ok": 1, "classname": "AKM", "found": True}),
         ) as call:
             await app.call_tool(
-                COMMAND, {"classname": "AKM", "dest": "hands", "timeout_s": 1.0}
+                COMMAND,
+                {"classname": "AKM", "dest": "hands", "uid": "player-1", "timeout_s": 1.0},
             )
 
         call.assert_awaited_once_with(COMMAND, VALID_ARGS, "server", 1.0)

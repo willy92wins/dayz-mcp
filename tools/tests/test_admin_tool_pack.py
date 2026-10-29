@@ -308,7 +308,7 @@ class AdminToolPackTest(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(dispatched.isError, dispatched)
                     self.assertIn(name, calls)
 
-    async def test_full_pack_still_accepts_without_uid_over_mcp_transport(
+    async def test_full_pack_refuses_empty_uid_over_mcp_transport(
         self,
     ) -> None:
         for name in sorted(UID_REQUIRED_TOOLS):
@@ -328,9 +328,14 @@ class AdminToolPackTest(unittest.IsolatedAsyncioTestCase):
                     result = await session.call_tool(
                         name, dict(UID_TOOL_ARGS[name])
                     )
-                    self.assertFalse(result.isError, result)
-                    self.assertNotIn("uid_required", _result_text(result))
-                    self.assertIn(name, calls)
+                    if name == "notify_players":
+                        # An empty uid broadcasts; it stays accepted.
+                        self.assertFalse(result.isError, result)
+                        self.assertIn(name, calls)
+                        continue
+                    self.assertTrue(result.isError, result)
+                    self.assertIn("bad_args", _result_text(result))
+                    self.assertNotIn(name, calls)
 
     async def test_full_catalog_keeps_long_descriptions_and_defaults(
         self,

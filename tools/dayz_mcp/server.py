@@ -6872,8 +6872,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} Teleport a "
             "connected player to pos. y==0 snaps to SurfaceY (vanilla "
-            "script-console contract). uid empty (default) targets the first "
-            "human; a non-empty uid selects by PlayerIdentity.GetPlainId(). "
+            "script-console contract). uid is required and never falls back "
+            "to the first human; uid selects by PlayerIdentity.GetPlainId(). "
             "Surface landings are refused with clearance_blocked when the "
             "target column is covered (a roof, canopy or water plane would "
             "bury the player); skip_clearance_check=true bypasses the probe "
@@ -6911,8 +6911,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         _require_admin_uid(uid)
+        if not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if not isinstance(skip_clearance_check, bool):
             raise ToolError(
                 _bad_args("skip_clearance_check", skip_clearance_check, "be a bool")
@@ -6959,8 +6961,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "player; nothing else in the inventory changes. Vanilla can lose "
             "the splint when it cannot place it, and the answer then says so. "
             "full=true (default) also fills water and energy to their maximum, "
-            "5000; full=false keeps their values. uid empty (default) targets "
-            "the first human; a non-empty uid selects by "
+            "5000; full=false keeps their values. uid is required and never "
+            "falls back to the first human; uid selects by "
             "PlayerIdentity.GetPlainId(). The player's godmode stays as it was. "
             "The answer is player_heal: full, in_vehicle (seated on the server "
             "before the heal), splint_returned and splint_returned_to "
@@ -6983,8 +6985,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         _require_admin_uid(uid)
+        if not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if not isinstance(full, bool):
             raise ToolError(_bad_args("full", full, "be a bool"))
         args: dict[str, Any] = {"full": full}
@@ -7004,7 +7008,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{GODMODE_DEFAULT_LINE} The choice is kept for that player identity "
             "until the mission ends, across player_respawn: a player switched "
             "off stays off on its next character and one switched on stays on. "
-            "uid empty (default) targets the first human; a non-empty uid "
+            "uid is required and never falls back to the first human; uid "
             "selects by PlayerIdentity.GetPlainId(). The answer is "
             "player_godmode: before and after (true is godmode on). "
             "query_all_players and query_player_state report godmode per "
@@ -7022,8 +7026,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(on, bool):
             raise ToolError(_bad_args("on", on, "be a bool"))
         if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         _require_admin_uid(uid)
+        if not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"godmode": on}
         if uid != "":
             args["uid"] = uid
@@ -7051,7 +7057,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         uid: StrictStr,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        if not isinstance(uid, str) or uid == "":
+        if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args = {"uid": uid}
         async with runtime.tool_lock:
@@ -7331,7 +7337,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "created, vanilla logs [wpnfsm] ... without FSM errors from the "
             "engine's save on the server and its load on the client, which a "
             "count of script errors should subtract; the item still arrives. "
-            "uid empty (default) targets the first human; a non-empty uid "
+            "uid is required and never falls back to the first human; uid "
             "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
             "success without a positive object_id still created the item: "
             "the receipt is returned with object_id_unavailable true. Do not "
@@ -7352,8 +7358,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 _bad_args("dest", dest, "be one of 'hands' or 'inventory'")
             )
-        if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"classname": classname, "dest": dest}
         if uid != "":
             args["uid"] = uid
@@ -7374,7 +7380,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_give.object_id. The take is predictive and "
             "asynchronous: accepted=true with confirmed=false means the server "
             "accepted the request, not that the item is in hands yet. Confirm "
-            "with weapon_state. uid empty (default) targets the first human. "
+            "with weapon_state. uid is required and never falls back to the first human. "
             "A confirmation is weapon_state.object_id equal to the requested "
             "object_id; the same type and visible state do not distinguish "
             "two items. No OS input and no client focus."
@@ -7389,8 +7395,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if object_id <= 0:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
-        if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"object_id": object_id}
         if uid != "":
             args["uid"] = uid
@@ -7415,7 +7421,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_attach.item_object_id is the held item's registry id, "
             "0 when it was never registered. Confirm with weapon_state (hands "
             "empty) and telemetry_read on the destination (the item in "
-            "attachment_items). uid empty (default) targets the first human. "
+            "attachment_items). uid is required and never falls back to the first human. "
             "No OS input and no client focus."
         )
     )
@@ -7431,8 +7437,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if not isinstance(slot, str) or slot == "":
             raise ToolError(_bad_args("slot", slot, "be a non-empty string"))
-        if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"object_id": object_id, "slot": slot}
         if uid != "":
             args["uid"] = uid
@@ -7473,8 +7479,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "that code (no_room, not_reachable, and the other client codes). "
             "Only a failure to read the id ends as timeout. Refusals "
             "before the call move nothing: object_not_found, not_reachable, "
-            "no_room, slot_not_found, slot_occupied. uid empty targets the "
-            "first human. Client moves need that player in reach "
+            "no_room, slot_not_found, slot_occupied. uid is required and "
+            "never falls back to the first human for client moves and for "
+            "to_hands, to_inventory, split_half and split_to_hands; a "
+            "server-authority world-to-world move names no player and "
+            "needs no uid. Client moves need that player in reach "
             "(UAMaxDistances.DEFAULT). No OS input and no client focus."
         )
     )
@@ -7517,6 +7526,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("authority", authority, "be client or server"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        if (authority == "client" or op in {"to_hands", "to_inventory", "split_half", "split_to_hands"}) and not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if op == "to_attachment" and slot == "":
             raise ToolError(_bad_args("slot", slot, "be a non-empty string for to_attachment"))
         if op in {"to_cargo", "to_attachment", "combine"} and target_object_id <= 0:
@@ -7877,10 +7888,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "already handed still runs after the tool gave up on it: that is "
             "the transport's behavior. timeout_s is the wait for each of these "
             "game calls. Created items get no registry ids. The target is "
-            "chosen as loadout_get chooses it: uid or object_id, not both. With "
-            "clear_first and neither, the creates go by uid to the player the "
-            "clear acted on, so a first human who left in between answers "
-            "player_not_found. Quantity, health and other item state are not "
+            "chosen as loadout_get chooses it, except that uid is required "
+            "and never falls back to the first human: give a non-empty uid "
+            "or an object_id above 0, not both. Quantity, health and other "
+            "item state are not "
             "set. ok is 0 and warnings includes loadout_incomplete when the "
             "answer cannot be read: the apply may have run, so read the target "
             "with loadout_get before applying again. Errors: bad_args, not_found, "
@@ -7908,6 +7919,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             rows = loadout_contract.flatten_request(loadout)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+        if not target or ("uid" in target and not target["uid"].strip()):
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string, or object_id a survivor id above 0"))
         timeout = _timeout(timeout_s)
         args: dict[str, Any] = dict(target)
         args["loadout_items"] = [row for _path, row in rows]
@@ -7922,15 +7935,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
                 try:
                     clear = loadout_contract.clear_reply(cleared)
-                    if not target:
-                        # The first human can change between the two commands:
-                        # the creates go by uid to the player the clear acted
-                        # on, and are refused if that player has left (#261
-                        # review Y11).
-                        args = {
-                            "uid": loadout_contract.cleared_uid(cleared),
-                            "loadout_items": args["loadout_items"],
-                        }
                 except ValueError as exc:
                     raise ToolError(str(exc)) from exc
             try:

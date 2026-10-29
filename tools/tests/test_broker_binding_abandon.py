@@ -165,10 +165,10 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         token = grant["lease_token"]
         fixture.runtime._control.active_lease_token = token
         first = await fixture.runtime.enqueue_bridge(
-            "player_heal", {"full": True}, "server", 2.0
+            "player_heal", {"full": True, "uid": "76561198000000001"}, "server", 2.0
         )
         second = await fixture.runtime.enqueue_bridge(
-            "player_heal", {"full": True}, "server", 2.0
+            "player_heal", {"full": True, "uid": "76561198000000001"}, "server", 2.0
         )
         wrong = fixture.http_abandon(
             identity.to_payload(), "broker-gen", first, "cancelled", token="other-lease-token"
@@ -283,7 +283,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
 
         fixture.runtime._call = note_await
         task = asyncio.create_task(
-            fixture.runtime.call_bridge("player_heal", {"full": True}, "server", 5.0)
+            fixture.runtime.call_bridge("player_heal", {"full": True, "uid": "76561198000000001"}, "server", 5.0)
         )
         self.assertTrue(await asyncio.to_thread(awaiting.wait, 5))
         self.assertTrue(fixture.state._bound_queues[INST_SERVER])
@@ -308,7 +308,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         worker.join(timeout=2)
         blocked.bind(INST_SERVER, "server", PID_SERVER)
         queued = await blocked.runtime.enqueue_bridge(
-            "player_heal", {"full": True}, "server", 2.0
+            "player_heal", {"full": True, "uid": "76561198000000001"}, "server", 2.0
         )
         self.assertIsInstance(queued, int)
         held.clear()
@@ -367,7 +367,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
 
         fixture.runtime._call = answer_late
         task = asyncio.create_task(
-            fixture.runtime.call_bridge("player_heal", {"full": True}, "server", 5.0)
+            fixture.runtime.call_bridge("player_heal", {"full": True, "uid": "76561198000000001"}, "server", 5.0)
         )
         self.assertTrue(await asyncio.to_thread(published.wait, 5))
         self.assertTrue(fixture.state._bound_queues[INST_SERVER])
@@ -419,7 +419,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         fixture.bind(INST_SERVER, "server", PID_SERVER)
         with self.assertRaises(ToolError) as timed:
             await fixture.runtime.call_bridge(
-                "player_heal", {"full": True}, "server", 1.0
+                "player_heal", {"full": True, "uid": "76561198000000001"}, "server", 1.0
             )
         self.assertIn("timeout waiting", str(timed.exception))
         self.assertEqual(fixture.state._bound_queues[INST_SERVER], [])
@@ -434,7 +434,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
             creation_time_utc=_CTIME,
         )
         status, payload = state.enqueue_command(
-            "player_heal", {"full": True}, peer="server", operation_timeout_s=1.0
+            "player_heal", {"full": True, "uid": "76561198000000001"}, peer="server", operation_timeout_s=1.0
         )
         self.assertEqual(status, 200, payload)
         clock["now"] = 5.0
@@ -444,7 +444,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         separate = self._open()
         separate.bind(INST_SERVER, "server", PID_SERVER)
         command_id = await separate.runtime.enqueue_bridge(
-            "player_heal", {"full": True}, "server", 2.0
+            "player_heal", {"full": True, "uid": "76561198000000001"}, "server", 2.0
         )
         with self.assertRaises(ToolError) as waited:
             await separate.runtime.await_enqueued(

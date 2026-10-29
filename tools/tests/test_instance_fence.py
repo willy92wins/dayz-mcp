@@ -47,7 +47,7 @@ INST_S1 = "33333333-3333-4333-8333-333333333333"
 INST_OFF = "44444444-4444-4444-8444-444444444444"
 HASH_A = "a" * 64
 HASH_B = "b" * 64
-TELEPORT = {"pos": [1.0, 2.0, 3.0]}
+TELEPORT = {"uid": "player-1", "pos": [1.0, 2.0, 3.0]}
 LEGACY_UNBOUND_HINT = (
     "Peer poll lacks a valid inst=. Relaunch via dayz_test_run so start_run "
     "writes instance into $profile:dayz_mcp.json. Do not mutate a hand-launched game."

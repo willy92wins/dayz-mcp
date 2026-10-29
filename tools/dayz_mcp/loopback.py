@@ -521,6 +521,10 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+def _is_uid(value: object) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
 _ACTION_HOLD_SELECTORS = frozenset({"world", "hands", "self", "door", "component"})
 _ACTION_HOLD_KEYS = frozenset(
     {
@@ -1254,12 +1258,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    # B2 min (fb-20261028-131048-091a): uid is required and non-empty for
+    # every player mutation. An empty or missing uid used to fall through
+    # ResolvePlayer to the first human in the bridge; the daemon now refuses
+    # it here, before anything is queued for the bridge. player_kill already
+    # had this shape.
     "player_teleport": _command_schema(
         _schema_variant(
-            required=("pos",),
-            optional=("uid",),
+            required=("pos", "uid"),
             validators={
-                "uid": _is_string,
+                "uid": _is_uid,
                 "pos": _is_real_vector3,
             },
         )
@@ -1270,21 +1278,19 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # vanilla damage instead of the choice the caller made.
     "player_heal": _command_schema(
         _schema_variant(
-            required=("full",),
-            optional=("uid",),
+            required=("full", "uid"),
             validators={
                 "full": _is_strict_bool,
-                "uid": _is_string,
+                "uid": _is_uid,
             },
         )
     ),
     "player_godmode": _command_schema(
         _schema_variant(
-            required=("godmode",),
-            optional=("uid",),
+            required=("godmode", "uid"),
             validators={
                 "godmode": _is_strict_bool,
-                "uid": _is_string,
+                "uid": _is_uid,
             },
         )
     ),
@@ -1293,7 +1299,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "player_kill": _command_schema(
         _schema_variant(
             required=("uid",),
-            validators={"uid": _is_non_empty_string},
+            validators={"uid": _is_uid},
         )
     ),
     "bot_start": _command_schema(
@@ -1532,7 +1538,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     # hands_take is predictive: the daemon accepts the request, the client
-    # finishes it. uid empty selects the first human, same as inventory_give.
+    # finishes it. uid is required and non-empty (B2 min), same as inventory_give.
     "hands_take": _command_schema(
         _schema_variant(
             required=("object_id",),
@@ -1589,7 +1595,8 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     # loadout_get / loadout_apply / loadout_clear (fb99, 220f): the target is
-    # a connected player by uid (absent is the first human) or a survivor by
+    # a connected player by uid (loadout_get only: absent is the first human;
+    # apply and clear refuse a missing uid) or a survivor by
     # object_id, never both. The rows always travel: the bridge reads an absent
     # key as no rows (fb-20260930-065425-8779). They are the flat list
     # loadout.py builds. loadout_clear is what the loadout_apply tool sends
@@ -2147,7 +2154,42 @@ def _inventory_move_op_rules(args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+# B2 min (fb-20261028-131048-091a): commands that mutate one connected
+# player and whose bridge handler resolves that player from uid. Without a
+# non-empty uid the bridge fell back to the first human, so the daemon
+# refuses them before queueing. loadout_apply/loadout_clear are exempt only
+# when object_id > 0 names a survivor dummy instead of a connected player.
+# inventory_move is covered only where it needs a player: client authority,
+# or an op the bridge always resolves a player for (MCPInventoryMoveNeedsPlayer);
+# a server-authority world-to-world move (to_cargo/to_attachment/combine of
+# unrooted items) names no player and keeps its shape. Reads (weapon_state,
+# loadout_get) and notify_players (empty uid is its broadcast form) are out.
+_PLAYER_UID_COMMANDS = frozenset({
+    "inventory_give", "hands_take", "hands_attach",
+})
+_INVENTORY_MOVE_PLAYER_OPS = frozenset({
+    "to_hands", "to_inventory", "split_half", "split_to_hands",
+})
+
+
+def _uid_refusal(cmd: str, args: dict) -> bool:
+    if cmd in _PLAYER_UID_COMMANDS:
+        return not _is_uid(args.get("uid"))
+    if cmd == "inventory_move":
+        if args.get("authority", "client") == "client" or (isinstance(args.get("op"), str) and args["op"] in _INVENTORY_MOVE_PLAYER_OPS):
+            return not _is_uid(args.get("uid"))
+        return False
+    if cmd in {"loadout_apply", "loadout_clear"}:
+        object_id = args.get("object_id")
+        if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
+            return False
+        return not _is_uid(args.get("uid"))
+    return False
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
+    if isinstance(args, dict) and _uid_refusal(cmd, args):
+        return False, "bad_args"
     schema = _COMMAND_ARG_SCHEMAS.get(cmd)
     if schema is not None:
         variants, delegated = schema

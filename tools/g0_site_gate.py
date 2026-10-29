@@ -77,6 +77,7 @@ CORRIDOR_QUERY_RADIUS_M = 65.0
 CORRIDOR_COVERAGE_NEEDED_M = 45.0
 PLAYER_OFFSET_SOUTH_M = 8.0
 ARRIVAL_TOLERANCE_M = 30.0
+PLAYER_MATCH_M = 5.0
 DELTA2_MIN_M = 1.0
 DELTA5_MIN_M = 10.0
 CANOPY_DY_M = 0.05
@@ -354,6 +355,46 @@ def canopy_gate(daemon: g.Daemon, x: float, z: float) -> dict:
     return record
 
 
+def player_uid(daemon: g.Daemon) -> str | None:
+    """uid of the connected player the gate drives.
+
+    player_teleport requires a non-empty uid (B2: an empty uid used to fall
+    through to the first human in the bridge). query_player_state reports the
+    first player and carries no uid, so the uid comes from query_all_players.
+    The gate is a single-player tool: it only answers when query_all_players
+    lists exactly one player and that player stands where query_player_state
+    says the observed player stands. With several players connected it
+    refuses (the uid cannot be tied to the observed player). Known limit: the
+    bridge omits a player without an identity from query_all_players and
+    reports name "" for it in query_player_state, so a nameless observed
+    player is refused. Residual: a player that gains or loses its identity
+    between the two queries; closing it needs query_player_state to carry
+    the uid (a PBO change). None when it cannot be read.
+    """
+    state = daemon.run("query_player_state", {}, "server", 15.0)
+    state_pos = g.extract_pos(state)
+    if state.get("_timeout") or state_pos is None:
+        return None
+    body = state.get("state") if isinstance(state.get("state"), dict) else state
+    name = body.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        # The bridge reports name "" for a first player without identity.
+        return None
+    result = daemon.run("query_all_players", {}, "server", 15.0)
+    players = result.get("players")
+    if result.get("_timeout") or not g._is_true(result.get("ok")):
+        return None
+    if not isinstance(players, list) or len(players) != 1 or not isinstance(players[0], dict):
+        return None
+    uid = players[0].get("uid")
+    row_pos = g.extract_pos(players[0])
+    if not (isinstance(uid, str) and uid.strip()) or row_pos is None:
+        return None
+    if math.hypot(row_pos[0] - state_pos[0], row_pos[2] - state_pos[2]) > PLAYER_MATCH_M:
+        return None
+    return uid
+
+
 def precheck(daemon: g.Daemon, label: str, x: float, z: float) -> dict:
     record: dict[str, object] = {"status": "FAIL"}
 
@@ -369,9 +410,13 @@ def precheck(daemon: g.Daemon, label: str, x: float, z: float) -> dict:
         return record
 
     y_player = float(canopy_player["surface_y"])
+    uid = player_uid(daemon)
+    if uid is None:
+        record["reason"] = "player_uid_unavailable"
+        return record
     tp = daemon.run(
         "player_teleport",
-        {"pos": [x, y_player, z - PLAYER_OFFSET_SOUTH_M]},
+        {"pos": [x, y_player, z - PLAYER_OFFSET_SOUTH_M], "uid": uid},
         "server",
         30.0,
     )
