@@ -55,6 +55,7 @@ from dayz_mcp.instance_fence import (
 )
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.session_coordination import (
+    READ_ONLY_COMMANDS,
     ClientIdentity,
     MAX_SESSION_QUEUE,
     SessionCoordinator,
@@ -155,6 +156,75 @@ CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+# B4 (fb-20261028-131107-9249): live profile the daemon enforces. The tool
+# catalog is not access control, so the closed list lives here, at the
+# enqueue every client command passes before it can reach the bridge (and
+# at Handler._handle_lifecycle, the route the dayz_test* tools pass).
+# Off by default; the daemon turns it on only from the environment below
+# (or an explicit ServerState argument). Working assumption D4, not
+# confirmed by the owner: reads and warnings alone, admin mutations only
+# when expressly enabled, after passing the bench.
+LIVE_PROFILE_ENV = "DAYZ_MCP_LIVE_PROFILE"
+LIVE_ADMIN_ENV = "DAYZ_MCP_LIVE_ADMIN"
+LIVE_PROFILE_REFUSED = "live_profile_refused"
+LIVE_PROFILE_ADMIN_DISABLED = "live_profile_admin_disabled"
+_LIVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "live"})
+# The only mutations the profile can ever allow, and only with admin
+# enabled: the player/world mutations the admin tool pack
+# (tool_pack.ADMIN_TOOL_NAMES) enqueues on the server bridge. Each name was
+# checked against SERVER_COMMANDS. The pack's world_spawn stays out (spawn
+# family) and its restore_gameplay stays out (camera/client family), as do
+# bot_*, player_move, weapon_fire, player_view_set, vehicle_* and every
+# other command, with or without admin.
+LIVE_ADMIN_COMMANDS = frozenset(
+    {
+        "player_teleport",
+        "player_heal",
+        "player_godmode",
+        "world_time_set",
+        "world_weather_set",
+        "object_delete",
+    }
+)
+# Reads the profile allows by default, plus notify_players, the warning:
+# only server-side state reads of server/player/world. Client reads that
+# consult UI, camera or input stay out (camera_get, ui_tree, input_describe,
+# action_cursor and its server correlate action_cursor_ids, and the client
+# vehicle_telemetry read). players_visibility stays out too: although it
+# runs on the server, it reads the player's camera/input heading
+# (GetInputController().GetHeadingAngle()), like action_cursor.
+LIVE_ALLOWED_COMMANDS = frozenset(
+    ((READ_ONLY_COMMANDS & SERVER_COMMANDS) | {"notify_players"})
+    - {"action_cursor_ids", "players_visibility"}
+)
+
+
+def live_profile_refusal(
+    cmd: object, *, enabled: bool, admin_enabled: bool
+) -> str | None:
+    """Named refusal for cmd under the live profile, or None when allowed."""
+    if not enabled:
+        return None
+    if not isinstance(cmd, str):
+        return LIVE_PROFILE_REFUSED
+    if cmd in LIVE_ALLOWED_COMMANDS:
+        return None
+    if cmd in LIVE_ADMIN_COMMANDS:
+        return None if admin_enabled else LIVE_PROFILE_ADMIN_DISABLED
+    return LIVE_PROFILE_REFUSED
+
+
+def live_profile_from_env(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[bool, bool]:
+    """(profile_enabled, admin_enabled) from the daemon's environment."""
+    environment = os.environ if environ is None else environ
+
+    def _on(name: str) -> bool:
+        value = environment.get(name)
+        return isinstance(value, str) and value.strip().lower() in _LIVE_TRUE_VALUES
+
+    return _on(LIVE_PROFILE_ENV), _on(LIVE_ADMIN_ENV)
 # Releases the broker publishes when it abandons a delivered command: (source
 # command, release command, builder of the release arguments from the source's
 # id and admitted arguments). ServerState uses this table unless a caller
@@ -2284,7 +2354,13 @@ class ServerState:
         coordination: SessionCoordinator | None = None,
         config_port: int | None = None,
         release_registry: tuple | None = None,
+        live_profile: bool = False,
+        live_admin_enabled: bool = False,
     ) -> None:
+        if type(live_profile) is not bool or type(live_admin_enabled) is not bool:
+            raise ValueError("invalid_live_profile")
+        self.live_profile = live_profile
+        self.live_admin_enabled = live_admin_enabled
         self.key = key
         # Loopback port this daemon owns. Only read to seed a bridge config
         # the deploy never wrote; None keeps prepare() failing closed.
@@ -3370,6 +3446,22 @@ class ServerState:
             "last_recovered_age_s": age if recent else None,
         }
 
+    def _live_profile_refusal(
+        self, cmd: object, *, internal: bool
+    ) -> tuple[int, dict] | None:
+        # Daemon-internal commands (owner cleanup, releases) are not a
+        # client sending a command, so the profile does not gate them.
+        if internal:
+            return None
+        refusal = live_profile_refusal(
+            cmd,
+            enabled=self.live_profile,
+            admin_enabled=self.live_admin_enabled,
+        )
+        if refusal is None:
+            return None
+        return 403, {"error": refusal}
+
     def enqueue_command(
         self,
         cmd: str,
@@ -3383,6 +3475,9 @@ class ServerState:
         expected_fence: object = _FENCE_OMITTED,
         lease_token_for_proof: str | None = None,
     ) -> tuple[int, dict]:
+        live_refusal = self._live_profile_refusal(cmd, internal=internal)
+        if live_refusal is not None:
+            return live_refusal
         if expected_fence is _FENCE_OMITTED:
             parsed_fence = None
         else:
@@ -3724,6 +3819,9 @@ class ServerState:
         expected_fence: dict | None = None,
         lease_token: str | None = None,
     ) -> tuple[int, dict]:
+        live_refusal = self._live_profile_refusal(cmd, internal=internal)
+        if live_refusal is not None:
+            return live_refusal
         if cmd not in self.whitelisted_commands():
             return 400, {"error": "not_whitelisted"}
         if not isinstance(args, dict):
@@ -6252,6 +6350,10 @@ class Handler(BaseHTTPRequestHandler):
         the grant response must arrive whole.
         """
 
+        # B4: adopting a run is a lifecycle delegation that bypasses
+        # /lifecycle/*; under the live profile it never happens.
+        if getattr(self.state, "live_profile", False):
+            return payload
         if payload.get("status") != "active":
             return payload
         token = payload.get("lease_token")
@@ -6512,6 +6614,14 @@ class Handler(BaseHTTPRequestHandler):
             return result
 
     def _handle_lifecycle(self, action: str) -> None:
+        # B4: the dayz_test* tools reach the lifecycle through these routes,
+        # never through enqueue_command, so the live profile refuses every
+        # /lifecycle/* route here, before any delegation, admin or not.
+        # Daemon-internal publications, owner cleanup and releases do not
+        # pass through this handler and stay unfiltered.
+        if getattr(self.state, "live_profile", False):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         self._clear_request_renewed_lease()
         body = self._read_json()
         if body is None:
@@ -6629,6 +6739,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid_op"})
 
     def _handle_admin(self, action: str) -> None:
+        # B4 round 2: /admin/reconcile and
+        # /admin/lifecycle-recovery-repair are external HTTP entry points
+        # into the lifecycle, so under the live profile they are refused
+        # here, before any delegation, admin or not -- same as
+        # /lifecycle/*. Daemon-internal cleanup paths that call
+        # lifecycle.admin_reconcile or _repair_lifecycle_recovery_fault
+        # directly do not pass through this handler and stay unfiltered.
+        if action in {"reconcile", "lifecycle-recovery-repair"} and getattr(
+            self.state, "live_profile", False
+        ):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         body = self._read_json()
         if body is None:
             return
