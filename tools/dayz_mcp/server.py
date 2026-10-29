@@ -2977,6 +2977,62 @@ def _player_count(result: dict[str, Any]) -> int:
     return len(players)
 
 
+def _player_find_candidates(players: Any, name: Any) -> list[dict[str, Any]]:
+    """All {name, uid} rows whose name matches exactly (B3).
+
+    Match rule: the query and each row name are trimmed, then compared
+    case-insensitively (casefold) for equality; no substring or fuzzy
+    match. Every match is returned; this helper never picks one.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ToolError(_bad_args("name", name, "be a non-empty player name"))
+    wanted = name.strip().casefold()
+    candidates: list[dict[str, Any]] = []
+    if isinstance(players, list):
+        for row in players:
+            if not isinstance(row, dict):
+                continue
+            row_name = row.get("name")
+            if not isinstance(row_name, str):
+                continue
+            if row_name.strip().casefold() != wanted:
+                continue
+            uid = row.get("uid")
+            candidates.append(
+                {"name": row_name, "uid": uid if isinstance(uid, str) else ""}
+            )
+    return candidates
+
+
+def _resolve_player_by_name(players: Any, name: Any) -> dict[str, Any]:
+    """The single candidate for name, or a named error (B3).
+
+    Zero candidates raise player_not_found; more than one raises
+    ambiguous_player_name listing every candidate. Nothing is mutated
+    and no candidate is ever chosen for the caller.
+    """
+    candidates = _player_find_candidates(players, name)
+    shown = name.strip() if isinstance(name, str) else name
+    if not candidates:
+        raise ToolError(
+            f"player_not_found: no connected player named {shown!r}"
+        )
+    if len(candidates) > 1:
+        raise ToolError(
+            f"ambiguous_player_name: name {shown!r} matches "
+            f"{len(candidates)} players: "
+            f"{json.dumps(candidates, ensure_ascii=False)}; "
+            "call the player tool with one of these uids"
+        )
+    candidate = candidates[0]
+    return {
+        "ok": True,
+        "name": candidate["name"],
+        "uid": candidate["uid"],
+        "candidates": candidates,
+    }
+
+
 # Teleport clearance probe (fb-20260824-115220-1bc1): a surface landing must have
 # an uncovered vertical column. Constants mirror the certified site gate probe
 # (tools/g0_site_gate.py canopy_gate, calibrated 2026-08-19 at 0.05 m).
@@ -6084,6 +6140,37 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def query_all_players(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_all_players", {}, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            "Find a connected player by name and return its {name, uid}. "
+            "Read-only, no lease: it only calls query_all_players and "
+            "filters its rows, and mutates nothing. Match rule: the name "
+            "and each row name are trimmed, then compared exactly and "
+            "case-insensitively; no substring match. One match returns "
+            "{ok, name, uid, candidates}; no match is player_not_found; "
+            "more than one is ambiguous_player_name listing every "
+            "candidate, and no candidate is ever picked for you. An "
+            "empty or blank name is bad_args. An older PBO leaves name "
+            "out of query_all_players rows, so every search then reads "
+            "player_not_found. A non-success query_all_players answer "
+            "(such as game_not_ready when no game is running) is returned "
+            "unchanged, not read as player_not_found."
+        )
+    )
+    async def player_find(
+        name: StrictStr, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S
+    ) -> dict[str, Any]:
+        # Validate before the bridge call: a blank name must not query.
+        _player_find_candidates([], name)
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "query_all_players", {}, "server", _timeout(timeout_s)
+            )
+        if isinstance(result, dict) and (not result.get("ok") or result.get("error")):
+            return result
+        players = result.get("players") if isinstance(result, dict) else None
+        return _resolve_player_by_name(players, name)
 
     # F2.1: marker state lives per MCP session (this process), so a caller can
     # poll without threading the marker through every call. Passing `marker`

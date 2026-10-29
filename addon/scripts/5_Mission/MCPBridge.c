@@ -7552,6 +7552,7 @@ class MCPBridge : Managed
 
 			MCPAllPlayer player = new MCPAllPlayer();
 			player.uid = ident.GetPlainId();
+			player.name = ident.GetName();
 
 			vector pos = p.GetPosition();
 			player.pos.Insert(pos[0]);

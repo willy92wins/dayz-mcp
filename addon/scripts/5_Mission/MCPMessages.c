@@ -346,6 +346,7 @@ class MCPPlayerState
 class MCPAllPlayer
 {
 	string uid;
+	string name;
 	ref array<float> pos;
 	float health;
 	bool in_vehicle;
