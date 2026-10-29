@@ -74,13 +74,22 @@ class HandsTakeIngressTest(unittest.TestCase):
         self.assertEqual(loopback.peer_for_command("hands_take"), "server")
         self.assertNotIn("hands_take", READ_ONLY_COMMANDS)
         self.assertTrue(command_requires_lease("hands_take"))
-        status, body = self.state.enqueue_command("hands_take", {"object_id": 3})
+        status, body = self.state.enqueue_command(
+            "hands_take", {"object_id": 3, "uid": "player-1"}
+        )
         self.assertEqual(status, 200)
         self.assertEqual(body["peer"], "server")
         self.assertEqual(body["cmd"], "hands_take")
 
     def test_rejects_missing_and_non_positive_object_id(self) -> None:
-        for args in ({}, {"object_id": 0}, {"object_id": True}, {"object_id": 1, "extra": 1}):
+        for args in (
+            {},
+            {"object_id": 0},
+            {"object_id": True},
+            {"object_id": 1, "extra": 1},
+            {"object_id": 3},
+            {"object_id": 3, "uid": ""},
+        ):
             with self.subTest(args=args):
                 status, body = self.state.enqueue_command("hands_take", args)  # type: ignore[arg-type]
                 self.assertEqual(status, 400)
@@ -211,7 +220,7 @@ class WeaponHandsAppToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(LEASE_TOOL_LINE, tools["hands_take"].description or "")
         self.assertNotIn("Requires a lease", tools["weapon_state"].description or "")
         self.assertIn("confirmed=false", tools["hands_take"].description or "")
-        self.assertIn("with weapon_state. uid empty", tools["hands_take"].description or "")
+        self.assertIn("with weapon_state. uid is required", tools["hands_take"].description or "")
         self.assertIn("weapon_state.object_id", tools["hands_take"].description or "")
         self.assertIn("no_weapon_in_hands", tools["weapon_state"].description or "")
         self.assertIn("ok=true", tools["weapon_state"].description or "")
@@ -220,8 +229,12 @@ class WeaponHandsAppToolTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             runtime, "call_bridge", new=AsyncMock(return_value={"ok": 1})
         ) as call:
-            await app.call_tool("hands_take", {"object_id": 9, "timeout_s": 1.0})
-            call.assert_awaited_once_with("hands_take", {"object_id": 9}, "server", 1.0)
+            await app.call_tool(
+                "hands_take", {"object_id": 9, "uid": "player-1", "timeout_s": 1.0}
+            )
+            call.assert_awaited_once_with(
+                "hands_take", {"object_id": 9, "uid": "player-1"}, "server", 1.0
+            )
 
         with patch.object(
             runtime, "call_bridge", new=AsyncMock(return_value={"ok": 0})

@@ -101,12 +101,11 @@ class Batch6Test(unittest.TestCase):
             self.assertFalse(ok, msg=f"args={args!r} should fail")
             self.assertEqual(err, "bad_args")
 
-    def test_player_teleport_uid_is_optional(self) -> None:
-        ok_legacy, err_legacy = loopback.validate_command_args(
-            "player_teleport", {"pos": list(_GOOD_POS)}
-        )
-        self.assertTrue(ok_legacy)
-        self.assertIsNone(err_legacy)
+    def test_player_teleport_uid_is_required(self) -> None:
+        for args in ({"pos": list(_GOOD_POS)}, {"pos": list(_GOOD_POS), "uid": ""}):
+            ok_legacy, err_legacy = loopback.validate_command_args("player_teleport", args)
+            self.assertFalse(ok_legacy)
+            self.assertEqual(err_legacy, "bad_args")
         ok_uid, err_uid = loopback.validate_command_args(
             "player_teleport", {"pos": list(_GOOD_POS), "uid": "76561198000000000"}
         )
@@ -118,12 +117,14 @@ class Batch6Test(unittest.TestCase):
         self.assertFalse(ok_bad)
         self.assertEqual(err_bad, "bad_args")
 
-    def test_inventory_give_uid_is_optional(self) -> None:
-        ok_legacy, err_legacy = loopback.validate_command_args(
-            "inventory_give", {"classname": "Apple", "dest": "inventory"}
-        )
-        self.assertTrue(ok_legacy)
-        self.assertIsNone(err_legacy)
+    def test_inventory_give_uid_is_required(self) -> None:
+        for args in (
+            {"classname": "Apple", "dest": "inventory"},
+            {"classname": "Apple", "dest": "inventory", "uid": ""},
+        ):
+            ok_legacy, err_legacy = loopback.validate_command_args("inventory_give", args)
+            self.assertFalse(ok_legacy)
+            self.assertEqual(err_legacy, "bad_args")
         ok_uid, err_uid = loopback.validate_command_args(
             "inventory_give",
             {"classname": "Apple", "dest": "inventory", "uid": "76561198000000000"},

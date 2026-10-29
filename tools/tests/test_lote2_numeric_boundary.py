@@ -122,7 +122,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # 177 before either batch, plus both additions.
         # + 4 from c703 (object_set_health health01/object_id/pos/timeout_s).
         # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
-        self.assertEqual(len(rows), 216)
+        # + 1 from B3 (player_find timeout_s; name is a string).
+        self.assertEqual(len(rows), 217)
+        self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
         self.assertIn(("object_set_health", "pos", "vector"), rows)
