@@ -44,20 +44,40 @@ def _bridge_harness(name: str) -> dict:
             return WireString(self.data + other.data)
 
     game = SimpleNamespace(ms=100, GetTime=lambda: game.ms)
+    clock = SimpleNamespace(ms=100)
     posted = []
+    polls = []
+    transport = SimpleNamespace(
+        POST=lambda cb, req, body: posted.append(body.data),
+        GET=lambda cb, req: polls.append(req.data),
+    )
     ns = dict(
         LOAD_COUNTER_CAP=_CAP, MAX_DISPATCH_PER_TICK=2, _S=WireString,
+        MAX_CALLBACK_REFS=int(re.search(r"MAX_CALLBACK_REFS = (\d+);", source)[1]),
+        MAX_POLL_RESULTS=int(re.search(r"MAX_POLL_RESULTS = (\d+);", source)[1]),
         m_Cmds=0, m_CmdBytes=0, m_BusyMs=0, m_LastCmdsPerPoll=0,
-        m_Configured=True, m_Ctx=SimpleNamespace(POST=lambda cb, req, body: posted.append(body.data)),
+        m_Configured=True, m_Ctx=transport, m_PollCtx=transport,
         m_Pending=EnforceArray(), m_CallbackRefs=EnforceArray(),
+        m_Jobs=EnforceArray(), m_PollCallback=object(),
+        m_Polls=0, m_SincePollS=0.0, m_LastPollIntervalS=0.0,
         m_Key=EnforceString.of("k"), m_PeerInstance=EnforceString.of(""),
         m_ResultDropLogged=False, m_Tick=1, m_TickPollCallback=0,
         m_PollInFlight=True, m_Backoff=0.0, GetGame=lambda: game,
+        TickCount=lambda prev: clock.ms - prev,
+        GetPollVersion=lambda: EnforceString.of("12~1.30"),
+        EncodeQueryValue=lambda value: value,
+        LoadCounterQuery=lambda: EnforceString.of(""),
+        SERVER_CAPABILITIES=EnforceString.of(""),
+        SERVER_ARG_CONTRACT_HASH=EnforceString.of(""),
+        CLIENT_POLL_CAPS=EnforceString.of(""),
+        OutstandingWork=lambda: sum(len(ns[key]) for key in ("m_CallbackRefs", "m_Pending", "m_Jobs")),
+        EnsurePollCallback=lambda: None, HoldPollCallback=lambda: None,
         MCPCommandBatch=lambda: SimpleNamespace(commands=None),
         MCPClientResultCallback=lambda owner: object(),
         AcquireResultCallback=lambda: object(), this=None,
         OnPollFail=lambda reason: None,
-        game=game, posted=posted, commands=[], parse_ok=True, serialize_ok=True,
+        game=game, clock=clock, posted=posted, polls=polls,
+        commands=[], parse_ok=True, serialize_ok=True,
     )
 
     class Pending(EnforceArray):
@@ -79,7 +99,9 @@ def _bridge_harness(name: str) -> dict:
     ns["QueuePendingOrFail"] = lambda command: ns["m_Pending"].Insert(command)
 
     def dispatch(command):
-        game.ms += command.duration_ms
+        # Mission time stays fixed within synchronous dispatch; the native
+        # performance counter advances independently (ensystem.c:106).
+        clock.ms += command.duration_ms
         ns["PostResult"](command)
 
     ns["Dispatch"] = dispatch
@@ -87,6 +109,7 @@ def _bridge_harness(name: str) -> dict:
         "protected int NextLoadCounter(int value)",
         "protected int AddLoadCounter(int value, int amount)",
         "protected void DispatchMeasured(MCPCommand command)",
+        "protected void StartPoll()",
         "void OnPollSuccess(string data, int dataSize)",
         "protected void DrainPending()",
         "protected void PostResult(MCPResult result)",
@@ -98,7 +121,8 @@ def _bridge_harness(name: str) -> dict:
             signature + "\n{" + body + "}\n", signature, ns,
             members=set(re.findall(r'\bm_\w+', body)),
             class_types=("MCPCommandBatch", "JsonSerializer", "MCPCommand",
-                         "MCPResult", "MCPResultCallback", "MCPClientResultCallback"),
+                         "MCPResult", "MCPResultCallback", "MCPClientResultCallback",
+                         "MCPPollCallback"),
         )
     return ns
 
@@ -121,7 +145,11 @@ class LoadCountersTest(unittest.TestCase):
         for name in ("MCPBridge.c", "MCPClientBridge.c"):
             with self.subTest(bridge=name):
                 ns = _bridge_harness(name)
-                poll = lambda: ns["OnPollSuccess"](EnforceString.of("{}"), 2)
+
+                def poll():
+                    ns["StartPoll"]()
+                    ns["OnPollSuccess"](EnforceString.of("{}"), 2)
+
                 poll()
                 self.assertEqual([ns[key] for key in ("m_Cmds", "m_CmdBytes", "m_BusyMs")], [0, 0, 0])
                 ns["commands"] = [_command(i) for i in range(5)]
@@ -132,14 +160,21 @@ class LoadCountersTest(unittest.TestCase):
                 ns["DrainPending"]()
                 self.assertEqual(ns["m_Cmds"], 5)
                 self.assertEqual(ns["m_BusyMs"], 15)
+                self.assertEqual(ns["game"].GetTime(), 100)
                 self.assertEqual(ns["m_CmdBytes"], sum(map(len, ns["posted"])))
                 self.assertEqual(ns["m_CmdBytes"], 5 * len(_command(0).body))
                 before = [ns[key] for key in ("m_Cmds", "m_CmdBytes", "m_BusyMs", "m_LastCmdsPerPoll")]
+                self.assertEqual(ns["m_Polls"], 2)
                 ns["commands"] = []
                 for _ in range(30):
                     ns["game"].ms += 300
+                    ns["clock"].ms += 300
+                    ns["m_SincePollS"] += 0.3
                     poll()
                     ns["DrainPending"]()
+                self.assertEqual(ns["m_Polls"], 32)
+                self.assertEqual(len(ns["polls"]), 32)
+                self.assertAlmostEqual(ns["m_LastPollIntervalS"], 0.3)
                 self.assertEqual([ns[key] for key in ("m_Cmds", "m_CmdBytes", "m_BusyMs", "m_LastCmdsPerPoll")], before)
                 ns["commands"] = [_command(6)]
                 poll()

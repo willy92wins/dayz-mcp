@@ -1154,9 +1154,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 		m_Cmds = NextLoadCounter(m_Cmds);
-		int startedMs = GetGame().GetTime();
+		int startedMs = TickCount(0);
 		Dispatch(command);
-		int elapsedMs = GetGame().GetTime() - startedMs;
+		int elapsedMs = TickCount(startedMs);
 		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 

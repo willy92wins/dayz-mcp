@@ -3048,10 +3048,6 @@ class ServerState:
         self._retired_roles.add(binding.role)
         if binding.role == "offline":
             self._retired_roles.update({"server", "client"})
-        self._drop_peer_load_locked(binding.role, instance)
-        if binding.role == "offline":
-            self._drop_peer_load_locked("server", instance)
-            self._drop_peer_load_locked("client", instance)
         self._invalidate_caps_for_instance_locked(instance)
         retired_pid = binding.pid
         self._bindings.pop(instance, None)
@@ -5984,14 +5980,6 @@ class ServerState:
         if token is None:
             return current is None
         return bool(accredited) and token == current
-
-    def _drop_peer_load_locked(self, peer: str, instance: str) -> None:
-        if peer not in self._peer_load:
-            return
-        if self._peer_load_instance.get(peer) != instance:
-            return
-        self._peer_load[peer] = _empty_peer_load()
-        self._peer_load_instance[peer] = None
 
     def _peer_load_view_locked(self, peer: str) -> dict[str, int | float | None]:
         """Null unless the stored reading belongs to the instance bound now.
