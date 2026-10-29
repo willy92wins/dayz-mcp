@@ -157,8 +157,9 @@ CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
 # B4 (fb-20261028-131107-9249): live profile the daemon enforces. The tool
-# catalog is not access control, so the closed list lives here, at the one
-# enqueue every client command passes before it can reach the bridge.
+# catalog is not access control, so the closed list lives here, at the
+# enqueue every client command passes before it can reach the bridge (and
+# at Handler._handle_lifecycle, the route the dayz_test* tools pass).
 # Off by default; the daemon turns it on only from the environment below
 # (or an explicit ServerState argument). Working assumption D4, not
 # confirmed by the owner: reads and warnings alone, admin mutations only
@@ -168,31 +169,32 @@ LIVE_ADMIN_ENV = "DAYZ_MCP_LIVE_ADMIN"
 LIVE_PROFILE_REFUSED = "live_profile_refused"
 LIVE_PROFILE_ADMIN_DISABLED = "live_profile_admin_disabled"
 _LIVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "live"})
-# Families that stay out even when admin mutations are enabled: camera,
-# input and UI (by prefix in _live_profile_excluded) plus these names.
-_LIVE_EXCLUDED_COMMANDS = frozenset(
+# The only mutations the profile can ever allow, and only with admin
+# enabled: the player/world mutations the admin tool pack
+# (tool_pack.ADMIN_TOOL_NAMES) enqueues on the server bridge. Each name was
+# checked against SERVER_COMMANDS. The pack's world_spawn stays out (spawn
+# family) and its restore_gameplay stays out (camera/client family), as do
+# bot_*, player_move, weapon_fire, player_view_set, vehicle_* and every
+# other command, with or without admin.
+LIVE_ADMIN_COMMANDS = frozenset(
     {
-        "key_press",
-        "input_describe",
-        "input_trigger",
-        "world_spawn",
-        "world_spawn_batch",
-        "exec_enforce",
+        "player_teleport",
+        "player_heal",
+        "player_godmode",
+        "world_time_set",
+        "world_weather_set",
+        "object_delete",
     }
 )
-# Reads the profile allows by default, plus notify_players, the warning.
+# Reads the profile allows by default, plus notify_players, the warning:
+# only server-side state reads of server/player/world. Client reads that
+# consult UI, camera or input stay out (camera_get, ui_tree, input_describe,
+# action_cursor and its server correlate action_cursor_ids, and the client
+# vehicle_telemetry read).
 LIVE_ALLOWED_COMMANDS = frozenset(
-    ((READ_ONLY_COMMANDS & WHITELISTED_COMMANDS) | {"notify_players"})
-    - _LIVE_EXCLUDED_COMMANDS
-    - {name for name in WHITELISTED_COMMANDS if name.startswith(("camera_", "ui_"))}
+    ((READ_ONLY_COMMANDS & SERVER_COMMANDS) | {"notify_players"})
+    - {"action_cursor_ids"}
 )
-
-
-def _live_profile_excluded(cmd: str) -> bool:
-    return (
-        cmd in _LIVE_EXCLUDED_COMMANDS
-        or cmd.startswith(("camera_", "ui_", "dayz_test"))
-    )
 
 
 def live_profile_refusal(
@@ -201,11 +203,11 @@ def live_profile_refusal(
     """Named refusal for cmd under the live profile, or None when allowed."""
     if not enabled:
         return None
-    if not isinstance(cmd, str) or _live_profile_excluded(cmd):
+    if not isinstance(cmd, str):
         return LIVE_PROFILE_REFUSED
     if cmd in LIVE_ALLOWED_COMMANDS:
         return None
-    if cmd in WHITELISTED_COMMANDS or cmd in EXEC_COMMANDS:
+    if cmd in LIVE_ADMIN_COMMANDS:
         return None if admin_enabled else LIVE_PROFILE_ADMIN_DISABLED
     return LIVE_PROFILE_REFUSED
 
@@ -6346,6 +6348,10 @@ class Handler(BaseHTTPRequestHandler):
         the grant response must arrive whole.
         """
 
+        # B4: adopting a run is a lifecycle delegation that bypasses
+        # /lifecycle/*; under the live profile it never happens.
+        if getattr(self.state, "live_profile", False):
+            return payload
         if payload.get("status") != "active":
             return payload
         token = payload.get("lease_token")
@@ -6606,6 +6612,14 @@ class Handler(BaseHTTPRequestHandler):
             return result
 
     def _handle_lifecycle(self, action: str) -> None:
+        # B4: the dayz_test* tools reach the lifecycle through these routes,
+        # never through enqueue_command, so the live profile refuses every
+        # /lifecycle/* route here, before any delegation, admin or not.
+        # Daemon-internal publications, owner cleanup and releases do not
+        # pass through this handler and stay unfiltered.
+        if getattr(self.state, "live_profile", False):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         self._clear_request_renewed_lease()
         body = self._read_json()
         if body is None:
