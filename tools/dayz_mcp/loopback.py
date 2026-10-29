@@ -36,6 +36,8 @@ from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
+    LOAD_COUNTER_CAP,
+    _peer_load,
     is_allowed_spawn_flags,
 )
 from dayz_mcp.instance_fence import (
@@ -2341,11 +2343,7 @@ class _BoundPeerRunning:
 
 
 def _empty_peer_load() -> dict[str, int | float | None]:
-    return {
-        "init_attempts": None,
-        "polls": None,
-        "last_poll_interval_s": None,
-    }
+    return _peer_load(None)
 
 
 # ASCII digits only. str.isdigit() is true for Nd characters such as ², and
@@ -2359,7 +2357,7 @@ _POLL_COUNTER_RE = re.compile(rf"^[0-9]{{1,{_POLL_COUNTER_MAX_DIGITS}}}$")
 def _load_from_poll_query(
     qs: dict[str, list[str]],
 ) -> dict[str, int | float] | None:
-    """ia, pc and lpims travel together. A partial or junk triple is ignored."""
+    """Keep the legacy triple atomic; optional work counters validate individually."""
     if "ia" not in qs or "pc" not in qs or "lpims" not in qs:
         return None
     try:
@@ -2369,14 +2367,30 @@ def _load_from_poll_query(
             if not isinstance(raw, str) or _POLL_COUNTER_RE.fullmatch(raw) is None:
                 return None
             counts.append(int(raw))
+        if counts[0] > LOAD_COUNTER_CAP or counts[1] > LOAD_COUNTER_CAP:
+            return None
         interval = counts[2] / 1000.0
     except (ValueError, OverflowError, TypeError, IndexError, ArithmeticError):
         return None
-    return {
+    load = {
         "init_attempts": counts[0],
         "polls": counts[1],
         "last_poll_interval_s": interval,
     }
+    for query_key, field in (
+        ("cc", "cmds"), ("cb", "cmd_bytes"),
+        ("bms", "busy_ms"), ("lcp", "last_cmds_per_poll"),
+    ):
+        values = qs.get(query_key)
+        if not isinstance(values, list) or len(values) != 1:
+            continue
+        raw = values[0]
+        if not isinstance(raw, str) or _POLL_COUNTER_RE.fullmatch(raw) is None:
+            continue
+        value = int(raw)
+        if value <= LOAD_COUNTER_CAP:
+            load[field] = value
+    return load
 
 
 class ServerState:
@@ -4986,15 +5000,14 @@ class ServerState:
             if load is not None and self._load_reading_applies_locked(
                 peer, token, accredited
             ):
-                try:
-                    self._peer_load[peer] = {
-                        "init_attempts": int(load["init_attempts"]),
-                        "polls": int(load["polls"]),
-                        "last_poll_interval_s": float(load["last_poll_interval_s"]),
-                    }
+                reading = _peer_load(load)
+                if all(reading[key] is not None for key in (
+                    "init_attempts", "polls", "last_poll_interval_s"
+                )):
+                    self._peer_load[peer].update(
+                        (key, value) for key, value in reading.items() if value is not None
+                    )
                     self._peer_load_instance[peer] = token
-                except (KeyError, TypeError, ValueError, OverflowError, ArithmeticError):
-                    pass
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (

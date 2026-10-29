@@ -5044,6 +5044,17 @@ def _bridge_status_description() -> str:
     reason_list = "|".join(reasons)
     return (
         "Inspect peer liveness, version_state, and ready "
+        "plus server_peer.load/client_peer.load from the last announcing poll. "
+        "Work counters: cmds counts non-null commands dispatched (including "
+        "rejections and deferred dispatch); cmd_bytes counts result JSON body "
+        "bytes submitted for POST, not delivery acknowledgements; busy_ms sums "
+        "synchronous dispatch elapsed mission milliseconds, possibly zero for "
+        "short calls, excluding later async job work. last_cmds_per_poll is "
+        "the command array size of the last non-empty poll, retained on idle. "
+        "Counts saturate at 2000000000 per bridge lifetime. init_attempts "
+        "counts TryInit calls; polls and last_poll_interval_s track the poll "
+        "clock, not load. Unannounced fields are null; malformed readings "
+        "are ignored. These are not process CPU measurements. "
         f"{{ready, reason is an OPEN set (today: {reason_list}): validate by shape "
         "(ready: bool first, reason: non-empty string, next_step: public tool "
         "when ready is false, then stale_threshold_s "

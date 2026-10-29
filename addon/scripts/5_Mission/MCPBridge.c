@@ -109,6 +109,10 @@ class MCPBridge : Managed
 	protected const int LOAD_COUNTER_CAP = 2000000000;
 	protected int m_InitAttempts;
 	protected int m_Polls;
+	protected int m_Cmds;
+	protected int m_CmdBytes;
+	protected int m_BusyMs;
+	protected int m_LastCmdsPerPoll;
 	protected float m_LastPollIntervalS;
 	protected float m_SincePollS;
 	protected bool m_ResultDropLogged;
@@ -145,6 +149,10 @@ class MCPBridge : Managed
 		m_InitFailureLogged = false;
 		m_InitAttempts = 0;
 		m_Polls = 0;
+		m_Cmds = 0;
+		m_CmdBytes = 0;
+		m_BusyMs = 0;
+		m_LastCmdsPerPoll = 0;
 		m_LastPollIntervalS = 0.0;
 		m_SincePollS = 0.0;
 		m_ResultDropLogged = false;
@@ -324,7 +332,7 @@ class MCPBridge : Managed
 			ms = 0;
 		}
 
-		return "&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms;
+		return "&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms + "&cc=" + m_Cmds + "&cb=" + m_CmdBytes + "&bms=" + m_BusyMs + "&lcp=" + m_LastCmdsPerPoll;
 	}
 
 	protected void LogInitFailure(string reason)
@@ -410,6 +418,7 @@ class MCPBridge : Managed
 		int count = batch.commands.Count();
 		if (count > 0)
 		{
+			m_LastCmdsPerPoll = AddLoadCounter(0, count);
 			Log("poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
 		}
 
@@ -430,7 +439,7 @@ class MCPBridge : Managed
 			}
 			else if (i < MAX_DISPATCH_PER_TICK)
 			{
-				Dispatch(command);
+				DispatchMeasured(command);
 			}
 			else
 			{
@@ -452,7 +461,7 @@ class MCPBridge : Managed
 		{
 			MCPCommand command = m_Pending.Get(0);
 			m_Pending.Remove(0);
-			Dispatch(command);
+			DispatchMeasured(command);
 			dispatched = dispatched + 1;
 		}
 	}
@@ -567,6 +576,39 @@ class MCPBridge : Managed
 		m_Key = cfg.key;
 		m_Backoff = 0.0;
 		Log("poll key reloaded path=" + path + " keylen=" + m_Key.Length());
+	}
+
+	// Saturate BEFORE addition so a large byte/time delta cannot wrap int32.
+	protected int AddLoadCounter(int value, int amount)
+	{
+		if (value < 0 || value >= LOAD_COUNTER_CAP)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+		if (amount <= 0)
+		{
+			return value;
+		}
+		if (amount >= LOAD_COUNTER_CAP - value)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+		return value + amount;
+	}
+
+	// Includes dispatch rejection/serialization, but not later asynchronous jobs.
+	// GetTime is mission milliseconds (game.c); sub-ms dispatch may measure zero.
+	protected void DispatchMeasured(MCPCommand command)
+	{
+		if (!command)
+		{
+			return;
+		}
+		m_Cmds = NextLoadCounter(m_Cmds);
+		int startedMs = GetGame().GetTime();
+		Dispatch(command);
+		int elapsedMs = GetGame().GetTime() - startedMs;
+		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 
 	protected void Dispatch(MCPCommand command)
@@ -7685,6 +7727,8 @@ class MCPBridge : Managed
 		{
 			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		// Result JSON bytes submitted, not acknowledgements or HTTP overhead.
+		m_CmdBytes = AddLoadCounter(m_CmdBytes, body.Length());
 		m_Ctx.POST(cb, resultRequest, body);
 		string okStr = "0";
 		if (result.ok) { okStr = "1"; }

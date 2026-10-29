@@ -122,6 +122,9 @@ def _peer_status(
     }
 
 
+LOAD_COUNTER_CAP = 2_000_000_000
+
+
 def _peer_load(raw: Any) -> dict[str, int | float | None]:
     """Load counters from the last poll that announced them.
 
@@ -135,11 +138,15 @@ def _peer_load(raw: Any) -> dict[str, int | float | None]:
         "init_attempts": _load_count(source.get("init_attempts")),
         "polls": _load_count(source.get("polls")),
         "last_poll_interval_s": _load_seconds(source.get("last_poll_interval_s")),
+        "cmds": _load_count(source.get("cmds")),
+        "cmd_bytes": _load_count(source.get("cmd_bytes")),
+        "busy_ms": _load_count(source.get("busy_ms")),
+        "last_cmds_per_poll": _load_count(source.get("last_cmds_per_poll")),
     }
 
 
 def _load_count(value: Any) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= LOAD_COUNTER_CAP:
         return None
     return value
 
@@ -147,7 +154,10 @@ def _load_count(value: Any) -> int | None:
 def _load_seconds(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    seconds = float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return None
     if seconds < 0.0 or seconds != seconds or seconds == float("inf"):
         return None
     return seconds
