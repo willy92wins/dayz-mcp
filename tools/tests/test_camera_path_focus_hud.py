@@ -17,6 +17,7 @@ import math
 import re
 import struct
 import unittest
+from itertools import permutations
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import Any, Callable
@@ -2416,6 +2417,80 @@ class ExecutedDispatchTest(unittest.TestCase):
 
     def test_lease_cleanup_tracks_plain_order_6_7_8(self) -> None:
         self._release_after_path_order((6, 7, 8))
+
+    def test_retired_play_replies_preserve_the_replacement_chain(self) -> None:
+        for reply_order in permutations((1, 2, 3)):
+            with self.subTest(reply_order=reply_order):
+                self.client = _ClientBridge(self.bridge_source, self.Path)
+                state, coordinator, client, token = self._leased()
+                plays = [self._deliver_play(state, token, f"take{i}") for i in range(3)]
+                self.assertEqual([play["id"] for play in plays], [1, 2, 3])
+                replies = {}
+                for play in reversed(plays):
+                    self.assertTrue(self.client.play({"mode": "stop", "path_id": ""}).ok)
+                    replies[play["id"]] = self._execute_path(play)
+                    self.assertTrue(replies[play["id"]]["ok"])
+                self.assertEqual(
+                    [replies[i]["camera_path"]["replaced_command_id"] for i in (3, 2, 1)], [0, 3, 2]
+                )
+                for command_id in reply_order:
+                    status, stored = state.store_result(replies[command_id], instance=INST_CLIENT)
+                    self.assertEqual(status, 200, stored)
+                    state.take_result(command_id, remove=True)
+                    if reply_order[0] == 1:
+                        # Even before the missing middle reply arrives, an
+                        # unrelated stale reply cannot displace confirmed 1.
+                        self.assertEqual(state._camera_path_active_by_lease, {"path-lease": 1})
+                self.assertEqual(state._camera_path_play_by_lease, {"path-lease": {1}})
+                self.assertEqual(state._camera_path_active_by_lease, {"path-lease": 1})
+                self.assertEqual(self.client.m_CameraPathCommandId, 1)
+                status, released = coordinator.release(client, token)
+                self.assertEqual(status, 200, released)
+                self.assertEqual(released["cleanup"]["camera_path_release_enqueued"], 1)
+                [release] = self._poll(state)["commands"]
+                self.assertEqual(release["args"], {"command_id": 1})
+                self.assertTrue(self.client.release(1, release["id"]).matched)
+                self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+                self.assertEqual(state._camera_path_successor_by_lease, {})
+
+    def test_stale_66_then_retired_65_cannot_delay_active_1_cleanup(self) -> None:
+        self.assertEqual(loopback.MAX_QUEUE, 64)
+        state, coordinator, client, token = self._leased()
+        # After the two confirmed predecessors retire, 65 plays remain held:
+        # enough to overflow the release queue even with correct pruning.
+        plays = [self._deliver_play(state, token, f"take{i}") for i in range(67)]
+        self.assertEqual([play["id"] for play in plays], list(range(1, 68)))
+        replies = {}
+        for command_id in (66, 65, 1):
+            self.assertTrue(self.client.play({"mode": "stop", "path_id": ""}).ok)
+            replies[command_id] = self._execute_path(plays[command_id - 1])
+            self.assertTrue(replies[command_id]["ok"])
+        self.assertEqual(
+            [replies[i]["camera_path"]["replaced_command_id"] for i in (66, 65, 1)], [0, 66, 65]
+        )
+        for command_id in (1, 66, 65):
+            status, stored = state.store_result(replies[command_id], instance=INST_CLIENT)
+            self.assertEqual(status, 200, stored)
+            state.take_result(command_id, remove=True)
+        self.assertEqual(self.client.m_CameraPathCommandId, 1)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200, released)
+        self.assertEqual(released["cleanup"]["camera_path_release_enqueued"], 64)
+        self.assertIn("camera_path_release_unconfirmed", released.get("cleanup_degraded", []))
+        first_batch = self._poll(state)["commands"]
+        # Observe the actual release order, not just the broker's active marker.
+        self.assertEqual(first_batch[0]["args"], {"command_id": 1})
+        answer = self.client.release(1, first_batch[0]["id"])
+        self.assertTrue(answer.matched)
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+        expected = [1, 67, *range(64, 1, -1)]
+        self.assertEqual([row["args"]["command_id"] for row in first_batch], expected[:64])
+        self.assertEqual(self._sent(state), self._releases(expected[-1]))
+        self.assertEqual(state._camera_path_play_by_lease, {})
+        self.assertEqual(state._camera_path_active_by_lease, {})
+        self.assertEqual(state._camera_path_release_pending_leases, set())
+        self.assertEqual(state._camera_path_successor_by_lease, {})
+        self.assertEqual(self._sent(state), [])
 
     def test_new_play_does_not_drop_an_unexecuted_lower_id(self) -> None:
         state, coordinator, client, token = self._leased()

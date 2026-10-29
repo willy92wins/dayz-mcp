@@ -2507,6 +2507,9 @@ class ServerState:
         # or refusal, or their cleanup is queued. Command ids are not execution
         # order: the client's pending array removes by swapping with its last.
         self._camera_path_play_by_lease: dict[str, set[int]] = {}
+        # Keep delivered ids and their confirmed successors after retirement:
+        # a late predecessor reply can still connect two replacement chains.
+        self._camera_path_successor_by_lease: dict[str, dict[int, int | None]] = {}
         self._camera_path_active_by_lease: dict[str, int] = {}
         self._camera_path_release_pending_leases: set[str] = set()
         self._holds: dict[str, dict[str, object]] = {}
@@ -3905,21 +3908,25 @@ class ServerState:
         if owner is None or not isinstance(owner[1], str) or not owner[1]:
             return
         self._camera_path_play_by_lease.setdefault(owner[1], set()).add(command_id)
+        self._camera_path_successor_by_lease.setdefault(owner[1], {}).setdefault(command_id, None)
 
     def _note_camera_path_result_locked(self, command_id: int, stored: dict) -> None:
         """Prune only a play the client explicitly refused or replaced.
 
         The echoed predecessor was inactive when this play started, regardless
         of command or HTTP result order. Other unanswered plays may still run.
+        Retired plays still contribute links; only a causal successor may
+        displace the confirmed active play, never mere reply arrival order.
         An older client without the echo leaves them held conservatively. Late
         accepted results count too; fenced results never reach here. Lock held.
         """
 
-        for lease_id, command_ids in self._camera_path_play_by_lease.items():
-            if command_id in command_ids:
+        for lease_id, successors in self._camera_path_successor_by_lease.items():
+            if command_id in successors:
                 break
         else:
             return
+        command_ids = self._camera_path_play_by_lease[lease_id]
         ok_value = stored.get("ok")
         if ok_value is True or (
             isinstance(ok_value, int)
@@ -3934,13 +3941,26 @@ class ServerState:
                 and path.get("state") == "playing"
             ):
                 replaced = path.get("replaced_command_id")
-                if type(replaced) is int and replaced > 0 and replaced != command_id:
+                if type(replaced) is int and replaced in successors and replaced != command_id:
+                    successors[replaced] = command_id
                     command_ids.discard(replaced)
-                self._camera_path_active_by_lease[lease_id] = command_id
+                active = self._camera_path_active_by_lease.get(lease_id, command_id)
+                seen: set[int] = set()
+                while (successor := successors.get(active)) is not None and active not in seen:
+                    seen.add(active)
+                    active = successor
+                if active in command_ids:
+                    self._camera_path_active_by_lease[lease_id] = active
+                elif command_id in command_ids:
+                    # The previous active may already have a cleanup queued.
+                    self._camera_path_active_by_lease[lease_id] = command_id
+                else:
+                    self._camera_path_active_by_lease.pop(lease_id, None)
         elif ok_value is False or (type(ok_value) is int and ok_value == 0):
             command_ids.discard(command_id)
         if not command_ids:
             del self._camera_path_play_by_lease[lease_id]
+            del self._camera_path_successor_by_lease[lease_id]
             self._camera_path_active_by_lease.pop(lease_id, None)
 
     def enqueue_camera_path_releases_for_lease(self, lease_id: str) -> dict[str, int]:
@@ -3988,6 +4008,7 @@ class ServerState:
             else:
                 self._camera_path_release_pending_leases.discard(lease_id)
                 self._camera_path_play_by_lease.pop(lease_id, None)
+                self._camera_path_successor_by_lease.pop(lease_id, None)
                 self._camera_path_active_by_lease.pop(lease_id, None)
         return {"enqueued": enqueued, "failed": failed}
 
