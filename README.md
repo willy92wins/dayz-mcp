@@ -38,13 +38,14 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 An agent that can call these can iterate on a mod the way it iterates on code: change,
 build, run, measure, fix — the way this repo itself was developed and gated.
 
-**Godmode is on by default.** In every run that loads DayZ_MCP, the server makes each
-player immune to damage when it connects or respawns: falls, hits, hunger and thirst
-do not hurt or kill it. This changes how damage behaves in the game you test. To test
-vanilla damage, call `player_godmode(on=false)`: the player takes damage again, and it
-stays that way for that player identity across `player_respawn` until the mission ends
-or you switch it back on. `query_all_players` and `query_player_state` report `godmode`
-for each player, and `player_heal` heals a player at once without moving it.
+**Godmode is off by default** (SUPUESTO D1, option a, not confirmed). Players take
+vanilla damage in every run that loads DayZ_MCP, unless the run is a harness test run
+whose MCP bridge config says `profile=test`: there each player is immune to damage
+when it connects or respawns. Call `player_godmode(on=true)` to switch godmode on
+explicitly for one player and `player_godmode(on=false)` to give vanilla damage back;
+the choice stays for that player identity across `player_respawn` until the mission
+ends. `query_all_players` and `query_player_state` report `godmode` for each player,
+and `player_heal` heals a player at once without moving it.
 
 For a custom terrain, `dayz_test_run(project, mode="server", navmesh_data_server=True, …)`
 starts the managed server with `-startNavmeshDataServer` for DayZ Tools NavMeshGenerator.

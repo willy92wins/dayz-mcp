@@ -10,7 +10,11 @@ modded class MissionServer
 		super.OnMissionStart();
 
 		// Godmode choices last one mission (MCPGodmode, MCP_PlayerCare.c).
+		// B1: the default is on only when the MCP config on disk is the
+		// harness's profile=test one; no config, or any other profile,
+		// leaves players mortal and without the water/energy refill.
 		MCPGodmode.ResetMission();
+		MCPGodmode.SetDefaultOn(MCPBridge.ConfigIsTestProfile());
 
 		MCPBridge bridge = MCPBridge.Get();
 		if (bridge)
@@ -23,8 +27,9 @@ modded class MissionServer
 	{
 		super.OnUpdate(timeslice);
 
-		// The godmode top-up runs whether or not the bridge is configured: the
-		// default godmode does not depend on it.
+		// The godmode top-up runs whether or not the bridge is configured:
+		// the mission default was fixed at OnMissionStart from the config
+		// on disk, and Tick leaves at once when no body is in godmode.
 		MCPGodmode.Tick(timeslice);
 
 		MCPBridge bridge = MCPBridge.Get();
@@ -37,7 +42,8 @@ modded class MissionServer
 	// missionserver.c:422-427. Vanilla calls it for a new character
 	// (ClientNewEvent, :316-326, which is also how a respawn gets its new body)
 	// and for a loaded one (ClientReadyEvent, :334-346). After vanilla, the body
-	// gets its identity's godmode: on unless switched off this mission.
+	// gets its identity's godmode: its explicit choice this mission, else the
+	// mission default (on only under profile=test).
 	override void InvokeOnConnect(PlayerBase player, PlayerIdentity identity)
 	{
 		super.InvokeOnConnect(player, identity);

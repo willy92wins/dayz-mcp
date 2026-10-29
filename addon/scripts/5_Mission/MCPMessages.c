@@ -8,6 +8,9 @@ class MCPConfig
 	string key;
 	float pollHz;
 	string instance;
+	// B1: "test" only when the harness wrote this config for a test run;
+	// anything else (or no config) keeps godmode and its refill off.
+	string profile;
 };
 
 // ui_dialog wire field. Key is default_text; default is reserved in Enforce.

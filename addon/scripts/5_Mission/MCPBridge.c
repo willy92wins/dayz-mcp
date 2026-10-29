@@ -7784,6 +7784,31 @@ class MCPBridge : Managed
 		}
 	}
 
+	// B1: true only when the MCP config on disk (the same paths TryInit
+	// reads) carries profile=test, which only the harness writes. No file,
+	// an unreadable file, or any other profile value is false, so a server
+	// with the PBO and no harness config leaves players mortal. Read once
+	// per mission from MissionServer.OnMissionStart; it touches no client.
+	static bool ConfigIsTestProfile()
+	{
+		string path = "$profile:dayz_mcp.json";
+		if (!FileExist(path))
+		{
+			path = "$mission:dayz_mcp.json";
+		}
+		if (!FileExist(path))
+		{
+			return false;
+		}
+		MCPConfig cfg = new MCPConfig();
+		JsonFileLoader<MCPConfig>.JsonLoadFile(path, cfg);
+		if (!cfg.profile || cfg.profile == "")
+		{
+			return false;
+		}
+		return cfg.profile == "test";
+	}
+
 	protected void Log(string message)
 	{
 		Print("[DayZ-MCP] " + message);

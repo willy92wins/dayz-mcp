@@ -6,11 +6,14 @@
 
 // Godmode: SetAllowDamage(false) on the PlayerBase (object.c:1187-1192), the
 // switch of the diag menu's invincibility and of the benchmark mission
-// (plugindiagmenu.c:688-695, missionbenchmark.c:373). ON by default: every body
-// an identity gets, a new or a loaded character and a respawn's new body alike,
-// goes through MissionServer.InvokeOnConnect (missionserver.c:316-326, :334-346,
-// :422-427), where OnBodyReady applies the identity's state: on, unless
-// player_godmode switched it off for that identity during this mission.
+// (plugindiagmenu.c:688-695, missionbenchmark.c:373). OFF by default (B1,
+// SUPUESTO D1 option a): every body an identity gets, a new or a loaded
+// character and a respawn's new body alike, goes through
+// MissionServer.InvokeOnConnect (missionserver.c:316-326, :334-346,
+// :422-427), where OnBodyReady applies the identity's state: the mission
+// default, which MissionServer sets on only when the MCP config the harness
+// wrote says profile=test, unless player_godmode chose otherwise for that
+// identity during this mission.
 // Godmode is the identity's, not a body's: a body that leaves its identity (a
 // respawn's old body, missionserver.c:598-618; a finished logout, :677-711) is
 // released first, so vanilla can still kill it (SetHealth at :608 and :744).
@@ -33,18 +36,43 @@ class MCPGodmode
 	// these 200.
 	static const float TOPUP_MARGIN = 200.0;
 
-	// Identity plain id -> true while switched off during this mission. An
-	// identity missing from the map is on, the default.
-	protected static ref map<string, bool> s_Off;
+	// Identity plain id -> the choice player_godmode made for it during
+	// this mission. An identity missing from the map gets s_DefaultOn.
+	protected static ref map<string, bool> s_Choice;
+	// The mission default: false until SetDefaultOn turns it on for a
+	// profile=test config. No config, or a config without profile=test,
+	// leaves every player mortal and without the refill.
+	protected static bool s_DefaultOn;
+	// True once any body has been switched on this mission. Tick reads it
+	// to leave at once when no body can need a top-up.
+	protected static bool s_AnyOn;
 	protected static ref array<Man> s_Players;
 	protected static float s_TopUpAccumS;
 
-	// A mission starts with every identity on again (MissionServer.OnMissionStart).
+	// A mission starts mortal, with no choice kept (MissionServer.OnMissionStart).
 	static void ResetMission()
 	{
-		s_Off = new map<string, bool>();
+		s_Choice = new map<string, bool>();
+		s_DefaultOn = false;
+		s_AnyOn = false;
 		s_Players = new array<Man>();
 		s_TopUpAccumS = 0.0;
+	}
+
+	// MissionServer.OnMissionStart, after ResetMission: the harness's
+	// profile=test config is the only way the default turns on.
+	static void SetDefaultOn(bool on)
+	{
+		s_DefaultOn = on;
+		if (on)
+		{
+			s_AnyOn = true;
+		}
+	}
+
+	static bool DefaultOn()
+	{
+		return s_DefaultOn;
 	}
 
 	// The state query_all_players and query_player_state report: damage off on
@@ -58,19 +86,19 @@ class MCPGodmode
 		return !body.GetAllowDamage();
 	}
 
-	// On unless player_godmode switched it off for this identity during this
-	// mission.
+	// The identity's explicit choice when player_godmode made one during
+	// this mission, else the mission default (off unless profile=test).
 	static bool IsOnFor(string plainId)
 	{
-		if (!s_Off)
+		if (!s_Choice)
 		{
-			return true;
+			return s_DefaultOn;
 		}
-		if (s_Off.Contains(plainId))
+		if (s_Choice.Contains(plainId))
 		{
-			return false;
+			return s_Choice.Get(plainId);
 		}
-		return true;
+		return s_DefaultOn;
 	}
 
 	// player_godmode: the identity's choice for the rest of the mission, applied
@@ -93,7 +121,7 @@ class MCPGodmode
 		{
 			return;
 		}
-		on = true;
+		on = s_DefaultOn;
 		plainId = "";
 		if (identity)
 		{
@@ -140,6 +168,10 @@ class MCPGodmode
 			return;
 		}
 		s_TopUpAccumS = 0.0;
+		if (!s_AnyOn)
+		{
+			return;
+		}
 		if (!GetGame())
 		{
 			return;
@@ -191,16 +223,11 @@ class MCPGodmode
 
 	protected static void Remember(string plainId, bool on)
 	{
-		if (!s_Off)
+		if (!s_Choice)
 		{
-			s_Off = new map<string, bool>();
+			s_Choice = new map<string, bool>();
 		}
-		if (on)
-		{
-			s_Off.Remove(plainId);
-			return;
-		}
-		s_Off.Set(plainId, true);
+		s_Choice.Set(plainId, on);
 	}
 
 	// The player's own damage switch, never its vehicle's. A body switched on is
@@ -214,6 +241,7 @@ class MCPGodmode
 		player.SetAllowDamage(!on);
 		if (on)
 		{
+			s_AnyOn = true;
 			TopUp(player);
 		}
 	}
