@@ -107,6 +107,8 @@ class MCPBridge : Managed
 	// Signed int32 wraps negative; a negative triple is dropped and the daemon
 	// keeps the previous reading. Saturate at this cap and stay there.
 	protected const int LOAD_COUNTER_CAP = 2000000000;
+	// TickCount reports 100 ns CPU ticks: 10,000 ticks per millisecond.
+	protected const int TICKS_PER_MS = 10000;
 	protected int m_InitAttempts;
 	protected int m_Polls;
 	protected int m_Cmds;
@@ -605,9 +607,9 @@ class MCPBridge : Managed
 			return;
 		}
 		m_Cmds = NextLoadCounter(m_Cmds);
-		int startedMs = TickCount(0);
+		int startedTicks = TickCount(0);
 		Dispatch(command);
-		int elapsedMs = TickCount(startedMs);
+		int elapsedMs = TickCount(startedTicks) / TICKS_PER_MS;
 		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 

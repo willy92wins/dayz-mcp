@@ -44,7 +44,7 @@ def _bridge_harness(name: str) -> dict:
             return WireString(self.data + other.data)
 
     game = SimpleNamespace(ms=100, GetTime=lambda: game.ms)
-    clock = SimpleNamespace(ms=100)
+    clock = SimpleNamespace(ticks=1_000_000)
     posted = []
     polls = []
     transport = SimpleNamespace(
@@ -53,6 +53,8 @@ def _bridge_harness(name: str) -> dict:
     )
     ns = dict(
         LOAD_COUNTER_CAP=_CAP, MAX_DISPATCH_PER_TICK=2, _S=WireString,
+        TICKS_PER_MS=int(re.search(r"TICKS_PER_MS = (\d+);", source)[1]),
+        IntDivide=lambda value, divisor: value // divisor if value >= 0 else -(-value // divisor),
         MAX_CALLBACK_REFS=int(re.search(r"MAX_CALLBACK_REFS = (\d+);", source)[1]),
         MAX_POLL_RESULTS=int(re.search(r"MAX_POLL_RESULTS = (\d+);", source)[1]),
         m_Cmds=0, m_CmdBytes=0, m_BusyMs=0, m_LastCmdsPerPoll=0,
@@ -63,7 +65,7 @@ def _bridge_harness(name: str) -> dict:
         m_Key=EnforceString.of("k"), m_PeerInstance=EnforceString.of(""),
         m_ResultDropLogged=False, m_Tick=1, m_TickPollCallback=0,
         m_PollInFlight=True, m_Backoff=0.0, GetGame=lambda: game,
-        TickCount=lambda prev: clock.ms - prev,
+        TickCount=lambda prev: clock.ticks - prev,
         GetPollVersion=lambda: EnforceString.of("12~1.30"),
         EncodeQueryValue=lambda value: value,
         LoadCounterQuery=lambda: EnforceString.of(""),
@@ -100,8 +102,9 @@ def _bridge_harness(name: str) -> dict:
 
     def dispatch(command):
         # Mission time stays fixed within synchronous dispatch; the native
-        # performance counter advances independently (ensystem.c:106).
-        clock.ms += command.duration_ms
+        # performance counter advances independently in 100 ns ticks
+        # (ensystem.c:105-106): 30,000 ticks must measure as 3 ms.
+        clock.ticks += command.duration_ticks
         ns["PostResult"](command)
 
     ns["Dispatch"] = dispatch
@@ -117,6 +120,11 @@ def _bridge_harness(name: str) -> dict:
     for signature in signatures:
         body = method_body(source, signature)
         body = re.sub(r'\bLog\([^;\n]*\);', '', body)
+        if signature == "protected void DispatchMeasured(MCPCommand command)":
+            # The shared subset refuses division. Lower only this expression,
+            # preserving its source operands and integer truncation toward zero.
+            # If the division is absent, leave the raw ticks for assertions to catch.
+            body = re.sub(r"\b(TickCount\(\w+\))\s*/\s*(\w+)", r"IntDivide(\1, \2)", body)
         translate(
             signature + "\n{" + body + "}\n", signature, ns,
             members=set(re.findall(r'\bm_\w+', body)),
@@ -127,8 +135,8 @@ def _bridge_harness(name: str) -> dict:
     return ns
 
 
-def _command(index: int, *, kind: str = "query_all_players", duration_ms: int = 3):
-    return SimpleNamespace(id=index, cmd=EnforceString.of(kind), duration_ms=duration_ms,
+def _command(index: int, *, kind: str = "query_all_players", duration_ticks: int = 30_000):
+    return SimpleNamespace(id=index, cmd=EnforceString.of(kind), duration_ticks=duration_ticks,
                            body='{"ok":true,"text":"ñ"}'.encode("utf-8"), ok=True)
 
 
@@ -168,7 +176,7 @@ class LoadCountersTest(unittest.TestCase):
                 ns["commands"] = []
                 for _ in range(30):
                     ns["game"].ms += 300
-                    ns["clock"].ms += 300
+                    ns["clock"].ticks += 3_000_000
                     ns["m_SincePollS"] += 0.3
                     poll()
                     ns["DrainPending"]()
@@ -180,6 +188,18 @@ class LoadCountersTest(unittest.TestCase):
                 poll()
                 self.assertEqual(ns["m_LastCmdsPerPoll"], 1)
                 self.assertEqual(ns["m_Cmds"], 6)
+
+    def test_dispatch_tick_deltas_truncate_to_nonnegative_milliseconds(self) -> None:
+        for name in ("MCPBridge.c", "MCPClientBridge.c"):
+            for ticks, milliseconds in ((-2_147_483_648, 0), (-30_000, 0), (-1, 0),
+                    (0, 0), (9_999, 0), (10_000, 1), (19_999, 1), (30_000, 3),
+                    (2_147_483_647, 214_748)):
+                with self.subTest(bridge=name, ticks=ticks):
+                    ns = _bridge_harness(name)
+                    ns["m_BusyMs"] = 7
+                    ns["DispatchMeasured"](_command(0, duration_ticks=ticks))
+                    self.assertEqual(ns["m_BusyMs"], 7 + milliseconds)
+                    self.assertIs(type(ns["m_BusyMs"]), int)
 
     def test_world_spawn_counts_when_drained_not_when_queued(self) -> None:
         ns = _bridge_harness("MCPBridge.c")
@@ -211,7 +231,7 @@ class LoadCountersTest(unittest.TestCase):
             self.assertEqual(ns["m_Cmds"], 0)
             self.assertEqual(ns["m_LastCmdsPerPoll"], 0)
             ns["serialize_ok"] = False
-            ns["DispatchMeasured"](_command(1, duration_ms=-2))
+            ns["DispatchMeasured"](_command(1, duration_ticks=-20_000))
             self.assertEqual(ns["m_Cmds"], 1)
             self.assertEqual(ns["m_CmdBytes"], 0)
             self.assertEqual(ns["m_BusyMs"], 0)

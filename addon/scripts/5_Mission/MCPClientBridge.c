@@ -499,6 +499,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// Same load counters as MCPBridge (A1). The client poll carries them too.
 	// Saturate at the same cap: a wrapped negative drops the whole triple.
 	protected const int LOAD_COUNTER_CAP = 2000000000;
+	// TickCount reports 100 ns CPU ticks: 10,000 ticks per millisecond.
+	protected const int TICKS_PER_MS = 10000;
 	protected int m_InitAttempts;
 	protected int m_Polls;
 	protected int m_Cmds;
@@ -1154,9 +1156,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 		m_Cmds = NextLoadCounter(m_Cmds);
-		int startedMs = TickCount(0);
+		int startedTicks = TickCount(0);
 		Dispatch(command);
-		int elapsedMs = TickCount(startedMs);
+		int elapsedMs = TickCount(startedTicks) / TICKS_PER_MS;
 		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 
