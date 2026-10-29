@@ -3,8 +3,8 @@
 The daemon refuses player_teleport and the other player mutations without a
 non-empty uid (loopback.validate_command_args). A gate script that omitted it
 would get bad_args and fail its own setup (tools/g0_site_gate.py did, with
-teleport_failed). This pins two things: precheck sends the uid of the player it
-observes on player_teleport, and no call in a tools/ script names one of these
+teleport_failed). This pins two things: precheck sends the uid of the single
+connected player it observes on player_teleport, and no call in a tools/ script names one of these
 commands with an argument dict (literal, or a variable assigned a literal in
 the same file) that lacks "uid" or sets it to a blank literal. Arguments built
 any other way (dict(), ** merges, a variable assigned elsewhere) are not
@@ -77,16 +77,15 @@ class SiteGateUidTest(unittest.TestCase):
         self.assertTrue(ok, error)
         self.assertEqual(record["reason"], "teleport_failed")
 
-    def test_uid_is_the_one_of_the_player_that_query_player_state_reports(self) -> None:
-        # The first row is somebody else; the bridge skips players without an
-        # identity, so the first row is not necessarily the observed player.
+    def test_several_connected_players_are_refused(self) -> None:
+        # The uid cannot be tied to the player query_player_state observes
+        # (the bridge skips players without an identity), so the gate refuses.
         record, daemon = self._precheck({"ok": 1, "players": [
             _row(OTHER_UID, (900.0, 5.0, 900.0)),
             _row(UID, (1.0, 2.0, 3.0)),
         ]})
-        teleports = self._teleports(daemon)
-        self.assertEqual(len(teleports), 1)
-        self.assertEqual(teleports[0]["uid"], UID)
+        self.assertEqual(record["reason"], "player_uid_unavailable")
+        self.assertEqual(self._teleports(daemon), [])
 
     def test_no_readable_uid_stops_before_any_teleport(self) -> None:
         far = _row(OTHER_UID, (900.0, 5.0, 900.0))
@@ -99,6 +98,8 @@ class SiteGateUidTest(unittest.TestCase):
             ("no row near the observed player", {"ok": 1, "players": [far]}, None),
             ("two rows near the observed player",
              {"ok": 1, "players": [_row(UID), _row(OTHER_UID, (2.0, 2.0, 4.0))]}, None),
+            ("observed player moved away from the only row",
+             {"ok": 1, "players": [_row(UID, (7.0, 2.0, 3.0))]}, None),
             ("row without pos", {"ok": 1, "players": [{"uid": UID}]}, None),
             ("state unreadable", {"ok": 1, "players": [_row()]}, {"ok": 0}),
             ("state timeout", {"ok": 1, "players": [_row()]}, {"_timeout": True}),
@@ -118,6 +119,12 @@ def _uid_less_calls(source: str) -> list[tuple[int, str]]:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     assigned.setdefault(target.id, []).append(node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.value, ast.Dict)
+            and isinstance(node.target, ast.Name)
+        ):
+            assigned.setdefault(node.target.id, []).append(node.value)
 
     def lacks_uid(arg_dict: ast.Dict) -> bool:
         for key, value in zip(arg_dict.keys, arg_dict.values):
@@ -157,6 +164,7 @@ class ScanTest(unittest.TestCase):
             ("keyword args", 'run(cmd="player_teleport", args={"pos": p})'),
             ("keyword cmd and positional", 'run("player_heal", args={})'),
             ("variable dict", 'a = {"pos": p}\nd.run("player_teleport", a)'),
+            ("annotated variable dict", 'a: dict = {"pos": p}\nd.run("player_teleport", a)'),
             ("blank uid", 'd.run("inventory_give", {"uid": "", "item": 1})'),
             ("whitespace uid", 'd.run("hands_take", {"uid": "  "})'),
             ("none uid", 'd.run("player_godmode", {"uid": None})'),

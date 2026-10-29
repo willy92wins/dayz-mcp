@@ -360,11 +360,16 @@ def player_uid(daemon: g.Daemon) -> str | None:
 
     player_teleport requires a non-empty uid (B2: an empty uid used to fall
     through to the first human in the bridge). query_player_state reports the
-    first player and carries no uid, and query_all_players skips players
-    without an identity, so its first row may be another player. The uid is
-    the one of the single query_all_players row whose position matches the
-    player query_player_state reports. None when it cannot be read or is
-    ambiguous.
+    first player and carries no uid, so the uid comes from query_all_players.
+    The gate is a single-player tool: it only answers when query_all_players
+    lists exactly one player and that player stands where query_player_state
+    says the observed player stands. With several players connected it
+    refuses (the uid cannot be tied to the observed player). Known limit: the
+    bridge omits a player without an identity from query_all_players, so a
+    just-joining identity-less first player next to a single identified
+    player within PLAYER_MATCH_M cannot be told apart; closing it needs
+    query_player_state to carry the uid (a PBO change). None when it cannot
+    be read.
     """
     state = daemon.run("query_player_state", {}, "server", 15.0)
     state_pos = g.extract_pos(state)
@@ -374,21 +379,15 @@ def player_uid(daemon: g.Daemon) -> str | None:
     players = result.get("players")
     if result.get("_timeout") or not g._is_true(result.get("ok")):
         return None
-    if not isinstance(players, list):
+    if not isinstance(players, list) or len(players) != 1 or not isinstance(players[0], dict):
         return None
-    matches = []
-    for row in players:
-        if not isinstance(row, dict):
-            continue
-        uid = row.get("uid")
-        row_pos = g.extract_pos(row)
-        if not (isinstance(uid, str) and uid.strip()) or row_pos is None:
-            continue
-        if math.hypot(row_pos[0] - state_pos[0], row_pos[2] - state_pos[2]) <= PLAYER_MATCH_M:
-            matches.append(uid)
-    if len(matches) != 1:
+    uid = players[0].get("uid")
+    row_pos = g.extract_pos(players[0])
+    if not (isinstance(uid, str) and uid.strip()) or row_pos is None:
         return None
-    return matches[0]
+    if math.hypot(row_pos[0] - state_pos[0], row_pos[2] - state_pos[2]) > PLAYER_MATCH_M:
+        return None
+    return uid
 
 
 def precheck(daemon: g.Daemon, label: str, x: float, z: float) -> dict:
