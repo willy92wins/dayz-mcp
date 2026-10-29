@@ -15,6 +15,7 @@ Profile off changes nothing.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -108,6 +109,24 @@ class AdminMutationsTest(unittest.TestCase):
         self.assertEqual((status, body), (403, {"error": "live_profile_refused"}))
 
 
+class PlayersVisibilityTest(unittest.TestCase):
+    def test_players_visibility_refused_with_and_without_admin(self) -> None:
+        self.assertNotIn(
+            "players_visibility", loopback.LIVE_ALLOWED_COMMANDS
+        )
+        for admin in (False, True):
+            state = _state(live_profile=True, live_admin_enabled=admin)
+            with self.subTest(admin=admin):
+                status, body = state.enqueue_command(
+                    "players_visibility",
+                    {"pos": [10.0, 5.0, 20.0], "radius": 0.0},
+                    peer="server",
+                )
+                self.assertEqual(
+                    (status, body), (403, {"error": "live_profile_refused"})
+                )
+
+
 class ReadsAndWarningsTest(unittest.TestCase):
     def test_reads_and_warnings_allowed_by_default(self) -> None:
         state = _state(live_profile=True)
@@ -135,6 +154,14 @@ class ProfileOffTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 status, body = state.enqueue_command(cmd, args, peer=peer)
                 self.assertEqual(status, 200, body)
+        # players_visibility keeps its pre-B4 gating (capability check),
+        # never the live-profile refusal.
+        status, body = state.enqueue_command(
+            "players_visibility",
+            {"pos": [10.0, 5.0, 20.0], "radius": 0.0},
+            peer="server",
+        )
+        self.assertNotEqual(body, {"error": "live_profile_refused"})
         # The pre-B4 refusal for an unknown command is unchanged.
         status, body = state.enqueue_command("dayz_test_run", {})
         self.assertEqual((status, body), (400, {"error": "not_whitelisted"}))
@@ -157,6 +184,7 @@ class AlwaysRefusedTest(unittest.TestCase):
             ("player_view_set", {}, "client"),
             ("action_cursor", {}, "client"),
             ("action_cursor_ids", {}, "server"),
+            ("players_visibility", {}, "server"),
             ("input_describe", {}, "client"),
             ("vehicle_enter", {}, "server"),
             ("vehicle_control", {}, "client"),
@@ -231,6 +259,7 @@ class PartitionTest(unittest.TestCase):
             "player_view_set",
             "action_cursor",
             "action_cursor_ids",
+            "players_visibility",
             "input_describe",
             "world_spawn",
             "world_spawn_batch",
@@ -303,6 +332,10 @@ class _FakeLifecycle:
         self.calls.append("status")
         return {"runs": [], "retail_quarantine": False}
 
+    def admin_reconcile(self, run_id, pid, reason, empty=False):
+        self.calls.append("reconcile")
+        return {"reconciled": True}
+
 
 _LIFECYCLE_BODIES: dict[str, dict] = {
     # The routes the real dayz_test_run / dayz_test_stop / dayz_test_close /
@@ -347,6 +380,102 @@ def _lifecycle_reply(
     if len(replies) != 1:
         raise AssertionError(f"{action} replied {len(replies)} times")
     return replies[0]
+
+
+_ADMIN_BODIES: dict[str, dict] = {
+    "reconcile": {
+        "reason": "incident",
+        "run_id": "R",
+        "pid": 123,
+        "confirmation": "FORCE R 123",
+    },
+    "lifecycle-recovery-repair": {
+        "reason": "incident",
+        "fault_id": "F",
+        "expected_head_sha256": "a" * 64,
+        "confirmation": "REPAIR LIFECYCLE F",
+    },
+}
+
+
+def _admin_reply_via_post(
+    state: loopback.ServerState, action: str, body: dict
+) -> tuple[int, dict]:
+    """One /admin/<action> through the real Handler.do_POST, no socket."""
+    handler = loopback.Handler.__new__(loopback.Handler)
+    handler.server = types.SimpleNamespace(state=state, log_sink=lambda _m: None)
+    raw = json.dumps(body).encode("utf-8")
+    handler.path = f"/admin/{action}?key={state.key}"
+    handler.headers = {"Content-Length": str(len(raw))}
+    handler.rfile = io.BytesIO(raw)
+    replies: list[tuple[int, dict]] = []
+    handler._json = lambda code, payload: replies.append(  # type: ignore[method-assign]
+        (code, json.loads(json.dumps(payload)))
+    )
+    handler.do_POST()
+    if len(replies) != 1:
+        raise AssertionError(f"{action} replied {len(replies)} times")
+    return replies[0]
+
+
+class AdminRoutesLiveProfileTest(unittest.TestCase):
+    def test_admin_routes_refused_via_do_post_with_and_without_admin(
+        self,
+    ) -> None:
+        for admin in (False, True):
+            state = loopback.ServerState(
+                "test-key", live_profile=True, live_admin_enabled=admin
+            )
+            lifecycle = _FakeLifecycle()
+            state.lifecycle = lifecycle
+            repair_calls: list[tuple] = []
+
+            def _fake_repair(state_, fault_id, expected_head):
+                repair_calls.append((fault_id, expected_head))
+                return 200, {"repaired": True, "fault_id": fault_id}
+
+            with patch.object(
+                loopback, "_repair_lifecycle_recovery_fault", _fake_repair
+            ):
+                for action, body in _ADMIN_BODIES.items():
+                    with self.subTest(action=action, admin=admin):
+                        status, payload = _admin_reply_via_post(
+                            state, action, body
+                        )
+                        self.assertEqual(
+                            (status, payload),
+                            (403, {"error": "live_profile_refused"}),
+                        )
+            self.assertEqual(lifecycle.calls, [])
+            self.assertEqual(repair_calls, [])
+
+    def test_admin_routes_unchanged_with_profile_off(self) -> None:
+        state = loopback.ServerState("test-key")
+        lifecycle = _FakeLifecycle()
+        state.lifecycle = lifecycle
+        repair_calls: list[tuple] = []
+
+        def _fake_repair(state_, fault_id, expected_head):
+            repair_calls.append((fault_id, expected_head))
+            return 200, {"repaired": True, "fault_id": fault_id}
+
+        with patch.object(
+            loopback, "_repair_lifecycle_recovery_fault", _fake_repair
+        ):
+            status, payload = _admin_reply_via_post(
+                state, "reconcile", _ADMIN_BODIES["reconcile"]
+            )
+            self.assertEqual((status, payload), (200, {"reconciled": True}))
+            status, payload = _admin_reply_via_post(
+                state,
+                "lifecycle-recovery-repair",
+                _ADMIN_BODIES["lifecycle-recovery-repair"],
+            )
+            self.assertEqual(
+                (status, payload), (200, {"repaired": True, "fault_id": "F"})
+            )
+        self.assertEqual(lifecycle.calls, ["reconcile"])
+        self.assertEqual(repair_calls, [("F", "a" * 64)])
 
 
 class LifecycleRoutesTest(unittest.TestCase):

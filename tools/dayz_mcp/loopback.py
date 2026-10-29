@@ -190,10 +190,12 @@ LIVE_ADMIN_COMMANDS = frozenset(
 # only server-side state reads of server/player/world. Client reads that
 # consult UI, camera or input stay out (camera_get, ui_tree, input_describe,
 # action_cursor and its server correlate action_cursor_ids, and the client
-# vehicle_telemetry read).
+# vehicle_telemetry read). players_visibility stays out too: although it
+# runs on the server, it reads the player's camera/input heading
+# (GetInputController().GetHeadingAngle()), like action_cursor.
 LIVE_ALLOWED_COMMANDS = frozenset(
     ((READ_ONLY_COMMANDS & SERVER_COMMANDS) | {"notify_players"})
-    - {"action_cursor_ids"}
+    - {"action_cursor_ids", "players_visibility"}
 )
 
 
@@ -6737,6 +6739,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid_op"})
 
     def _handle_admin(self, action: str) -> None:
+        # B4 round 2: /admin/reconcile and
+        # /admin/lifecycle-recovery-repair are external HTTP entry points
+        # into the lifecycle, so under the live profile they are refused
+        # here, before any delegation, admin or not -- same as
+        # /lifecycle/*. Daemon-internal cleanup paths that call
+        # lifecycle.admin_reconcile or _repair_lifecycle_recovery_fault
+        # directly do not pass through this handler and stay unfiltered.
+        if action in {"reconcile", "lifecycle-recovery-repair"} and getattr(
+            self.state, "live_profile", False
+        ):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         body = self._read_json()
         if body is None:
             return
