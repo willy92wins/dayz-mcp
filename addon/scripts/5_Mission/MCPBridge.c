@@ -5533,18 +5533,15 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// The filter nav_path_query walks with: the walking flags (ground, doors,
-	// inside buildings) included, the disabled and swimming ones excluded.
-	// PGPolyFlags declares no values although PGFilter takes bitmasks
-	// (aiworld.c:1-26 and :61), and vanilla never builds a PGFilter: these
-	// masks are not measured. The final in-game round's street, door and
-	// water paths test what they admit, not their values.
+	// The filter nav_path_query walks with: the engine's default PGFilter.
+	// No flags are set: PGFilter.SetFlags takes bitmasks but PGPolyFlags is a
+	// sequential enum that declares no bit values (aiworld.c:1-26 and :61), so
+	// ORing its members builds no meaningful mask. Doors and water are not
+	// guaranteed to be included or excluded. A measured filter is future work
+	// and needs an in-game round.
 	protected PGFilter BuildNavWalkFilter()
 	{
 		PGFilter filter = new PGFilter();
-		int includeFlags = PGPolyFlags.WALK | PGPolyFlags.DOOR | PGPolyFlags.INSIDE;
-		int excludeFlags = PGPolyFlags.DISABLED | PGPolyFlags.SWIM | PGPolyFlags.SWIM_SEA;
-		filter.SetFlags(includeFlags, excludeFlags, 0);
 		return filter;
 	}
 
