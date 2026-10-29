@@ -1292,6 +1292,11 @@ class MCPCameraPathState
 	float t_s;
 	float duration_s;
 	string path_id;
+	// Execution identity belongs to the client, not to the order ids were queued.
+	// A successful play echoes the prior path it replaced, even if that path's
+	// result has not arrived yet. Other pending plays are not thereby superseded.
+	int command_id;
+	int replaced_command_id;
 };
 
 // hud_set (f427): the in-game HUD's player hide flags read back with

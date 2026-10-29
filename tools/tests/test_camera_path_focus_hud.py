@@ -2793,11 +2793,14 @@ class EnforceWiringTest(unittest.TestCase):
         )
         self.assertEqual(
             _members(_class_body(self.messages, "MCPCameraPathState")),
-            [("string", "state"), ("float", "t_s"), ("float", "duration_s"), ("string", "path_id")],
-        )
-        self.assertEqual(
-            _members(_class_body(self.path, "MCPCameraPathState")),
-            [("int", "command_id"), ("int", "replaced_command_id")],
+            [
+                ("string", "state"),
+                ("float", "t_s"),
+                ("float", "duration_s"),
+                ("string", "path_id"),
+                ("int", "command_id"),
+                ("int", "replaced_command_id"),
+            ],
         )
         self.assertEqual(
             _members(_class_body(self.messages, "MCPHudState")),
