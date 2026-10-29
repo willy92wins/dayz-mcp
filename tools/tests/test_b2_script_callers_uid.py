@@ -138,6 +138,8 @@ def _uid_less_calls(source: str) -> list[tuple[int, str]]:
             if isinstance(key, ast.Constant) and key.value == "uid":
                 last = value
         if last is not None:
+            if isinstance(last, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+                return True  # a literal container is never a uid string
             return (
                 isinstance(last, ast.Constant)
                 and (not isinstance(last.value, str) or not last.value.strip())
@@ -177,6 +179,9 @@ class ScanTest(unittest.TestCase):
             ("blank uid", 'd.run("inventory_give", {"uid": "", "item": 1})'),
             ("whitespace uid", 'd.run("hands_take", {"uid": "  "})'),
             ("duplicate uid key, last one blank", 'd.run("hands_take", {"uid": "ok", "uid": ""})'),
+            ("duplicate uid key, last one a list", 'd.run("player_teleport", {"uid": "", "uid": []})'),
+            ("container uid", 'd.run("player_heal", {"uid": {"a": 1}})'),
+            ("number uid", 'd.run("player_heal", {"uid": 7})'),
             ("none uid", 'd.run("player_godmode", {"uid": None})'),
         ):
             with self.subTest(case=label):
