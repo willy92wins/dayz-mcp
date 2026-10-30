@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- FIFO/reservations remain available with v12 peers: lease-end stage 2b stays inert until PBO v13 announces `lease_close` / `lease_close_client`. The broker checks the bound peer's capability census (no environment flag); unsupported closes settle without queued commands or OWED rows, so later grants do not inherit `lease_end_unconfirmed`. Bridge protocol version 12 and the server argument-contract hash are unchanged; no PBO rebuild is needed for this broker fix.
+- FIFO/reservations remain available with v12 peers: lease-end stage 2b stays inert until PBO v13 announces `lease_close` / `lease_close_client`. The broker checks the bound peer's capability census (no environment flag); unsupported closes settle without queued commands or OWED rows, so later grants do not inherit `lease_end_unconfirmed`. Bridge protocol version 12 and the server argument-contract hash are unchanged; this F1 broker fix alone needs no PBO rebuild (PR #268 as a whole touches `addon/` and does require one).
 
 ### Added
 
