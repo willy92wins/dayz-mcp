@@ -3911,7 +3911,7 @@ class ServerState:
         self._camera_path_successor_by_lease.setdefault(owner[1], {}).setdefault(command_id, None)
 
     def _note_camera_path_result_locked(self, command_id: int, stored: dict) -> None:
-        """Prune only a play the client explicitly refused or replaced.
+        """Prune a play the client explicitly refused, replaced or finished.
 
         The echoed predecessor was inactive when this play started, regardless
         of command or HTTP result order. Other unanswered plays may still run.
@@ -3934,6 +3934,15 @@ class ServerState:
             and ok_value == 1
         ):
             path = stored.get("camera_path")
+            if (
+                isinstance(path, dict)
+                and type(path.get("command_id")) is int
+                and path["command_id"] == command_id
+                and path.get("state") == "finished"
+            ):
+                command_ids.discard(command_id)
+                if self._camera_path_active_by_lease.get(lease_id) == command_id:
+                    self._camera_path_active_by_lease.pop(lease_id, None)
             if (
                 isinstance(path, dict)
                 and type(path.get("command_id")) is int

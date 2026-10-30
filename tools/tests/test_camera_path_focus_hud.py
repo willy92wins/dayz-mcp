@@ -521,7 +521,7 @@ _BRIDGE_METHODS = (
 )
 _BRIDGE_SIBLINGS = (
     "FinishCameraHandoff|SuppressGameplay|DeleteOwnedCamera|RestoreGameplay|StopCameraPath|"
-    "HasExclusiveJob|Log"
+    "HasExclusiveJob|ReleaseCamera|PostResult|Log"
 )
 
 
@@ -559,6 +559,7 @@ class _ClientBridge:
             "_S": _Text,
             "MCPCameraPath": path_class,
             "MCPCameraPathState": _state_block,
+            "MCPResult": lambda: SimpleNamespace(),
             "g_Game": SimpleNamespace(CreateObject=self._create, ObjectDelete=self._delete),
             "Camera": SimpleNamespace(Cast=lambda thing: thing if isinstance(thing, _Camera) else None),
             "FreeDebugCamera": SimpleNamespace(GetInstance=lambda: self.free_cam),
@@ -573,7 +574,7 @@ class _ClientBridge:
                 code,
                 head,
                 namespace,
-                class_types={"MCPCameraPath", "Object", "Camera", "FreeDebugCamera", "PlayerBase"},
+                class_types={"MCPCameraPath", "MCPCameraPathState", "MCPResult", "Object", "Camera", "FreeDebugCamera", "PlayerBase"},
             )
             if method.__name__ == "TickCameraPath":
                 self._tick_camera_path = MethodType(method, self)
@@ -603,6 +604,12 @@ class _ClientBridge:
 
     def RestoreGameplay(self) -> None:
         self.log.append(("bridge", "RestoreGameplay"))
+
+    def ReleaseCamera(self) -> None:
+        self.log.append(("bridge", "ReleaseCamera"))
+
+    def PostResult(self, result: SimpleNamespace) -> None:
+        self.terminal_result = {"id": result.id, "ok": result.ok, "camera_path": _block(result.camera_path)}
 
     def HasExclusiveJob(self) -> bool:
         self.log.append(("bridge", "HasExclusiveJob"))
@@ -1974,14 +1981,91 @@ class ExecutedDispatchTest(unittest.TestCase):
     def test_a_refused_play_changes_nothing(self) -> None:
         job = self.client.play({"mode": "play", "keys": [_key(0)], "easing": "linear", "path_id": ""})
         self.assertEqual((job.done, job.error.text), (True, "bad_args"))
-        self._played()
+        self.assertEqual(self.client.m_CameraPathCommandId, 0)
+
+    def test_play_replaces_and_late_release_does_not_stop_successor(self) -> None:
+        first = self._played()
+        old_path = self.client.m_CameraPath
+        second = self._new_camera()
+        answer = self.client.play(self._wire("second"), command_id=8)
+        self.assertTrue(answer.ok)
+        self.assertEqual(_block(answer.camera_path)["replaced_command_id"], 7)
+        self.assertEqual(_report(old_path)["state"], "aborted")
+        self.assertIn(("engine", "ObjectDelete", first), self.client.log)
+        self.assertFalse(self.client.release(7).matched)
+        self.assertEqual(self.client.m_CameraPathCommandId, 8)
+        self.assertTrue(second.active)
+        self.assertTrue(self.client.release(8).matched)
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
+        self.assertEqual(self.client.m_CameraPathCommandId, 0)
+        self.assertIn(("bridge", "ReleaseCamera"), self.client.log)
+        self.assertIn(("bridge", "RestoreGameplay"), self.client.log)
+
+    def test_natural_end_restores_and_settles_even_after_play_result_consumed(self) -> None:
+        state, coordinator, client, token = self._leased()
+        play = self._deliver_play(state, token, "finished")
+        self._report_play(state, play)
+        state.take_result(play["id"], remove=True)
         self.client.log.clear()
-        job = self.client.play(self._wire("second"), command_id=8)
-        self.assertEqual((job.done, job.error.text), (True, "path_busy"))
-        self.assertEqual(self.client.log, [])
-        self.assertEqual(_report(self.client.m_CameraPath)["path_id"], "line6")
-        # The playing path keeps the id of the play that started it.
-        self.assertEqual(self.client.m_CameraPathCommandId, 7)
+        self.client.TickCameraPath(_F32(6.0))
+        self.assertEqual(_report(self.client.m_CameraPath)["state"], "finished")
+        self.assertEqual(self.client.m_CameraPathCommandId, 0)
+        self.assertIsNone(self.client.m_CameraPathCam)
+        self.assertIn(("bridge", "ReleaseCamera"), self.client.log)
+        self.assertIn(("bridge", "RestoreGameplay"), self.client.log)
+        self.assertEqual(self.client.terminal_result["camera_path"]["command_id"], play["id"])
+        state.store_result(self.client.terminal_result, instance=INST_CLIENT)
+        self.assertFalse(self.client.release(play["id"]).matched)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued", 0), 0)
+        self.assertEqual(self._sent(state), [])
+
+    def test_terminal_report_before_play_reply_does_not_rearm_cleanup(self) -> None:
+        state, coordinator, client, token = self._leased()
+        play = self._deliver_play(state, token, "finished")
+        reply = self._execute_path(play)
+        self.client.TickCameraPath(_F32(6.0))
+        state.store_result(self.client.terminal_result, instance=INST_CLIENT)
+        # Independent HTTP callbacks can deliver the immediate reply last.
+        state.store_result(reply, instance=INST_CLIENT)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued", 0), 0)
+        self.assertEqual(self._sent(state), [])
+
+    def test_finished_predecessor_does_not_retire_its_successor(self) -> None:
+        state, coordinator, client, token = self._leased()
+        first = self._deliver_play(state, token, "first")
+        self._report_play(state, first)
+        self.client.TickCameraPath(_F32(6.0))
+        terminal = self.client.terminal_result
+        second = self._deliver_play(state, token, "second")
+        self._report_play(state, second)
+        state.store_result(terminal, instance=INST_CLIENT)
+        status, released = coordinator.release(client, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(released["cleanup"].get("camera_path_release_enqueued"), 1)
+        self.assertEqual(self._sent(state), self._releases(second["id"]))
+
+    def test_unverified_finished_report_keeps_cleanup_armed(self) -> None:
+        for failure in ("wrong_id", "boolean_id", "wrong_instance"):
+            with self.subTest(failure=failure):
+                self.setUp()
+                state, coordinator, client, token = self._leased()
+                play = self._deliver_play(state, token, "running")
+                self._report_play(state, play)
+                terminal = {"id": play["id"], "ok": True,
+                            "camera_path": {"command_id": play["id"], "state": "finished"}}
+                if failure == "wrong_id":
+                    terminal["camera_path"]["command_id"] += 1
+                elif failure == "boolean_id":
+                    terminal["camera_path"]["command_id"] = True
+                instance = "unbound-client" if failure == "wrong_instance" else INST_CLIENT
+                state.store_result(terminal, instance=instance)
+                status, released = coordinator.release(client, token)
+                self.assertEqual(status, 200)
+                self.assertEqual(released["cleanup"].get("camera_path_release_enqueued", 0), 1)
 
     def test_a_busy_play_changes_nothing(self) -> None:
         self.client.exclusive = True
@@ -2312,8 +2396,9 @@ class ExecutedDispatchTest(unittest.TestCase):
             {"id": playing["id"], "ok": answer.ok, "camera_path": _block(answer.camera_path)}, instance=INST_CLIENT
         )
         busy = self._deliver_play(state, token, "busy")
+        self.client.exclusive = True
         answer = self.client.play(busy["args"], command_id=busy["id"])
-        self.assertEqual((answer.ok, answer.error.text), (False, "path_busy"))
+        self.assertEqual((answer.ok, answer.error.text), (False, "busy"))
         state.store_result({"id": busy["id"], "ok": answer.ok, "error": answer.error.text}, instance=INST_CLIENT)
         status, released = coordinator.release(client, token)
         self.assertEqual(status, 200, released)
@@ -2835,7 +2920,6 @@ class EnforceWiringTest(unittest.TestCase):
         body = _flat(_method_body(self.bridge, "protected bool DispatchCameraPathPlay("))
         order = [
             "error = candidate.Load(command.args);",
-            'result.error = "path_busy";',
             'result.error = "busy";',
             'cameraObject = g_Game.CreateObject("staticcamera", candidate.StartPosition(), true);',
             "cam = Camera.Cast(cameraObject);",

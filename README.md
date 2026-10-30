@@ -104,6 +104,19 @@ hold the design together, and why each one exists, are in
 
 **A2.** Python held `/poll` for 600 ms; `ticks_in_flight` = **4741** (run_045213). Pass line ≥ 5 (`product-spec.md:43`).
 
+**Camera paths (#263).** A natural end returns to the player through the same
+camera handoff and gameplay restoration used by `restore_gameplay`, and clears
+the playing command id. A successful play replaces a running play and reports
+its id as `camera_path.replaced_command_id`; `busy` still rejects an exclusive
+job. The daemon settles lease tracking on the client's terminal `finished`
+report. Explicit mode=stop keeps its existing last-pose behavior.
+`camera_path_release` remains an internal, client-capability-gated command:
+it is not one of the **102 public tools** and LIVE still rejects it. A matching
+command_id aborts the path and releases camera/gameplay; a stale id cannot stop
+its successor. Public exposure is deferred because `server.py` tool registration
+is outside this patch's write-set. The older tool catalog's finished-pose text
+is superseded by this behavior. PBO rebuild and in-game retest remain required.
+
 **Infected heading.** `infected_drive` at 90°: authoritative heading **92.1°** (error 2.1°). Run `1a1cb6e1-7230-43c4-9164-41ab3b0be936` (`tools/tests/test_task9_spawn_phase_markers.py:101-105`). Same run: 76.6 m away from a player at 0.95 m; 270° measured **270.1°**, 41.7 m in 46 s, 0.02 m lateral; `mode="release"` returns vanilla AI (171.7°, 0.25 m/s).
 
 **B3.** Fixture ready, throttle 1.0, PHYSICS: `engine_on_server=1`, `speedo≈0`, `pos_delta≈0` (`product-spec.md:56`). `ActionStartEngine` returns on `INSTANCETYPE_SERVER` when PHYSICS (`actionstartengine.c:51-58`). Cars are not driven from `MissionServer` (`product-spec.md:325`). Cars move from the owning client (`vehicle_control`).

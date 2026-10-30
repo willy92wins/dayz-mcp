@@ -1957,12 +1957,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				result.error = error;
 				return true;
 			}
-			if (m_CameraPath.IsPlaying())
-			{
-				result.ok = false;
-				result.error = "path_busy";
-				return true;
-			}
 			if (HasExclusiveJob())
 			{
 				result.ok = false;
@@ -1987,6 +1981,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return true;
 			}
 
+			StopCameraPath();
 			FinishCameraHandoff();
 			SuppressGameplay();
 			// After a camera_set free the free camera is still on and the player
@@ -2057,11 +2052,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
-	// camera_path_release (d026), an internal command and not a tool: the
-	// loopback sends it when the lease that played a path ends, and when a
-	// play it delivered is abandoned. It stops the playing path, as stop
-	// does, only while the play with command_id is the one playing, so a late
-	// release cannot end a later play, and answers whether it matched.
+	// camera_path_release remains internal: public tool registration is outside
+	// the 263fix write-set. Loopback sends it when the owning lease ends or a
+	// delivered play is abandoned. Unlike mode=stop it also releases the
+	// camera and restores gameplay. Only the matching playing command_id
+	// can be released, so a late release cannot end a later play. The result
+	// answers whether it matched.
 	protected bool DispatchCameraPathRelease(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || command.args.command_id <= 0)
@@ -2075,6 +2071,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (m_CameraPath.IsPlaying() && m_CameraPathCommandId == command.args.command_id)
 		{
 			StopCameraPath();
+			m_CameraPathCommandId = 0;
+			ReleaseCamera();
+			RestoreGameplay();
 			result.matched = true;
 		}
 		result.ok = true;
@@ -5287,6 +5286,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected void TickCameraPath(float timeslice)
 	{
 		FreeDebugCamera freeCam;
+		MCPResult result;
 		if (!m_CameraPath || !m_CameraPath.IsPlaying())
 		{
 			return;
@@ -5313,6 +5313,23 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		m_CameraPath.Advance(timeslice);
 		m_CameraPath.Apply(m_CameraPathCam);
+		if (!m_CameraPath.IsPlaying())
+		{
+			// Keep the terminal path report, but relinquish camera ownership.
+			// The original play id also settles loopback lease cleanup, even
+			// if the immediate playing reply has already been consumed.
+			result = new MCPResult();
+			result.id = m_CameraPathCommandId;
+			result.ok = true;
+			result.camera_path = new MCPCameraPathState();
+			m_CameraPath.Fill(result.camera_path);
+			result.camera_path.command_id = m_CameraPathCommandId;
+			m_CameraPathCommandId = 0;
+			m_CameraPathCam = null;
+			ReleaseCamera();
+			RestoreGameplay();
+			PostResult(result);
+		}
 	}
 
 	// Ends a playing path as aborted where its camera stands now; a finished,
