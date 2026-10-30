@@ -323,10 +323,13 @@ class InventoryGiveIdToolTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime, "call_bridge", new=AsyncMock(return_value=payload)) as call:
             result = await self.app.call_tool(
                 "inventory_give",
-                {"classname": "Rag", "dest": dest, "timeout_s": 1.0},
+                {"classname": "Rag", "dest": dest, "uid": "player-1", "timeout_s": 1.0},
             )
         call.assert_awaited_once_with(
-            "inventory_give", {"classname": "Rag", "dest": dest}, "server", 1.0
+            "inventory_give",
+            {"classname": "Rag", "dest": dest, "uid": "player-1"},
+            "server",
+            1.0,
         )
         return str(result)
 

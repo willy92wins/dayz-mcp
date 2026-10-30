@@ -165,6 +165,7 @@ from dayz_mcp.tool_catalog import (
     _INITIAL_READ_TOOL_NAMES,
     _LEASE_REVEAL_PREFIXES,
     _OPENER_FOR_CLOSER,
+    _admin_catalog,
     _bridge_success_candidates,
     _compact_description,
     _compact_initial_catalog,
@@ -429,13 +430,17 @@ WAIT_FOR_CONDITIONS = frozenset({
 })
 TELEMETRY_READ_MODES = frozenset({"object_at", "fixture_jsonl"})
 LEASE_TOOL_LINE = "Requires a lease (session_acquire_wait)."
-# Godmode is on by default (inbox 3136). The descriptions of the tools that
-# launch a run, change godmode or report it carry this sentence, so the changed
-# default damage behaviour is stated where an agent reads it.
+# Godmode is off by default (B1, SUPUESTO D1 option a; inbox 3136 had it on).
+# It is on by default only in a harness test run, whose bridge config carries
+# profile=test. The descriptions of the tools that launch a run, change godmode
+# or report it carry this sentence, so the default damage behaviour is stated
+# where an agent reads it.
 GODMODE_DEFAULT_LINE = (
-    "Godmode is ON by default: in every run that loads DayZ_MCP the server makes "
-    "each player immune to damage (falls, hits, hunger and thirst) when it "
-    "connects or respawns; call player_godmode(on=false) to get vanilla damage back."
+    "Godmode is OFF by default: players take vanilla damage unless the run is a "
+    "harness test run (its MCP bridge config says profile=test), where each player "
+    "is immune to damage (falls, hits, hunger and thirst) when it connects or "
+    "respawns; player_godmode(on=true) switches godmode on explicitly for one "
+    "player and player_godmode(on=false) gives vanilla damage back."
 )
 
 # flags=0 stays the surface default. This mask is the example to add when
@@ -2976,6 +2981,62 @@ def _player_count(result: dict[str, Any]) -> int:
     return len(players)
 
 
+def _player_find_candidates(players: Any, name: Any) -> list[dict[str, Any]]:
+    """All {name, uid} rows whose name matches exactly (B3).
+
+    Match rule: the query and each row name are trimmed, then compared
+    case-insensitively (casefold) for equality; no substring or fuzzy
+    match. Every match is returned; this helper never picks one.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ToolError(_bad_args("name", name, "be a non-empty player name"))
+    wanted = name.strip().casefold()
+    candidates: list[dict[str, Any]] = []
+    if isinstance(players, list):
+        for row in players:
+            if not isinstance(row, dict):
+                continue
+            row_name = row.get("name")
+            if not isinstance(row_name, str):
+                continue
+            if row_name.strip().casefold() != wanted:
+                continue
+            uid = row.get("uid")
+            candidates.append(
+                {"name": row_name, "uid": uid if isinstance(uid, str) else ""}
+            )
+    return candidates
+
+
+def _resolve_player_by_name(players: Any, name: Any) -> dict[str, Any]:
+    """The single candidate for name, or a named error (B3).
+
+    Zero candidates raise player_not_found; more than one raises
+    ambiguous_player_name listing every candidate. Nothing is mutated
+    and no candidate is ever chosen for the caller.
+    """
+    candidates = _player_find_candidates(players, name)
+    shown = name.strip() if isinstance(name, str) else name
+    if not candidates:
+        raise ToolError(
+            f"player_not_found: no connected player named {shown!r}"
+        )
+    if len(candidates) > 1:
+        raise ToolError(
+            f"ambiguous_player_name: name {shown!r} matches "
+            f"{len(candidates)} players: "
+            f"{json.dumps(candidates, ensure_ascii=False)}; "
+            "call the player tool with one of these uids"
+        )
+    candidate = candidates[0]
+    return {
+        "ok": True,
+        "name": candidate["name"],
+        "uid": candidate["uid"],
+        "candidates": candidates,
+    }
+
+
 # Teleport clearance probe (fb-20260824-115220-1bc1): a surface landing must have
 # an uncovered vertical column. Constants mirror the certified site gate probe
 # (tools/g0_site_gate.py canopy_gate, calibrated 2026-08-19 at 0.05 m).
@@ -5076,6 +5137,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("session_tools_require_client_mode")
         return runtime
 
+    def _require_admin_uid(uid: str) -> None:
+        # Admin pack only (fix1): the listed schema marks uid required, so
+        # enforce it before dispatch; other packs keep the first-player
+        # fallback (empty uid is omitted from the bridge args as before).
+        if config.tool_pack == "admin" and not uid.strip():
+            raise ToolError(
+                "uid_required: uid must name a player under --tool-pack admin"
+            )
+
     # Observed after build_app has finished registering, which is the only
     # moment the set is complete, and cached because it cannot change afterwards.
     _registered_tool_names: set[str] = set()
@@ -6075,6 +6145,37 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("query_all_players", {}, "server", _timeout(timeout_s))
 
+    @app.tool(
+        description=(
+            "Find a connected player by name and return its {name, uid}. "
+            "Read-only, no lease: it only calls query_all_players and "
+            "filters its rows, and mutates nothing. Match rule: the name "
+            "and each row name are trimmed, then compared exactly and "
+            "case-insensitively; no substring match. One match returns "
+            "{ok, name, uid, candidates}; no match is player_not_found; "
+            "more than one is ambiguous_player_name listing every "
+            "candidate, and no candidate is ever picked for you. An "
+            "empty or blank name is bad_args. An older PBO leaves name "
+            "out of query_all_players rows, so every search then reads "
+            "player_not_found. A non-success query_all_players answer "
+            "(such as game_not_ready when no game is running) is returned "
+            "unchanged, not read as player_not_found."
+        )
+    )
+    async def player_find(
+        name: StrictStr, timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S
+    ) -> dict[str, Any]:
+        # Validate before the bridge call: a blank name must not query.
+        _player_find_candidates([], name)
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge(
+                "query_all_players", {}, "server", _timeout(timeout_s)
+            )
+        if isinstance(result, dict) and (not result.get("ok") or result.get("error")):
+            return result
+        players = result.get("players") if isinstance(result, dict) else None
+        return _resolve_player_by_name(players, name)
+
     # F2.1: marker state lives per MCP session (this process), so a caller can
     # poll without threading the marker through every call. Passing `marker`
     # explicitly still wins, which is what makes the tool replayable.
@@ -6548,6 +6649,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("icon", icon, "be a string"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        _require_admin_uid(uid)
         args: dict[str, Any] = {
             "show_time": show_time_value,
             "title": title,
@@ -6861,8 +6963,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         description=(
             f"{LEASE_TOOL_LINE} Teleport a "
             "connected player to pos. y==0 snaps to SurfaceY (vanilla "
-            "script-console contract). uid empty (default) targets the first "
-            "human; a non-empty uid selects by PlayerIdentity.GetPlainId(). "
+            "script-console contract). uid is required and never falls back "
+            "to the first human; uid selects by PlayerIdentity.GetPlainId(). "
             "Surface landings are refused with clearance_blocked when the "
             "target column is covered (a roof, canopy or water plane would "
             "bury the player); skip_clearance_check=true bypasses the probe "
@@ -6900,7 +7002,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        _require_admin_uid(uid)
+        if not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if not isinstance(skip_clearance_check, bool):
             raise ToolError(
                 _bad_args("skip_clearance_check", skip_clearance_check, "be a bool")
@@ -6947,8 +7052,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "player; nothing else in the inventory changes. Vanilla can lose "
             "the splint when it cannot place it, and the answer then says so. "
             "full=true (default) also fills water and energy to their maximum, "
-            "5000; full=false keeps their values. uid empty (default) targets "
-            "the first human; a non-empty uid selects by "
+            "5000; full=false keeps their values. uid is required and never "
+            "falls back to the first human; uid selects by "
             "PlayerIdentity.GetPlainId(). The player's godmode stays as it was. "
             "The answer is player_heal: full, in_vehicle (seated on the server "
             "before the heal), splint_returned and splint_returned_to "
@@ -6971,7 +7076,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
         if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        _require_admin_uid(uid)
+        if not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if not isinstance(full, bool):
             raise ToolError(_bad_args("full", full, "be a bool"))
         args: dict[str, Any] = {"full": full}
@@ -6980,7 +7088,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge("player_heal", args, "server", _timeout(timeout_s))
 
-    # inbox 3136: godmode on by default for every player of a run, switchable.
+    # inbox 3136, B1: godmode off by default, on by default only under
+    # profile=test, and always switchable per player identity.
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Switch a connected player's godmode on the "
@@ -6991,7 +7100,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{GODMODE_DEFAULT_LINE} The choice is kept for that player identity "
             "until the mission ends, across player_respawn: a player switched "
             "off stays off on its next character and one switched on stays on. "
-            "uid empty (default) targets the first human; a non-empty uid "
+            "uid is required and never falls back to the first human; uid "
             "selects by PlayerIdentity.GetPlainId(). The answer is "
             "player_godmode: before and after (true is godmode on). "
             "query_all_players and query_player_state report godmode per "
@@ -7009,7 +7118,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not isinstance(on, bool):
             raise ToolError(_bad_args("on", on, "be a bool"))
         if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        _require_admin_uid(uid)
+        if not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"godmode": on}
         if uid != "":
             args["uid"] = uid
@@ -7037,7 +7149,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         uid: StrictStr,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
-        if not isinstance(uid, str) or uid == "":
+        if not isinstance(uid, str) or not uid.strip():
             raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args = {"uid": uid}
         async with runtime.tool_lock:
@@ -7317,7 +7429,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "created, vanilla logs [wpnfsm] ... without FSM errors from the "
             "engine's save on the server and its load on the client, which a "
             "count of script errors should subtract; the item still arrives. "
-            "uid empty (default) targets the first human; a non-empty uid "
+            "uid is required and never falls back to the first human; uid "
             "selects by PlayerIdentity.GetPlainId(). A PBO that answers "
             "success without a positive object_id still created the item: "
             "the receipt is returned with object_id_unavailable true. Do not "
@@ -7338,8 +7450,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 _bad_args("dest", dest, "be one of 'hands' or 'inventory'")
             )
-        if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"classname": classname, "dest": dest}
         if uid != "":
             args["uid"] = uid
@@ -7360,7 +7472,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_give.object_id. The take is predictive and "
             "asynchronous: accepted=true with confirmed=false means the server "
             "accepted the request, not that the item is in hands yet. Confirm "
-            "with weapon_state. uid empty (default) targets the first human. "
+            "with weapon_state. uid is required and never falls back to the first human. "
             "A confirmation is weapon_state.object_id equal to the requested "
             "object_id; the same type and visible state do not distinguish "
             "two items. No OS input and no client focus."
@@ -7375,8 +7487,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if object_id <= 0:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
-        if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"object_id": object_id}
         if uid != "":
             args["uid"] = uid
@@ -7401,7 +7513,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_attach.item_object_id is the held item's registry id, "
             "0 when it was never registered. Confirm with weapon_state (hands "
             "empty) and telemetry_read on the destination (the item in "
-            "attachment_items). uid empty (default) targets the first human. "
+            "attachment_items). uid is required and never falls back to the first human. "
             "No OS input and no client focus."
         )
     )
@@ -7417,8 +7529,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if not isinstance(slot, str) or slot == "":
             raise ToolError(_bad_args("slot", slot, "be a non-empty string"))
-        if not isinstance(uid, str):
-            raise ToolError(_bad_args("uid", uid, "be a string"))
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         args: dict[str, Any] = {"object_id": object_id, "slot": slot}
         if uid != "":
             args["uid"] = uid
@@ -7459,8 +7571,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "that code (no_room, not_reachable, and the other client codes). "
             "Only a failure to read the id ends as timeout. Refusals "
             "before the call move nothing: object_not_found, not_reachable, "
-            "no_room, slot_not_found, slot_occupied. uid empty targets the "
-            "first human. Client moves need that player in reach "
+            "no_room, slot_not_found, slot_occupied. uid is required and "
+            "never falls back to the first human for client moves and for "
+            "to_hands, to_inventory, split_half and split_to_hands; a "
+            "server-authority world-to-world move names no player and "
+            "needs no uid. Client moves need that player in reach "
             "(UAMaxDistances.DEFAULT). No OS input and no client focus."
         )
     )
@@ -7503,6 +7618,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("authority", authority, "be client or server"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        if (authority == "client" or op in {"to_hands", "to_inventory", "split_half", "split_to_hands"}) and not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
         if op == "to_attachment" and slot == "":
             raise ToolError(_bad_args("slot", slot, "be a non-empty string for to_attachment"))
         if op in {"to_cargo", "to_attachment", "combine"} and target_object_id <= 0:
@@ -7863,10 +7980,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "already handed still runs after the tool gave up on it: that is "
             "the transport's behavior. timeout_s is the wait for each of these "
             "game calls. Created items get no registry ids. The target is "
-            "chosen as loadout_get chooses it: uid or object_id, not both. With "
-            "clear_first and neither, the creates go by uid to the player the "
-            "clear acted on, so a first human who left in between answers "
-            "player_not_found. Quantity, health and other item state are not "
+            "chosen as loadout_get chooses it, except that uid is required "
+            "and never falls back to the first human: give a non-empty uid "
+            "or an object_id above 0, not both. Quantity, health and other "
+            "item state are not "
             "set. ok is 0 and warnings includes loadout_incomplete when the "
             "answer cannot be read: the apply may have run, so read the target "
             "with loadout_get before applying again. Errors: bad_args, not_found, "
@@ -7894,6 +8011,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             rows = loadout_contract.flatten_request(loadout)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+        if not target or ("uid" in target and not target["uid"].strip()):
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string, or object_id a survivor id above 0"))
         timeout = _timeout(timeout_s)
         args: dict[str, Any] = dict(target)
         args["loadout_items"] = [row for _path, row in rows]
@@ -7908,15 +8027,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 )
                 try:
                     clear = loadout_contract.clear_reply(cleared)
-                    if not target:
-                        # The first human can change between the two commands:
-                        # the creates go by uid to the player the clear acted
-                        # on, and are refused if that player has left (#261
-                        # review Y11).
-                        args = {
-                            "uid": loadout_contract.cleared_uid(cleared),
-                            "loadout_items": args["loadout_items"],
-                        }
                 except ValueError as exc:
                     raise ToolError(str(exc)) from exc
             try:
@@ -8992,8 +9102,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "same character-selection, death-screen, menu, and mission teardown sequence as "
         "vanilla InGameMenu.GameRespawn. ok/requested means the request was "
         "issued; observe player state separately for completion. The new "
-        "character keeps the player identity's godmode: on by default, off "
-        "when player_godmode(on=false) switched it off during this mission."
+        "character keeps the player identity's godmode: off by default (on by "
+        "default only in a harness test run with profile=test), or the choice "
+        "player_godmode made for that identity during this mission."
     ))
     async def player_respawn(
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
@@ -10186,6 +10297,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     async def list_tools_progressive():
         tools = await _original_list_tools()
+        if getattr(config, "tool_pack", None) == "admin":
+            return _admin_catalog(tools)
         if not _progressive_disclosure_active(runtime):
             return tools
         return _compact_initial_catalog(tools)

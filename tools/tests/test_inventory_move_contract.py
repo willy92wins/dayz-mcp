@@ -12,33 +12,40 @@ from dayz_mcp import loopback, server
 from tests.mcp_helpers import _content_json
 
 _ROOT = Path(__file__).resolve().parents[2]
+UID = "76561198000000001"
 
 
 class InventoryMoveDaemonArgsTest(unittest.TestCase):
     def test_ops_that_need_a_destination_or_a_slot(self):
         accepted = (
-            {"item_object_id": 1, "op": "to_hands"},
-            {"item_object_id": 1, "op": "to_inventory"},
-            {"item_object_id": 1, "op": "split_half"},
-            {"item_object_id": 1, "op": "split_to_hands"},
-            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 4},
-            {"item_object_id": 1, "op": "combine", "target_object_id": 4, "authority": "server"},
+            {"item_object_id": 1, "op": "to_hands", "uid": UID},
+            {"item_object_id": 1, "op": "to_inventory", "uid": UID},
+            {"item_object_id": 1, "op": "split_half", "uid": UID},
+            {"item_object_id": 1, "op": "split_to_hands", "uid": UID},
+            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 4, "uid": UID},
+            {"item_object_id": 1, "op": "combine", "target_object_id": 4, "authority": "server", "uid": UID},
             {
                 "item_object_id": 1,
                 "op": "to_attachment",
                 "target_object_id": 4,
                 "slot": "Vest",
+                "uid": UID,
             },
+            # Server world-to-world stays exempt from uid (B2).
+            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 4, "authority": "server"},
         )
         for args in accepted:
             with self.subTest(args=args):
                 self.assertEqual(loopback.validate_command_args("inventory_move", args), (True, None))
         rejected = (
-            {"item_object_id": 1, "op": "to_cargo"},
-            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 0},
-            {"item_object_id": 1, "op": "combine"},
-            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 4},
-            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 4, "slot": ""},
+            {"item_object_id": 1, "op": "to_cargo", "uid": UID},
+            {"item_object_id": 1, "op": "to_cargo", "target_object_id": 0, "uid": UID},
+            {"item_object_id": 1, "op": "combine", "uid": UID},
+            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 4, "uid": UID},
+            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 4, "slot": "", "uid": UID},
+            {"item_object_id": 1, "op": "to_hands"},
+            {"item_object_id": 1, "op": "to_hands", "uid": ""},
+            {"item_object_id": 1, "op": "to_inventory", "authority": "client"},
         )
         for args in rejected:
             with self.subTest(args=args):
@@ -56,19 +63,20 @@ class InventoryMovePublicArgsTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(runtime, "call_bridge", new=AsyncMock(return_value={"ok": 1})) as call:
             await app.call_tool(
                 "inventory_move",
-                {"item_object_id": 1, "op": "to_cargo", "target_object_id": 3, "timeout_s": 1.0},
+                {"item_object_id": 1, "op": "to_cargo", "target_object_id": 3, "timeout_s": 1.0, "uid": UID},
             )
             call.assert_awaited()
         with patch.object(runtime, "call_bridge", new=AsyncMock()) as call:
             for arguments in (
-                {"item_object_id": 1, "op": "to_cargo", "timeout_s": 1.0},
-                {"item_object_id": 1, "op": "combine", "timeout_s": 1.0},
+                {"item_object_id": 1, "op": "to_cargo", "timeout_s": 1.0, "uid": UID},
+                {"item_object_id": 1, "op": "combine", "timeout_s": 1.0, "uid": UID},
                 {
                     "item_object_id": 1,
                     "op": "to_attachment",
                     "target_object_id": 3,
                     "slot": "",
                     "timeout_s": 1.0,
+                    "uid": UID,
                 },
             ):
                 with self.subTest(arguments=arguments):
@@ -101,6 +109,7 @@ class InventoryMovePublicArgsTest(unittest.IsolatedAsyncioTestCase):
                         "op": "to_inventory",
                         "authority": "client",
                         "timeout_s": 1.0,
+                        "uid": UID,
                     },
                 )
             )

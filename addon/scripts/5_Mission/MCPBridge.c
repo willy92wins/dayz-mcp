@@ -43,6 +43,7 @@ class MCPBridge : Managed
 	protected const float SERVER_PERF_WINDOW_MIN_S = 1.0;
 	protected const float SERVER_PERF_WINDOW_MAX_S = 60.0;
 	protected const float NAV_SNAP_RADIUS_MAX = 50.0;
+	protected const int NAV_POLY_BIT_OFFSET = 1;
 	protected const float VISIBILITY_RADIUS_MAX = 100.0;
 	// players_visibility: the field of view either side of the heading, in
 	// degrees; the head bone; the head height over the position used when that
@@ -5541,17 +5542,19 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// The filter nav_path_query walks with: the walking flags (ground, doors,
-	// inside buildings) included, the disabled and swimming ones excluded.
-	// PGPolyFlags declares no values although PGFilter takes bitmasks
-	// (aiworld.c:1-26 and :61), and vanilla never builds a PGFilter: these
-	// masks are not measured. The final in-game round's street, door and
-	// water paths test what they admit, not their values.
+	// Shared by both endpoint samples and FindPath; admit walking, reject water.
+	// Vanilla scripts/3_Game/ai/aiworld.c:1-26 declares sequential PGPolyFlags;
+	// :61-65 declares SetFlags(includeFlags, excludeFlags, exclusiveFlags) as masks.
+	// With bit = 1 << (flag - NAV_POLY_BIT_OFFSET), offset 1 maps WALK=1 -> 1,
+	// DOOR=3 -> 4, INSIDE=4 -> 8 (include 13); DISABLED=2 -> 2, SWIM=5 -> 16,
+	// SWIM_SEA=6 -> 32 (exclude 50). NONE=0 is never shifted.
+	// The native bit convention and sea rejection still need an in-game check;
+	// changing NAV_POLY_BIT_OFFSET to 0 selects the alternative 1 << flag.
 	protected PGFilter BuildNavWalkFilter()
 	{
 		PGFilter filter = new PGFilter();
-		int includeFlags = PGPolyFlags.WALK | PGPolyFlags.DOOR | PGPolyFlags.INSIDE;
-		int excludeFlags = PGPolyFlags.DISABLED | PGPolyFlags.SWIM | PGPolyFlags.SWIM_SEA;
+		int includeFlags = (1 << (PGPolyFlags.WALK - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.DOOR - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.INSIDE - NAV_POLY_BIT_OFFSET));
+		int excludeFlags = (1 << (PGPolyFlags.DISABLED - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM_SEA - NAV_POLY_BIT_OFFSET));
 		filter.SetFlags(includeFlags, excludeFlags, 0);
 		return filter;
 	}
@@ -7557,6 +7560,7 @@ class MCPBridge : Managed
 
 			MCPAllPlayer player = new MCPAllPlayer();
 			player.uid = ident.GetPlainId();
+			player.name = ident.GetName();
 
 			vector pos = p.GetPosition();
 			player.pos.Insert(pos[0]);
@@ -7793,6 +7797,47 @@ class MCPBridge : Managed
 			m_Instance.Shutdown();
 			m_Instance = null;
 		}
+	}
+
+	// B1: true only when the MCP config on disk (the same paths TryInit
+	// reads) carries profile=test, which only the harness writes. No file,
+	// an unreadable file, or any other profile value is false, so a server
+	// with the PBO and no harness config leaves players mortal. Read once
+	// per mission from MissionServer.OnMissionStart; it touches no client.
+	// LoadFile is the non-deprecated loader: static bool LoadFile(string,
+	// out T, out string) (3_game/tools/jsonfileloader.c:7), unused elsewhere
+	// in this addon; a false result or a null config is false here.
+	static bool ConfigIsTestProfile()
+	{
+		string path;
+		MCPConfig cfg;
+		string loadError;
+		bool loaded;
+		path = "$profile:dayz_mcp.json";
+		if (!FileExist(path))
+		{
+			path = "$mission:dayz_mcp.json";
+		}
+		if (!FileExist(path))
+		{
+			return false;
+		}
+		cfg = new MCPConfig();
+		loadError = "";
+		loaded = JsonFileLoader<MCPConfig>.LoadFile(path, cfg, loadError);
+		if (!loaded)
+		{
+			return false;
+		}
+		if (!cfg)
+		{
+			return false;
+		}
+		if (!cfg.profile || cfg.profile == "")
+		{
+			return false;
+		}
+		return cfg.profile == "test";
 	}
 
 	protected void Log(string message)
