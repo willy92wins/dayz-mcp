@@ -9,6 +9,7 @@ the bridges are not under test here.
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -2911,6 +2912,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.audit = AuditSink()
         self.a = _identity("a")
         self.b = _identity("b")
+        self.close_supported = True
         self._build()
 
     def _build(self, *, offline: bool = False, version_validator=None) -> None:
@@ -2946,6 +2948,8 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self, peer: str, *, pid: int | None = None, version: str = "12~1.29"
     ) -> list[dict]:
         query = poll_census_query(peer)
+        if self.close_supported:
+            query["caps"] += "," + _CLOSE_NAMES[peer]
         status, body = self.state.record_poll(
             peer,
             version,
@@ -3464,6 +3468,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.clock.advance(SESSION_TTL_S + 1.0)
         query = poll_census_query("client")
+        query["caps"] += ",lease_close_client"
         answers: list[tuple[int, dict]] = []
         answered = threading.Event()
 
@@ -3494,6 +3499,40 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(self._cmds(commands), ["lease_close_client"])
         self._accepted(self._settle("client", commands[0]))
         self.assertEqual(self._queued("server"), ["lease_close"])
+
+    def test_k32_neg_v12_census_keeps_lease_close_inert(self) -> None:
+        self.close_supported = False
+        lease, _ = self._work()
+        for peer, filename, constant in (
+            ("server", "MCPBridge.c", "SERVER_CAPABILITIES"),
+            ("client", "MCPClientBridge.c", "CLIENT_POLL_CAPS"),
+        ):
+            source = (_TOOLS_DIR.parent / "addon/scripts/5_Mission" / filename).read_text()
+            declaration = re.search(r"\b" + constant + r"\s*=\s*([^;]+);", source)
+            self.assertIsNotNone(declaration)
+            caps = "".join(re.findall(r'"([^"\n]*)"', declaration.group(1)))
+            self.assertNotIn(_CLOSE_NAMES[peer], caps.split(","))
+            query = poll_census_query(peer)
+            status, body = self.state.record_poll(
+                peer, "12~1.29", instance=self.instances[peer],
+                source_pid=self.pids[peer], caps=caps, ach=query.get("ach"),
+            )
+            self.assertEqual(status, 200, body)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {})
+        self.assertEqual(self._photo().get("outstanding", 0), 0)
+        grant = self._acquire(self.b)
+        self.assertNotIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
+
+    def test_k32_positive_announced_close_is_published(self) -> None:
+        self._ended_lease()
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        self.assertEqual(self._queued("server"), ["lease_close"])
+        self._accepted(self._settle("server", self._deliver_close("server")))
+        self.assertEqual(self._owed(), {})
 
     def test_k32_close_names_are_internal_only(self) -> None:
         lease = self._acquire(self.a)
