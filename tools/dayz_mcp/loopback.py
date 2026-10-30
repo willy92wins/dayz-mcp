@@ -4832,6 +4832,14 @@ class ServerState:
             return False, "not_bound"
         if instance in self._version_blocked_instances:
             return False, "version_blocked"
+        census = self._peer_caps.get(peer, {})
+        close_command = "lease_close_client" if peer == "client" else "lease_close"
+        if (
+            census.get("instance") != instance
+            or census.get("generation") != self.daemon_generation
+            or close_command not in (census.get("commands") or [])
+        ):
+            return False, "close_not_supported"
         return True, ""
 
     def _reserve_close_id_locked(self) -> int:
