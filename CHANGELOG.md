@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- FIFO/reservations remain available with v12 peers: lease-end stage 2b stays inert until PBO v13 announces `lease_close` / `lease_close_client`. The broker checks the bound peer's capability census (no environment flag); unsupported closes settle without queued commands or OWED rows, so later grants do not inherit `lease_end_unconfirmed`. Bridge protocol version 12 and the server argument-contract hash are unchanged; no PBO rebuild is needed for this broker fix.
+
 ### Added
 
 - `query_all_players` rows now carry `name` (`PlayerIdentity.GetName()`; identity-less rows stay omitted), and the read-only `player_find(name)` returns the one `{name, uid}` matching exactly after trim, case-insensitively: none is `player_not_found`, several is `ambiguous_player_name` listing all candidates (never a pick, nothing mutated), blank is `bad_args`. It only calls `query_all_players` (no new bridge command, contract hash unchanged) and is in the admin pack (now 23). Needs a PBO built from this release (B3, fb-20261028-131200-20dc).

@@ -1762,7 +1762,10 @@ class SessionCoordinator:
                     accepted.add(key)
                 elif action == "unreachable":
                     reason = str(report.get("reason") or "unreachable")
-                    self._set_row_owed_locked(row, [reason])
+                    if reason == "close_not_supported":
+                        self._settle_row_locked(row)
+                    else:
+                        self._set_row_owed_locked(row, [reason])
                     accepted.add(key)
                 else:
                     continue
@@ -1822,7 +1825,10 @@ class SessionCoordinator:
                 or not row.reported
             ):
                 return False
-            self._set_row_owed_locked(row, [reason])
+            if reason == "close_not_supported":
+                self._settle_row_locked(row)
+            else:
+                self._set_row_owed_locked(row, [reason])
             self._condition.notify_all()
             return True
 
