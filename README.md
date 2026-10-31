@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 100 typed
+game, put the world into a state, act, and read back what the engine did — 105 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -30,7 +30,7 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 |---|---|---|
 | **Build + launch** | `dayz_test_run(project, mode, build=True, …)` | Packs the mod with AddonBuilder, starts a diag server and/or client with it loaded, waits for readiness. Managed run, returns a `run_id`. |
 | **Set up the scene** | `world_spawn`, `world_spawn_batch`, `player_teleport`, `player_heal`, `player_godmode`, `object_set_health`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `loadout_apply`, `hands_attach`, `hands_take`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. Heal a player at once, seated or not, or switch its godmode. Set one object's Health and read it back. Spawn up to 200 objects in one call, sent in groups of `per_tick` that the bridge each creates in one server tick, every one registered under a scene when given a `scene_id`. |
-| **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `player_view_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move` | Drive, animate, open or close a car door, frame the shot, set the local player's first or third person view, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, and walk the on-foot player in a direction or to a point. |
+| **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `camera_path_play`, `hud_set`, `player_view_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move` | Drive, animate, open or close a car door, frame the shot (focus included), move the camera along a keyed path, hide the HUD, set the local player's first or third person view, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, and walk the on-foot player in a direction or to a point. |
 | **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `ui_dialog`, `capture_screenshot` | Reload a `.layout` written into the client's profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. `ui_dialog` is the client modal (acknowledge/confirm/form) for the local player. |
 | **Observe** | `wait_for`, `logs_since`, `query_player_state`, `weapon_state`, `object_inspect`, `object_doors`, `loadout_get`, `input_describe`, `world_time_get`, `scene_entities`, `vehicle_telemetry`, `vehicle_trace`, `player_trace`, `anim_timeline`, `scene_raycast`, `surface_query`, `server_perf`, `nav_path_query`, `players_visibility`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle and on-foot player traces, client action/animation-phase timelines, raycasts, frames. Building door flags, registered input bindings, the in-game clock, what a scene holds, the server frame rate with its entity counts, a navmesh path and which players could see a point are reads. Data an agent can assert on, not pixels to squint at. |
 | **Reset + repeat** | `scene_clear`, `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Delete the objects a scene spawned, as `object_delete` deletes one (or nothing, when one shares a hierarchy with another scene's), return the world to normal, stop the managed run, hand the game to the next session. |
@@ -78,10 +78,10 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**100 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**105 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
-`action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_set`, `capture_screenshot`,
-`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
+`action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `gameplay_state`,
+`dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
 `pipeline_resolve`, `playbook_reload`, `playbook_run`, `player_find`, `player_godmode`, `player_heal`, `player_kill`, `player_look_at`, `player_move`, `player_respawn`, `player_teleport`, `player_trace`, `player_view_set`, `players_visibility`, `bot_start`, `bot_stop`, `query_all_players`, `query_get_in_condition`,
@@ -103,6 +103,23 @@ hold the design together, and why each one exists, are in
 **A1.** `query_player_state` against an independent mission marker (`target=marker`): **0.0313 m**, pass line < 0.5 m (`product-spec.md:42`).
 
 **A2.** Python held `/poll` for 600 ms; `ticks_in_flight` = **4741** (run_045213). Pass line ≥ 5 (`product-spec.md:43`).
+
+**Camera paths (#263).** A natural end returns to the player through the same
+camera handoff and gameplay restoration used by `restore_gameplay`, and clears
+the playing command id. A successful play replaces a running play and reports
+its id as `camera_path.replaced_command_id`; `busy` still rejects an exclusive
+job. The daemon settles lease tracking on the client's terminal `finished`
+report. Explicit mode=stop keeps its existing last-pose behavior.
+`camera_path_release(command_id)` is public and requires the same lease as play;
+the daemon also uses it internally for lease cleanup. A matching command_id
+aborts the path and releases camera/gameplay (`matched=true`); a stale id cannot
+stop its successor (`matched=false`). The LIVE tool pack still excludes it.
+`camera_set_focus` exposes the existing camera setter with required focus
+distance and blur, sharing `camera_set`'s validation and lease rules.
+`gameplay_state()` reads controls (bridge flag and vanilla engine view), the
+HUD widget's Show flag, HUD_HIDE/QUICKBAR_HIDE and the bridge's simulation flag
+without a lease or state changes. Use it after `restore_gameplay` alongside
+`camera_get`. PBO rebuild and in-game retest remain required.
 
 **Infected heading.** `infected_drive` at 90°: authoritative heading **92.1°** (error 2.1°). Run `1a1cb6e1-7230-43c4-9164-41ab3b0be936` (`tools/tests/test_task9_spawn_phase_markers.py:101-105`). Same run: 76.6 m away from a player at 0.95 m; 270° measured **270.1°**, 41.7 m in 46 s, 0.02 m lateral; `mode="release"` returns vanilla AI (171.7°, 0.25 m/s).
 
