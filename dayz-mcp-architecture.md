@@ -7,7 +7,7 @@
 > **Base:** 2 workflows de investigación (≈2.5M tokens) + spot-check directo de Claude sobre
 > cada API load-bearing (leídas en el source vanilla bajo `<vanilla scripts root>`).
 > Generado 2026-06-06 como documento de diseño. **Implementado y en produccion desde
-> entonces**: el servidor expone hoy 100 tools y el puente va por `MCP_BRIDGE_VERSION = "12"`.
+> entonces**: el servidor expone hoy 105 tools y el puente va por `MCP_BRIDGE_VERSION = "12"`.
 > Esto queda como el diseño original — util para entender por que las piezas son como son,
 > no como descripcion del estado actual. Para eso, `README.md` (superficie de tools) y el
 > bloque LIVE-STATE de `HANDOFF.md`.
@@ -122,7 +122,7 @@ Claude ──stdio/JSON-RPC──> MCP server (Python+FastMCP)
 
 ---
 
-## 4. Tool surface (100 tools (+ `exec_enforce` when an allowlist is configured))
+## 4. Tool surface (105 tools (+ `exec_enforce` when an allowlist is configured))
 
 El recuento sale de `tools/tests/test_install_mcp.py::PublicToolCountDocsTest`:
 `build_app` → `app._tool_manager.list_tools()`, sin descartar tools del número
@@ -140,7 +140,7 @@ Mapeadas a las APIs verificadas. 9 unguarded, 2 `DIAG`. (superficie inicial, 202
 - **world:** `world_spawn` (CreateObjectEx) · `world_time_set` (SetDate/SetTimeMultiplier) · `world_weather_set` (WeatherPhenomenon)
 - **vehicle:** `vehicle_enter` (StartCommand_Vehicle) · `vehicle_control` (client throttle/steer/brake)
 - **scene:** `scene_raycast` (DayZPhysics.RaycastRVProxy + GetCrosshairObject) — "ver" sin pixeles
-- **camera+capture:** `camera_set`/`camera_get` (SetCameraEx/GetCamera) · `capture_screenshot` (MakeScreenshot **o** window-grab fallback → PNG→base64 ImageContent — ver §6)
+- **camera+capture:** `camera_set`/`camera_set_focus`/`camera_get`, `camera_path_play`/`camera_path_release` · `gameplay_state` (lectura de controles, HUD y flag de simulación del bridge, sin lease) · `capture_screenshot` (MakeScreenshot **o** window-grab fallback → PNG→base64 ImageContent — ver §6)
 - **exec (breakglass, `DIAG`):** `exec_enforce` (ExecuteEnforceScript) — **solo** para lo no mapeado, con whitelist
 - **telemetry:** `telemetry_read` (XML/CSV del AutoTestFixture / JSON-lines)
 
