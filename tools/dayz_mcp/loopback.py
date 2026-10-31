@@ -36,6 +36,8 @@ from dayz_mcp.client_dump_registry import ClientDumpRegistry
 from dayz_mcp.core import (
     BLOCKED_VERSION_STATES,
     EXPECTED_BRIDGE_VERSION,
+    LOAD_COUNTER_CAP,
+    _peer_load,
     is_allowed_spawn_flags,
 )
 from dayz_mcp.instance_fence import (
@@ -2475,6 +2477,57 @@ class _BoundPeerRunning:
     state = "RUNNING"
 
 
+def _empty_peer_load() -> dict[str, int | float | None]:
+    return _peer_load(None)
+
+
+# ASCII digits only. str.isdigit() is true for Nd characters such as ², and
+# int() then raises ValueError. A few hundred nines pass isdigit and then
+# raise OverflowError when divided into a float. 10 digits covers the bridge
+# saturation cap (2000000000) and stays inside a float.
+_POLL_COUNTER_MAX_DIGITS = 10
+_POLL_COUNTER_RE = re.compile(rf"^[0-9]{{1,{_POLL_COUNTER_MAX_DIGITS}}}$")
+
+
+def _load_from_poll_query(
+    qs: dict[str, list[str]],
+) -> dict[str, int | float] | None:
+    """Keep the legacy triple atomic; optional work counters validate individually."""
+    if "ia" not in qs or "pc" not in qs or "lpims" not in qs:
+        return None
+    try:
+        counts: list[int] = []
+        for key in ("ia", "pc", "lpims"):
+            raw = qs.get(key, [""])[0]
+            if not isinstance(raw, str) or _POLL_COUNTER_RE.fullmatch(raw) is None:
+                return None
+            counts.append(int(raw))
+        if counts[0] > LOAD_COUNTER_CAP or counts[1] > LOAD_COUNTER_CAP:
+            return None
+        interval = counts[2] / 1000.0
+    except (ValueError, OverflowError, TypeError, IndexError, ArithmeticError):
+        return None
+    load = {
+        "init_attempts": counts[0],
+        "polls": counts[1],
+        "last_poll_interval_s": interval,
+    }
+    for query_key, field in (
+        ("cc", "cmds"), ("cb", "cmd_bytes"),
+        ("bms", "busy_ms"), ("lcp", "last_cmds_per_poll"),
+    ):
+        values = qs.get(query_key)
+        if not isinstance(values, list) or len(values) != 1:
+            continue
+        raw = values[0]
+        if not isinstance(raw, str) or _POLL_COUNTER_RE.fullmatch(raw) is None:
+            continue
+        value = int(raw)
+        if value <= LOAD_COUNTER_CAP:
+            load[field] = value
+    return load
+
+
 class ServerState:
     """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
 
@@ -2574,6 +2627,17 @@ class ServerState:
         self._poll_delay_ms = 0
         self._last_poll_at: dict[str, float | None] = {"server": None, "client": None}
         self._poll_versions: dict[str, str | None] = {"server": None, "client": None}
+        # Last load counters a poll announced (ia/pc/lpims). None until a poll
+        # carries all three; an older PBO leaves them None. The reading belongs
+        # to the instance token that announced it (None on the legacy path).
+        self._peer_load: dict[str, dict[str, int | float | None]] = {
+            "server": _empty_peer_load(),
+            "client": _empty_peer_load(),
+        }
+        self._peer_load_instance: dict[str, str | None] = {
+            "server": None,
+            "client": None,
+        }
         # Last session-driven (client) HTTP request; feeds the daemon idle watchdog
         # so a broker daemon with no game and no client traffic can reap itself.
         self._last_client_request_at: float | None = None
@@ -5018,6 +5082,7 @@ class ServerState:
         source_creation_time: str | None = None,
         caps: str | None = None,
         ach: str | None = None,
+        load: dict[str, int | float] | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -5120,6 +5185,19 @@ class ServerState:
             self._record_poll_caps_locked(
                 peer, caps, accredited, ach=ach, instance=token, now=now
             )
+            if load is not None and self._load_reading_applies_locked(
+                peer, token, accredited
+            ):
+                reading = _peer_load(load)
+                if all(reading[key] is not None for key in (
+                    "init_attempts", "polls", "last_poll_interval_s"
+                )):
+                    if self._peer_load_instance.get(peer) != token:
+                        self._peer_load[peer] = _empty_peer_load()
+                    self._peer_load[peer].update(
+                        (key, value) for key, value in reading.items() if value is not None
+                    )
+                    self._peer_load_instance[peer] = token
 
             if not accredited:
                 self._unaccredited_poll_counts[bind_label] = (
@@ -6059,6 +6137,7 @@ class ServerState:
                     "run_id": run_id,
                     "bound_last_poll_age_s": bound_age,
                     "capabilities": self._capabilities_view_locked(peer),
+                    "load": self._peer_load_view_locked(peer),
                 }
                 identity = self._peer_identity_locked(peer)
                 peers[peer]["run_id"] = None if identity is None else identity[0]
@@ -6084,6 +6163,43 @@ class ServerState:
             "fence": fence,
             "daemon_generation": self.daemon_generation,
         }
+
+    def _bound_instance_locked(self, peer: str) -> str | None:
+        """The single BOUND instance that covers this peer, or None."""
+
+        found: list[str] = []
+        for binding in self._bindings.values():
+            if binding.state == BINDING_BOUND and self._peer_covers(binding, peer):
+                found.append(binding.instance)
+        if len(found) == 1:
+            return found[0]
+        return None
+
+    def _load_reading_applies_locked(
+        self, peer: str, token: str | None, accredited: bool
+    ) -> bool:
+        """A triple sticks only to the instance that is bound right now.
+
+        Legacy polls (no instance) update the reading only while nothing is
+        BOUND for that peer. An unaccredited poll never writes one.
+        """
+
+        current = self._bound_instance_locked(peer)
+        if token is None:
+            return current is None
+        return bool(accredited) and token == current
+
+    def _peer_load_view_locked(self, peer: str) -> dict[str, int | float | None]:
+        """Null unless the stored reading belongs to the instance bound now.
+
+        After a handoff the new instance, including an older PBO that sends
+        no triple, reads null until it announces its own.
+        """
+
+        current = self._bound_instance_locked(peer)
+        if self._peer_load_instance.get(peer) != current:
+            return _empty_peer_load()
+        return dict(self._peer_load[peer])
 
     def _record_poll_caps_locked(
         self,
@@ -7121,6 +7237,7 @@ class Handler(BaseHTTPRequestHandler):
         instance = inst_raw if inst_raw else None
         caps_raw = qs.get("caps", [""])[0]
         ach_raw = qs.get("ach", [""])[0]
+        load = _load_from_poll_query(qs)
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
         )
@@ -7131,6 +7248,7 @@ class Handler(BaseHTTPRequestHandler):
             source_pid=source_pid,
             caps=caps_raw,
             ach=ach_raw,
+            load=load,
         )
         if status != 200:
             self._json(status, payload)
