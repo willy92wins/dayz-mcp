@@ -250,6 +250,52 @@ class EffectiveProfileTest(unittest.TestCase):
             )
 
 
+class StatusProfileFailClosedTest(unittest.TestCase):
+    """Runtime.status() must not crash on a state without a profile.
+
+    Absent or non-boolean is unknown, never full: it publishes as
+    live/restrictive (and admin disabled), matching _serving_live_enabled.
+    """
+
+    def _runtime(self, state: object) -> server.Runtime:
+        runtime = object.__new__(server.Runtime)
+        runtime.config = server.ServerConfig(log_sink=lambda _m: None)
+        runtime.loopback = SimpleNamespace(state=state)
+        return runtime
+
+    def test_absent_profile_publishes_live_not_full(self) -> None:
+        real = loopback.ServerState("c4-status-test")
+        state = SimpleNamespace(status_snapshot=real.status_snapshot)
+        self.assertFalse(hasattr(state, "live_profile"))
+        payload = self._runtime(state).status()
+        self.assertIs(payload["live_profile"], True)
+        self.assertIs(payload["live_admin_enabled"], False)
+
+    def test_non_bool_profile_is_unknown_not_full(self) -> None:
+        real = loopback.ServerState("c4-status-test")
+        state = SimpleNamespace(
+            status_snapshot=real.status_snapshot,
+            live_profile=None,
+            live_admin_enabled=None,
+        )
+        payload = self._runtime(state).status()
+        self.assertIs(payload["live_profile"], True)
+        self.assertIs(payload["live_admin_enabled"], False)
+
+    def test_explicit_bool_profile_is_published_verbatim(self) -> None:
+        for live, admin in ((False, False), (True, True), (True, False)):
+            with self.subTest(live=live, admin=admin):
+                real = loopback.ServerState("c4-status-test")
+                state = SimpleNamespace(
+                    status_snapshot=real.status_snapshot,
+                    live_profile=live,
+                    live_admin_enabled=admin,
+                )
+                payload = self._runtime(state).status()
+                self.assertIs(payload["live_profile"], live)
+                self.assertIs(payload["live_admin_enabled"], admin)
+
+
 class ServingDaemonAuthorityTest(unittest.TestCase):
     """A client reusing a daemon learns its profile from that daemon.
 

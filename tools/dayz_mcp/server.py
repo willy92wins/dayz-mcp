@@ -1332,9 +1332,16 @@ class Runtime:
             expected_game_version=self.config.expected_game_version,
         )
         # The serving state is the authority clients learn the profile
-        # from (C4); publish it next to the rest of /status.
-        payload["live_profile"] = bool(self.state.live_profile)
-        payload["live_admin_enabled"] = bool(self.state.live_admin_enabled)
+        # from (C4); publish it next to the rest of /status. A state
+        # without a boolean profile (test doubles, older states) is
+        # unknown, not full: fail closed as live/restrictive, matching
+        # _serving_live_enabled, and keep admin disabled.
+        live = getattr(self.state, "live_profile", None)
+        payload["live_profile"] = live if isinstance(live, bool) else True
+        admin = getattr(self.state, "live_admin_enabled", None)
+        payload["live_admin_enabled"] = (
+            admin if isinstance(admin, bool) else False
+        )
         return payload
 
     def _version_state_for(self, version: str | None) -> tuple[str, str]:
