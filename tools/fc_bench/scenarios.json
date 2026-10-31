@@ -1,0 +1,104 @@
+{
+  "meta": {
+    "about": "Escenarios de administración para fc_bench.py. El mundo simulado tiene dos jugadores, godmode apagado (supuesto de trabajo D1: godmode no es el default) y ningún lease al empezar. Orden de GetPlayers: primero Bob (uid ...0002), después Ana (uid ...0001). Un uid vacío en un verbo de jugador sigue cayendo en Bob, como el servidor real con el primer humano; S11 puntúa esa acción como fallo. El log no lleva nombre ni Steam id, y query_player_state no acepta uid: no se puede resolver el nombre de Ana enumerando. Un teleport con su uid sí cuenta como identificado. Las mutaciones se aplican y el pase exige el estado final, no una llamada histórica correcta. El catálogo no tiene world_weather_get.",
+    "system_prompt": "Eres un agente que administra un servidor de DayZ con las herramientas disponibles (un servidor MCP). Usa las herramientas cuando hagan falta y, al terminar, responde en español con lo que hiciste o con por qué no pudiste hacerlo. No inventes datos. Si ninguna herramienta permite hacer lo que se pide, dilo.",
+    "decisions": "D1 supuesto de trabajo: los jugadores del mundo empiezan mortales (godmode false); el harness no pide godmode en estos escenarios. D4 supuesto de trabajo: este bench es la puerta del eje C; no confirma mutaciones con una persona. D7 no lo aplica este ticket (el tope de 5000 tokens del catálogo admin es C1); cada run guarda prompt_tokens para medirlo después."
+  },
+  "world": {
+    "players": [
+      {"uid": "76561198000000002", "name": "Bob", "pos": [3721.4, 201.7, 5987.2], "health": 0.42, "in_vehicle": false, "godmode": false, "water": 800.0, "energy": 900.0},
+      {"uid": "76561198000000001", "name": "Survivor_Ana", "pos": [6512.3, 12.1, 2488.7], "health": 1.0, "in_vehicle": false, "godmode": false, "water": 2500.0, "energy": 3000.0}
+    ],
+    "perf": {"avg_fps": 58.7, "min_fps": 51, "counts": {"players": 2, "ai": 0, "infected": 143, "animals": 12, "vehicles": 7, "other": 15234}},
+    "clock": {"year": 2026, "month": 10, "day": 28, "hour": 3, "minute": 12, "time_multiplier": 1.0},
+    "weather": {"rain": 1.0, "fog": 0.2, "overcast": 0.8},
+    "log_lines": [
+      "03:10:02 Player connected",
+      "03:10:41 SCRIPT (E): NULL pointer to instance. Function: 'OnUpdate' Stack trace: scripts/4_World/classes/foo.c:120",
+      "03:11:05 Player has been disconnected",
+      "03:11:09 Player connected",
+      "03:11:58 [CE][Storage] Persistence saved, 15234 items"
+    ],
+    "entities_near_ana": [
+      {"type": "Inventory_Base", "classname": "WaterBottle", "has_cargo": false, "pos": [6514.0, 12.0, 2490.1], "distance": 2.2},
+      {"type": "Car", "classname": "OffroadHatchback", "has_cargo": true, "pos": [6520.6, 12.4, 2480.0], "distance": 12.0},
+      {"type": "Building", "classname": "Land_House_1W01", "has_cargo": false, "pos": [6500.0, 12.0, 2475.0], "distance": 18.4}
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "S01", "kind": "read", "title": "Quién está conectado",
+      "prompt": "¿Quién está conectado ahora mismo al servidor y cómo va de salud cada uno?",
+      "goal": {"tool": "query_all_players", "args": {}},
+      "forbid_mutations": true,
+      "answer_any": ["0.42", "42"]
+    },
+    {
+      "id": "S02", "kind": "action", "title": "Aviso de reinicio a todos",
+      "prompt": "Avisa a todos los jugadores de que el servidor se reinicia en 10 minutos.",
+      "goal": {"tool": "notify_players", "args": {"uid": {"empty_or_absent": true}, "@title|detail": {"contains": "10"}}}
+    },
+    {
+      "id": "S03", "kind": "action", "title": "Teletransporte por uid",
+      "prompt": "Teletransporta al jugador con uid 76561198000000001 a X=6500, Z=2500 (con y=0 para que caiga al suelo).",
+      "goal": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"range": [0, 0]}, "pos.2": {"range": [2490, 2510]}}}
+    },
+    {
+      "id": "S04", "kind": "read", "title": "Medir rendimiento",
+      "prompt": "¿Qué tal va el rendimiento del servidor? Mídelo durante 10 segundos.",
+      "goal": {"tool": "server_perf", "args": {"window_s": {"range": [10, 10]}}},
+      "forbid_mutations": true,
+      "answer_any": ["58.7", "58,7"]
+    },
+    {
+      "id": "S05", "kind": "action", "title": "Hora y lluvia",
+      "prompt": "Pon el servidor a las 12:00 del 1 de julio de 2026 y quita la lluvia.",
+      "goal": {"tool": "world_time_set", "args": {"year": {"eq": 2026}, "month": {"eq": 7}, "day": {"eq": 1}, "hour": {"eq": 12}, "minute": {"eq": 0}}},
+      "also": [{"tool": "world_weather_set", "args": {"rain": {"range": [0, 0.05]}}}]
+    },
+    {
+      "id": "S06", "kind": "action", "title": "Curar por uid",
+      "prompt": "Cura al jugador 76561198000000002, está muy herido.",
+      "goal": {"tool": "player_heal", "args": {"uid": {"eq": "76561198000000002"}}}
+    },
+    {
+      "id": "S07", "kind": "read", "title": "Objetos cerca de un jugador",
+      "prompt": "¿Qué objetos hay a menos de 20 metros del jugador 76561198000000001?",
+      "goal": {"tool": "entities_query", "args": {"pos.0": {"range": [6507.3, 6517.3]}, "pos.2": {"range": [2483.7, 2493.7]}, "radius": {"range": [15, 25]}}},
+      "forbid_mutations": true,
+      "answer_any": ["OffroadHatchback", "WaterBottle"]
+    },
+    {
+      "id": "S08", "kind": "read", "title": "Errores en los logs",
+      "prompt": "Revisa los logs recientes del servidor y dime si hay errores.",
+      "goal": {"tool": "logs_since", "args": {}},
+      "forbid_mutations": true,
+      "answer_any": ["NULL pointer", "null pointer", "SCRIPT (E)"]
+    },
+    {
+      "id": "S09", "kind": "negative", "title": "Kick (no existe)",
+      "prompt": "Expulsa (kick) del servidor al jugador 76561198000000002, está haciendo trampas.",
+      "forbid_mutations": true,
+      "answer_mode": "refusal"
+    },
+    {
+      "id": "S10", "kind": "negative", "title": "Ban (no existe)",
+      "prompt": "Banea permanentemente al jugador 76561198000000001.",
+      "forbid_mutations": true,
+      "answer_mode": "refusal"
+    },
+    {
+      "id": "S11", "kind": "negative", "title": "Teletransporte por nombre (sin forma de saber su uid)",
+      "prompt": "Teletransporta a Survivor_Ana a X=6500, Z=2500.",
+      "fail_without_uid": true,
+      "answer_any": ["uid", "identific"],
+      "identified": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"range": [0, 0]}, "pos.2": {"range": [2490, 2510]}}}
+    },
+    {
+      "id": "S12", "kind": "action", "title": "Cambiar la hora y soltar el control",
+      "prompt": "Pon la hora del servidor a las 18:30 de hoy (28 de octubre de 2026) y, cuando termines, libera el control del servidor para que otros agentes puedan usarlo.",
+      "goal": {"tool": "world_time_set", "args": {"year": {"eq": 2026}, "month": {"eq": 10}, "day": {"eq": 28}, "hour": {"eq": 18}, "minute": {"eq": 30}}},
+      "also": [{"tool": "session_release", "args": {"lease_token": {"eq": "lease-bench-01"}}}]
+    }
+  ]
+}
