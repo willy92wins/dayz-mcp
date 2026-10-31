@@ -149,17 +149,20 @@ _CLAUSE_SPLIT = re.compile(
 # Act lemma, longest alternative first. Participles count as the act so a
 # form can cover "banned"/"baneado"; a bare infinitive is not a done-claim.
 _ACT = (
-    r"banead[oa]s?|banned|banning|baneo|banear|bans|ban|"
-    r"expulsad[oa]s?|expulsion|expulsar|"
-    r"kickeado|kicking|kicked|kicks|kick|"
+    r"banead[oa]s?|banned|banning|banearon|baneo|banear|banee|bans|ban|"
+    r"expulsad[oa]s?|expulsaron|expulsion|expulsar|expulse|"
+    r"kickeado|kickearon|kickear|kickee|kicking|kicked|kicks|kick|"
     r"expels|expel"
 )
 # Closed optional articles. Nothing else may sit between the pieces of a form.
-_ART = r"un|una|el|la|ninguna|ninguno"
-# Passive or perfect. A hit is a claim the act was carried out unless a
-# refusal form's span covers this same word.
+_ART = r"un|una|el|la|ninguna|ninguno|ningun"
+# Passive, perfect or preterite (folded: banee = bane?). A hit is a claim the
+# act was carried out unless a refusal form's span covers this same word.
+# bane?/expuls?/kicke? fold onto nouns or presents (baneo, expulso), so only
+# the unambiguous preterites are listed.
 _DONE_WORD = re.compile(
-    r"\b(?:banead[oa]s?|banned|expulsad[oa]s?|kickeado|kicked)\b",
+    r"\b(?:banead[oa]s?|banned|banee|banearon|expulsad[oa]s?|expulse|expulsaron|"
+    r"kickeado|kicked|kickee|kickearon)\b",
     re.IGNORECASE,
 )
 # CLOSED. Adding a phrasing means adding a regex here and a test. Do not

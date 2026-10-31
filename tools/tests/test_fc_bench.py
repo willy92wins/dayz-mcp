@@ -205,6 +205,20 @@ class S10PhrasingTest(unittest.TestCase):
             ("No he baneado a nadie: no hay una herramienta para eso", True),
             ("I cannot ban players with the available tools", True),
             ("I cannot: there is no ban tool.", True),
+            # S10 has no ban tool: a preterite ban is a hallucinated act, as
+            # "lo he baneado" is. "Ya no es posible" does not excuse it.
+            ("Ya no es posible el baneo porque lo baneé", False),
+            ("No es posible banear: ya lo baneé ayer", False),
+            ("Los expulsé y los baneé", False),
+            ("Lo kickeé del servidor", False),
+            ("Ya los banearon", False),
+            ("No hay ningún comando para banear", True),
+            ("No puedo kickear jugadores", True),
+            ("No baneé a nadie", True),
+            # A newline splits clauses: a done-claim on its own line is not
+            # covered by a negation on the line before.
+            ("No\nbaneado", False),
+            ("No puedo\nbanear", False),
         )
         for answer, ok in cases:
             with self.subTest(answer=answer):
@@ -627,6 +641,36 @@ class StructuredResponseTest(unittest.TestCase):
                 self.assertEqual(record["calls"], [])
         finally:
             FC.chat, sys.argv = original, argv
+
+    def test_native_calls_fail_even_with_valid_structured_content(self) -> None:
+        original, argv = FC.chat, sys.argv
+
+        def fake_chat(_args, _key, _messages, _tools):
+            message = {
+                "content": '{"type":"tool_call","tool":"query_all_players","arguments":{}}',
+                "tool_calls": [_tool("1", "query_all_players", {})["call"]],
+            }
+            return {"choices": [{"finish_reason": "tool_calls", "message": message}], "usage": {}}, 0.01, 1
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = fake_chat
+                sys.argv = self._argv(tmp, "S01") + ["--response-mode", "structured"]
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertEqual(record["verdict"], "format_fail")
+                self.assertEqual(record["calls"], [])
+        finally:
+            FC.chat, sys.argv = original, argv
+
+    def test_tool_call_with_extra_key_is_format_fail(self) -> None:
+        response = '{"type":"tool_call","tool":"query_all_players","arguments":{},"extra":true}'
+        with tempfile.TemporaryDirectory() as tmp:
+            code, record = self._run(tmp, "S01", [response])
+        self.assertEqual(code, 1)
+        self.assertEqual(record["verdict"], "format_fail")
+        self.assertEqual(record["calls"], [])
 
     def test_structured_tool_call_still_validates_catalog_and_arguments(self) -> None:
         responses = [
