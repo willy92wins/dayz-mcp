@@ -3427,6 +3427,12 @@ class ServerState:
                 self._note_profile_release_error(
                     config_path, ValueError("profile_prior_invalid")
                 )
+                # A corrupt sidecar, or a reparse point we refuse to read, is
+                # not a prior we can restore. Drop profile=test the same way a
+                # missing prior does, and keep the error: the flag must not
+                # stay on disk in silence.
+                if owned and _profile_is_test(config_path):
+                    self._strip_profile_test(config_path)
                 return "failed"
             if owned and _profile_is_test(config_path):
                 self._note_profile_release_error(
