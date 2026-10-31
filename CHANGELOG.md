@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- FIFO/reservations remain available with v12 peers: lease-end stage 2b stays inert until PBO v13 announces `lease_close` / `lease_close_client`. The broker checks the bound peer's capability census (no environment flag); unsupported closes settle without queued commands or OWED rows, so later grants do not inherit `lease_end_unconfirmed`. Bridge protocol version 12 and the server argument-contract hash are unchanged; this F1 broker fix alone needs no PBO rebuild (PR #268 as a whole touches `addon/` and does require one).
+
 ### Added
 
 - A1 load counters (PR #286): each bridge now announces `cmds` (`cc`, non-null commands actually dispatched, including rejections and deferred dispatch), `cmd_bytes` (`cb`, result JSON body bytes submitted for POST, including later job results; not delivery acknowledgements), `busy_ms` (`bms`, synchronous dispatch elapsed milliseconds from `TickCount` CPU ticks; each bridge carries the sub-millisecond tick remainder (ticks mod 10000) into the next dispatch, so short dispatches accumulate instead of being dropped; excludes later async job work), and `last_cmds_per_poll` (`lcp`, command array size of the last non-empty parsed poll, retained on idle). Counters saturate at 2000000000 before addition. `init_attempts` remains initialization activity; `polls` and `last_poll_interval_s` measure the poll clock, not command load. New fields accept individual ASCII integers from 0 through the cap; absent/invalid fields preserve that instance's last good value or stay null. The legacy triple remains atomic, and an older PBO still reports it. Requires a rebuilt PBO; bridge version, argument contracts and sealed launcher modules are unchanged. Offline tests exercise the actual counter, poll, queue and POST method bodies with a fake clock/transport, plus parser and status validation. The in-game idle/load/idle gate is not run by this implementation.

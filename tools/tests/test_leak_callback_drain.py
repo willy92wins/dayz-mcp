@@ -105,12 +105,15 @@ class CallbackDrainTest(unittest.TestCase):
         model.complete(results[20], result=True)
         self.assertEqual(len(model.refs), 64)
         self.assertNotIn(results[20], model.refs)
+        self.assertTrue(model.blocked())
+        model.complete(results[21], result=True)
+        self.assertEqual(len(model.refs), 63)
         self.assertFalse(model.blocked())
         poll = model.poll()
         self.assertIsNotNone(poll)
         self.assertTrue(model.blocked())
         model.complete(poll)
-        self.assertEqual(len(model.refs), 64)
+        self.assertEqual(len(model.refs), 63)
         for cb in results:
             model.complete(cb, result=True)
         self.assertEqual(model.refs, [])
@@ -143,7 +146,7 @@ class CallbackDrainTest(unittest.TestCase):
 
     def test_pending_and_jobs_reservation_is_kept_when_no_callbacks_are_held(self):
         model = SourceDrain()
-        model.pending, model.jobs = 33, 32
+        model.pending, model.jobs = 32, 32
         self.assertTrue(model.blocked())
         model.jobs -= 1
         self.assertFalse(model.blocked())
@@ -153,7 +156,7 @@ class CallbackDrainTest(unittest.TestCase):
         self.assertEqual(model.refs, [])
 
     def test_mutations_missing_release_or_missing_remove_close_admission(self):
-        # Negative controls against independent invariant: with 65 completed
+        # Negative controls against independent invariant: with 64 completed
         # requests left in the array, the exact production guard must close.
         for mutation in ("release", "remove"):
             bridge, callbacks = source("MCPBridge.c"), source("MCPCallbacks.c")
@@ -163,11 +166,11 @@ class CallbackDrainTest(unittest.TestCase):
                 bridge = bridge.replace("m_CallbackRefs.Remove(idx);", "")
             with self.subTest(mutation=mutation):
                 model = SourceDrain(bridge, callbacks)
-                for _ in range(65):
+                for _ in range(64):
                     cb = model.poll()
                     self.assertIsNotNone(cb)
                     model.complete(cb)
-                self.assertEqual(len(model.refs), 65)
+                self.assertEqual(len(model.refs), 64)
                 self.assertTrue(model.blocked())
                 self.assertIsNone(model.poll())
 

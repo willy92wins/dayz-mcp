@@ -354,7 +354,8 @@ class MCPBridge : Managed
 	{
 		// Count accepted work too: jobs/pending each still owe one result.
 		// Pause admission only; draining and terminal POSTs must keep running.
-		if (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
+		// Leave room for a whole batch and, on top of it, a lease close.
+		if (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1)
 		{
 			return;
 		}
@@ -426,7 +427,8 @@ class MCPBridge : Managed
 			Log("poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
 		}
 
-		bool deferFromWorldSpawn = false;
+		// Defer the new batch when work is already waiting, so it cannot overtake.
+		bool deferFromWorldSpawn = m_Pending.Count() > 0;
 		int i = 0;
 		while (i < count)
 		{
@@ -464,7 +466,7 @@ class MCPBridge : Managed
 		while (m_Pending.Count() > 0 && dispatched < MAX_DISPATCH_PER_TICK)
 		{
 			MCPCommand command = m_Pending.Get(0);
-			m_Pending.Remove(0);
+			m_Pending.RemoveOrdered(0);
 			DispatchMeasured(command);
 			dispatched = dispatched + 1;
 		}
@@ -482,7 +484,13 @@ class MCPBridge : Managed
 			return;
 		}
 
-		if (m_Pending.Count() >= MAX_PENDING)
+		// The last slot is kept for a lease close.
+		int limit = MAX_PENDING - 1;
+		if (command.cmd == "lease_close")
+		{
+			limit = MAX_PENDING;
+		}
+		if (m_Pending.Count() >= limit)
 		{
 			PostCommandError(command, "bridge_queue_full");
 			return;
