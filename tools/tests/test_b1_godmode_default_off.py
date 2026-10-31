@@ -3,6 +3,11 @@ water/energy refill are OFF by default for everyone. They turn on by default
 only when the MCP bridge config on disk says profile=test, which only the
 harness writes. No config, or a config without profile=test, leaves players
 mortal and without refill. player_godmode(on=true/false) stays explicit.
+
+B1-4 acceptance criterion (RP, 2026-10-31; run b28bba22):
+With godmode on, max energy and max water per 10 s window >= 500
+(TOPUP_INTERVAL_S), not every sample. Every sample must stay > 300;
+decay below 500 between top-ups is expected.
 """
 from __future__ import annotations
 
