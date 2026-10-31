@@ -1346,8 +1346,10 @@ class GodmodeTopUpTest(unittest.TestCase):
         godmode = _Godmode(players=[body])
         godmode.ResetMission()
         godmode.SetDefaultOn(True)
+        # The window is RP's 10 s, pinned so a longer interval fails here.
+        self.assertEqual(godmode.G.TOPUP_INTERVAL_S, 10.0)
         steps = 32
-        timeslice = godmode.G.TOPUP_INTERVAL_S / steps
+        timeslice = 10.0 / steps
         for window in range(4):
             samples = []
             for _ in range(steps):
