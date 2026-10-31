@@ -82,7 +82,7 @@ RUNNER_METHODS = (
     "protected void ProcessJobs(MCPJobRunnerOwner owner)",
 )
 # The job kinds HasExclusiveJob leaves out; the tool description names them.
-NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move")
+NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move", "actor_emote")
 EXCLUSION_CLAUSE = (
     "busy while an exclusive client job runs, such as camera_set or player_look_at (a "
     + ", ".join(NON_EXCLUSIVE_KINDS[:-1])
@@ -860,8 +860,8 @@ class PlayerViewSetCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55")
-        self.assertEqual(server.server_arg_contract_hash(), "0401bed390754a55")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
+        self.assertEqual(server.server_arg_contract_hash(), "86e3c48a43e86b91")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1158,7 +1158,7 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         self.assertEqual(model.replies()[1], (8, False, "no_player", "", ""))
         self.assertEqual(model.handled, [COMMAND])
 
-    def test_the_four_kinds_left_out_of_exclusive_jobs_do_not_refuse(self) -> None:
+    def test_the_five_kinds_left_out_of_exclusive_jobs_do_not_refuse(self) -> None:
         exclusive = _method_body(_source(CLIENT_PATH), EXCLUSIVE)
         left_out = re.findall(r'(?:CountExcluding|CountOfKind)\("(\w+)"\)', exclusive)
         self.assertEqual(sorted(left_out), sorted(NON_EXCLUSIVE_KINDS))
