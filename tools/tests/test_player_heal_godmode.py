@@ -1,10 +1,11 @@
-"""player_heal (inbox bef7) and player_godmode, on by default (inbox 3136).
+"""player_heal (inbox bef7) and player_godmode (inbox 3136; B1 default).
 
-Two server bridge verbs and a new default. player_heal applies DayZ's own full
+Two server bridge verbs and a mission default. player_heal applies DayZ's own full
 heal, the Bullet_CupidsBolt branch of PlayerBase.EEHitBy, to the server's
 PlayerBase, seated or not. player_godmode switches SetAllowDamage on the player
 only and keeps the choice per identity for the mission; MissionServer gives every
-body an identity gets that choice, on by default, takes it off a body that leaves
+body an identity gets that choice, else the mission default (off unless the
+harness config says profile=test), takes it off a body that leaves
 its identity, and a periodic top-up keeps a godmode body's water and energy away
 from the level where hunger and thirst cost health.
 
@@ -55,6 +56,8 @@ FILL_VITALS = "protected void FillPlayerVitals(PlayerBase target, MCPPlayerVital
 BUILD_ALL = "protected array<ref MCPAllPlayer> BuildAllPlayers()"
 BUILD_STATE = "protected MCPPlayerState BuildPlayerState()"
 RESET = "static void ResetMission()"
+SET_DEFAULT_ON = "static void SetDefaultOn(bool on)"
+DEFAULT_ON = "static bool DefaultOn()"
 IS_ON = "static bool IsOn(Man body)"
 IS_ON_FOR = "static bool IsOnFor(string plainId)"
 CHOOSE = "static void Choose(PlayerBase player, string plainId, bool on)"
@@ -119,7 +122,7 @@ _MEMBER_RE = re.compile(
 # MCPGodmode's statics read through G, its `new` and template locals as calls and
 # plain names the translator can read.
 _GODMODE_REWRITES = (
-    (re.compile(r"(?<![\w.])(s_Off|s_Players|s_TopUpAccumS|TOPUP_INTERVAL_S|TOPUP_MARGIN)\b"), r"G.\1"),
+    (re.compile(r"(?<![\w.])(s_Choice|s_DefaultOn|s_OnCount|s_AnyOn|s_Players|s_TopUpAccumS|TOPUP_INTERVAL_S|TOPUP_MARGIN)\b"), r"G.\1"),
     (re.compile(r"new map<string, bool>\(\)"), "NewMap()"),
     (re.compile(r"new array<Man>\(\)"), "NewArray()"),
     (re.compile(r"PlayerStat<float>"), "PlayerStatF"),
@@ -271,6 +274,9 @@ class _Map:
     def Contains(self, key: EnforceString) -> bool:
         return key.data in self.items
 
+    def Get(self, key: EnforceString) -> bool | None:
+        return self.items.get(key.data)
+
     def Set(self, key: EnforceString, value: bool) -> None:
         self.items[key.data] = value
 
@@ -346,7 +352,10 @@ class _Godmode:
         self.source = _source(CARE_PATH)
         self.printed: list[str] = []
         self.G = SimpleNamespace(
-            s_Off=None,
+            s_Choice=None,
+            s_DefaultOn=False,
+            s_OnCount=0,
+            s_AnyOn=False,
             s_Players=None,
             s_TopUpAccumS=0.0,
             TOPUP_INTERVAL_S=_godmode_constant("TOPUP_INTERVAL_S"),
@@ -366,7 +375,7 @@ class _Godmode:
                 LOW_WATER_THRESHOLD=LOW_THRESHOLD, LOW_ENERGY_THRESHOLD=LOW_THRESHOLD
             ),
         }
-        for signature in (RESET, IS_ON, IS_ON_FOR, REMEMBER, NOTE, TOP_UP, APPLY, CHOOSE, ON_BODY_READY, RELEASE_BODY, TICK):
+        for signature in (RESET, SET_DEFAULT_ON, DEFAULT_ON, IS_ON, IS_ON_FOR, REMEMBER, NOTE, TOP_UP, APPLY, CHOOSE, ON_BODY_READY, RELEASE_BODY, TICK):
             translate(
                 _rewritten(self.source, signature, _GODMODE_REWRITES),
                 signature,
@@ -384,7 +393,9 @@ class _Godmode:
             raise AttributeError(name) from None
 
     def off_ids(self) -> set[bytes]:
-        return set(self.G.s_Off.items) if self.G.s_Off is not None else set()
+        if self.G.s_Choice is None:
+            return set()
+        return {key for key, value in self.G.s_Choice.items.items() if value is False}
 
 
 class _HealPlayer:
@@ -536,7 +547,7 @@ class HealGodmodeIngressTest(unittest.TestCase):
         bind_both_peers(self.state)
 
     def test_both_are_server_commands_that_need_a_lease(self) -> None:
-        for command, args in ((HEAL, {"full": True}), (GODMODE, {"godmode": False})):
+        for command, args in ((HEAL, {"full": True, "uid": "76561198000000001"}), (GODMODE, {"godmode": False, "uid": "76561198000000001"})):
             with self.subTest(command=command):
                 self.assertIn(command, loopback.SERVER_COMMANDS)
                 self.assertNotIn(command, loopback.CLIENT_COMMANDS)
@@ -550,46 +561,50 @@ class HealGodmodeIngressTest(unittest.TestCase):
                     (400, {"error": "bad_peer"}),
                 )
 
-    def test_one_exact_variant_each_with_an_optional_uid(self) -> None:
+    def test_one_exact_variant_each_with_a_required_uid(self) -> None:
         for command, choice in ((HEAL, "full"), (GODMODE, "godmode")):
             with self.subTest(command=command):
                 variants, delegated = loopback._COMMAND_ARG_SCHEMAS[command]
                 self.assertIsNone(delegated)
                 self.assertEqual(len(variants), 1)
                 required, optional, validators = variants[0]
-                self.assertEqual(required, frozenset({choice}))
-                self.assertEqual(optional, frozenset({"uid"}))
+                self.assertEqual(required, frozenset({choice, "uid"}))
+                self.assertEqual(optional, frozenset())
                 self.assertEqual(set(validators), {choice, "uid"})
 
     def test_the_choice_travels_as_a_json_boolean_and_nothing_else_travels(self) -> None:
         # fb-20260930-065425-8779: an absent key reaches Enforce as false, so the
         # choice is required, and 1, 0 and "true" are not booleans.
         accepted = {
-            HEAL: ({"full": True}, {"full": False}, {"full": True, "uid": "76561198000000001"}, {"full": False, "uid": ""}),
-            GODMODE: ({"godmode": True}, {"godmode": False}, {"godmode": False, "uid": "76561198000000001"}),
+            HEAL: ({"full": True, "uid": "76561198000000001"}, {"full": False, "uid": "76561198000000001"}, {"full": True, "uid": "76561198000000001"}, {"full": False, "uid": "76561198000000001"}),
+            GODMODE: ({"godmode": True, "uid": "76561198000000001"}, {"godmode": False, "uid": "76561198000000001"}, {"godmode": False, "uid": "76561198000000001"}),
         }
         refused = {
             HEAL: (
                 {},
                 {"uid": "76561198000000001"},
-                {"full": 1},
-                {"full": 0},
-                {"full": "true"},
-                {"full": None},
+                {"full": True},
+                {"full": False, "uid": ""},
+                {"full": 1, "uid": "76561198000000001"},
+                {"full": 0, "uid": "76561198000000001"},
+                {"full": "true", "uid": "76561198000000001"},
+                {"full": None, "uid": "76561198000000001"},
                 {"full": True, "uid": 7},
-                {"full": True, "godmode": True},
-                {"full": True, "pos": [0.0, 0.0, 0.0]},
+                {"full": True, "godmode": True, "uid": "76561198000000001"},
+                {"full": True, "pos": [0.0, 0.0, 0.0], "uid": "76561198000000001"},
             ),
             GODMODE: (
                 {},
                 {"uid": "76561198000000001"},
-                {"godmode": 1},
-                {"godmode": 0},
-                {"godmode": "off"},
-                {"godmode": None},
+                {"godmode": True},
+                {"godmode": False, "uid": ""},
+                {"godmode": 1, "uid": "76561198000000001"},
+                {"godmode": 0, "uid": "76561198000000001"},
+                {"godmode": "off", "uid": "76561198000000001"},
+                {"godmode": None, "uid": "76561198000000001"},
                 {"godmode": True, "uid": None},
-                {"godmode": True, "on": True},
-                {"on": False},
+                {"godmode": True, "on": True, "uid": "76561198000000001"},
+                {"on": False, "uid": "76561198000000001"},
             ),
         }
         for command in COMMANDS:
@@ -1119,12 +1134,15 @@ class PlayerHealGroundSplintCountTest(unittest.TestCase):
 
 
 class GodmodeMemoryTest(unittest.TestCase):
-    """MCPGodmode's per-identity memory: on unless switched off this mission."""
+    """MCPGodmode's per-identity memory: the mission default, else the choice."""
 
     def test_an_identity_is_on_until_it_is_switched_off_and_on_again(self) -> None:
+        # Harness mission (profile=test): the old on-by-default behaviour.
         godmode = _Godmode()
-        self.assertTrue(godmode.IsOnFor(_s("76561198000000001")), "before any mission state")
+        self.assertFalse(godmode.IsOnFor(_s("76561198000000001")), "before any mission state")
         godmode.ResetMission()
+        godmode.SetDefaultOn(True)
+        self.assertTrue(godmode.DefaultOn())
         self.assertTrue(godmode.IsOnFor(_s("76561198000000001")))
         godmode.Remember(_s("76561198000000001"), False)
         self.assertFalse(godmode.IsOnFor(_s("76561198000000001")))
@@ -1132,6 +1150,19 @@ class GodmodeMemoryTest(unittest.TestCase):
         godmode.Remember(_s("76561198000000001"), True)
         self.assertTrue(godmode.IsOnFor(_s("76561198000000001")))
         self.assertEqual(godmode.off_ids(), set())
+
+    def test_an_identity_is_off_until_it_is_switched_on_and_off_again(self) -> None:
+        # Counterpart with the default off (no profile=test config).
+        godmode = _Godmode()
+        godmode.ResetMission()
+        self.assertFalse(godmode.DefaultOn())
+        self.assertFalse(godmode.IsOnFor(_s("76561198000000001")))
+        godmode.Remember(_s("76561198000000001"), True)
+        self.assertTrue(godmode.IsOnFor(_s("76561198000000001")))
+        self.assertFalse(godmode.IsOnFor(_s("76561198000000002")), "another identity stays off")
+        godmode.Remember(_s("76561198000000001"), False)
+        self.assertFalse(godmode.IsOnFor(_s("76561198000000001")))
+        self.assertEqual(godmode.off_ids(), {b"76561198000000001"})
 
     def test_remember_creates_the_memory_when_the_mission_has_none(self) -> None:
         godmode = _Godmode()
@@ -1141,12 +1172,16 @@ class GodmodeMemoryTest(unittest.TestCase):
     def test_a_new_mission_forgets_every_choice_and_the_top_up_clock(self) -> None:
         godmode = _Godmode()
         godmode.ResetMission()
+        godmode.SetDefaultOn(True)
         godmode.Remember(_s("a"), False)
         godmode.G.s_TopUpAccumS = 7.5
         godmode.ResetMission()
-        self.assertTrue(godmode.IsOnFor(_s("a")))
+        self.assertFalse(godmode.IsOnFor(_s("a")), "a new mission starts mortal")
+        self.assertFalse(godmode.DefaultOn())
         self.assertEqual(godmode.G.s_TopUpAccumS, 0.0)
         self.assertIsInstance(godmode.G.s_Players, _ManArray)
+        godmode.SetDefaultOn(True)
+        self.assertTrue(godmode.IsOnFor(_s("a")), "the old choice is forgotten, the default applies")
 
 
 class GodmodeSwitchTest(unittest.TestCase):
@@ -1197,11 +1232,14 @@ class GodmodeSwitchTest(unittest.TestCase):
 
 
 class GodmodeDefaultOnTest(unittest.TestCase):
-    """Every body an identity gets starts with its identity's godmode, on by default."""
+    """Every body an identity gets starts with its identity's choice, else the
+    mission default: on only in a harness mission (SetDefaultOn(true)), off else."""
 
     def test_a_body_gets_its_identitys_choice_on_by_default(self) -> None:
+        # Harness mission (profile=test): the old on-by-default behaviour.
         godmode = _Godmode()
         godmode.ResetMission()
+        godmode.SetDefaultOn(True)
         fresh = _Body(identity=_Identity("76561198000000001"))
         godmode.OnBodyReady(fresh, fresh.identity)
         self.assertEqual(fresh.damage_writes, [False])
@@ -1221,18 +1259,54 @@ class GodmodeDefaultOnTest(unittest.TestCase):
             ],
         )
 
-    def test_a_body_without_identity_gets_the_default_and_none_is_skipped(self) -> None:
+    def test_a_body_gets_no_godmode_by_default_without_a_test_profile(self) -> None:
+        # Counterpart with the default off (no profile=test config).
         godmode = _Godmode()
         godmode.ResetMission()
+        fresh = _Body(identity=_Identity("76561198000000001"))
+        godmode.OnBodyReady(fresh, fresh.identity)
+        self.assertEqual(fresh.damage_writes, [True])
+        godmode.Remember(_s("76561198000000001"), True)
+        respawned = _Body(identity=_Identity("76561198000000001"))
+        godmode.OnBodyReady(respawned, respawned.identity)
+        self.assertEqual(respawned.damage_writes, [False])
+        other = _Body(identity=_Identity("76561198000000002"))
+        godmode.OnBodyReady(other, other.identity)
+        self.assertEqual(other.damage_writes, [True])
+        self.assertEqual(
+            godmode.printed,
+            [
+                "[DayZ_MCP] godmode on=0 uid=76561198000000001 reason=connect",
+                "[DayZ_MCP] godmode on=1 uid=76561198000000001 reason=connect",
+                "[DayZ_MCP] godmode on=0 uid=76561198000000002 reason=connect",
+            ],
+        )
+
+    def test_a_body_without_identity_gets_the_default_and_none_is_skipped(self) -> None:
+        # Harness mission (profile=test): the old on-by-default behaviour.
+        godmode = _Godmode()
+        godmode.ResetMission()
+        godmode.SetDefaultOn(True)
         body = _Body()
         godmode.OnBodyReady(body, None)
         self.assertEqual(body.damage_writes, [False])
         godmode.OnBodyReady(None, _Identity("x"))
         self.assertEqual(godmode.printed, ["[DayZ_MCP] godmode on=1 uid= reason=connect"])
 
-    def test_a_body_leaving_its_identity_loses_godmode_and_the_choice_stays(self) -> None:
+    def test_a_body_without_identity_gets_no_godmode_with_the_default_off(self) -> None:
         godmode = _Godmode()
         godmode.ResetMission()
+        body = _Body()
+        godmode.OnBodyReady(body, None)
+        self.assertEqual(body.damage_writes, [True])
+        godmode.OnBodyReady(None, _Identity("x"))
+        self.assertEqual(godmode.printed, ["[DayZ_MCP] godmode on=0 uid= reason=connect"])
+
+    def test_a_body_leaving_its_identity_loses_godmode_and_the_choice_stays(self) -> None:
+        # Harness mission (profile=test): the old on-by-default behaviour.
+        godmode = _Godmode()
+        godmode.ResetMission()
+        godmode.SetDefaultOn(True)
         leaving = _Body(allow_damage=False, identity=_Identity("76561198000000001"))
         godmode.ReleaseBody(leaving, _s("respawn"))
         self.assertEqual(leaving.damage_writes, [True])
@@ -1241,6 +1315,17 @@ class GodmodeDefaultOnTest(unittest.TestCase):
         godmode.ReleaseBody(vanilla, _s("disconnect"))
         godmode.ReleaseBody(None, _s("disconnect"))
         self.assertEqual(vanilla.damage_writes, [])
+        self.assertEqual(godmode.printed, ["[DayZ_MCP] godmode released uid=76561198000000001 reason=respawn"])
+
+    def test_a_body_leaving_keeps_its_explicit_choice_with_the_default_off(self) -> None:
+        godmode = _Godmode()
+        godmode.ResetMission()
+        godmode.Remember(_s("76561198000000001"), True)
+        leaving = _Body(allow_damage=False, identity=_Identity("76561198000000001"))
+        godmode.ReleaseBody(leaving, _s("respawn"))
+        self.assertEqual(leaving.damage_writes, [True])
+        self.assertTrue(godmode.IsOnFor(_s("76561198000000001")), "the explicit choice stays")
+        self.assertFalse(godmode.IsOnFor(_s("76561198000000002")), "no choice, default off")
         self.assertEqual(godmode.printed, ["[DayZ_MCP] godmode released uid=76561198000000001 reason=respawn"])
 
 
@@ -1254,6 +1339,30 @@ class GodmodeTopUpTest(unittest.TestCase):
         # The fastest drain (sprint 0.6 + basal 0.01 per second, times 1 + value / 5000,
         # thirst.c:36-37) over one interval must stay inside the margin.
         self.assertLess((0.6 + 0.01) * (1.0 + floor / STAT_MAX) * interval, margin)
+
+    def test_b1_4_top_up_floor_is_a_per_window_maximum(self) -> None:
+        # B1-4 criterion (run b28bba22): the maximum per interval reaches 500.
+        body = _Body(allow_damage=False, water=310.0, energy=310.0)
+        godmode = _Godmode(players=[body])
+        godmode.ResetMission()
+        godmode.SetDefaultOn(True)
+        # The window is RP's 10 s, pinned so a longer interval fails here.
+        self.assertEqual(godmode.G.TOPUP_INTERVAL_S, 10.0)
+        steps = 32
+        timeslice = 10.0 / steps
+        for window in range(4):
+            samples = []
+            for _ in range(steps):
+                for stat in (body.energy, body.water):
+                    drain = (0.6 + 0.01) * (1.0 + stat.Get() / STAT_MAX)
+                    stat.Set(stat.Get() - drain * timeslice)
+                godmode.Tick(timeslice)
+                samples.append((body.energy.Get(), body.water.Get()))
+            for name, values in zip(("energy", "water"), zip(*samples)):
+                with self.subTest(window=window, stat=name):
+                    self.assertGreaterEqual(max(values), 500.0)
+                    self.assertGreater(min(values), LOW_THRESHOLD)
+                    self.assertLess(min(values), 500.0)
 
     def test_top_up_raises_to_the_floor_and_never_lowers(self) -> None:
         godmode = _Godmode()
@@ -1275,6 +1384,7 @@ class GodmodeTopUpTest(unittest.TestCase):
         dead_low = _Body(allow_damage=False, alive=False, water=310.0, energy=310.0)
         godmode = _Godmode(players=[on_low, off_low, dead_low, object()])
         godmode.ResetMission()
+        godmode.SetDefaultOn(True)
         floor = LOW_THRESHOLD + godmode.G.TOPUP_MARGIN
         godmode.Tick(9.5)
         self.assertEqual(on_low.water.Get(), 310.0, "before the interval")
@@ -1286,7 +1396,16 @@ class GodmodeTopUpTest(unittest.TestCase):
 
     def test_without_a_game_the_pass_does_nothing(self) -> None:
         godmode = _Godmode(players=[_Body(allow_damage=False, water=10.0)], game=False)
+        godmode.SetDefaultOn(True)
         godmode.Tick(60.0)
+        self.assertEqual(godmode.G.s_TopUpAccumS, 0.0)
+
+    def test_with_the_default_off_and_no_choice_the_pass_tops_up_nobody(self) -> None:
+        low = _Body(allow_damage=True, water=10.0, energy=10.0)
+        godmode = _Godmode(players=[low])
+        godmode.ResetMission()
+        godmode.Tick(60.0)
+        self.assertEqual((low.water.Get(), low.energy.Get()), (10.0, 10.0))
         self.assertEqual(godmode.G.s_TopUpAccumS, 0.0)
 
 
@@ -1307,7 +1426,7 @@ class GodmodeMissionHookTest(unittest.TestCase):
         namespace: dict[str, Any] = {
             "super": recorder("super"),
             "MCPGodmode": recorder("MCPGodmode"),
-            "MCPBridge": SimpleNamespace(Get=lambda: bridge),
+            "MCPBridge": SimpleNamespace(Get=lambda: bridge, ConfigIsTestProfile=lambda: False),
         }
         hook = translate(
             _source(MISSION_PATH),
@@ -1339,7 +1458,12 @@ class GodmodeMissionHookTest(unittest.TestCase):
     def test_the_mission_resets_the_memory_and_ticks_the_top_up_without_the_bridge(self) -> None:
         self.assertEqual(
             self._run(ON_MISSION_START),
-            [("super", "OnMissionStart"), ("MCPGodmode", "ResetMission"), ("bridge", "OnTick", 0.0)],
+            [
+                ("super", "OnMissionStart"),
+                ("MCPGodmode", "ResetMission"),
+                ("MCPGodmode", "SetDefaultOn", False),
+                ("bridge", "OnTick", 0.0),
+            ],
         )
         self.assertEqual(
             self._run(ON_UPDATE, 0.25),
@@ -1433,7 +1557,7 @@ class HealGodmodeMessagesTest(unittest.TestCase):
     def test_both_query_rows_add_godmode_after_their_fields(self) -> None:
         self.assertEqual(
             _class_members(self.messages, "MCPAllPlayer"),
-            [("string", "uid"), ("ref array<float>", "pos"), ("float", "health"), ("bool", "in_vehicle"), ("bool", "godmode")],
+            [("string", "uid"), ("string", "name"), ("ref array<float>", "pos"), ("float", "health"), ("bool", "in_vehicle"), ("bool", "godmode")],
         )
         self.assertEqual(
             _class_members(self.messages, "MCPPlayerState"),
@@ -1568,14 +1692,14 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(tool, server._CLOSED_SCHEMA_TOOLS)
 
     async def test_player_heal_forwards_full_and_a_set_uid_only(self) -> None:
-        self.assertEqual(await self._forwarded(HEAL, {}), (HEAL, {"full": True}, "server", 15.0))
+        self.assertEqual(await self._forwarded(HEAL, {"uid": "76561198000000001"}), (HEAL, {"full": True, "uid": "76561198000000001"}, "server", 15.0))
         self.assertEqual(
             await self._forwarded(HEAL, {"full": False, "uid": "76561198000000001", "timeout_s": 2.0}),
             (HEAL, {"full": False, "uid": "76561198000000001"}, "server", 2.0),
         )
 
     async def test_player_godmode_forwards_the_choice_as_godmode(self) -> None:
-        self.assertEqual(await self._forwarded(GODMODE, {"on": False}), (GODMODE, {"godmode": False}, "server", 15.0))
+        self.assertEqual(await self._forwarded(GODMODE, {"on": False, "uid": "76561198000000001"}), (GODMODE, {"godmode": False, "uid": "76561198000000001"}, "server", 15.0))
         self.assertEqual(
             await self._forwarded(GODMODE, {"on": True, "uid": "76561198000000001"}),
             (GODMODE, {"godmode": True, "uid": "76561198000000001"}, "server", 15.0),
@@ -1594,7 +1718,7 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
             (HEAL, {"uid": 7}, ("\nuid\n", "valid string")),
             (HEAL, {"player": "76561198000000001"}, ("bad_args: unexpected arguments: player",)),
             (HEAL, {"timeout_s": True}, ("\ntimeout_s\n", "valid number")),
-            (HEAL, {"timeout_s": 0.0}, ("bad_timeout",)),
+            (HEAL, {"timeout_s": 0.0, "uid": "76561198000000001"}, ("bad_timeout",)),
         ):
             with self.subTest(tool=tool, arguments=arguments):
                 text = await self._refused(tool, arguments)
@@ -1604,10 +1728,12 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
     def test_descriptions_state_the_default_and_the_way_back(self) -> None:
         line = server.GODMODE_DEFAULT_LINE
         for phrase in (
-            "Godmode is ON by default",
-            "every run that loads DayZ_MCP",
+            "Godmode is OFF by default",
+            "harness test run",
+            "profile=test",
             "immune to damage (falls, hits, hunger and thirst)",
             "connects or respawns",
+            "player_godmode(on=true)",
             "player_godmode(on=false)",
             "vanilla damage back",
         ):
@@ -1617,8 +1743,9 @@ class HealGodmodeToolTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=tool):
                 self.assertIn(line, self.tools[tool].description or "")
         self.assertIn(
-            "The new character keeps the player identity's godmode: on by default, off when "
-            "player_godmode(on=false) switched it off during this mission.",
+            "The new character keeps the player identity's godmode: off by default (on by "
+            "default only in a harness test run with profile=test), or the choice "
+            "player_godmode made for that identity during this mission.",
             self.tools["player_respawn"].description or "",
         )
         self.assertIn("in_vehicle stays 0", self.tools["query_all_players"].description or "")
@@ -1708,10 +1835,10 @@ class HealGodmodeBridgePathTest(unittest.IsolatedAsyncioTestCase):
     @slow_test
     async def test_a_refusal_is_a_tool_error_naming_the_code(self) -> None:
         for tool, arguments, code in (
-            (HEAL, {}, "player_dead"),
+            (HEAL, {"uid": "76561198000000001"}, "player_dead"),
             (HEAL, {"uid": "x"}, "player_not_found"),
-            (GODMODE, {"on": False}, "no_identity"),
-            (GODMODE, {"on": True}, "no_players"),
+            (GODMODE, {"on": False, "uid": "76561198000000001"}, "no_identity"),
+            (GODMODE, {"on": True, "uid": "76561198000000001"}, "no_players"),
         ):
             with self.subTest(tool=tool, code=code):
                 with self.assertRaisesRegex(server.ToolError, code):
@@ -1721,10 +1848,10 @@ class HealGodmodeBridgePathTest(unittest.IsolatedAsyncioTestCase):
         reply = {"before": 1, "after": 0}
         (_content, structured), enqueued = await self._call(
             GODMODE,
-            {"on": False},
+            {"on": False, "uid": "76561198000000001"},
             {"ok": 1, "error": "", GODMODE: dict(reply), HEAL: {}, "players": [], "state": {}},
         )
-        self.assertEqual(enqueued, [(GODMODE, {"godmode": False}, "server")])
+        self.assertEqual(enqueued, [(GODMODE, {"godmode": False, "uid": "76561198000000001"}, "server")])
         self.assertEqual(structured[GODMODE], reply)
         for gone in (HEAL, "players", "state"):
             with self.subTest(gone=gone):

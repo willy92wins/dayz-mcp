@@ -410,9 +410,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int MAX_PENDING = 16;
 	protected const int PENDING_POLL_THRESHOLD = 8;
 	protected const int MAX_CALLBACK_REFS = 128;
-	// One poll accepts at most MAX_DISPATCH_PER_TICK dispatched plus MAX_PENDING
-	// queued; QueuePendingOrFail refuses the rest. Reserve exactly that much.
-	protected const int MAX_POLL_RESULTS = 20;
+	// Reserve the daemon ingress cap (loopback.py MAX_QUEUE) per poll, as the
+	// server does: a QueuePendingOrFail refusal POSTs too.
+	protected const int MAX_POLL_RESULTS = 64;
 	protected const float CAMERA_JOB_TIMEOUT_S = 5.0;
 	protected const float CAMERA_SETTLE_STEP_S = 0.05;
 	protected const int CAMERA_DEFAULT_SETTLE_TICKS = 3;
@@ -496,6 +496,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	// Same load counters as MCPBridge (A1). The client poll carries them too.
+	// Saturate at the same cap: a wrapped negative drops the whole triple.
+	protected const int LOAD_COUNTER_CAP = 2000000000;
+	// TickCount reports 100 ns CPU ticks: 10,000 ticks per millisecond.
+	protected const int TICKS_PER_MS = 10000;
+	protected int m_InitAttempts;
+	protected int m_Polls;
+	protected int m_Cmds;
+	protected int m_CmdBytes;
+	protected int m_BusyMs;
+	protected int m_BusyTicksRemainder;
+	protected int m_LastCmdsPerPoll;
+	protected float m_LastPollIntervalS;
+	protected float m_SincePollS;
 	protected bool m_Shutdown;
 	protected bool m_ShutdownReentryLogged;
 	protected bool m_RestoreNoGameLogged;
@@ -538,6 +552,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollInFlightS = 0.0;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_InitAttempts = 0;
+		m_Polls = 0;
+		m_Cmds = 0;
+		m_CmdBytes = 0;
+		m_BusyMs = 0;
+		m_BusyTicksRemainder = 0;
+		m_LastCmdsPerPoll = 0;
+		m_LastPollIntervalS = 0.0;
+		m_SincePollS = 0.0;
 		m_Shutdown = false;
 		m_ShutdownReentryLogged = false;
 		m_RestoreNoGameLogged = false;
@@ -598,6 +621,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	void OnTick(float timeslice)
 	{
 		m_Tick = m_Tick + 1;
+		m_SincePollS = m_SincePollS + timeslice;
 		// Returns before any engine call while no weapon override is armed.
 		MCPWeaponControl.MaintainFromTick();
 		// Releases the input_trigger key when its phase, its TTL or the local
@@ -673,8 +697,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		StartPoll();
 	}
 
+	protected int NextLoadCounter(int value)
+	{
+		if (value < 0 || value >= LOAD_COUNTER_CAP)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+
+		return value + 1;
+	}
+
 	protected void TryInit()
 	{
+		m_InitAttempts = NextLoadCounter(m_InitAttempts);
 		RestApi api = GetRestApi();
 		if (!api)
 		{
@@ -751,6 +786,17 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		Log("client config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
 	}
 
+	protected string LoadCounterQuery()
+	{
+		int ms = m_LastPollIntervalS * 1000.0;
+		if (ms < 0)
+		{
+			ms = 0;
+		}
+
+		return "&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms + "&cc=" + m_Cmds + "&cb=" + m_CmdBytes + "&bms=" + m_BusyMs + "&lcp=" + m_LastCmdsPerPoll;
+	}
+
 	protected void LogInitFailure(string reason)
 	{
 		if (m_InitFailureLogged)
@@ -794,7 +840,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// Pause admission only. OnTick ticks jobs and drains pending above the poll
 		// decision, so the count keeps falling while polling is held.
-		if (OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
+		// Leave room for a whole batch and, on top of it, a lease close.
+		if (OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1)
 		{
 			return;
 		}
@@ -803,6 +850,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PollInFlight = true;
 		m_PollInFlightS = 0.0;
 		m_TickPollSent = m_Tick;
+		if (m_Polls > 0)
+		{
+			m_LastPollIntervalS = m_SincePollS;
+		}
+		m_SincePollS = 0.0;
+		m_Polls = NextLoadCounter(m_Polls);
 
 		EnsurePollCallback();
 		HoldPollCallback();
@@ -813,6 +866,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
 		request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);
+		request = request + LoadCounterQuery();
 		m_PollCtx.GET(m_PollCallback, request);
 	}
 
@@ -877,16 +931,23 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int count = batch.commands.Count();
 		if (count > 0)
 		{
+			m_LastCmdsPerPoll = AddLoadCounter(0, count);
 			Log("client poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
 		}
 
+		// Defer the new batch when work is already waiting, so it cannot overtake.
+		bool deferBehindPending = m_Pending.Count() > 0;
 		int i = 0;
 		while (i < count)
 		{
 			MCPCommand command = batch.commands.Get(i);
-			if (i < MAX_DISPATCH_PER_TICK)
+			if (deferBehindPending)
 			{
-				Dispatch(command);
+				QueuePendingOrFail(command);
+			}
+			else if (i < MAX_DISPATCH_PER_TICK)
+			{
+				DispatchMeasured(command);
 			}
 			else
 			{
@@ -1027,8 +1088,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		while (m_Pending.Count() > 0 && dispatched < MAX_DISPATCH_PER_TICK)
 		{
 			MCPCommand command = m_Pending.Get(0);
-			m_Pending.Remove(0);
-			Dispatch(command);
+			m_Pending.RemoveOrdered(0);
+			DispatchMeasured(command);
 			dispatched = dispatched + 1;
 		}
 	}
@@ -1040,7 +1101,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		if (m_Pending.Count() >= MAX_PENDING)
+		// The last slot is kept for a lease close.
+		int limit = MAX_PENDING - 1;
+		if (command.cmd == "lease_close_client")
+		{
+			limit = MAX_PENDING;
+		}
+		if (m_Pending.Count() >= limit)
 		{
 			PostCommandError(command, "client_bridge_queue_full");
 			return;
@@ -1075,6 +1142,48 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		moveJobs = m_JobRunner.CountOfKind("player_move");
 		blocking = blocking - moveJobs;
 		return blocking > 0;
+	}
+
+	// Saturate BEFORE addition so a large byte/time delta cannot wrap int32.
+	protected int AddLoadCounter(int value, int amount)
+	{
+		if (value < 0 || value >= LOAD_COUNTER_CAP)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+		if (amount <= 0)
+		{
+			return value;
+		}
+		if (amount >= LOAD_COUNTER_CAP - value)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+		return value + amount;
+	}
+
+	// Includes dispatch rejection/serialization, but not later asynchronous jobs.
+	// Carry sub-ms TickCount time across dispatches into whole busy milliseconds.
+	protected void DispatchMeasured(MCPCommand command)
+	{
+		if (!command)
+		{
+			return;
+		}
+		m_Cmds = NextLoadCounter(m_Cmds);
+		int startedTicks = TickCount(0);
+		Dispatch(command);
+		int elapsedTicks = TickCount(startedTicks);
+		if (elapsedTicks < 0)
+		{
+			return;
+		}
+		// Split before adding: even an int32-max delta cannot overflow the remainder.
+		int elapsedMs = elapsedTicks / TICKS_PER_MS;
+		m_BusyTicksRemainder = m_BusyTicksRemainder + (elapsedTicks % TICKS_PER_MS);
+		elapsedMs = elapsedMs + (m_BusyTicksRemainder / TICKS_PER_MS);
+		m_BusyTicksRemainder = m_BusyTicksRemainder % TICKS_PER_MS;
+		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 
 	protected void Dispatch(MCPCommand command)
@@ -7472,6 +7581,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		// Result JSON bytes submitted, not acknowledgements or HTTP overhead.
+		m_CmdBytes = AddLoadCounter(m_CmdBytes, body.Length());
 		m_Ctx.POST(cb, resultRequest, body);
 		string okStr = "0";
 		if (result.ok)

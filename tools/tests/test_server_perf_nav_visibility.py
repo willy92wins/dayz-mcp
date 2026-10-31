@@ -754,19 +754,18 @@ class NavPathEnforceTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _locals_on_top("\t\tint a;\n\t\ta = 1;\n\t\tint b;\n")
 
-    def test_the_walk_filter_is_the_default_filter(self) -> None:
-        # PGPolyFlags declares no bit values, so no mask is built from it.
+    def test_the_walk_filter_is_configured_before_return(self) -> None:
+        # The enum-to-bit mapping and exact masks are pinned by test_nav_walk_filter.
         code = _method_code(self.source, "BuildNavWalkFilter")
         _in_order(
             self,
             code,
             (
                 "PGFilter filter = new PGFilter();",
+                "filter.SetFlags(includeFlags, excludeFlags, 0);",
                 "return filter;",
             ),
         )
-        self.assertNotIn("SetFlags", code)
-        self.assertNotIn("PGPolyFlags", code)
         self.assertIsNone(re.search(r"PGPolyFlags\.\w+\s*\|", self.source))
 
     def test_the_reply_members(self) -> None:

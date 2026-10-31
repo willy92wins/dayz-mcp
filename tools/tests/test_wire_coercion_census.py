@@ -713,7 +713,7 @@ class WireCoercionTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.runtime, "call_bridge", spy):
                 await self.app.call_tool(
                     "player_teleport",
-                    {"pos": [1.0, 0.0, 3.0], "skip_clearance_check": 1},
+                    {"uid": "player-1", "pos": [1.0, 0.0, 3.0], "skip_clearance_check": 1},
                 )
             self.assertEqual(calls, ["vehicle_telemetry", "player_teleport"])
 
@@ -721,7 +721,7 @@ class WireCoercionTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.runtime, "call_bridge", spy):
                 await self.app.call_tool(
                     "player_teleport",
-                    {"pos": [1.0, 0.0, 3.0], "skip_clearance_check": False},
+                    {"uid": "player-1", "pos": [1.0, 0.0, 3.0], "skip_clearance_check": False},
                 )
             self.assertEqual(calls, ["vehicle_telemetry", "surface_query", "scene_raycast"])
 

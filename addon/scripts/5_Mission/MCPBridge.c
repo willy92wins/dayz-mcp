@@ -43,6 +43,7 @@ class MCPBridge : Managed
 	protected const float SERVER_PERF_WINDOW_MIN_S = 1.0;
 	protected const float SERVER_PERF_WINDOW_MAX_S = 60.0;
 	protected const float NAV_SNAP_RADIUS_MAX = 50.0;
+	protected const int NAV_POLY_BIT_OFFSET = 1;
 	protected const float VISIBILITY_RADIUS_MAX = 100.0;
 	// players_visibility: the field of view either side of the heading, in
 	// degrees; the head bone; the head height over the position used when that
@@ -100,6 +101,23 @@ class MCPBridge : Managed
 	protected bool m_PollInFlight;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
+	// A1 (fb-20261028-131233-a07f): frames that called TryInit, polls actually
+	// sent, seconds since the previous sent poll (0 on the first), and the
+	// accumulator for that gap. Announced on every poll as ia=, pc=, lpims=.
+	// Signed int32 wraps negative; a negative triple is dropped and the daemon
+	// keeps the previous reading. Saturate at this cap and stay there.
+	protected const int LOAD_COUNTER_CAP = 2000000000;
+	// TickCount reports 100 ns CPU ticks: 10,000 ticks per millisecond.
+	protected const int TICKS_PER_MS = 10000;
+	protected int m_InitAttempts;
+	protected int m_Polls;
+	protected int m_Cmds;
+	protected int m_CmdBytes;
+	protected int m_BusyMs;
+	protected int m_BusyTicksRemainder;
+	protected int m_LastCmdsPerPoll;
+	protected float m_LastPollIntervalS;
+	protected float m_SincePollS;
 	protected bool m_ResultDropLogged;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref MCPPollCallback m_PollCallback;
@@ -132,6 +150,15 @@ class MCPBridge : Managed
 		m_PollInFlight = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
+		m_InitAttempts = 0;
+		m_Polls = 0;
+		m_Cmds = 0;
+		m_CmdBytes = 0;
+		m_BusyMs = 0;
+		m_BusyTicksRemainder = 0;
+		m_LastCmdsPerPoll = 0;
+		m_LastPollIntervalS = 0.0;
+		m_SincePollS = 0.0;
 		m_ResultDropLogged = false;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_ResultCallbackPool = new array<ref MCPResultCallback>();
@@ -177,6 +204,7 @@ class MCPBridge : Managed
 	{
 		m_Tick = m_Tick + 1;
 		m_ElapsedS = m_ElapsedS + timeslice;
+		m_SincePollS = m_SincePollS + timeslice;
 		MCPBotControl.Tick(this, m_ElapsedS);
 
 		if (!m_Configured)
@@ -210,8 +238,19 @@ class MCPBridge : Managed
 		StartPoll();
 	}
 
+	protected int NextLoadCounter(int value)
+	{
+		if (value < 0 || value >= LOAD_COUNTER_CAP)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+
+		return value + 1;
+	}
+
 	protected void TryInit()
 	{
+		m_InitAttempts = NextLoadCounter(m_InitAttempts);
 		RestApi api = GetRestApi();
 		if (!api)
 		{
@@ -288,6 +327,18 @@ class MCPBridge : Managed
 		Log("config loaded path=" + path + " url=" + m_Url + " keylen=" + m_Key.Length() + " instlen=" + m_PeerInstance.Length() + " poll_hz=" + m_PollHz);
 	}
 
+	// ia= init attempts, pc= polls sent, lpims= last gap in whole milliseconds.
+	protected string LoadCounterQuery()
+	{
+		int ms = m_LastPollIntervalS * 1000.0;
+		if (ms < 0)
+		{
+			ms = 0;
+		}
+
+		return "&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms + "&cc=" + m_Cmds + "&cb=" + m_CmdBytes + "&bms=" + m_BusyMs + "&lcp=" + m_LastCmdsPerPoll;
+	}
+
 	protected void LogInitFailure(string reason)
 	{
 		if (m_InitFailureLogged)
@@ -303,7 +354,8 @@ class MCPBridge : Managed
 	{
 		// Count accepted work too: jobs/pending each still owe one result.
 		// Pause admission only; draining and terminal POSTs must keep running.
-		if (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS)
+		// Leave room for a whole batch and, on top of it, a lease close.
+		if (m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1)
 		{
 			return;
 		}
@@ -311,6 +363,12 @@ class MCPBridge : Managed
 		m_Accum = 0.0;
 		m_PollInFlight = true;
 		m_TickPollSent = m_Tick;
+		if (m_Polls > 0)
+		{
+			m_LastPollIntervalS = m_SincePollS;
+		}
+		m_SincePollS = 0.0;
+		m_Polls = NextLoadCounter(m_Polls);
 
 		// Reuse across completed polls, as the client does. A native-retained
 		// RestCallback must not turn every successful poll into another object.
@@ -324,6 +382,7 @@ class MCPBridge : Managed
 		request = request + "&ver=" + GetPollVersion();
 		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
 		request = request + "&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
+		request = request + LoadCounterQuery();
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
@@ -364,10 +423,12 @@ class MCPBridge : Managed
 		int count = batch.commands.Count();
 		if (count > 0)
 		{
+			m_LastCmdsPerPoll = AddLoadCounter(0, count);
 			Log("poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
 		}
 
-		bool deferFromWorldSpawn = false;
+		// Defer the new batch when work is already waiting, so it cannot overtake.
+		bool deferFromWorldSpawn = m_Pending.Count() > 0;
 		int i = 0;
 		while (i < count)
 		{
@@ -384,7 +445,7 @@ class MCPBridge : Managed
 			}
 			else if (i < MAX_DISPATCH_PER_TICK)
 			{
-				Dispatch(command);
+				DispatchMeasured(command);
 			}
 			else
 			{
@@ -405,8 +466,8 @@ class MCPBridge : Managed
 		while (m_Pending.Count() > 0 && dispatched < MAX_DISPATCH_PER_TICK)
 		{
 			MCPCommand command = m_Pending.Get(0);
-			m_Pending.Remove(0);
-			Dispatch(command);
+			m_Pending.RemoveOrdered(0);
+			DispatchMeasured(command);
 			dispatched = dispatched + 1;
 		}
 	}
@@ -423,7 +484,13 @@ class MCPBridge : Managed
 			return;
 		}
 
-		if (m_Pending.Count() >= MAX_PENDING)
+		// The last slot is kept for a lease close.
+		int limit = MAX_PENDING - 1;
+		if (command.cmd == "lease_close")
+		{
+			limit = MAX_PENDING;
+		}
+		if (m_Pending.Count() >= limit)
 		{
 			PostCommandError(command, "bridge_queue_full");
 			return;
@@ -521,6 +588,48 @@ class MCPBridge : Managed
 		m_Key = cfg.key;
 		m_Backoff = 0.0;
 		Log("poll key reloaded path=" + path + " keylen=" + m_Key.Length());
+	}
+
+	// Saturate BEFORE addition so a large byte/time delta cannot wrap int32.
+	protected int AddLoadCounter(int value, int amount)
+	{
+		if (value < 0 || value >= LOAD_COUNTER_CAP)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+		if (amount <= 0)
+		{
+			return value;
+		}
+		if (amount >= LOAD_COUNTER_CAP - value)
+		{
+			return LOAD_COUNTER_CAP;
+		}
+		return value + amount;
+	}
+
+	// Includes dispatch rejection/serialization, but not later asynchronous jobs.
+	// Carry sub-ms TickCount time across dispatches into whole busy milliseconds.
+	protected void DispatchMeasured(MCPCommand command)
+	{
+		if (!command)
+		{
+			return;
+		}
+		m_Cmds = NextLoadCounter(m_Cmds);
+		int startedTicks = TickCount(0);
+		Dispatch(command);
+		int elapsedTicks = TickCount(startedTicks);
+		if (elapsedTicks < 0)
+		{
+			return;
+		}
+		// Split before adding: even an int32-max delta cannot overflow the remainder.
+		int elapsedMs = elapsedTicks / TICKS_PER_MS;
+		m_BusyTicksRemainder = m_BusyTicksRemainder + (elapsedTicks % TICKS_PER_MS);
+		elapsedMs = elapsedMs + (m_BusyTicksRemainder / TICKS_PER_MS);
+		m_BusyTicksRemainder = m_BusyTicksRemainder % TICKS_PER_MS;
+		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 
 	protected void Dispatch(MCPCommand command)
@@ -5533,15 +5642,20 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// The filter nav_path_query walks with: the engine's default PGFilter.
-	// No flags are set: PGFilter.SetFlags takes bitmasks but PGPolyFlags is a
-	// sequential enum that declares no bit values (aiworld.c:1-26 and :61), so
-	// ORing its members builds no meaningful mask. Doors and water are not
-	// guaranteed to be included or excluded. A measured filter is future work
-	// and needs an in-game round.
+	// Shared by both endpoint samples and FindPath; admit walking, reject water.
+	// Vanilla scripts/3_Game/ai/aiworld.c:1-26 declares sequential PGPolyFlags;
+	// :61-65 declares SetFlags(includeFlags, excludeFlags, exclusiveFlags) as masks.
+	// With bit = 1 << (flag - NAV_POLY_BIT_OFFSET), offset 1 maps WALK=1 -> 1,
+	// DOOR=3 -> 4, INSIDE=4 -> 8 (include 13); DISABLED=2 -> 2, SWIM=5 -> 16,
+	// SWIM_SEA=6 -> 32 (exclude 50). NONE=0 is never shifted.
+	// The native bit convention and sea rejection still need an in-game check;
+	// changing NAV_POLY_BIT_OFFSET to 0 selects the alternative 1 << flag.
 	protected PGFilter BuildNavWalkFilter()
 	{
 		PGFilter filter = new PGFilter();
+		int includeFlags = (1 << (PGPolyFlags.WALK - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.DOOR - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.INSIDE - NAV_POLY_BIT_OFFSET));
+		int excludeFlags = (1 << (PGPolyFlags.DISABLED - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM_SEA - NAV_POLY_BIT_OFFSET));
+		filter.SetFlags(includeFlags, excludeFlags, 0);
 		return filter;
 	}
 
@@ -7546,6 +7660,7 @@ class MCPBridge : Managed
 
 			MCPAllPlayer player = new MCPAllPlayer();
 			player.uid = ident.GetPlainId();
+			player.name = ident.GetName();
 
 			vector pos = p.GetPosition();
 			player.pos.Insert(pos[0]);
@@ -7633,6 +7748,8 @@ class MCPBridge : Managed
 		{
 			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		// Result JSON bytes submitted, not acknowledgements or HTTP overhead.
+		m_CmdBytes = AddLoadCounter(m_CmdBytes, body.Length());
 		m_Ctx.POST(cb, resultRequest, body);
 		string okStr = "0";
 		if (result.ok) { okStr = "1"; }
@@ -7782,6 +7899,47 @@ class MCPBridge : Managed
 			m_Instance.Shutdown();
 			m_Instance = null;
 		}
+	}
+
+	// B1: true only when the MCP config on disk (the same paths TryInit
+	// reads) carries profile=test, which only the harness writes. No file,
+	// an unreadable file, or any other profile value is false, so a server
+	// with the PBO and no harness config leaves players mortal. Read once
+	// per mission from MissionServer.OnMissionStart; it touches no client.
+	// LoadFile is the non-deprecated loader: static bool LoadFile(string,
+	// out T, out string) (3_game/tools/jsonfileloader.c:7), unused elsewhere
+	// in this addon; a false result or a null config is false here.
+	static bool ConfigIsTestProfile()
+	{
+		string path;
+		MCPConfig cfg;
+		string loadError;
+		bool loaded;
+		path = "$profile:dayz_mcp.json";
+		if (!FileExist(path))
+		{
+			path = "$mission:dayz_mcp.json";
+		}
+		if (!FileExist(path))
+		{
+			return false;
+		}
+		cfg = new MCPConfig();
+		loadError = "";
+		loaded = JsonFileLoader<MCPConfig>.LoadFile(path, cfg, loadError);
+		if (!loaded)
+		{
+			return false;
+		}
+		if (!cfg)
+		{
+			return false;
+		}
+		if (!cfg.profile || cfg.profile == "")
+		{
+			return false;
+		}
+		return cfg.profile == "test";
 	}
 
 	protected void Log(string message)
