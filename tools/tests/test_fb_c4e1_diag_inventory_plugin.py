@@ -5,7 +5,8 @@ registers PluginInventoryDebug through RegisterPluginDebug, whose
 reg_on_release=false makes RegisterPlugin return before the insert unless
 IsDebug(), so the plugin never exists there, while DayZPlayerInventory reads it
 without a null check under DIAG_DEVELOPER. addon/scripts/4_World/
-MCP_DiagPlugins.c registers it. These tests pin the source shape the game will
+MCP_DiagPlugins.c registers it and PluginItemDiagnostic's missing
+PluginConfigDebugProfile dependency (#292). These tests pin the source shape the game will
 compile and the vanilla declarations it relies on. They do not launch DayZ.
 """
 from __future__ import annotations
@@ -26,6 +27,7 @@ VANILLA = Path(os.environ.get("DAYZ_MCP_VANILLA_SCRIPTS", "P:/scripts"))
 GUARD = "#ifdef DIAG_DEVELOPER"
 NOT_INTERNAL = "if (!g_Game.IsDebug())"
 REGISTER = 'RegisterPlugin("PluginInventoryDebug", true, true, true);'
+REGISTER_PROFILE = 'RegisterPlugin("PluginConfigDebugProfile", true, true, true);'
 FOUND = "if (GetPluginByType(PluginInventoryDebug))"
 VERDICT_1 = "[DayZ_MCP] diag PluginInventoryDebug registered=1"
 VERDICT_0 = "[DayZ_MCP] diag PluginInventoryDebug registered=0"
@@ -79,10 +81,11 @@ class DiagInventoryPluginContractTest(unittest.TestCase):
         self.assertIn("super.Init();", init)
         self.assertIn(NOT_INTERNAL, init)
         self.assertLess(init.index("super.Init();"), init.index(NOT_INTERNAL))
-        # The call is the whole body of the guard and the only registration in
-        # the file: an internal build (IsDebug) already has vanilla's.
-        self.assertEqual(_method_body(init, NOT_INTERNAL).strip(), REGISTER)
-        self.assertEqual(code.count("RegisterPlugin"), 1)
+        # Both calls are the whole guard; internal builds already register both.
+        guarded = _method_body(init, NOT_INTERNAL)
+        self.assertEqual(guarded.split(), (REGISTER + " " + REGISTER_PROFILE).split())
+        self.assertEqual(code.count("RegisterPlugin"), 2)
+        self.assertNotIn("UnregisterPlugin", code)
 
     def test_plugins_init_calls_super_then_prints_one_verdict(self) -> None:
         code = _code(self._source())
@@ -116,6 +119,94 @@ class DiagInventoryPluginVanillaTest(unittest.TestCase):
     only show in game. Skipped without the vanilla scripts tree
     (DAYZ_MCP_VANILLA_SCRIPTS, default P:/scripts).
     """
+
+    def _vanilla(self, relative: str) -> str:
+        path = VANILLA / relative
+        if not path.is_file():
+            self.skipTest(f"vanilla scripts tree not present: {VANILLA}")
+        return _code(path.read_text(encoding="utf-8", errors="replace"))
+
+    def test_all_plugins_exist_before_item_diagnostic_initializes(self) -> None:
+        manager = self._vanilla("4_world/plugins/pluginmanager.c")
+        init = _method_body(manager, "void Init()")
+        for kind, name in (("Diag", "PluginItemDiagnostic"),
+                           ("Debug", "PluginConfigDebugProfile")):
+            self.assertRegex(init, rf'RegisterPlugin{kind}\(\s*"{name}",\s*true,\s*true\s*\);')
+        diag = _method_body(manager, "protected void RegisterPluginDiag(")
+        self.assertRegex(diag, r"#ifdef DIAG_DEVELOPER\s*RegisterPlugin\(plugin_class_name, reg_on_client, reg_on_server, true\);")
+        body = _method_body(manager, "void PluginsInit()")
+        spawn_loop = "foreach (typename pluginType : m_PluginRegister)"
+        init_loop = "foreach (PluginBase plugin : pluginPtrs)"
+        spawn = _method_body(body, spawn_loop)
+        self.assertIn("PluginBase moduleNew = PluginBase.Cast(pluginType.Spawn());", spawn)
+        self.assertIn("m_PluginsPtrs.Set(pluginType, moduleNew);", spawn)
+        self.assertIn("pluginPtrs.Insert(moduleNew);", spawn)
+        self.assertLess(body.index(spawn) + len(spawn), body.index(init_loop))
+        self.assertNotIn("OnInit", spawn)
+        self.assertIn("plugin.OnInit();", _method_body(body, init_loop))
+        self.assertEqual(body.count(".OnInit()"), 1)
+        item = self._vanilla("4_world/plugins/pluginbase/pluginitemdiagnostic.c")
+        on_init = _method_body(item, "override void OnInit()")
+        self.assertIn("GetPlugin(PluginConfigDebugProfile)", on_init)
+        self.assertIn("m_ConfigDebugProfile.GetItemDebugPos()", on_init)
+
+    def test_debug_profile_is_ready_in_its_constructor_without_other_plugins(self) -> None:
+        root = "4_world/plugins/pluginbase/"
+        profile = self._vanilla(root + "pluginfilehandler/pluginconfighandler/pluginconfigdebugprofile.c")
+        handler = self._vanilla(root + "pluginfilehandler/pluginconfighandler.c")
+        file_handler = self._vanilla(root + "pluginfilehandler.c")
+        self.assertIn("class PluginConfigDebugProfile extends PluginConfigHandler", profile)
+        self.assertIn("class PluginConfigHandler extends PluginFileHandler", handler)
+        self.assertIn("class PluginFileHandler extends PluginBase", file_handler)
+        # Config and defaults are ready before any OnInit (including the consumer's).
+        constructor = _method_body(handler, "void PluginConfigHandler()")
+        self.assertIn("m_CfgParams = new array<ref CfgParam>();", constructor)
+        self.assertIn("LoadConfigFile();", constructor)
+        load = _method_body(handler, "void LoadConfigFile()")
+        self.assertIn("LoadFile();", load)
+        self.assertIn("m_CfgParams.Insert( ParseText(m_FileContent.Get(j)) );", load)
+        defaults = _method_body(profile, "void PluginConfigDebugProfile()")
+        self.assertRegex(defaults, r'm_DefaultValues.Insert\(ITEMDEBUG,\s*GetNewCfgParamString\("0 0 0"\)\s*\);')
+        self.assertEqual(_method_body(profile, "vector GetItemDebugPos()").strip(),
+                         "return GetString( ITEMDEBUG ).ToVector();")
+        # Only a self lookup in GetInstance; Fixed is used only for constants.
+        self.assertEqual(re.findall(r"GetPlugin\(([^)]*)\)", profile), ["PluginConfigDebugProfile"])
+        self.assertEqual(set(re.findall(r"PluginConfigDebugProfileFixed\.(\w+)", profile)),
+                         {"SUB_PARAM_POS_NAME", "SUB_PARAM_POS_VEC"})
+        for source in (handler, file_handler):
+            self.assertNotIn("GetPlugin", source)
+        on_init = _method_body(profile, "override void OnInit()")
+        for call in ("super.OnInit();", "GetArray(PRESET_LIST)", "LoadCameraPresets();", "LoadWeatherPresets();"):
+            self.assertIn(call, on_init)
+        for signature in ("override void OnInit()", "protected void LoadCameraPresets()",
+                          "protected void LoadWeatherPresets()"):
+            self.assertNotRegex(_method_body(profile, signature), r"\b(?:g_Game|GetGame|GetPlugin)\b")
+        self.assertEqual(_method_body(file_handler, "override void OnInit()").strip(), "super.OnInit();")
+        self.assertNotIn("OnInit", handler)
+        base = self._vanilla("4_world/plugins/pluginbase.c")
+        self.assertIn("void OnInit();", base)
+
+    def test_debug_profile_persists_only_profile_preferences_on_init(self) -> None:
+        root = "4_world/plugins/pluginbase/"
+        profile = self._vanilla(root + "pluginfilehandler/pluginconfighandler/pluginconfigdebugprofile.c")
+        handler = self._vanilla(root + "pluginfilehandler/pluginconfighandler.c")
+        file_handler = self._vanilla(root + "pluginfilehandler.c")
+        constants = self._vanilla("3_game/constants.c")
+        self.assertRegex(constants, r'CFG_FILE_DEBUG_DIR\s*=\s*"\$profile:ScriptConsole/";')
+        self.assertRegex(constants, r'CFG_FILE_DEBUG_PROFILE\s*=\s*"debugProfile.cfg";')
+        filename = _method_body(profile, "override string GetFileName()")
+        self.assertIn("if (!FileExist(GetSubFolderName()))", filename)
+        self.assertIn('return "$profile:debugProfile.cfg";', filename)
+        self.assertIn("return GetSubFolderName() + CFG_FILE_DEBUG_PROFILE;", filename)
+        self.assertEqual(_method_body(profile, "override string GetSubFolderName()").strip(),
+                         "return CFG_FILE_DEBUG_DIR;")
+        for setter in ("protected CfgParamString SetString(", "protected CfgParamArray SetArray("):
+            self.assertIn("SaveConfigToFile();", _method_body(profile, setter))
+        self.assertIn("SaveFile();", _method_body(handler, "void SaveConfigToFile()"))
+        self.assertIn("OpenFile(GetFileName(), FileMode.READ)", _method_body(file_handler, "bool LoadFile()"))
+        save = _method_body(file_handler, "bool SaveFile()")
+        self.assertLess(save.index("MakeDirectory(GetSubFolderName());"),
+                        save.index("OpenFile(GetFileName(), FileMode.WRITE)"))
 
     def test_overrides_and_registration_match_vanilla(self) -> None:
         manager_path = VANILLA / "4_world" / "plugins" / "pluginmanager.c"
