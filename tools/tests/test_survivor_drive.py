@@ -1292,6 +1292,7 @@ class _HandlerModel(_DriveModel):
             m_RuntimeObjects=_Registry(self.objects),
             m_Tick=0,
             m_ElapsedS=0.0,
+            m_SincePollS=0.0,
             m_Configured=True,
             m_PollInFlight=False,
             m_Accum=0.0,
