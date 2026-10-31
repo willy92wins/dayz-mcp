@@ -470,7 +470,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get," + "camera_path_play,camera_path_release,camera_set,camera_set_focus,engine_set,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release," + "player_move,player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control," + "vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1378,6 +1378,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			postNow = DispatchHudSet(command, result);
 		}
+		else if (command.cmd == "gameplay_state")
+		{
+			postNow = DispatchGameplayState(command, result);
+		}
 		else if (command.cmd == "ui_dialog")
 		{
 			postNow = DispatchUiDialog(command, result);
@@ -2148,9 +2152,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
-	// camera_path_release remains internal: public tool registration is outside
-	// the 263fix write-set. Loopback sends it when the owning lease ends or a
-	// delivered play is abandoned. Unlike mode=stop it also releases the
+	// camera_path_release is public. Loopback also sends it when the owning
+	// lease ends or a delivered play is abandoned. Unlike mode=stop it releases the
 	// camera and restores gameplay. Only the matching playing command_id
 	// can be released, so a late release cannot end a later play. The result
 	// answers whether it matched.
@@ -2219,6 +2222,47 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		state.quickbar_hide = visibility.IsContextFlagActive(EHudContextFlags.QUICKBAR_HIDE);
 		state.visible = !state.hud_hide && !state.quickbar_hide;
 		result.hud = state;
+		result.ok = true;
+		return true;
+	}
+
+	// Vanilla missiongameplay.c:1119; ingamehud.c:373,1026;
+	// enwidgets.c:138. Read the widget Show changes, not the deprecated
+	// IsHudVisible stub. HUD_HIDE/QUICKBAR_HIDE remain separate context flags.
+	protected bool DispatchGameplayState(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		IngameHud hud = IngameHud.Cast(mission.GetHud());
+		IngameHudVisibility visibility;
+		Widget panel;
+		if (hud)
+		{
+			visibility = hud.GetHudVisibility();
+			panel = hud.GetHudPanelWidget();
+		}
+		if (!visibility || !panel)
+		{
+			result.ok = false;
+			result.error = "hud_unavailable";
+			return true;
+		}
+		MCPGameplayState state = new MCPGameplayState();
+		state.controls_suppressed = m_ControlsSuppressed;
+		state.engine_controls_disabled = mission.IsControlDisabled();
+		state.hud_shown = panel.IsVisible();
+		state.player_simulation_disabled = m_PlayerSimulationDisabled;
+		MCPHudState hudState = new MCPHudState();
+		hudState.hud_hide = visibility.IsContextFlagActive(EHudContextFlags.HUD_HIDE);
+		hudState.quickbar_hide = visibility.IsContextFlagActive(EHudContextFlags.QUICKBAR_HIDE);
+		hudState.visible = !hudState.hud_hide && !hudState.quickbar_hide;
+		result.gameplay = state;
+		result.hud = hudState;
 		result.ok = true;
 		return true;
 	}

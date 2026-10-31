@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 102 typed
+game, put the world into a state, act, and read back what the engine did — 105 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -78,9 +78,9 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` is broken in the diag build (T165276), so frames
 come from an external window grab of the rendered client, which only reads pixels.
 
-**102 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**105 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
-`action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_set`, `capture_screenshot`,
+`action_cursor`, `action_hold`, `action_use`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `gameplay_state`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
@@ -110,12 +110,16 @@ the playing command id. A successful play replaces a running play and reports
 its id as `camera_path.replaced_command_id`; `busy` still rejects an exclusive
 job. The daemon settles lease tracking on the client's terminal `finished`
 report. Explicit mode=stop keeps its existing last-pose behavior.
-`camera_path_release` remains an internal, client-capability-gated command:
-it is not one of the **102 public tools** and LIVE still rejects it. A matching
-command_id aborts the path and releases camera/gameplay; a stale id cannot stop
-its successor. Public exposure is deferred because `server.py` tool registration
-is outside this patch's write-set. The older tool catalog's finished-pose text
-is superseded by this behavior. PBO rebuild and in-game retest remain required.
+`camera_path_release(command_id)` is public and requires the same lease as play;
+the daemon also uses it internally for lease cleanup. A matching command_id
+aborts the path and releases camera/gameplay (`matched=true`); a stale id cannot
+stop its successor (`matched=false`). The LIVE tool pack still excludes it.
+`camera_set_focus` exposes the existing camera setter with required focus
+distance and blur, sharing `camera_set`'s validation and lease rules.
+`gameplay_state()` reads controls (bridge flag and vanilla engine view), the
+HUD widget's Show flag, HUD_HIDE/QUICKBAR_HIDE and the bridge's simulation flag
+without a lease or state changes. Use it after `restore_gameplay` alongside
+`camera_get`. PBO rebuild and in-game retest remain required.
 
 **Infected heading.** `infected_drive` at 90°: authoritative heading **92.1°** (error 2.1°). Run `1a1cb6e1-7230-43c4-9164-41ab3b0be936` (`tools/tests/test_task9_spawn_phase_markers.py:101-105`). Same run: 76.6 m away from a player at 0.95 m; 270° measured **270.1°**, 41.7 m in 46 s, 0.02 m lateral; `mode="release"` returns vanilla AI (171.7°, 0.25 m/s).
 

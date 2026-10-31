@@ -204,9 +204,9 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
     ReleaseCamera() return nothing and result.ok = true is unconditional
     (MCPClientBridge.c:706-711), while both have exits that do nothing at all
     (if (!mission) return; at :3919-3922; the m_ControlsSuppressed guard at
-    :3924). Ficha fb-20260903-125244-4f83. Python cannot read controls, HUD or
-    the simulation flag from here, but it can re-read the camera through the
-    camera_get verb that already exists, so that is the one postcondition this
+    :3924). Ficha fb-20260903-125244-4f83. The separate gameplay_state reader
+    exposes controls, HUD and the bridge simulation flag; restore_gameplay's
+    automatic verification still re-reads only camera_get, so that is the one postcondition this
     layer may claim -- and the only ground on which it may answer ok.
     """
 

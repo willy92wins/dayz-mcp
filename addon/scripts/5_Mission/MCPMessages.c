@@ -1308,6 +1308,15 @@ class MCPHudState
 	bool quickbar_hide;
 };
 
+// Read-only gameplay_state snapshot. Simulation is the bridge's own flag.
+class MCPGameplayState
+{
+	bool controls_suppressed;
+	bool engine_controls_disabled;
+	bool hud_shown;
+	bool player_simulation_disabled;
+};
+
 class MCPResult
 {
 	int id;
@@ -1498,6 +1507,7 @@ class MCPResult
 	ref MCPCameraPathState camera_path;
 	// hud_set read-back (f427). Unassigned on other commands.
 	ref MCPHudState hud;
+	ref MCPGameplayState gameplay;
 };
 
 class MCPJob

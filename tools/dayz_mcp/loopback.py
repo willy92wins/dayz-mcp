@@ -120,6 +120,7 @@ CLIENT_COMMANDS = {
     "camera_set",
     "camera_set_focus",
     "camera_get",
+    "gameplay_state",
     "camera_path_play",
     "camera_path_release",
     "hud_set",
@@ -1233,13 +1234,14 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
 # the plain case), so these codes mean a bound client whose census does not
 # name the verb, is stale or comes from another instance. action_hold
 # keeps the hold_not_supported its tool publishes; any other verb is refused
-# with the server census code, bridge_capability_missing. camera_path_release
-# is internal: that spares it a live lease at owner cleanup, not this check.
+# with the server census code, bridge_capability_missing. Internal uses of
+# camera_path_release skip the live lease at owner cleanup, not this check.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
     "camera_path_play": "bridge_capability_missing",
     "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
+    "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
 }
@@ -1275,6 +1277,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
 # Command schemas keep the authenticated ingress contract in one place. Variants
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
+    "gameplay_state": _command_schema(_schema_variant()),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
     "key_press": _command_schema(
@@ -2262,7 +2265,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"view": _one_of("first", "third")},
         )
     ),
-    # d026, internal: the id of the camera_path_play whose path to stop.
+    # The id of the camera_path_play to stop; also used by owner cleanup.
     "camera_path_release": _command_schema(
         _schema_variant(
             required=("command_id",),

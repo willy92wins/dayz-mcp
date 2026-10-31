@@ -134,8 +134,9 @@ PRUNABLE_FIELDS = (
     "scene_clear",
     # camera_path_play fills it with the path's state (d026).
     "camera_path",
-    # hud_set fills it with the HUD flags it read back (f427).
+    # hud_set and gameplay_state fill it with the HUD flags they read (f427).
     "hud",
+    "gameplay",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

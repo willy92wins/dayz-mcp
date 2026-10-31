@@ -149,6 +149,10 @@ _BATCH_ITEM: dict[str, object] = {
 
 
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
+    "gameplay_state": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+    ),
     "restore_gameplay": (
         ("valid_empty", {}, (True, None)),
         ("extra_mode", {"mode": "restore"}, (False, "bad_args")),

@@ -51,6 +51,7 @@ _INITIAL_READ_TOOL_NAMES = frozenset(
     {
         "action_cursor",
         "camera_get",
+        "gameplay_state",
         "entities_query",
         "input_describe",
         "loadout_get",

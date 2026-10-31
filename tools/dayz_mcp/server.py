@@ -8754,6 +8754,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         return result
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Set the client camera and its depth of field. "
+        "Same modes, pose, FOV, settle and result as camera_set, with required "
+        "focus_distance and focus_blur. Distance is metres above 0; blur is "
+        "non-negative; both must remain valid as 32-bit floats and be at most "
+        "1e9. Uses camera_set_focus on the bridge. focus_applied echoes the "
+        "values sent to Camera.SetFocus, not a native readback. Visibility "
+        "of blur depends on the client's video options. Use restore_gameplay "
+        "to release the camera."
+    ))
+    async def camera_set_focus(
+        cam_mode: StrictStr,
+        focus_distance: StrictFloat,
+        focus_blur: StrictFloat,
+        cam_pos: list[StrictFloat] | None = None,
+        cam_orientation: list[StrictFloat] | None = None,
+        look_at: list[StrictFloat] | None = None,
+        cam_matrix: list[StrictFloat] | None = None,
+        fov: StrictFloat = 0.0,
+        settle_ticks: StrictInt = 3,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        return await camera_set(
+            cam_mode=cam_mode, cam_pos=cam_pos, cam_orientation=cam_orientation,
+            look_at=look_at, cam_matrix=cam_matrix, fov=fov,
+            settle_ticks=settle_ticks, timeout_s=timeout_s,
+            focus_distance=focus_distance, focus_blur=focus_blur,
+        )
+
+    @app.tool(description=(
         "Read the client camera through camera_get. Observable trichotomy "
         "(decision 6): camera.view='player' + ok + viewport_moved=0 is the "
         "liberated player camera (DayZPlayer.GetCurrentCameraTransform); "
@@ -8848,6 +8877,46 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "camera_path_play", args, "client", _timeout(timeout_s)
             )
 
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Release the playing camera path identified by "
+        "command_id (camera_path.command_id returned by camera_path_play). "
+        "A positive integer is required. matched=true means it stopped that "
+        "play and released its camera and gameplay; false changes nothing "
+        "(already finished or another play is current). The daemon also uses "
+        "this bridge command internally when the owning lease ends."
+    ))
+    async def camera_path_release(
+        command_id: StrictInt,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args = {"command_id": command_id}
+        if isinstance(command_id, bool) or not isinstance(command_id, int) or command_id <= 0:
+            raise ToolError("bad_args: command_id must be a positive integer")
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "camera_path_release", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        "Read local gameplay restore state. No lease; changes no state. "
+        "gameplay.controls_suppressed is the bridge's m_ControlsSuppressed; "
+        "engine_controls_disabled reads MissionGameplay.IsControlDisabled "
+        "(any active input exclude, restriction or legacy disable). "
+        "gameplay.hud_shown reads IngameHud.GetHudPanelWidget().IsVisible(), "
+        "the widget flag set by Hud.Show; it does not prove rendered visibility. "
+        "hud is MCPHudState: HUD_HIDE and QUICKBAR_HIDE read from vanilla's "
+        "context flags, with visible=true when neither is active. "
+        "gameplay.player_simulation_disabled is the bridge's "
+        "m_PlayerSimulationDisabled, not an engine simulation readback. "
+        "Use after restore_gameplay alongside camera_get. Errors: "
+        "client_not_in_game, hud_unavailable."
+    ))
+    async def gameplay_state(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("gameplay_state", {}, "client", _timeout(timeout_s))
+
     @app.tool(
         description=(
             "Read the local player's real action cursor. No lease. No target "
@@ -8936,9 +9005,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "(camera_released: true), camera_still_active when view='scripted' or "
         "viewport_moved, restore_unverified when the probe is illegible "
         "(ok=0). Do not treat a missing scripted camera as liberation. "
-        "Controls, HUD, simulation and render are NOT verified -- no reader for "
-        "controls, HUD or simulation exists on the wire, and the render is not "
-        "checked here -- and the ok names them in not_verified. Check the render "
+        "Controls, HUD, simulation and render are NOT verified by this tool, "
+        "and the ok names them in not_verified. Read controls, HUD and the "
+        "bridge's simulation flag with gameplay_state. Check the render "
         "with capture_screenshot with frames of at least 2: its warnings carry "
         "render_frozen_signal when max_adjacent_delta is below "
         f"{mcp_capture.RENDER_FROZEN_DELTA_EPS:g}, even with distinct_frames above 1, "

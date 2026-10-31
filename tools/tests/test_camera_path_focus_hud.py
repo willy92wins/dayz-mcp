@@ -1566,7 +1566,7 @@ class CensusTest(unittest.TestCase):
                 self.assertEqual(result["state"], "match" if release_present else "mismatch")
                 self.assertEqual(
                     result["registered_without_announced_command"],
-                    [] if release_present else ["camera_path_play"],
+                    [] if release_present else ["camera_path_play", "camera_path_release"],
                 )
 
     def test_the_client_announces_and_dispatches_each_command(self) -> None:
@@ -1580,13 +1580,13 @@ class CensusTest(unittest.TestCase):
 
     def test_the_fixture_and_the_readiness_map_name_their_tools(self) -> None:
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))["peers"]["client"]
-        expected = {"camera_path_play": "camera_path_play", "camera_set_focus": "camera_set", "hud_set": "hud_set"}
+        expected = {"camera_path_play": "camera_path_play", "camera_set_focus": "camera_set_focus", "hud_set": "hud_set"}
         for command, tool in expected.items():
             with self.subTest(command=command):
                 self.assertEqual(fixture[command], tool)
                 self.assertEqual(server._BRIDGE_COMMAND_TOOLS["client"][command], tool)
 
-    def test_the_release_is_an_internal_client_command(self) -> None:
+    def test_the_release_is_public_and_still_supports_internal_cleanup(self) -> None:
         source = _source(BRIDGE)
         self.assertIn("camera_path_release", announced_caps(source))
         self.assertIn("camera_path_release", dispatch_census(source))
@@ -1598,11 +1598,11 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(loopback._CLIENT_ANNOUNCED_COMMANDS["camera_path_release"], "bridge_capability_missing")
         self.assertEqual(loopback._CLIENT_ANNOUNCED_WITH, {"camera_path_play": "camera_path_release"})
         self.assertTrue(command_requires_lease("camera_path_release"))
-        # Not a tool: the readiness map and its fixture name none.
+        # Public, with the same internal cleanup command and release builder.
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))["peers"]["client"]
         self.assertIn("camera_path_release", fixture)
-        self.assertIsNone(fixture["camera_path_release"])
-        self.assertIsNone(server._BRIDGE_COMMAND_TOOLS["client"]["camera_path_release"])
+        self.assertEqual(fixture["camera_path_release"], "camera_path_release")
+        self.assertEqual(server._BRIDGE_COMMAND_TOOLS["client"]["camera_path_release"], "camera_path_release")
         registry = {source: (target, build) for source, target, build in loopback.RELEASE_REGISTRY}
         target, build = registry["camera_path_play"]
         self.assertEqual(target, "camera_path_release")
@@ -2903,11 +2903,12 @@ class EnforceWiringTest(unittest.TestCase):
         ):
             self.assertIn(member, args)
         result = _members(_class_body(self.messages, "MCPResult"))
-        self.assertEqual(result[-2:], [("ref MCPCameraPathState", "camera_path"), ("ref MCPHudState", "hud")])
+        self.assertEqual(result[-3:], [("ref MCPCameraPathState", "camera_path"), ("ref MCPHudState", "hud"),
+                                      ("ref MCPGameplayState", "gameplay")])
         self.assertIn(("bool", "camera_focus"), _members(_class_body(self.messages, "MCPJob")))
 
     def test_the_blocks_are_prunable_and_kept_when_filled(self) -> None:
-        self.assertEqual(result_prune.PRUNABLE_FIELDS[-2:], ("camera_path", "hud"))
+        self.assertEqual(result_prune.PRUNABLE_FIELDS[-3:], ("camera_path", "hud", "gameplay"))
         path = {"state": "idle", "t_s": 0.0, "duration_s": 0.0, "path_id": ""}
         kept = result_prune.prune_unfilled_fields("camera_path_play", {"ok": 1, "camera_path": dict(path), "hud": {}})
         self.assertEqual(kept["camera_path"], path)
