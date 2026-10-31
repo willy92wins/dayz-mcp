@@ -155,6 +155,8 @@ MARKERS = (
     'Log("spawn phase id=" + command.id + " phase=create_return");',
 )
 
+# A1 wraps the same synchronous dispatch to measure work; the deferral branches
+# and their order stay frozen. Counter behavior is covered by test_a1_load_counters.
 WORLD_SPAWN_DEFERRAL = """\
 \t\t// Defer the new batch when work is already waiting, so it cannot overtake.
 \t\tbool deferFromWorldSpawn = m_Pending.Count() > 0;
@@ -174,7 +176,7 @@ WORLD_SPAWN_DEFERRAL = """\
 \t\t\t}
 \t\t\telse if (i < MAX_DISPATCH_PER_TICK)
 \t\t\t{
-\t\t\t\tDispatch(command);
+\t\t\t\tDispatchMeasured(command);
 \t\t\t}
 \t\t\telse
 \t\t\t{

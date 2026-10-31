@@ -242,6 +242,38 @@ A display in power-save can pass this check: in one report (inbox d490) every ca
 
 Do not start a capture tandem after `frame_client_all_black`; that error is the in-run symptom of the same host state. Unlock or wake the host and retry `dayz_test_run`.
 
+### Bridge load counters
+
+`bridge_status()` exposes `server_peer.load` and `client_peer.load` from each
+bridge's last announcing poll. These measurements reset with that bridge;
+retiring a bound instance clears its reading. They are not process CPU usage.
+
+| Field | Meaning |
+| --- | --- |
+| `cmds` | Non-null commands actually dispatched, including rejected commands. Queued commands count when drained, once per command, not per poll. |
+| `cmd_bytes` | Bytes of result JSON bodies submitted to asynchronous POST, measured by byte-string `Length()`. Includes error results and later job results; excludes HTTP overhead and does not confirm receipt. |
+| `busy_ms` | Sum of synchronous dispatch durations from `TickCount` CPU ticks, in whole milliseconds, with the sub-millisecond tick remainder (ticks mod 10000) carried into the next dispatch; not mission `GetGame().GetTime()`. Includes dispatch rejection and synchronous result serialization/submission; excludes later async jobs, HTTP waits and idle polling. Short dispatches accumulate through the carried remainder; this is elapsed time, not CPU time. |
+| `last_cmds_per_poll` | Command array size in the last successfully parsed non-empty poll. Retained across empty polls; a gauge, not a cumulative count. |
+| `init_attempts` | Calls to `TryInit`; initialization activity, not command load. |
+| `polls` | Poll requests sent; follows the poll clock even while idle. |
+| `last_poll_interval_s` | Seconds between the last two sent polls (0 for the first); a poll-clock gauge, not command load. |
+
+Integer counters and the command-count gauge saturate at 2000000000. The poll
+query carries `ia`, `pc`, `lpims` (interval in ms), plus `cc`, `cb`, `bms`, `lcp`.
+The legacy triple remains required and atomic; each new field is optional and
+accepts one ASCII decimal integer from 0 through the cap. Malformed, negative,
+duplicate or over-cap work fields are ignored individually, preserving that
+instance's previous valid value. Unannounced fields stay null, including the
+new fields on an older PBO. Updates reach status on the next poll; status itself
+dispatches no game command. Empty polls leave work counters unchanged, though
+previously queued dispatch or a pending job's result can still add work.
+
+Requires a rebuilt PBO for the new counters; bridge version and argument
+contracts are unchanged. The idle/load/idle experiment is still pending; unit
+tests with a fake clock do not establish the engine clock's resolution or that
+`busy_ms` will increase for a particular workload. The four-state process-CPU
+baseline remains separately unmeasured (`empty_load_baseline_record()`).
+
 ### Wait for a player
 
 1. `session_status()` — confirm the lease is free (`owner` null, `grace` null, empty `queue`; `claimable: true` alone does not say so) and read `box` (occupied runs/foreign/ports) before launching.
