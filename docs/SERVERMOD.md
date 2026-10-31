@@ -33,21 +33,38 @@ el que use el launcher), no solo al servidor.
 
 ## Síntoma para diagnosticarlo
 
-En una carga correcta del cliente, su RPT muestra el arranque del bridge de
-cliente, empezando por la línea `[DayZ-MCP] client init pending/…` (emitida
-por `MCPClientBridge` al inicializar). Si el PBO se cargó solo con
-`-serverMod=`:
+El logger del cliente es `MCPClientBridge.Log`, que emite el prefijo
+`[MCP-CLIENT]`; el prefijo `[DayZ-MCP]` es el del bridge de servidor
+(`MCPBridge`). Hay que distinguir dos resultados en el RPT del cliente:
 
-- el RPT del **cliente** no contiene `[DayZ-MCP] client init pending/…` ni
-  ninguna otra línea `[DayZ-MCP]` del bridge de cliente;
+- **Arranque correcto:** `[MCP-CLIENT] client config loaded path=…`. Una
+  inicialización correcta emite directamente esa línea, sin pasar por
+  `pending`.
+- **Inicialización pendiente o fallida:** `[MCP-CLIENT] client init
+  pending: <motivo>`. Esa línea solo sale del manejo de fallos
+  (`LogInitFailure`: RestApi o config no disponible, URL/clave ausente,
+  RestContext no disponible, …). Indica que el PBO de cliente sí cargó,
+  pero su inicialización no se completó. Su ausencia no demuestra que
+  falte el addon: un arranque correcto tampoco la emite.
+
+Si el PBO se cargó solo con `-serverMod=`:
+
+- el RPT del **cliente** no contiene ninguna línea `[MCP-CLIENT]`, ni la
+  de arranque correcto ni la de inicialización pendiente;
 - el RPT del **servidor** sí muestra actividad `[DayZ-MCP]` de `MCPBridge`.
 
-Esa asimetría (servidor con bridge, cliente sin ninguna línea `[DayZ-MCP]`)
-es la firma de «PBO solo en el servidor», no de un bridge de cliente roto.
+Esa asimetría (servidor con bridge, cliente sin ninguna línea
+`[MCP-CLIENT]`) es un indicio compatible con «PBO solo en el servidor»,
+no su causa exclusiva ni una prueba por sí sola: un RPT de otra
+ejecución o perfil, un cliente que aún no llegó a `MissionGameplay` o un
+log incompleto producirían la misma ausencia. Confírmalo con la lista de
+PBO/mods efectivamente cargados por el cliente antes de concluirlo.
 
 ## Verificación pendiente
 
 Pendiente de confirmar por Experto MCP en una ejecución real: lanzar una vez
-solo con `-serverMod=` y comprobar que falta `[DayZ-MCP] client init
-pending/…` en el RPT del cliente mientras el servidor responde. Hasta ese log,
-esta guía es explicación del código, no un hecho medido.
+solo con `-serverMod=` y comprobar que no hay ninguna línea `[MCP-CLIENT]`
+en el RPT del cliente mientras el servidor muestra `[DayZ-MCP]` y responde,
+y que una carga completa del cliente muestra `[MCP-CLIENT] client config
+loaded path=…`. Hasta ese log, esta guía es explicación del código, no un
+hecho medido.

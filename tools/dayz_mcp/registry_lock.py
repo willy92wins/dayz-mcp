@@ -263,12 +263,18 @@ def acquire_registry_lock_with_retry(
         raise ValueError("invalid_registry_lock_retry")
     deadline = monotonic_fn() + deadline_s
     backoff = initial_backoff_s
+    last_busy: RuntimeError | None = None
     while True:
+        if last_busy is not None and monotonic_fn() >= deadline:
+            raise RuntimeError(
+                f"launcher_registry_busy_timeout: lock still busy after {deadline_s:g}s"
+            ) from last_busy
         try:
             return acquire_registry_lock(exclusive=exclusive, path=path)
         except RuntimeError as error:
             if str(error) != "launcher_registry_busy":
                 raise
+            last_busy = error
             remaining = deadline - monotonic_fn()
             if remaining <= 0:
                 raise RuntimeError(
