@@ -463,6 +463,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// the job releases the move itself and answers aborted. The tool waits
 	// hold_s plus the same 5 s.
 	protected const float PLAYER_MOVE_JOB_SLACK_S = 5.0;
+	// actor_emote's wait_s, the seconds its job watches m_bEmoteIsPlaying. Mirrored
+	// by ACTOR_EMOTE_WAIT_MIN_S and ACTOR_EMOTE_WAIT_MAX_S in loopback.py; a value
+	// outside is refused, never clamped.
+	protected const float ACTOR_EMOTE_WAIT_MIN_S = 0.5;
+	protected const float ACTOR_EMOTE_WAIT_MAX_S = 30.0;
 	//! Capability census announced on every poll as `caps=`: the exact set of
 	//! command.cmd branches Dispatch() handles before falling to unknown_command,
 	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
@@ -470,7 +475,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1142,6 +1147,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int weaponJobs;
 		int triggerJobs;
 		int moveJobs;
+		int emoteJobs;
 		if (!m_JobRunner)
 		{
 			return false;
@@ -1149,13 +1155,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
 		// Nor does an input_trigger click or hold, which waits on a key release,
-		// or a player_move hold, which waits on its release.
+		// a player_move hold, which waits on its release, or an actor_emote,
+		// which only watches m_bEmoteIsPlaying.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
 		blocking = blocking - weaponJobs - triggerJobs;
 		moveJobs = m_JobRunner.CountOfKind("player_move");
 		blocking = blocking - moveJobs;
+		emoteJobs = m_JobRunner.CountOfKind("actor_emote");
+		blocking = blocking - emoteJobs;
 		return blocking > 0;
 	}
 
@@ -1374,6 +1383,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "action_hold_cancel")
 		{
 			postNow = DispatchActionHoldCancel(command, result);
+		}
+		else if (command.cmd == "actor_emote")
+		{
+			postNow = DispatchActorEmote(command, result);
 		}
 		else if (command.cmd == "camera_set_focus")
 		{
@@ -5441,6 +5454,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessPlayerViewSetJob(job);
 		}
+		else if (job.kind == "actor_emote")
+		{
+			return ProcessActorEmoteJob(job);
+		}
 		else if (job.kind == "action_hold")
 		{
 			MCPHoldControl.Maintain();
@@ -6521,6 +6538,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostPlayerViewSetJob(job);
 		}
 
+		// ProcessActorEmoteJob is done only when it saw the end.
+		if (job.kind == "actor_emote")
+		{
+			PostActorEmoteJob(job, true);
+		}
+
 		if (job.kind == "action_hold")
 		{
 			PostActionHoldJob(job);
@@ -6622,6 +6645,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				MCPLookAtControl.Release("deadline");
 			}
 			PostPlayerLookAtJob(job);
+			return;
+		}
+
+		// wait_s is over: started or timed_out.
+		if (job.kind == "actor_emote")
+		{
+			PostActorEmoteJob(job, false);
 			return;
 		}
 
@@ -7508,6 +7538,399 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "view_not_applied";
+		}
+		PostResult(result);
+	}
+
+	// actor_emote (inbox 36fa): one emote on the local player through
+	// EmoteManager.CreateEmoteCBFromMenu, the call the gestures menu makes
+	// (1.29 and 1.30 gesturesmenu.c:655). EmoteManager.Update then sends the
+	// request and the server answers it as it answers a person's gesture
+	// (1.30 emotemanager.c:480, :538, :551). end asks the server to end the
+	// playing emote (EmoteManager.MCP_RequestEmoteEnd, MCP_Emote.c). Refused
+	// before anything is sent: a name outside the catalog or a wait_s outside
+	// 0.5..30 (bad_args), a local player that is not a PlayerBase (no_player;
+	// with no local player Dispatch answers client_not_in_game before this
+	// handler) or no emote manager (no_emote_manager); a new emote while
+	// IsEmotePlaying() reads true (an emote playing, a request pending or the
+	// player surrendered, 1.30 emotemanager.c:1328-1331), or one that
+	// CanPlayEmote and CanPlayEmoteClientCheck refuse (two of the checks
+	// SendEmoteRequestSync makes, 1.30 emotemanager.c:899), is emote_rejected;
+	// end while no emote plays (m_bEmoteIsPlaying false, a pending request
+	// included) is no_emote_playing. The job then watches m_bEmoteIsPlaying for
+	// wait_s (ProcessActorEmoteJob). An emote that is already playing is
+	// refused because the watch could not tell it from the new one; a pending
+	// request or a surrender the player made stays a refusal too (a request the
+	// server refused while surrendered would end in ClearSurrenderState,
+	// 1.30 emotemanager.c:314-315). So is any actor_emote, end included, while
+	// another one's job still watches: that emote may not play yet, and two
+	// jobs would watch the same flag.
+	protected bool DispatchActorEmote(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		int emoteId;
+		bool isEnd;
+		float waitS;
+		MCPJob job;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		isEnd = command.args.emote == "end";
+		emoteId = ActorEmoteId(command.args.emote);
+		if (!isEnd && emoteId <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		waitS = command.args.wait_s;
+		if (!IsStrictFinite(waitS) || waitS < ACTOR_EMOTE_WAIT_MIN_S || waitS > ACTOR_EMOTE_WAIT_MAX_S)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (m_JobRunner.CountOfKind("actor_emote") > 0)
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "no_player";
+			return true;
+		}
+		emotes = player.GetEmoteManager();
+		if (!emotes)
+		{
+			result.ok = false;
+			result.error = "no_emote_manager";
+			return true;
+		}
+		if (isEnd)
+		{
+			if (!emotes.m_bEmoteIsPlaying)
+			{
+				result.ok = false;
+				result.error = "no_emote_playing";
+				result.emote_state = "rejected";
+				return true;
+			}
+			if (!emotes.MCP_RequestEmoteEnd())
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				return true;
+			}
+		}
+		else
+		{
+			if (emotes.IsEmotePlaying() || !emotes.CanPlayEmote(emoteId) || !emotes.CanPlayEmoteClientCheck(emoteId))
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				return true;
+			}
+			emotes.CreateEmoteCBFromMenu(emoteId);
+		}
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "actor_emote";
+		job.emote_end = isEnd;
+		job.emote_request_s = GetGame().GetTickTime();
+		job.wait_s = waitS;
+		job.deadline_s = m_JobRunner.GetElapsedS() + waitS;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	// actor_emote's closed catalog: each name is the EmoteConstants id of the
+	// same name, lowercase (1.30 constants.c:366-409), one that exists in 1.29
+	// and 1.30. Not the suicide emote (it kills the player) nor the debug id,
+	// nor vomit or surrender. vomit's EmoteStartOverride queues the vomit
+	// symptom, which has gameplay effects, in both versions
+	// (1.30 emoteclasses.c:753-768; 1.29 :760-775). surrender's differs by
+	// version: in 1.30 it only changes the surrender state and returns true
+	// (1.30 :449-453), so PlayEmote creates no callback
+	// (1.30 emotemanager.c:667-671); in 1.29 it plays its own surrender in and
+	// out callbacks (PlaySurrenderInOut, 1.29 emotemanager.c:1156, :1183,
+	// :1194) and changes the surrender state and the hands (1.29
+	// emoteclasses.c:449-460). In both the surrender state is one that
+	// IsEmotePlaying() reads, so every later emote, surrender included, would
+	// be emote_rejected: a surrender verb needs its own way out. The same names
+	// are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0 for any
+	// other name.
+	protected int ActorEmoteId(string emote)
+	{
+		if (emote == "greeting")
+		{
+			return EmoteConstants.ID_EMOTE_GREETING;
+		}
+		if (emote == "sos")
+		{
+			return EmoteConstants.ID_EMOTE_SOS;
+		}
+		if (emote == "heart")
+		{
+			return EmoteConstants.ID_EMOTE_HEART;
+		}
+		if (emote == "taunt")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNT;
+		}
+		if (emote == "lyingdown")
+		{
+			return EmoteConstants.ID_EMOTE_LYINGDOWN;
+		}
+		if (emote == "tauntkiss")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTKISS;
+		}
+		if (emote == "facepalm")
+		{
+			return EmoteConstants.ID_EMOTE_FACEPALM;
+		}
+		if (emote == "tauntelbow")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTELBOW;
+		}
+		if (emote == "thumb")
+		{
+			return EmoteConstants.ID_EMOTE_THUMB;
+		}
+		if (emote == "throat")
+		{
+			return EmoteConstants.ID_EMOTE_THROAT;
+		}
+		if (emote == "dance")
+		{
+			return EmoteConstants.ID_EMOTE_DANCE;
+		}
+		if (emote == "campfire")
+		{
+			return EmoteConstants.ID_EMOTE_CAMPFIRE;
+		}
+		if (emote == "sita")
+		{
+			return EmoteConstants.ID_EMOTE_SITA;
+		}
+		if (emote == "sitb")
+		{
+			return EmoteConstants.ID_EMOTE_SITB;
+		}
+		if (emote == "thumbdown")
+		{
+			return EmoteConstants.ID_EMOTE_THUMBDOWN;
+		}
+		if (emote == "dabbing")
+		{
+			return EmoteConstants.ID_EMOTE_DABBING;
+		}
+		if (emote == "timeout")
+		{
+			return EmoteConstants.ID_EMOTE_TIMEOUT;
+		}
+		if (emote == "clap")
+		{
+			return EmoteConstants.ID_EMOTE_CLAP;
+		}
+		if (emote == "point")
+		{
+			return EmoteConstants.ID_EMOTE_POINT;
+		}
+		if (emote == "silent")
+		{
+			return EmoteConstants.ID_EMOTE_SILENT;
+		}
+		if (emote == "salute")
+		{
+			return EmoteConstants.ID_EMOTE_SALUTE;
+		}
+		if (emote == "rps")
+		{
+			return EmoteConstants.ID_EMOTE_RPS;
+		}
+		if (emote == "watching")
+		{
+			return EmoteConstants.ID_EMOTE_WATCHING;
+		}
+		if (emote == "hold")
+		{
+			return EmoteConstants.ID_EMOTE_HOLD;
+		}
+		if (emote == "listening")
+		{
+			return EmoteConstants.ID_EMOTE_LISTENING;
+		}
+		if (emote == "pointself")
+		{
+			return EmoteConstants.ID_EMOTE_POINTSELF;
+		}
+		if (emote == "lookatme")
+		{
+			return EmoteConstants.ID_EMOTE_LOOKATME;
+		}
+		if (emote == "tauntthink")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTTHINK;
+		}
+		if (emote == "move")
+		{
+			return EmoteConstants.ID_EMOTE_MOVE;
+		}
+		if (emote == "down")
+		{
+			return EmoteConstants.ID_EMOTE_DOWN;
+		}
+		if (emote == "come")
+		{
+			return EmoteConstants.ID_EMOTE_COME;
+		}
+		if (emote == "rps_r")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_R;
+		}
+		if (emote == "rps_p")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_P;
+		}
+		if (emote == "rps_s")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_S;
+		}
+		if (emote == "nod")
+		{
+			return EmoteConstants.ID_EMOTE_NOD;
+		}
+		if (emote == "shake")
+		{
+			return EmoteConstants.ID_EMOTE_SHAKE;
+		}
+		if (emote == "shrug")
+		{
+			return EmoteConstants.ID_EMOTE_SHRUG;
+		}
+		return 0;
+	}
+
+	// actor_emote: the first tick m_bEmoteIsPlaying (1.30 emotemanager.c:127)
+	// reads true is the start, and a started emote that reads false again is
+	// finished. Its only writes are true once CreateEmoteCallback has the
+	// callback (1.30 :709-711) and false in OnEmoteEnd (1.30 :501-502), on this
+	// client too. A request still pending is not a start: IsEmotePlaying() also
+	// counts it (and the surrender state, 1.30 :1330), and a request the server
+	// refuses comes back as an INSTACANCEL (1.30 :537-552) that clears the
+	// pending flag with no callback (1.30 :304-312), which would read as
+	// started then finished. So the watch reads m_bEmoteIsPlaying alone, and
+	// such a request answers emote_timed_out. end starts nothing: it is
+	// finished once m_bEmoteIsPlaying reads false. No local player or emote
+	// manager reads as not playing.
+	// Times are GetTickTime seconds. A tick more than wait_s after the request
+	// records nothing and the watch goes on, so the job's deadline, wait_s
+	// after the request (MCP_PostJobTimeout, at the first runner tick past
+	// it), answers what was reached within wait_s; a tick at exactly wait_s
+	// still counts.
+	protected bool ProcessActorEmoteJob(MCPJob job)
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		bool playing;
+		float nowS;
+		nowS = GetGame().GetTickTime();
+		if (nowS - job.emote_request_s > job.wait_s)
+		{
+			return false;
+		}
+		playing = false;
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			emotes = player.GetEmoteManager();
+		}
+		if (emotes)
+		{
+			playing = emotes.m_bEmoteIsPlaying;
+		}
+		if (job.emote_end)
+		{
+			if (playing)
+			{
+				return false;
+			}
+			job.emote_finished_s = nowS;
+			return true;
+		}
+		if (playing)
+		{
+			if (!job.emote_started)
+			{
+				job.emote_started = true;
+				job.emote_started_s = nowS;
+			}
+			return false;
+		}
+		if (!job.emote_started)
+		{
+			return false;
+		}
+		job.emote_finished_s = nowS;
+		return true;
+	}
+
+	// actor_emote's answer. finished: the job saw the emote start and stop
+	// (for end, the playing emote stop) within wait_s. At the first tick past
+	// wait_s: started when it started within wait_s and did not stop within
+	// it, else emote_timed_out with emote_state timed_out. A new emote's
+	// request was sent, so it may still start later; for end the emote still
+	// plays, and the end may never have been sent (SendEmoteRequestSync's own
+	// checks, MCP_Emote.c).
+	// started_after_s and finished_after_s are GetTickTime seconds from the
+	// request; a time not reached stays 0 and the tool drops it.
+	protected void PostActorEmoteJob(MCPJob job, bool finished)
+	{
+		MCPResult result;
+		if (!job)
+		{
+			return;
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		if (job.emote_started)
+		{
+			result.started_after_s = job.emote_started_s - job.emote_request_s;
+		}
+		if (finished)
+		{
+			result.ok = true;
+			result.emote_state = "finished";
+			result.finished_after_s = job.emote_finished_s - job.emote_request_s;
+		}
+		else if (job.emote_started)
+		{
+			result.ok = true;
+			result.emote_state = "started";
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "emote_timed_out";
+			result.emote_state = "timed_out";
 		}
 		PostResult(result);
 	}

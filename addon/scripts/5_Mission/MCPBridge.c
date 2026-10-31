@@ -68,18 +68,21 @@ class MCPBridge : Managed
 	// two ranges meet only after a billion commands in one daemon run.
 	protected const int SPAWN_BATCH_PER_TICK_MAX = 50;
 	protected const int BATCH_OBJECT_ID_BASE = 1000000000;
+	// survivor_drive heading bound, compass degrees either way. Mirrors
+	// SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG in tools/dayz_mcp/loopback.py.
+	protected const float SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = 360.0;
 	// Capability census announced on every poll (caps=). Sorted ascending,
 	// comma separated; one entry per branch of Dispatch() before unknown_command.
 	// The daemon crosses this list against its registered tools; keep it in
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "0401bed390754a55";
+	protected const string SERVER_ARG_CONTRACT_HASH = "86e3c48a43e86b91";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -206,6 +209,7 @@ class MCPBridge : Managed
 		m_ElapsedS = m_ElapsedS + timeslice;
 		m_SincePollS = m_SincePollS + timeslice;
 		MCPBotControl.Tick(this, m_ElapsedS);
+		MCPSurvivorDrive.Tick(this);
 
 		if (!m_Configured)
 		{
@@ -748,6 +752,14 @@ class MCPBridge : Managed
 		{
 			postNow = DispatchInfectedDrive(command, result);
 		}
+		else if (command.cmd == "survivor_drive")
+		{
+			postNow = DispatchSurvivorDrive(command, result);
+		}
+		else if (command.cmd == "survivor_drive_release")
+		{
+			postNow = DispatchSurvivorDriveRelease(command, result);
+		}
 		else if (command.cmd == "inventory_give")
 		{
 			postNow = DispatchInventoryGive(command, result);
@@ -915,6 +927,7 @@ class MCPBridge : Managed
 		result.object_id = objectId;
 		result.deleted = 0;
 		MCPBotControl.OnObjectGone(this, objectId);
+		MCPSurvivorDrive.OnObjectGone(this, objectId);
 
 		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
 		{
@@ -2290,6 +2303,7 @@ class MCPBridge : Managed
 					if (m_RuntimeObjects.Get(entry.object_id) == entry.obj)
 					{
 						MCPBotControl.OnObjectGone(this, entry.object_id);
+						MCPSurvivorDrive.OnObjectGone(this, entry.object_id);
 						m_RuntimeObjects.Remove(entry.object_id);
 					}
 
@@ -3604,7 +3618,10 @@ class MCPBridge : Managed
 
 	// bot_start (inbox 120f). Wire shape is checked before any dummy init.
 	// On a build without the 1.30 bot macros, Available() is false and the
-	// answer is bot_unavailable with no mutation.
+	// answer is bot_unavailable with no mutation. A survivor that
+	// survivor_drive walks is drive_busy, also with no mutation (c801): the
+	// drive's Tick would keep re-applying its overrides under the bot, so the
+	// drive is released first.
 	protected bool DispatchBotStart(MCPCommand command, MCPResult result)
 	{
 		string botError;
@@ -3620,6 +3637,12 @@ class MCPBridge : Managed
 		{
 			result.ok = false;
 			result.error = "bot_unavailable";
+			return true;
+		}
+		if (MCPSurvivorDrive.IsDriven(command.args.object_id))
+		{
+			result.ok = false;
+			result.error = "drive_busy";
 			return true;
 		}
 		botStarted = false;
@@ -4037,6 +4060,151 @@ class MCPBridge : Managed
 		result.pos_real.Insert(current[2]);
 		result.type = command.args.type;
 		result.found = true;
+		result.ok = true;
+		return true;
+	}
+
+	// survivor_drive (inbox c801): walk or stop a survivor of the registry
+	// through its server input overrides (MCPSurvivorDrive, MCP_SurvivorDrive.c).
+	// Every refusal comes before anything changes: the registry's
+	// object_id_unknown and object_id_stale (as hands_take), bad_target for
+	// anything but a PlayerBase, refused_player_controlled for one with a
+	// PlayerIdentity, player_dead, bot_busy while bot_start runs on it, and
+	// no_input_controller. pos_real is the survivor's position read back. A
+	// drive keeps the command's id, which survivor_drive_release names with the
+	// survivor's object_id. DispatchBotStart refuses a driven survivor the same
+	// way (drive_busy).
+	protected bool DispatchSurvivorDrive(MCPCommand command, MCPResult result)
+	{
+		int objectId;
+		Object registered;
+		PlayerBase survivor;
+		vector current;
+		if (!SurvivorDriveArgsOk(command))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		objectId = command.args.object_id;
+		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
+		{
+			result.ok = false;
+			result.error = "object_id_unknown";
+			return true;
+		}
+		registered = m_RuntimeObjects.Get(objectId);
+		if (!registered)
+		{
+			result.ok = false;
+			result.error = "object_id_stale";
+			return true;
+		}
+		survivor = PlayerBase.Cast(registered);
+		if (!survivor)
+		{
+			result.ok = false;
+			result.error = "bad_target";
+			return true;
+		}
+		if (survivor.GetIdentity())
+		{
+			result.ok = false;
+			result.error = "refused_player_controlled";
+			return true;
+		}
+		if (!survivor.IsAlive())
+		{
+			result.ok = false;
+			result.error = "player_dead";
+			return true;
+		}
+		if (MCPBotControl.IsRunning(objectId))
+		{
+			result.ok = false;
+			result.error = "bot_busy";
+			return true;
+		}
+		if (!survivor.GetInputController())
+		{
+			result.ok = false;
+			result.error = "no_input_controller";
+			return true;
+		}
+		if (command.args.mode == "release")
+		{
+			MCPSurvivorDrive.Release(this, objectId);
+		}
+		else
+		{
+			MCPSurvivorDrive.Drive(survivor, objectId, command.args.heading, command.args.speed, command.id);
+		}
+		current = survivor.GetPosition();
+		result.pos_real = new array<float>();
+		result.pos_real.Insert(current[0]);
+		result.pos_real.Insert(current[1]);
+		result.pos_real.Insert(current[2]);
+		result.ok = true;
+		return true;
+	}
+
+	// survivor_drive's wire shape, the ingress schema's rule again (an absent
+	// key reads 0 or false here, so each value travels with its _set flag): a
+	// positive object_id, then mode release with neither heading nor speed, or
+	// no mode with both: heading finite within
+	// +-SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG, speed the OverrideMovementSpeed
+	// value of walk, jog or sprint (1, 2, 3; MCPSurvivorDrive.IsDriveSpeed).
+	protected bool SurvivorDriveArgsOk(MCPCommand command)
+	{
+		float heading;
+		if (!command.args || command.args.object_id <= 0)
+		{
+			return false;
+		}
+		if (command.args.mode == "release")
+		{
+			if (command.args.heading_set || command.args.speed_set)
+			{
+				return false;
+			}
+			return true;
+		}
+		if (command.args.mode != "")
+		{
+			return false;
+		}
+		if (!command.args.heading_set || !command.args.speed_set)
+		{
+			return false;
+		}
+		heading = command.args.heading;
+		if (!IsFiniteFloat(heading))
+		{
+			return false;
+		}
+		if (heading < -SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG || heading > SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG)
+		{
+			return false;
+		}
+		return MCPSurvivorDrive.IsDriveSpeed(command.args.speed);
+	}
+
+	// survivor_drive_release (c801), internal: the broker sends it with the id
+	// of a survivor_drive command and that drive's object_id when the lease
+	// that sent the command ends (cleanup_owner) or abandons it after delivery
+	// (RELEASE_REGISTRY). It drops that survivor's drive only if that command
+	// set it (MCPSurvivorDrive.ReleaseCommand) and answers whether it did in
+	// matched; any other id or survivor changes nothing. Command ids restart
+	// with each daemon, so the id alone could name another survivor's drive.
+	protected bool DispatchSurvivorDriveRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0 || command.args.object_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		result.matched = MCPSurvivorDrive.ReleaseCommand(this, command.args.object_id, command.args.command_id);
 		result.ok = true;
 		return true;
 	}
@@ -7816,6 +7984,7 @@ class MCPBridge : Managed
 	void Shutdown()
 	{
 		MCPBotControl.ShutdownAll(this);
+		MCPSurvivorDrive.ShutdownAll(this);
 		// A completed cached callback is no longer in m_CallbackRefs.
 		if (m_PollCallback)
 		{
