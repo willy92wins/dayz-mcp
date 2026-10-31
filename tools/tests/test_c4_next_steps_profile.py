@@ -366,6 +366,48 @@ class ServingDaemonAuthorityTest(unittest.TestCase):
         self.assertEqual(captured["live_admin_enabled"], False)
 
 
+class RunDaemonModeTest(unittest.TestCase):
+    """run() in daemon mode reaches _run_daemon and serves its profile.
+
+    Only daemon.run_daemon is substituted (the process that would own
+    the port); the status provider is the real daemon one, wrapped by
+    _run_daemon, so the assertions read the payload a client would be
+    served instead of any internal call. If run() skipped _run_daemon,
+    the served payload would carry no live_profile at all.
+    """
+
+    def test_run_daemon_mode_publishes_serving_live_profile(self) -> None:
+        for live, admin in ((True, False), (False, True)):
+            with self.subTest(live_profile=live, live_admin_enabled=admin):
+                state = loopback.ServerState(
+                    "c4-run-daemon-test",
+                    live_profile=live,
+                    live_admin_enabled=admin,
+                )
+                served: dict = {}
+
+                def fake_run_daemon(config: object) -> int:
+                    provider = daemon.make_status_provider(config, state)
+                    served.update(provider())
+                    return 7
+
+                original_provider = daemon.make_status_provider
+                with patch.object(daemon, "run_daemon", fake_run_daemon):
+                    self.assertEqual(
+                        server.run(["--daemon", "--keyfile", "c4-test.key"]), 7
+                    )
+                self.assertIs(served["live_profile"], live)
+                self.assertIs(served["live_admin_enabled"], admin)
+                self.assertIn("daemon_generation", served)
+                # _run_daemon restores the unwrapped provider on exit:
+                # the same state served without it publishes no profile.
+                self.assertIs(daemon.make_status_provider, original_provider)
+                restored = daemon.make_status_provider(
+                    server.ServerConfig(log_sink=lambda _m: None), state
+                )()
+                self.assertNotIn("live_profile", restored)
+
+
 class McpErrorProfileFilterTest(unittest.IsolatedAsyncioTestCase):
     """A real MCP error leaving build_app is filtered under the live profile."""
 
@@ -527,10 +569,14 @@ def _fake_filter_app(error_text: str):
     return app
 
 
-async def _run_filter(app, runtime, config) -> str:
+async def _run_filter(app, runtime, config, allowed=None) -> str:
     server._install_next_step_profile_filter(
         app,
-        lambda: server._effective_next_tools(config, runtime=runtime),
+        (
+            lambda: server._effective_next_tools(config, runtime=runtime)
+        )
+        if allowed is None
+        else allowed,
         runtime=runtime,
         config=config,
     )
@@ -651,6 +697,51 @@ class UnknownProfileMcpRegressionTest(unittest.IsolatedAsyncioTestCase):
         text = await _run_filter(app, client, config)
         self.assertGreaterEqual(len(client._request_calls), 1)  # type: ignore[attr-defined]
         self.assertNotIn("next_step=dayz_knowledge", text)
+
+
+class UnknownProfileFilterIntersectionTest(unittest.IsolatedAsyncioTestCase):
+    """The filter's own fail-closed intersection (server.py:636).
+
+    The allowed set is passed as the full public set, so
+    _effective_next_tools cannot do the restriction: only the filter
+    intersecting an unknown client profile with LIVE_NEXT_TOOLS can
+    strip the knowledge hint. This pins line 636 as load-bearing for
+    callers that do not resolve the effective set themselves, so it is
+    kept rather than deleted as redundant.
+    """
+
+    async def test_unknown_client_full_allowed_set_is_intersected(self) -> None:
+        client = _bare_client(
+            request_once=lambda *a, **k: (200, {"daemon_generation": "g1"})
+        )
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(
+            app, client, config, allowed=agent_loop.PUBLIC_NEXT_TOOLS
+        )
+        self.assertNotIn("next_step=dayz_knowledge", text)
+        self.assertIsNone(client._serving_live_profile)
+        self.assertFalse(server._serving_live_known(client))
+
+    async def test_known_full_client_full_allowed_set_keeps_hint(self) -> None:
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=lambda *a, **k: (
+                200,
+                {"daemon_generation": "g1", "live_profile": False},
+            ),
+        )
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(
+            app, client, config, allowed=agent_loop.PUBLIC_NEXT_TOOLS
+        )
+        self.assertIn("next_step=dayz_knowledge_status", text)
+        self.assertTrue(server._serving_live_known(client))
 
 
 class NoSpawnProbeSyncTest(unittest.TestCase):
