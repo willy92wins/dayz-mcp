@@ -178,13 +178,16 @@ class RestoreGameplayEnforceSourceContractTest(unittest.TestCase):
         self.assertIn("job.sim_restored = true;", prep)
         self.assertLess(prep.index(guard), prep.index("player.GetCommand_Vehicle()"))
 
-    def test_camera_set_job_restores_when_apply_fails(self) -> None:
+    def test_camera_set_restores_when_its_apply_fails(self) -> None:
+        # The apply runs in DispatchCameraSet and its job only settles (d026):
+        # a failed apply hands gameplay back and answers at once.
         source = CLIENT_BRIDGE.read_text(encoding="utf-8")
-        body = _method_body(source, "protected bool ProcessCameraSetJob(MCPJob job)")
+        body = _method_body(source, "protected bool DispatchCameraSet(MCPCommand command, MCPResult result)")
         marker = "bool applied = ApplyCameraSet(job);"
         self.assertIn(marker, body)
+        self.assertNotIn("ApplyCameraSet", _method_body(source, "protected bool ProcessCameraSetJob(MCPJob job)"))
         after = body[body.index(marker):]
-        # !applied branch must restore before completing the job
+        # !applied branch must restore before answering
         fail_branch_start = after.index("if (!applied)")
         fail_branch = after[fail_branch_start : after.index("}", fail_branch_start) + 1]
         self.assertIn("RestoreGameplay();", fail_branch)

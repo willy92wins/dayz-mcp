@@ -87,6 +87,51 @@ def _player_trace_args(*, drop: str = "", **overrides: object) -> dict[str, obje
     return args
 
 
+def _focus_args(
+    cam_mode: str = "orient", aim: str = "cam_orientation", *, drop: str = "", **overrides: object
+) -> dict[str, object]:
+    """A valid camera_set_focus payload for cam_mode and aim, `overrides` applied, `drop` removed."""
+    args: dict[str, object] = {"cam_mode": cam_mode, "fov": 0.0, "settle_ticks": 3}
+    if cam_mode == "matrix":
+        args["cam_matrix"] = [0.0] * 12
+    else:
+        args["cam_pos"] = [0.0, 2.0, 0.0]
+        args[aim] = [5.0, 1.0, 5.0] if aim == "look_at" else [90.0, 0.0, 0.0]
+    args.update(focus_distance=2.0, focus_blur=1.5)
+    args.update(overrides)
+    if drop:
+        del args[drop]
+    return args
+
+
+def _path_key(t: float, **overrides: object) -> dict[str, object]:
+    """One camera_path_play key at t: cam_pos on a line, cam_orientation level."""
+    key: dict[str, object] = {"t": t, "cam_pos": [t, 2.0, 0.0], "cam_orientation": [0.0, 0.0, 0.0]}
+    key.update(overrides)
+    return key
+
+
+def _path_args(*, drop: str = "", **overrides: object) -> dict[str, object]:
+    """A valid camera_path_play play payload with `overrides` applied and `drop` removed."""
+    args: dict[str, object] = {
+        "mode": "play",
+        "keys": [_path_key(0.0), _path_key(3.0), _path_key(6.0)],
+        "easing": "linear",
+        "path_id": "dolly_1",
+    }
+    args.update(overrides)
+    if drop:
+        del args[drop]
+    return args
+
+
+def _look_key(t: float, **overrides: object) -> dict[str, object]:
+    """One look_at key with a FOV."""
+    key: dict[str, object] = {"t": t, "cam_pos": [t, 2.0, 0.0], "look_at": [0.0, 1.0, 9.0], "fov": 0.9}
+    key.update(overrides)
+    return key
+
+
 # A valid world_spawn payload without the optional lifetime_s pair.
 _SPAWN: dict[str, object] = {
     "type": "CivilianSedan",
@@ -2418,6 +2463,9 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             },
             (False, "bad_args"),
         ),
+        # 702f: focus travels on camera_set_focus only, so camera_set never
+        # carries it to a bridge that would drop it.
+        ("focus_is_camera_set_focus_only", _focus_args(), (False, "bad_args")),
         (
             "extra_key",
             {
@@ -2436,6 +2484,149 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_get", {"cam_mode": "get"}, (True, None)),
         ("empty_cam_mode", {"cam_mode": ""}, (False, "bad_args")),
         ("extra_key", {"cam_mode": "get", "extra": None}, (False, "bad_args")),
+    ),
+    # 702f: camera_set's five shapes, each with both focus arguments.
+    "camera_set_focus": (
+        ("valid_orient", _focus_args(), (True, None)),
+        ("valid_lookat", _focus_args("lookat", "look_at"), (True, None)),
+        ("valid_matrix", _focus_args("matrix"), (True, None)),
+        ("valid_free_look_at", _focus_args("free", "look_at"), (True, None)),
+        ("valid_free_orientation", _focus_args("free", "cam_orientation"), (True, None)),
+        ("valid_blur_zero", _focus_args(focus_blur=0.0), (True, None)),
+        ("valid_integer_distance", _focus_args(focus_distance=50), (True, None)),
+        ("missing_blur", _focus_args(drop="focus_blur"), (False, "bad_args")),
+        ("missing_distance", _focus_args(drop="focus_distance"), (False, "bad_args")),
+        (
+            "camera_set_shape_without_focus",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+            },
+            (False, "bad_args"),
+        ),
+        ("blur_null", _focus_args(focus_blur=None), (False, "bad_args")),
+        ("distance_zero", _focus_args(focus_distance=0.0), (False, "bad_args")),
+        ("distance_negative", _focus_args(focus_distance=-2.0), (False, "bad_args")),
+        ("distance_inf", _focus_args(focus_distance=float("inf")), (False, "bad_args")),
+        ("distance_nan", _focus_args(focus_distance=float("nan")), (False, "bad_args")),
+        ("distance_bool", _focus_args(focus_distance=True), (False, "bad_args")),
+        ("distance_string", _focus_args(focus_distance="2"), (False, "bad_args")),
+        ("blur_negative", _focus_args(focus_blur=-0.1), (False, "bad_args")),
+        ("blur_inf", _focus_args(focus_blur=float("inf")), (False, "bad_args")),
+        ("blur_bool", _focus_args(focus_blur=False), (False, "bad_args")),
+        # The tool's bounds (camera_path.focus_distance and focus_blur): at most
+        # 1e9, and above 0 still as the bridge's 32-bit float.
+        ("valid_distance_at_the_bound", _focus_args(focus_distance=1e9), (True, None)),
+        ("valid_distance_least_float", _focus_args(focus_distance=1e-45), (True, None)),
+        ("valid_blur_least_float", _focus_args(focus_blur=1e-45), (True, None)),
+        ("distance_1e100", _focus_args(focus_distance=1e100), (False, "bad_args")),
+        ("distance_1e-46", _focus_args(focus_distance=1e-46), (False, "bad_args")),
+        ("blur_1e100", _focus_args(focus_blur=1e100), (False, "bad_args")),
+        ("blur_1e-46", _focus_args(focus_blur=1e-46), (False, "bad_args")),
+        ("alias_never_on_the_wire", _focus_args("look_at", "look_at"), (False, "bad_args")),
+        ("extra_key", _focus_args(extra=None), (False, "bad_args")),
+    ),
+    # d026: the bounds mirror MCPCameraPath through camera_path.py.
+    "camera_path_play": (
+        ("valid_play_linear", _path_args(), (True, None)),
+        ("valid_play_smooth", _path_args(easing="smooth"), (True, None)),
+        ("valid_play_two_keys", _path_args(keys=[_path_key(0.0), _path_key(0.5)]), (True, None)),
+        (
+            "valid_play_64_keys",
+            _path_args(keys=[_path_key(float(index)) for index in range(64)]),
+            (True, None),
+        ),
+        ("valid_play_last_t_600", _path_args(keys=[_path_key(0.0), _path_key(600.0)]), (True, None)),
+        (
+            "valid_play_look_at_with_fov",
+            _path_args(keys=[_look_key(0.0), _look_key(2.0, fov=0.5)]),
+            (True, None),
+        ),
+        ("valid_play_integer_t", _path_args(keys=[_path_key(0), _path_key(2)]), (True, None)),
+        ("valid_play_no_path_id", _path_args(path_id=""), (True, None)),
+        ("valid_play_path_id_64", _path_args(path_id="a-Z_9" * 12 + "abcd"), (True, None)),
+        ("valid_state", {"mode": "state", "path_id": ""}, (True, None)),
+        ("valid_state_named", {"mode": "state", "path_id": "dolly_1"}, (True, None)),
+        ("valid_stop", {"mode": "stop", "path_id": ""}, (True, None)),
+        ("one_key", _path_args(keys=[_path_key(0.0)]), (False, "bad_args")),
+        ("no_keys", _path_args(keys=[]), (False, "bad_args")),
+        (
+            "65_keys",
+            _path_args(keys=[_path_key(float(index)) for index in range(65)]),
+            (False, "bad_args"),
+        ),
+        ("keys_not_a_list", _path_args(keys={"t": 0.0}), (False, "bad_args")),
+        ("keys_null", _path_args(keys=None), (False, "bad_args")),
+        ("key_not_an_object", _path_args(keys=[_path_key(0.0), [1.0, 2.0]]), (False, "bad_args")),
+        ("first_t_not_zero", _path_args(keys=[_path_key(0.5), _path_key(1.0)]), (False, "bad_args")),
+        ("t_repeated", _path_args(keys=[_path_key(0.0), _path_key(2.0), _path_key(2.0)]), (False, "bad_args")),
+        ("t_decreasing", _path_args(keys=[_path_key(0.0), _path_key(3.0), _path_key(2.0)]), (False, "bad_args")),
+        ("last_t_above_600", _path_args(keys=[_path_key(0.0), _path_key(600.5)]), (False, "bad_args")),
+        ("t_missing", _path_args(keys=[_path_key(0.0), {"cam_pos": [1.0, 2.0, 0.0], "cam_orientation": [0.0, 0.0, 0.0]}]), (False, "bad_args")),
+        ("t_bool", _path_args(keys=[_path_key(0.0), _path_key(True)]), (False, "bad_args")),
+        ("t_nan", _path_args(keys=[_path_key(0.0), _path_key(float("nan"))]), (False, "bad_args")),
+        ("t_string", _path_args(keys=[_path_key(0.0), _path_key("1")]), (False, "bad_args")),
+        ("cam_pos_two_numbers", _path_args(keys=[_path_key(0.0), _path_key(1.0, cam_pos=[1.0, 2.0])]), (False, "bad_args")),
+        ("cam_pos_bool", _path_args(keys=[_path_key(0.0), _path_key(1.0, cam_pos=[1.0, True, 0.0])]), (False, "bad_args")),
+        ("cam_pos_inf", _path_args(keys=[_path_key(0.0), _path_key(1.0, cam_pos=[1.0, float("inf"), 0.0])]), (False, "bad_args")),
+        ("cam_pos_missing", _path_args(keys=[_path_key(0.0), {"t": 1.0, "cam_orientation": [0.0, 0.0, 0.0]}]), (False, "bad_args")),
+        ("orientation_two_numbers", _path_args(keys=[_path_key(0.0), _path_key(1.0, cam_orientation=[0.0, 0.0])]), (False, "bad_args")),
+        ("both_aims", _path_args(keys=[_path_key(0.0), _path_key(1.0, look_at=[0.0, 0.0, 9.0])]), (False, "bad_args")),
+        ("no_aim", _path_args(keys=[_path_key(0.0), {"t": 1.0, "cam_pos": [1.0, 2.0, 0.0]}]), (False, "bad_args")),
+        (
+            "mixed_aims",
+            _path_args(keys=[_path_key(0.0), {"t": 1.0, "cam_pos": [1.0, 2.0, 0.0], "look_at": [0.0, 0.0, 9.0]}]),
+            (False, "bad_args"),
+        ),
+        ("fov_on_some_keys", _path_args(keys=[_look_key(0.0), _look_key(1.0), {"t": 2.0, "cam_pos": [2.0, 2.0, 0.0], "look_at": [0.0, 1.0, 9.0]}]), (False, "bad_args")),
+        ("fov_zero", _path_args(keys=[_look_key(0.0), _look_key(1.0, fov=0.0)]), (False, "bad_args")),
+        ("fov_negative", _path_args(keys=[_look_key(0.0), _look_key(1.0, fov=-0.5)]), (False, "bad_args")),
+        ("fov_bool", _path_args(keys=[_look_key(0.0), _look_key(1.0, fov=True)]), (False, "bad_args")),
+        # The bridge reads each number as a 32-bit float and bounds it to 1e9.
+        ("t_collapses_as_float32", _path_args(keys=[_path_key(0.0), _path_key(1.0), _path_key(1.00000001)]), (False, "bad_args")),
+        ("valid_t_distinct_as_float32", _path_args(keys=[_path_key(0.0), _path_key(1.0), _path_key(1.0000002)]), (True, None)),
+        ("t_huge_int", _path_args(keys=[_path_key(0.0), _path_key(10**400)]), (False, "bad_args")),
+        ("valid_cam_pos_at_the_bound", _path_args(keys=[_path_key(0.0, cam_pos=[1e9, -1e9, 0.0]), _path_key(1.0)]), (True, None)),
+        ("cam_pos_past_the_bound", _path_args(keys=[_path_key(0.0, cam_pos=[1.5e9, 0.0, 0.0]), _path_key(1.0)]), (False, "bad_args")),
+        ("cam_pos_1e100", _path_args(keys=[_path_key(0.0), _path_key(1.0, cam_pos=[1e100, 2.0, 0.0])]), (False, "bad_args")),
+        ("orientation_1e100", _path_args(keys=[_path_key(0.0), _path_key(1.0, cam_orientation=[1e100, 0.0, 0.0])]), (False, "bad_args")),
+        ("look_at_1e100", _path_args(keys=[_look_key(0.0), _look_key(1.0, look_at=[0.0, 1e100, 9.0])]), (False, "bad_args")),
+        ("fov_1e100", _path_args(keys=[_look_key(0.0), _look_key(1.0, fov=1e100)]), (False, "bad_args")),
+        ("fov_zero_as_float32", _path_args(keys=[_look_key(0.0), _look_key(1.0, fov=1e-46)]), (False, "bad_args")),
+        ("key_unknown_field", _path_args(keys=[_path_key(0.0), _path_key(1.0, focus_distance=2.0)]), (False, "bad_args")),
+        ("bad_easing", _path_args(easing="ease_in"), (False, "bad_args")),
+        ("easing_not_a_string", _path_args(easing=1), (False, "bad_args")),
+        ("bad_mode", _path_args(mode="pause"), (False, "bad_args")),
+        ("upper_mode", _path_args(mode="PLAY"), (False, "bad_args")),
+        ("unhashable_mode", _path_args(mode=["play"]), (False, "bad_args")),
+        ("path_id_65", _path_args(path_id="a" * 65), (False, "bad_args")),
+        ("path_id_space", _path_args(path_id="dolly 1"), (False, "bad_args")),
+        ("path_id_non_ascii", _path_args(path_id="grúa"), (False, "bad_args")),
+        ("path_id_newline", _path_args(path_id="dolly\n"), (False, "bad_args")),
+        ("path_id_int", _path_args(path_id=1), (False, "bad_args")),
+        ("play_missing_path_id", _path_args(drop="path_id"), (False, "bad_args")),
+        ("play_missing_easing", _path_args(drop="easing"), (False, "bad_args")),
+        ("play_missing_keys", _path_args(drop="keys"), (False, "bad_args")),
+        ("state_with_keys", {"mode": "state", "path_id": "", "keys": [_path_key(0.0), _path_key(1.0)]}, (False, "bad_args")),
+        ("state_with_easing", {"mode": "state", "path_id": "", "easing": "linear"}, (False, "bad_args")),
+        ("stop_bad_path_id", {"mode": "stop", "path_id": "a/b"}, (False, "bad_args")),
+        ("stop_missing_path_id", {"mode": "stop"}, (False, "bad_args")),
+        ("missing_mode", {"path_id": ""}, (False, "bad_args")),
+        ("extra_key", _path_args(extra=None), (False, "bad_args")),
+    ),
+    # f427: visible is a JSON bool and the only key.
+    "hud_set": (
+        ("valid_hidden", {"visible": False}, (True, None)),
+        ("valid_shown", {"visible": True}, (True, None)),
+        ("int_one", {"visible": 1}, (False, "bad_args")),
+        ("int_zero", {"visible": 0}, (False, "bad_args")),
+        ("string_true", {"visible": "true"}, (False, "bad_args")),
+        ("null", {"visible": None}, (False, "bad_args")),
+        ("missing_visible", {}, (False, "bad_args")),
+        ("extra_key", {"visible": True, "extra": None}, (False, "bad_args")),
     ),
     "engine_set": (
         ("valid_start", {"mode": "start"}, (True, None)),
@@ -2639,6 +2830,14 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("null_view", {"view": None}, (False, "bad_args")),
         ("unhashable_view", {"view": ["third"]}, (False, "bad_args")),
         ("extra_key", {"view": "third", "extra": None}, (False, "bad_args")),
+    ),
+    # d026, internal: the loopback's release of the path a play started.
+    "camera_path_release": (
+        ("valid", {"command_id": 1}, (True, None)),
+        ("zero", {"command_id": 0}, (False, "bad_args")),
+        ("bool", {"command_id": True}, (False, "bad_args")),
+        ("missing", {}, (False, "bad_args")),
+        ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
     ),
     "action_cursor_ids": (
         (

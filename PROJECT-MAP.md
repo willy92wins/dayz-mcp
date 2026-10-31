@@ -81,15 +81,15 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-30 (UTC)
 - `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-09-30 (UTC)
 - `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-30 (UTC)
-- `CHANGELOG.md` - 104 KB, touched 2026-10-31 (UTC)
+- `CHANGELOG.md` - 109 KB, touched 2026-10-31 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-09-30 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-10-17 (UTC)
-- `dayz-mcp-architecture.md` - 20 KB, touched 2026-09-30 (UTC)
+- `dayz-mcp-architecture.md` - 20 KB, touched 2026-10-29 (UTC)
 - `GATES.md` - 4 KB, touched 2026-09-30 (UTC)
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-09-30 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-10-06 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-09-30 (UTC)
-- `README.md` - 32 KB, touched 2026-10-19 (UTC)
+- `README.md` - 34 KB, touched 2026-10-29 (UTC)
 
 ## Reparse points omitidos
 

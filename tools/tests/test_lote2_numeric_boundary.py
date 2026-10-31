@@ -119,11 +119,14 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 4 from 165a/5a21/7f5d (world_spawn_batch per_tick/timeout_s,
         # scene_entities timeout_s, scene_clear timeout_s; scene_id is a string
         # and items a list, not in this census).
+        # + 4 from d026, 702f and f427 (camera_path_play timeout_s, camera_set
+        # focus_distance/focus_blur, hud_set timeout_s; keys is a list of objects,
+        # mode, easing and path_id are strings and visible is a bool).
         # 177 before either batch, plus both additions.
         # + 4 from c703 (object_set_health health01/object_id/pos/timeout_s).
         # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
         # + 1 from B3 (player_find timeout_s; name is a string).
-        self.assertEqual(len(rows), 217)
+        self.assertEqual(len(rows), 221)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
@@ -147,6 +150,10 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("world_spawn_batch", "timeout_s", "float"), rows)
         self.assertIn(("scene_entities", "timeout_s", "float"), rows)
         self.assertIn(("scene_clear", "timeout_s", "float"), rows)
+        self.assertIn(("camera_path_play", "timeout_s", "float"), rows)
+        self.assertIn(("camera_set", "focus_distance", "float"), rows)
+        self.assertIn(("camera_set", "focus_blur", "float"), rows)
+        self.assertIn(("hud_set", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
         self.assertIn(("inventory_move", "item_object_id", "int"), rows)
