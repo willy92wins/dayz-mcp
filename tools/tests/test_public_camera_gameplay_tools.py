@@ -9,12 +9,12 @@ from unittest.mock import patch
 from dayz_mcp import bridge_readiness, loopback, result_prune
 from dayz_mcp.server import ServerConfig, build_app
 from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator, command_requires_lease
-from tests.test_camera_path_focus_hud import (
+from tests.camera_tool_helpers import (
+    _FakeClientRuntime,
     BRIDGE, _PATH_OWNER, _ToolCase, _camera_answer, _function,
 )
 from tests.fence_helpers import INST_CLIENT, PID_CLIENT, bind_both_peers
 from tests.enforce_subset_helpers import translate
-from tests.test_progressive_disclosure import _FakeClientRuntime
 
 
 POSE = {"cam_mode": "orient", "cam_pos": [1.0, 2.0, 3.0], "cam_orientation": [0.0, 90.0, 0.0]}

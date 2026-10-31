@@ -126,7 +126,8 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 4 from c703 (object_set_health health01/object_id/pos/timeout_s).
         # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
         # + 1 from B3 (player_find timeout_s; name is a string).
-        self.assertEqual(len(rows), 221)
+        # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
+        self.assertEqual(len(rows), 233)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
