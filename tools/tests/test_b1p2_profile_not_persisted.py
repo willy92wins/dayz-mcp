@@ -9,6 +9,7 @@ running. That hot path is an addon change and is not implemented here.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import json
 import os
@@ -22,6 +23,8 @@ from unittest.mock import patch
 
 from dayz_mcp import loopback, runtime_state
 from dayz_mcp.instance_fence import BindingPrepareError
+from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore, RunRecord
+from dayz_mcp.runtime_state import RuntimePaths
 from tests._addon_paths import addon_root
 
 _IDENTITY = {
@@ -64,8 +67,8 @@ def _prior(config: Path) -> dict | None:
 
 def _installer(**extra: object) -> dict:
     payload: dict[str, object] = {
-        "url": "http://127.0.0.1:2402/",
-        "key": "installer-key",
+        "url": "http://127.0.0.1:8765/",
+        "key": "live-key",
         "pollHz": 5,
     }
     payload.update(extra)
@@ -163,7 +166,7 @@ class ReleaseRestoresInstallerProfileTest(_Case):
         self.assertEqual(held["profile"], "test")
         self.assertEqual(held["instance"], minted)
         self.assertEqual(held["url"], original["url"])
-        self.assertEqual(held["key"], "installer-key")
+        self.assertEqual(held["key"], original["key"])
         self.assertEqual(held["note"], "keep-me")
         prior = _prior(config)
         self.assertIsNotNone(prior)
@@ -216,7 +219,7 @@ class ReleaseRestoresInstallerProfileTest(_Case):
         server_cfg = server / "dayz_mcp.json"
         client_cfg = client / "dayz_mcp.json"
         server_original = _installer(role="server")
-        client_original = _installer(role="client", url="http://127.0.0.1:2403/")
+        client_original = _installer(role="client")
         _write(server_cfg, server_original)
         _write(client_cfg, client_original)
         state = _state()
@@ -487,6 +490,22 @@ class SeededFileAndMissionCopyTest(_Case):
         self.assertEqual(_load(target_cfg), {"profile": "test", "secret": "do-not-rewrite"})
         self.assertEqual(state.profile_release_errors, [])
 
+    def test_sibling_role_root_junction_is_not_swept(self) -> None:
+        root = self._tmp()
+        server = self._leaf(root, "_server")
+        (root / "mpmissions").mkdir()
+        outside = self._tmp() / "foreign-client"
+        foreign_leaf = outside / "leaf"
+        foreign_cfg = foreign_leaf / "dayz_mcp.json"
+        _write(foreign_cfg, {"profile": "test", "secret": "external"})
+        self._junction(root / "_client", outside)
+        state = _state(_SEED_KEY)
+        state.prepare(_RUN, "server", str(server))
+        state.retire_run(_RUN, "stopped")
+        self.assertFalse((server / "dayz_mcp.json").exists())
+        self.assertEqual(_load(foreign_cfg), {"profile": "test", "secret": "external"})
+        self.assertEqual(state.profile_release_errors, [])
+
     def test_another_profile_leaf_is_left_alone(self) -> None:
         root = self._tmp()
         profiles = self._leaf(root, leaf="leaf")
@@ -568,6 +587,31 @@ class SeededFileAndMissionCopyTest(_Case):
         self.assertTrue(any("mission_profile_unreadable" in item for item in state.profile_release_errors))
         self.assertTrue(any("profile_delete_blocked" in item for item in state.profile_release_errors))
 
+    def test_mission_scandir_permission_blocks_seeded_delete(self) -> None:
+        root = self._tmp()
+        profiles = self._leaf(root)
+        missions = root / "mpmissions"
+        missions.mkdir()
+        mission_cfg = missions / "dayzOffline.chernarusplus" / "dayz_mcp.json"
+        _write(mission_cfg, {"profile": "test", "keep": "mission"})
+        state = _state(_SEED_KEY)
+        state.prepare(_RUN, "server", str(profiles))
+        config = profiles / "dayz_mcp.json"
+        real = os.scandir
+
+        def deny(path: object) -> object:
+            if Path(path) == missions:
+                raise PermissionError(13, "Access is denied")
+            return real(path)
+
+        with patch.object(os, "scandir", deny):
+            state.retire_run(_RUN, "stopped")
+        self.assertTrue(config.is_file())
+        self.assertNotEqual((_load(config) or {}).get("profile"), "test")
+        self.assertTrue(_prior_path(config).is_file())
+        self.assertEqual(_load(mission_cfg), {"profile": "test", "keep": "mission"})
+        self.assertTrue(any("PermissionError" in item for item in state.profile_release_errors))
+
 
 class CrashRecoveryTest(_Case):
     def test_a_new_process_restores_the_installer_file_after_a_crash(self) -> None:
@@ -615,6 +659,38 @@ class CrashRecoveryTest(_Case):
 
         fresh = _state()
         fresh.lifecycle = SimpleNamespace(manifest=Manifest())
+        self.assertEqual(_load(config), original)
+        self.assertEqual(fresh.profile_release_errors, [])
+
+    def test_pruned_exited_run_is_recovered_from_preprune_backup(self) -> None:
+        profiles = self._profiles()
+        config = profiles / "dayz_mcp.json"
+        original = _installer(note="keep-me")
+        _write(config, original)
+        abandoned = _state()
+        abandoned.prepare(_RUN, "server", str(profiles))
+        self.assertEqual(_load(config)["profile"], "test")
+        runtime = self._tmp() / "runtime"
+        runtime.mkdir()
+        runs_path = runtime / "runs.json"
+        record = RunRecord(
+            _RUN, None, None, "EXITED", "b1p2", "@DayZ_MCP", str(profiles), "", []
+        )
+        runs_path.write_bytes(
+            json.dumps(
+                {"version": 1, "runs": [dataclasses.asdict(record)]},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        paths = RuntimePaths(
+            runtime, runtime / "audit", runtime / "coordination.json", runs_path
+        )
+        store = RunManifestStore(paths)
+        self.assertEqual(store.list_runs(), [])
+        self.assertTrue((runtime / "runs.json.bak-preprune").is_file())
+        fresh = _state()
+        fresh.lifecycle = SimpleNamespace(manifest=store)
         self.assertEqual(_load(config), original)
         self.assertEqual(fresh.profile_release_errors, [])
 
@@ -719,6 +795,58 @@ class FailClosedAbuseTest(_Case):
         self.assertEqual(raised.exception.code, "instance_config_missing")
         self.assertEqual(config.read_bytes(), before)
         self.assertNotIn(b'"profile"', before)
+
+    def test_config_that_grows_past_the_reader_limit_is_not_published(self) -> None:
+        profiles = self._profiles()
+        config = profiles / "dayz_mcp.json"
+        limit = loopback._PROFILE_PRIOR_MAX_BYTES
+        original = _installer(pad="A" * (limit - 160))
+        sidecar = loopback._prior_payload(original, kind="present")
+        while loopback._profile_json_size(sidecar) <= limit:
+            original["pad"] = str(original["pad"]) + "A"
+            sidecar = loopback._prior_payload(original, kind="present")
+        while loopback._profile_json_size(original) > limit:
+            original["pad"] = str(original["pad"])[:-1]
+            sidecar = loopback._prior_payload(original, kind="present")
+        self.assertLessEqual(loopback._profile_json_size(original), limit)
+        self.assertGreater(loopback._profile_json_size(sidecar), limit)
+        config.write_text(
+            json.dumps(original, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        before = config.read_bytes()
+        state = _state()
+        with self.assertRaises(BindingPrepareError) as raised:
+            state.prepare(_RUN, "server", str(profiles))
+        self.assertEqual(raised.exception.code, "instance_config_missing")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse(_prior_path(config).exists())
+        self.assertNotIn(b'"profile":"test"', before)
+
+    def test_default_instance_endpoint_mismatch_does_not_leave_profile_test(self) -> None:
+        profiles = self._profiles()
+        config = profiles / "dayz_mcp.json"
+        original = {
+            "url": "http://127.0.0.1:2402/",
+            "key": "installer-key",
+            "pollHz": 5,
+            "note": "keep-me",
+        }
+        _write(config, original)
+        state = _state()
+        lifecycle = ProcessLifecycle.__new__(ProcessLifecycle)
+        lifecycle.bindings = state
+        minted, error = lifecycle._prepare_instance(_RUN, "server", str(profiles), False)
+        self.assertIsNone(minted)
+        self.assertEqual(error, "instance_endpoint_mismatch")
+        restored = _load(config)
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertNotEqual(restored.get("profile"), "test")
+        self.assertEqual(restored["url"], original["url"])
+        self.assertEqual(restored["key"], original["key"])
+        self.assertEqual(restored["note"], "keep-me")
+        self.assertEqual(state._profile_holders, {})
 
     def test_a_directory_named_as_the_config_is_not_followed(self) -> None:
         profiles = self._profiles()
@@ -946,6 +1074,9 @@ class AtomicReplaceAndReleaseOutputTest(_Case):
                 state._note_profile_release_error(config, _permission(99))
                 return {"_http_status": 409, "error": "active_run_exists"}
 
+            def status(self, client: object) -> dict:
+                return {"_http_status": 200, "runs": []}
+
         state.lifecycle = Lifecycle()
         logs: list[str] = []
 
@@ -969,7 +1100,9 @@ class AtomicReplaceAndReleaseOutputTest(_Case):
 
         with patch.object(runtime_state.os, "replace", deny):
             status, payload = reply("stop")
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 500)
+        self.assertEqual(payload.get("ok"), False)
+        self.assertEqual(payload.get("error"), "profile_restore_failed")
         self.assertTrue(any("PermissionError" in item for item in payload["profile_restore_errors"]))
         self.assertTrue(any(line.startswith("PROFILE ") and "PermissionError" in line for line in logs))
         self.assertEqual(_load(config)["profile"], "test")
@@ -978,15 +1111,75 @@ class AtomicReplaceAndReleaseOutputTest(_Case):
         status, payload = reply("close")
         self.assertEqual(status, 500)
         self.assertEqual(payload["error"], "close_failed")
+        self.assertEqual(payload.get("ok"), False)
         self.assertTrue(any("PermissionError" in item for item in payload["profile_restore_errors"]))
 
         status, payload = reply("reap")
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 500)
+        self.assertEqual(payload.get("ok"), False)
+        self.assertEqual(payload.get("error"), "profile_restore_failed")
         self.assertTrue(any("PermissionError" in item for item in payload["profile_restore_errors"]))
 
         status, payload = reply("start")
         self.assertEqual((status, payload), (409, {"error": "active_run_exists"}))
         self.assertIs(runtime_state.os.replace, real)
+
+        status, payload = reply("status")
+        self.assertEqual(status, 200)
+        self.assertTrue(any("PermissionError" in item for item in payload["profile_restore_errors"]))
+
+        handler = loopback.Handler.__new__(loopback.Handler)
+        handler.server = SimpleNamespace(state=state, log_sink=logs.append, status_provider=None)
+        status_replies: list[tuple[int, dict]] = []
+        handler._json = lambda code, payload: status_replies.append(  # type: ignore[method-assign]
+            (code, json.loads(json.dumps(payload)))
+        )
+        handler._handle_status()
+        self.assertEqual(len(status_replies), 1)
+        self.assertEqual(status_replies[0][0], 200)
+        self.assertTrue(
+            any("PermissionError" in item for item in status_replies[0][1]["profile_restore_errors"])
+        )
+
+    def test_startup_restore_errors_stay_visible_on_later_status(self) -> None:
+        profiles, config, _original = self._crash_installer()
+        fresh = _state()
+        audit: list[dict[str, object]] = []
+        fresh.audit_writer = SimpleNamespace(write=audit.append)
+
+        def deny(src: str, dst: str) -> None:
+            raise _permission(99)
+
+        with patch.object(runtime_state.os, "replace", deny):
+            errors = fresh.recover_crashed_profile(str(profiles))
+        self.assertTrue(any("PermissionError" in item for item in errors))
+        self.assertEqual(_load(config)["profile"], "test")
+        self.assertTrue(any("profile_restore_failed" == item.get("event") for item in audit))
+        snapshot = fresh.status_snapshot()
+        self.assertTrue(
+            any("PermissionError" in item for item in snapshot["profile_restore_errors"])
+        )
+
+        class Lifecycle:
+            def status(self, client: object) -> dict:
+                return {"_http_status": 200, "runs": []}
+
+        fresh.lifecycle = Lifecycle()
+        replies: list[tuple[int, dict]] = []
+        handler = loopback.Handler.__new__(loopback.Handler)
+        handler.server = SimpleNamespace(state=fresh, log_sink=lambda _line: None)
+        handler._read_json = lambda: json.loads(  # type: ignore[method-assign]
+            json.dumps({"identity": _IDENTITY, "lease_token": "token"})
+        )
+        handler._json = lambda code, payload: replies.append(  # type: ignore[method-assign]
+            (code, json.loads(json.dumps(payload)))
+        )
+        handler._handle_lifecycle("status")
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0][0], 200)
+        self.assertTrue(
+            any("PermissionError" in item for item in replies[0][1]["profile_restore_errors"])
+        )
 
     def test_restore_methods_do_not_add_a_second_retry_loop(self) -> None:
         for name in ("_apply_profile_prior", "_ensure_profile_prior", "_strip_profile_test"):
