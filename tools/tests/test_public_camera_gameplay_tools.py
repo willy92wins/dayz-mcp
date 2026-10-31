@@ -217,3 +217,38 @@ class CameraPathReleaseWaitsForHandoffTest(unittest.TestCase):
         post = post[:post.index("PostResult(resultRelease);")]
         self.assertIn("resultRelease.matched = true;", post)
         self.assertIn("resultRelease.ok = true;", post)
+
+
+class CameraPathReleaseJobGateTest(unittest.TestCase):
+    """Auditor P3 (263 §15): the release job is ready only once the handoff ends,
+    and its timeout still answers matched."""
+
+    def setUp(self) -> None:
+        self.source = BRIDGE.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    def _branch(self, opener: str) -> str:
+        start = self.source.index(opener)
+        open_brace = self.source.index("{", start)
+        depth = 0
+        for i in range(open_brace, len(self.source)):
+            depth += {"{": 1, "}": -1}.get(self.source[i], 0)
+            if depth == 0:
+                return self.source[open_brace + 1:i]
+        raise AssertionError(opener)
+
+    def test_release_job_waits_for_the_handoff(self) -> None:
+        body = self._branch('else if (job.kind == "camera_path_release")')
+        code = [line.strip() for line in body.splitlines() if line.strip() and not line.strip().startswith("//")]
+        self.assertEqual(code, ["return !m_CameraHandoffPending;"])
+
+    def test_timeout_reply_keeps_matched_for_release_only(self) -> None:
+        start = self.source.index('result.error = "timeout";\n\t\t// A camera_path_release job')
+        tail = self.source[start:self.source.index("PostResult(result);", start)]
+        body = self._branch_at(tail, 'if (job.kind == "camera_path_release")')
+        self.assertEqual([l.strip() for l in body.splitlines() if l.strip()], ["result.matched = true;"])
+        self.assertNotIn("result.ok = true", tail)
+
+    @staticmethod
+    def _branch_at(text: str, opener: str) -> str:
+        start = text.index(opener)
+        return text[text.index("{", start) + 1:text.index("}", start)]

@@ -6487,7 +6487,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostResult(resultRestore);
 		}
 
-		// The reply a matched camera_path_release posts when no handoff runs.
+		// A matched camera_path_release's reply, posted once the camera handoff
+		// has finished (the dispatch posts the same reply itself when none ran).
 		if (job.kind == "camera_path_release")
 		{
 			MCPResult resultRelease = new MCPResult();
@@ -6636,6 +6637,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.id = job.id;
 		result.ok = false;
 		result.error = "timeout";
+		// A camera_path_release job is queued only for a matched release, which
+		// has already stopped the path, released the camera and restored
+		// gameplay; only the handoff wait timed out, so the match still holds.
+		if (job.kind == "camera_path_release")
+		{
+			result.matched = true;
+		}
 		result.tick_poll_sent = job.tick_poll_sent;
 		result.tick_poll_callback = job.tick_poll_callback;
 		result.tick_dispatch = job.tick_dispatch;
