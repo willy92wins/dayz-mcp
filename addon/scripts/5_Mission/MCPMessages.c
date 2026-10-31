@@ -79,6 +79,19 @@ class MCPSpawnBatchItem
 	}
 };
 
+// camera_path_play key (d026). t is seconds from the start of the path;
+// cam_orientation [yaw, pitch, roll] in degrees or look_at [x, y, z], the same
+// one on every key, and the other absent; fov in radians on every key or on
+// none; an absent fov reads 0 (MCPCameraPath.Load).
+class MCPPathKey
+{
+	float t;
+	ref array<float> cam_pos;
+	ref array<float> cam_orientation;
+	ref array<float> look_at;
+	float fov;
+};
+
 // Command args. A key absent from the command JSON reaches the handler as 0 or
 // false, not as the constructor value (fb-20260930-065425-8779: an object_anim
 // read wrote phase 0 and a partial world_weather_set zeroed the other levels).
@@ -243,7 +256,8 @@ class MCPArgs
 	ref array<int> net_low;
 	ref array<int> net_high;
 	string run_token;
-	// player_look_at_release. The command id that owns the aim overrides.
+	// player_look_at_release: the command id that owns the aim overrides.
+	// camera_path_release (d026): the command id of the play to stop.
 	int command_id;
 	// loadout_apply (220f): the rows to create, in apply order. object_id and
 	// uid above select the target.
@@ -275,6 +289,18 @@ class MCPArgs
 	// maximum Health, in [0, 1]. An absent zone reads "" (global health).
 	float health01;
 	string zone;
+	// camera_path_play (d026). mode is play, state or stop; keys and easing
+	// (linear or smooth) travel with play only. path_id is an optional label of
+	// up to 64 characters from A-Z a-z 0-9 _ -, empty for none.
+	ref array<ref MCPPathKey> keys;
+	string easing;
+	string path_id;
+	// camera_set_focus (702f): camera_set plus Camera.SetFocus. The command
+	// name, not these fields, turns focus on; both always travel with it.
+	float focus_distance;
+	float focus_blur;
+	// hud_set (f427). The tool always sends it; an absent key reads false.
+	bool visible;
 
 	void MCPArgs()
 	{
@@ -289,6 +315,7 @@ class MCPArgs
 		sources = new array<string>();
 		fields = new array<ref MCPDialogField>();
 		loadout_items = new array<ref MCPLoadoutItem>();
+		keys = new array<ref MCPPathKey>();
 		net_low = new array<int>();
 		net_high = new array<int>();
 		items = new array<ref MCPSpawnBatchItem>();
@@ -1256,6 +1283,40 @@ class MCPSceneEntry
 	Object obj;
 };
 
+// camera_path_play (d026): the current or last path. state is idle, playing,
+// finished or aborted; t_s is the client frame time the path has run, at most
+// duration_s, the t of its last key; path_id is the label play was given.
+class MCPCameraPathState
+{
+	string state;
+	float t_s;
+	float duration_s;
+	string path_id;
+	// Execution identity belongs to the client, not to the order ids were queued.
+	// A successful play echoes the prior path it replaced, even if that path's
+	// result has not arrived yet. Other pending plays are not thereby superseded.
+	int command_id;
+	int replaced_command_id;
+};
+
+// hud_set (f427): the in-game HUD's player hide flags read back with
+// IsContextFlagActive after the set. visible is true when neither is active.
+class MCPHudState
+{
+	bool visible;
+	bool hud_hide;
+	bool quickbar_hide;
+};
+
+// Read-only gameplay_state snapshot. Simulation is the bridge's own flag.
+class MCPGameplayState
+{
+	bool controls_suppressed;
+	bool engine_controls_disabled;
+	bool hud_shown;
+	bool player_simulation_disabled;
+};
+
 class MCPResult
 {
 	int id;
@@ -1442,6 +1503,11 @@ class MCPResult
 	// scene_clear counts, or on scene_shared the pair that blocked it.
 	// Unassigned on its other refusals and on other commands.
 	ref MCPSceneClear scene_clear;
+	// camera_path_play state (d026). Unassigned on other commands.
+	ref MCPCameraPathState camera_path;
+	// hud_set read-back (f427). Unassigned on other commands.
+	ref MCPHudState hud;
+	ref MCPGameplayState gameplay;
 };
 
 class MCPJob
@@ -1505,6 +1571,8 @@ class MCPJob
 	// scene_clear: the counts so far and the entries whose delete is read back.
 	ref MCPSceneClear scene_clear;
 	ref array<ref MCPSceneEntry> scene_pending;
+	// camera_set_focus: the apply also sets the camera's focus (702f).
+	bool camera_focus;
 };
 
 class MCPSpawnValidation

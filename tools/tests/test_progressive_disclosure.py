@@ -46,6 +46,7 @@ if sys.platform != "win32":
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp.server import ServerConfig, build_app
+from tests.camera_tool_helpers import _FakeClientRuntime
 from tests._tiers import slow_test
 
 
@@ -55,13 +56,6 @@ LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
 PREFIXED_LEASE_FREE_READS = frozenset({"ui_tree", "vehicle_telemetry", "world_time_get"})
 INITIAL_CATALOG_MAX_BYTES = 23_000
 INITIAL_CATALOG_TARGET_BYTES = 20_000
-
-
-class _FakeClientRuntime:
-    def __init__(self, config: ServerConfig, **_kwargs: object) -> None:
-        self.config = config
-        self.active_lease_token = None
-        self._registered_tool_names = None
 
 
 def _catalog_bytes(tools: list[object]) -> int:

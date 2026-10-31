@@ -149,6 +149,7 @@ from dayz_mcp.session_coordination import (
 from dayz_mcp.steam_preflight import STEAM_APP_VIEW_STALE, observe_app_steam_view
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+from dayz_mcp import camera_path as camera_path_contract
 from dayz_mcp import loadout as loadout_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
@@ -8580,12 +8581,28 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "run 8834df0e, 2026-10-04); fov=0 keeps the current FOV and does not "
         "guarantee resetting to that measured default, the singleton free "
         "camera included. "
+        "focus_distance (metres, above 0, also as the 32-bit float the bridge "
+        "reads) and focus_blur (0, or above 0 also as that float), each at most "
+        "1e9, go together or not at all; one without the other is bad_args. "
+        "Given, the applied camera also gets Camera.SetFocus(focus_distance, "
+        "focus_blur), its depth of field, and a successful apply echoes them as "
+        "top-level focus_applied {distance, blur}; omitted, the focus is left "
+        "as it is and focus_applied is null. focus_applied is an echo of the "
+        "values sent, not a read-back: Camera has no focus getter. Whether the "
+        "blur shows may depend on the client's depth-of-field video option, "
+        "which is not measured. The free camera is a singleton and keeps the "
+        "last focus set on it. A call with focus is refused as "
+        "bridge_capability_missing, with nothing sent, while the client bridge "
+        "bound to the run does not announce camera_set_focus, as one older than "
+        "this release does not; with no client bound, the loopback's binding "
+        "fence refuses it first (legacy_unbound in the plain case). "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
         "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV): "
         "settle_ticks * 0.05 seconds, and 0 keeps the default of three ticks (0.15 s). "
         "settle_ticks must be an integer from 0 to 600. timeout_s has to cover that "
         "settle plus bridge processing and transport. A timeout does not prove the "
-        "camera was not applied; the job may already have moved it. "
+        "camera was not applied: the bridge applies it when the command arrives, "
+        "before the settle. "
         "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
     ))
     async def camera_set(
@@ -8597,6 +8614,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fov: StrictFloat = 0.0,
         settle_ticks: StrictInt = 3,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+        focus_distance: StrictFloat | None = None,
+        focus_blur: StrictFloat | None = None,
     ) -> dict[str, Any]:
         # The wire value is `lookat`, but the vector argument sitting
         # right beside it is `look_at`, so a caller naturally spells the mode
@@ -8645,13 +8664,48 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "(0 keeps the default of three ticks; each tick is 0.05 s)"
             )
         args["settle_ticks"] = settle_ticks
+        # 702f: the two Camera.SetFocus arguments travel together, on the
+        # camera_set_focus command, so a bridge that does not know them answers
+        # for the command instead of dropping them; camera_set never carries them.
+        command = "camera_set"
+        focus_applied: dict[str, float] | None = None
+        if (focus_distance is None) != (focus_blur is None):
+            raise ToolError(
+                "bad_args: focus_distance and focus_blur go together; give both or neither"
+            )
+        if focus_distance is not None and focus_blur is not None:
+            # The ingress makes the same check (camera_path.py): a finite
+            # Python float can still be infinite or 0 as the bridge's float.
+            distance = camera_path_contract.focus_distance(focus_distance)
+            if distance is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_distance",
+                        focus_distance,
+                        "be a number of metres above 0, also as a 32-bit float, "
+                        "and at most 1e9",
+                    )
+                )
+            blur = camera_path_contract.focus_blur(focus_blur)
+            if blur is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_blur",
+                        focus_blur,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
+            args["focus_distance"] = distance
+            args["focus_blur"] = blur
+            command = "camera_set_focus"
+            focus_applied = {"distance": distance, "blur": blur}
         async with runtime.tool_lock:
             result: dict[str, Any] | None = None
             failed = False
             reason: str | None = None
             try:
                 result = await runtime.call_bridge(
-                    "camera_set", args, "client", _timeout(timeout_s)
+                    command, args, "client", _timeout(timeout_s)
                 )
             except Exception as exc:
                 failed = True
@@ -8695,7 +8749,38 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         camera_observation = result.get("camera")
         if result.get("ok") and isinstance(camera_observation, dict) and camera_observation.get("ok"):
             result["fov_applied"] = fov_value if fov_value > 0.0 else None
+            # 702f: the same rule; omitted focus sent no SetFocus, an explicit null.
+            result["focus_applied"] = focus_applied
         return result
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Set the client camera and its depth of field. "
+        "Same modes, pose, FOV, settle and result as camera_set, with required "
+        "focus_distance and focus_blur. Distance is metres above 0; blur is "
+        "non-negative; both must remain valid as 32-bit floats and be at most "
+        "1e9. Uses camera_set_focus on the bridge. focus_applied echoes the "
+        "values sent to Camera.SetFocus, not a native readback. Visibility "
+        "of blur depends on the client's video options. Use restore_gameplay "
+        "to release the camera."
+    ))
+    async def camera_set_focus(
+        cam_mode: StrictStr,
+        focus_distance: StrictFloat,
+        focus_blur: StrictFloat,
+        cam_pos: list[StrictFloat] | None = None,
+        cam_orientation: list[StrictFloat] | None = None,
+        look_at: list[StrictFloat] | None = None,
+        cam_matrix: list[StrictFloat] | None = None,
+        fov: StrictFloat = 0.0,
+        settle_ticks: StrictInt = 3,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        return await camera_set(
+            cam_mode=cam_mode, cam_pos=cam_pos, cam_orientation=cam_orientation,
+            look_at=look_at, cam_matrix=cam_matrix, fov=fov,
+            settle_ticks=settle_ticks, timeout_s=timeout_s,
+            focus_distance=focus_distance, focus_blur=focus_blur,
+        )
 
     @app.tool(description=(
         "Read the client camera through camera_get. Observable trichotomy "
@@ -8719,6 +8804,118 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"cam_mode": cam_mode} if cam_mode else {}
         async with runtime.tool_lock:
             return await runtime.call_bridge("camera_get", args, "client", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Play a keyed camera path on the client, on the "
+            "scripted camera camera_set uses, entered the same way (HUD hidden, "
+            "controls off) and left with restore_gameplay. mode=play takes keys, "
+            f"{camera_path_contract.KEYS_MIN} to {camera_path_contract.KEYS_MAX} "
+            "objects {t, cam_pos, cam_orientation or look_at, fov}: t in seconds, "
+            "the first exactly 0, strictly increasing (also as the 32-bit "
+            "floats the bridge reads), the last at most "
+            f"{camera_path_contract.DURATION_MAX_S:g}; cam_pos [x, y, z]; "
+            "cam_orientation [yaw, pitch, roll] in degrees or look_at [x, y, z], "
+            "the same one on every key; fov in radians above 0 (also as a "
+            "32-bit float), on every key or on none (none keeps the camera's "
+            "FOV); every cam_pos, cam_orientation, look_at and fov number "
+            f"{camera_path_contract.MAGNITUDE_TEXT}. The client moves the camera "
+            "on every frame by its own frame time accumulated since play; there "
+            "is no Camera.InterpolateTo. easing=smooth (default) runs a "
+            "Catmull-Rom spline by time through the positions, with the end "
+            "tangents taken from the end segments; easing=linear interpolates "
+            "piecewise linearly. Orientation angles interpolate per component "
+            "the short way round, with the same easing; with look_at the point "
+            "interpolates like the positions and the camera faces it on every "
+            "frame; fov interpolates linearly. mode=state reads the current or "
+            "last path and mode=stop ends a playing path where its camera "
+            "stands and leaves that scripted camera mounted (it does not "
+            "restore gameplay); neither takes keys. Every mode answers camera_path {state, "
+            "t_s, duration_s, path_id}: state is idle (no play yet), playing, "
+            "finished or aborted, and t_s is the path time, at most duration_s. "
+            "A path that runs to its end releases the camera back to the "
+            "player and restores gameplay, as restore_gameplay does, which also "
+            "ends any running weapon, look-at, input_trigger or player_move "
+            "job; camera_set or restore_gameplay "
+            "during a path ends it aborted, and so do stop, the engine reporting "
+            "the path's camera inactive and vanilla's developer free camera "
+            "turned on; another camera turned on from outside the bridge ends it "
+            "only if the engine then reports the path's camera inactive. When the "
+            "lease that played it ends, the daemon queues an internal "
+            "camera_path_release for the client, which ends the path aborted when "
+            "the client runs it; nothing confirms that stop, and the daemon can "
+            "miss a play the client ran out of order or one that followed many "
+            "unanswered plays. path_id is an optional label of up to "
+            f"{camera_path_contract.PATH_ID_MAX_CHARS} characters from A-Z a-z "
+            "0-9 _ -; given to state or stop it must name the current or last "
+            "path. Read the pose with camera_get. Errors: bad_args (refused "
+            "before the camera moves; a play while a path plays replaces that "
+            "path and echoes camera_path.replaced_command_id), path_not_found, "
+            "busy (another client camera or "
+            "player job is running), client_not_in_game, camera_create_failed "
+            "(the staticcamera could not be made; nothing changed), "
+            "bridge_capability_missing (the client bridge bound to the run does "
+            "not announce both camera_path_play and camera_path_release, as one "
+            "older than this release does not; nothing is sent). With no client "
+            "bound, the loopback's binding fence refuses the call first "
+            "(legacy_unbound in the plain case)."
+        )
+    )
+    async def camera_path_play(
+        mode: StrictStr,
+        keys: list[dict[str, Any]] | None = None,
+        easing: StrictStr = "smooth",
+        path_id: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = camera_path_contract.normalize_request(mode, keys, easing, path_id)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "camera_path_play", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Release the playing camera path identified by "
+        "command_id (camera_path.command_id returned by camera_path_play). "
+        "A positive integer is required. matched=true means it stopped that "
+        "play and released its camera and gameplay; false changes nothing "
+        "(already finished or another play is current). The daemon also uses "
+        "this bridge command internally when the owning lease ends."
+    ))
+    async def camera_path_release(
+        command_id: StrictInt,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args = {"command_id": command_id}
+        if isinstance(command_id, bool) or not isinstance(command_id, int) or command_id <= 0:
+            raise ToolError("bad_args: command_id must be a positive integer")
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "camera_path_release", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        "Read local gameplay restore state. No lease; changes no state. "
+        "gameplay.controls_suppressed is the bridge's m_ControlsSuppressed; "
+        "engine_controls_disabled reads MissionGameplay.IsControlDisabled "
+        "(any active input exclude, restriction or legacy disable). "
+        "gameplay.hud_shown reads IngameHud.GetHudPanelWidget().IsVisible(), "
+        "the widget flag set by Hud.Show; it does not prove rendered visibility. "
+        "hud is MCPHudState: HUD_HIDE and QUICKBAR_HIDE read from vanilla's "
+        "context flags, with visible=true when neither is active. "
+        "gameplay.player_simulation_disabled is the bridge's "
+        "m_PlayerSimulationDisabled, not an engine simulation readback. "
+        "Use after restore_gameplay alongside camera_get. Errors: "
+        "client_not_in_game, hud_unavailable."
+    ))
+    async def gameplay_state(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("gameplay_state", {}, "client", _timeout(timeout_s))
 
     @app.tool(
         description=(
@@ -8808,9 +9005,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "(camera_released: true), camera_still_active when view='scripted' or "
         "viewport_moved, restore_unverified when the probe is illegible "
         "(ok=0). Do not treat a missing scripted camera as liberation. "
-        "Controls, HUD, simulation and render are NOT verified -- no reader for "
-        "controls, HUD or simulation exists on the wire, and the render is not "
-        "checked here -- and the ok names them in not_verified. Check the render "
+        "Controls, HUD, simulation and render are NOT verified by this tool, "
+        "and the ok names them in not_verified. Read controls, HUD and the "
+        "bridge's simulation flag with gameplay_state. Check the render "
         "with capture_screenshot with frames of at least 2: its warnings carry "
         "render_frozen_signal when max_adjacent_delta is below "
         f"{mcp_capture.RENDER_FROZEN_DELTA_EPS:g}, even with distinct_frames above 1, "
@@ -8852,6 +9049,40 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             confirmed["camera_released"] = True
             confirmed["not_verified"] = list(RESTORE_NOT_VERIFIED)
             return confirmed
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Hide or show the in-game HUD without touching "
+            "the controls. visible=false sets the two flags vanilla's hide-HUD "
+            "key sets, HUD_HIDE (the left and right HUD) and QUICKBAR_HIDE (the "
+            "quickbar), through IngameHud.ShowHudPlayer and ShowQuickbarPlayer; "
+            "visible=true clears them. HUD_DISABLE, the options menu's switch, "
+            "is not touched, and neither is the HUD hiding of camera_set's "
+            "scripted camera. The answer is hud {visible, hud_hide, "
+            "quickbar_hide}, read back with IsContextFlagActive after the call, "
+            "not an echo; visible is true when neither flag is set, and does "
+            "not cover the other reasons a HUD is hidden (the options menu, a "
+            "scripted camera, an open menu). restore_gameplay calls neither "
+            "setter, so hud_set(visible=true) is what brings the HUD back. "
+            "Errors: a visible that is not a bool is refused before anything "
+            "is sent (bad_args at the daemon), client_not_in_game (no client "
+            "in game; nothing changes), hud_unavailable (no in-game HUD), "
+            "bridge_capability_missing (the client bridge bound to the run does "
+            "not announce hud_set, as one older than this release does not; "
+            "nothing is sent). With no client bound, the loopback's binding "
+            "fence refuses the call first (legacy_unbound in the plain case)."
+        )
+    )
+    async def hud_set(
+        visible: StrictBool,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(visible, bool):
+            raise ToolError(_bad_args("visible", visible, "be a bool"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "hud_set", {"visible": visible}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         "Read GetInputByName for a UAInput name, and what the selected "
