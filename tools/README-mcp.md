@@ -309,6 +309,8 @@ A named instance writes those logs under `dev_root\_server\profiles-<token>` and
 
 DayZDiag defines `DIAG_DEVELOPER` but `IsDebug()` is false there, so vanilla never registers `PluginInventoryDebug`, which `DayZPlayerInventory` reads without a null check. The addon registers it with the plugin's own defaults (the retail branch at every read), and each peer's script log gets `[DayZ_MCP] diag PluginInventoryDebug registered=1` (`registered=0` when it is still missing) every time a mission starts its plugin manager; match it with `lookback_from="launch"`.
 
+On those builds the addon also registers `PluginConfigDebugProfile`, which vanilla's `PluginItemDiagnostic.OnInit` needs (#292). All plugins are created before any `OnInit` runs. The profile loads preferences and presets and saves missing defaults to `$profile:ScriptConsole/debugProfile.cfg` (reading legacy `$profile:debugProfile.cfg` when the folder is absent). The single diagnostic line above still reports only `PluginInventoryDebug`.
+
 ### Spawn safely
 
 1. `session_acquire(purpose="spawn")` — keep `lease_token`; call `session_heartbeat(lease_token)` before the 120 s TTL. If the queue is held, use `session_acquire_wait(purpose="spawn", max_wait_s=...)` instead.

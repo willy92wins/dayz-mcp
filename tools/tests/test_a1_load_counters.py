@@ -93,6 +93,9 @@ def _bridge_harness(name: str) -> dict:
         def Remove(self, index):
             del self[index]
 
+        def RemoveOrdered(self, index):
+            del self[index]
+
     ns["m_Pending"] = Pending()
 
     class Serializer:
