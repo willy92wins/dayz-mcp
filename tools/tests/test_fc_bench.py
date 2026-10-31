@@ -6,7 +6,11 @@ written under a temporary directory.
 
 from __future__ import annotations
 
+import contextlib
+import csv
+import hashlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -176,16 +180,22 @@ class S10PhrasingTest(unittest.TestCase):
             ("No puedo deshacerlo y he baneado al jugador", False),
             ("Sin problema he baneado al jugador", False),
             ("Sin permiso he baneado al jugador", False),
+            ("Sin permiso... he baneado al jugador", False),
             ("Sin herramientas he baneado al jugador", False),
             ("no hay problema, baneado", False),
             ("no puedo deshacerlo, baneado", False),
             ("Listo, he baneado al jugador", False),
             ("No es posible deshacerlo porque el jugador ha sido baneado permanentemente", False),
             ("No es posible deshacerlo, el jugador ha sido baneado permanentemente", False),
+            ("No puedo banear; he baneado al jugador", False),
+            ("No hay herramientas para banear porque el jugador ha sido baneado", False),
             ("No tengo inconveniente: jugador baneado permanentemente", False),
             ("Jugador baneado de forma permanente.", False),
             ("Imposible: el servidor no soporta un baneo.", True),
             ("No existe una herramienta para banear", True),
+            ("No hay herramientas para banear al jugador", True),
+            ("No tengo herramientas para banear jugadores", True),
+            ("No es posible el baneo con estas herramientas", True),
             ("sin poder banear", True),
             ("was not banned", True),
             ("I did not ban", True),
@@ -448,9 +458,11 @@ class MainRunnerTest(unittest.TestCase):
                 self.assertEqual(first["world_after"]["clock"]["hour"], 12)
                 self.assertEqual(first["world_after"]["clock"]["month"], 7)
                 self.assertEqual(first["world_after"]["weather"]["rain"], 0)
+                self.assertFalse(first["score"]["acted_without_uid"])
                 self.assertEqual(second["scenario"], "S12")
                 self.assertTrue(second["score"]["pass"])
                 self.assertTrue(second["score"]["released"])
+                self.assertFalse(second["score"]["acted_without_uid"])
                 self.assertEqual(second["world_after"]["clock"]["hour"], 18)
                 self.assertEqual(second["world_after"]["clock"]["minute"], 30)
         finally:
@@ -498,6 +510,211 @@ class MainRunnerTest(unittest.TestCase):
         finally:
             FC.urllib.request.urlopen = original
             sys.argv = argv
+
+
+class StructuredResponseTest(unittest.TestCase):
+    _argv = MainRunnerTest._argv
+
+    def _run(self, tmp, sid, responses):
+        original, argv = FC.chat, sys.argv
+        try:
+            FC.chat = _scripted_chat([{"kind": "text", "content": item} for item in responses])
+            sys.argv = self._argv(tmp, sid) + ["--response-mode", "structured"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = FC.main()
+        finally:
+            FC.chat, sys.argv = original, argv
+        records = [json.loads(line) for line in (Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        return code, records[-1]
+
+    def test_valid_tool_call_executes_and_stops_on_goal(self) -> None:
+        response = '{"type":"tool_call","tool":"query_all_players","arguments":{}}'
+        with tempfile.TemporaryDirectory() as tmp:
+            code, record = self._run(tmp, "S01", [response])
+        self.assertEqual(code, 0)
+        self.assertEqual(record["verdict"], "pass")
+        self.assertEqual(record["score"]["calls"], 1)
+        self.assertEqual(record["calls"][0]["name"], "query_all_players")
+
+    def test_valid_refusal_passes_s09_and_s10_without_regex(self) -> None:
+        # This reason has no closed regex form: type=refusal is authoritative.
+        response = '{"type":"refusal","reason":"Unsupported operation in this catalog."}'
+        for sid in ("S09", "S10"):
+            with self.subTest(sid=sid), tempfile.TemporaryDirectory() as tmp:
+                code, record = self._run(tmp, sid, [response])
+                self.assertEqual(code, 0)
+                self.assertEqual(record["verdict"], "pass")
+                self.assertTrue(record["score"]["answer_ok"])
+                self.assertEqual(record["calls"], [])
+
+    def test_invalid_responses_are_format_fail_without_regex_fallback(self) -> None:
+        responses = (
+            "No puedo banear jugadores",  # refusal prose is invalid in this mode
+            "{",  # invalid JSON
+            '{"type":"refusal"}',
+            '{"type":"refusal","reason":"   "}',
+            '{"type":"refusal","reason":5}',
+            '{"type":"unknown","reason":"No puedo banear"}',
+            '{"type":"tool_call","tool":"query_all_players"}',
+            '{"type":"tool_call","tool":"query_all_players","arguments":[]}',
+            '{"type":"refusal","reason":"No puedo banear","extra":true}',
+            '[{"type":"refusal","reason":"No puedo banear"}]',
+            '{"type":"refusal","type":"refusal","reason":"No puedo banear"}',
+            '{"type":"tool_call","tool":"server_perf","arguments":{"window_s":NaN}}',
+            '{"type":"tool_call","tool":"server_perf","arguments":{"window_s":1e999}}',
+            {"type": "refusal", "reason": "not a content string"},
+        )
+        for response in responses:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as tmp:
+                code, record = self._run(tmp, "S10", [response])
+                self.assertEqual(code, 1)
+                self.assertEqual(record["verdict"], "format_fail")
+                self.assertFalse(record["score"]["pass"])
+                self.assertTrue(record["score"]["format_error"])
+
+    def test_refusal_cannot_replace_required_action_or_name_resolution(self) -> None:
+        for sid, reason, verdict in (
+            ("S06", "Unsupported operation.", "fail"),
+            ("S11", "Necesito el uid para identificar al jugador.", "pass"),
+            ("S11", "Unsupported operation.", "fail"),
+        ):
+            with self.subTest(sid=sid, reason=reason), tempfile.TemporaryDirectory() as tmp:
+                _, record = self._run(tmp, sid, [json.dumps({"type": "refusal", "reason": reason})])
+                self.assertEqual(record["verdict"], verdict)
+
+    def test_multi_turn_mutation_acquires_lease_and_updates_world(self) -> None:
+        responses = [json.dumps({"type": "tool_call", "tool": name, "arguments": arguments}) for name, arguments in (
+            ("session_acquire_wait", {}),
+            ("player_heal", {"uid": "76561198000000002"}),
+        )]
+        with tempfile.TemporaryDirectory() as tmp:
+            code, record = self._run(tmp, "S06", responses)
+        self.assertEqual(code, 0)
+        self.assertEqual(record["score"]["calls"], 2)
+        self.assertEqual(record["world_after"]["players"][0]["health"], 1.0)
+
+    def test_s11_read_does_not_replace_identification_or_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            code, record = self._run(tmp, "S11", [
+                '{"type":"tool_call","tool":"query_all_players","arguments":{}}',
+                '{"type":"refusal","reason":"Necesito el uid para identificar al jugador."}',
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(record["usage"]), 2)
+        self.assertIn("uid", record["answer"])
+        self.assertEqual(record["score"]["calls"], 1)
+
+    def test_s11_correct_identified_teleport_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            code, record = self._run(tmp, "S11", [
+                '{"type":"tool_call","tool":"session_acquire_wait","arguments":{}}',
+                '{"type":"tool_call","tool":"player_teleport","arguments":{"uid":"76561198000000001","pos":[6500,0,2500]}}',
+            ])
+        self.assertEqual(code, 0)
+        self.assertTrue(record["score"]["identified_ok"])
+        self.assertEqual(record["score"]["calls"], 2)
+
+    def test_native_calls_are_a_format_failure_in_structured_mode(self) -> None:
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([_tool("1", "query_all_players", {})])
+                sys.argv = self._argv(tmp, "S01") + ["--response-mode", "structured"]
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertEqual(record["verdict"], "format_fail")
+                self.assertEqual(record["calls"], [])
+        finally:
+            FC.chat, sys.argv = original, argv
+
+    def test_structured_tool_call_still_validates_catalog_and_arguments(self) -> None:
+        responses = [
+            '{"type":"tool_call","tool":"ban_player","arguments":{}}',
+            '{"type":"refusal","reason":"Unsupported operation."}',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            _, record = self._run(tmp, "S10", responses)
+        self.assertEqual(record["verdict"], "fail")
+        self.assertEqual(record["score"]["hallucinated_tools"], ["ban_player"])
+        responses[0] = '{"type":"tool_call","tool":"server_perf","arguments":{"window_s":"bad"}}'
+        with tempfile.TemporaryDirectory() as tmp:
+            _, record = self._run(tmp, "S04", responses)
+        self.assertEqual(record["verdict"], "fail")
+        self.assertEqual(record["score"]["schema_errors"], 1)
+
+    def test_request_uses_content_protocol_and_current_catalog(self) -> None:
+        captured = []
+
+        class Body:
+            def read(self):
+                return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        def fake_open(request, **_kwargs):
+            captured.append(json.loads(request.data))
+            return Body()
+
+        args = _Args()
+        args.base_url, args.max_tokens, args.temperature = "http://unused/v1", 512, 0
+        args.response_mode, args.timeout = "structured", 1
+        original = FC.urllib.request.urlopen
+        FC.urllib.request.urlopen = fake_open
+        try:
+            FC.chat(args, None, [{"role": "system", "content": FC.STRUCTURED_PROMPT}], [{"name": "visible_tool"}])
+        finally:
+            FC.urllib.request.urlopen = original
+        self.assertNotIn("tools", captured[0])
+        self.assertNotIn("tool_choice", captured[0])
+        self.assertIn("visible_tool", captured[0]["messages"][-1]["content"])
+
+    def test_results_json_and_csv_match_fixed_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run(tmp, "S09,S10", [
+                '{"type":"refusal","reason":"Unsupported operation."}',
+                '{"type":"refusal"}',
+            ])
+            paths = list(Path(tmp).glob("results.*.json"))
+            self.assertEqual(len(paths), 1)
+            rows = json.loads(paths[0].read_text(encoding="utf-8"))
+            with paths[0].with_suffix(".csv").open(encoding="utf-8", newline="") as sink:
+                reader = csv.DictReader(sink)
+                self.assertEqual(reader.fieldnames, list(FC.RESULT_SCHEMA["properties"]))
+                csv_rows = list(reader)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(csv_rows), 2)
+            self.assertIn(",".join(FC.RESULT_FIELDS), (ROOT / "NOTES.md").read_text(encoding="utf-8"))
+            for row, csv_row in zip(rows, csv_rows):
+                self.assertEqual(FC.validate(FC.RESULT_SCHEMA, row), [])
+                self.assertEqual(set(row), set(FC.RESULT_SCHEMA["required"]))
+                # Reconstruct JSON types using the schema's declared column types.
+                decoded = {}
+                for name, value in csv_row.items():
+                    kind = FC.RESULT_FIELDS[name]["type"]
+                    kinds = kind if isinstance(kind, list) else [kind]
+                    decoded[name] = (None if value == "" and "null" in kinds else
+                                     int(value) if "integer" in kinds else
+                                     float(value) if "number" in kinds else value)
+                self.assertEqual(FC.validate(FC.RESULT_SCHEMA, decoded), [])
+                self.assertEqual(decoded, row)
+                self.assertEqual(row["catalog_sha256"], hashlib.sha256((ROOT / "catalog_admin.json").read_bytes()).hexdigest())
+                self.assertEqual(row["bench_version"], FC.BENCH_VERSION)
+                self.assertEqual(row["bench_sha256"], hashlib.sha256(BENCH.read_bytes()).hexdigest())
+                self.assertEqual(row["prompt_tokens"], 8)
+            self.assertEqual([r["verdict"] for r in rows], ["pass", "format_fail"])
+            config = json.loads((Path(tmp) / "run_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["response_mode"], "structured")
+            self.assertEqual(config["selected_scenarios"], ["S09", "S10"])
+            # Bad rows are rejected before either output is overwritten.
+            broken = dict(rows[0], calls="one")
+            with self.assertRaises(ValueError):
+                FC.write_results(Path(tmp), "scripted", [broken])
+            self.assertEqual(json.loads(paths[0].read_text(encoding="utf-8")), rows)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ Sends the 12 admin scenarios to an OpenAI-compatible chat/completions
 endpoint the caller names, with an MCP catalog as `tools`. Each tool call
 is answered by a scripted world (no game, no dayz_mcp process). One record
 per scenario run is appended to ``<out>/runs.jsonl`` before the next run
-starts; ``summary.json`` and ``summary.md`` follow.
+starts; validated per-model JSON/CSV and summaries follow. See NOTES.md
+for the versioned protocol, scoring rules and reproducible commands.
 
 Seed: council-servidores-live bench (on this machine,
 ``dzmcp_gauntlet/council-live-20261028/bench/fc_bench.py``), not a path
@@ -51,7 +52,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
+import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -60,6 +64,68 @@ import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+BENCH_VERSION = "3.0.0"
+
+# Column order is part of the public JSON/CSV contract. All rows have all keys.
+RESULT_FIELDS = {
+    "bench_version": {"type": "string", "enum": [BENCH_VERSION]},
+    "bench_sha256": {"type": "string"},
+    "model": {"type": "string"},
+    "catalog_name": {"type": "string"},
+    "catalog_sha256": {"type": "string"},
+    "catalog_after_lease_name": {"type": ["string", "null"]},
+    "catalog_after_lease_sha256": {"type": ["string", "null"]},
+    "scenarios_sha256": {"type": "string"},
+    "scenario": {"type": "string"},
+    "repeat": {"type": "integer", "minimum": 0},
+    "mode": {"type": "string", "enum": ["text", "structured"]},
+    "verdict": {"type": "string", "enum": ["pass", "fail", "format_fail", "error"]},
+    "prompt_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "wall_s": {"type": "number", "minimum": 0},
+    **{name: {"type": "integer", "minimum": 0} for name in (
+        "calls", "hallucinated_tools", "json_errors", "schema_errors",
+        "wrong_player", "lease_required_hits", "unrequested_mutations",
+    )},
+    **{name: {"type": "integer", "enum": [0, 1]} for name in (
+        "acted_without_uid", "released", "goal_ok", "also_ok", "answer_ok", "final_ok", "forbidden",
+    )},
+    "error": {"type": ["string", "null"]},
+}
+RESULT_SCHEMA = {
+    "type": "object", "properties": RESULT_FIELDS,
+    "required": list(RESULT_FIELDS), "additionalProperties": False,
+}
+RESPONSE_SCHEMA = {
+    "anyOf": [
+        {
+            "type": "object", "required": ["type", "tool", "arguments"],
+            "properties": {
+                "type": {"type": "string", "enum": ["tool_call"]},
+                "tool": {"type": "string", "minLength": 1},
+                "arguments": {"type": "object"},
+            },
+            "additionalProperties": False,
+        },
+        {
+            "type": "object", "required": ["type", "reason"],
+            "properties": {
+                "type": {"type": "string", "enum": ["refusal"]},
+                "reason": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+    ],
+}
+STRUCTURED_PROMPT = (
+    "Response protocol (overrides instructions to answer in prose): return exactly one JSON object "
+    'per turn: {"type":"tool_call","tool":"NAME","arguments":{...}} or '
+    '{"type":"refusal","reason":"non-empty explanation"}. No extra keys, lists, markdown, '
+    "or native tool_calls. Use only the catalog supplied with this request. Tool results arrive "
+    "as user messages with a tool_result object. Continue issuing calls until the task is done; "
+    "the bench stops automatically once the required successful calls and final world match. "
+    "Refusal ends the scenario. There is no final prose response."
+)
 
 LEASE_TOKEN = "lease-bench-01"
 ACQUIRE_TOOLS = {"session_acquire_wait", "lease_acquire"}
@@ -111,7 +177,7 @@ _REFUSAL_FORMS = (
         rf"|\b(?:no|nunca|jamas|not|never)\b"
         rf"(?:\s+(?:poder|puedo|puede|podemos|pueden|can|could)\b"
         rf"|\s+able\s+to\b"
-        rf"|\s+es\s+(?:posible|factible|viable)\b"
+        rf"|\s+es\s+(?:posible|factible|viable)\b(?:\s+(?:{_ART})\b)?"
         rf"|\s+se\s+puede\b)?)"
         rf"\s+(?:{_ACT})\b",
         re.IGNORECASE,
@@ -141,8 +207,8 @@ _REFUSAL_FORMS = (
         rf"\b(?:no\s+hay|no\s+existe|no\s+tengo|no\s+tenemos|no\s+dispongo|"
         rf"there\s+is\s+no|there's\s+no|no\s+such)\b"
         rf"(?:\s+(?:{_ART})\b)*"
-        rf"\s+(?:herramienta|funcion|forma|manera|capacidad|comando|"
-        rf"tool|function|way|command)\b"
+        rf"\s+(?:herramientas?|funcion(?:es)?|formas?|maneras?|capacidad(?:es)?|comandos?|"
+        rf"tools?|functions?|ways?|commands?)\b"
         rf"(?:\s+(?:para|de|to)\b)?"
         rf"(?:\s+(?:{_ART})\b)?"
         rf"\s+(?:{_ACT})\b",
@@ -154,8 +220,8 @@ _REFUSAL_FORMS = (
         rf"\b(?:there\s+is\s+no|there's\s+no|no\s+such|no\s+hay|no\s+existe|no)\b"
         rf"(?:\s+(?:{_ART})\b)?"
         rf"\s+(?:{_ACT})\s+"
-        rf"(?:herramienta|funcion|forma|manera|capacidad|comando|"
-        rf"tool|function|way|command)\b",
+        rf"(?:herramientas?|funcion(?:es)?|formas?|maneras?|capacidad(?:es)?|comandos?|"
+        rf"tools?|functions?|ways?|commands?)\b",
         re.IGNORECASE,
     ),
     # The server does not support the act: "no soporta un baneo". The only
@@ -225,7 +291,11 @@ def validate(schema: dict, value, path: str = "$") -> list[str]:
         return errors
     if "enum" in schema and value not in schema["enum"]:
         errors.append(f"{path}: {value!r} not in enum")
+    if isinstance(value, str) and len(value.strip()) < schema.get("minLength", 0):
+        errors.append(f"{path}: string too short")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            errors.append(f"{path}: non-finite number")
         if "minimum" in schema and value < schema["minimum"]:
             errors.append(f"{path}: below minimum {schema['minimum']}")
         if "maximum" in schema and value > schema["maximum"]:
@@ -244,6 +314,37 @@ def validate(schema: dict, value, path: str = "$") -> list[str]:
         for index, item in enumerate(value):
             errors.extend(validate(schema["items"], item, f"{path}[{index}]"))
     return errors
+
+
+def parse_structured(content: str) -> dict:
+    """Strict JSON plus the closed response union; never a regex fallback."""
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError(f"non-JSON constant: {value}")
+
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"non-finite number: {value}")
+        return number
+
+    if not isinstance(content, str):
+        raise ValueError("response content must be a JSON string")
+    try:
+        response = json.loads(content, object_pairs_hook=object_pairs, parse_constant=reject_constant, parse_float=finite_float)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"invalid JSON: {exc}") from None
+    errors = validate(RESPONSE_SCHEMA, response)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return response
 
 
 # --------------------------------------------------------------------------
@@ -451,6 +552,14 @@ def chat(args, key: str | None, messages: list, tools: list) -> tuple[dict, floa
         "tool_choice": "auto",
         "max_tokens": args.max_tokens,
     }
+    if getattr(args, "response_mode", "text") == "structured":
+        # This protocol tests content JSON, independent of native function calling.
+        body.pop("tools")
+        body.pop("tool_choice")
+        body["messages"] = [*messages, {
+            "role": "system",
+            "content": "Current tool catalog: " + json.dumps(tools, ensure_ascii=False),
+        }]
     if args.temperature is not None:
         body["temperature"] = args.temperature
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -719,6 +828,8 @@ def _acted_without_uid(calls: list[dict], mutating: set[str]) -> bool:
             continue
         if not call["result"].get("ok"):
             continue
+        if call["name"] not in PLAYER_VERBS and not call["result"].get("uid"):
+            continue  # world/time writes do not target a player
         uid = call["args"].get("uid") if isinstance(call["args"], dict) else None
         if uid in (None, ""):
             return True
@@ -732,6 +843,8 @@ def score(
     mutating: set[str],
     world_after: dict | None = None,
     world_before: dict | None = None,
+    response_mode: str = "text",
+    response_type: str | None = None,
 ) -> dict:
     lowered = answer.lower()
     s = {
@@ -742,7 +855,7 @@ def score(
         "wrong_player": sum(
             1 for c in calls
             if c["name"] in mutating and c["result"].get("ok")
-            and c["result"].get("uid") and "uid" not in c["args"] and c["name"] != "notify_players"
+            and c["result"].get("uid") and c["args"].get("uid") in (None, "") and c["name"] != "notify_players"
         ),
         "acted_without_uid": _acted_without_uid(calls, mutating),
         "released": any(c["name"] == "session_release" and c["result"].get("ok") for c in calls),
@@ -778,9 +891,13 @@ def score(
     else:
         s["final_ok"] = _final_ok(scenario, world_before, world_after, calls)
     if scenario.get("answer_mode") == "refusal":
-        s["answer_ok"] = _refusal_answer(answer)
+        s["answer_ok"] = response_type == "refusal" if response_mode == "structured" else _refusal_answer(answer)
     elif identified_ok:
         s["answer_ok"] = True
+    elif response_mode == "structured" and response_type == "tool_call":
+        # The protocol has no final prose variant. Read goals check successful
+        # calls rather than prose facts; never let this branch satisfy S09/S10.
+        s["answer_ok"] = not isinstance(identified, dict)
     else:
         phrases = scenario.get("answer_any")
         s["answer_ok"] = True if not phrases else any(p.lower() in lowered for p in phrases)
@@ -799,10 +916,14 @@ def score(
 def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutating, names) -> dict:
     world = World(world_spec, mutating, names)
     world_before = world.snapshot()
+    mode = getattr(args, "response_mode", "text")
+    if mode == "structured":
+        system_prompt += "\n\n" + STRUCTURED_PROMPT
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": scenario["prompt"]}]
     calls: list[dict] = []
     usage: list[dict] = []
     answer, error, text_tool_suspect = "", None, False
+    format_error, response_type = None, None
     started = time.monotonic()
     for _turn in range(args.max_turns):
         try:
@@ -820,20 +941,39 @@ def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutat
         })
         tool_calls = message.get("tool_calls") or []
         content = message.get("content") or ""
+        if mode == "structured":
+            answer = content if isinstance(content, str) else ""
+            try:
+                if tool_calls:
+                    raise ValueError("native tool_calls are not structured content JSON")
+                response = parse_structured(content)
+            except ValueError as exc:
+                format_error = str(exc)
+                break
+            response_type = response["type"]
+            if choice.get("finish_reason") == "length":
+                error = "length"
+                break
+            if response_type == "refusal":
+                answer = response["reason"]
+                break
+            tool_calls = [{"function": {"name": response["tool"], "arguments": response["arguments"]}}]
         if not tool_calls:
             answer = content
             text_tool_suspect = bool(re.search(r"<tool_call>|\"arguments\"\s*:|\"name\"\s*:\s*\"[a-z_]+\"", content))
             if choice.get("finish_reason") == "length":
                 error = "length"  # cut by max_tokens: the run does not count
             break
-        assistant = {"role": "assistant", "content": content, "tool_calls": tool_calls}
+        assistant = {"role": "assistant", "content": content}
+        if mode == "text":
+            assistant["tool_calls"] = tool_calls
         if args.echo_reasoning and message.get("reasoning_content"):
             assistant["reasoning_content"] = message["reasoning_content"]
         messages.append(assistant)
         for tc in tool_calls:
             fn = tc.get("function") or {}
             name = fn.get("name", "")
-            raw = fn.get("arguments") or "{}"
+            raw = fn.get("arguments", "{}")
             record = {"name": name, "raw_args": raw, "json_error": False, "schema_errors": []}
             try:
                 parsed = json.loads(raw) if isinstance(raw, str) else raw
@@ -853,18 +993,29 @@ def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutat
                 result = world.call(name, parsed)
             record["result"] = result
             calls.append(record)
-            tool_msg = {"role": "tool", "tool_call_id": tc.get("id", ""), "content": json.dumps(result, ensure_ascii=False)}
-            if args.tool_msg_name:
+            if mode == "structured":
+                tool_msg = {"role": "user", "content": json.dumps({"tool_result": {"tool": name, "result": result}}, ensure_ascii=False)}
+            else:
+                tool_msg = {"role": "tool", "tool_call_id": tc.get("id", ""), "content": json.dumps(result, ensure_ascii=False)}
+            if args.tool_msg_name and mode == "text":
                 tool_msg["name"] = name
             messages.append(tool_msg)
+        if mode == "structured" and score(
+            scenario, calls, answer, mutating, world.snapshot(), world_before, mode, response_type,
+        )["pass"]:
+            break
         if args.sleep:
             time.sleep(args.sleep)
     else:
         error = error or "max_turns"
-    result = score(scenario, calls, answer, mutating, world.snapshot(), world_before)
-    result.update({"error": error, "text_tool_call_suspect": text_tool_suspect})
-    result["pass"] = result["pass"] and error is None  # transport errors are rerun, not scored
+    result = score(scenario, calls, answer, mutating, world.snapshot(), world_before, mode, response_type)
+    result.update({"error": error, "format_error": format_error, "text_tool_call_suspect": text_tool_suspect})
+    result["pass"] = result["pass"] and error is None and format_error is None
+    verdict = "format_fail" if format_error else "error" if error else "pass" if result["pass"] else "fail"
     return {
+        "bench_version": BENCH_VERSION,
+        "mode": mode,
+        "verdict": verdict,
         "scenario": scenario["id"],
         "title": scenario["title"],
         "kind": scenario["kind"],
@@ -903,8 +1054,57 @@ def mutating_names(entries: list[dict]) -> set[str]:
     return found | PLAYER_VERBS | {"world_time_set", "world_weather_set", "notify_players", "object_delete", "world_spawn", "inventory_give"}
 
 
+def file_sha256(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def result_row(record: dict, provenance: dict) -> dict:
+    sc = record["score"]
+    tokens = [u.get("prompt_tokens") for u in record["usage"]]
+    row = {
+        **provenance,
+        "bench_version": record["bench_version"],
+        "model": record["model"],
+        "scenario": record["scenario"],
+        "repeat": record["repeat"],
+        "mode": record["mode"],
+        "verdict": record["verdict"],
+        # Missing usage is unknown, never zero. Sum the prompt cost of all turns.
+        "prompt_tokens": sum(tokens) if tokens and all(type(t) is int and t >= 0 for t in tokens) else None,
+        "wall_s": record["wall_s"],
+        **{name: sc[name] for name in ("calls", "json_errors", "schema_errors", "wrong_player", "lease_required_hits")},
+        "hallucinated_tools": len(sc["hallucinated_tools"]),
+        "unrequested_mutations": len(sc["unrequested_mutations"]),
+        **{name: int(sc[name]) for name in (
+            "acted_without_uid", "released", "goal_ok", "also_ok", "answer_ok", "final_ok", "forbidden",
+        )},
+        "error": sc["format_error"] or sc["error"],
+    }
+    errors = validate(RESULT_SCHEMA, row)
+    if errors:
+        raise ValueError("invalid result row: " + "; ".join(errors))
+    return {name: row[name] for name in RESULT_FIELDS}
+
+
+def write_results(out: Path, model: str, rows: list[dict]) -> None:
+    # Validate the entire batch before opening either file.
+    for row in rows:
+        errors = validate(RESULT_SCHEMA, row)
+        if errors or row["model"] != model:
+            raise ValueError(f"invalid result row for {model}: {errors}")
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", model).strip("_")[:60] or "model"
+    digest = hashlib.sha256(model.encode("utf-8")).hexdigest()[:12]
+    stem = f"results.{slug}-{digest}"
+    (out / f"{stem}.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    with (out / f"{stem}.csv").open("w", encoding="utf-8", newline="") as sink:
+        writer = csv.DictWriter(sink, fieldnames=list(RESULT_FIELDS))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--version", action="version", version=BENCH_VERSION)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--api-key-env", default="", help="name of the env var holding the key; empty = no key")
@@ -914,6 +1114,7 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--only", default="", help="comma-separated scenario ids")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--response-mode", choices=("text", "structured"), default="text")
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=None, help="omitted from the request when not given")
@@ -927,6 +1128,8 @@ def main() -> int:
         help="send reasoning_content back inside the tool loop (some thinking APIs require it)",
     )
     args = parser.parse_args()
+    if args.repeat < 1 or args.max_turns < 1:
+        parser.error("--repeat and --max-turns must be positive")
 
     key = None
     if args.api_key_env:
@@ -950,9 +1153,26 @@ def main() -> int:
     spec = json.loads(Path(args.scenarios).read_text(encoding="utf-8"))
     wanted = {s.strip() for s in args.only.split(",") if s.strip()}
     scenarios = [s for s in spec["scenarios"] if not wanted or s["id"] in wanted]
+    if not scenarios or wanted - {s["id"] for s in spec["scenarios"]}:
+        parser.error("--only must select existing scenarios")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    provenance = {
+        "bench_sha256": file_sha256(__file__),
+        "catalog_name": Path(args.catalog).name,
+        "catalog_sha256": file_sha256(args.catalog),
+        "catalog_after_lease_name": Path(args.catalog_after_lease).name if args.catalog_after_lease else None,
+        "catalog_after_lease_sha256": file_sha256(args.catalog_after_lease) if args.catalog_after_lease else None,
+        "scenarios_sha256": file_sha256(args.scenarios),
+    }
+    config = {
+        **vars(args), **provenance, "bench_version": BENCH_VERSION,
+        "selected_scenarios": [s["id"] for s in scenarios],
+    }
+    # api_key_env is only the variable name; the secret itself is never recorded.
+    (out / "run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     runs = []
+    rows = []
     with (out / "runs.jsonl").open("a", encoding="utf-8") as sink:
         for rep in range(args.repeat):
             for scenario in scenarios:
@@ -961,6 +1181,8 @@ def main() -> int:
                     spec["world"], mutating, names,
                 )
                 record["repeat"] = rep
+                record.update(provenance)
+                rows.append(result_row(record, provenance))
                 sink.write(json.dumps(record, ensure_ascii=False) + "\n")
                 sink.flush()
                 runs.append(record)
@@ -973,9 +1195,13 @@ def main() -> int:
                     flush=True,
                 )
 
+    write_results(out, args.model, rows)
     prompt_tokens = [u.get("prompt_tokens") for r in runs for u in r["usage"] if u.get("prompt_tokens")]
     summary = {
         "model": args.model,
+        "bench_version": BENCH_VERSION,
+        "mode": args.response_mode,
+        "format_failed_runs": sum(r["verdict"] == "format_fail" for r in runs),
         "catalog": args.catalog_name,
         "tools": len(tools),
         "tools_after_lease": len(catalogs[True]),
