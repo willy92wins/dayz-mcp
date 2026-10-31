@@ -354,6 +354,36 @@ playbook_tool_mod.load_runner()
 # Freeze at import, before build_app can be delayed or repeated.
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
 
+
+def _profile_ok_next_step(
+    result: dict[str, Any], cmd: str, pack: str
+) -> dict[str, Any]:
+    """_with_ok_next_step with the hint filtered to the active tool pack (C4).
+
+    A next_step the pack does not expose (for example dayz_test_run under
+    --tool-pack admin) is replaced by the next public tool the pack does
+    expose, or dropped when there is none. The full pack keeps the hint
+    exactly as before.
+    """
+    payload = _with_ok_next_step(result, cmd)
+    if not isinstance(payload, dict):
+        return payload
+    existing = payload.get("next_step")
+    if not isinstance(existing, str):
+        return payload
+    allowed = tool_pack_mod.next_step_tools(pack)
+    if existing in allowed:
+        return payload
+    follow = ok_next_step(
+        cmd, mutating=command_requires_lease(cmd), allowed=allowed
+    )
+    payload = dict(payload)
+    if follow is None:
+        payload.pop("next_step", None)
+    else:
+        payload["next_step"] = follow
+    return payload
+
 UiClickMode = Literal["direct", "complete"]
 InventoryAttachDest = Literal["attachment", "cargo"]
 UiReloadLayoutMode = Literal["reload", "close"]
@@ -1179,7 +1209,11 @@ class Runtime:
             raise
         finally:
             _drop_broker_admit(self, command_id)
-        return _with_bridge_success_hints(self, cmd, result)
+        return _profile_ok_next_step(
+            _with_bridge_success_hints(self, cmd, result),
+            cmd,
+            self.config.tool_pack,
+        )
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         self.touch()
@@ -2479,7 +2513,11 @@ class ClientRuntime:
                 if str(exc).startswith("timeout waiting"):
                     await _shielded_broker_cleanup(self, command_id, "tool_timeout")
                 raise
-            return _with_bridge_success_hints(self, cmd, result)
+            return _profile_ok_next_step(
+                _with_bridge_success_hints(self, cmd, result),
+                cmd,
+                self.config.tool_pack,
+            )
         finally:
             self._allow_stale_policy = previous
             _drop_broker_admit(self, command_id)
@@ -5196,11 +5234,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         client = _client_runtime()
         steam_view = await _observe_steam_app_view()
         async with client.tool_lock:
-            return _with_ok_next_step(
+            return _profile_ok_next_step(
                 _annotate_steam_app_view(
                     await client.session_acquire(purpose.strip()), steam_view
                 ),
                 "session_acquire",
+                config.tool_pack,
             )
 
     @app.tool(
@@ -5211,11 +5250,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_ticket")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
+            return _profile_ok_next_step(
                 await client.session_wait(
                     ticket, _require_range(timeout_s, 0.0, 30.0, "bad_wait_timeout")
                 ),
                 "session_wait",
+                config.tool_pack,
             )
 
     @app.tool(
@@ -5259,11 +5299,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         # tools/list_changed for the revealed catalog is sent by
         # _install_catalog_change_notice once this call returns.
-        return _with_ok_next_step(
+        return _profile_ok_next_step(
             _annotate_steam_app_view(
                 _annotate_caller_tool_registry(payload, caller_stale), steam_view
             ),
             "session_acquire_wait",
+            config.tool_pack,
         )
 
     app.add_tool(
@@ -5280,8 +5321,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_ticket")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_cancel(ticket), "session_cancel"
+            return _profile_ok_next_step(
+                await client.session_cancel(ticket),
+                "session_cancel",
+                config.tool_pack,
             )
 
     @app.tool(
@@ -5300,8 +5343,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_lease_token")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_heartbeat(lease_token), "session_heartbeat"
+            return _profile_ok_next_step(
+                await client.session_heartbeat(lease_token),
+                "session_heartbeat",
+                config.tool_pack,
             )
 
     @app.tool(
@@ -5315,8 +5360,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_lease_token")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_release(lease_token), "session_release"
+            return _profile_ok_next_step(
+                await client.session_release(lease_token),
+                "session_release",
+                config.tool_pack,
             )
 
     @app.tool(
@@ -5373,8 +5420,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 status, caller_session or None
             )
             await _attach_revalidated_runs_retired_recently(client, status)
-            return _with_ok_next_step(
-                _annotate_steam_app_view(status, steam_view), "session_status"
+            return _profile_ok_next_step(
+                _annotate_steam_app_view(status, steam_view),
+                "session_status",
+                config.tool_pack,
             )
 
     @app.tool(

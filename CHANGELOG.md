@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Error and ok:true `next_step` hints now follow the active profile (C4, fb-20261028-131128-792e): `agent_loop.next_step` / `with_next_step` / `ok_next_step` accept the profile's exposed tools, and a hint outside the closed live profile (B4) or the admin tool pack (C1) is replaced by the next public tool that profile exposes (`bridge_status`, then `session_status`) or dropped. `tool_pack.profile_next_tools` / `next_step_tools` publish the per-profile hint sets; `build_app` and the bridge-result paths pass `config.tool_pack` through `server._profile_ok_next_step`. With the full pack the hints are exactly the previous ones.
 - FIFO/reservations remain available with v12 peers: lease-end stage 2b stays inert until PBO v13 announces `lease_close` / `lease_close_client`. The broker checks the bound peer's capability census (no environment flag); unsupported closes settle without queued commands or OWED rows, so later grants do not inherit `lease_end_unconfirmed`. Bridge protocol version 12 and the server argument-contract hash are unchanged; this F1 broker fix alone needs no PBO rebuild (PR #268 as a whole touches `addon/` and does require one).
 
 ### Added

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS
+
 
 LOCAL8B_TOOL_NAMES = frozenset(
     {
@@ -84,6 +86,53 @@ def tool_names(pack: str) -> frozenset[str] | None:
     if not isinstance(pack, str) or pack not in _TOOL_PACKS:
         raise ValueError("invalid tool_pack: expected 'full', 'local8b' or 'admin'")
     return _TOOL_PACKS[pack]
+
+
+# Public next-step tools under the daemon live profile (B4,
+# fb-20261028-131107-9249): the admin pack's session/status core plus the
+# public hints whose bridge command the live list allows (object_inspect,
+# query_player_state). The dayz_test* lifecycle tools and the knowledge and
+# pipeline tools are outside the closed live list, so an error hint under
+# that profile never names them. Kept as a literal so this module stays
+# import-light; tests/test_c4_next_steps_profile.py pins it against
+# loopback.LIVE_ALLOWED_COMMANDS / LIVE_ADMIN_COMMANDS.
+LIVE_NEXT_TOOLS = frozenset(
+    {
+        "bridge_status",
+        "session_acquire_wait",
+        "session_heartbeat",
+        "session_release",
+        "session_status",
+        "query_player_state",
+        "object_inspect",
+        "wait_for",
+    }
+)
+
+_PROFILE_NEXT_TOOLS: dict[str, frozenset[str]] = {
+    "test": PUBLIC_NEXT_TOOLS,
+    "live": LIVE_NEXT_TOOLS,
+    "admin": PUBLIC_NEXT_TOOLS & ADMIN_TOOL_NAMES,
+}
+
+
+def next_step_tools(pack: str) -> frozenset[str]:
+    """Public tools a next_step hint may name under one tool pack."""
+    allowed = tool_names(pack)
+    if allowed is None:
+        return PUBLIC_NEXT_TOOLS
+    return PUBLIC_NEXT_TOOLS & allowed
+
+
+def profile_next_tools(profile: str) -> frozenset[str]:
+    """Public tools a next_step hint may name under one named profile.
+
+    "test" is the harness profile (full public set), "live" is the B4
+    daemon live profile and "admin" is the C1 admin tool pack.
+    """
+    if not isinstance(profile, str) or profile not in _PROFILE_NEXT_TOOLS:
+        raise ValueError("invalid profile: expected 'test', 'live' or 'admin'")
+    return _PROFILE_NEXT_TOOLS[profile]
 
 
 def apply_tool_pack(tool_manager: Any, pack: str) -> frozenset[str] | None:
