@@ -119,6 +119,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 4 from 165a/5a21/7f5d (world_spawn_batch per_tick/timeout_s,
         # scene_entities timeout_s, scene_clear timeout_s; scene_id is a string
         # and items a list, not in this census).
+        # + 2 from 36fa (actor_emote wait_s/timeout_s; emote is a string).
+        # + 3 from c801 (survivor_drive object_id/heading/timeout_s; speed and
+        # mode are strings).
         # + 4 from d026, 702f and f427 (camera_path_play timeout_s, camera_set
         # focus_distance/focus_blur, hud_set timeout_s; keys is a list of objects,
         # mode, easing and path_id are strings and visible is a bool).
@@ -127,7 +130,7 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
         # + 1 from B3 (player_find timeout_s; name is a string).
         # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
-        self.assertEqual(len(rows), 233)
+        self.assertEqual(len(rows), 238)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
@@ -151,6 +154,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("world_spawn_batch", "timeout_s", "float"), rows)
         self.assertIn(("scene_entities", "timeout_s", "float"), rows)
         self.assertIn(("scene_clear", "timeout_s", "float"), rows)
+        self.assertIn(("actor_emote", "wait_s", "float"), rows)
+        self.assertIn(("actor_emote", "timeout_s", "float"), rows)
+        self.assertIn(("survivor_drive", "object_id", "int"), rows)
+        self.assertIn(("survivor_drive", "heading", "float"), rows)
+        self.assertIn(("survivor_drive", "timeout_s", "float"), rows)
         self.assertIn(("camera_path_play", "timeout_s", "float"), rows)
         self.assertIn(("camera_set", "focus_distance", "float"), rows)
         self.assertIn(("camera_set", "focus_blur", "float"), rows)
