@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import (
     anim_timeline,
+    camera_path,
     daemon_credential,
     loadout,
     orphan_guard,
@@ -120,7 +121,12 @@ SERVER_COMMANDS = {
 }
 CLIENT_COMMANDS = {
     "camera_set",
+    "camera_set_focus",
     "camera_get",
+    "gameplay_state",
+    "camera_path_play",
+    "camera_path_release",
+    "hud_set",
     "restore_gameplay",
     "key_press",
     "input_describe",
@@ -254,6 +260,12 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
             "object_id": args["object_id"],
         },
     ),
+    # d026: the client stops the path only while this play is the one playing.
+    (
+        "camera_path_play",
+        "camera_path_release",
+        lambda command_id, args: {"command_id": command_id},
+    ),
 )
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
 # process only answers the one transition those runtimes call.
@@ -379,7 +391,17 @@ VersionValidator = Callable[[str | None], str]
 ExecAudit = Callable[[str, str, str, int | None], None]
 
 
+LEASE_CLOSE_PEERS = {
+    "lease_close": "server",
+    "lease_close_client": "client",
+}
+LEASE_CLOSE_SERVER_DELAY_S = 10.0
+
+
 def peer_for_command(cmd: str) -> str:
+    mapped = LEASE_CLOSE_PEERS.get(cmd)
+    if mapped is not None:
+        return mapped
     if cmd in CLIENT_COMMANDS:
         return "client"
     return "server"
@@ -874,6 +896,10 @@ def _validate_ui_dialog_args(args: dict) -> tuple[bool, str | None]:
     return ui_dialog.validate_command_args(args)
 
 
+def _validate_camera_path_play_args(args: dict) -> tuple[bool, str | None]:
+    return camera_path.validate_command_args(args)
+
+
 _SAFE_FINITE_REAL = _reject_numeric_errors(_real_in_range())
 _SAFE_POSITIVE_REAL = _reject_numeric_errors(
     _real_in_range(minimum=0.0, minimum_inclusive=False)
@@ -1043,9 +1069,18 @@ def _validate_world_weather_set_args(args: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
+def _is_focus_distance(value: object) -> bool:
+    return camera_path.focus_distance(value) is not None
+
+
+def _is_focus_blur(value: object) -> bool:
+    return camera_path.focus_blur(value) is not None
+
+
+def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVariant:
     # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
-    # travel with every one of them.
+    # travel with every one of them. focus is the camera_set_focus shape
+    # (702f): the same plus both Camera.SetFocus arguments, always together.
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
@@ -1054,10 +1089,14 @@ def _camera_variant(mode: str, *vectors: str) -> _SchemaVariant:
     }
     for field in vectors:
         validators[field] = _is_real_list(12) if field == "cam_matrix" else _is_real_vector3
-    return _schema_variant(
-        required=("cam_mode", *vectors, "fov", "settle_ticks"),
-        validators=validators,
-    )
+    required: tuple[str, ...] = ("cam_mode", *vectors, "fov", "settle_ticks")
+    if focus:
+        # The tool's check, camera_path.focus_distance and focus_blur: at most
+        # 1e9 and kept by the bridge's 32-bit float, not just finite here.
+        required = (*required, "focus_distance", "focus_blur")
+        validators["focus_distance"] = _is_focus_distance
+        validators["focus_blur"] = _is_focus_blur
+    return _schema_variant(required=required, validators=validators)
 
 
 _SAFE_INPUT_TRIGGER_HOLD = _reject_numeric_errors(
@@ -1271,11 +1310,30 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "survivor_drive",
     "survivor_drive_release",
 })
-# Client verbs an older PBO must not be handed. Checked on the client census
-# (no server arg-contract hash) at enqueue and again at delivery. action_hold
+# Client verbs an older PBO must not be handed, each with the error it is
+# refused with. Checked on the census of the client bound to the run (no
+# server arg-contract hash) at enqueue, after the binding fence, and again at
+# delivery. With no client bound the fence answers first (legacy_unbound in
+# the plain case), so these codes mean a bound client whose census does not
+# name the verb, is stale or comes from another instance. action_hold
 # keeps the hold_not_supported its tool publishes; any other verb is refused
-# with the server census code, bridge_capability_missing.
-_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold", "player_view_set", "actor_emote"})
+# with the server census code, bridge_capability_missing. Internal uses of
+# camera_path_release skip the live lease at owner cleanup, not this check.
+_CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
+    "action_hold": "hold_not_supported",
+    "actor_emote": "bridge_capability_missing",
+    "camera_path_play": "bridge_capability_missing",
+    "camera_path_release": "bridge_capability_missing",
+    "camera_set_focus": "bridge_capability_missing",
+    "gameplay_state": "bridge_capability_missing",
+    "hud_set": "bridge_capability_missing",
+    "player_view_set": "bridge_capability_missing",
+}
+# A verb whose census must also name the command that stops it: a client that
+# could not be sent camera_path_release is not handed a play (d026).
+_CLIENT_ANNOUNCED_WITH: dict[str, str] = {
+    "camera_path_play": "camera_path_release",
+}
 
 
 def _requires_capability_admission(cmd: str, args: object) -> bool:
@@ -1296,6 +1354,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
         "player_look_at_release",
         "action_hold_cancel",
         "survivor_drive_release",
+        "camera_path_release",
     }
 )
 
@@ -1303,6 +1362,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
 # Command schemas keep the authenticated ingress contract in one place. Variants
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
+    "gameplay_state": _command_schema(_schema_variant()),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
     "key_press": _command_schema(
@@ -2214,6 +2274,23 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _camera_variant("free", "cam_pos", "look_at"),
         _camera_variant("free", "cam_pos", "cam_orientation"),
     ),
+    # camera_set with focus_distance and focus_blur (702f): the same five
+    # shapes, each with both focus arguments.
+    "camera_set_focus": _command_schema(
+        _camera_variant("orient", "cam_pos", "cam_orientation", focus=True),
+        _camera_variant("lookat", "cam_pos", "look_at", focus=True),
+        _camera_variant("matrix", "cam_matrix", focus=True),
+        _camera_variant("free", "cam_pos", "look_at", focus=True),
+        _camera_variant("free", "cam_pos", "cam_orientation", focus=True),
+    ),
+    # play carries mode, keys, easing and path_id; state and stop carry mode
+    # and path_id. The bounds mirror MCPCameraPath
+    # (addon/scripts/5_Mission/MCP_CameraPath.c) through camera_path.py.
+    "camera_path_play": _command_schema(delegated=_validate_camera_path_play_args),
+    # hud_set (f427): the tool always sends visible.
+    "hud_set": _command_schema(
+        _schema_variant(required=("visible",), validators={"visible": _is_strict_bool})
+    ),
     # camera_get sends {} when cam_mode is empty.
     "camera_get": _command_schema(
         _schema_variant(
@@ -2327,6 +2404,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                     )
                 ),
             },
+        )
+    ),
+    # The id of the camera_path_play to stop; also used by owner cleanup.
+    "camera_path_release": _command_schema(
+        _schema_variant(
+            required=("command_id",),
+            validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
     "action_cursor_ids": _command_schema(delegated=_validate_action_cursor_ids),
@@ -2619,6 +2703,15 @@ class ServerState:
         # lease -> survivor object_id -> id of the latest survivor_drive of that
         # lease delivered to drive it (c801). cleanup_owner releases each one.
         self._drive_by_lease: dict[str, dict[int, int]] = {}
+        # Delivered plays stay held until the client confirms their replacement
+        # or refusal, or their cleanup is queued. Command ids are not execution
+        # order: the client's pending array removes by swapping with its last.
+        self._camera_path_play_by_lease: dict[str, set[int]] = {}
+        # Keep delivered ids and their confirmed successors after retirement:
+        # a late predecessor reply can still connect two replacement chains.
+        self._camera_path_successor_by_lease: dict[str, dict[int, int | None]] = {}
+        self._camera_path_active_by_lease: dict[str, int] = {}
+        self._camera_path_release_pending_leases: set[str] = set()
         self._holds: dict[str, dict[str, object]] = {}
         self._hold_by_command: dict[int, str] = {}
         self._hold_blocked_runs: set[str] = set()
@@ -2646,6 +2739,11 @@ class ServerState:
         # Injectable monotonic clock. Defaults to time.monotonic; tests inject a
         # fake so the stale-command TTL / reconnect-flush logic is deterministic.
         self._time_fn = time_fn or time.monotonic
+        self._lease_closes: dict[int, dict[str, object]] = {}
+        self._deferred_server_closes: dict[tuple[int, str], dict[str, object]] = {}
+        self._version_blocked_instances: set[str] = set()
+        self._lease_close_outcomes: list[dict[str, object]] = []
+        self._lease_close_ignored = 0
 
     def _now(self) -> float:
         return self._time_fn()
@@ -3060,15 +3158,19 @@ class ServerState:
             self._fence_delivered_holds_for_instance(instance)
         discarded_exec: list[tuple[str, str, int]] = []
         finished_operations: list[tuple[ClientIdentity, str, int, str, str]] = []
+        close_outcomes: list[dict[str, object]] = []
         with self._lock:
             instance = self._role_index.pop((run_id, role), None)
             if instance is None:
-                return
-            self._retire_instance_locked(
-                instance, reason, discarded_exec, finished_operations
-            )
-            self._tombstone_run_activity(run_id)
+                close_outcomes = self._drain_close_outcomes_locked()
+            else:
+                self._retire_instance_locked(
+                    instance, reason, discarded_exec, finished_operations
+                )
+                self._tombstone_run_activity(run_id)
+                close_outcomes = self._drain_close_outcomes_locked()
         self._flush_queue_discards(discarded_exec, finished_operations)
+        self._flush_close_outcomes(close_outcomes)
 
     def retire_run(self, run_id: str, reason: str) -> None:
         self._fence_delivered_holds(run_id=run_id)
@@ -3085,7 +3187,9 @@ class ServerState:
             if isinstance(run_id, str) and run_id:
                 self._fenced_runs.discard(run_id)
                 self._tombstone_run_activity(run_id)
+            close_outcomes = self._drain_close_outcomes_locked()
         self._flush_queue_discards(discarded_exec, finished_operations)
+        self._flush_close_outcomes(close_outcomes)
 
     def install_bound_peer(
         self,
@@ -3195,6 +3299,13 @@ class ServerState:
             override.drop_instance(instance, retired_pid)
         # Result fences of already-dispatched ids survive retirement (P12).
         # Queued commands drop their fence in _mark_discarded.
+        for close_id, row in list(self._lease_closes.items()):
+            if row.get("instance") != instance or row.get("state") != "delivered":
+                continue
+            self._lease_closes.pop(close_id, None)
+            self._append_close_outcome_locked(
+                row, "discarded", reason="binding_retired"
+            )
 
     def _peer_covers(self, binding: Binding, peer: str) -> bool:
         return binding.role == peer or binding.role == "offline"
@@ -3209,7 +3320,10 @@ class ServerState:
     def _command_exempt_from_fence(self, command_id: object) -> bool:
         """P-J1: the daemon's own fire-and-forget cleanup survives the owner fence."""
 
-        return isinstance(command_id, int) and command_id in self._fire_and_forget_ids
+        return isinstance(command_id, int) and (
+            command_id in self._fire_and_forget_ids
+            or command_id in self._lease_closes
+        )
 
     def _drain_run_locked(
         self,
@@ -3949,17 +4063,17 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, is hold_not_supported for action_hold and
-        bridge_capability_missing for the other verbs. Re-checked at
-        delivery so a destination change after enqueue cannot hand the verb
-        to an older PBO.
+        does not name the command (or the command _CLIENT_ANNOUNCED_WITH
+        pairs it with), refuses it with the command's code in
+        _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold and
+        bridge_capability_missing for the other verbs). Internal commands are
+        checked too. Re-checked at delivery so a destination change after
+        enqueue cannot hand the verb to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
             return None
-        refusal = (
-            "hold_not_supported" if cmd == "action_hold" else "bridge_capability_missing"
-        )
+        refusal = _CLIENT_ANNOUNCED_COMMANDS[cmd]
         view = self._capabilities_view_locked(peer)
         if view.get("state") != "announced":
             return refusal
@@ -3977,6 +4091,9 @@ class ServerState:
             return refusal
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
+            return refusal
+        paired = _CLIENT_ANNOUNCED_WITH.get(cmd)
+        if paired is not None and paired not in announced:
             return refusal
         return None
 
@@ -4066,6 +4183,128 @@ class ServerState:
                     enqueued += 1
                 else:
                     failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
+    def _note_camera_path_play_locked(self, command_id: int, args: object) -> None:
+        """Remember a delivered play under its owner's lease (d026). Caller holds the lock."""
+
+        if not isinstance(args, dict) or args.get("mode") != "play":
+            return
+        owner = self._command_owner.get(command_id)
+        if owner is None or not isinstance(owner[1], str) or not owner[1]:
+            return
+        self._camera_path_play_by_lease.setdefault(owner[1], set()).add(command_id)
+        self._camera_path_successor_by_lease.setdefault(owner[1], {}).setdefault(command_id, None)
+
+    def _note_camera_path_result_locked(self, command_id: int, stored: dict) -> None:
+        """Prune a play the client explicitly refused, replaced or finished.
+
+        The echoed predecessor was inactive when this play started, regardless
+        of command or HTTP result order. Other unanswered plays may still run.
+        Retired plays still contribute links; only a causal successor may
+        displace the confirmed active play, never mere reply arrival order.
+        An older client without the echo leaves them held conservatively. Late
+        accepted results count too; fenced results never reach here. Lock held.
+        """
+
+        for lease_id, successors in self._camera_path_successor_by_lease.items():
+            if command_id in successors:
+                break
+        else:
+            return
+        command_ids = self._camera_path_play_by_lease[lease_id]
+        ok_value = stored.get("ok")
+        if ok_value is True or (
+            isinstance(ok_value, int)
+            and not isinstance(ok_value, bool)
+            and ok_value == 1
+        ):
+            path = stored.get("camera_path")
+            if (
+                isinstance(path, dict)
+                and type(path.get("command_id")) is int
+                and path["command_id"] == command_id
+                and path.get("state") == "finished"
+            ):
+                command_ids.discard(command_id)
+                if self._camera_path_active_by_lease.get(lease_id) == command_id:
+                    self._camera_path_active_by_lease.pop(lease_id, None)
+            if (
+                isinstance(path, dict)
+                and type(path.get("command_id")) is int
+                and path["command_id"] == command_id
+                and path.get("state") == "playing"
+            ):
+                replaced = path.get("replaced_command_id")
+                if type(replaced) is int and replaced in successors and replaced != command_id:
+                    successors[replaced] = command_id
+                    command_ids.discard(replaced)
+                active = self._camera_path_active_by_lease.get(lease_id, command_id)
+                seen: set[int] = set()
+                while (successor := successors.get(active)) is not None and active not in seen:
+                    seen.add(active)
+                    active = successor
+                if active in command_ids:
+                    self._camera_path_active_by_lease[lease_id] = active
+                elif command_id in command_ids:
+                    # The previous active may already have a cleanup queued.
+                    self._camera_path_active_by_lease[lease_id] = command_id
+                else:
+                    self._camera_path_active_by_lease.pop(lease_id, None)
+        elif ok_value is False or (type(ok_value) is int and ok_value == 0):
+            command_ids.discard(command_id)
+        if not command_ids:
+            del self._camera_path_play_by_lease[lease_id]
+            del self._camera_path_successor_by_lease[lease_id]
+            self._camera_path_active_by_lease.pop(lease_id, None)
+
+    def enqueue_camera_path_releases_for_lease(self, lease_id: str) -> dict[str, int]:
+        """camera_path_release for each play that lease still holds (d026).
+
+        Try the client-confirmed active play first, then newest delivered ids.
+        Failed enqueues remain held and are retried after a client poll drains
+        the queue or on another lease cleanup call; enqueue is not a stop ack.
+
+        A path moves the camera every frame after its play has answered, so it
+        must not outlive the lease that started it. The client stops a path
+        only while the named play is the one playing, so a release for a play
+        that finished, failed or was followed by another changes nothing. As
+        for enqueue_bot_stops_for_lease, the caller should hold the queue lock;
+        each release is internal and fire-and-forget, so it is delivered
+        without a live lease (_cleanup_dispatch_locked). A client whose census
+        does not announce camera_path_release is refused it here and at
+        delivery (_client_announce_refusal_locked), and a refusal here counts
+        as failed.
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            held = self._camera_path_play_by_lease.get(lease_id, set())
+            active = self._camera_path_active_by_lease.get(lease_id)
+            command_ids = sorted(held, key=lambda value: (value == active, value), reverse=True)
+            enqueued = 0
+            failed = 0
+            for command_id in command_ids:
+                status, payload = self.enqueue_command(
+                    "camera_path_release",
+                    {"command_id": command_id},
+                    peer="client",
+                    internal=True,
+                )
+                release_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(release_id, int):
+                    self._fire_and_forget_ids.add(release_id)
+                    held.discard(command_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+            if held:
+                self._camera_path_release_pending_leases.add(lease_id)
+            else:
+                self._camera_path_release_pending_leases.discard(lease_id)
+                self._camera_path_play_by_lease.pop(lease_id, None)
+                self._camera_path_successor_by_lease.pop(lease_id, None)
+                self._camera_path_active_by_lease.pop(lease_id, None)
         return {"enqueued": enqueued, "failed": failed}
 
     def _enqueue_command(
@@ -4247,12 +4486,11 @@ class ServerState:
         refusal = self._capability_refusal_locked(peer, cmd, fence_instance, args)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
-        if not internal:
-            client_refusal = self._client_announce_refusal_locked(
-                peer, cmd, fence_instance
-            )
-            if client_refusal is not None:
-                return (409, {"error": client_refusal}), None, None, None
+        client_refusal = self._client_announce_refusal_locked(
+            peer, cmd, fence_instance
+        )
+        if client_refusal is not None:
+            return (409, {"error": client_refusal}), None, None, None
         pin = None
         if peer == "client" and not internal:
             pin = self._client_gate_pin_locked(fence_instance)
@@ -4925,6 +5163,383 @@ class ServerState:
         self._fire_and_forget_ids.discard(command_id)
         self._broker_rows.pop(command_id, None)
 
+    def _drain_close_outcomes_locked(self) -> list[dict[str, object]]:
+        outcomes = self._lease_close_outcomes
+        self._lease_close_outcomes = []
+        return outcomes
+
+    def _flush_close_outcomes(self, outcomes: list[dict[str, object]]) -> None:
+        coordination = self.coordination
+        if coordination is None or not outcomes:
+            return
+        statuses = coordination.note_close_outcomes(outcomes)
+        ignored = sum(1 for status in statuses if status == "ignored")
+        if ignored:
+            with self._lock:
+                self._lease_close_ignored += ignored
+
+    def _append_close_outcome_locked(
+        self,
+        row: dict[str, object],
+        kind: str,
+        *,
+        reasons: list[str] | None = None,
+        error: str = "",
+        reason: str = "",
+        floor: dict[str, object] | None = None,
+        reported_floors: list[dict[str, object]] | None = None,
+    ) -> None:
+        self._lease_close_outcomes.append(
+            {
+                "round": row.get("round"),
+                "run_id": row.get("run_id"),
+                "peer": row.get("peer"),
+                "close_id": str(row.get("close_id") or ""),
+                "kind": kind,
+                "reasons": list(reasons or []),
+                "error": error,
+                "reason": reason,
+                "floor": floor,
+                "reported_floors": list(reported_floors or []),
+            }
+        )
+        if row.get("peer") == "client":
+            # Any outcome resolves the client row, so that run's deferred
+            # server close may go; only a clean one carries a floor (§2.4).
+            deferred = self._deferred_server_closes.get(
+                (row.get("round"), row.get("run_id"))
+            )
+            if deferred is not None:
+                deferred["client_outcome"] = {"kind": kind, "floor": floor}
+
+    def _close_destination_locked(
+        self, instance: object, peer: str
+    ) -> tuple[bool, str]:
+        if not isinstance(instance, str) or not instance:
+            return False, "not_bound"
+        binding = self._bindings.get(instance)
+        if (
+            binding is None
+            or binding.state != BINDING_BOUND
+            or not self._peer_covers(binding, peer)
+            or instance not in self._bound_queues
+            or self._stopping
+            or not self._pin_has_complete_identity(
+                self._destination_pin_locked(peer, instance)
+            )
+        ):
+            return False, "not_bound"
+        if instance in self._version_blocked_instances:
+            return False, "version_blocked"
+        census = self._peer_caps.get(peer, {})
+        close_command = "lease_close_client" if peer == "client" else "lease_close"
+        if (
+            census.get("instance") != instance
+            or census.get("generation") != self.daemon_generation
+            or close_command not in (census.get("commands") or [])
+        ):
+            return False, "close_not_supported"
+        return True, ""
+
+    def _reserve_close_id_locked(self) -> int:
+        close_id = self._next_id
+        self._next_id += 1
+        return close_id
+
+    def _publish_close_locked(
+        self,
+        close_id: int,
+        *,
+        peer: str,
+        instance: str,
+        round_id: int,
+        run_id: str,
+        generation: str,
+        lease_id: str,
+        close_floors: list[dict[str, object]] | None = None,
+    ) -> None:
+        # The caller found the destination reachable in this lock section.
+        pin = self._destination_pin_locked(peer, instance)
+        queue = self._bound_queues[instance]
+        kept: list[dict] = []
+        discarded_exec: list[tuple[str, str, int]] = []
+        finished_operations: list[
+            tuple[ClientIdentity, str, int, str, str]
+        ] = []
+        for command in queue:
+            other_id = command.get("id")
+            other = (
+                self._lease_closes.get(other_id)
+                if isinstance(other_id, int)
+                else None
+            )
+            if (
+                isinstance(other, dict)
+                and other.get("state") == "queued"
+                and other.get("peer") == peer
+                and other.get("instance") == instance
+            ):
+                self._mark_discarded(
+                    command,
+                    "lease_close_superseded",
+                    discarded_exec,
+                    finished_operations,
+                )
+            else:
+                kept.append(command)
+        queue[:] = kept
+        cmd = "lease_close_client" if peer == "client" else "lease_close"
+        args: dict[str, object] = {
+            "close_generation": generation,
+            "close_lease_id": lease_id,
+        }
+        if peer == "server":
+            args["close_floors"] = list(close_floors or [])
+        command = {
+            "id": close_id,
+            "cmd": cmd,
+            "args": args,
+            "_broker_pin": copy.deepcopy(pin),
+        }
+        queue.append(command)
+        self._enqueued_at[close_id] = self._now()
+        binding = self._bindings.get(instance)
+        self._seal_command(close_id, instance, binding)
+        self._lease_closes[close_id] = {
+            "round": round_id,
+            "run_id": run_id,
+            "peer": peer,
+            "instance": instance,
+            "generation": generation,
+            "lease_id": lease_id,
+            "state": "queued",
+            "close_id": str(close_id),
+        }
+
+    @staticmethod
+    def _deferred_close_due(entry: dict[str, object], now: float) -> bool:
+        return now >= float(entry.get("since") or 0.0) + LEASE_CLOSE_SERVER_DELAY_S
+
+    def _deferred_close_quarantine(self, *, any_close: bool = False) -> bool | None:
+        # Read before the broker lock, and only while a deferred server close
+        # could go: one due or resolved, or any of them for a result, which
+        # may resolve one. None means not read.
+        if self.coordination is None:
+            return None
+        now = self._now()
+        with self._lock:
+            entries = list(self._deferred_server_closes.values())
+        if any_close:
+            waiting = bool(entries)
+        else:
+            waiting = any(
+                entry.get("client_outcome") is not None
+                or self._deferred_close_due(entry, now)
+                for entry in entries
+            )
+        return self._retail_quarantined() if waiting else None
+
+    def _publish_due_deferred_closes_locked(self, quarantined: bool | None) -> None:
+        # quarantined is the caller's _deferred_close_quarantine; a close it
+        # did not read for waits for a later call.
+        coordination = self.coordination
+        if coordination is None:
+            return
+        now = self._now()
+        for key, entry in list(self._deferred_server_closes.items()):
+            round_id, run_id = key
+            outcome = entry.get("client_outcome")
+            if outcome is None and not self._deferred_close_due(entry, now):
+                continue
+            if quarantined is None:
+                continue
+            self._deferred_server_closes.pop(key, None)
+            if quarantined:
+                coordination.note_close_unreachable(
+                    round_id, run_id, "server", "retail_quarantine"
+                )
+                continue
+            instance = entry.get("instance")
+            reachable, reason = self._close_destination_locked(instance, "server")
+            if not reachable:
+                coordination.note_close_unreachable(
+                    round_id, run_id, "server", reason
+                )
+                continue
+            floors: list[dict[str, object]] = []
+            if isinstance(outcome, dict) and outcome.get("kind") == "clean":
+                floor = outcome.get("floor")
+                conn_gen = floor.get("conn_gen") if isinstance(floor, dict) else None
+                if self._is_plain_int(conn_gen) and isinstance(floor, dict):
+                    floors = [dict(floor)]
+            close_id = self._reserve_close_id_locked()
+            accepted = coordination.note_close_published(
+                round_id,
+                run_id,
+                "server",
+                str(close_id),
+                floors,
+            )
+            if not accepted:
+                continue
+            if isinstance(instance, str):
+                self._publish_close_locked(
+                    close_id,
+                    peer="server",
+                    instance=instance,
+                    round_id=round_id,
+                    run_id=run_id,
+                    generation=str(entry.get("generation") or ""),
+                    lease_id=str(entry.get("lease_id") or ""),
+                    close_floors=floors,
+                )
+
+    def _client_floor_from_census(
+        self, census: dict[str, object]
+    ) -> dict[str, object] | None:
+        conn_gen = census.get("conn_gen")
+        if not isinstance(conn_gen, int) or isinstance(conn_gen, bool):
+            return None
+        return {
+            "net_low": census.get("net_low"),
+            "net_high": census.get("net_high"),
+            "conn_gen": conn_gen,
+            "move_id": census.get("move_floor"),
+            "weapon_id": census.get("weapon_floor"),
+        }
+
+    @staticmethod
+    def _is_plain_int(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    @staticmethod
+    def _is_plain_str(value: object) -> bool:
+        return isinstance(value, str)
+
+    def _census_fields_ok(self, census: dict[str, object], peer: str) -> bool:
+        for key in ("generation", "lease_id", "peer", "state"):
+            if not self._is_plain_str(census.get(key)):
+                return False
+        entries = census.get("entries")
+        if not isinstance(entries, list):
+            return False
+        for item in entries:
+            if not isinstance(item, dict):
+                return False
+            if not self._is_plain_str(item.get("name")):
+                return False
+            if not self._is_plain_str(item.get("state")):
+                return False
+            if (
+                "reason" in item
+                and item.get("reason") is not None
+                and not self._is_plain_str(item.get("reason"))
+            ):
+                return False
+        if peer == "client":
+            for key in ("move_floor", "weapon_floor", "net_low", "net_high"):
+                if not self._is_plain_int(census.get(key)):
+                    return False
+            conn_gen = census.get("conn_gen")
+            if conn_gen is not None and not self._is_plain_int(conn_gen):
+                return False
+            return True
+        floors = census.get("floors")
+        if not isinstance(floors, list):
+            return False
+        for item in floors:
+            if not isinstance(item, dict):
+                return False
+            for key in ("net_low", "net_high", "conn_gen", "move_id", "weapon_id"):
+                if not self._is_plain_int(item.get(key)):
+                    return False
+        return True
+
+    def _close_outcome_from_result_locked(
+        self, command_id: int, body: dict, row: dict[str, object]
+    ) -> None:
+        # command_id is the id store_result validated; the body may carry it
+        # as a string.
+        fence = self._command_fence.get(command_id)
+        instance = row.get("instance")
+        binding = self._bindings.get(instance) if isinstance(instance, str) else None
+        sealed_epoch = fence[1] if fence is not None else None
+        if binding is None or binding.epoch != sealed_epoch:
+            self._append_close_outcome_locked(
+                row, "residue", reasons=["binding_epoch_changed"]
+            )
+            return
+        if body.get("ok") is not True:
+            error = body.get("error")
+            if not isinstance(error, str) or not error:
+                error = "close_failed"
+            self._append_close_outcome_locked(row, "rejected", error=error)
+            return
+        census = body.get("lease_close")
+        peer = str(row.get("peer") or "")
+        if not isinstance(census, dict) or not self._census_fields_ok(census, peer):
+            self._append_close_outcome_locked(
+                row, "residue", reasons=["census_malformed"]
+            )
+            return
+        if (
+            census.get("generation") != row.get("generation")
+            or census.get("lease_id") != row.get("lease_id")
+            or census.get("peer") != row.get("peer")
+        ):
+            self._lease_close_ignored += 1
+            return
+        entries = census.get("entries")
+        assert isinstance(entries, list)
+        entry_states = [
+            item.get("state") for item in entries if isinstance(item, dict)
+        ]
+        state = census.get("state")
+        cleanish = all(item in {"clean", "stopped"} for item in entry_states)
+        residue_entries = [
+            item
+            for item in entries
+            if isinstance(item, dict) and item.get("state") not in {"clean", "stopped"}
+        ]
+        floor = None
+        reported_floors: list[dict[str, object]] = []
+        if peer == "client":
+            floor = self._client_floor_from_census(census)
+        else:
+            floors = census.get("floors")
+            if isinstance(floors, list):
+                reported_floors = [dict(item) for item in floors if isinstance(item, dict)]
+        if state == "clean" and cleanish:
+            if peer == "client" and floor is None:
+                self._append_close_outcome_locked(
+                    row, "residue", reasons=["conn_gen_unknown"]
+                )
+                return
+            self._append_close_outcome_locked(
+                row,
+                "clean",
+                floor=floor,
+                reported_floors=reported_floors,
+            )
+            return
+        if state != "clean" and residue_entries:
+            reasons: list[str] = []
+            for item in residue_entries:
+                reason = item.get("reason")
+                if isinstance(reason, str) and reason:
+                    name = reason
+                else:
+                    name = str(item.get("name") or "")
+                if name and name not in reasons:
+                    reasons.append(name)
+            self._append_close_outcome_locked(
+                row, "residue", reasons=reasons, floor=floor, reported_floors=reported_floors
+            )
+            return
+        self._append_close_outcome_locked(
+            row, "residue", reasons=["census_malformed"]
+        )
+
     def _publish_release_locked(
         self,
         row: dict,
@@ -4945,6 +5560,13 @@ class ServerState:
             or self._peer_queue_len(release_peer) >= MAX_QUEUE
         ):
             return False, "queue_full", None
+        # The same census check as an enqueue: camera_path_release goes only
+        # to a client that announces it.
+        refusal = self._client_announce_refusal_locked(
+            release_peer, target, pin.get("instance")
+        )
+        if refusal is not None:
+            return False, refusal, None
         if pin.get("legacy") is True:
             queue = self._legacy_queues.get(pin.get("peer"))
         else:
@@ -5101,9 +5723,12 @@ class ServerState:
         token, token_class = classify_instance_token(instance)
         if source_pid is not None and source_creation_time is None:
             source_creation_time = self._lookup_creation_time(source_pid)
+        deferred_quarantine = self._deferred_close_quarantine()
 
         with self._lock:
             now = self._now()
+            if coordination is not None:
+                self._publish_due_deferred_closes_locked(deferred_quarantine)
             prev_poll = self._last_poll_at.get(peer)
             self._poll_versions[peer] = version
             self._last_poll_at[peer] = now
@@ -5205,17 +5830,23 @@ class ServerState:
                 )
 
             if version_state in {"legacy_blocked", "version_mismatch"}:
-                return 200, {"commands": [], "delay_ms": 0, "bind": bind_label}
-
-            if queue is None:
-                return 200, {"commands": [], "delay_ms": 0, "bind": bind_label}
+                if token is not None:
+                    self._version_blocked_instances.add(token)
+                early = True
+            else:
+                if token is not None:
+                    self._version_blocked_instances.discard(token)
+                early = queue is None
 
             deliver_queue = queue
             deliver_accredited = accredited
 
         commands: list[dict] = []
         delay_ms = 0
-        while True:
+        # A blocked poll, or one with no queue, delivers nothing but still
+        # leaves through the epilogue below: the sweep above may have
+        # discarded closes and other commands.
+        while not early:
             with self._lock:
                 queue_ref = deliver_queue
                 bound = self._bindings.get(token) if token is not None else None
@@ -5243,6 +5874,18 @@ class ServerState:
             )
 
             with self._lock:
+                # The expiry above can run a cleanup that replaces this
+                # queue's list; the close it publishes is on the new one.
+                live = (
+                    self._bound_queues.get(token)
+                    if token is not None
+                    else self._legacy_queues.get(peer)
+                )
+                if live is None:
+                    break
+                if live is not deliver_queue:
+                    deliver_queue = live
+                    continue
                 queue = deliver_queue
                 bound = self._bindings.get(token) if token is not None else None
                 hold_run_id = _binding_run_id(bound) if bound is not None else None
@@ -5332,8 +5975,16 @@ class ServerState:
                     ):
                         owner = self._command_owner.get(command_id)
                         discard_reason = ""
+                        close_row = self._lease_closes.get(command_id)
                         if retail_quarantined:
                             discard_reason = "retail_quarantine"
+                        elif close_row is not None:
+                            round_id = close_row.get("round")
+                            if not (
+                                isinstance(round_id, int)
+                                and coordination.lease_close_deliverable(round_id)
+                            ):
+                                discard_reason = "lease_close_stale"
                         elif self._cleanup_dispatch_locked(command_id, command_name):
                             pass
                         elif owner is None:
@@ -5368,6 +6019,15 @@ class ServerState:
                     tracked = self._broker_rows.get(command_id)
                     if isinstance(tracked, dict) and tracked.get("state") == "queued":
                         tracked["state"] = "delivered"
+                    if command_name == "camera_path_play" and isinstance(command_id, int):
+                        self._note_camera_path_play_locked(command_id, command.get("args"))
+                    close_row = (
+                        self._lease_closes.get(command_id)
+                        if isinstance(command_id, int)
+                        else None
+                    )
+                    if isinstance(close_row, dict):
+                        close_row["state"] = "delivered"
                     if command_name == "action_hold" and isinstance(command_id, int):
                         delivered_hold = self._hold_by_command.get(command_id)
                         if delivered_hold is not None:
@@ -5389,6 +6049,19 @@ class ServerState:
             except Exception:
                 pass
         self._finish_operations(finished_operations)
+        with self._lock:
+            close_outcomes = self._drain_close_outcomes_locked()
+        self._flush_close_outcomes(close_outcomes)
+
+        # Capacity has just been freed. Retry only cleanup already requested by
+        # a lease end, never plays held by a live lease. New releases leave on
+        # the next poll and pass the usual binding/census checks at delivery.
+        if peer == "client":
+            with self._lock:
+                retry_leases = tuple(self._camera_path_release_pending_leases)
+            if retry_leases and not self._retail_quarantined():
+                for lease_id in retry_leases:
+                    self.enqueue_camera_path_releases_for_lease(lease_id)
 
         return 200, {"commands": commands, "delay_ms": delay_ms, "bind": bind_label}
 
@@ -5499,6 +6172,15 @@ class ServerState:
         command_id = command.get("id")
         if command_id is None:
             return
+        close_row = (
+            self._lease_closes.pop(command_id, None)
+            if isinstance(command_id, int)
+            else None
+        )
+        if isinstance(close_row, dict):
+            self._append_close_outcome_locked(
+                close_row, "discarded", reason=reason
+            )
         fire_and_forget = command_id in self._fire_and_forget_ids
         if fire_and_forget:
             self._fire_and_forget_ids.discard(command_id)
@@ -5593,6 +6275,9 @@ class ServerState:
 
         owner_operation: tuple[ClientIdentity, str, int] | None = None
         discarded = False
+        close_handled = False
+        coordination = self.coordination
+        deferred_quarantine = self._deferred_close_quarantine(any_close=True)
         with self._lock:
             fence = self._command_fence.get(command_id)
             if fence is not None:
@@ -5605,7 +6290,8 @@ class ServerState:
                         else None
                     )
                     own_hold = (
-                        isinstance(hold_record, dict)
+                        command_id not in self._lease_closes
+                        and isinstance(hold_record, dict)
                         and hold_record.get("command_id") == command_id
                         and hold_record.get("instance") == target_instance
                     )
@@ -5644,45 +6330,67 @@ class ServerState:
                             "origin_epoch": self._station_epoch,
                         },
                     )
-            deadline = self._operation_deadlines.get(command_id)
-            known = (
-                command_id in self._enqueued_at
-                or command_id in self._fire_and_forget_ids
-            )
-            if not known or (deadline is not None and t_result >= deadline):
-                discarded = True
-                self._fire_and_forget_ids.discard(command_id)
-                self._results.pop(command_id, None)
-                self._enqueued_at.pop(command_id, None)
-                self._operation_deadlines.pop(command_id, None)
-                owner = self._command_owner.pop(command_id, None)
-                self._drop_broker_row_locked(command_id)
-                if owner is not None:
-                    owner_operation = (owner[0], owner[1], command_id)
-            elif command_id in self._fire_and_forget_ids:
-                self._fire_and_forget_ids.discard(command_id)
-                self._results.pop(command_id, None)
-                self._enqueued_at.pop(command_id, None)
-                self._operation_deadlines.pop(command_id, None)
-                owner = self._command_owner.pop(command_id, None)
-                self._drop_broker_row_locked(command_id)
-                if owner is not None:
-                    owner_operation = (owner[0], owner[1], command_id)
-            else:
-                t_enqueue = self._enqueued_at.get(command_id)
-                if t_enqueue is not None:
-                    meta["t_enqueue"] = t_enqueue
-                    meta["rtt_s"] = t_result - t_enqueue
-                stored["_server"] = meta
-                self._results[command_id] = stored
-                self._trim_results_locked()
-                owner = self._command_owner.get(command_id)
-                self._drop_broker_row_locked(command_id)
-                if owner is not None:
-                    owner_operation = (owner[0], owner[1], command_id)
-            self._note_hold_result_locked(
-                command_id, stored, discarded, instance or ""
-            )
+            close_row = self._lease_closes.get(command_id)
+            if close_row is not None:
+                close_handled = True
+                if close_row.get("state") != "delivered":
+                    # No poll delivered it, so the game did not run it.
+                    discarded = True
+                    self._lease_close_ignored += 1
+                else:
+                    self._lease_closes.pop(command_id, None)
+                    self._enqueued_at.pop(command_id, None)
+                    self._close_outcome_from_result_locked(
+                        command_id, stored, close_row
+                    )
+            if not close_handled:
+                deadline = self._operation_deadlines.get(command_id)
+                known = (
+                    command_id in self._enqueued_at
+                    or command_id in self._fire_and_forget_ids
+                )
+                if not known or (deadline is not None and t_result >= deadline):
+                    discarded = True
+                    self._fire_and_forget_ids.discard(command_id)
+                    self._results.pop(command_id, None)
+                    self._enqueued_at.pop(command_id, None)
+                    self._operation_deadlines.pop(command_id, None)
+                    owner = self._command_owner.pop(command_id, None)
+                    self._drop_broker_row_locked(command_id)
+                    if owner is not None:
+                        owner_operation = (owner[0], owner[1], command_id)
+                elif command_id in self._fire_and_forget_ids:
+                    self._fire_and_forget_ids.discard(command_id)
+                    self._results.pop(command_id, None)
+                    self._enqueued_at.pop(command_id, None)
+                    self._operation_deadlines.pop(command_id, None)
+                    owner = self._command_owner.pop(command_id, None)
+                    self._drop_broker_row_locked(command_id)
+                    if owner is not None:
+                        owner_operation = (owner[0], owner[1], command_id)
+                else:
+                    t_enqueue = self._enqueued_at.get(command_id)
+                    if t_enqueue is not None:
+                        meta["t_enqueue"] = t_enqueue
+                        meta["rtt_s"] = t_result - t_enqueue
+                    stored["_server"] = meta
+                    self._results[command_id] = stored
+                    self._trim_results_locked()
+                    owner = self._command_owner.get(command_id)
+                    self._drop_broker_row_locked(command_id)
+                    if owner is not None:
+                        owner_operation = (owner[0], owner[1], command_id)
+                self._note_hold_result_locked(
+                    command_id, stored, discarded, instance or ""
+                )
+                self._note_camera_path_result_locked(command_id, stored)
+            if coordination is not None:
+                # Last in the section: the returns above publish nothing, and
+                # a server close this result's client outcome lets go goes now.
+                self._publish_due_deferred_closes_locked(deferred_quarantine)
+            close_outcomes = self._drain_close_outcomes_locked()
+
+        self._flush_close_outcomes(close_outcomes)
 
         if owner_operation is not None and self.coordination is not None:
             ok_value = stored.get("ok")
@@ -5982,7 +6690,8 @@ class ServerState:
         )
         cleanup["vehicle_release_enqueued"] = 0
         self._retire_queued_holds(session_id, lease_id)
-        if self._retail_quarantined():
+        quarantined = self._retail_quarantined()
+        if quarantined:
             fenced = self._fence_open_holds(session_id, lease_id)
             if fenced:
                 degraded = cleanup.get("cleanup_degraded", [])
@@ -6016,10 +6725,149 @@ class ServerState:
                     enqueued += 1
             if enqueued:
                 cleanup["hold_cancel_enqueued"] = enqueued
+        close_outcomes: list[dict[str, object]] = []
+        if coordination is not None:
+            with self._lock:
+                if coordination.cleanup_authority_active(session_id, lease_id):
+                    info = coordination.lease_end_round(session_id, lease_id)
+                    if info is not None:
+                        round_id = info["round"]
+                        generation = (
+                            str(self.daemon_generation)
+                            if self.daemon_generation is not None
+                            else ""
+                        )
+                        reports: list[dict[str, object]] = []
+                        published: dict[tuple[str, str], int] = {}
+                        deferred: dict[tuple[str, str], dict[str, object]] = {}
+                        client_published: set[str] = set()
+                        for row in info["rows"]:
+                            run_id = str(row.get("run_id") or "")
+                            peer = str(row.get("peer") or "")
+                            instance = row.get("instance")
+                            if quarantined:
+                                reports.append(
+                                    {
+                                        "run_id": run_id,
+                                        "peer": peer,
+                                        "action": "unreachable",
+                                        "close_id": "",
+                                        "reason": "retail_quarantine",
+                                        "carried_floors": [],
+                                    }
+                                )
+                                continue
+                            reachable, cause = self._close_destination_locked(
+                                instance, peer
+                            )
+                            if not reachable:
+                                reports.append(
+                                    {
+                                        "run_id": run_id,
+                                        "peer": peer,
+                                        "action": "unreachable",
+                                        "close_id": "",
+                                        "reason": cause,
+                                        "carried_floors": [],
+                                    }
+                                )
+                                continue
+                            if peer == "client":
+                                close_id = self._reserve_close_id_locked()
+                                reports.append(
+                                    {
+                                        "run_id": run_id,
+                                        "peer": peer,
+                                        "action": "published",
+                                        "close_id": str(close_id),
+                                        "reason": "",
+                                        "carried_floors": [],
+                                    }
+                                )
+                                published[(run_id, peer)] = close_id
+                                client_published.add(run_id)
+                            elif run_id in client_published:
+                                reports.append(
+                                    {
+                                        "run_id": run_id,
+                                        "peer": peer,
+                                        "action": "deferred",
+                                        "close_id": "",
+                                        "reason": "",
+                                        "carried_floors": [],
+                                    }
+                                )
+                                # The 10 s run from the round's opening,
+                                # whose age the coordinator gives (§2.4).
+                                deferred[(run_id, peer)] = {
+                                    "instance": instance,
+                                    "generation": generation,
+                                    "lease_id": lease_id,
+                                    "since": self._now()
+                                    - float(info.get("age_s") or 0.0),
+                                }
+                            else:
+                                close_id = self._reserve_close_id_locked()
+                                reports.append(
+                                    {
+                                        "run_id": run_id,
+                                        "peer": peer,
+                                        "action": "published",
+                                        "close_id": str(close_id),
+                                        "reason": "",
+                                        "carried_floors": [],
+                                    }
+                                )
+                                published[(run_id, peer)] = close_id
+                        accepted = coordination.note_close_round(
+                            int(round_id), reports
+                        )
+                        enqueued_closes = 0
+                        for key, close_id in published.items():
+                            if key not in accepted:
+                                continue
+                            run_id, peer = key
+                            instance = next(
+                                (
+                                    row.get("instance")
+                                    for row in info["rows"]
+                                    if row.get("run_id") == run_id
+                                    and row.get("peer") == peer
+                                ),
+                                None,
+                            )
+                            if isinstance(instance, str):
+                                self._publish_close_locked(
+                                    close_id,
+                                    peer=peer,
+                                    instance=instance,
+                                    round_id=int(round_id),
+                                    run_id=run_id,
+                                    generation=generation,
+                                    lease_id=lease_id,
+                                    close_floors=[],
+                                )
+                                enqueued_closes += 1
+                        for key, entry in deferred.items():
+                            if key not in accepted:
+                                continue
+                            run_id, _peer = key
+                            self._deferred_server_closes[(int(round_id), run_id)] = dict(
+                                entry
+                            )
+                        cleanup["lease_close_enqueued"] = enqueued_closes
+                close_outcomes = self._drain_close_outcomes_locked()
+            self._flush_close_outcomes(close_outcomes)
         with self._lock:
             pending_bots = bool(self._bot_by_lease.get(lease_id))
             pending_drives = bool(self._drive_by_lease.get(lease_id))
-        if not vehicle_active and not pending_bots and not pending_drives:
+            pending_paths = bool(self._camera_path_play_by_lease.get(lease_id))
+        if (
+            not vehicle_active
+            and not pending_bots
+            and not pending_drives
+            and not pending_paths
+        ):
             return cleanup
 
         if self._retail_quarantined():
@@ -6029,6 +6877,12 @@ class ServerState:
                 values.append("retail_quarantine")
             if pending_drives:
                 values.append("survivor_drive_release_unconfirmed")
+            if pending_paths:
+                # No release goes out now. Keep the obligation for a later
+                # drain after quarantine clears; no client confirmed a stop.
+                with self._lock:
+                    self._camera_path_release_pending_leases.add(lease_id)
+                values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
             return cleanup
 
@@ -6054,6 +6908,7 @@ class ServerState:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
             report = self.enqueue_bot_stops_for_lease(lease_id)
             drive_report = self.enqueue_survivor_drive_releases_for_lease(lease_id)
+            paths = self.enqueue_camera_path_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
             cleanup["bot_stop_enqueued"] = report["enqueued"]
         if report["failed"]:
@@ -6070,6 +6925,13 @@ class ServerState:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("survivor_drive_release_unconfirmed")
+            cleanup["cleanup_degraded"] = values
+        if paths["enqueued"] or paths["failed"]:
+            cleanup["camera_path_release_enqueued"] = paths["enqueued"]
+        if paths["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("camera_path_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
         return cleanup
 
@@ -6340,6 +7202,9 @@ class ServerState:
             except Exception:
                 pass
         self._finish_operations(finished_operations)
+        with self._lock:
+            close_outcomes = self._drain_close_outcomes_locked()
+        self._flush_close_outcomes(close_outcomes)
 
     def resume_accepting(self) -> None:
         with self._lock:

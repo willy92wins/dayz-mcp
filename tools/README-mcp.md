@@ -115,9 +115,26 @@ A same-account process that copies `supervisor-identity.json` and rewrites its p
 
 Read-only tools do not require a lease. Never use another session's token or terminate a process to advance the FIFO queue.
 
-Requires a lease (these mutate the game): `world_spawn`, `world_spawn_batch`, `scene_clear`, `object_delete`, `object_resolve`, `object_set_health`, `player_teleport`, `player_heal`, `player_godmode`, `player_respawn`, `player_kill`, `inventory_give`, `inventory_attach`, `inventory_move`, `hands_take`, `hands_attach`, `loadout_apply`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `vehicle_get_in_client`, `vehicle_trace`, `anim_timeline`, `player_trace`, `weapon_aim`, `weapon_fire`, `weapon_raise`, `weapon_sights`, `infected_drive`, `survivor_drive`, `bot_start`, `bot_stop`, `camera_set`, `key_press`, `input_trigger`, `player_look_at`, `player_view_set`, `player_move`, `actor_emote`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `vehicle_door`, `restore_gameplay`, `action_hold`, `action_use`, `ui_set_text`, `ui_click`, `ui_focus`, `ui_reload_layout`, `ui_dialog`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally. The partition is the code's own: bridge commands not in `READ_ONLY_COMMANDS` (`session_coordination.py`) are mutating.
+Requires a lease (these mutate the game): `world_spawn`, `world_spawn_batch`, `scene_clear`, `object_delete`, `object_resolve`, `object_set_health`, `player_teleport`, `player_heal`, `player_godmode`, `player_respawn`, `player_kill`, `inventory_give`, `inventory_attach`, `inventory_move`, `hands_take`, `hands_attach`, `loadout_apply`, `notify_players`, `vehicle_enter`, `vehicle_control`, `vehicle_release`, `vehicle_prepare_fixture`, `vehicle_get_in_client`, `vehicle_trace`, `anim_timeline`, `player_trace`, `weapon_aim`, `weapon_fire`, `weapon_raise`, `weapon_sights`, `infected_drive`, `survivor_drive`, `bot_start`, `bot_stop`, `camera_set`, `camera_set_focus`, `camera_path_play`, `camera_path_release`, `hud_set`, `key_press`, `input_trigger`, `player_look_at`, `player_view_set`, `player_move`, `actor_emote`, `world_time_set`, `world_weather_set`, `engine_set`, `object_anim` (write), `vehicle_door`, `restore_gameplay`, `action_hold`, `action_use`, `ui_set_text`, `ui_click`, `ui_focus`, `ui_reload_layout`, `ui_dialog`, `dayz_test_run`, `dayz_test_stop`. The last two acquire and release the lease internally. The partition is the code's own: bridge commands not in `READ_ONLY_COMMANDS` (`session_coordination.py`) are mutating.
 
-No lease (read-only): `action_cursor`, `player_find`, `query_all_players`, `query_player_state`, `weapon_state`, `entities_query`, `scene_entities`, `surface_query`, `scene_raycast`, `object_inspect`, `object_doors`, `input_describe`, `world_time_get`, `loadout_get`, `server_perf`, `nav_path_query`, `players_visibility`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `logs_since`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
+No lease (read-only): `action_cursor`, `player_find`, `query_all_players`, `query_player_state`, `weapon_state`, `entities_query`, `scene_entities`, `surface_query`, `scene_raycast`, `object_inspect`, `object_doors`, `input_describe`, `world_time_get`, `loadout_get`, `server_perf`, `nav_path_query`, `players_visibility`, `telemetry_read`, `vehicle_telemetry`, `camera_get`, `gameplay_state`, `logs_since`, `ui_tree`, `query_get_in_condition`, `bridge_status`, `session_status`, `capture_screenshot`, `pipeline_*`.
+
+`gameplay_state()` reads `gameplay.controls_suppressed` (bridge flag),
+`engine_controls_disabled` (`MissionGameplay.IsControlDisabled()`), `hud_shown`
+(`IngameHud.GetHudPanelWidget().IsVisible()`, the widget flag changed by
+`Hud.Show`, not proof of rendered visibility), and `player_simulation_disabled`
+(the bridge flag, not an engine readback). Its separate `hud` is `MCPHudState`:
+`hud_hide`/`quickbar_hide` read HUD_HIDE/QUICKBAR_HIDE and `visible` is true when
+neither flag is active. The obsolete `IngameHud.IsHudVisible()` stub is not used.
+Read it after `restore_gameplay`, whose automatic verification remains camera-only.
+`camera_path_release(command_id)` requires a lease, aborts only that playing id,
+restores camera/gameplay and returns `matched`; lease-end internal cleanup uses
+the same bridge command. `camera_set_focus` takes `camera_set`'s camera arguments
+and required `focus_distance`/`focus_blur`, with the same validation and lease.
+Both focus values are at most 1e9; distance must be above zero and blur
+non-negative, including as the bridge's 32-bit floats. These controls are listed
+with a lease or `--no-progressive-disclosure`; the reader is listed before a lease.
+
 
 A mutation without a lease returns `lease_required`. Call `session_acquire_wait` first.
 
@@ -291,6 +308,8 @@ baseline remains separately unmeasured (`empty_load_baseline_record()`).
 A named instance writes those logs under `dev_root\_server\profiles-<token>` and `dev_root\_client\profiles-<token>` (offline uses the client leaf). `logs_since` reads both role leaves of that token, and so does `wait_for(condition="log_matches")` without `role`; with `role` it reads only that role's leaf (`offline` the client's). `wait_for(condition="file_matches", role=...)` reads one file under one role's leaf: `server` (the default), `client`, or `offline` (the client leaf). The default instance stays on `profiles`. Artifacts reported by `dayz_test_run` / `dayz_test_stop` use the same leaf.
 
 DayZDiag defines `DIAG_DEVELOPER` but `IsDebug()` is false there, so vanilla never registers `PluginInventoryDebug`, which `DayZPlayerInventory` reads without a null check. The addon registers it with the plugin's own defaults (the retail branch at every read), and each peer's script log gets `[DayZ_MCP] diag PluginInventoryDebug registered=1` (`registered=0` when it is still missing) every time a mission starts its plugin manager; match it with `lookback_from="launch"`.
+
+On those builds the addon also registers `PluginConfigDebugProfile`, which vanilla's `PluginItemDiagnostic.OnInit` needs (#292). All plugins are created before any `OnInit` runs. The profile loads preferences and presets and saves missing defaults to `$profile:ScriptConsole/debugProfile.cfg` (reading legacy `$profile:debugProfile.cfg` when the folder is absent). The single diagnostic line above still reports only `PluginInventoryDebug`.
 
 ### Spawn safely
 

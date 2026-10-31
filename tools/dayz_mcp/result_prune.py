@@ -132,6 +132,11 @@ PRUNABLE_FIELDS = (
     "scene_entities",
     # scene_clear fills it with its counts (5a21).
     "scene_clear",
+    # camera_path_play fills it with the path's state (d026).
+    "camera_path",
+    # hud_set and gameplay_state fill it with the HUD flags they read (f427).
+    "hud",
+    "gameplay",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -252,7 +257,7 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "flag_restored": frozenset({"action_hold"}),
     "cleanup_complete": frozenset({"action_hold", "action_hold_cancel", "loadout_clear"}),
     # survivor_drive_release answers whether the id named the live drive (c801).
-    "matched": frozenset({"action_hold_cancel", "survivor_drive_release"}),
+    "matched": frozenset({"action_hold_cancel", "camera_path_release", "survivor_drive_release"}),
     # player_view_set read-back (854c), also on view_not_applied.
     "person_view": frozenset({"player_view_set"}),
     "camera_class": frozenset({"player_view_set"}),

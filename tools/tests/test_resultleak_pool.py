@@ -371,7 +371,7 @@ class ResultPoolSourceTest(unittest.TestCase):
         bridge = source("MCPBridge.c")
         recycle = body(bridge, "void RecycleResultCallback(")
         self.assertIn("m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS", recycle)
-        self.assertIn("m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS", body(bridge, "protected void StartPoll()"))
+        self.assertIn("m_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1", body(bridge, "protected void StartPoll()"))
         cb = body(source("MCPCallbacks.c"), "class MCPResultCallback :")
         for event in ("Error", "Timeout"):
             handler = body(cb, "override void On" + event + "(")
