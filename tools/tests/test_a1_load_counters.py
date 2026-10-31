@@ -30,6 +30,12 @@ _WORK_FIELDS = ("cmds", "cmd_bytes", "busy_ms", "last_cmds_per_poll")
 _WIRE_FIELDS = ("cc", "cb", "bms", "lcp")
 
 
+def _int_divide(value: int, divisor: int) -> int:
+    if not -2_147_483_648 <= value <= 2_147_483_647:
+        raise AssertionError(f"int32 overflow before division: {value}")
+    return value // divisor if value >= 0 else -(-value // divisor)
+
+
 def _bridge_harness(name: str) -> dict:
     """Execute real counter/poll/drain/post bodies with fake dispatch and clock.
 
@@ -54,10 +60,11 @@ def _bridge_harness(name: str) -> dict:
     ns = dict(
         LOAD_COUNTER_CAP=_CAP, MAX_DISPATCH_PER_TICK=2, _S=WireString,
         TICKS_PER_MS=int(re.search(r"TICKS_PER_MS = (\d+);", source)[1]),
-        IntDivide=lambda value, divisor: value // divisor if value >= 0 else -(-value // divisor),
+        IntDivide=_int_divide,
+        IntRemainder=lambda value, divisor: value - _int_divide(value, divisor) * divisor,
         MAX_CALLBACK_REFS=int(re.search(r"MAX_CALLBACK_REFS = (\d+);", source)[1]),
         MAX_POLL_RESULTS=int(re.search(r"MAX_POLL_RESULTS = (\d+);", source)[1]),
-        m_Cmds=0, m_CmdBytes=0, m_BusyMs=0, m_LastCmdsPerPoll=0,
+        m_Cmds=0, m_CmdBytes=0, m_BusyMs=0, m_BusyTicksRemainder=0, m_LastCmdsPerPoll=0,
         m_Configured=True, m_Ctx=transport, m_PollCtx=transport,
         m_Pending=EnforceArray(), m_CallbackRefs=EnforceArray(),
         m_Jobs=EnforceArray(), m_PollCallback=object(),
@@ -121,10 +128,13 @@ def _bridge_harness(name: str) -> dict:
         body = method_body(source, signature)
         body = re.sub(r'\bLog\([^;\n]*\);', '', body)
         if signature == "protected void DispatchMeasured(MCPCommand command)":
-            # The shared subset refuses division. Lower only this expression,
-            # preserving its source operands and integer truncation toward zero.
-            # If the division is absent, leave the raw ticks for assertions to catch.
-            body = re.sub(r"\b(TickCount\(\w+\))\s*/\s*(\w+)", r"IntDivide(\1, \2)", body)
+            # The shared subset refuses / and %. Lower these simple operands
+            # with int32 bounds checks and Enforce truncation toward zero.
+            for operator, helper in (("/", "IntDivide"), ("%", "IntRemainder")):
+                body = re.sub(
+                    rf"\b(TickCount\(\w+\)|\w+)\s*{operator}\s*(\w+)",
+                    rf"{helper}(\1, \2)", body,
+                )
         translate(
             signature + "\n{" + body + "}\n", signature, ns,
             members=set(re.findall(r'\bm_\w+', body)),
@@ -189,7 +199,7 @@ class LoadCountersTest(unittest.TestCase):
                 self.assertEqual(ns["m_LastCmdsPerPoll"], 1)
                 self.assertEqual(ns["m_Cmds"], 6)
 
-    def test_dispatch_tick_deltas_truncate_to_nonnegative_milliseconds(self) -> None:
+    def test_dispatch_tick_deltas_preserve_fractional_milliseconds(self) -> None:
         for name in ("MCPBridge.c", "MCPClientBridge.c"):
             for ticks, milliseconds in ((-2_147_483_648, 0), (-30_000, 0), (-1, 0),
                     (0, 0), (9_999, 0), (10_000, 1), (19_999, 1), (30_000, 3),
@@ -200,6 +210,38 @@ class LoadCountersTest(unittest.TestCase):
                     ns["DispatchMeasured"](_command(0, duration_ticks=ticks))
                     self.assertEqual(ns["m_BusyMs"], 7 + milliseconds)
                     self.assertIs(type(ns["m_BusyMs"]), int)
+                    self.assertEqual(ns["m_BusyTicksRemainder"], max(ticks, 0) % 10_000)
+
+    def test_fast_dispatches_accumulate_and_carry_remainder(self) -> None:
+        for name in ("MCPBridge.c", "MCPClientBridge.c"):
+            with self.subTest(bridge=name):
+                ns = _bridge_harness(name)
+                for index in range(50):
+                    ns["DispatchMeasured"](_command(index, duration_ticks=2_500))
+                self.assertEqual(ns["m_BusyMs"], 12)
+                self.assertEqual(ns["m_BusyTicksRemainder"], 5_000)
+                for ticks, milliseconds, remainder in (
+                    (4_999, 12, 9_999), (-2_147_483_648, 12, 9_999),
+                    (-1, 12, 9_999), (0, 12, 9_999), (1, 13, 0),
+                    (12_500, 14, 2_500), (7_500, 15, 0),
+                ):
+                    ns["DispatchMeasured"](_command(50, duration_ticks=ticks))
+                    self.assertEqual(ns["m_BusyMs"], milliseconds)
+                    self.assertEqual(ns["m_BusyTicksRemainder"], remainder)
+
+    def test_max_tick_delta_with_remainder_and_saturated_counter(self) -> None:
+        for name in ("MCPBridge.c", "MCPClientBridge.c"):
+            for busy_ms in (0, _CAP - 1, _CAP):
+                with self.subTest(bridge=name, busy_ms=busy_ms):
+                    ns = _bridge_harness(name)
+                    ns.update(m_BusyMs=busy_ms, m_BusyTicksRemainder=9_999)
+                    total_ticks = 9_999
+                    for index in range(3):
+                        ns["DispatchMeasured"](_command(index, duration_ticks=2_147_483_647))
+                        total_ticks += 2_147_483_647
+                        milliseconds, remainder = divmod(total_ticks, 10_000)
+                        self.assertEqual(ns["m_BusyMs"], min(_CAP, busy_ms + milliseconds))
+                        self.assertEqual(ns["m_BusyTicksRemainder"], remainder)
 
     def test_world_spawn_counts_when_drained_not_when_queued(self) -> None:
         ns = _bridge_harness("MCPBridge.c")

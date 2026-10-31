@@ -506,6 +506,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected int m_Cmds;
 	protected int m_CmdBytes;
 	protected int m_BusyMs;
+	protected int m_BusyTicksRemainder;
 	protected int m_LastCmdsPerPoll;
 	protected float m_LastPollIntervalS;
 	protected float m_SincePollS;
@@ -556,6 +557,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Cmds = 0;
 		m_CmdBytes = 0;
 		m_BusyMs = 0;
+		m_BusyTicksRemainder = 0;
 		m_LastCmdsPerPoll = 0;
 		m_LastPollIntervalS = 0.0;
 		m_SincePollS = 0.0;
@@ -1148,7 +1150,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	}
 
 	// Includes dispatch rejection/serialization, but not later asynchronous jobs.
-	// GetTime is mission milliseconds (game.c); sub-ms dispatch may measure zero.
+	// Carry sub-ms TickCount time across dispatches into whole busy milliseconds.
 	protected void DispatchMeasured(MCPCommand command)
 	{
 		if (!command)
@@ -1158,7 +1160,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_Cmds = NextLoadCounter(m_Cmds);
 		int startedTicks = TickCount(0);
 		Dispatch(command);
-		int elapsedMs = TickCount(startedTicks) / TICKS_PER_MS;
+		int elapsedTicks = TickCount(startedTicks);
+		if (elapsedTicks < 0)
+		{
+			return;
+		}
+		// Split before adding: even an int32-max delta cannot overflow the remainder.
+		int elapsedMs = elapsedTicks / TICKS_PER_MS;
+		m_BusyTicksRemainder = m_BusyTicksRemainder + (elapsedTicks % TICKS_PER_MS);
+		elapsedMs = elapsedMs + (m_BusyTicksRemainder / TICKS_PER_MS);
+		m_BusyTicksRemainder = m_BusyTicksRemainder % TICKS_PER_MS;
 		m_BusyMs = AddLoadCounter(m_BusyMs, elapsedMs);
 	}
 
