@@ -66,6 +66,7 @@ READ_ONLY = {
     "camera_get",
     "vehicle_telemetry",
     "logs_since",
+    "player_find",
     "surface_query",
     "object_inspect",
     "object_doors",

@@ -34,9 +34,9 @@ and waits for before loadout_apply. It answers deleted, how many objects it
 deleted, cleanup_complete, whether they were all gone at its job's last
 check, which can come one bridge tick after the 5 s deadline, and uid, the
 player it acted on (MCPResult scalars); clear_reply and cleared_uid read
-them. With neither object_id nor uid given, the tool sends loadout_apply to
-that uid, so the creates go to the player the clear acted on even when the
-first human has changed in between (#261 review Y11).
+them. With clear_first the tool sends loadout_apply to that uid (the caller's
+required uid, or the one the clear acted on), so the creates go to the player
+the clear acted on (#261 review Y11).
 """
 from __future__ import annotations
 
@@ -83,7 +83,8 @@ def target_args(object_id: object, uid: object) -> dict[str, Any]:
     """The wire keys that name the target: object_id, uid, or neither.
 
     object_id > 0 is a same-run registry id; 0 leaves the choice to uid, where
-    "" is the first human. Both given is bad_args.
+    "" is the first human for loadout_get only (apply and clear refuse it in
+    the tool). Both given is bad_args.
     """
     if not _is_index(object_id) or object_id < 0:
         raise ValueError(

@@ -396,7 +396,8 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool_is_not_real", {"x": True, "z": 2.0}, (False, "bad_args")),
     ),
     "player_teleport": (
-        ("valid_without_uid", {"pos": [1.0, 2.0, 3.0]}, (True, None)),
+        ("without_uid", {"pos": [1.0, 2.0, 3.0]}, (False, "bad_args")),
+        ("empty_uid", {"pos": [1.0, 2.0, 3.0], "uid": ""}, (False, "bad_args")),
         (
             "valid_with_uid",
             {"pos": [1.0, 2.0, 3.0], "uid": "player-1"},
@@ -404,7 +405,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ),
         (
             "extra_key",
-            {"pos": [1.0, 2.0, 3.0], "extra": None},
+            {"pos": [1.0, 2.0, 3.0], "uid": "player-1", "extra": None},
             (False, "bad_args"),
         ),
         ("missing_pos", {"uid": "player-1"}, (False, "bad_args")),
@@ -417,12 +418,14 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     # full and godmode always travel as JSON booleans: the bridge reads an
     # absent key as false (fb-20260930-065425-8779).
     "player_heal": (
-        ("valid_full", {"full": True}, (True, None)),
+        ("valid_full", {"full": True, "uid": "player-1"}, (True, None)),
         ("valid_not_full_with_uid", {"full": False, "uid": "player-1"}, (True, None)),
+        ("without_uid", {"full": True}, (False, "bad_args")),
+        ("empty_uid", {"full": True, "uid": ""}, (False, "bad_args")),
         ("missing_full", {"uid": "player-1"}, (False, "bad_args")),
-        ("full_int_is_not_bool", {"full": 1}, (False, "bad_args")),
+        ("full_int_is_not_bool", {"full": 1, "uid": "player-1"}, (False, "bad_args")),
         ("uid_wrong_type", {"full": True, "uid": 1}, (False, "bad_args")),
-        ("extra_key", {"full": True, "extra": None}, (False, "bad_args")),
+        ("extra_key", {"full": True, "uid": "player-1", "extra": None}, (False, "bad_args")),
     ),
     "player_kill": (
         ("valid_uid", {"uid": "player-1"}, (True, None)),
@@ -451,12 +454,14 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("missing", {}, (False, "bad_args")),
     ),
     "player_godmode": (
-        ("valid_off", {"godmode": False}, (True, None)),
+        ("valid_off", {"godmode": False, "uid": "player-1"}, (True, None)),
         ("valid_on_with_uid", {"godmode": True, "uid": "player-1"}, (True, None)),
+        ("without_uid", {"godmode": False}, (False, "bad_args")),
+        ("empty_uid", {"godmode": False, "uid": ""}, (False, "bad_args")),
         ("missing_godmode", {"uid": "player-1"}, (False, "bad_args")),
-        ("godmode_int_is_not_bool", {"godmode": 0}, (False, "bad_args")),
+        ("godmode_int_is_not_bool", {"godmode": 0, "uid": "player-1"}, (False, "bad_args")),
         ("uid_wrong_type", {"godmode": True, "uid": 1}, (False, "bad_args")),
-        ("extra_key", {"godmode": True, "on": True}, (False, "bad_args")),
+        ("extra_key", {"godmode": True, "uid": "player-1", "on": True}, (False, "bad_args")),
     ),
     # heading and speed travel with their _set flags (fb-20260930-065425-8779).
     "infected_drive": (
@@ -695,9 +700,14 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
     ),
     "inventory_give": (
         (
-            "valid_without_uid",
+            "without_uid",
             {"classname": "BandageDressing", "dest": "hands"},
-            (True, None),
+            (False, "bad_args"),
+        ),
+        (
+            "empty_uid",
+            {"classname": "BandageDressing", "dest": "hands", "uid": ""},
+            (False, "bad_args"),
         ),
         (
             "valid_with_uid",
@@ -706,13 +716,13 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ),
         (
             "extra_key",
-            {"classname": "BandageDressing", "dest": "hands", "extra": None},
+            {"classname": "BandageDressing", "dest": "hands", "uid": "player-1", "extra": None},
             (False, "bad_args"),
         ),
-        ("missing_dest", {"classname": "BandageDressing"}, (False, "bad_args")),
+        ("missing_dest", {"classname": "BandageDressing", "uid": "player-1"}, (False, "bad_args")),
         (
             "bad_destination",
-            {"classname": "BandageDressing", "dest": "ground"},
+            {"classname": "BandageDressing", "dest": "ground", "uid": "player-1"},
             (False, "bad_args"),
         ),
     ),
@@ -868,52 +878,56 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
     ),
     "hands_take": (
-        ("valid", {"object_id": 1}, (True, None)),
+        ("without_uid", {"object_id": 1}, (False, "bad_args")),
+        ("empty_uid", {"object_id": 1, "uid": ""}, (False, "bad_args")),
         ("valid_with_uid", {"object_id": 7, "uid": "player-1"}, (True, None)),
-        ("extra_key", {"object_id": 1, "extra": None}, (False, "bad_args")),
-        ("missing_object_id", {}, (False, "bad_args")),
-        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
-        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
+        ("extra_key", {"object_id": 1, "uid": "player-1", "extra": None}, (False, "bad_args")),
+        ("missing_object_id", {"uid": "player-1"}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True, "uid": "player-1"}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0, "uid": "player-1"}, (False, "bad_args")),
     ),
     "inventory_move": (
-        ("valid_hands", {"item_object_id": 1, "op": "to_hands"}, (True, None)),
+        ("valid_hands", {"item_object_id": 1, "op": "to_hands", "uid": "player-1"}, (True, None)),
+        ("hands_without_uid", {"item_object_id": 1, "op": "to_hands"}, (False, "bad_args")),
+        ("hands_empty_uid", {"item_object_id": 1, "op": "to_hands", "uid": ""}, (False, "bad_args")),
         (
             "valid_cargo",
             {"item_object_id": 1, "op": "to_cargo", "target_object_id": 2, "authority": "server"},
             (True, None),
         ),
-        ("cargo_without_target", {"item_object_id": 1, "op": "to_cargo"}, (False, "bad_args")),
-        ("cargo_target_zero", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 0}, (False, "bad_args")),
-        ("combine_without_target", {"item_object_id": 1, "op": "combine"}, (False, "bad_args")),
+        ("cargo_without_target", {"item_object_id": 1, "op": "to_cargo", "uid": "player-1"}, (False, "bad_args")),
+        ("cargo_target_zero", {"item_object_id": 1, "op": "to_cargo", "target_object_id": 0, "uid": "player-1"}, (False, "bad_args")),
+        ("combine_without_target", {"item_object_id": 1, "op": "combine", "uid": "player-1"}, (False, "bad_args")),
         (
             "attachment_empty_slot",
-            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 2, "slot": ""},
+            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 2, "slot": "", "uid": "player-1"},
             (False, "bad_args"),
         ),
         (
             "valid_attachment",
-            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 2, "slot": "Vest"},
+            {"item_object_id": 1, "op": "to_attachment", "target_object_id": 2, "slot": "Vest", "uid": "player-1"},
             (True, None),
         ),
-        ("unknown_op", {"item_object_id": 1, "op": "drop"}, (False, "bad_args")),
-        ("missing_op", {"item_object_id": 1}, (False, "bad_args")),
-        ("zero_item", {"item_object_id": 0, "op": "to_hands"}, (False, "bad_args")),
-        ("bad_authority", {"item_object_id": 1, "op": "to_hands", "authority": "both"}, (False, "bad_args")),
-        ("extra_key", {"item_object_id": 1, "op": "to_hands", "extra": None}, (False, "bad_args")),
+        ("unknown_op", {"item_object_id": 1, "op": "drop", "uid": "player-1"}, (False, "bad_args")),
+        ("missing_op", {"item_object_id": 1, "uid": "player-1"}, (False, "bad_args")),
+        ("zero_item", {"item_object_id": 0, "op": "to_hands", "uid": "player-1"}, (False, "bad_args")),
+        ("bad_authority", {"item_object_id": 1, "op": "to_hands", "authority": "both", "uid": "player-1"}, (False, "bad_args")),
+        ("extra_key", {"item_object_id": 1, "op": "to_hands", "uid": "player-1", "extra": None}, (False, "bad_args")),
     ),
     "hands_attach": (
-        ("valid", {"object_id": 1, "slot": "LargeBattery"}, (True, None)),
+        ("without_uid", {"object_id": 1, "slot": "LargeBattery"}, (False, "bad_args")),
+        ("empty_uid", {"object_id": 1, "slot": "LargeBattery", "uid": ""}, (False, "bad_args")),
         (
             "valid_with_uid",
             {"object_id": 7, "slot": "LargeBattery", "uid": "player-1"},
             (True, None),
         ),
-        ("extra_key", {"object_id": 1, "slot": "LargeBattery", "extra": None}, (False, "bad_args")),
-        ("missing_slot", {"object_id": 1}, (False, "bad_args")),
-        ("empty_slot", {"object_id": 1, "slot": ""}, (False, "bad_args")),
-        ("missing_object_id", {"slot": "LargeBattery"}, (False, "bad_args")),
-        ("bool_is_not_int", {"object_id": True, "slot": "LargeBattery"}, (False, "bad_args")),
-        ("zero_object_id", {"object_id": 0, "slot": "LargeBattery"}, (False, "bad_args")),
+        ("extra_key", {"object_id": 1, "slot": "LargeBattery", "uid": "player-1", "extra": None}, (False, "bad_args")),
+        ("missing_slot", {"object_id": 1, "uid": "player-1"}, (False, "bad_args")),
+        ("empty_slot", {"object_id": 1, "slot": "", "uid": "player-1"}, (False, "bad_args")),
+        ("missing_object_id", {"slot": "LargeBattery", "uid": "player-1"}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True, "slot": "LargeBattery", "uid": "player-1"}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0, "slot": "LargeBattery", "uid": "player-1"}, (False, "bad_args")),
     ),
     "weapon_state": (
         ("empty", {}, (True, None)),
@@ -921,8 +935,10 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_key", {"extra": None}, (False, "bad_args")),
         ("uid_not_string", {"uid": 1}, (False, "bad_args")),
     ),
-    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): uid or object_id, never
-    # both. clear_first is not a wire key: the tool sends loadout_clear for it.
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): loadout_get
+    # takes uid or object_id or neither; loadout_apply / loadout_clear take a
+    # non-empty uid or an object_id, never both and never neither (B2).
+    # clear_first is not a wire key: the tool sends loadout_clear for it.
     "loadout_get": (
         ("empty", {}, (True, None)),
         ("valid_with_uid", {"uid": "player-1"}, (True, None)),
@@ -935,7 +951,9 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
     "loadout_apply": (
-        ("valid_empty", {"loadout_items": []}, (True, None)),
+        ("empty_without_target", {"loadout_items": []}, (False, "bad_args")),
+        ("empty_uid_without_object_id", {"loadout_items": [], "uid": ""}, (False, "bad_args")),
+        ("valid_empty_with_uid", {"loadout_items": [], "uid": "player-1"}, (True, None)),
         (
             "valid_uid_tree",
             {
@@ -959,16 +977,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             {"object_id": 4, "uid": "player-1", "loadout_items": []},
             (False, "bad_args"),
         ),
-        ("missing_rows", {}, (False, "bad_args")),
+        ("missing_rows", {"uid": "player-1"}, (False, "bad_args")),
         (
             "clear_first_is_not_a_wire_key",
-            {"clear_first": True, "loadout_items": []},
+            {"clear_first": True, "loadout_items": [], "uid": "player-1"},
             (False, "bad_args"),
         ),
-        ("rows_not_a_list", {"loadout_items": {}}, (False, "bad_args")),
+        ("rows_not_a_list", {"loadout_items": {}, "uid": "player-1"}, (False, "bad_args")),
         (
             "row_missing_parent",
             {
+                "uid": "player-1",
                 "loadout_items": [{"type": "Apple", "slot": "Body", "dest": "attachment"}],
             },
             (False, "bad_args"),
@@ -976,6 +995,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "row_extra_key",
             {
+                "uid": "player-1",
                 "loadout_items": [
                     {"type": "Apple", "slot": "Body", "dest": "attachment", "parent": -1, "qty": 1}
                 ],
@@ -985,6 +1005,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "parent_not_earlier",
             {
+                "uid": "player-1",
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": 0}],
             },
             (False, "bad_args"),
@@ -992,6 +1013,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "cargo_on_the_target",
             {
+                "uid": "player-1",
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "cargo", "parent": -1}],
             },
             (False, "bad_args"),
@@ -999,6 +1021,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "attachment_without_slot",
             {
+                "uid": "player-1",
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "attachment", "parent": -1}],
             },
             (False, "bad_args"),
@@ -1006,6 +1029,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "hands_inside_an_item",
             {
+                "uid": "player-1",
                 "loadout_items": [
                     {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1},
                     {"type": "M4A1", "slot": "", "dest": "hands", "parent": 0},
@@ -1016,6 +1040,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "two_hands",
             {
+                "uid": "player-1",
                 "loadout_items": [
                     {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
                     {"type": "M4A1", "slot": "", "dest": "hands", "parent": -1},
@@ -1026,6 +1051,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "unknown_dest",
             {
+                "uid": "player-1",
                 "loadout_items": [{"type": "Apple", "slot": "", "dest": "ground", "parent": -1}],
             },
             (False, "bad_args"),
@@ -1033,6 +1059,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "bool_parent",
             {
+                "uid": "player-1",
                 "loadout_items": [{"type": "Apple", "slot": "Body", "dest": "attachment", "parent": True}],
             },
             (False, "bad_args"),
@@ -1040,6 +1067,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "depth_five",
             {
+                "uid": "player-1",
                 "loadout_items": [
                     {"type": "AssaultBag_Black", "slot": "Back", "dest": "attachment", "parent": -1}
                 ]
@@ -1053,6 +1081,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         (
             "sixty_five_rows",
             {
+                "uid": "player-1",
                 "loadout_items": [
                     {"type": "Apple", "slot": "Body", "dest": "attachment", "parent": -1}
                 ]
@@ -1060,18 +1089,19 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             },
             (False, "bad_args"),
         ),
-        ("extra_key", {"loadout_items": [], "extra": None}, (False, "bad_args")),
+        ("extra_key", {"loadout_items": [], "uid": "player-1", "extra": None}, (False, "bad_args")),
     ),
     "loadout_clear": (
-        ("empty", {}, (True, None)),
+        ("empty", {}, (False, "bad_args")),
+        ("empty_uid", {"uid": ""}, (False, "bad_args")),
         ("valid_with_uid", {"uid": "player-1"}, (True, None)),
         ("valid_with_object_id", {"object_id": 3}, (True, None)),
         ("both_targets", {"object_id": 3, "uid": "player-1"}, (False, "bad_args")),
-        ("zero_object_id", {"object_id": 0}, (False, "bad_args")),
-        ("bool_is_not_int", {"object_id": True}, (False, "bad_args")),
+        ("zero_object_id", {"object_id": 0, "uid": "player-1"}, (False, "bad_args")),
+        ("bool_is_not_int", {"object_id": True, "uid": "player-1"}, (False, "bad_args")),
         ("uid_not_string", {"uid": 1}, (False, "bad_args")),
-        ("rows_on_a_clear", {"loadout_items": []}, (False, "bad_args")),
-        ("extra_key", {"extra": None}, (False, "bad_args")),
+        ("rows_on_a_clear", {"loadout_items": [], "uid": "player-1"}, (False, "bad_args")),
+        ("extra_key", {"extra": None, "uid": "player-1"}, (False, "bad_args")),
     ),
     "notify_players": (
         (
