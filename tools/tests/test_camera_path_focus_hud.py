@@ -449,7 +449,7 @@ _BRIDGE_METHODS = (
 )
 _BRIDGE_SIBLINGS = (
     "FinishCameraHandoff|SuppressGameplay|DeleteOwnedCamera|RestoreGameplay|StopCameraPath|"
-    "HasExclusiveJob|ReleaseCamera|PostResult|Log"
+    "HasExclusiveJob|ReleaseCamera|PostResult|Log|QueueCameraPathReleaseJob"
 )
 
 
@@ -473,6 +473,8 @@ class _ClientBridge:
         self.free_cam = self.camera("free")
         self.next_object: object = None
         self.exclusive = False
+        # True: a staticcamera handoff is still running, so a matched release queues its reply.
+        self.handoff_pending = False
         self.player = SimpleNamespace(
             DisableSimulation=lambda off: self.log.append(("player", "DisableSimulation", off))
         )
@@ -535,6 +537,10 @@ class _ClientBridge:
 
     def ReleaseCamera(self) -> None:
         self.log.append(("bridge", "ReleaseCamera"))
+
+    def QueueCameraPathReleaseJob(self, command: SimpleNamespace, result: SimpleNamespace) -> bool:
+        self.log.append(("bridge", "QueueCameraPathReleaseJob", command.id))
+        return self.handoff_pending
 
     def PostResult(self, result: SimpleNamespace) -> None:
         self.terminal_result = {"id": result.id, "ok": result.ok, "camera_path": _block(result.camera_path)}
@@ -1859,6 +1865,21 @@ class ExecutedDispatchTest(unittest.TestCase):
         self.assertEqual(self.client.m_CameraPathCommandId, 0)
         self.assertIn(("bridge", "ReleaseCamera"), self.client.log)
         self.assertIn(("bridge", "RestoreGameplay"), self.client.log)
+
+    def test_matched_release_waits_for_the_handoff_before_answering(self) -> None:
+        # Sol P2 (263t2): the simulation stays off until the handoff ends, so the
+        # matched reply is a job then; with no handoff it answers at once.
+        self._played()
+        self.client.handoff_pending = True
+        answer = self.client.release(7, command_id=51)
+        self.assertFalse(answer.done)
+        self.assertTrue(answer.matched)
+        self.assertLess(self.client.index(("bridge", "RestoreGameplay")),
+                        self.client.index(("bridge", "QueueCameraPathReleaseJob", 51)))
+        late = self.client.release(7, command_id=52)
+        self.assertTrue(late.done)
+        self.assertFalse(late.matched)
+        self.assertNotIn(("bridge", "QueueCameraPathReleaseJob", 52), self.client.log)
 
     def test_natural_end_restores_and_settles_even_after_play_result_consumed(self) -> None:
         state, coordinator, client, token = self._leased()

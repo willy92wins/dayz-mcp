@@ -190,3 +190,30 @@ class ExecutedGameplayReadTest(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(result.error.data.decode(), "client_not_in_game" if missing == "mission" else "hud_unavailable")
             self.assertFalse(hasattr(result, "gameplay"))
+
+
+class CameraPathReleaseWaitsForHandoffTest(unittest.TestCase):
+    """Sol P2 (263t2): a matched release answers only after the handoff that
+    keeps the player simulation off has finished, like restore_gameplay."""
+
+    def setUp(self) -> None:
+        from tests.enforce_subset_helpers import method_body
+        self.source = BRIDGE.read_text(encoding="utf-8")
+        self.body = method_body
+
+    def test_matched_release_defers_reply_while_handoff_pending(self) -> None:
+        release = self.body(self.source, "protected bool DispatchCameraPathRelease(MCPCommand command, MCPResult result)")
+        matched = release.index("result.matched = true;")
+        self.assertLess(release.index("RestoreGameplay();"), matched)
+        self.assertIn("return !QueueCameraPathReleaseJob(command, result);", release[matched:])
+        queue = self.body(self.source, "protected bool QueueCameraPathReleaseJob(MCPCommand command, MCPResult result)")
+        self.assertIn("if (!m_CameraHandoffPending)", queue)
+        self.assertIn('job.kind = "camera_path_release";', queue)
+        self.assertIn("m_JobRunner.AddJob(job);", queue)
+
+    def test_job_finishes_with_handoff_and_posts_matched(self) -> None:
+        self.assertIn('else if (job.kind == "camera_path_release")', self.source)
+        post = self.source[self.source.index('if (job.kind == "camera_path_release")'):]
+        post = post[:post.index("PostResult(resultRelease);")]
+        self.assertIn("resultRelease.matched = true;", post)
+        self.assertIn("resultRelease.ok = true;", post)

@@ -2187,8 +2187,36 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			ReleaseCamera();
 			RestoreGameplay();
 			result.matched = true;
+			result.ok = true;
+			// Like restore_gameplay (f47b): while the staticcamera handoff still
+			// holds the player simulation off, a job posts this reply once the
+			// handoff has finished, so gameplay_state read right after it sees
+			// the simulation back on (Sol P2, 263t2).
+			return !QueueCameraPathReleaseJob(command, result);
 		}
 		result.ok = true;
+		return true;
+	}
+
+	// Same wait as QueueRestoreGameplayJob, for a matched camera_path_release.
+	// The posted reply carries matched=true. True when queued.
+	protected bool QueueCameraPathReleaseJob(MCPCommand command, MCPResult result)
+	{
+		if (!m_CameraHandoffPending)
+		{
+			return false;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "camera_path_release";
+		job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+
+		Log("client job queued id=" + job.id + " kind=camera_path_release deadline_s=" + job.deadline_s);
 		return true;
 	}
 
@@ -5392,6 +5420,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			// Done once OnTick has finished the camera handoff (TickCameraHandoff).
 			return !m_CameraHandoffPending;
 		}
+		else if (job.kind == "camera_path_release")
+		{
+			// The same wait as restore_gameplay (Sol P2, 263t2).
+			return !m_CameraHandoffPending;
+		}
 		else if (job.kind == "input_trigger")
 		{
 			return ProcessInputTriggerJob(job);
@@ -6452,6 +6485,19 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			resultRestore.tick_poll_callback = job.tick_poll_callback;
 			resultRestore.tick_dispatch = job.tick_dispatch;
 			PostResult(resultRestore);
+		}
+
+		// The reply a matched camera_path_release posts when no handoff runs.
+		if (job.kind == "camera_path_release")
+		{
+			MCPResult resultRelease = new MCPResult();
+			resultRelease.id = job.id;
+			resultRelease.ok = true;
+			resultRelease.matched = true;
+			resultRelease.tick_poll_sent = job.tick_poll_sent;
+			resultRelease.tick_poll_callback = job.tick_poll_callback;
+			resultRelease.tick_dispatch = job.tick_dispatch;
+			PostResult(resultRelease);
 		}
 
 		if (job.kind == "input_trigger")
