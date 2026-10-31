@@ -90,10 +90,14 @@ class MCPBridge : Managed
 	protected string m_PollVersion;
 	protected float m_PollHz;
 	protected float m_Accum;
+	// Seconds since the last unconfigured TryInit. The first attempt does not wait.
+	protected float m_InitAccumS;
 	protected float m_ElapsedS;
 	// Backoff at which a poll failure stops looking transient and the credential on
 	// disk is re-read.
 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
+	// Unconfigured TryInit period. A queued CallLater would outlive ShutdownInstance.
+	protected const float INIT_RETRY_S = 1.0;
 	protected float m_Backoff;
 	protected int m_Tick;
 	protected int m_TickPollSent;
@@ -101,9 +105,10 @@ class MCPBridge : Managed
 	protected bool m_PollInFlight;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
-	// A1 (fb-20261028-131233-a07f): frames that called TryInit, polls actually
-	// sent, seconds since the previous sent poll (0 on the first), and the
-	// accumulator for that gap. Announced on every poll as ia=, pc=, lpims=.
+	// A1 (fb-20261028-131233-a07f): real TryInit attempts (not frames; A2
+	// fb-20261028-131212-b320 spaces them), polls actually sent, seconds since
+	// the previous sent poll (0 on the first), and the accumulator for that
+	// gap. Announced on every poll as ia=, pc=, lpims=.
 	// Signed int32 wraps negative; a negative triple is dropped and the daemon
 	// keeps the previous reading. Saturate at this cap and stay there.
 	protected const int LOAD_COUNTER_CAP = 2000000000;
@@ -140,6 +145,7 @@ class MCPBridge : Managed
 		int fixtureLineIndex = 0;
 		m_PollHz = 5.0;
 		m_Accum = 0.0;
+		m_InitAccumS = 0.0;
 		m_ElapsedS = 0.0;
 		m_Backoff = 0.0;
 		m_Tick = 0;
@@ -209,7 +215,12 @@ class MCPBridge : Managed
 
 		if (!m_Configured)
 		{
-			TryInit();
+			m_InitAccumS = m_InitAccumS + timeslice;
+			if (m_InitAttempts == 0 || m_InitAccumS >= INIT_RETRY_S)
+			{
+				m_InitAccumS = 0.0;
+				TryInit();
+			}
 			return;
 		}
 
