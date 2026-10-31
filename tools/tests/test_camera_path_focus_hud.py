@@ -1190,7 +1190,7 @@ class CameraPathToolTest(_ToolCase):
             "camera_path {state, t_s, duration_s, path_id}",
             "idle (no play yet), playing, finished or aborted",
             "Read the pose with camera_get",
-            "path_busy",
+            "replaced_command_id",
             "path_not_found",
             "client_not_in_game",
             "camera_create_failed",
@@ -1199,6 +1199,7 @@ class CameraPathToolTest(_ToolCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, description)
+        self.assertNotIn("path_busy", description)
 
 
 def _camera_answer(**overrides: object) -> dict[str, Any]:
