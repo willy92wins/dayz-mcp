@@ -25,7 +25,7 @@ no `vehicle_enter`, the bridge build of 2026-08-24 — the server's replica of
 the client-owned car was still at the spawn point while the client drove it.
 That observation is bound to its run and configuration; it is not a law.
 `vehicle_enter` seats the player in the server crew (`StartCommand_Vehicle`,
-`MCPBridge.c:1012-1022`; in-game 2026-06-08, product-spec B2), and every
+`MCPBridge.c:2953`, in `DispatchVehicleEnter` `:2918`; in-game 2026-06-08, product-spec B2), and every
 no-replica-motion sample this file carries was taken on a client-get-in-only
 ladder like the client one below. Whether the server side follows the
 client-owned car is read per run, with the server/client position comparison
@@ -190,7 +190,7 @@ server replica is.
 2. `player_teleport` the driver to the surface y behind the canopy gate, as
    in the client ladder (with the player's `uid`, which is required).
 3. `vehicle_enter` near the fixture pos: the server half of the seat. It
-   runs `StartCommand_Vehicle` (`MCPBridge.c:1012-1022`) and puts the player
+   runs `StartCommand_Vehicle` (`MCPBridge.c:2953`, in `DispatchVehicleEnter` `:2918`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
    (product-spec B2). `seated=1` means the server read the player it seated
    (or, if that one is gone, the first player) in the driver seat of that car
