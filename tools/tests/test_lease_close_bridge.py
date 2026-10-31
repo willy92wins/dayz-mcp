@@ -165,6 +165,11 @@ class LeaseCloseBridgeTests(unittest.TestCase):
         ns: dict[str, Any] = {
             "_S": _LogString,
             "Dispatch": Dispatch,
+            # #286 load counters: DispatchMeasured wraps Dispatch with busy_ms
+            # timing; AddLoadCounter is a saturating add. Neither changes order.
+            "DispatchMeasured": Dispatch,
+            "AddLoadCounter": lambda total, delta: total + delta,
+            "m_LastCmdsPerPoll": 0,
             "PostCommandError": PostCommandError,
             "OnPollFail": OnPollFail,
             "Log": Log,
@@ -205,6 +210,7 @@ class LeaseCloseBridgeTests(unittest.TestCase):
             class_types=("MCPCommand",),
             members=(
                 "batch",
+                "m_LastCmdsPerPoll",
                 "m_Pending",
                 "m_TickPollCallback",
                 "m_TickPollSent",
@@ -221,6 +227,7 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                 members=(
                     "m_Backoff",
                     "m_Configured",
+                    "m_LastCmdsPerPoll",
                     "m_Pending",
                     "m_PollInFlight",
                     "m_Tick",
