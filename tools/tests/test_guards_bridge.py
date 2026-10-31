@@ -82,7 +82,7 @@ class BridgeGuardsTest(unittest.TestCase):
                   and any(isinstance(t, ast.Name) and t.id == 'MAX_QUEUE' for t in node.targets)]
         self.assertEqual(values, [64], 'changed producer capacity needs a new reservation')
         poll = _body(source, 'protected void StartPoll()')
-        expression = 'm_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS'
+        expression = 'm_CallbackRefs.Count() + m_Pending.Count() + m_Jobs.Count() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1'
         guard = 'if (' + expression + ')'
         self.assertIn(guard, poll)
         self.assertEqual(_body(poll, guard).strip(), 'return;')
@@ -94,10 +94,10 @@ class BridgeGuardsTest(unittest.TestCase):
         for callbacks, pending, jobs in itertools.product((0, 1, 32, 63, 64, 65, 127, 128), repeat=3):
             blocked = eval(translated, {'__builtins__': {}}, dict(callbacks=callbacks, pending=pending, jobs=jobs, MAX_CALLBACK_REFS=cap, MAX_POLL_RESULTS=batch))
             outstanding = callbacks + pending + jobs
-            self.assertEqual(blocked, outstanding > 64)
+            self.assertEqual(blocked, outstanding > 63)
             if not blocked:
                 self.assertLessEqual(callbacks + 1, 128, 'GET also holds one callback')
-                self.assertLessEqual(outstanding + 64, 128, 'every accepted job can finish at once')
+                self.assertLessEqual(outstanding + 65, 128, 'every accepted job can finish at once, plus the close')
         # Backpressure must leave accepted commands/jobs and their terminal POSTs running.
         tick = _body(source, 'void OnTick(float timeslice)')
         self.assertLess(tick.index('ProcessJobs();'), tick.index('StartPoll();'))
@@ -175,16 +175,19 @@ class BridgeGuardsTest(unittest.TestCase):
         source = _source('MCPClientBridge.c')
         cap = _constant(source, 'MAX_CALLBACK_REFS')
         batch = _constant(source, 'MAX_POLL_RESULTS')
-        self.assertEqual((cap, batch), (128, 20))
-        # The reservation is derived, not chosen: it is what a single poll can accept
-        # before QueuePendingOrFail starts refusing.
-        self.assertEqual(batch, _constant(source, 'MAX_DISPATCH_PER_TICK') + _constant(source, 'MAX_PENDING'),
-                         'reservation must track what one poll admits')
+        self.assertEqual((cap, batch), (128, 64))
+        # Producer cap (daemon MAX_QUEUE) plus the close: refusals POST too.
+        daemon = ast.parse((ROOT / 'tools/dayz_mcp/loopback.py').read_text(encoding='utf-8-sig'))
+        values = [ast.literal_eval(node.value) for node in daemon.body
+                  if isinstance(node, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == 'MAX_QUEUE' for t in node.targets)]
+        self.assertEqual(values, [64], 'changed producer capacity needs a new reservation')
+        self.assertEqual(batch, values[0], 'reservation tracks the producer cap, not the old 20-slot admit sum')
         self.assertIn('client_bridge_queue_full',
                       _body(source, 'protected void QueuePendingOrFail(MCPCommand command)'))
 
         poll = _body(source, 'protected void StartPoll()')
-        expression = 'OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS'
+        expression = 'OutstandingWork() > MAX_CALLBACK_REFS - MAX_POLL_RESULTS - 1'
         guard = 'if (' + expression + ')'
         self.assertIn(guard, poll)
         self.assertEqual(_body(poll, guard).strip(), 'return;')
@@ -206,15 +209,15 @@ class BridgeGuardsTest(unittest.TestCase):
 
         # Evaluate the verified source condition against the capacity invariant.
         translated = expression.replace('OutstandingWork()', 'callbacks + pending + jobs')
-        for callbacks, pending, jobs in itertools.product((0, 1, 32, 107, 108, 109, 127), repeat=3):
+        for callbacks, pending, jobs in itertools.product((0, 1, 32, 62, 63, 64, 127), repeat=3):
             blocked = eval(translated, {'__builtins__': {}},
                            dict(callbacks=callbacks, pending=pending, jobs=jobs,
                                 MAX_CALLBACK_REFS=cap, MAX_POLL_RESULTS=batch))
             total = callbacks + pending + jobs
-            self.assertEqual(blocked, total > 108)
+            self.assertEqual(blocked, total > 63)
             if not blocked:
-                self.assertLessEqual(total + batch, cap,
-                                     'every command one poll admits can still finish at once')
+                self.assertLessEqual(total + batch + 1, cap,
+                                     'every command one poll admits can still finish at once, plus the close')
 
     def test_existing_callbacks_release_on_success_error_and_timeout(self) -> None:
         callbacks = (SCRIPTS / 'MCPCallbacks.c').read_text(encoding='utf-8-sig')
