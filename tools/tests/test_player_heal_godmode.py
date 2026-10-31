@@ -1340,6 +1340,28 @@ class GodmodeTopUpTest(unittest.TestCase):
         # thirst.c:36-37) over one interval must stay inside the margin.
         self.assertLess((0.6 + 0.01) * (1.0 + floor / STAT_MAX) * interval, margin)
 
+    def test_b1_4_top_up_floor_is_a_per_window_maximum(self) -> None:
+        # B1-4 criterion (run b28bba22): the maximum per interval reaches 500.
+        body = _Body(allow_damage=False, water=310.0, energy=310.0)
+        godmode = _Godmode(players=[body])
+        godmode.ResetMission()
+        godmode.SetDefaultOn(True)
+        steps = 32
+        timeslice = godmode.G.TOPUP_INTERVAL_S / steps
+        for window in range(4):
+            samples = []
+            for _ in range(steps):
+                for stat in (body.energy, body.water):
+                    drain = (0.6 + 0.01) * (1.0 + stat.Get() / STAT_MAX)
+                    stat.Set(stat.Get() - drain * timeslice)
+                godmode.Tick(timeslice)
+                samples.append((body.energy.Get(), body.water.Get()))
+            for name, values in zip(("energy", "water"), zip(*samples)):
+                with self.subTest(window=window, stat=name):
+                    self.assertGreaterEqual(max(values), 500.0)
+                    self.assertGreater(min(values), LOW_THRESHOLD)
+                    self.assertLess(min(values), 500.0)
+
     def test_top_up_raises_to_the_floor_and_never_lowers(self) -> None:
         godmode = _Godmode()
         floor = LOW_THRESHOLD + godmode.G.TOPUP_MARGIN
