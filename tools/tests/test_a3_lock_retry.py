@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from dayz_mcp import registry_lock
+from dayz_mcp import launcher_registry, registry_lock
+from dayz_mcp import launcher_registry_update as updater
 
 
 class _FakeClock:
@@ -200,6 +201,332 @@ class RegistryLockRetryTest(unittest.TestCase):
                 registry_lock.acquire_registry_lock(
                     exclusive=True, path=self.lock_path
                 )
+
+
+_BASELINE = b'{\n  "format_version": 1,\n  "launchers": []\n}\n'
+
+
+def _entry(sha256: str = "A" * 64) -> dict[str, object]:
+    return {
+        "id": "dayz-test-v1",
+        "relative_path": "dayz-test-launcher.exe",
+        "root": r"C:\fixture\dayz-test-v1",
+        "root_file_id": {"file_id": "0" * 32, "volume_serial_number": 1},
+        "sha256": sha256,
+    }
+
+
+class _FakeLock:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> "_FakeLock":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def _flaky(original, failures: int, calls: list):
+    def _acquire(**kwargs):
+        calls.append(kwargs)
+        if len(calls) <= failures:
+            raise RuntimeError("launcher_registry_busy")
+        return original(**kwargs)
+
+    return _acquire
+
+
+def _always_busy(calls: list):
+    def _acquire(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("launcher_registry_busy")
+
+    return _acquire
+
+
+def _fast_retry(**kwargs):
+    kwargs.update(deadline_s=0.3, initial_backoff_s=0.02, max_backoff_s=0.05)
+    return _REAL_RETRY(**kwargs)
+
+
+_REAL_RETRY = registry_lock.acquire_registry_lock_with_retry
+_REAL_ACQUIRE = registry_lock.acquire_registry_lock
+
+
+@unittest.skipUnless(os.name == "nt", "LockFileEx is Windows-only")
+class CallerRetryTest(unittest.TestCase):
+    def _paths(self, root: Path, raw: bytes = _BASELINE):
+        registry = root / "approved-launchers.json"
+        registry.write_bytes(raw)
+        lock = root / "approved-launchers.lock"
+        lock.write_bytes(b"lock\n")
+        return registry, lock, root / "receipts"
+
+    # -- open_approved_launcher (shared) --------------------------------
+    def test_open_retries_transient_busy(self) -> None:
+        fake_lock = _FakeLock()
+        opened = mock.Mock()
+        calls: list = []
+        with (
+            mock.patch.object(
+                registry_lock,
+                "acquire_registry_lock",
+                _flaky(lambda **_kw: fake_lock, 2, calls),
+            ),
+            mock.patch.object(
+                launcher_registry,
+                "_read_canonical_registry",
+                return_value=[_entry()],
+            ),
+            mock.patch.object(
+                launcher_registry, "_open_validated_entry", return_value=opened
+            ),
+        ):
+            result = launcher_registry.open_approved_launcher("dayz-test-v1")
+        self.assertIs(result, opened)
+        self.assertIs(opened._registry_lock, fake_lock)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(c["exclusive"] is False for c in calls))
+
+    def test_open_exhausted_fails_busy_timeout(self) -> None:
+        calls: list = []
+        with (
+            mock.patch.object(
+                registry_lock, "acquire_registry_lock", _always_busy(calls)
+            ),
+            mock.patch.object(
+                registry_lock, "acquire_registry_lock_with_retry", _fast_retry
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "launcher_registry_busy_timeout"
+            ):
+                launcher_registry.open_approved_launcher("dayz-test-v1")
+        self.assertGreaterEqual(len(calls), 2)
+
+    # -- _install_transition (exclusive) --------------------------------
+    def test_install_retries_transient_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            calls: list = []
+            with (
+                mock.patch.object(
+                    registry_lock,
+                    "acquire_registry_lock",
+                    _flaky(_REAL_ACQUIRE, 2, calls),
+                ),
+                mock.patch.object(
+                    updater, "_validated_entry", return_value=_entry()
+                ),
+            ):
+                sha = updater._install_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(_BASELINE),
+                )
+            self.assertEqual(sha, updater._sha256(registry.read_bytes()))
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(c["exclusive"] is True for c in calls))
+
+    def test_install_exhausted_fails_and_leaves_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            calls: list = []
+            with (
+                mock.patch.object(
+                    registry_lock, "acquire_registry_lock", _always_busy(calls)
+                ),
+                mock.patch.object(
+                    updater, "acquire_registry_lock_with_retry", _fast_retry
+                ),
+                mock.patch.object(
+                    updater, "_validated_entry", return_value=_entry()
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "launcher_registry_busy_timeout"
+                ):
+                    updater._install_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(_BASELINE),
+                    )
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(registry.read_bytes(), _BASELINE)
+
+    # -- _replace_transition (exclusive) --------------------------------
+    def _installed_registry(self, root: Path, sha256: str = "A" * 64) -> bytes:
+        raw = updater._canonical(
+            {"format_version": 1, "launchers": [_entry(sha256)]}
+        )
+        self._paths(root, raw)
+        return raw
+
+    def test_replace_retries_transient_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = self._installed_registry(root)
+            registry = root / "approved-launchers.json"
+            lock = root / "approved-launchers.lock"
+            receipts = root / "receipts"
+            calls: list = []
+            with (
+                mock.patch.object(
+                    registry_lock,
+                    "acquire_registry_lock",
+                    _flaky(_REAL_ACQUIRE, 2, calls),
+                ),
+                mock.patch.object(
+                    updater, "_validated_entry", return_value=_entry("B" * 64)
+                ),
+            ):
+                updater._replace_transition(
+                    registry_path=registry,
+                    lock_path=lock,
+                    receipts_path=receipts,
+                    bundle=root,
+                    expected_sha256=updater._sha256(raw),
+                )
+            self.assertEqual(len(calls), 3)
+            self.assertIn("B" * 64, registry.read_text(encoding="utf-8"))
+
+    def test_replace_exhausted_fails_and_leaves_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = self._installed_registry(root)
+            registry = root / "approved-launchers.json"
+            lock = root / "approved-launchers.lock"
+            receipts = root / "receipts"
+            calls: list = []
+            with (
+                mock.patch.object(
+                    registry_lock, "acquire_registry_lock", _always_busy(calls)
+                ),
+                mock.patch.object(
+                    updater, "acquire_registry_lock_with_retry", _fast_retry
+                ),
+                mock.patch.object(
+                    updater, "_validated_entry", return_value=_entry("B" * 64)
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "launcher_registry_busy_timeout"
+                ):
+                    updater._replace_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                        bundle=root,
+                        expected_sha256=updater._sha256(raw),
+                    )
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(registry.read_bytes(), raw)
+
+    # -- describe_registry_provenance (shared) ---------------------------
+    def test_describe_retries_transient_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            calls: list = []
+            with mock.patch.object(
+                registry_lock,
+                "acquire_registry_lock",
+                _flaky(_REAL_ACQUIRE, 2, calls),
+            ):
+                state = updater.describe_registry_provenance(
+                    registry_path=registry, lock_path=lock, receipts_path=receipts
+                )
+            self.assertEqual(state["status"], "pristine")
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(c["exclusive"] is False for c in calls))
+
+    def test_describe_exhausted_fails_busy_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            calls: list = []
+            with (
+                mock.patch.object(
+                    registry_lock, "acquire_registry_lock", _always_busy(calls)
+                ),
+                mock.patch.object(
+                    updater, "acquire_registry_lock_with_retry", _fast_retry
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "launcher_registry_busy_timeout"
+                ):
+                    updater.describe_registry_provenance(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                    )
+            self.assertGreaterEqual(len(calls), 2)
+
+    # -- _rollback_transition (exclusive) --------------------------------
+    def _install(self, root: Path):
+        registry, lock, receipts = self._paths(root)
+        with mock.patch.object(updater, "_validated_entry", return_value=_entry()):
+            updater._install_transition(
+                registry_path=registry,
+                lock_path=lock,
+                receipts_path=receipts,
+                bundle=root,
+                expected_sha256=updater._sha256(_BASELINE),
+            )
+        return registry, lock, receipts
+
+    def test_rollback_retries_transient_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._install(root)
+            calls: list = []
+            with mock.patch.object(
+                registry_lock,
+                "acquire_registry_lock",
+                _flaky(_REAL_ACQUIRE, 2, calls),
+            ):
+                restored = updater._rollback_transition(
+                    registry_path=registry, lock_path=lock, receipts_path=receipts
+                )
+            self.assertEqual(restored, updater._sha256(_BASELINE))
+            self.assertEqual(registry.read_bytes(), _BASELINE)
+            self.assertEqual(len(calls), 3)
+
+    def test_rollback_exhausted_fails_and_leaves_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._install(root)
+            installed = registry.read_bytes()
+            calls: list = []
+            with (
+                mock.patch.object(
+                    registry_lock, "acquire_registry_lock", _always_busy(calls)
+                ),
+                mock.patch.object(
+                    updater, "acquire_registry_lock_with_retry", _fast_retry
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "launcher_registry_busy_timeout"
+                ):
+                    updater._rollback_transition(
+                        registry_path=registry,
+                        lock_path=lock,
+                        receipts_path=receipts,
+                    )
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(registry.read_bytes(), installed)
 
 
 if __name__ == "__main__":

@@ -292,9 +292,9 @@ def _read_canonical_registry() -> list[dict[str, object]]:
 
 
 def open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
-    from dayz_mcp.registry_lock import acquire_registry_lock
+    from dayz_mcp.registry_lock import acquire_registry_lock_with_retry
 
-    registry_lock = acquire_registry_lock(exclusive=False)
+    registry_lock = acquire_registry_lock_with_retry(exclusive=False)
     try:
         approved = _read_canonical_registry()
         validated_id = _validate_id(launcher_id)
