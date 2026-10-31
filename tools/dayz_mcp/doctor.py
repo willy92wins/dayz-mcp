@@ -973,6 +973,7 @@ def _check_runs(
     sources: DoctorSources,
     observed: list[dict[str, object]] | None,
     findings: list[dict[str, object]],
+    crash_observed: list[dict[str, object]] | None = None,
 ) -> None:
     try:
         runs = RunManifestStore(sources.runtime_paths, read_only=True).list_runs()
@@ -1011,6 +1012,11 @@ def _check_runs(
     if observed is None:
         return
     observed_pids = {int(item["pid"]) for item in observed}
+    crash_pids = (
+        None
+        if crash_observed is None
+        else {int(item["pid"]) for item in crash_observed}
+    )
     records: dict[int, tuple[str, ProcessRecord]] = {}
     duplicate_runs: dict[int, set[str]] = {}
     for run in runs:
@@ -1047,7 +1053,12 @@ def _check_runs(
                 findings.append(_finding("RUN_STALE", pid=pid, run_id=run_id))
             accounted.add(pid)
             continue
-        if pid not in observed_pids:
+        present_pids = (
+            crash_pids if record.role == "crash_reporter" else observed_pids
+        )
+        if record.role == "crash_reporter" and crash_pids is None:
+            continue
+        if pid not in present_pids:
             findings.append(_finding("RUN_STALE", pid=pid, run_id=run_id))
             accounted.add(pid)
             continue
@@ -1317,6 +1328,9 @@ def _diagnose(
     managed = _safe_snapshot(
         sources.process_snapshot, _MANAGED_NAMES, "managed", findings
     )
+    crash_reporters = _safe_snapshot(
+        sources.process_snapshot, ["CrashReporter.exe"], "crash_reporter", findings
+    )
     if retail:
         findings.append(
             _finding(
@@ -1326,7 +1340,7 @@ def _diagnose(
             )
         )
     step[0] = "runs"
-    _check_runs(sources, managed, findings)
+    _check_runs(sources, managed, findings, crash_observed=crash_reporters)
     step[0] = "manifest_backup_retention"
     _check_manifest_backup_retention(sources, findings)
     step[0] = "manifest_backup_quarantine"

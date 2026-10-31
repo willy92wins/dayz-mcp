@@ -33,8 +33,12 @@ def _minimal_args(cmd: str) -> dict:
         "weapon_fire",
         "world_time_get",
         "action_cursor",
+        "loadout_get",
     }:
         return {}
+
+    if cmd == "loadout_clear":
+        return {"uid": "player-1"}
 
     # The rest of the verbs that were schemaless before 6ce4.
     if cmd == "world_spawn":
@@ -117,11 +121,11 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "surface_query":
         return {"x": 0.0, "z": 0.0}
     if cmd == "player_teleport":
-        return {"pos": [0.0, 0.0, 0.0]}
+        return {"pos": [0.0, 0.0, 0.0], "uid": "player-1"}
     if cmd == "player_heal":
-        return {"full": True}
+        return {"full": True, "uid": "player-1"}
     if cmd == "player_godmode":
-        return {"godmode": False}
+        return {"godmode": False, "uid": "player-1"}
     if cmd == "infected_drive":
         return {
             "type": "Infected",
@@ -136,7 +140,7 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "vehicle_door":
         return {"object_id": 1, "source": "DoorsDriver", "mode": "read"}
     if cmd == "inventory_give":
-        return {"classname": "Item", "dest": "hands"}
+        return {"classname": "Item", "dest": "hands", "uid": "player-1"}
     if cmd == "inventory_attach":
         return {"object_id": 1, "classname": "Item", "dest": "cargo"}
     if cmd == "object_inspect":
@@ -148,9 +152,17 @@ def _minimal_args(cmd: str) -> dict:
     if cmd == "object_delete":
         return {"object_id": 1}
     if cmd == "hands_take":
-        return {"object_id": 1}
+        return {"object_id": 1, "uid": "player-1"}
     if cmd == "hands_attach":
-        return {"object_id": 1, "slot": "LargeBattery"}
+        return {"object_id": 1, "slot": "LargeBattery", "uid": "player-1"}
+    if cmd == "loadout_apply":
+        return {"loadout_items": [], "uid": "player-1"}
+    if cmd == "inventory_move":
+        return {"item_object_id": 1, "op": "to_hands", "uid": "player-1"}
+    if cmd == "world_spawn_batch":
+        return {"items": [{"type": "Item", "pos": [0.0, 0.0, 0.0], "flags": 0, "rotation": 0}]}
+    if cmd in {"scene_entities", "scene_clear"}:
+        return {"scene_id": "a"}
     if cmd == "weapon_raise":
         return {"raised": True, "hold_ttl_s": 3.0}
     if cmd == "weapon_aim":
@@ -209,8 +221,18 @@ def _minimal_args(cmd: str) -> dict:
         return {"pos": [0.0, 0.0, 0.0], "timeout_s": 0.1}
     if cmd == "player_look_at_release":
         return {"command_id": 1}
+    if cmd == "player_view_set":
+        return {"view": "third"}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
+    if cmd == "server_perf":
+        return {"window_s": 10.0}
+    if cmd == "nav_path_query":
+        return {"from": [0.0, 0.0, 0.0], "to": [1.0, 0.0, 1.0], "snap_radius": 2.0}
+    if cmd == "players_visibility":
+        return {"pos": [0.0, 0.0, 0.0], "radius": 0.0}
+    if cmd == "object_set_health":
+        return {"object_id": 1, "health01": 0.0}
     if cmd == "exec_enforce":
         # Shape-only gate; allowlist/audit happen in _enqueue_exec_enforce.
         return {"expr": "allowed"}

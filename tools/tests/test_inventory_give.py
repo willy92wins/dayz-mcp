@@ -9,8 +9,14 @@ from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_l
 
 
 COMMAND = "inventory_give"
-VALID_ARGS = {"classname": "AKM", "dest": "hands"}
+VALID_ARGS = {"classname": "AKM", "dest": "hands", "uid": "player-1"}
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
+MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
+FSM_CAST = "Weapon_Base spawnedWeapon = Weapon_Base.Cast(spawned);"
+FSM_WRITE = (
+    "result.weapon_without_fsm = spawnedWeapon && "
+    "!spawnedWeapon.CanProcessWeaponEvents();"
+)
 
 
 def _method_body(source: str, signature: str) -> str:
@@ -43,7 +49,7 @@ class InventoryGiveIngressTest(unittest.TestCase):
         for dest in ("hands", "inventory"):
             with self.subTest(dest=dest):
                 status, body = self.state.enqueue_command(
-                    COMMAND, {"classname": "AKM", "dest": dest}
+                    COMMAND, {"classname": "AKM", "dest": dest, "uid": "player-1"}
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(body["peer"], "server")
@@ -56,6 +62,8 @@ class InventoryGiveIngressTest(unittest.TestCase):
             {"classname": "AKM", "dest": "ground"},
             {"classname": "AKM", "dest": "HANDS"},
             {"classname": "AKM", "dest": "hands", "extra": 1},
+            {"classname": "AKM", "dest": "hands"},
+            {"classname": "AKM", "dest": "hands", "uid": ""},
         ]
         for args in invalid:
             with self.subTest(args=args):
@@ -125,6 +133,26 @@ class InventoryGiveEnforceContractTest(unittest.TestCase):
         self.assertIn('result.error = "create_failed"', null_block)
         self.assertNotIn("hands_occupied", null_block)
 
+    def test_weapon_without_fsm_is_read_back_from_the_created_item(self) -> None:
+        # 71c9: one read of the created entity, after the create both dests
+        # share has succeeded. Vanilla's own test (weapon_base.c:270) decides.
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        body = _method_body(source, "protected bool DispatchInventoryGive(")
+        self.assertEqual(body.count("result.weapon_without_fsm"), 1)
+        self.assertEqual(body.count(FSM_CAST), 1)
+        self.assertEqual(body.count(FSM_WRITE), 1)
+        hands_block = _method_body(body, 'if (command.args.dest == "hands")')
+        self.assertNotIn("weapon_without_fsm", hands_block)
+        self.assertLess(body.index("if (!spawned)"), body.index(FSM_CAST))
+        self.assertLess(body.index("m_RuntimeObjects.Insert"), body.index(FSM_CAST))
+        self.assertLess(body.index(FSM_CAST), body.index(FSM_WRITE))
+        self.assertLess(body.index(FSM_WRITE), body.index("result.ok = true;"))
+
+        messages = MESSAGES_PATH.read_text(encoding="utf-8")
+        result_class = messages[messages.index("class MCPResult") :]
+        result_class = result_class[: result_class.index("};")]
+        self.assertIn("\tbool weapon_without_fsm;\n", result_class)
+
 
 class InventoryGiveAppToolTest(unittest.IsolatedAsyncioTestCase):
     async def test_app_tool_registered_and_forwards(self) -> None:
@@ -140,10 +168,25 @@ class InventoryGiveAppToolTest(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value={"ok": 1, "classname": "AKM", "found": True}),
         ) as call:
             await app.call_tool(
-                COMMAND, {"classname": "AKM", "dest": "hands", "timeout_s": 1.0}
+                COMMAND,
+                {"classname": "AKM", "dest": "hands", "uid": "player-1", "timeout_s": 1.0},
             )
 
         call.assert_awaited_once_with(COMMAND, VALID_ARGS, "server", 1.0)
+
+    async def test_description_names_weapon_without_fsm(self) -> None:
+        app, _runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        description = tools[COMMAND].description or ""
+        self.assertIn(
+            "weapon_without_fsm is true when the created item is a weapon "
+            "with no state machine, such as a bow.",
+            description,
+        )
+        self.assertIn("[wpnfsm] ... without FSM", description)
+        self.assertIn("the item still arrives", description)
 
 
 if __name__ == "__main__":

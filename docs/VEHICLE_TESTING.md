@@ -127,6 +127,8 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    `player_teleport` the driver to the surface y (mutation — hold a session
    lease). Never teleport to unverified coordinates: the vertical column,
    not just the ground, must be clear (fb-20260824-115220-1bc1).
+   `player_teleport` requires a non-empty `uid` (B2): pass the uid of the
+   connected player (`query_all_players`), as `tools/g0_site_gate.py` does.
 2. `world_spawn` the vehicle at the site (`flags: 0`; y=0 grounds it).
 3. `vehicle_prepare_fixture` (`mode: object_at`) at the real spawn position.
 4. `restore_gameplay` + `vehicle_release` (clean slate), then
@@ -143,7 +145,7 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    on this stand (see "The exit reality"). Tear down with `vehicle_release`
    and `object_delete` of the fixture (`vehicle_release` only aborts the
    trace and clears the drive-control state,
-   `MCPClientBridge.c:2623-2628` — it is not a get-out); verify the ejection
+   `MCPClientBridge.c:2656-2661` — it is not a get-out); verify the ejection
    via telemetry (`not_seated`), then `restore_gameplay`.
 10. Release the session lease.
 
@@ -186,13 +188,17 @@ server replica is.
    the real spawn position. Keep the registered in-session `object_id`: the
    teardown below deletes that id, and no fixture id survives the run.
 2. `player_teleport` the driver to the surface y behind the canopy gate, as
-   in the client ladder.
+   in the client ladder (with the player's `uid`, which is required).
 3. `vehicle_enter` near the fixture pos: the server half of the seat. It
    runs `StartCommand_Vehicle` (`MCPBridge.c:1001-1011`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
-   (product-spec B2). `seated=1` says the command was accepted, not that
-   the state settled: assert `seated` and `seat == "driver"`, and treat the
-   settle as unproven until step 6 reads it back.
+   (product-spec B2). `seated=1` means the server read the player it seated
+   (or, if that one is gone, the first player) in the driver seat of that car
+   once the get-in ended (`IsSeatReady`). The bridge checks that each tick and
+   answers `timeout` on a tick that does not read it once 5 s
+   (`JOB_TIMEOUT_S`) have passed, whatever `timeout_s` is, so a `timeout` can
+   still end seated: read `query_all_players` (`in_vehicle`) before retrying.
+   Assert `seated` and `seat == "driver"`.
 4. `vehicle_get_in_client`: the client-ownership half, which `engine_set`,
    `vehicle_control` and `vehicle_trace` require and which does not place
    the player in the server crew (its description in
@@ -204,7 +210,7 @@ server replica is.
    server-known position, or `object_inspect(object_id=<fixture id>,
    want=["inventory"])` and its `telemetry.pos`, the world position
    (`GetPosition`, `MCPBridge.c:3471`). `bounding_center` is model-local
-   (`MCPMessages.c:476`) and is not a position to compare. Client
+   (`MCPMessages.c:479`) and is not a position to compare. Client
    side: `vehicle_telemetry` `pos_real` and the `vehicle_trace` samples.
    This step checks position agreement only, not the server crew:
    `query_all_players` reports the server `in_vehicle` (`IsInTransport`,
@@ -217,7 +223,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: `vehicle_release`, then
    `object_delete` of the registered fixture id — the release only clears
-   trace/control (`MCPClientBridge.c:2623-2628`), the delete performs the
+   trace/control (`MCPClientBridge.c:2656-2661`), the delete performs the
    ejection, verified via telemetry (`not_seated`) — then
    `restore_gameplay` and the session release.
 

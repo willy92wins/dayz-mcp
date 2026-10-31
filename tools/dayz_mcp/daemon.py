@@ -43,6 +43,7 @@ from dayz_mcp.loopback import (
     ServerState,
     _is_address_in_use,
     create_http_server,
+    live_profile_from_env,
     read_key,
 )
 from dayz_mcp.runtime_state import (
@@ -385,6 +386,16 @@ def build_server_state(
             config_port = int(getattr(config, "port", 8765))
         except (TypeError, ValueError):
             config_port = None
+    # B4: explicit config attributes win; otherwise the daemon's own
+    # environment (DAYZ_MCP_LIVE_PROFILE / DAYZ_MCP_LIVE_ADMIN), off by
+    # default. A client cannot turn this on or off per request.
+    env_live, env_admin = live_profile_from_env()
+    live_profile = getattr(config, "live_profile", None)
+    if not isinstance(live_profile, bool):
+        live_profile = env_live
+    live_admin = getattr(config, "live_admin_enabled", None)
+    if not isinstance(live_admin, bool):
+        live_admin = env_admin
     state = ServerState(
         key,
         enable_exec_enforce=enable_exec,
@@ -393,6 +404,8 @@ def build_server_state(
         exec_audit=exec_audit,
         coordination=None,
         config_port=config_port,
+        live_profile=live_profile,
+        live_admin_enabled=live_admin,
     )
     state.daemon_generation = generation
     state.instance_token = getattr(config, "instance_token", None)
@@ -627,6 +640,13 @@ def _activate_server_coordination(
         # fb-20260904-114520-6927: the socket table is the second witness of
         # the box; a DayZ image holding a UDP port occupies it without a run.
         port_probe=orphan_guard.snapshot_udp_port_holders,
+        child_probe=lambda: orphan_guard.snapshot_processes_with_parent(
+            ["CrashReporter.exe"]
+        ),
+        parent_anchor=(
+            orphan_guard.open_process_anchor,
+            orphan_guard.close_process_anchor,
+        ),
         game_path=game_path if game_path is not None else _lifecycle_game_path(None),
         recovery_fault_arm=arm_lifecycle_recovery_fault,
         bindings=state,

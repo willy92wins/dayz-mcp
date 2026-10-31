@@ -22,6 +22,10 @@ READ_ONLY_COMMANDS = frozenset(
     {
         "query_player_state",
         "query_all_players",
+        # B3: not a bridge command -- the player_find tool only calls
+        # query_all_players and filters its rows. Listed like logs_since so
+        # it stays read-only if ever routed through authorize().
+        "player_find",
         "scene_raycast",
         "telemetry_read",
         "query_get_in_condition",
@@ -43,10 +47,19 @@ READ_ONLY_COMMANDS = frozenset(
         "input_describe",
         # Server read of the in-game clock (World.GetDate); it writes nothing.
         "world_time_get",
+        # Server read of what a player or survivor wears and holds (fb99).
+        "loadout_get",
         # Client read of the action cursor. The server correlate that
         # resolves its network pairs is the same read, not a mutation.
         "action_cursor",
         "action_cursor_ids",
+        # Server reads: the frame rate over a window and the entity counts, a
+        # navmesh path between two points, and which players could see a point.
+        "server_perf",
+        "nav_path_query",
+        "players_visibility",
+        # Server read of one scene's registry and its objects (165a).
+        "scene_entities",
     }
 )
 MAX_OPERATION_PIN_S = 300.0
@@ -1274,11 +1287,27 @@ class SessionCoordinator:
             return 200, payload
 
     def active_lease_id(
-        self, client: ClientIdentity, lease_token: str | None
+        self,
+        client: ClientIdentity,
+        lease_token: str | None,
+        *,
+        blocking: bool = True,
     ) -> str | None:
-        """Lease id for a token that would pass authorize, without renewing it."""
-        with self._condition:
+        """Lease id for a token that would pass authorize, without renewing it.
+
+        None once the lease's effective expiry has passed, which is when
+        _expire_due ends it; this reads the clock and runs no cleanup. With
+        blocking=False, also None when another thread holds the lock
+        (inbox 6310: a report must not wait on it).
+        """
+        if not self._condition.acquire(blocking=blocking):
+            return None
+        try:
             lease, _error = self._validate_token_locked(client, lease_token)
+            if lease is not None and self._time_fn() >= lease.effective_expiry():
+                lease = None
+        finally:
+            self._condition.release()
         if lease is None:
             return None
         return lease.lease_id

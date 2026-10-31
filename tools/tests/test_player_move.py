@@ -647,7 +647,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only, and a
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "4f90284258023d98")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1706,11 +1706,12 @@ class PlayerMovePayloadTest(unittest.TestCase):
             with self.subTest(owner=owner):
                 self.assertEqual(_class_members(self.messages, owner).count(("ref MCPPlayerMove", FIELD)), 1)
         # player_move sits just before player_trace. direction (c32c) is followed
-        # by the 86a3 refs action_cursor, look_at and cursor_ids.
+        # by the 86a3 refs action_cursor, look_at and cursor_ids, then by
+        # loadout (fb99, 220f).
         result_members = _class_members(self.messages, "MCPResult")
         move_at = result_members.index(("ref MCPPlayerMove", FIELD))
         self.assertEqual(
-            result_members[move_at:move_at + 6],
+            result_members[move_at:move_at + 7],
             [
                 ("ref MCPPlayerMove", FIELD),
                 ("ref MCPPlayerTraceRead", "player_trace"),
@@ -1718,16 +1719,35 @@ class PlayerMovePayloadTest(unittest.TestCase):
                 ("ref MCPActionCursor", "action_cursor"),
                 ("ref MCPLookAt", "look_at"),
                 ("ref MCPCursorIds", "cursor_ids"),
+                ("ref MCPLoadout", "loadout"),
             ],
         )
-        self.assertEqual(result_members[move_at + 6][1], "hold_protocol")
+        self.assertEqual(result_members[move_at + 7][1], "hold_protocol")
         self.assertLess(self.messages.index("class MCPPlayerMove"), self.messages.index("class MCPResult"))
 
     def test_the_reply_is_prunable_and_a_refusal_keeps_its_zero_facts(self) -> None:
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
+        # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-6:],
-            (FIELD, "player_trace", "direction", "action_cursor", "look_at", "cursor_ids"),
+            result_prune.PRUNABLE_FIELDS[-16:],
+            (
+                FIELD,
+                "player_trace",
+                "direction",
+                "action_cursor",
+                "look_at",
+                "cursor_ids",
+                "loadout",
+                "inventory_move",
+                "counts",
+                "points",
+                "from_snapped",
+                "to_snapped",
+                "players_visibility",
+                "world_spawn_batch",
+                "scene_entities",
+                "scene_clear",
+            ),
         )
         self.assertEqual(
             result_prune.PRUNABLE_FIELDS[

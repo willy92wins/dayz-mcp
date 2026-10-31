@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse
 from dayz_mcp import (
     anim_timeline,
     daemon_credential,
+    loadout,
     orphan_guard,
     pinned_keyfile,
     player_move,
@@ -54,6 +55,7 @@ from dayz_mcp.instance_fence import (
 )
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.session_coordination import (
+    READ_ONLY_COMMANDS,
     ClientIdentity,
     MAX_SESSION_QUEUE,
     SessionCoordinator,
@@ -88,8 +90,13 @@ SERVER_COMMANDS = {
     "vehicle_door",
     "inventory_attach",
     "inventory_give",
+    "inventory_move",
+    "loadout_get",
+    "loadout_apply",
+    "loadout_clear",
     "object_inspect",
     "object_resolve",
+    "object_set_health",
     "object_doors",
     "infected_drive",
     "entities_query",
@@ -97,6 +104,14 @@ SERVER_COMMANDS = {
     "hands_attach",
     "weapon_state",
     "action_cursor_ids",
+    # Server reads: frame rate and entity counts, a navmesh path, and which
+    # players could see a point. None of them writes the world.
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
+    "world_spawn_batch",
+    "scene_entities",
+    "scene_clear",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -134,12 +149,82 @@ CLIENT_COMMANDS = {
     "action_cursor",
     "player_look_at",
     "player_look_at_release",
+    "player_view_set",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
 EXEC_COMMANDS = {"exec_enforce"}
 WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
+# B4 (fb-20261028-131107-9249): live profile the daemon enforces. The tool
+# catalog is not access control, so the closed list lives here, at the
+# enqueue every client command passes before it can reach the bridge (and
+# at Handler._handle_lifecycle, the route the dayz_test* tools pass).
+# Off by default; the daemon turns it on only from the environment below
+# (or an explicit ServerState argument). Working assumption D4, not
+# confirmed by the owner: reads and warnings alone, admin mutations only
+# when expressly enabled, after passing the bench.
+LIVE_PROFILE_ENV = "DAYZ_MCP_LIVE_PROFILE"
+LIVE_ADMIN_ENV = "DAYZ_MCP_LIVE_ADMIN"
+LIVE_PROFILE_REFUSED = "live_profile_refused"
+LIVE_PROFILE_ADMIN_DISABLED = "live_profile_admin_disabled"
+_LIVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "live"})
+# The only mutations the profile can ever allow, and only with admin
+# enabled: the player/world mutations the admin tool pack
+# (tool_pack.ADMIN_TOOL_NAMES) enqueues on the server bridge. Each name was
+# checked against SERVER_COMMANDS. The pack's world_spawn stays out (spawn
+# family) and its restore_gameplay stays out (camera/client family), as do
+# bot_*, player_move, weapon_fire, player_view_set, vehicle_* and every
+# other command, with or without admin.
+LIVE_ADMIN_COMMANDS = frozenset(
+    {
+        "player_teleport",
+        "player_heal",
+        "player_godmode",
+        "world_time_set",
+        "world_weather_set",
+        "object_delete",
+    }
+)
+# Reads the profile allows by default, plus notify_players, the warning:
+# only server-side state reads of server/player/world. Client reads that
+# consult UI, camera or input stay out (camera_get, ui_tree, input_describe,
+# action_cursor and its server correlate action_cursor_ids, and the client
+# vehicle_telemetry read). players_visibility stays out too: although it
+# runs on the server, it reads the player's camera/input heading
+# (GetInputController().GetHeadingAngle()), like action_cursor.
+LIVE_ALLOWED_COMMANDS = frozenset(
+    ((READ_ONLY_COMMANDS & SERVER_COMMANDS) | {"notify_players"})
+    - {"action_cursor_ids", "players_visibility"}
+)
+
+
+def live_profile_refusal(
+    cmd: object, *, enabled: bool, admin_enabled: bool
+) -> str | None:
+    """Named refusal for cmd under the live profile, or None when allowed."""
+    if not enabled:
+        return None
+    if not isinstance(cmd, str):
+        return LIVE_PROFILE_REFUSED
+    if cmd in LIVE_ALLOWED_COMMANDS:
+        return None
+    if cmd in LIVE_ADMIN_COMMANDS:
+        return None if admin_enabled else LIVE_PROFILE_ADMIN_DISABLED
+    return LIVE_PROFILE_REFUSED
+
+
+def live_profile_from_env(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[bool, bool]:
+    """(profile_enabled, admin_enabled) from the daemon's environment."""
+    environment = os.environ if environ is None else environ
+
+    def _on(name: str) -> bool:
+        value = environment.get(name)
+        return isinstance(value, str) and value.strip().lower() in _LIVE_TRUE_VALUES
+
+    return _on(LIVE_PROFILE_ENV), _on(LIVE_ADMIN_ENV)
 # Releases the broker publishes when it abandons a delivered command: (source
 # command, release command, builder of the release arguments from the source's
 # id and admitted arguments). ServerState uses this table unless a caller
@@ -506,6 +591,10 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and value != ""
 
 
+def _is_uid(value: object) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
 _ACTION_HOLD_SELECTORS = frozenset({"world", "hands", "self", "door", "component"})
 _ACTION_HOLD_KEYS = frozenset(
     {
@@ -803,6 +892,69 @@ _SAFE_SPAWN_LIFETIME = _reject_numeric_errors(
         minimum_inclusive=False,
     )
 )
+# 165a: a scene_id is 1 to SCENE_ID_MAX_CHARS characters from A-Z a-z 0-9 _ -.
+# Mirrors SCENE_ID_MAX_CHARS and IsValidSceneId in MCPBridge.c; a test keeps the
+# two rules equal.
+SCENE_ID_MAX_CHARS = 64
+_SCENE_ID_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{1,{SCENE_ID_MAX_CHARS}}}")
+
+
+def is_scene_id(value: object) -> bool:
+    return isinstance(value, str) and _SCENE_ID_PATTERN.fullmatch(value) is not None
+
+
+# 7f5d: the world_spawn_batch tool takes 1 to SPAWN_BATCH_ITEMS_MAX items and
+# sends them as commands of 1 to SPAWN_BATCH_PER_TICK_MAX items each, every one
+# created in the server tick that dispatches it. Only the per-command bound
+# reaches the wire; it mirrors SPAWN_BATCH_PER_TICK_MAX in MCPBridge.c, and a
+# test keeps the two equal.
+SPAWN_BATCH_ITEMS_MAX = 200
+SPAWN_BATCH_PER_TICK_MAX = 50
+# A batch item's rotation is an Enforce int (CreateObjectEx's RF_* flags).
+SPAWN_ROTATION_MIN = -2147483648
+SPAWN_ROTATION_MAX = 2147483647
+_SPAWN_BATCH_ITEM_REQUIRED = frozenset({"type", "pos", "flags", "rotation"})
+_SPAWN_BATCH_ITEM_OPTIONAL = frozenset({"ground", "ypr", "ypr_set"})
+_IS_SPAWN_ROTATION = _integer_in_range(
+    minimum=SPAWN_ROTATION_MIN, maximum=SPAWN_ROTATION_MAX
+)
+
+
+def _is_spawn_batch_item(value: object) -> bool:
+    # One item as the world_spawn_batch tool sends it: world_spawn's four keys,
+    # ground only as true (y given as null, resolved by the bridge), and ypr with
+    # ypr_set true, or neither, on an item whose rotation is 0. The bridge reads
+    # an absent key as 0 or false (fb-20260930-065425-8779).
+    if not isinstance(value, dict):
+        return False
+    keys = set(value)
+    if not _SPAWN_BATCH_ITEM_REQUIRED.issubset(keys):
+        return False
+    if keys - _SPAWN_BATCH_ITEM_REQUIRED - _SPAWN_BATCH_ITEM_OPTIONAL:
+        return False
+    if not _is_non_empty_string(value["type"]) or not _is_real_vector3(value["pos"]):
+        return False
+    if not _is_spawn_flags(value["flags"]) or not _IS_SPAWN_ROTATION(value["rotation"]):
+        return False
+    if "ground" in value and not _is_true(value["ground"]):
+        return False
+    if ("ypr" in value) != ("ypr_set" in value):
+        return False
+    if "ypr" in value:
+        if not _is_true(value["ypr_set"]) or not _is_real_vector3(value["ypr"]):
+            return False
+        if value["rotation"] != 0:
+            return False
+    return True
+
+
+def _is_spawn_batch_items(value: object) -> bool:
+    # One command's items: the tool sends a longer list as several commands.
+    return (
+        isinstance(value, list)
+        and 1 <= len(value) <= SPAWN_BATCH_PER_TICK_MAX
+        and all(_is_spawn_batch_item(item) for item in value)
+    )
 
 
 def _is_real_list(length: int) -> _FieldValidator:
@@ -1031,12 +1183,35 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "bot_start",
     "bot_stop",
     "object_resolve",
+    "object_set_health",
     "action_cursor_ids",
     "hands_attach",
+    "loadout_get",
+    "loadout_apply",
+    "loadout_clear",
+    "server_perf",
+    "nav_path_query",
+    "players_visibility",
+    "world_spawn_batch",
+    "scene_entities",
+    "scene_clear",
 })
 # Client verbs an older PBO must not be handed. Checked on the client census
-# (no server arg-contract hash) at enqueue and again at delivery.
-_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold"})
+# (no server arg-contract hash) at enqueue and again at delivery. action_hold
+# keeps the hold_not_supported its tool publishes; any other verb is refused
+# with the server census code, bridge_capability_missing.
+_CLIENT_ANNOUNCED_COMMANDS = frozenset({"action_hold", "player_view_set"})
+
+
+def _requires_capability_admission(cmd: str, args: object) -> bool:
+    # A world_spawn that names a scene is admitted like a new verb (165a): an
+    # older PBO would create the object and never register it, and only the
+    # arg-contract hash tells the two world_spawn bridges apart.
+    if cmd in _CAPABILITY_ADMISSION_COMMANDS:
+        return True
+    return cmd == "world_spawn" and isinstance(args, Mapping) and "scene_id" in args
+
+
 # Owner cleanup may deliver these without a live lease. Nothing else internal
 # skips the authority check.
 _OWNER_CLEANUP_COMMANDS = frozenset(
@@ -1153,12 +1328,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    # B2 min (fb-20261028-131048-091a): uid is required and non-empty for
+    # every player mutation. An empty or missing uid used to fall through
+    # ResolvePlayer to the first human in the bridge; the daemon now refuses
+    # it here, before anything is queued for the bridge. player_kill already
+    # had this shape.
     "player_teleport": _command_schema(
         _schema_variant(
-            required=("pos",),
-            optional=("uid",),
+            required=("pos", "uid"),
             validators={
-                "uid": _is_string,
+                "uid": _is_uid,
                 "pos": _is_real_vector3,
             },
         )
@@ -1169,21 +1348,19 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # vanilla damage instead of the choice the caller made.
     "player_heal": _command_schema(
         _schema_variant(
-            required=("full",),
-            optional=("uid",),
+            required=("full", "uid"),
             validators={
                 "full": _is_strict_bool,
-                "uid": _is_string,
+                "uid": _is_uid,
             },
         )
     ),
     "player_godmode": _command_schema(
         _schema_variant(
-            required=("godmode",),
-            optional=("uid",),
+            required=("godmode", "uid"),
             validators={
                 "godmode": _is_strict_bool,
-                "uid": _is_string,
+                "uid": _is_uid,
             },
         )
     ),
@@ -1192,7 +1369,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "player_kill": _command_schema(
         _schema_variant(
             required=("uid",),
-            validators={"uid": _is_non_empty_string},
+            validators={"uid": _is_uid},
         )
     ),
     "bot_start": _command_schema(
@@ -1385,6 +1562,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         ),
     ),
+    "object_set_health": _command_schema(
+        _schema_variant(
+            required=("object_id", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+        _schema_variant(
+            required=("type", "pos", "health01"),
+            optional=("slot", "zone"),
+            validators={
+                "type": _is_non_empty_string,
+                "pos": _is_real_vector3,
+                "health01": _SAFE_UNIT_REAL,
+                "slot": _is_non_empty_string,
+                "zone": _is_non_empty_string,
+            },
+        ),
+    ),
     # Same target shapes as object_inspect, without want. A phase key is refused
     # so this read cannot be confused with object_anim's write.
     "object_doors": _command_schema(
@@ -1408,7 +1608,7 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         )
     ),
     # hands_take is predictive: the daemon accepts the request, the client
-    # finishes it. uid empty selects the first human, same as inventory_give.
+    # finishes it. uid is required and non-empty (B2 min), same as inventory_give.
     "hands_take": _command_schema(
         _schema_variant(
             required=("object_id",),
@@ -1421,6 +1621,32 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # hands_attach is predictive like hands_take: the held item into one
     # attachment slot of a registered world entity (9608).
+    # inventory_move is predictive on authority=client: accepted is not the
+    # server read. The result waits until that read matches, or times out.
+    # Per-op rules (destination, slot) are applied in validate_command_args,
+    # the same rules as the public tool.
+    "inventory_move": _command_schema(
+        _schema_variant(
+            required=("item_object_id", "op"),
+            optional=("target_object_id", "slot", "authority", "uid"),
+            validators={
+                "item_object_id": _integer_in_range(minimum=1),
+                "op": _one_of(
+                    "to_cargo",
+                    "to_attachment",
+                    "to_hands",
+                    "to_inventory",
+                    "combine",
+                    "split_half",
+                    "split_to_hands",
+                ),
+                "target_object_id": _integer_in_range(minimum=0),
+                "slot": _is_string,
+                "authority": _one_of("client", "server"),
+                "uid": _is_string,
+            },
+        )
+    ),
     "hands_attach": _command_schema(
         _schema_variant(
             required=("object_id", "slot"),
@@ -1437,6 +1663,50 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             optional=("uid",),
             validators={"uid": _is_string},
         )
+    ),
+    # loadout_get / loadout_apply / loadout_clear (fb99, 220f): the target is
+    # a connected player by uid (loadout_get only: absent is the first human;
+    # apply and clear refuse a missing uid) or a survivor by
+    # object_id, never both. The rows always travel: the bridge reads an absent
+    # key as no rows (fb-20260930-065425-8779). They are the flat list
+    # loadout.py builds. loadout_clear is what the loadout_apply tool sends
+    # first for clear_first.
+    "loadout_get": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        ),
+    ),
+    "loadout_apply": _command_schema(
+        _schema_variant(
+            required=("loadout_items",),
+            optional=("uid",),
+            validators={
+                "loadout_items": loadout.is_wire_items,
+                "uid": _is_string,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "loadout_items"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "loadout_items": loadout.is_wire_items,
+            },
+        ),
+    ),
+    "loadout_clear": _command_schema(
+        _schema_variant(
+            optional=("uid",),
+            validators={"uid": _is_string},
+        ),
+        _schema_variant(
+            required=("object_id",),
+            validators={"object_id": _integer_in_range(minimum=1)},
+        ),
     ),
     "notify_players": _command_schema(
         _schema_variant(
@@ -1655,25 +1925,29 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # (tests/test_ingress_schema_coherence.py).
     "query_player_state": _command_schema(_schema_variant()),
     "query_all_players": _command_schema(_schema_variant()),
-    "vehicle_telemetry": _command_schema(_schema_variant()),
+    "vehicle_telemetry": _command_schema(_schema_variant(optional=("pos",), validators={"pos": _is_real_vector3})),
     "vehicle_release": _command_schema(_schema_variant()),
     # flags goes through the same ECE mask policy as the tool
     # (core.is_allowed_spawn_flags), which mirrors the bridge's IsAllowedSpawnFlags.
     # lifetime_s travels with lifetime_s_set true, or neither travels: the bridge
     # reads an absent key as 0 or false (fb-20260930-065425-8779), so only the
     # flag asks for the economy lifetime override (fb-20260930-080543-bd28).
+    # scene_id travels only when the caller named a scene (165a).
     "world_spawn": _command_schema(
         _schema_variant(
             required=("type", "pos", "flags", "rotation"),
+            optional=("scene_id",),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
                 "flags": _is_spawn_flags,
                 "rotation": _integer_in_range(),
+                "scene_id": is_scene_id,
             },
         ),
         _schema_variant(
             required=("type", "pos", "flags", "rotation", "lifetime_s", "lifetime_s_set"),
+            optional=("scene_id",),
             validators={
                 "type": _is_string,
                 "pos": _is_real_vector3,
@@ -1681,8 +1955,28 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "rotation": _integer_in_range(),
                 "lifetime_s": _SAFE_SPAWN_LIFETIME,
                 "lifetime_s_set": _is_true,
+                "scene_id": is_scene_id,
             },
         ),
+    ),
+    # 7f5d: one group of the items the world_spawn_batch tool has checked one by
+    # one, all created in the server tick that dispatches it.
+    "world_spawn_batch": _command_schema(
+        _schema_variant(
+            required=("items",),
+            optional=("scene_id",),
+            validators={
+                "items": _is_spawn_batch_items,
+                "scene_id": is_scene_id,
+            },
+        )
+    ),
+    # 165a / 5a21: the scene a read or a clear names.
+    "scene_entities": _command_schema(
+        _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
+    ),
+    "scene_clear": _command_schema(
+        _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
     ),
     "vehicle_enter": _command_schema(
         _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
@@ -1731,6 +2025,43 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     # world_time_get reads the clock and takes no argument.
     "world_time_get": _command_schema(_schema_variant()),
+    # The bounds mirror server.py and MCPBridge.c (SERVER_PERF_WINDOW_MIN_S and
+    # _MAX_S, NAV_SNAP_RADIUS_MAX, VISIBILITY_RADIUS_MAX); a test tries each
+    # edge here with server.py's values. Every key travels: the bridge reads an
+    # absent one as 0.
+    "server_perf": _command_schema(
+        _schema_variant(
+            required=("window_s",),
+            validators={
+                "window_s": _reject_numeric_errors(
+                    _real_in_range(minimum=1.0, maximum=60.0)
+                ),
+            },
+        )
+    ),
+    "nav_path_query": _command_schema(
+        _schema_variant(
+            required=("from", "to", "snap_radius"),
+            validators={
+                "from": _is_real_vector3,
+                "to": _is_real_vector3,
+                "snap_radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=50.0, minimum_inclusive=False)
+                ),
+            },
+        )
+    ),
+    "players_visibility": _command_schema(
+        _schema_variant(
+            required=("pos", "radius"),
+            validators={
+                "pos": _is_real_vector3,
+                "radius": _reject_numeric_errors(
+                    _real_in_range(minimum=0.0, maximum=100.0)
+                ),
+            },
+        )
+    ),
     # time_multiplier travels with time_multiplier_set true, or neither travels:
     # the bridge reads an absent key as 0 or false (fb-20260930-065425-8779).
     "world_time_set": _command_schema(
@@ -1854,6 +2185,13 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
+    # player_view_set (854c): the local player's first or third person view.
+    "player_view_set": _command_schema(
+        _schema_variant(
+            required=("view",),
+            validators={"view": _one_of("first", "third")},
+        )
+    ),
     "action_cursor_ids": _command_schema(delegated=_validate_action_cursor_ids),
 }
 
@@ -1872,7 +2210,56 @@ def _matches_schema_variant(
     return True
 
 
+def _inventory_move_op_rules(args: dict) -> tuple[bool, str | None]:
+    """Destination and slot rules shared with the public inventory_move tool."""
+    op = args.get("op")
+    target = args.get("target_object_id", 0)
+    slot = args.get("slot", "")
+    if op in {"to_cargo", "to_attachment", "combine"} and (
+        not isinstance(target, int) or isinstance(target, bool) or target <= 0
+    ):
+        return False, "bad_args"
+    if op == "to_attachment" and slot == "":
+        return False, "bad_args"
+    return True, None
+
+
+# B2 min (fb-20261028-131048-091a): commands that mutate one connected
+# player and whose bridge handler resolves that player from uid. Without a
+# non-empty uid the bridge fell back to the first human, so the daemon
+# refuses them before queueing. loadout_apply/loadout_clear are exempt only
+# when object_id > 0 names a survivor dummy instead of a connected player.
+# inventory_move is covered only where it needs a player: client authority,
+# or an op the bridge always resolves a player for (MCPInventoryMoveNeedsPlayer);
+# a server-authority world-to-world move (to_cargo/to_attachment/combine of
+# unrooted items) names no player and keeps its shape. Reads (weapon_state,
+# loadout_get) and notify_players (empty uid is its broadcast form) are out.
+_PLAYER_UID_COMMANDS = frozenset({
+    "inventory_give", "hands_take", "hands_attach",
+})
+_INVENTORY_MOVE_PLAYER_OPS = frozenset({
+    "to_hands", "to_inventory", "split_half", "split_to_hands",
+})
+
+
+def _uid_refusal(cmd: str, args: dict) -> bool:
+    if cmd in _PLAYER_UID_COMMANDS:
+        return not _is_uid(args.get("uid"))
+    if cmd == "inventory_move":
+        if args.get("authority", "client") == "client" or (isinstance(args.get("op"), str) and args["op"] in _INVENTORY_MOVE_PLAYER_OPS):
+            return not _is_uid(args.get("uid"))
+        return False
+    if cmd in {"loadout_apply", "loadout_clear"}:
+        object_id = args.get("object_id")
+        if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
+            return False
+        return not _is_uid(args.get("uid"))
+    return False
+
+
 def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
+    if isinstance(args, dict) and _uid_refusal(cmd, args):
+        return False, "bad_args"
     schema = _COMMAND_ARG_SCHEMAS.get(cmd)
     if schema is not None:
         variants, delegated = schema
@@ -1881,6 +2268,8 @@ def validate_command_args(cmd: str, args: dict) -> tuple[bool, str | None]:
 
         keys = set(args)
         if any(_matches_schema_variant(args, keys, variant) for variant in variants):
+            if cmd == "inventory_move":
+                return _inventory_move_op_rules(args)
             return True, None
         return False, "bad_args"
 
@@ -1965,7 +2354,13 @@ class ServerState:
         coordination: SessionCoordinator | None = None,
         config_port: int | None = None,
         release_registry: tuple | None = None,
+        live_profile: bool = False,
+        live_admin_enabled: bool = False,
     ) -> None:
+        if type(live_profile) is not bool or type(live_admin_enabled) is not bool:
+            raise ValueError("invalid_live_profile")
+        self.live_profile = live_profile
+        self.live_admin_enabled = live_admin_enabled
         self.key = key
         # Loopback port this daemon owns. Only read to seed a bridge config
         # the deploy never wrote; None keeps prepare() failing closed.
@@ -2269,13 +2664,16 @@ class ServerState:
         if isinstance(self.config_port, bool) or not config_path.parent.is_dir():
             return False
         try:
-            # The same three fields install_mcp.py writes (install_mcp.py:977-984).
+            # The fields install_mcp.py writes, plus profile=test (B1): a
+            # config this harness generates is a test run, so the addon
+            # keeps godmode and its water/energy refill on by default there.
             atomic_write_json(
                 config_path,
                 {
                     "url": "http://127.0.0.1:" + str(self.config_port) + "/",
                     "key": self.key,
                     "pollHz": 5,
+                    "profile": "test",
                 },
             )
         except OSError:
@@ -2388,6 +2786,10 @@ class ServerState:
         minted = str(uuid.uuid4())
         if not _valid_uuid4(minted):
             minted = str(uuid.uuid4())
+        # B1: every launch this harness prepares is a test run, even on a
+        # config the installer wrote without a profile, so godmode and its
+        # refill stay on by default exactly as harness runs had them.
+        payload["profile"] = "test"
         payload["instance"] = minted
         atomic_write_json(config_path, payload)
         try:
@@ -3051,6 +3453,22 @@ class ServerState:
             "last_recovered_age_s": age if recent else None,
         }
 
+    def _live_profile_refusal(
+        self, cmd: object, *, internal: bool
+    ) -> tuple[int, dict] | None:
+        # Daemon-internal commands (owner cleanup, releases) are not a
+        # client sending a command, so the profile does not gate them.
+        if internal:
+            return None
+        refusal = live_profile_refusal(
+            cmd,
+            enabled=self.live_profile,
+            admin_enabled=self.live_admin_enabled,
+        )
+        if refusal is None:
+            return None
+        return 403, {"error": refusal}
+
     def enqueue_command(
         self,
         cmd: str,
@@ -3064,6 +3482,9 @@ class ServerState:
         expected_fence: object = _FENCE_OMITTED,
         lease_token_for_proof: str | None = None,
     ) -> tuple[int, dict]:
+        live_refusal = self._live_profile_refusal(cmd, internal=internal)
+        if live_refusal is not None:
+            return live_refusal
         if expected_fence is _FENCE_OMITTED:
             parsed_fence = None
         else:
@@ -3276,16 +3697,21 @@ class ServerState:
         }
 
     def _capability_refusal_locked(
-        self, peer: str, cmd: str, instance: str | None = None
+        self,
+        peer: str,
+        cmd: str,
+        instance: str | None = None,
+        args: object = None,
     ) -> str | None:
         """None when this command may be queued or delivered. Caller holds the lock.
 
         A missing, stale, aged or foreign-binding census is
         bridge_capability_missing. An announced census with a missing or
         different arg-contract hash is arg_contract_mismatch, and that wins
-        over a missing command name.
+        over a missing command name. args matter only to world_spawn
+        (_requires_capability_admission).
         """
-        if cmd not in _CAPABILITY_ADMISSION_COMMANDS:
+        if not _requires_capability_admission(cmd, args):
             return None
         from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 
@@ -3321,31 +3747,35 @@ class ServerState:
         """None when this client command was announced by the destination now bound.
 
         Caller holds the lock. A census from another instance, or one that
-        does not name the command, is hold_not_supported. Re-checked at
+        does not name the command, is hold_not_supported for action_hold and
+        bridge_capability_missing for the other verbs. Re-checked at
         delivery so a destination change after enqueue cannot hand the verb
         to an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
             return None
+        refusal = (
+            "hold_not_supported" if cmd == "action_hold" else "bridge_capability_missing"
+        )
         view = self._capabilities_view_locked(peer)
         if view.get("state") != "announced":
-            return "hold_not_supported"
+            return refusal
         entry = self._peer_caps.get(peer)
         if not isinstance(entry, dict):
-            return "hold_not_supported"
+            return refusal
         announced_at = entry.get("announced_at")
         if (
             not isinstance(announced_at, (int, float))
             or isinstance(announced_at, bool)
             or (self._now() - float(announced_at)) >= PEER_STALE_S
         ):
-            return "hold_not_supported"
+            return refusal
         if not isinstance(instance, str) or instance != entry.get("instance"):
-            return "hold_not_supported"
+            return refusal
         announced = view.get("announced_commands")
         if not isinstance(announced, list) or cmd not in announced:
-            return "hold_not_supported"
+            return refusal
         return None
 
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:
@@ -3396,6 +3826,9 @@ class ServerState:
         expected_fence: dict | None = None,
         lease_token: str | None = None,
     ) -> tuple[int, dict]:
+        live_refusal = self._live_profile_refusal(cmd, internal=internal)
+        if live_refusal is not None:
+            return live_refusal
         if cmd not in self.whitelisted_commands():
             return 400, {"error": "not_whitelisted"}
         if not isinstance(args, dict):
@@ -3454,7 +3887,7 @@ class ServerState:
         gate_pin: tuple[str, str, int, int | None, str | None] | None = None
         with self._lock:
             error, queue, fence_instance, gate_pin = self._admit_enqueue_locked(
-                peer, cmd, internal=internal, owner_session=owner_session
+                peer, cmd, internal=internal, owner_session=owner_session, args=args
             )
             if error is not None:
                 return error
@@ -3483,7 +3916,7 @@ class ServerState:
             )
             with self._lock:
                 error, queue, fence_instance, repin = self._admit_enqueue_locked(
-                    peer, cmd, internal=internal, owner_session=owner_session
+                    peer, cmd, internal=internal, owner_session=owner_session, args=args
                 )
                 if error is not None:
                     return error
@@ -3528,6 +3961,7 @@ class ServerState:
         *,
         internal: bool,
         owner_session: str | None,
+        args: object = None,
     ) -> tuple[
         tuple[int, dict] | None,
         list[dict] | None,
@@ -3554,7 +3988,7 @@ class ServerState:
             return self._fence_reject_response(code, peer=peer), None, None, None
         if self._peer_queue_len(peer) >= MAX_QUEUE:
             return (429, {"error": "queue_full"}), None, None, None
-        refusal = self._capability_refusal_locked(peer, cmd, fence_instance)
+        refusal = self._capability_refusal_locked(peer, cmd, fence_instance, args)
         if refusal is not None:
             return (409, {"error": refusal}), None, None, None
         if not internal:
@@ -4588,11 +5022,13 @@ class ServerState:
                     refusal = None
                     if (
                         isinstance(command_name, str)
-                        and command_name in _CAPABILITY_ADMISSION_COMMANDS
+                        and _requires_capability_admission(
+                            command_name, command.get("args")
+                        )
                         and deliver_accredited
                     ):
                         refusal = self._capability_refusal_locked(
-                            peer, command_name, token
+                            peer, command_name, token, command.get("args")
                         )
                     if (
                         refusal is None
@@ -4998,7 +5434,17 @@ class ServerState:
         return 200, response
 
     def take_result(self, command_id: int, remove: bool = False) -> dict | None:
+        return self.take_result_with_owner(command_id, remove)[0]
+
+    def take_result_with_owner(
+        self, command_id: int, remove: bool = False
+    ) -> tuple[dict | None, tuple[ClientIdentity, str] | None]:
+        """take_result, plus the lease that enqueued a done command (inbox 6310).
+
+        The owner is read in the lock section that pops it with remove=1.
+        """
         self.reap_expired_commands()
+        owner: tuple[ClientIdentity, str] | None = None
         owner_operation: tuple[ClientIdentity, str, int] | None = None
         with self._lock:
             if remove:
@@ -5016,13 +5462,15 @@ class ServerState:
                         owner_operation = (owner[0], owner[1], command_id)
             else:
                 result = self._results.get(command_id)
+                if result is not None:
+                    owner = self._command_owner.get(command_id)
         if owner_operation is not None:
             self.coordination.finish_operation_exact(
                 owner_operation[0].session_id,
                 owner_operation[1],
                 owner_operation[2],
             )
-        return result
+        return result, owner
 
     def cancel_owner_pending(
         self, session_id: str, reason: str, lease_id: str | None = None
@@ -5631,6 +6079,11 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_abandon()
             return
 
+        if parsed.path == "/await":
+            self.state.touch_client()
+            self._handle_await_post(qs)
+            return
+
         session_action = SESSION_ROUTES.get(parsed.path)
         if session_action is not None:
             self.state.touch_client()
@@ -5727,6 +6180,74 @@ class Handler(BaseHTTPRequestHandler):
     def _log(self, message: str) -> None:
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
         sink(message)
+
+    def _log_human_input_block_failed(self) -> None:
+        # After the answer: at most one diagnostic thread waits on the sink.
+        sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
+        slot = getattr(self.server, "_human_input_diagnostic", None)
+        if slot is None:
+            return
+        if not slot.acquire(blocking=False):
+            return
+
+        def emit() -> None:
+            try:
+                sink("human_input_block failed")
+            except Exception:
+                pass
+            finally:
+                slot.release()
+
+        worker = threading.Thread(
+            target=emit, name="mcp-human-input-diagnostic", daemon=True
+        )
+        try:
+            worker.start()
+        except Exception:
+            slot.release()
+
+    def _human_input_payload(
+        self, session_id: object, lease_id: object
+    ) -> tuple[dict[str, object] | None, bool]:
+        """inbox 6310: (the block or None, whether building it failed).
+
+        Report only: a failure never changes the verb or heartbeat.
+        """
+        lifecycle = self.state.lifecycle
+        if lifecycle is None or not hasattr(lifecycle, "human_input_block"):
+            return None, False
+        try:
+            return lifecycle.human_input_block(session_id, lease_id), False
+        except Exception:
+            return {"signal": "unavailable", "runs": []}, True
+
+    def _holder_human_input(
+        self,
+        client: ClientIdentity,
+        lease_token: object,
+        owner_lease_id: str,
+    ) -> tuple[dict[str, object] | None, bool]:
+        """inbox 6310: the block for a caller that holds the command's lease.
+
+        The caller's token must still be the live, unexpired token of the
+        lease that enqueued the command, for this caller's identity. The
+        check does not renew the lease and does not wait for the coordinator
+        lock: one that another thread holds gives no block.
+        """
+        if not isinstance(lease_token, str) or not lease_token:
+            return None, False
+        coordination = self.state.coordination
+        if coordination is None:
+            return None, False
+        try:
+            lease_id = coordination.active_lease_id(
+                client, lease_token, blocking=False
+            )
+        except Exception:
+            return None, False
+        if lease_id != owner_lease_id:
+            return None, False
+        return self._human_input_payload(client.session_id, lease_id)
 
     def _clear_request_renewed_lease(self) -> None:
         """Drop a lease id left on this thread by an earlier request.
@@ -5836,6 +6357,10 @@ class Handler(BaseHTTPRequestHandler):
         the grant response must arrive whole.
         """
 
+        # B4: adopting a run is a lifecycle delegation that bypasses
+        # /lifecycle/*; under the live profile it never happens.
+        if getattr(self.state, "live_profile", False):
+            return payload
         if payload.get("status") != "active":
             return payload
         token = payload.get("lease_token")
@@ -6054,6 +6579,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._adopt_on_grant(client, payload)
 
         payload = self._persist_coordination(payload)
+        block_failed = False
+        if action == "heartbeat" and status == 200:
+            block, block_failed = self._human_input_payload(
+                client.session_id, payload.get("lease_id")
+            )
+            if block is not None:
+                payload["human_input"] = block
         self._log(
             "SESSION "
             f"event={action} status={status} "
@@ -6061,6 +6593,9 @@ class Handler(BaseHTTPRequestHandler):
             f"ticket={payload.get('ticket', '')}"
         )
         self._json(status, payload)
+        if block_failed:
+            # After the answer: a sink that raises or blocks cannot lose it.
+            self._log_human_input_block_failed()
 
     def _persist_coordination(self, payload: dict) -> dict:
         coordination = self.state.coordination
@@ -6086,6 +6621,14 @@ class Handler(BaseHTTPRequestHandler):
             return result
 
     def _handle_lifecycle(self, action: str) -> None:
+        # B4: the dayz_test* tools reach the lifecycle through these routes,
+        # never through enqueue_command, so the live profile refuses every
+        # /lifecycle/* route here, before any delegation, admin or not.
+        # Daemon-internal publications, owner cleanup and releases do not
+        # pass through this handler and stay unfiltered.
+        if getattr(self.state, "live_profile", False):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         self._clear_request_renewed_lease()
         body = self._read_json()
         if body is None:
@@ -6203,6 +6746,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid_op"})
 
     def _handle_admin(self, action: str) -> None:
+        # B4 round 2: /admin/reconcile and
+        # /admin/lifecycle-recovery-repair are external HTTP entry points
+        # into the lifecycle, so under the live profile they are refused
+        # here, before any delegation, admin or not -- same as
+        # /lifecycle/*. Daemon-internal cleanup paths that call
+        # lifecycle.admin_reconcile or _repair_lifecycle_recovery_fault
+        # directly do not pass through this handler and stay unfiltered.
+        if action in {"reconcile", "lifecycle-recovery-repair"} and getattr(
+            self.state, "live_profile", False
+        ):
+            self._json(403, {"error": LIVE_PROFILE_REFUSED})
+            return
         body = self._read_json()
         if body is None:
             return
@@ -6281,7 +6836,27 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, result)
 
 
-    def _handle_await(self, qs: dict[str, list[str]]) -> None:
+    def _handle_await_post(self, qs: dict[str, list[str]]) -> None:
+        """inbox 6310: GET /await plus who asks, so the holder gets human_input.
+
+        The body is {"identity", "lease_token"}; the query is GET's.
+        """
+        body = self._read_json()
+        if body is None:
+            return
+        try:
+            client = ClientIdentity.from_payload(body.get("identity"))
+        except (TypeError, ValueError):
+            # TypeError: an unhashable platform, such as [] or {}.
+            self._json(400, {"error": "invalid_identity"})
+            return
+        self._handle_await(qs, holder=(client, body.get("lease_token")))
+
+    def _handle_await(
+        self,
+        qs: dict[str, list[str]],
+        holder: tuple[ClientIdentity, object] | None = None,
+    ) -> None:
         try:
             command_id = int(qs.get("id", [""])[0])
         except ValueError:
@@ -6292,12 +6867,28 @@ class Handler(BaseHTTPRequestHandler):
         # leak one _results entry per command in the shared daemon. Default keeps
         # the non-destructive read for back-compat with the harness.
         remove = qs.get("remove", ["0"])[0] == "1"
-        result = self.state.take_result(command_id, remove=remove)
+        if holder is None:
+            result, owner = self.state.take_result(command_id, remove=remove), None
+        else:
+            result, owner = self.state.take_result_with_owner(
+                command_id, remove=remove
+            )
         if result is None:
             self._json(200, {"status": "pending"})
             return
 
-        self._json(200, {"status": "done", "result": result})
+        body: dict[str, object] = {"status": "done", "result": result}
+        block_failed = False
+        if holder is not None and owner is not None:
+            block, block_failed = self._holder_human_input(
+                holder[0], holder[1], owner[1]
+            )
+            if block is not None:
+                body["human_input"] = block
+        self._json(200, body)
+        if block_failed:
+            # After the answer, whose result remove=1 may have consumed.
+            self._log_human_input_block_failed()
 
     def _handle_status(self) -> None:
         # Authenticated health/status read used by client bridge_status and by the
@@ -6667,6 +7258,7 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        self._human_input_diagnostic = threading.BoundedSemaphore(1)
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
