@@ -416,6 +416,22 @@ def _serving_live_unknown(config: Any, runtime: Any) -> bool:
     return _is_client_authority(config, runtime)
 
 
+def _forget_serving_live_profile(runtime: Any) -> None:
+    """Drop a cached serving profile so it reads as unknown (fail-closed).
+
+    A failed probe must not keep serving hints from a profile learned
+    from an earlier daemon: unknown resolves to the restrictive set in
+    _serving_live_enabled / _install_next_step_profile_filter.
+    """
+    if runtime is None:
+        return
+    try:
+        if hasattr(runtime, "_serving_live_profile"):
+            runtime._serving_live_profile = None
+    except Exception:
+        pass
+
+
 async def _refresh_serving_live_profile_no_spawn(
     runtime: Any, timeout_s: float
 ) -> None:
@@ -436,37 +452,58 @@ async def _refresh_serving_live_profile_no_spawn(
     )
     if callable(mocked):
         try:
-            result = mocked(timeout_s=timeout_s)
-        except TypeError:
-            result = mocked()
-        if inspect.isawaitable(result):
-            result = await result
+            try:
+                result = mocked(timeout_s=timeout_s)
+            except TypeError:
+                result = mocked()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
         learn = getattr(runtime, "_learn_serving_live_profile", None)
         if callable(learn) and isinstance(result, dict):
             learn(result)
+        else:
+            _forget_serving_live_profile(runtime)
         return
     probe = getattr(runtime, "probe_serving_live_profile_no_spawn", None)
     if callable(probe):
-        result = probe(timeout_s=timeout_s)
-        if inspect.isawaitable(result):
-            await result
+        try:
+            result = probe(timeout_s=timeout_s)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
         return
     healthy = getattr(runtime, "_daemon_healthy", None)
     if callable(healthy):
         deadline = time.monotonic() + float(timeout_s)
-        await asyncio.to_thread(healthy, deadline)
+        try:
+            healthy_ok = await asyncio.to_thread(healthy, deadline)
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        if not healthy_ok:
+            _forget_serving_live_profile(runtime)
         return
     status_fn = getattr(runtime, "bridge_status_payload", None)
     if callable(status_fn) and not _is_client_authority(None, runtime):
         try:
-            result = status_fn(timeout_s=timeout_s)
-        except TypeError:
-            result = status_fn()
-        if inspect.isawaitable(result):
-            result = await result
+            try:
+                result = status_fn(timeout_s=timeout_s)
+            except TypeError:
+                result = status_fn()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
         learn = getattr(runtime, "_learn_serving_live_profile", None)
         if callable(learn) and isinstance(result, dict):
             learn(result)
+        else:
+            _forget_serving_live_profile(runtime)
 
 
 def _serving_live_enabled(config: Any, runtime: Any = None) -> bool:
@@ -1701,8 +1738,11 @@ class ClientRuntime:
             self._serving_live_generation = gen
         live = _live_from_status_payload(payload)
         if live is None:
-            # Unknown for this generation stays unknown (fail-closed).
-            if gen is not None and cached_gen is None:
+            # Unknown for this generation stays unknown (fail-closed):
+            # a payload that teaches nothing must not confirm a profile
+            # cached from an earlier daemon.
+            self._serving_live_profile = None
+            if gen is not None:
                 self._serving_live_generation = gen
             return
         self._serving_live_profile = live
@@ -1712,26 +1752,39 @@ class ClientRuntime:
             self._serving_live_generation = None
 
     def _probe_serving_live_profile_sync(self, timeout_s: float) -> bool:
-        """GET /status without spawning; True when a payload was learned."""
+        """GET /status without spawning; True when a payload was learned.
+
+        Any failure forgets the cached profile (fail-closed): a stale
+        full profile must not keep authorising hints after the probe
+        that was supposed to revalidate it has failed.
+        """
         if getattr(self, "_probe", None) is not None:
             try:
                 deadline = self._time_fn() + float(timeout_s)
-                return bool(self._daemon_healthy(deadline))
+                healthy = bool(self._daemon_healthy(deadline))
             except Exception:
+                _forget_serving_live_profile(self)
                 return False
+            if not healthy:
+                _forget_serving_live_profile(self)
+            return healthy
         if getattr(self, "_credential_provider", None) is None:
+            _forget_serving_live_profile(self)
             return False
         try:
             status, payload = self._request_once(
                 "GET", "/status", timeout=float(timeout_s)
             )
         except Exception:
+            _forget_serving_live_profile(self)
             return False
         if status != 200:
+            _forget_serving_live_profile(self)
             return False
         try:
             self._learn_serving_live_profile(payload)
         except Exception:
+            _forget_serving_live_profile(self)
             return False
         return True
 
@@ -1753,14 +1806,19 @@ class ClientRuntime:
         )
         if callable(mocked):
             try:
-                result = mocked(timeout_s=timeout_s)
-            except TypeError:
-                result = mocked()
-            if inspect.isawaitable(result):
-                result = await result
+                try:
+                    result = mocked(timeout_s=timeout_s)
+                except TypeError:
+                    result = mocked()
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception:
+                _forget_serving_live_profile(self)
+                return False
             if isinstance(result, dict):
                 self._learn_serving_live_profile(result)
                 return True
+            _forget_serving_live_profile(self)
             return False
         return await asyncio.to_thread(
             self._probe_serving_live_profile_sync, float(timeout_s)

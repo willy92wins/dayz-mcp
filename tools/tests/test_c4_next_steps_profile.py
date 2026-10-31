@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
@@ -479,10 +479,32 @@ class ServerProfileFilterTest(unittest.TestCase):
         self.assertEqual(payload["next_step"], "session_acquire_wait")
 
 
-def _bare_client(payload: dict | None = None) -> server.ClientRuntime:
+def _bare_client(
+    payload: dict | None = None,
+    *,
+    request_once=None,
+) -> server.ClientRuntime:
+    """Bare client whose only daemon transport is the given _request_once.
+
+    Tests simulate the daemon at _request_once so the real no-spawn
+    probe (_probe_serving_live_profile_sync via _request_once) runs;
+    no bridge_status_payload stub is installed.
+    """
     client = object.__new__(server.ClientRuntime)
     client._serving_live_profile = None
     client._serving_live_generation = None
+    client._probe = None  # type: ignore[attr-defined]
+    client._credential_provider = object()  # type: ignore[attr-defined]
+    calls: list = []
+
+    def _recorded(*args, **kwargs):
+        calls.append((args, kwargs))
+        if request_once is None:
+            raise RuntimeError("no daemon simulated")
+        return request_once(*args, **kwargs)
+
+    client._request_once = _recorded  # type: ignore[attr-defined]
+    client._request_calls = calls  # type: ignore[attr-defined]
     if payload is not None:
         client._learn_serving_live_profile(dict(payload))
     return client
@@ -567,17 +589,21 @@ class GenerationCacheRegressionTest(unittest.TestCase):
 
 class GenerationMcpRegressionTest(unittest.IsolatedAsyncioTestCase):
     async def test_full_to_live_same_client_strips_knowledge_hint(self) -> None:
-        client = _bare_client({"daemon_generation": "g1", "live_profile": False})
+        # Daemon replaced: the real probe (via _request_once) now sees g2 live.
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=lambda *a, **k: (
+                200,
+                {"daemon_generation": "g2", "live_profile": True},
+            ),
+        )
         config = server.ServerConfig(
             mode="client", tool_pack="full", log_sink=lambda _m: None
         )
-        # Daemon replaced: same client now probes a live g2 daemon.
-        client.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
-            return_value={"daemon_generation": "g2", "live_profile": True}
-        )
         app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
         text = await _run_filter(app, client, config)
-        self.assertGreaterEqual(client.bridge_status_payload.call_count, 1)
+        self.assertGreaterEqual(len(client._request_calls), 1)  # type: ignore[attr-defined]
+        self.assertEqual(client._request_calls[0][0][:2], ("GET", "/status"))  # type: ignore[attr-defined]
         self.assertNotIn("next_step=dayz_knowledge", text)
         self.assertEqual(client._serving_live_generation, "g2")
         self.assertTrue(client._serving_live_profile)
@@ -600,29 +626,30 @@ class UnknownProfileFailClosedTest(unittest.TestCase):
 
 class UnknownProfileMcpRegressionTest(unittest.IsolatedAsyncioTestCase):
     async def test_status_without_live_profile_strips_knowledge_hint_via_mcp(self) -> None:
-        client = _bare_client()
+        client = _bare_client(
+            request_once=lambda *a, **k: (200, {"daemon_generation": "g1"})
+        )
         config = server.ServerConfig(
             mode="client", tool_pack="full", log_sink=lambda _m: None
         )
-        client.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
-            return_value={"daemon_generation": "g1"}
-        )
         app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
         text = await _run_filter(app, client, config)
+        self.assertGreaterEqual(len(client._request_calls), 1)  # type: ignore[attr-defined]
         self.assertNotIn("next_step=dayz_knowledge", text)
         self.assertIsNone(client._serving_live_profile)
         self.assertFalse(server._serving_live_known(client))
 
     async def test_failed_probe_keeps_unknown_restrictive_via_mcp(self) -> None:
-        client = _bare_client()
+        def _down(*_a, **_k):
+            raise RuntimeError("status down")
+
+        client = _bare_client(request_once=_down)
         config = server.ServerConfig(
             mode="client", tool_pack="full", log_sink=lambda _m: None
         )
-        client.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
-            side_effect=RuntimeError("status down")
-        )
         app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
         text = await _run_filter(app, client, config)
+        self.assertGreaterEqual(len(client._request_calls), 1)  # type: ignore[attr-defined]
         self.assertNotIn("next_step=dayz_knowledge", text)
 
 
@@ -647,20 +674,107 @@ class NoSpawnProbeSyncTest(unittest.TestCase):
         self.assertEqual(client._serving_live_generation, "g2")
 
 
-class NoHintNoSpawnRegressionTest(unittest.IsolatedAsyncioTestCase):
-    async def test_error_without_hint_skips_status_and_spawn(self) -> None:
-        client = _bare_client()
+class FailedProbeFailClosedTest(unittest.TestCase):
+    """P2 r5-1: a failed probe forgets a cached full profile (sync core)."""
+
+    def _config(self) -> server.ServerConfig:
+        return server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+
+    def test_transport_failure_forgets_cached_full(self) -> None:
+        def _down(*_a, **_k):
+            raise RuntimeError("status down")
+
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=_down,
+        )
+        self.assertEqual(
+            server._effective_next_tools(self._config(), runtime=client),
+            agent_loop.PUBLIC_NEXT_TOOLS,
+        )
+        self.assertFalse(client._probe_serving_live_profile_sync(1.0))
+        self.assertIsNone(client._serving_live_profile)
+        self.assertEqual(
+            server._effective_next_tools(self._config(), runtime=client),
+            tool_pack.profile_next_tools("live"),
+        )
+
+    def test_non_200_forgets_cached_full(self) -> None:
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=lambda *a, **k: (503, {}),
+        )
+        self.assertFalse(client._probe_serving_live_profile_sync(1.0))
+        self.assertIsNone(client._serving_live_profile)
+        self.assertEqual(
+            server._effective_next_tools(self._config(), runtime=client),
+            tool_pack.profile_next_tools("live"),
+        )
+
+    def test_payload_without_live_profile_forgets_cached_full(self) -> None:
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=lambda *a, **k: (200, {"daemon_generation": "g1"}),
+        )
+        self.assertTrue(client._probe_serving_live_profile_sync(1.0))
+        self.assertIsNone(client._serving_live_profile)
+        self.assertEqual(
+            server._effective_next_tools(self._config(), runtime=client),
+            tool_pack.profile_next_tools("live"),
+        )
+
+
+class FailedProbeMcpRegressionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_probe_after_cached_full_strips_hint_via_mcp(self) -> None:
+        def _down(*_a, **_k):
+            raise RuntimeError("status down")
+
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=_down,
+        )
         config = server.ServerConfig(
             mode="client", tool_pack="full", log_sink=lambda _m: None
         )
-        status_mock = AsyncMock(return_value={"daemon_generation": "g2", "live_profile": True})
-        client.bridge_status_payload = status_mock  # type: ignore[attr-defined]
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(app, client, config)
+        self.assertGreaterEqual(len(client._request_calls), 1)  # type: ignore[attr-defined]
+        self.assertNotIn("next_step=dayz_knowledge", text)
+        self.assertIsNone(client._serving_live_profile)
+
+    async def test_unknown_payload_after_cached_full_strips_hint_via_mcp(self) -> None:
+        client = _bare_client(
+            {"daemon_generation": "g1", "live_profile": False},
+            request_once=lambda *a, **k: (200, {"daemon_generation": "g1"}),
+        )
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(app, client, config)
+        self.assertNotIn("next_step=dayz_knowledge", text)
+        self.assertIsNone(client._serving_live_profile)
+
+
+class NoHintNoSpawnRegressionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_error_without_hint_skips_status_and_spawn(self) -> None:
+        client = _bare_client(
+            request_once=lambda *a, **k: (
+                200,
+                {"daemon_generation": "g2", "live_profile": True},
+            )
+        )
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
         spawn_calls: list[int] = []
         client._ensure_daemon = lambda *a, **k: spawn_calls.append(1) or True  # type: ignore[attr-defined]
         app = _fake_filter_app("bad_purpose")
         text = await _run_filter(app, client, config)
         self.assertEqual(text, "bad_purpose")
-        self.assertEqual(status_mock.call_count, 0)
+        self.assertEqual(len(client._request_calls), 0)  # type: ignore[attr-defined]
         self.assertEqual(spawn_calls, [])
 
 
