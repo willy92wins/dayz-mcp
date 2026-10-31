@@ -102,6 +102,9 @@ SERVER_COMMANDS = {
     "object_set_health",
     "object_doors",
     "infected_drive",
+    "survivor_drive",
+    # Internal: the broker's release of one drive (c801), never a public tool.
+    "survivor_drive_release",
     "entities_query",
     "hands_take",
     "hands_attach",
@@ -158,6 +161,7 @@ CLIENT_COMMANDS = {
     "player_look_at",
     "player_look_at_release",
     "player_view_set",
+    "actor_emote",
 }
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
@@ -247,6 +251,14 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "action_hold",
         "action_hold_cancel",
         lambda command_id, args: {"hold_id": args["hold_id"]},
+    ),
+    (
+        "survivor_drive",
+        "survivor_drive_release",
+        lambda command_id, args: {
+            "command_id": command_id,
+            "object_id": args["object_id"],
+        },
     ),
     # d026: the client stops the path only while this play is the one playing.
     (
@@ -1216,6 +1228,65 @@ BOT_START_ACTIONS = (
     "PLAYER_BOT_TEST_SWAP_G2H",
     "PLAYER_BOT_TEST_SWAP_INTERNAL",
 )
+# actor_emote's closed catalog (36fa): each name is an EmoteConstants id of the
+# same name, lowercase, that exists in 1.29 and 1.30 (constants.c:366-409), in
+# id order. Not the suicide emote (it kills the player) nor the debug id, nor
+# vomit (its EmoteStartOverride queues the vomit symptom, in both versions) or
+# surrender (in 1.30 it only changes the surrender state, so no callback; in
+# 1.29 it plays its own in and out callbacks and changes the state and the
+# hands; in both IsEmotePlaying() then reads the state, so every later emote
+# would be refused). MCPClientBridge.c ActorEmoteId has the cites and refuses
+# any other name too. end is not an id: it ends the playing emote.
+ACTOR_EMOTES = (
+    "greeting",
+    "sos",
+    "heart",
+    "taunt",
+    "lyingdown",
+    "tauntkiss",
+    "facepalm",
+    "tauntelbow",
+    "thumb",
+    "throat",
+    "dance",
+    "campfire",
+    "sita",
+    "sitb",
+    "thumbdown",
+    "dabbing",
+    "timeout",
+    "clap",
+    "point",
+    "silent",
+    "salute",
+    "rps",
+    "watching",
+    "hold",
+    "listening",
+    "pointself",
+    "lookatme",
+    "tauntthink",
+    "move",
+    "down",
+    "come",
+    "rps_r",
+    "rps_p",
+    "rps_s",
+    "nod",
+    "shake",
+    "shrug",
+)
+ACTOR_EMOTE_END = "end"
+# wait_s, the seconds the client job watches m_bEmoteIsPlaying. Mirrored by
+# ACTOR_EMOTE_WAIT_MIN_S and ACTOR_EMOTE_WAIT_MAX_S in MCPClientBridge.c.
+ACTOR_EMOTE_WAIT_MIN_S = 0.5
+ACTOR_EMOTE_WAIT_MAX_S = 30.0
+# The tool waits at least wait_s plus this for the answer, as player_move
+# waits hold_s plus HOLD_SLACK_S.
+ACTOR_EMOTE_WAIT_SLACK_S = 5.0
+# survivor_drive heading bound, compass degrees either way, as infected_drive's.
+# Mirrored by SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG in MCPBridge.c.
+SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = 360.0
 # Verbs an older PBO must never be handed. Admission and delivery both require
 # a fresh accredited server census that names the command and the current
 # arg-contract hash.
@@ -1236,6 +1307,8 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "world_spawn_batch",
     "scene_entities",
     "scene_clear",
+    "survivor_drive",
+    "survivor_drive_release",
 })
 # Client verbs an older PBO must not be handed, each with the error it is
 # refused with. Checked on the census of the client bound to the run (no
@@ -1248,6 +1321,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
 # camera_path_release skip the live lease at owner cleanup, not this check.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
+    "actor_emote": "bridge_capability_missing",
     "camera_path_play": "bridge_capability_missing",
     "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
@@ -1279,6 +1353,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
         "bot_stop",
         "player_look_at_release",
         "action_hold_cancel",
+        "survivor_drive_release",
         "camera_path_release",
     }
 )
@@ -1483,6 +1558,34 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "type": _is_non_empty_string,
                 "pos": _is_real_vector3,
+                "mode": _equal_to("release"),
+            },
+        ),
+    ),
+    # survivor_drive (c801): a registry survivor. A drive carries heading and
+    # speed, each with its _set flag true, as infected_drive; speed is the
+    # OverrideMovementSpeed value of walk, jog or sprint. A release carries
+    # mode alone.
+    "survivor_drive": _command_schema(
+        _schema_variant(
+            required=("object_id", "heading", "heading_set", "speed", "speed_set"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "heading": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=-SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
+                        maximum=SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
+                    )
+                ),
+                "heading_set": _is_true,
+                "speed": _is_player_move_speed,
+                "speed_set": _is_true,
+            },
+        ),
+        _schema_variant(
+            required=("object_id", "mode"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
                 "mode": _equal_to("release"),
             },
         ),
@@ -2275,6 +2378,34 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"view": _one_of("first", "third")},
         )
     ),
+    # survivor_drive_release (c801), internal: the id of the drive command and
+    # its survivor's object_id. The bridge drops that survivor's drive only
+    # while that command's drive is the one set: command ids restart with each
+    # daemon, so the id alone could name another survivor's drive.
+    "survivor_drive_release": _command_schema(
+        _schema_variant(
+            required=("command_id", "object_id"),
+            validators={
+                "command_id": _integer_in_range(minimum=1),
+                "object_id": _integer_in_range(minimum=1),
+            },
+        )
+    ),
+    # actor_emote (36fa): a catalog name or end, and the seconds the client
+    # job watches m_bEmoteIsPlaying. The tool always sends both.
+    "actor_emote": _command_schema(
+        _schema_variant(
+            required=("emote", "wait_s"),
+            validators={
+                "emote": _one_of(*ACTOR_EMOTES, ACTOR_EMOTE_END),
+                "wait_s": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=ACTOR_EMOTE_WAIT_MIN_S, maximum=ACTOR_EMOTE_WAIT_MAX_S
+                    )
+                ),
+            },
+        )
+    ),
     # The id of the camera_path_play to stop; also used by owner cleanup.
     "camera_path_release": _command_schema(
         _schema_variant(
@@ -2569,6 +2700,9 @@ class ServerState:
         self._operation_deadlines: dict[int, float] = {}
         self._command_owner: dict[int, tuple[ClientIdentity, str]] = {}
         self._bot_by_lease: dict[str, set[int]] = {}
+        # lease -> survivor object_id -> id of the latest survivor_drive of that
+        # lease delivered to drive it (c801). cleanup_owner releases each one.
+        self._drive_by_lease: dict[str, dict[int, int]] = {}
         # Delivered plays stay held until the client confirms their replacement
         # or refusal, or their cleanup is queued. Command ids are not execution
         # order: the client's pending array removes by swapping with its last.
@@ -3986,6 +4120,60 @@ class ServerState:
                 status, payload = self.enqueue_command(
                     "bot_stop",
                     {"object_id": object_id},
+                    peer="server",
+                    internal=True,
+                )
+                command_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(command_id, int):
+                    self._fire_and_forget_ids.add(command_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
+    def _record_delivered_drive_locked(self, command_id: int, command: dict) -> None:
+        """At delivery, a drive becomes its lease's latest for that survivor
+        (c801); a mode release is not recorded. Not at enqueue: a drive the
+        queue drops before delivery never runs, and naming it at cleanup would
+        leave on the drive delivered before it. Caller holds self._lock.
+        """
+        owner = self._command_owner.get(command_id)
+        args = command.get("args")
+        if owner is None or not isinstance(args, dict):
+            return
+        lease_id = owner[1]
+        driven_id = args.get("object_id")
+        if (
+            isinstance(lease_id, str)
+            and lease_id
+            and args.get("mode") != "release"
+            and isinstance(driven_id, int)
+            and not isinstance(driven_id, bool)
+            and driven_id > 0
+        ):
+            self._drive_by_lease.setdefault(lease_id, {})[driven_id] = command_id
+
+    def enqueue_survivor_drive_releases_for_lease(
+        self, lease_id: str
+    ) -> dict[str, int]:
+        """survivor_drive_release for the latest delivered drive of each
+        survivor that lease drove (c801), naming the drive's id and the
+        survivor. The bridge drops that survivor's drive only if that id set
+        it.
+
+        Same rules as enqueue_bot_stops_for_lease: the caller holds the queue
+        lock, and the releases are fire-and-forget owner cleanup.
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            drives = self._drive_by_lease.pop(lease_id, {})
+            enqueued = 0
+            failed = 0
+            for object_id in sorted(drives):
+                status, payload = self.enqueue_command(
+                    "survivor_drive_release",
+                    {"command_id": drives[object_id], "object_id": object_id},
                     peer="server",
                     internal=True,
                 )
@@ -5846,6 +6034,8 @@ class ServerState:
                             record = self._holds.get(delivered_hold)
                             if record is not None:
                                 record["delivered"] = True
+                    if command_name == "survivor_drive" and isinstance(command_id, int):
+                        self._record_delivered_drive_locked(command_id, command)
                     commands.append(wire_command)
                 queue[:] = remaining + queue[len(snapshot) :]
                 if commands and self._poll_delay_ms > 0:
@@ -6670,8 +6860,14 @@ class ServerState:
             self._flush_close_outcomes(close_outcomes)
         with self._lock:
             pending_bots = bool(self._bot_by_lease.get(lease_id))
+            pending_drives = bool(self._drive_by_lease.get(lease_id))
             pending_paths = bool(self._camera_path_play_by_lease.get(lease_id))
-        if not vehicle_active and not pending_bots and not pending_paths:
+        if (
+            not vehicle_active
+            and not pending_bots
+            and not pending_drives
+            and not pending_paths
+        ):
             return cleanup
 
         if self._retail_quarantined():
@@ -6679,6 +6875,8 @@ class ServerState:
             values = list(existing) if isinstance(existing, list) else []
             if "retail_quarantine" not in values:
                 values.append("retail_quarantine")
+            if pending_drives:
+                values.append("survivor_drive_release_unconfirmed")
             if pending_paths:
                 # No release goes out now. Keep the obligation for a later
                 # drain after quarantine clears; no client confirmed a stop.
@@ -6709,6 +6907,7 @@ class ServerState:
                 else:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
             report = self.enqueue_bot_stops_for_lease(lease_id)
+            drive_report = self.enqueue_survivor_drive_releases_for_lease(lease_id)
             paths = self.enqueue_camera_path_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
             cleanup["bot_stop_enqueued"] = report["enqueued"]
@@ -6716,6 +6915,16 @@ class ServerState:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("bot_stop_failed")
+            cleanup["cleanup_degraded"] = values
+        # As bot_stop and camera_path_release: the count when releases went
+        # out, and survivor_drive_release_unconfirmed only for one that could
+        # not be queued (retail quarantine reports it above).
+        if drive_report["enqueued"] or drive_report["failed"]:
+            cleanup["survivor_drive_release_enqueued"] = drive_report["enqueued"]
+        if drive_report["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("survivor_drive_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
         if paths["enqueued"] or paths["failed"]:
             cleanup["camera_path_release_enqueued"] = paths["enqueued"]

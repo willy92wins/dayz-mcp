@@ -471,6 +471,10 @@ GENERIC_SCALAR_OWNERS = {
     "min_fps": ({"server_perf"}, 0),
     "insufficient_samples": ({"server_perf"}, 0),
     "length_m": ({"nav_path_query"}, 0.0),
+    # actor_emote's watch (36fa): kept at "" and 0.0 for it, dropped elsewhere.
+    "emote_state": ({"actor_emote"}, ""),
+    "started_after_s": ({"actor_emote"}, 0.0),
+    "finished_after_s": ({"actor_emote"}, 0.0),
 }
 
 # Deliberately not owned. A stale 0 here is still not dropped.
