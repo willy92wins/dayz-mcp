@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import stat
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,6 +236,46 @@ def _create_missing_lock(directory_handle: int, name: str) -> None:
     if status != 0:
         raise OSError(0, f"launcher registry lock not created (NTSTATUS {status:#010x})")
     _files.CloseHandle(created)
+
+
+def acquire_registry_lock_with_retry(
+    *,
+    exclusive: bool,
+    path: Path = _CANONICAL_LOCK,
+    deadline_s: float = 5.0,
+    initial_backoff_s: float = 0.05,
+    max_backoff_s: float = 0.5,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> RegistryLock:
+    """Acquire the registry lock, retrying only while it is busy (A3, 964e).
+
+    `acquire_registry_lock` stays fail-fast (`launcher_registry_busy` on the
+    first contention). This wrapper retries that one error with exponential
+    backoff capped at `max_backoff_s` until `deadline_s` from the first
+    attempt; still busy then raises `launcher_registry_busy_timeout`. Any
+    other error propagates at once, without a retry.
+    """
+    for value in (deadline_s, initial_backoff_s, max_backoff_s):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("invalid_registry_lock_retry")
+    if initial_backoff_s <= 0 or max_backoff_s < initial_backoff_s:
+        raise ValueError("invalid_registry_lock_retry")
+    deadline = monotonic_fn() + deadline_s
+    backoff = initial_backoff_s
+    while True:
+        try:
+            return acquire_registry_lock(exclusive=exclusive, path=path)
+        except RuntimeError as error:
+            if str(error) != "launcher_registry_busy":
+                raise
+            remaining = deadline - monotonic_fn()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"launcher_registry_busy_timeout: lock still busy after {deadline_s:g}s"
+                ) from error
+            sleep_fn(min(backoff, remaining))
+            backoff = min(backoff * 2, max_backoff_s)
 
 
 def acquire_registry_lock(*, exclusive: bool, path: Path = _CANONICAL_LOCK) -> RegistryLock:

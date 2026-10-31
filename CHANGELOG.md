@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- A3 (fb-20261028-131246-964e): `acquire_registry_lock_with_retry` in `tools/dayz_mcp/registry_lock.py` retries only `launcher_registry_busy` with bounded exponential backoff (0.05 s → 0.5 s by default) until a 5 s deadline, then raises `launcher_registry_busy_timeout`; `acquire_registry_lock` stays fail-fast and every other error propagates without a retry. New guide `docs/SERVERMOD.md` explains loading the addon only on the server with `-serverMod=` (server-only `MissionServer`/`MCPBridge` vs client `MCPClientBridge` in `MissionGameplay`, missing `[DayZ-MCP] client init pending/…` in the client RPT as the symptom); it is not yet confirmed against a real run — that check stays queued with Experto MCP. No `addon/`, `config.cpp` or launch-argument change.
+
 ### Fixed
 
 - FIFO/reservations remain available with v12 peers: lease-end stage 2b stays inert until PBO v13 announces `lease_close` / `lease_close_client`. The broker checks the bound peer's capability census (no environment flag); unsupported closes settle without queued commands or OWED rows, so later grants do not inherit `lease_end_unconfirmed`. Bridge protocol version 12 and the server argument-contract hash are unchanged; this F1 broker fix alone needs no PBO rebuild (PR #268 as a whole touches `addon/` and does require one).
