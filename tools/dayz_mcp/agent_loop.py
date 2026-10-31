@@ -7,6 +7,8 @@ dead-ends the loop. This module is the single allowlist those recipes use.
 
 from __future__ import annotations
 
+import re
+
 # Tools that exist on the standard public catalog and are safe to name in
 # error recipes. Keep this list a subset of build_app() registrations.
 PUBLIC_NEXT_TOOLS = frozenset(
@@ -88,6 +90,28 @@ def ok_next_step(
         if named is not None:
             return named
     return None
+
+
+_NEXT_STEP_TOKEN_RE = re.compile(r";?\s*next_step=([A-Za-z0-9_]+);?")
+
+
+def filter_next_step_text(
+    message: str, allowed: frozenset[str] | set[str] | None
+) -> str:
+    """Drop next_step=<tool> tokens the active profile does not expose.
+
+    Error text built at import time (for example the knowledge remedies)
+    cannot know the profile a server runs under, so the MCP boundary
+    rewrites it on the way out. Allowed tokens pass through unchanged;
+    with allowed=None the text is returned as-is.
+    """
+    if allowed is None:
+        return message
+
+    def _keep(match: re.Match[str]) -> str:
+        return match.group(0) if match.group(1) in allowed else ""
+
+    return _NEXT_STEP_TOKEN_RE.sub(_keep, message).strip(" ;")
 
 
 def with_next_step(

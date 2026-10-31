@@ -124,6 +124,23 @@ def next_step_tools(pack: str) -> frozenset[str]:
     return PUBLIC_NEXT_TOOLS & allowed
 
 
+def effective_next_tools(
+    pack: str, *, live_enabled: bool = False
+) -> frozenset[str]:
+    """Hint set for one server: its tool pack intersected with the live profile.
+
+    The daemon live profile (B4) is enforced at the broker, below the tool
+    catalog, so a pack that exposes a tool does not make its hint callable
+    while the profile is on. Intersecting both is the set a caller can
+    actually use. No PUBLIC_NEXT_TOOLS hint enqueues a LIVE_ADMIN_COMMANDS
+    bridge command, so the admin flag does not widen this set.
+    """
+    allowed = next_step_tools(pack)
+    if live_enabled:
+        allowed = allowed & LIVE_NEXT_TOOLS
+    return allowed
+
+
 def profile_next_tools(profile: str) -> frozenset[str]:
     """Public tools a next_step hint may name under one named profile.
 

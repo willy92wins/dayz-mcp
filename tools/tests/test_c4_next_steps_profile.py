@@ -10,13 +10,18 @@ back to the next public tool the profile does expose, or to none.
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
+
+from mcp import types
 
 from dayz_mcp import agent_loop, loopback, server, tool_pack
 
@@ -98,17 +103,46 @@ class NextStepStaysInsideProfileTest(unittest.TestCase):
                         follow is None or follow in allowed, (cmd, follow)
                     )
 
-    def test_ok_next_step_substitutes_bridge_status_when_mapped_is_outside(self) -> None:
-        admin = tool_pack.profile_next_tools("admin")
-        # session_release maps to session_acquire_wait, which admin exposes.
+    def test_ok_next_step_mapped_tool_survives_when_profile_exposes_it(self) -> None:
+        for name in ("admin", "live"):
+            allowed = tool_pack.profile_next_tools(name)
+            with self.subTest(profile=name):
+                # session_release maps to session_acquire_wait, exposed by both.
+                self.assertEqual(
+                    agent_loop.ok_next_step("session_release", allowed=allowed),
+                    "session_acquire_wait",
+                )
+
+    def test_ok_next_step_falls_back_to_bridge_status_when_mapped_excluded(self) -> None:
+        # session_release maps to session_acquire_wait; exclude exactly that
+        # destination so only the fallback chain can answer.
+        allowed = tool_pack.profile_next_tools("live") - {"session_acquire_wait"}
+        self.assertNotIn("session_acquire_wait", allowed)
         self.assertEqual(
-            agent_loop.ok_next_step("session_release", allowed=admin),
-            "session_acquire_wait",
+            agent_loop.ok_next_step("session_release", allowed=allowed),
+            "bridge_status",
         )
-        live = tool_pack.profile_next_tools("live")
         self.assertEqual(
-            agent_loop.ok_next_step("session_release", allowed=live),
-            "session_acquire_wait",
+            agent_loop.ok_next_step(
+                "session_release",
+                allowed=frozenset({"bridge_status", "session_status"}),
+            ),
+            "bridge_status",
+        )
+
+    def test_ok_next_step_falls_back_to_session_status_when_bridge_excluded(self) -> None:
+        self.assertEqual(
+            agent_loop.ok_next_step(
+                "session_release", allowed=frozenset({"session_status"})
+            ),
+            "session_status",
+        )
+
+    def test_ok_next_step_names_nothing_when_no_fallback_is_allowed(self) -> None:
+        self.assertIsNone(
+            agent_loop.ok_next_step(
+                "session_release", allowed=frozenset({"wait_for"})
+            )
         )
 
 
@@ -140,6 +174,97 @@ class TestProfileRegressionTest(unittest.TestCase):
         self.assertIsNone(agent_loop.ok_next_step("bridge_status"))
 
 
+class EffectiveProfileTest(unittest.TestCase):
+    """The daemon live profile is propagated and intersected with the pack."""
+
+    def test_live_intersects_full_and_local8b_packs(self) -> None:
+        live = tool_pack.profile_next_tools("live")
+        self.assertEqual(
+            tool_pack.effective_next_tools("full", live_enabled=True), live
+        )
+        self.assertEqual(
+            tool_pack.effective_next_tools("local8b", live_enabled=True),
+            live & tool_pack.LOCAL8B_TOOL_NAMES,
+        )
+        self.assertNotIn(
+            "dayz_knowledge_status",
+            tool_pack.effective_next_tools("local8b", live_enabled=True),
+        )
+
+    def test_profile_off_keeps_the_pack_set(self) -> None:
+        self.assertEqual(
+            tool_pack.effective_next_tools("local8b"),
+            tool_pack.next_step_tools("local8b"),
+        )
+
+    def test_server_effective_set_uses_config_then_environment(self) -> None:
+        live = tool_pack.profile_next_tools("live")
+        config = server.ServerConfig(
+            tool_pack="full", live_profile=True, log_sink=lambda _m: None
+        )
+        self.assertEqual(server._effective_next_tools(config), live)
+        env_config = server.ServerConfig(
+            tool_pack="local8b", log_sink=lambda _m: None
+        )
+        with patch.dict(os.environ, {"DAYZ_MCP_LIVE_PROFILE": "1"}):
+            self.assertEqual(
+                server._effective_next_tools(env_config),
+                live & tool_pack.LOCAL8B_TOOL_NAMES,
+            )
+        with patch.dict(os.environ, {"DAYZ_MCP_LIVE_PROFILE": "0"}):
+            self.assertEqual(
+                server._effective_next_tools(env_config),
+                tool_pack.next_step_tools("local8b"),
+            )
+
+
+class McpErrorProfileFilterTest(unittest.IsolatedAsyncioTestCase):
+    """A real MCP error leaving build_app is filtered under the live profile."""
+
+    async def _knowledge_find_error_text(self, *, live: bool) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "DAYZ_MCP_KNOWLEDGE_JSON": str(Path(tmp) / "missing.json"),
+                "LOCALAPPDATA": tmp,
+            }
+            with patch.dict(os.environ, env):
+                app, _runtime = server.build_app(
+                    server.ServerConfig(
+                        tool_pack="full",
+                        live_profile=live,
+                        log_sink=lambda _m: None,
+                    )
+                )
+                request = types.CallToolRequest(
+                    method="tools/call",
+                    params=types.CallToolRequestParams(
+                        name="dayz_knowledge_find", arguments={"query": "Get"}
+                    ),
+                )
+                response = await app._mcp_server.request_handlers[
+                    types.CallToolRequest
+                ](request)
+        result = response.root
+        self.assertTrue(result.isError)
+        return "".join(
+            block.text for block in result.content if isinstance(block, types.TextContent)
+        )
+
+    async def test_live_profile_strips_knowledge_next_step_from_real_error(self) -> None:
+        text = await self._knowledge_find_error_text(live=True)
+        # The error really is the no-index knowledge error...
+        self.assertIn("knowledge_", text)
+        # ...but its next_step names nothing outside the live profile.
+        self.assertNotIn("next_step=dayz_knowledge", text)
+        live = tool_pack.profile_next_tools("live")
+        for token in text.split("next_step=")[1:]:
+            self.assertIn(token.split(";")[0].split()[0], live)
+
+    async def test_profile_off_keeps_knowledge_next_step_in_real_error(self) -> None:
+        text = await self._knowledge_find_error_text(live=False)
+        self.assertIn("next_step=dayz_knowledge_status", text)
+
+
 class ServerProfileFilterTest(unittest.TestCase):
     def test_admin_pack_rewrites_an_out_of_pack_next_step(self) -> None:
         payload = server._profile_ok_next_step(
@@ -152,6 +277,17 @@ class ServerProfileFilterTest(unittest.TestCase):
             {"ok": True, "next_step": "dayz_test_run"}, "world_spawn", "full"
         )
         self.assertEqual(payload["next_step"], "dayz_test_run")
+
+    def test_live_profile_rewrites_an_out_of_profile_next_step(self) -> None:
+        config = server.ServerConfig(
+            tool_pack="full", live_profile=True, log_sink=lambda _m: None
+        )
+        payload = server._profile_ok_next_step(
+            {"ok": True, "next_step": "dayz_test_run"},
+            "world_spawn",
+            allowed=server._effective_next_tools(config),
+        )
+        self.assertIn(payload["next_step"], tool_pack.profile_next_tools("live"))
 
     def test_session_hint_survives_the_admin_pack(self) -> None:
         payload = server._profile_ok_next_step(

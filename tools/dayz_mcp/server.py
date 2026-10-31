@@ -21,6 +21,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
+from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
@@ -76,7 +77,13 @@ from dayz_mcp.action_hold import (
     parse_action_selector,
     validate_hold_budget,
 )
-from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS, next_step, ok_next_step, with_next_step
+from dayz_mcp.agent_loop import (
+    PUBLIC_NEXT_TOOLS,
+    filter_next_step_text,
+    next_step,
+    ok_next_step,
+    with_next_step,
+)
 from dayz_mcp.knowledge import register_knowledge_tools
 from dayz_mcp.occupant_seat import occupant_client_seated
 from dayz_mcp.peer_liveness import (
@@ -89,6 +96,7 @@ from dayz_mcp.lease_result_ttl import (
     LEASE_LOCAL_TOOL,
     LEASE_TTL_OBSERVE_TOOL,
     install_lease_ttl_annotation,
+    is_internal_probe,
     observe_caller_presence,
 )
 from dayz_mcp.server_freshness import (
@@ -115,6 +123,7 @@ from dayz_mcp.loopback import (
     _FENCE_OMITTED,
     is_printable_input_name,
     is_scene_id,
+    live_profile_from_env,
     read_key,
 )
 from dayz_mcp.instance_context import (
@@ -355,15 +364,39 @@ playbook_tool_mod.load_runner()
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
 
 
-def _profile_ok_next_step(
-    result: dict[str, Any], cmd: str, pack: str
-) -> dict[str, Any]:
-    """_with_ok_next_step with the hint filtered to the active tool pack (C4).
+def _daemon_live_enabled(config: Any) -> bool:
+    """Whether the daemon serving this server enforces the B4 live profile.
 
-    A next_step the pack does not expose (for example dayz_test_run under
-    --tool-pack admin) is replaced by the next public tool the pack does
-    expose, or dropped when there is none. The full pack keeps the hint
-    exactly as before.
+    Same rule as daemon.run_daemon: an explicit boolean config attribute
+    wins, otherwise the daemon environment (DAYZ_MCP_LIVE_PROFILE) decides.
+    """
+    explicit = getattr(config, "live_profile", None)
+    if isinstance(explicit, bool):
+        return explicit
+    enabled, _admin_enabled = live_profile_from_env()
+    return enabled
+
+
+def _effective_next_tools(config: Any) -> frozenset[str]:
+    """Hint tools for one server: tool pack intersected with the live profile."""
+    return tool_pack_mod.effective_next_tools(
+        config.tool_pack, live_enabled=_daemon_live_enabled(config)
+    )
+
+
+def _profile_ok_next_step(
+    result: dict[str, Any],
+    cmd: str,
+    pack: str = "full",
+    allowed: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """_with_ok_next_step with the hint filtered to the effective profile (C4).
+
+    A next_step outside the effective set (for example dayz_test_run under
+    --tool-pack admin, or any knowledge hint while the daemon live profile
+    is on) is replaced by the next public tool the set does expose, or
+    dropped when there is none. The full pack with the profile off keeps
+    the hint exactly as before.
     """
     payload = _with_ok_next_step(result, cmd)
     if not isinstance(payload, dict):
@@ -371,7 +404,8 @@ def _profile_ok_next_step(
     existing = payload.get("next_step")
     if not isinstance(existing, str):
         return payload
-    allowed = tool_pack_mod.next_step_tools(pack)
+    if allowed is None:
+        allowed = tool_pack_mod.next_step_tools(pack)
     if existing in allowed:
         return payload
     follow = ok_next_step(
@@ -383,6 +417,40 @@ def _profile_ok_next_step(
     else:
         payload["next_step"] = follow
     return payload
+
+
+def _install_next_step_profile_filter(
+    app: FastMCP, allowed: frozenset[str]
+) -> None:
+    """Filter error next_step tokens at the MCP boundary (C4).
+
+    Error text is built where the profile is unknown (the knowledge
+    remedies are import-time constants naming dayz_knowledge_prepare /
+    dayz_knowledge_status), so success-path filtering cannot reach it.
+    Installed after the lease-TTL decorator and before the freshness
+    wrapper, so every error result that leaves over MCP is rewritten and
+    the freshness marker is still appended outermost.
+    """
+    installed = app._mcp_server
+    handlers = installed.request_handlers
+    original = handlers[mcp_types.CallToolRequest]
+
+    async def handler(
+        request: mcp_types.CallToolRequest,
+    ) -> mcp_types.ServerResult:
+        if is_internal_probe(request):
+            return await original(request)
+        response = await original(request)
+        result = response.root
+        if not isinstance(result, mcp_types.CallToolResult) or not result.isError:
+            return response
+        for block in result.content:
+            if isinstance(block, mcp_types.TextContent):
+                block.text = filter_next_step_text(block.text, allowed)
+        return response
+
+    handlers[mcp_types.CallToolRequest] = handler
+
 
 UiClickMode = Literal["direct", "complete"]
 InventoryAttachDest = Literal["attachment", "cargo"]
@@ -872,6 +940,11 @@ class ServerConfig:
     auto_spawn_daemon: bool = True
     # Opt-in small-model surface. The full public registry remains the default.
     tool_pack: str = "full"
+    # B4 live profile of the daemon serving this server (None: decide from
+    # the daemon environment, as daemon.run_daemon does). Only used to keep
+    # next_step hints inside what the daemon will actually accept (C4).
+    live_profile: bool | None = None
+    live_admin_enabled: bool | None = None
     # Client mode lists a compact catalog until a lease is held and relies on the
     # host re-listing after tools/list_changed. Claude Code does not (#93, e7ef),
     # so client_platform claude lists everything from the start whatever this
@@ -1212,7 +1285,7 @@ class Runtime:
         return _profile_ok_next_step(
             _with_bridge_success_hints(self, cmd, result),
             cmd,
-            self.config.tool_pack,
+            allowed=_effective_next_tools(self.config),
         )
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
@@ -2516,7 +2589,7 @@ class ClientRuntime:
             return _profile_ok_next_step(
                 _with_bridge_success_hints(self, cmd, result),
                 cmd,
-                self.config.tool_pack,
+                allowed=_effective_next_tools(self.config),
             )
         finally:
             self._allow_stale_policy = previous
@@ -5239,7 +5312,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     await client.session_acquire(purpose.strip()), steam_view
                 ),
                 "session_acquire",
-                config.tool_pack,
+                allowed=_effective_next_tools(config),
             )
 
     @app.tool(
@@ -5255,7 +5328,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     ticket, _require_range(timeout_s, 0.0, 30.0, "bad_wait_timeout")
                 ),
                 "session_wait",
-                config.tool_pack,
+                allowed=_effective_next_tools(config),
             )
 
     @app.tool(
@@ -5304,7 +5377,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 _annotate_caller_tool_registry(payload, caller_stale), steam_view
             ),
             "session_acquire_wait",
-            config.tool_pack,
+            allowed=_effective_next_tools(config),
         )
 
     app.add_tool(
@@ -5324,7 +5397,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return _profile_ok_next_step(
                 await client.session_cancel(ticket),
                 "session_cancel",
-                config.tool_pack,
+                allowed=_effective_next_tools(config),
             )
 
     @app.tool(
@@ -5346,7 +5419,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return _profile_ok_next_step(
                 await client.session_heartbeat(lease_token),
                 "session_heartbeat",
-                config.tool_pack,
+                allowed=_effective_next_tools(config),
             )
 
     @app.tool(
@@ -5363,7 +5436,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return _profile_ok_next_step(
                 await client.session_release(lease_token),
                 "session_release",
-                config.tool_pack,
+                allowed=_effective_next_tools(config),
             )
 
     @app.tool(
@@ -5423,7 +5496,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             return _profile_ok_next_step(
                 _annotate_steam_app_view(status, steam_view),
                 "session_status",
-                config.tool_pack,
+                allowed=_effective_next_tools(config),
             )
 
     @app.tool(
@@ -10353,6 +10426,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # (including errors, images, and lists) can carry lease_ttl_s and freshness
     # still sees the decorated result.
     install_lease_ttl_annotation(app, runtime)
+    _install_next_step_profile_filter(app, _effective_next_tools(config))
     observe_server_sources = install_result_freshness(app, server_sources)
     _original_list_tools = app.list_tools
 
