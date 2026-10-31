@@ -250,21 +250,26 @@ class EffectiveProfileTest(unittest.TestCase):
             )
 
 
-class ServingDaemonAuthorityTest(unittest.IsolatedAsyncioTestCase):
-    """A client reusing a daemon learns its profile from that daemon."""
+class ServingDaemonAuthorityTest(unittest.TestCase):
+    """A client reusing a daemon learns its profile from that daemon.
+
+    The learning entry is ClientRuntime._learn_serving_live_profile, fed
+    by the daemon's /status in bridge_status_payload and _daemon_healthy;
+    it is exercised synchronously so the authority rule is checked even
+    where an event loop cannot be created.
+    """
 
     def _client(self, payload: dict) -> server.ClientRuntime:
         client = object.__new__(server.ClientRuntime)
         client._serving_live_profile = None
         client._serving_live_generation = None
-        client._call = lambda *_args: (200, dict(payload))  # type: ignore[method-assign]
+        client._learn_serving_live_profile(dict(payload))
         return client
 
-    async def test_reused_live_daemon_filters_despite_client_env_off(self) -> None:
+    def test_reused_live_daemon_filters_despite_client_env_off(self) -> None:
         client = self._client(
             {"daemon_generation": "g1", "live_profile": True}
         )
-        await client.bridge_status_payload()
         config = server.ServerConfig(
             tool_pack="full", live_profile=False, log_sink=lambda _m: None
         )
@@ -274,11 +279,10 @@ class ServingDaemonAuthorityTest(unittest.IsolatedAsyncioTestCase):
                 tool_pack.profile_next_tools("live"),
             )
 
-    async def test_reused_full_daemon_keeps_hints_despite_client_env_on(self) -> None:
+    def test_reused_full_daemon_keeps_hints_despite_client_env_on(self) -> None:
         client = self._client(
             {"daemon_generation": "g1", "live_profile": False}
         )
-        await client.bridge_status_payload()
         config = server.ServerConfig(
             tool_pack="full", live_profile=True, log_sink=lambda _m: None
         )
@@ -287,6 +291,11 @@ class ServingDaemonAuthorityTest(unittest.IsolatedAsyncioTestCase):
                 server._effective_next_tools(config, runtime=client),
                 agent_loop.PUBLIC_NEXT_TOOLS,
             )
+
+    def test_status_without_live_profile_teaches_nothing(self) -> None:
+        client = self._client({"daemon_generation": "g1"})
+        self.assertIsNone(client._serving_live_profile)
+        self.assertFalse(server._serving_live_known(client))
 
     def test_daemon_entry_publishes_its_serving_profile_on_status(self) -> None:
         state = SimpleNamespace(live_profile=True, live_admin_enabled=False)
