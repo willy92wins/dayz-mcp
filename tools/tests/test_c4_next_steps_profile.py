@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
@@ -431,6 +431,191 @@ class ServerProfileFilterTest(unittest.TestCase):
             {"ok": True}, "session_release", "admin"
         )
         self.assertEqual(payload["next_step"], "session_acquire_wait")
+
+
+def _bare_client(payload: dict | None = None) -> server.ClientRuntime:
+    client = object.__new__(server.ClientRuntime)
+    client._serving_live_profile = None
+    client._serving_live_generation = None
+    if payload is not None:
+        client._learn_serving_live_profile(dict(payload))
+    return client
+
+
+def _fake_filter_app(error_text: str):
+    app = SimpleNamespace()
+    handlers: dict = {}
+
+    async def original(_request):
+        return types.ServerResult(
+            types.CallToolResult(
+                isError=True,
+                content=[types.TextContent(type="text", text=error_text)],
+            )
+        )
+
+    handlers[types.CallToolRequest] = original
+    app._mcp_server = SimpleNamespace(request_handlers=handlers)
+    return app
+
+
+async def _run_filter(app, runtime, config) -> str:
+    server._install_next_step_profile_filter(
+        app,
+        lambda: server._effective_next_tools(config, runtime=runtime),
+        runtime=runtime,
+        config=config,
+    )
+    request = types.CallToolRequest(
+        method="tools/call",
+        params=types.CallToolRequestParams(
+            name="dayz_knowledge_find", arguments={"query": "Get"}
+        ),
+    )
+    response = await app._mcp_server.request_handlers[types.CallToolRequest](
+        request
+    )
+    result = response.root
+    return "".join(
+        block.text
+        for block in result.content
+        if isinstance(block, types.TextContent)
+    )
+
+
+class GenerationCacheRegressionTest(unittest.TestCase):
+    """P2 r3-1: cache is bound to the daemon generation."""
+
+    def test_generation_change_invalidates_cached_full_profile(self) -> None:
+        client = _bare_client({"daemon_generation": "g1", "live_profile": False})
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        self.assertEqual(
+            server._effective_next_tools(config, runtime=client),
+            agent_loop.PUBLIC_NEXT_TOOLS,
+        )
+        client._learn_serving_live_profile(
+            {"daemon_generation": "g2", "live_profile": True}
+        )
+        self.assertEqual(client._serving_live_generation, "g2")
+        self.assertEqual(
+            server._effective_next_tools(config, runtime=client),
+            tool_pack.profile_next_tools("live"),
+        )
+
+    def test_new_generation_without_live_profile_invalidates_to_unknown(self) -> None:
+        client = _bare_client({"daemon_generation": "g1", "live_profile": False})
+        client._learn_serving_live_profile({"daemon_generation": "g2"})
+        self.assertIsNone(client._serving_live_profile)
+        self.assertEqual(client._serving_live_generation, "g2")
+        self.assertFalse(server._serving_live_known(client))
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        self.assertEqual(
+            server._effective_next_tools(config, runtime=client),
+            tool_pack.profile_next_tools("live"),
+        )
+
+
+class GenerationMcpRegressionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_full_to_live_same_client_strips_knowledge_hint(self) -> None:
+        client = _bare_client({"daemon_generation": "g1", "live_profile": False})
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        # Daemon replaced: same client now probes a live g2 daemon.
+        client.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
+            return_value={"daemon_generation": "g2", "live_profile": True}
+        )
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(app, client, config)
+        self.assertGreaterEqual(client.bridge_status_payload.call_count, 1)
+        self.assertNotIn("next_step=dayz_knowledge", text)
+        self.assertEqual(client._serving_live_generation, "g2")
+        self.assertTrue(client._serving_live_profile)
+
+
+class UnknownProfileFailClosedTest(unittest.TestCase):
+    def test_unknown_client_profile_is_restrictive_not_full(self) -> None:
+        client = _bare_client({"daemon_generation": "g1"})
+        self.assertIsNone(client._serving_live_profile)
+        config = server.ServerConfig(
+            mode="client",
+            tool_pack="full",
+            live_profile=False,
+            log_sink=lambda _m: None,
+        )
+        effective = server._effective_next_tools(config, runtime=client)
+        self.assertEqual(effective, tool_pack.profile_next_tools("live"))
+        self.assertNotIn("dayz_knowledge_status", effective)
+
+
+class UnknownProfileMcpRegressionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_status_without_live_profile_strips_knowledge_hint_via_mcp(self) -> None:
+        client = _bare_client()
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        client.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
+            return_value={"daemon_generation": "g1"}
+        )
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(app, client, config)
+        self.assertNotIn("next_step=dayz_knowledge", text)
+        self.assertIsNone(client._serving_live_profile)
+        self.assertFalse(server._serving_live_known(client))
+
+    async def test_failed_probe_keeps_unknown_restrictive_via_mcp(self) -> None:
+        client = _bare_client()
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        client.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=RuntimeError("status down")
+        )
+        app = _fake_filter_app("knowledge_no_index; next_step=dayz_knowledge_status")
+        text = await _run_filter(app, client, config)
+        self.assertNotIn("next_step=dayz_knowledge", text)
+
+
+class NoSpawnProbeSyncTest(unittest.TestCase):
+    def test_no_spawn_probe_never_calls_ensure_daemon_sync(self) -> None:
+        # Sync core of probe_serving_live_profile_no_spawn: the async
+        # wrapper only adds asyncio.to_thread around this, so checking
+        # it here runs even where an event loop cannot be created.
+        client = _bare_client({"daemon_generation": "g1", "live_profile": False})
+        ensure_calls: list[int] = []
+        client._ensure_daemon = lambda *a, **k: ensure_calls.append(1) or True  # type: ignore[attr-defined]
+        client._probe = None  # type: ignore[attr-defined]
+        client._credential_provider = object()  # type: ignore[attr-defined]
+        client._request_once = lambda *a, **k: (  # type: ignore[attr-defined]
+            200,
+            {"daemon_generation": "g2", "live_profile": True},
+        )
+        ok = client._probe_serving_live_profile_sync(1.0)
+        self.assertTrue(ok)
+        self.assertEqual(ensure_calls, [])
+        self.assertTrue(client._serving_live_profile)
+        self.assertEqual(client._serving_live_generation, "g2")
+
+
+class NoHintNoSpawnRegressionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_error_without_hint_skips_status_and_spawn(self) -> None:
+        client = _bare_client()
+        config = server.ServerConfig(
+            mode="client", tool_pack="full", log_sink=lambda _m: None
+        )
+        status_mock = AsyncMock(return_value={"daemon_generation": "g2", "live_profile": True})
+        client.bridge_status_payload = status_mock  # type: ignore[attr-defined]
+        spawn_calls: list[int] = []
+        client._ensure_daemon = lambda *a, **k: spawn_calls.append(1) or True  # type: ignore[attr-defined]
+        app = _fake_filter_app("bad_purpose")
+        text = await _run_filter(app, client, config)
+        self.assertEqual(text, "bad_purpose")
+        self.assertEqual(status_mock.call_count, 0)
+        self.assertEqual(spawn_calls, [])
 
 
 if __name__ == "__main__":

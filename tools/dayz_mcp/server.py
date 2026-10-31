@@ -392,6 +392,77 @@ def _serving_live_known(runtime: Any) -> bool:
     return isinstance(getattr(runtime, "_serving_live_profile", None), bool)
 
 
+def _is_client_authority(config: Any, runtime: Any) -> bool:
+    if runtime is None:
+        return False
+    if getattr(config, "mode", None) == "client":
+        return True
+    # Bare ClientRuntime instances carry the serving-profile cache.
+    return hasattr(runtime, "_serving_live_profile") or hasattr(
+        runtime, "_serving_live_generation"
+    )
+
+
+def _serving_live_unknown(config: Any, runtime: Any) -> bool:
+    """True for a client daemon whose profile has not been confirmed."""
+    if runtime is None or _serving_live_known(runtime):
+        return False
+    return _is_client_authority(config, runtime)
+
+
+async def _refresh_serving_live_profile_no_spawn(
+    runtime: Any, timeout_s: float
+) -> None:
+    """Revalidate the serving profile without ever spawning a daemon.
+
+    Prefers an instance-level ``bridge_status_payload`` double (tests),
+    then ``ClientRuntime.probe_serving_live_profile_no_spawn`` (direct
+    ``GET /status`` via ``_request_once``, no ``_ensure_daemon``), then
+    ``_daemon_healthy`` in a thread, then a non-client fake's status.
+    """
+    if runtime is None:
+        return
+    instance_dict = getattr(runtime, "__dict__", None)
+    mocked = (
+        instance_dict.get("bridge_status_payload")
+        if isinstance(instance_dict, dict)
+        else None
+    )
+    if callable(mocked):
+        try:
+            result = mocked(timeout_s=timeout_s)
+        except TypeError:
+            result = mocked()
+        if inspect.isawaitable(result):
+            result = await result
+        learn = getattr(runtime, "_learn_serving_live_profile", None)
+        if callable(learn) and isinstance(result, dict):
+            learn(result)
+        return
+    probe = getattr(runtime, "probe_serving_live_profile_no_spawn", None)
+    if callable(probe):
+        result = probe(timeout_s=timeout_s)
+        if inspect.isawaitable(result):
+            await result
+        return
+    healthy = getattr(runtime, "_daemon_healthy", None)
+    if callable(healthy):
+        deadline = time.monotonic() + float(timeout_s)
+        await asyncio.to_thread(healthy, deadline)
+        return
+    status_fn = getattr(runtime, "bridge_status_payload", None)
+    if callable(status_fn) and not _is_client_authority(None, runtime):
+        try:
+            result = status_fn(timeout_s=timeout_s)
+        except TypeError:
+            result = status_fn()
+        if inspect.isawaitable(result):
+            result = await result
+        learn = getattr(runtime, "_learn_serving_live_profile", None)
+        if callable(learn) and isinstance(result, dict):
+            learn(result)
+
+
 def _serving_live_enabled(config: Any, runtime: Any = None) -> bool:
     """Whether the authority serving this server enforces the B4 live profile.
 
@@ -413,6 +484,11 @@ def _serving_live_enabled(config: Any, runtime: Any = None) -> bool:
         cached = getattr(runtime, "_serving_live_profile", None)
         if isinstance(cached, bool):
             return cached
+        # Fail-closed: a client daemon whose profile is unknown (old
+        # daemon without live_profile, or a failed probe) is treated
+        # as live/restrictive until its profile is confirmed.
+        if _serving_live_unknown(config, runtime):
+            return True
     explicit = getattr(config, "live_profile", None)
     if isinstance(explicit, bool):
         return explicit
@@ -481,8 +557,10 @@ def _install_next_step_profile_filter(
     resolved per error from the serving authority, not frozen at
     build_app time: in client mode a daemon reused by this process may
     enforce a different profile than this process was configured with,
-    so an unknown client authority is learned from that daemon's
-    /status before filtering (a failed probe keeps the last known set).
+    so a client authority is revalidated from that daemon's /status
+    before filtering, bound to its daemon generation. The probe never
+    spawns a daemon and is skipped when the error carries no hint.
+    An unknown profile is restrictive (fail-closed) until confirmed.
     """
     installed = app._mcp_server
     handlers = installed.request_handlers
@@ -497,19 +575,22 @@ def _install_next_step_profile_filter(
         result = response.root
         if not isinstance(result, mcp_types.CallToolResult) or not result.isError:
             return response
-        if (
-            runtime is not None
-            and config is not None
-            and getattr(config, "mode", None) == "client"
-            and not _serving_live_known(runtime)
-        ):
+        has_hint = any(
+            isinstance(block, mcp_types.TextContent) and "next_step=" in block.text
+            for block in result.content
+        )
+        if not has_hint:
+            return response
+        if runtime is not None and _is_client_authority(config, runtime):
             try:
-                await runtime.bridge_status_payload(
-                    timeout_s=LIVENESS_STATUS_TIMEOUT_S
+                await _refresh_serving_live_profile_no_spawn(
+                    runtime, LIVENESS_STATUS_TIMEOUT_S
                 )
             except Exception:
                 pass
         resolved = allowed() if callable(allowed) else allowed
+        if runtime is not None and _serving_live_unknown(config, runtime):
+            resolved = resolved & tool_pack_mod.LIVE_NEXT_TOOLS
         for block in result.content:
             if isinstance(block, mcp_types.TextContent):
                 block.text = filter_next_step_text(block.text, resolved)
@@ -1591,13 +1672,81 @@ class ClientRuntime:
     _serving_live_generation: str | None = None
 
     def _learn_serving_live_profile(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        generation = payload.get("daemon_generation")
+        gen = generation if isinstance(generation, str) and generation else None
+        cached_gen = getattr(self, "_serving_live_generation", None)
+        if gen is not None and cached_gen is not None and gen != cached_gen:
+            # New daemon generation: the cached profile belonged to the
+            # previous daemon and must not be reused.
+            self._serving_live_profile = None
+            self._serving_live_generation = gen
         live = _live_from_status_payload(payload)
         if live is None:
+            # Unknown for this generation stays unknown (fail-closed).
+            if gen is not None and cached_gen is None:
+                self._serving_live_generation = gen
             return
         self._serving_live_profile = live
-        generation = payload.get("daemon_generation") if isinstance(payload, dict) else None
-        self._serving_live_generation = (
-            generation if isinstance(generation, str) and generation else None
+        if gen is not None:
+            self._serving_live_generation = gen
+        elif cached_gen is None:
+            self._serving_live_generation = None
+
+    def _probe_serving_live_profile_sync(self, timeout_s: float) -> bool:
+        """GET /status without spawning; True when a payload was learned."""
+        if getattr(self, "_probe", None) is not None:
+            try:
+                deadline = self._time_fn() + float(timeout_s)
+                return bool(self._daemon_healthy(deadline))
+            except Exception:
+                return False
+        if getattr(self, "_credential_provider", None) is None:
+            return False
+        try:
+            status, payload = self._request_once(
+                "GET", "/status", timeout=float(timeout_s)
+            )
+        except Exception:
+            return False
+        if status != 200:
+            return False
+        try:
+            self._learn_serving_live_profile(payload)
+        except Exception:
+            return False
+        return True
+
+    async def probe_serving_live_profile_no_spawn(
+        self, *, timeout_s: float = LIVENESS_STATUS_TIMEOUT_S
+    ) -> bool:
+        """No-spawn revalidation of the serving profile (C4 r4).
+
+        An instance-level ``bridge_status_payload`` double is honoured
+        so tests can inject the daemon's answer without a subprocess;
+        the real path uses ``_request_once`` directly and never calls
+        ``_ensure_daemon`` / ``_call`` (which would autospawn).
+        """
+        instance_dict = getattr(self, "__dict__", None)
+        mocked = (
+            instance_dict.get("bridge_status_payload")
+            if isinstance(instance_dict, dict)
+            else None
+        )
+        if callable(mocked):
+            try:
+                result = mocked(timeout_s=timeout_s)
+            except TypeError:
+                result = mocked()
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, dict):
+                self._learn_serving_live_profile(result)
+                return True
+            return False
+        return await asyncio.to_thread(
+            self._probe_serving_live_profile_sync, float(timeout_s)
         )
 
     def __init__(
