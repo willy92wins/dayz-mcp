@@ -351,6 +351,33 @@ MAX_RESULTS = MAX_QUEUE * 4
 # ceiling closes the accepted socket without a worker (reject, do not queue):
 # Handler.timeout already bounds each worker's duration, not concurrency.
 MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
+# Ceiling for one GET/POST /await?wait_ms= hold. Each wait occupies one of the
+# workers above. The pool is one POST /wait (up to 30s) per queued session plus
+# 32 for /poll, /enqueue, /await, /status and a short burst. A cap near that
+# 30s wait would pin /await and leave no worker for the game's POST /result, so
+# a stored result could not be published until some worker timed out. 2s fits
+# the spare headroom and sits far under Handler.timeout (35s), which must stay
+# strictly above the /wait ceiling. The client reissues with whatever deadline
+# remains. The cap limits duration, not how many waits run at once: that is
+# AWAIT_LONG_POLL_MAX_IN_FLIGHT. LoopbackServer.stop() calls cancel_pending(),
+# which sets _stopping and notifies the condition, so a normal stop does not
+# hold the worker for the cap. Handler.timeout does not interrupt
+# Condition.wait (it is not a socket read); a stop that skips cancel_pending
+# is still bounded by this cap.
+AWAIT_LONG_POLL_MAX_S = 2.0
+# Present on a pending /await body only after that wait budget was spent with
+# no result. Absent means "answer was immediate" (no wait_ms, an older daemon,
+# or this daemon had no free long-poll slot): the client keeps sleeping
+# POLL_INTERVAL_S. Without wait_ms the pending body stays {"status":"pending"}.
+AWAIT_LONG_POLL_FIELD = "await_long_poll"
+# How many /await waits may hold a worker at once. The pool is 96
+# (MAX_SESSION_QUEUE + 32). 64 of those are the session waits. Of the 32 left
+# for /poll, /result, /enqueue, /status and a short burst, long-polls may take
+# 8. 8 is well under 32, and 64 + 8 leaves 24 workers, so those three routes
+# keep a worker even when every session wait and every allowed long-poll is in
+# flight. A request that does not get a slot does not wait and omits
+# await_long_poll, and the client returns to its 50ms poll.
+AWAIT_LONG_POLL_MAX_IN_FLIGHT = 8
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -2935,6 +2962,22 @@ def _mission_configs(profiles_dir: Path, mission: str | None) -> list[Path]:
     return found
 
 
+class ResultWaitCancel:
+    """Cooperative cancel for an in-process wait on a stored result.
+
+    trip() is safe from another thread. The waiter observes it under the state
+    lock and does not consume a result.
+    """
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def trip(self, state: "ServerState") -> None:
+        with state._lock:
+            self.cancelled = True
+            state._result_cv.notify_all()
+
+
 class ServerState:
     """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
 
@@ -2994,6 +3037,14 @@ class ServerState:
         self._install_release_registry(release_registry)
         self.instance_token: str | None = None
         self._lock = threading.RLock()
+        # Same lock as every _results write, so notify cannot be lost between
+        # the emptiness check and Condition.wait.
+        self._result_cv = threading.Condition(self._lock)
+        # Taken only for a positive /await wait, and only without blocking.
+        # The HTTP worker is already running; a full quota answers immediately.
+        self._await_long_poll_slots = threading.BoundedSemaphore(
+            AWAIT_LONG_POLL_MAX_IN_FLIGHT
+        )
         self._fenced_runs: set[str] = set()
         self._next_id = 1
         self._legacy_queues: dict[str, list[dict]] = {"server": [], "client": []}
@@ -7255,19 +7306,17 @@ class ServerState:
         if fire_and_forget:
             self._fire_and_forget_ids.discard(command_id)
             if command.get("cmd") == "bot_stop" and command_id not in self._results:
-                self._results[command_id] = {
-                    "id": command_id,
-                    "ok": False,
-                    "error": reason,
-                }
-                self._trim_results_locked()
+                self._remember_result_locked(
+                    command_id,
+                    {"id": command_id, "ok": False, "error": reason},
+                )
             else:
                 self._results.pop(command_id, None)
         elif command_id not in self._results:
-            self._results[command_id] = {"id": command_id, "ok": False, "error": reason}
+            failed = {"id": command_id, "ok": False, "error": reason}
             if hint is not None:
-                self._results[command_id]["hint"] = hint
-            self._trim_results_locked()
+                failed["hint"] = hint
+            self._remember_result_locked(command_id, failed)
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
         self._command_fence.pop(command_id, None)
@@ -7330,6 +7379,16 @@ class ServerState:
         while len(self._results) > MAX_RESULTS:
             oldest_id = next(iter(self._results))
             self._evict_result_locked(oldest_id)
+
+    def _remember_result_locked(self, command_id: int, result: dict) -> None:
+        # Caller holds self._lock. Publishes one result and wakes /await waits.
+        self._results[command_id] = result
+        self._trim_results_locked()
+        self._result_cv.notify_all()
+
+    def _wake_result_waiters_locked(self) -> None:
+        # Caller holds self._lock. Used when no new row was stored (shutdown).
+        self._result_cv.notify_all()
 
     def store_result(
         self, body: dict, instance: str | None = None
@@ -7444,8 +7503,7 @@ class ServerState:
                         meta["t_enqueue"] = t_enqueue
                         meta["rtt_s"] = t_result - t_enqueue
                     stored["_server"] = meta
-                    self._results[command_id] = stored
-                    self._trim_results_locked()
+                    self._remember_result_locked(command_id, stored)
                     owner = self._command_owner.get(command_id)
                     self._drop_broker_row_locked(command_id)
                     if owner is not None:
@@ -7483,44 +7541,130 @@ class ServerState:
             response["discarded"] = True
         return 200, response
 
-    def take_result(self, command_id: int, remove: bool = False) -> dict | None:
-        return self.take_result_with_owner(command_id, remove)[0]
+    def take_result(
+        self, command_id: int, remove: bool = False, *, wait_s: float = 0.0
+    ) -> dict | None:
+        return self.take_result_with_owner(command_id, remove, wait_s=wait_s)[0]
 
     def take_result_with_owner(
-        self, command_id: int, remove: bool = False
+        self, command_id: int, remove: bool = False, *, wait_s: float = 0.0
     ) -> tuple[dict | None, tuple[ClientIdentity, str] | None]:
         """take_result, plus the lease that enqueued a done command (inbox 6310).
 
         The owner is read in the lock section that pops it with remove=1.
+        wait_s=0 keeps the historical non-blocking read.
         """
-        self.reap_expired_commands()
+        result, owner, _exhausted = self.await_stored_result(
+            command_id, remove, wait_s
+        )
+        return result, owner
+
+    def await_stored_result(
+        self,
+        command_id: int,
+        remove: bool = False,
+        wait_s: float = 0.0,
+        cancel: ResultWaitCancel | None = None,
+    ) -> tuple[dict | None, tuple[ClientIdentity, str] | None, bool]:
+        """Block until command_id is stored, the wait ends, the server stops, or cancel.
+
+        The third value is True only when wait_s was spent with no result and
+        the server was not stopping. remove=1 still pops the row once, under
+        the same lock as the emptiness check. wait_s is clamped to
+        AWAIT_LONG_POLL_MAX_S. A non-positive or non-finite wait does not block.
+        """
+        if (
+            isinstance(wait_s, bool)
+            or not isinstance(wait_s, (int, float))
+            or not math.isfinite(wait_s)
+            or wait_s <= 0.0
+        ):
+            wait_s = 0.0
+        elif wait_s > AWAIT_LONG_POLL_MAX_S:
+            wait_s = AWAIT_LONG_POLL_MAX_S
+        deadline = time.monotonic() + wait_s
+        result: dict | None = None
         owner: tuple[ClientIdentity, str] | None = None
         owner_operation: tuple[ClientIdentity, str, int] | None = None
-        with self._lock:
-            if remove:
-                result = self._results.pop(command_id, None)
-                # A polling /await?remove=1 must consume ownership/pin metadata
-                # only when it actually consumes a result.  While pending, the
-                # command still owns its operation pin and remains attributable
-                # for owner-scoped cleanup/status.
-                if result is not None:
-                    self._enqueued_at.pop(command_id, None)
-                    self._operation_deadlines.pop(command_id, None)
-                    owner = self._command_owner.pop(command_id, None)
-                    self._drop_broker_row_locked(command_id)
-                    if owner is not None:
-                        owner_operation = (owner[0], owner[1], command_id)
-            else:
-                result = self._results.get(command_id)
-                if result is not None:
-                    owner = self._command_owner.get(command_id)
-        if owner_operation is not None:
+        exhausted = False
+        while True:
+            # reap takes the lock itself. A result it stores is visible on the
+            # check below; a store that lands during wait() notifies.
+            self.reap_expired_commands()
+            with self._lock:
+                if cancel is not None and cancel.cancelled:
+                    result = None
+                    owner = None
+                    owner_operation = None
+                    break
+                result, owner, owner_operation = self._extract_result_locked(
+                    command_id, remove
+                )
+                if result is not None or wait_s <= 0.0 or self._stopping:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    exhausted = True
+                    break
+                self._result_cv.wait(timeout=remaining)
+        if owner_operation is not None and self.coordination is not None:
             self.coordination.finish_operation_exact(
                 owner_operation[0].session_id,
                 owner_operation[1],
                 owner_operation[2],
             )
-        return result, owner
+        return result, owner, exhausted
+
+    def wait_until_command_result(
+        self,
+        command_id: int,
+        wait_s: float,
+        cancel: ResultWaitCancel | None = None,
+    ) -> str:
+        """'ready', 'timeout', or 'stopped'. Does not consume the result.
+
+        'stopped' means cancel or server shutdown: the caller must not spin.
+        Embedded wait_for_result does not call this. A wait on the shared
+        executor held a pool thread, and a result published while that call
+        was still queued was only observed after the caller's deadline.
+        """
+        result, _owner, _exhausted = self.await_stored_result(
+            command_id, False, wait_s, cancel
+        )
+        if result is not None:
+            return "ready"
+        if (cancel is not None and cancel.cancelled) or self._stopping:
+            return "stopped"
+        return "timeout"
+
+    def _extract_result_locked(
+        self, command_id: int, remove: bool
+    ) -> tuple[
+        dict | None,
+        tuple[ClientIdentity, str] | None,
+        tuple[ClientIdentity, str, int] | None,
+    ]:
+        # Caller holds self._lock.
+        owner: tuple[ClientIdentity, str] | None = None
+        owner_operation: tuple[ClientIdentity, str, int] | None = None
+        if remove:
+            result = self._results.pop(command_id, None)
+            # A polling /await?remove=1 must consume ownership/pin metadata
+            # only when it actually consumes a result.  While pending, the
+            # command still owns its operation pin and remains attributable
+            # for owner-scoped cleanup/status.
+            if result is not None:
+                self._enqueued_at.pop(command_id, None)
+                self._operation_deadlines.pop(command_id, None)
+                owner = self._command_owner.pop(command_id, None)
+                self._drop_broker_row_locked(command_id)
+                if owner is not None:
+                    owner_operation = (owner[0], owner[1], command_id)
+        else:
+            result = self._results.get(command_id)
+            if result is not None:
+                owner = self._command_owner.get(command_id)
+        return result, owner, owner_operation
 
     def cancel_owner_pending(
         self, session_id: str, reason: str, lease_id: str | None = None
@@ -8269,6 +8413,9 @@ class ServerState:
                 self._discard_queue(
                     queue, reason, discarded_exec, finished_operations
                 )
+            # Queued commands already woke their waiters via the synthetic
+            # result. This covers an /await for an id that was not queued.
+            self._wake_result_waiters_locked()
         for expr, main_fn, command_id in discarded_exec:
             try:
                 if self.exec_audit is not None:
@@ -8285,6 +8432,29 @@ class ServerState:
             if self._stopping:
                 self._enqueue_generation += 1
                 self._stopping = False
+
+
+def _parse_await_wait_s(qs: dict[str, list[str]]) -> tuple[float, bool]:
+    """(seconds, requested). Absent or non-ASCII wait_ms does not wait.
+
+    requested is True for one to nine ASCII digits, including 0. The value is
+    capped at AWAIT_LONG_POLL_MAX_S. "00000000" is 0ms and "00000001" is 1ms.
+    str.isdigit() accepts "²", and int("²") raises; that string is not a wait.
+    The handler adds AWAIT_LONG_POLL_FIELD only when the wait budget is spent.
+    """
+    values = qs.get("wait_ms")
+    if not values:
+        return 0.0, False
+    raw = values[0]
+    if not isinstance(raw, str) or re.fullmatch(r"[0-9]{1,9}", raw) is None:
+        return 0.0, False
+    millis = int(raw)
+    cap_ms = int(AWAIT_LONG_POLL_MAX_S * 1000)
+    if millis > cap_ms:
+        millis = cap_ms
+    if millis <= 0:
+        return 0.0, True
+    return millis / 1000.0, True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -9186,14 +9356,30 @@ class Handler(BaseHTTPRequestHandler):
         # leak one _results entry per command in the shared daemon. Default keeps
         # the non-destructive read for back-compat with the harness.
         remove = qs.get("remove", ["0"])[0] == "1"
-        if holder is None:
-            result, owner = self.state.take_result(command_id, remove=remove), None
-        else:
-            result, owner = self.state.take_result_with_owner(
-                command_id, remove=remove
+        wait_s, wait_requested = _parse_await_wait_s(qs)
+        # The slot covers the wait, not the request. No slot: the same immediate
+        # pending body as a daemon that was not asked to wait, so the client
+        # sleeps instead of hammering a saturated pool.
+        held_slot = False
+        if wait_requested and wait_s > 0.0:
+            held_slot = self.state._await_long_poll_slots.acquire(blocking=False)
+            if not held_slot:
+                wait_s = 0.0
+                wait_requested = False
+        try:
+            result, owner, exhausted = self.state.await_stored_result(
+                command_id, remove, wait_s
             )
+        finally:
+            if held_slot:
+                self.state._await_long_poll_slots.release()
+        if holder is None:
+            owner = None
         if result is None:
-            self._json(200, {"status": "pending"})
+            body: dict[str, object] = {"status": "pending"}
+            if wait_requested and exhausted:
+                body[AWAIT_LONG_POLL_FIELD] = True
+            self._json(200, body)
             return
 
         body: dict[str, object] = {"status": "done", "result": result}
