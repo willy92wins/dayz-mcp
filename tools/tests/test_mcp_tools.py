@@ -73,7 +73,15 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
     async def test_happy_path_server_and_client_tools(self) -> None:
         app, runtime = self.build_started()
         self.start_peer(runtime, "server", version=_VALID_PEER_VERSION)
-        self.start_peer(runtime, "client", version=_VALID_PEER_VERSION)
+        client_peer = self.start_peer(runtime, "client", version=_VALID_PEER_VERSION)
+
+        def client_response(command: dict[str, Any]) -> dict[str, Any]:
+            result = client_peer.default_responder(command)
+            if command["cmd"] == "vehicle_telemetry":
+                result["seated"] = 0
+            return result
+
+        client_peer.responder = client_response
         await self.wait_bridge_ready(runtime)
 
         state = _content_json(await app.call_tool("query_player_state", {"timeout_s": 1.0}))

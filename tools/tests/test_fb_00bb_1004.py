@@ -176,7 +176,7 @@ class Fb1004TeardownCopyTest(unittest.TestCase):
         self.assertIn("object_delete", teleport_desc)
         self.assertIn("object_delete", get_in_desc)
 
-    def test_1004_object_delete_does_not_invent_pos_type_api_or_refuse_seat(self) -> None:
+    def test_1004_object_delete_keeps_id_only_api_with_302_seat_guard(self) -> None:
         source = SERVER_PY.read_text(encoding="utf-8")
         body = _python_def(
             source, "async def object_delete(", "async def object_resolve("
@@ -184,8 +184,9 @@ class Fb1004TeardownCopyTest(unittest.TestCase):
         self.assertIn("object_id", body)
         self.assertNotIn("expected_type", body)
         self.assertNotIn("pos:", body)
-        self.assertNotIn("vehicle_telemetry", body)
-        self.assertNotIn("occupant_client_seated", body)
+        # #302 supersedes the historical no-seat-precheck contract. The
+        # behavioral refusal and normal forwarding are covered by its tests.
+        self.assertIn("vehicle_client_seated", body)
         self.assertNotIn("async def object_resolve(", body)
 
 
