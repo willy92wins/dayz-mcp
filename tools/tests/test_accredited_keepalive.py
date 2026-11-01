@@ -1079,3 +1079,144 @@ class DaemonKeepaliveTests(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=8.0)
         self.assertEqual(errors, [])
+
+    def test_ambiguous_framing_does_not_desync_keepalive(self) -> None:
+        """F6: chunked bodies and contradictory Content-Length must not keep-alive."""
+        cases = (
+            (
+                "chunked",
+                self._request_with_headers(
+                    "POST",
+                    "/enqueue",
+                    ["Transfer-Encoding: chunked"],
+                    b"2\r\n{}\r\n0\r\n\r\n",
+                ),
+            ),
+            (
+                "contradictory_content_length",
+                self._request_with_headers(
+                    "POST",
+                    "/enqueue",
+                    ["Content-Length: 0", "Content-Length: 2"],
+                    b"{}",
+                ),
+            ),
+        )
+        for name, payload in cases:
+            with self.subTest(framing=name):
+                self._assert_payload_does_not_desync(payload)
+
+    def _request_with_headers(
+        self,
+        method: str,
+        path: str,
+        extra_headers: list[str],
+        body: bytes,
+    ) -> bytes:
+        target = path + "?" + urllib.parse.urlencode({"key": self.key})
+        lines = [f"{method} {target} HTTP/1.1", "Host: 127.0.0.1", "Connection: keep-alive"]
+        lines.extend(extra_headers)
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
+
+    def _assert_payload_does_not_desync(self, payload: bytes) -> None:
+        sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        try:
+            sock.settimeout(2.0)
+            sock.sendall(payload)
+            _status, headers, _body, rest = _read_http(sock)
+            connection = headers.get("connection", "").lower()
+            stayed_open = "keep-alive" in connection and "close" not in connection
+            if not stayed_open:
+                self.assertNotIn("keep-alive", connection)
+                return
+            sock.sendall(
+                self._raw(
+                    "GET",
+                    "/status",
+                    protocol="HTTP/1.1",
+                    connection="keep-alive",
+                )
+            )
+            status2, _headers2, body2, _rest = _read_http(sock, rest)
+            self.assertTrue(status2.startswith(b"HTTP/1.0 200"), status2)
+            self.assertIsInstance(json.loads(body2.decode("utf-8")), dict)
+        finally:
+            sock.close()
+
+    def test_stop_does_not_dispatch_persistent_connection(self) -> None:
+        """F7: after stop(), a kept-alive socket must not run another request."""
+        coordinator = SessionCoordinator(audit=lambda _event: True)
+        daemon = loopback.LoopbackServer(
+            0,
+            "stop-key",
+            log_sink=lambda _message: None,
+            poll_interval=0.01,
+            reclaim_orphans=False,
+        )
+        daemon.state.coordination = coordinator
+        daemon.start()
+        sock: socket.socket | None = None
+        try:
+            assert daemon.httpd is not None
+            host, port = daemon.httpd.server_address
+            self.assertNotEqual(int(port), _FORBIDDEN_PORT)
+            sock = socket.create_connection((host, int(port)), timeout=2.0)
+            sock.settimeout(2.0)
+            target = "/status?" + urllib.parse.urlencode({"key": "stop-key"})
+            first = (
+                f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Connection: keep-alive\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(first)
+            status, headers, _body, _rest = _read_http(sock)
+            self.assertTrue(status.startswith(b"HTTP/1.0 200"), status)
+            self.assertIn("keep-alive", headers.get("connection", "").lower())
+            daemon.stop()
+            time.sleep(0.1)
+            client = ClientIdentity(
+                "codex",
+                7,
+                1,
+                "2026-07-14T20:00:00Z",
+                "session-after-stop",
+                "stop",
+            )
+            acquire_body = json.dumps(
+                {"identity": client.to_payload(), "purpose": "after stop"}
+            ).encode("utf-8")
+            follow = (
+                f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Connection: keep-alive\r\n\r\n"
+            ).encode("ascii") + (
+                "POST /session/acquire?"
+                + urllib.parse.urlencode({"key": "stop-key"})
+                + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+                + f"Content-Length: {len(acquire_body)}\r\n\r\n"
+            ).encode("ascii") + acquire_body
+            codes: list[bytes] = []
+            bodies: list[bytes] = []
+            try:
+                sock.sendall(follow)
+                rest = b""
+                for _ in range(2):
+                    try:
+                        followed, _hdrs, body, rest = _read_http(sock, rest)
+                    except (AssertionError, OSError, TimeoutError):
+                        break
+                    parts = followed.split()
+                    codes.append(parts[1] if len(parts) > 1 else b"")
+                    bodies.append(body)
+                    if not rest:
+                        sock.settimeout(0.5)
+            except (AssertionError, OSError, TimeoutError):
+                pass
+            self.assertNotIn(b"200", codes)
+            self.assertFalse(any(b"lease_token" in body for body in bodies))
+            self.assertIsNone(coordinator._active)
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            daemon.stop()

@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import re
+import socket
 import stat
 import sys
 import threading
@@ -8331,8 +8332,8 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 35.0
     _keepalive_ok = False
     _force_close = False
-    # False until this request has no body, or _read_json has read its
-    # Content-Length. A response before that closes. Missing means closed.
+    # False until this request's one unambiguous length is fully read.
+    # A response before that, or any ambiguous framing, closes.
     _body_fully_consumed = False
     _idle_slot_held = False
 
@@ -8344,10 +8345,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.handle_one_request()
             while not self.close_connection:
-                self._arm_keepalive_idle_read()
-                if self.close_connection:
+                # A follow-up on a kept-alive socket is a new request.
+                # Once stop has begun, do not dispatch it.
+                if self._server_stopping():
+                    self.close_connection = True
                     return
-                self.handle_one_request()
+                self._arm_keepalive_idle_read()
+                if self.close_connection or self._server_stopping():
+                    self.close_connection = True
+                    return
+                if not self._read_idle_request_line():
+                    self.close_connection = True
+                    return
+                if self._server_stopping():
+                    self._refuse_during_stop()
+                    return
+                self.handle_one_request(line_ready=True)
         finally:
             self._release_idle_keepalive_slot()
 
@@ -8357,22 +8370,14 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.close_connection = True
 
-    def handle_one_request(self) -> None:
+    def handle_one_request(self, line_ready: bool = False) -> None:
         # Same request dispatch as http.server.BaseHTTPRequestHandler in
         # CPython 3.14, plus the idle-timeout restore below.
         self._keepalive_ok = False
         self._force_close = False
         self._body_fully_consumed = False
         try:
-            self.raw_requestline = self.rfile.readline(65537)
-            if len(self.raw_requestline) > 65536:
-                self.requestline = ""
-                self.request_version = ""
-                self.command = ""
-                self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
-                return
-            if not self.raw_requestline:
-                self.close_connection = True
+            if not line_ready and not self._consume_request_line():
                 return
             # The next request has arrived: this socket is not idle any more.
             self._release_idle_keepalive_slot()
@@ -8384,6 +8389,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self.parse_request():
                 return
             self._note_body_if_absent()
+            if self._server_stopping():
+                self._refuse_during_stop()
+                return
             mname = "do_" + self.command
             if not hasattr(self, mname):
                 self.send_error(
@@ -8426,28 +8434,119 @@ class Handler(BaseHTTPRequestHandler):
         if "keep-alive" in tokens and "close" not in tokens:
             self._keepalive_ok = True
 
-    def _note_body_if_absent(self) -> None:
-        """No Content-Length and no chunked body means there is nothing to read.
+    def _server_stopping(self) -> bool:
+        try:
+            return bool(self.state._stopping)
+        except Exception:
+            return True
 
-        Anything else stays unconsumed until _read_json has taken exactly
-        Content-Length bytes. Unreadable framing fails closed.
+    def _refuse_during_stop(self) -> None:
+        """Reject a not-yet-dispatched request and close. No lease, no keep-alive."""
+        self._force_close = True
+        self._body_fully_consumed = False
+        self.close_connection = True
+        try:
+            self._json(503, {"error": "server_stopping"})
+        except Exception:
+            self.close_connection = True
+
+    def _mark_idle_keepalive(self, idle: bool) -> None:
+        try:
+            if idle:
+                self.server.register_idle_keepalive(self.connection)
+            else:
+                self.server.unregister_idle_keepalive(self.connection)
+        except Exception:
+            self.close_connection = True
+
+    def _read_idle_request_line(self) -> bool:
+        """Block for the next request line while stop() can wake this socket."""
+        self._mark_idle_keepalive(True)
+        try:
+            if self.close_connection or self._server_stopping():
+                self.close_connection = True
+                return False
+            return self._consume_request_line()
+        finally:
+            self._mark_idle_keepalive(False)
+
+    def _consume_request_line(self) -> bool:
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            return False
+        if len(self.raw_requestline) > 65536:
+            self.requestline = ""
+            self.request_version = ""
+            self.command = ""
+            self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+            self.close_connection = True
+            return False
+        if not self.raw_requestline:
+            self.close_connection = True
+            return False
+        return True
+
+    def _unambiguous_body_length(self) -> int | None:
+        """One declared body length, or None when the framing cannot be kept.
+
+        None covers Transfer-Encoding (this server does not read chunked
+        bodies), more than one Content-Length, and a length that is not a
+        single non-negative integer. Two Content-Length fields close the
+        connection even when the numbers match: RFC 9112 requires rejecting
+        conflicting values, and identical repeats are still not one length
+        (recipients disagree on which field wins). 0 is an empty body.
+        """
+        try:
+            headers = self.headers
+            if self._transfer_encoding_present(headers):
+                return None
+            lengths = self._content_length_values(headers)
+        except Exception:
+            return None
+        if lengths is None or len(lengths) > 1:
+            return None
+        if len(lengths) == 0:
+            return 0
+        try:
+            length = int(str(lengths[0]).strip())
+        except (TypeError, ValueError):
+            return None
+        if length < 0:
+            return None
+        return length
+
+    def _transfer_encoding_present(self, headers: object) -> bool:
+        if hasattr(headers, "get_all"):
+            values = headers.get_all("Transfer-Encoding")
+            if not values:
+                return False
+            return any(str(value).strip() for value in values)
+        raw = headers.get("Transfer-Encoding", "")
+        return bool(str(raw).strip()) if raw is not None else False
+
+    def _content_length_values(self, headers: object) -> list[object] | None:
+        if hasattr(headers, "get_all"):
+            values = headers.get_all("Content-Length")
+            if values is None:
+                return []
+            return list(values)
+        if "Content-Length" not in headers:
+            return []
+        raw = headers.get("Content-Length")
+        if raw is None:
+            return []
+        return [raw]
+
+    def _note_body_if_absent(self) -> None:
+        """An unambiguous length of 0 is already fully consumed.
+
+        Any other length stays unconsumed until _read_json has read exactly
+        that many bytes. Ambiguous framing stays unconsumed.
         """
         self._body_fully_consumed = False
-        try:
-            transfer = self.headers.get("Transfer-Encoding", "")
-            if not isinstance(transfer, str) or transfer.strip():
-                return
-            if "Content-Length" not in self.headers:
-                self._body_fully_consumed = True
-                return
-            raw_length = self.headers.get("Content-Length")
-        except Exception:
-            return
-        try:
-            length = int(raw_length)
-        except (TypeError, ValueError):
-            return
-        if length == 0:
+        if self._unambiguous_body_length() == 0:
             self._body_fully_consumed = True
 
     @property
@@ -8548,13 +8647,10 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_json(self) -> dict | None:
-        raw_length = self.headers.get("Content-Length", "0")
-        try:
-            length = int(raw_length)
-        except (TypeError, ValueError):
-            self._reject_unread_body(400, "bad_content_length")
-            return None
-        if length < 0:
+        length = self._unambiguous_body_length()
+        if length is None:
+            # Do not read a default of 0. That marked chunked and
+            # contradictory Content-Length bodies as consumed.
             self._reject_unread_body(400, "bad_content_length")
             return None
         if length > MAX_BODY_BYTES:
@@ -8569,9 +8665,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) != length:
             self._reject_unread_body(400, "bad_body_length")
             return None
-        # The bytes are consumed even when the JSON itself is rejected.
-        # _force_close still makes that rejection drop the connection.
-        self._body_fully_consumed = True
+        # Consumed only after the one declared length was read in full.
+        # Invalid JSON still closes via _force_close.
+        if self._unambiguous_body_length() == length:
+            self._body_fully_consumed = True
 
         try:
             text = raw.decode("utf-8")
@@ -8598,12 +8695,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, body: dict) -> None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        # One decision for every JSON reply. Early 403/404 never mark the
-        # body consumed, so they close. Invalid JSON sets _force_close.
+        # One decision for every JSON reply. Keep-alive needs the flag,
+        # no forced close, and a single unambiguous length. Early 403/404,
+        # chunked bodies and repeated Content-Length values close.
+        try:
+            framing_ok = self._unambiguous_body_length() is not None
+        except Exception:
+            framing_ok = False
         persist = (
             getattr(self, "_keepalive_ok", False)
             and not getattr(self, "_force_close", True)
             and getattr(self, "_body_fully_consumed", False)
+            and framing_ok
         )
         if persist and not self._claim_idle_keepalive_slot():
             persist = False
@@ -9784,7 +9887,27 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
         self._idle_keepalive_slots = threading.BoundedSemaphore(MAX_IDLE_KEEPALIVES)
         self._human_input_diagnostic = threading.BoundedSemaphore(1)
+        self._idle_keepalive_lock = threading.Lock()
+        self._idle_keepalive_sockets: set[object] = set()
         super().__init__(*args, **kwargs)
+
+    def register_idle_keepalive(self, connection: object) -> None:
+        with self._idle_keepalive_lock:
+            self._idle_keepalive_sockets.add(connection)
+
+    def unregister_idle_keepalive(self, connection: object) -> None:
+        with self._idle_keepalive_lock:
+            self._idle_keepalive_sockets.discard(connection)
+
+    def wake_idle_keepalives(self) -> None:
+        """Unblock idle keep-alive reads so stop() does not leave them dispatched."""
+        with self._idle_keepalive_lock:
+            sockets = list(self._idle_keepalive_sockets)
+        for connection in sockets:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def process_request(self, request, client_address):
         # Auth runs in the handler, after a worker exists. An idle TCP has
@@ -9914,6 +10037,10 @@ class LoopbackServer:
         if self.httpd is None:
             return
         self.state.cancel_pending()
+        try:
+            self.httpd.wake_idle_keepalives()
+        except Exception:
+            pass
         self.httpd.shutdown()
         self.httpd.server_close()
         if self.thread is not None:
