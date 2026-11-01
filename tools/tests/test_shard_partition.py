@@ -203,12 +203,35 @@ class ShardPartitionTest(unittest.TestCase):
                 f"module {name} was split across shards {sorted(shards)}",
             )
 
+        # Direct children, not the runner's leaf walk. Every discovered child
+        # is executed by exactly one shard: none dropped, none duplicated.
+        executed_ids = [
+            id(original)
+            for shard in first
+            for group in shard
+            for original in group.suites
+        ]
+        self.assertEqual(
+            sorted(executed_ids),
+            sorted(_discovered_child_ids(suite)),
+            "a discovered child was dropped or duplicated",
+        )
+
         parts: list[str] = []
         for index, shard in enumerate(first, start=1):
             names = _shard.module_names(shard)
             test_count = sum(len(group.tests) for group in shard)
             parts.append(f"{index}: {len(names)} modules, {test_count} tests")
         print("SHARD_SIZES " + "; ".join(parts), flush=True)
+
+
+def _discovered_child_ids(suite: unittest.TestSuite) -> list[int]:
+    """Ids of the suite's own children, in discovery order.
+
+    This does not call tests._shard. The partition check compares the
+    runner's assigned suites to this list.
+    """
+    return [id(child) for child in suite]
 
 
 def _suite_leaves(item: unittest.TestSuite | unittest.case.TestCase):
@@ -497,8 +520,9 @@ class ShardRunnerParityTest(unittest.TestCase):
     def test_empty_custom_suite_does_not_pass_a_shard(self) -> None:
         """Three one-test modules plus an empty TestSuite subclass.
 
-        The empty suite lands on its own shard. That shard has no tests, so
-        its exit code is non-zero. Shards that do have tests still pass.
+        The empty suite has no tests, so it runs on the preceding module's
+        shard. The shard that receives no child still exits non-zero. Shards
+        that do have tests still pass.
         """
         names = ("shard_reg_a", "shard_reg_b", "shard_reg_c")
 
@@ -677,6 +701,149 @@ class ShardRunnerParityTest(unittest.TestCase):
         self.assertEqual(
             (discover.returncode, whole.returncode, placed.returncode),
             (0, 0, 0),
+            detail,
+        )
+
+    def test_no_discovered_child_is_dropped_or_duplicated(self) -> None:
+        """A standard suite with no leaves is still one of the children.
+
+        The wrapper holds a custom suite and no test cases. A trailing empty
+        TestSuite is another child. Both must be assigned once.
+        """
+        names = ("shard_keep_a", "shard_keep_b")
+
+        class Inner(unittest.TestSuite):
+            pass
+
+        wrapper = unittest.TestSuite()
+        wrapper.addTest(Inner())
+        top = unittest.TestSuite()
+        try:
+            top.addTest(wrapper)
+            for name in names:
+                top.addTest(_one_test_suite(name))
+            top.addTest(unittest.TestSuite())
+            assigned = _shard.assign_groups(_shard.groups_from_suite(top), 4)
+            executed = [
+                original
+                for shard in assigned
+                for group in shard
+                for original in group.suites
+            ]
+            discovered = [id(child) for child in top]
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        self.assertEqual(
+            sorted(id(child) for child in executed),
+            sorted(discovered),
+            "a discovered child was dropped or duplicated",
+        )
+
+    def test_leafless_wrapper_matches_unittest_discover(self) -> None:
+        """load_tests returns a TestSuite whose only child is a custom suite.
+
+        The custom suite has no cases and records an error from run(). Discover
+        reports that error. 1/1 and the four shards must too: the wrapper is a
+        discovered child, so it runs once on one shard.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-wrapper-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            for name in ("test_m1", "test_m2", "test_m3", "test_m4"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class One(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            _write(
+                root / "tests" / "test_wrap.py",
+                """
+                import sys
+                import unittest
+
+                class Marker(unittest.TestCase):
+                    def test_marker(self):
+                        pass
+
+                class Hidden(unittest.TestSuite):
+                    def run(self, result, debug=False):
+                        super().run(result, debug=debug)
+                        case = Marker("test_marker")
+                        try:
+                            raise RuntimeError("nested custom suite ran")
+                        except RuntimeError:
+                            result.addError(case, sys.exc_info())
+                        return result
+
+                def load_tests(loader, tests, pattern):
+                    outer = unittest.TestSuite()
+                    outer.addTest(Hidden())
+                    return outer
+                """,
+            )
+            env = _fresh_env()
+            (root / "_drive.py").write_text(_DRIVER, encoding="utf-8")
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            whole = subprocess.run(
+                [sys.executable, "-B", str(root / "_drive.py"), str(_SHARD_FILE)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            codes: list[int] = []
+            shard_errs: list[str] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        str(root / "_run.py"),
+                        str(_SHARD_FILE),
+                        str(index),
+                        "4",
+                    ],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+                shard_errs.append(run.stderr)
+        marker = "nested custom suite ran"
+        detail = (
+            f"discover={discover.returncode} 1/1={whole.returncode} "
+            f"shards={codes}\n"
+            f"--- discover stderr ---\n{discover.stderr}\n"
+            f"--- 1/1 stderr ---\n{whole.stderr}\n"
+            f"--- shard stderr ---\n" + "\n".join(shard_errs)
+        )
+        self.assertEqual(
+            (
+                discover.returncode,
+                whole.returncode,
+                tuple(sorted(codes)),
+                marker in discover.stderr,
+                marker in whole.stderr,
+                sum(marker in err for err in shard_errs),
+            ),
+            (1, 1, (0, 0, 0, 1), True, True, 1),
             detail,
         )
 

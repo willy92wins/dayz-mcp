@@ -9,16 +9,17 @@ Invoke from tools/:
 pattern="test*.py", top_level_dir="."), the same call the single full job
 used, so load_tests and the rest of discovery stay in place.
 
-Each direct child of that suite is one discovered module (a test file, or
-the suite load_tests returned for it). A child is never split, and the shard
-runs that original suite object. Flattening is only for counting and
+Each direct child of that suite is kept. The shard runs that original object
+once, on one shard, in discovery order. Flattening is only for counting and
 grouping, so a load_tests suite keeps its own run(). Counting descends every
 BaseTestSuite, not only TestSuite: a BaseTestSuite is not a TestSuite, and
 stopping there would name the cases inside it after the suite. If two
 children share a test module, they stay on the same shard too: splitting
-either one would split a module. A plain empty TestSuite is not a module.
-A shard with no tests exits 1 even when an empty suite was assigned to it.
-Original suites still run when the shard has tests.
+either one would split a module. A child with no leaves is not a module and
+does not move the balance. It runs on the shard of the nearest preceding
+child that has leaves, or on shard 1 when none precedes it (the tests package
+is usually that child). A shard with no tests exits 1 even after those
+suites have run.
 
 Warnings follow unittest's CLI (TestProgram): 'default' when the process has
 no -W and no PYTHONWARNINGS; those filters stay in place when it does.
@@ -113,9 +114,12 @@ def module_of(test: unittest.case.TestCase) -> str:
 def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
     """Whole discovered modules, in discovery order.
 
-    Children that name the same module are one group, so a module cannot land
-    on two shards. A child that names several modules ties those modules
-    together for the same reason.
+    Every direct child is kept. Children that name the same module are one
+    group, so a module cannot land on two shards. A child that names several
+    modules ties those modules together. A child with no leaves joins the
+    group of the nearest preceding child that has leaves, so it runs on that
+    child's shard. With no such predecessor it is its own group and
+    assign_groups pins that group to shard 1.
     """
     # modules, leaf tests (counting only), and the original child object.
     children: list[
@@ -137,10 +141,6 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
 
     for child in suite:
         tests = list(iter_tests(child))
-        # The tests package is often an empty TestSuite. A load_tests hook may
-        # return a subclass whose run() is the behavior, even with no leaves.
-        if not tests and type(child) is unittest.TestSuite:
-            continue
         modules: list[str] = []
         seen: set[str] = set()
         for test in tests:
@@ -148,11 +148,13 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
             if name not in seen:
                 seen.add(name)
                 modules.append(name)
-        if not modules:
+        if tests and not modules:
             modules.append(f"{type(child).__module__}.{type(child).__qualname__}")
         index = len(children)
         children.append((modules, tests, child))
         parent.append(index)
+        if not tests:
+            continue
         for name in modules:
             owner = module_owner.get(name)
             if owner is None:
@@ -162,30 +164,68 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
 
     members: dict[int, list[int]] = {}
     order: list[int] = []
-    for index in range(len(children)):
+    for index, (_modules, tests, _child) in enumerate(children):
+        if not tests:
+            continue
         root = find(index)
         if root not in members:
             members[root] = []
             order.append(root)
         members[root].append(index)
 
-    groups: list[Group] = []
+    # Mutable so a later child with no leaves can join the preceding group.
+    modules_of: dict[int, list[str]] = {}
+    tests_of: dict[int, list[unittest.case.TestCase]] = {}
+    suites_of: dict[int, list[unittest.TestSuite | unittest.case.TestCase]] = {}
+    positions_of: dict[int, list[int]] = {}
+    group_of: dict[int, int] = {}
     for root in order:
-        modules: list[str] = []
+        modules_of[root] = []
+        tests_of[root] = []
+        suites_of[root] = []
+        positions_of[root] = []
         seen_modules: set[str] = set()
-        tests: list[unittest.case.TestCase] = []
-        suites: list[unittest.TestSuite | unittest.case.TestCase] = []
-        positions: list[int] = []
         for index in members[root]:
             child_modules, child_tests, child_suite = children[index]
             for name in child_modules:
                 if name not in seen_modules:
                     seen_modules.add(name)
-                    modules.append(name)
-            tests.extend(child_tests)
-            suites.append(child_suite)
-            positions.append(index)
-        groups.append(Group(tuple(modules), tuple(tests), tuple(suites), tuple(positions)))
+                    modules_of[root].append(name)
+            tests_of[root].extend(child_tests)
+            suites_of[root].append(child_suite)
+            positions_of[root].append(index)
+            group_of[index] = root
+
+    prefix_suites: list[unittest.TestSuite | unittest.case.TestCase] = []
+    prefix_positions: list[int] = []
+    for index, (_modules, tests, child) in enumerate(children):
+        if tests:
+            continue
+        host: int | None = None
+        for earlier in range(index - 1, -1, -1):
+            if children[earlier][1]:
+                host = earlier
+                break
+        if host is None:
+            prefix_suites.append(child)
+            prefix_positions.append(index)
+            continue
+        root = group_of[host]
+        suites_of[root].append(child)
+        positions_of[root].append(index)
+
+    groups: list[Group] = []
+    if prefix_suites:
+        groups.append(Group((), (), tuple(prefix_suites), tuple(prefix_positions)))
+    for root in order:
+        groups.append(
+            Group(
+                tuple(modules_of[root]),
+                tuple(tests_of[root]),
+                tuple(suites_of[root]),
+                tuple(positions_of[root]),
+            )
+        )
     return groups
 
 
@@ -258,11 +298,17 @@ def group_weight(group: Group) -> int:
 
 
 def assign_groups(groups: list[Group], shard_count: int) -> list[list[Group]]:
-    """Place whole groups onto shard_count shards. Shard 0 is index 1."""
+    """Place whole groups onto shard_count shards. Shard 0 is index 1.
+
+    A group with no tests is the leading children that have no leaves. They
+    are not balanced: shard 1 runs them. Every other group has tests.
+    """
     if shard_count < 1:
         raise ValueError("shard count must be at least 1")
     discover_order = {id(group): index for index, group in enumerate(groups)}
-    weighted = [(group_weight(group), group) for group in groups]
+    pinned = [group for group in groups if not group.tests]
+    floating = [group for group in groups if group.tests]
+    weighted = [(group_weight(group), group) for group in floating]
     ranked = sorted(weighted, key=lambda item: (-item[0], item[1].modules))
     loads = [0] * shard_count
     buckets: list[list[Group]] = [[] for _ in range(shard_count)]
@@ -270,6 +316,7 @@ def assign_groups(groups: list[Group], shard_count: int) -> list[list[Group]]:
         shard = min(range(shard_count), key=lambda item: (loads[item], item))
         buckets[shard].append(group)
         loads[shard] += weight
+    buckets[0].extend(pinned)
     for bucket in buckets:
         bucket.sort(key=lambda group: discover_order[id(group)])
     return buckets
@@ -309,13 +356,16 @@ def run_assigned(
     groups: list[Group], *, index: int, count: int, list_only: bool
 ) -> int:
     chosen = assign_groups(groups, count)[index - 1]
-    # An empty custom suite is still a suite object. The gate is the tests:
-    # a shard with none exits 1. Suites on a shard that has tests are the
-    # original objects, added below.
-    if not chosen or not any(group.tests for group in chosen):
+    if not chosen:
         print(f"shard {index}/{count} has no tests", file=sys.stderr)
         return 1
+    # The gate is the tests, not the suite objects. A shard that only holds
+    # suites still runs those suites (each child runs once) and then exits 1.
+    has_tests = any(group.tests for group in chosen)
     if list_only:
+        if not has_tests:
+            print(f"shard {index}/{count} has no tests", file=sys.stderr)
+            return 1
         for name in module_names(chosen):
             print(name)
         return 0
@@ -336,6 +386,9 @@ def run_assigned(
         # load_tests suite's own run() (suite.py).
         suite.addTest(original)
     result = unittest.TextTestRunner(verbosity=1, warnings=_runner_warnings()).run(suite)
+    if not has_tests:
+        print(f"shard {index}/{count} has no tests", file=sys.stderr)
+        return 1
     return 0 if result.wasSuccessful() else 1
 
 
