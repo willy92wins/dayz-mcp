@@ -9,7 +9,62 @@ failures" were a bad test site. Every drive test therefore runs at a
 **certified site**, and a failing drive at an uncertified site is evidence
 about the site, not about the tools.
 
-## The exit reality: teardown is by fixture delete, not by the get-out action
+## The exit reality: confirm the client exit before fixture deletion
+
+**Issue #302:** `object_delete` refuses with `ok=false`,
+`error=vehicle_client_seated`, `deleted=0` and the requested `object_id`
+when client telemetry shows a client-owned seated occupant. No delete is
+sent to the server. The current telemetry has no server registry `object_id`
+(`addon/scripts/5_Mission/MCPClientBridge.c:2928-2976`), so the guard
+conservatively refuses **every target**, including an apparently unrelated
+object, while that seat is occupied.
+
+Exit through the client exit flow (for example, `action_use`
+`ActionGetOutTransport` when its conditions permit it), confirm `seated=false`
+with `vehicle_telemetry`, then retry the deletion. `vehicle_release` does not
+exit the seat. If the exit is refused, stop the cleanup; do not use a raw
+server delete or `scene_clear` to bypass this guard. For server-authoritative
+seating use `vehicle_enter`; it does not itself perform a client exit.
+
+Outside live, the guard returns `ok=false`, `error=vehicle_seat_unverified`,
+`deleted=0` and the requested `object_id`, without sending a delete, when:
+
+- Reading bridge status fails, including in embedded mode.
+- The client is absent, stale or otherwise not probeable. No telemetry probe
+  is sent in this case.
+- Telemetry is not a dictionary, lacks `seated`, or has a non-boolean
+  `seated` value. Valid wire booleans are `true`/`false` and integer `0`/`1`
+  (Enforce encoding, `tools/dayz_mcp/world_results.py:133-135`); strings,
+  floats, null and other values are unreadable.
+
+There is no established exception for an absent/stale client: probeability
+only checks binding and poll age (`tools/dayz_mcp/peer_liveness.py:14-38`).
+The addon poll failure path only retries with backoff, without vacating the
+seat or revoking ownership (`addon/scripts/5_Mission/MCPClientBridge.c:1038-1067`).
+No poll is not proof of an empty seat, even outside live.
+
+Deletion uses `occupant_client_seated_strict`
+(`tools/dayz_mcp/occupant_seat.py:29`); `player_teleport` retains its existing
+permissive predicate and probe policy. Missing/unreadable `is_authority_owner`
+**does** block when `seated=true`; `seated=false` permits deletion even if
+`is_authority_owner` is absent. A verified on-foot or authority-owned seat
+preserves the server delete reply. An exception from the telemetry call
+propagates without sending a delete.
+
+**TOCTOU window:** the telemetry check and delete are separate bridge calls.
+`runtime.tool_lock` serializes tool calls on that runtime and is held across
+both operations; it does not lock manual player input or prevent previously
+started actions from progressing. `action_use` can return success while an
+action is still running (`addon/scripts/5_Mission/MCPClientBridge.c:4657-4674`).
+Manual input or an earlier action could seat the player between the check and
+delete. **Before deletion, ensure no actions are pending or in progress;
+operators must not interact with the vehicle during delete.**
+
+The reported #302 runs `59b8dbc7` and `0761a892` crashed natively after
+client-only seating and deletion, even though the server's crew was empty.
+The #298 server-side eject cannot see that local seat. The Python guard
+requires no addon/PBO change; its regression checks are offline, and the
+#302 fix has **not been tested in-game**.
 
 `ActionGetOutTransport.ActionCondition` requires
 `crewIndex >= 0 && CrewCanGetThrough && IsAreaAtDoorFree`
@@ -135,18 +190,25 @@ delta_2s_xz 3.1-3.7 m across 6 sessions):
   passable under the old tolerance, blocking under the current rule.
 
 Re-certify when any of these change: map, vehicle type, game build
-(compatibility drift), or the mod's spawn/control path. Run the gate with:
-
-[EXACT]
-
-```powershell
-python tools\g0_site_gate.py --pbo-sha256 <sha> --out _site_protocol_verdict.json
-```
-
-The game must already be running with the bridge ready (the gate drives the
-broker daemon over raw authenticated HTTP and never launches DayZ itself).
+(compatibility drift), or the mod's spawn/control path. Do not run
+`tools/g0_site_gate.py` for client-seated vehicle tests until its shared
+cleanup is adapted to stop on a refused or unconfirmed exit. It delegates
+teardown to `g0_abba_gate.finish_site` (`tools/g0_site_gate.py:540`), which
+still attempts a forced delete after an unconfirmed exit
+(`tools/g0_abba_gate.py:1622-1638`).
 
 ## Standard test ladder (one vehicle scenario)
+
+These ladders require a confirmed non-live profile. In live, including
+live+admin, the public `object_delete` returns `vehicle_seat_unverified`
+with `deleted=0` for every ID, without requesting `vehicle_telemetry` or
+sending the delete. The same refusal applies when the serving daemon's
+profile cannot be verified. Live forbids the client seat read
+(`tools/dayz_mcp/loopback.py:215-240`); the server-only `in_vehicle=false`
+cannot exclude a client-owned seat (`MCPBridge.c:8105-8133`), and missing
+or stale polls do not prove an empty seat. Thus even an on-foot live client
+cannot currently use this deletion tool. Stop on this refusal; a permitted
+seat-verification channel is needed to support live deletion safely.
 
 1. Run the canopy gate at the player point **and** at the car point, then
    `player_teleport` the driver to the surface y (mutation — hold a session
@@ -166,14 +228,15 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
 7. Judge `delta_2s_xz` / `delta_5s_xz` from S0/S2/S5 plus the trace
    integrity gates. Ownership evidence comes from the same samples.
 8. Brake to a stop (`brake 1.0`, `handbrake 1.0`), `engine_set stop`.
-9. Attempt `action_use ActionGetOutTransport`; expect `condition_failed`
-   on this stand (see "The exit reality"). Tear down with `vehicle_release`
-   and `object_delete` of the fixture (`vehicle_release` only aborts the
-   trace and clears the drive-control state,
-   `MCPClientBridge.c:3151-3157` — it is not a get-out); verify the ejection
-   via telemetry (`not_seated`) and continued client polling, then
-   `restore_gameplay`. A `vehicle_eject_failed` result leaves the fixture
-   registered; stop the ladder and diagnose the refused exit before retrying.
+9. Attempt `action_use ActionGetOutTransport`; the historical stand returned
+   `condition_failed` (see "The exit reality"). Confirm the client exit via
+   `vehicle_telemetry` (`seated=false`) before `object_delete` of the fixture.
+   `vehicle_release` only aborts the trace and clears drive-control state
+   (`MCPClientBridge.c:3151-3157`); it is not a get-out. Stop the ladder on a
+   refused exit, `vehicle_seat_unverified`, `vehicle_client_seated` or
+   `vehicle_eject_failed`, retaining the fixture id
+   for retry. After a successful deletion verify continued client polling,
+   then `restore_gameplay`.
 10. Release the session lease.
 
 A vehicle field arrives only from a verb that fills it. `seated`, `seat`,
@@ -196,11 +259,14 @@ player is in the server crew; re-read the server side instead of carrying
 these no-crew numbers across configurations — the server-side ladder below
 ends in exactly that comparison.
 
-Steps 2-9 are exactly `prepare_site` / `run_cell` / `finish_site` in
-[`tools/g0_abba_gate.py`](../tools/g0_abba_gate.py); drive new tests through
-that library instead of re-implementing the ladder. The threshold judgement
-of step 7 (`delta_2s_xz` / `delta_5s_xz` against the contract) lives in the
-site gate's `drive_metrics`, not in the library.
+Do not use [`tools/g0_abba_gate.py`](../tools/g0_abba_gate.py) as an
+implementation of this ladder until its cleanup is adapted to stop on a
+refused or unconfirmed exit. Its `finish_site` still sends `object_delete`
+after an unconfirmed exit (`tools/g0_abba_gate.py:1622-1638`) over raw
+authenticated HTTP (`tools/g0_abba_gate.py:866-883`), so the helper is not
+equivalent to this recipe. The threshold judgement of step 7 (`delta_2s_xz` /
+`delta_5s_xz` against the contract) lives in the site gate's `drive_metrics`,
+not in the library.
 
 ## Server-side ladder (server crew, and where the replica is)
 
@@ -248,12 +314,13 @@ server replica is.
    that run's configuration, not noise: the frozen-replica run above
    (fb-20260824-133301-ecf5) is the standing counter-example to assuming
    the server side follows the client-owned car.
-7. Tear down as the client ladder does: `vehicle_release`, then
-   `object_delete` of the registered fixture id — the release only clears
-   trace/control (`MCPClientBridge.c:3151-3157`), and the bridge must confirm
-   every occupant has left before deleting. Verify via telemetry
-   (`not_seated`) and continued client polling, then `restore_gameplay` and
-   the session release. Stop the ladder on `vehicle_eject_failed`; keep the
+7. Tear down as the client ladder does: confirm the client exit before
+   `object_delete` of the registered fixture id. `vehicle_release` only
+   clears trace/control (`MCPClientBridge.c:3151-3157`); server-visible
+   occupants still go through the bridge's eject guard. Verify via telemetry
+   (`seated=false`) and continued
+   client polling, then `restore_gameplay` and the session release. Stop the
+   ladder on `vehicle_client_seated` or `vehicle_eject_failed`; keep the
    registered fixture id for a retry after resolving the blocked exit.
 
 ## Session shape

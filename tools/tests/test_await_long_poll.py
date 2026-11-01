@@ -975,6 +975,755 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleanups, [(7, "tool_timeout")], detail)
         self.assertTrue(any(item["path"] == "/abandon" for item in seen), detail)
 
+    async def _credential_replay(
+        self, mode: str
+    ) -> tuple[str, list[dict[str, object]], list[tuple[object, object]]]:
+        # Sol r4 F-07: budget 1.5s, the refresh lock is held for 1.1s, then
+        # accreditation takes 200ms. The real provider resends the original
+        # wait_ms. On 3bfd5fc that replay outlives the socket.
+        import tempfile
+
+        from dayz_mcp import accredited_daemon_transport as transport
+        from dayz_mcp import daemon_credential
+        from dayz_mcp.daemon_policy import AccreditedDaemonPolicy
+        from dayz_mcp.daemon_policy_contract import (
+            authority_payload,
+            authority_sha256,
+        )
+        from dayz_mcp.session_coordination import ClientIdentity
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        _host, port = daemon.httpd.server_address
+        seen: list[dict[str, object]] = []
+        cleanups: list[tuple[object, object]] = []
+        verified = {"n": 0}
+
+        def verify(*_args, **_kwargs) -> bool:
+            verified["n"] += 1
+            if mode == "reaccreditation" and verified["n"] == 1:
+                return False
+            time.sleep(0.2)
+            return True
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        keyfile = (Path(directory.name) / "daemon.key").resolve()
+        stale = "stale-await-credential"
+        keyfile.write_text(
+            (stale if mode == "401" else daemon.key) + "\n", encoding="utf-8"
+        )
+        argv = (
+            r"P:\Runtime\python.exe",
+            "-m",
+            "dayz_mcp",
+            "--daemon",
+            "--port",
+            str(int(port)),
+        )
+        payload = authority_payload(
+            kind="normal",
+            host="127.0.0.1",
+            port=int(port),
+            keyfile=str(keyfile),
+            native_executable=r"P:\Runtime\python.exe",
+            argv=argv,
+            cwd=r"P:\DayZ_MCP_dev\tools",
+            security_build_id=None,
+        )
+        provider = daemon_credential.RefreshingDaemonCredential(
+            policy=AccreditedDaemonPolicy(
+                kind="normal",
+                host="127.0.0.1",
+                port=int(port),
+                keyfile=str(keyfile),
+                native_executable=r"P:\Runtime\python.exe",
+                argv=argv,
+                cwd=r"P:\DayZ_MCP_dev\tools",
+                security_build_id=None,
+                authority_sha256=authority_sha256(**payload),
+            )
+        )
+        if mode == "401":
+            keyfile.write_text(daemon.key + "\n", encoding="utf-8")
+
+        def request_fn(**kwargs: object) -> tuple[int, bytes]:
+            path = str(kwargs.get("path"))
+            query = dict(kwargs.get("query") or {})
+            if path == "/enqueue":
+                seen.append({"path": path, "query": query})
+                return 200, b'{"id": 7}'
+            if path == "/abandon":
+                seen.append({"path": path, "query": query})
+                return 200, b'{"status":"abandoned"}'
+            if path != "/await":
+                seen.append({"path": path, "query": query})
+                return 200, b"{}"
+            seen.append({"path": path, "query": query})
+            return transport.verified_daemon_http_request(**kwargs)
+
+        provider._request_fn = request_fn
+        held = threading.Event()
+
+        def hold_refresh() -> None:
+            provider._refresh_lock.acquire()
+            held.set()
+            time.sleep(1.1)
+            provider._refresh_lock.release()
+
+        locker = threading.Thread(target=hold_refresh, daemon=True)
+        locker.start()
+        self.addCleanup(held.set)
+        self.assertTrue(held.wait(timeout=2.0), "refresh lock was not taken")
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._control = SimpleNamespace(
+            active_lease_token=None, active_ticket=None
+        )
+        runtime.identity = ClientIdentity.from_payload(_HOLDER["identity"])
+        runtime._credential_provider = provider
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        real_cleanup = server._shielded_broker_cleanup
+
+        async def spy_cleanup(bound, command_id, reason, budget_deadline=None):
+            cleanups.append((command_id, reason))
+            return await real_cleanup(
+                bound, command_id, reason, budget_deadline
+            )
+
+        with mock.patch.object(server, "_shielded_broker_cleanup", spy_cleanup):
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", verify
+            ):
+                with self.assertRaises(server.ToolError) as caught:
+                    # camera_set is mutating, so the 401 path re-reads the key.
+                    await runtime.call_bridge("camera_set", {}, "client", 1.5)
+        locker.join(timeout=2.0)
+        return str(caught.exception), seen, cleanups
+
+    def _assert_replay_is_a_timeout(
+        self,
+        message: str,
+        seen: list[dict[str, object]],
+        cleanups: list[tuple[object, object]],
+    ) -> None:
+        detail = (message, seen, cleanups)
+        self.assertTrue(message.startswith("timeout waiting"), detail)
+        self.assertNotIn("daemon_response_ambiguous", message)
+        self.assertNotIn("stale_client_credential", message)
+        self.assertNotIn("reaccreditation", message)
+        awaits = [item for item in seen if item["path"] == "/await"]
+        self.assertGreaterEqual(len(awaits), 2, detail)
+        self.assertIn("wait_ms", awaits[0]["query"])
+        self.assertNotIn("wait_ms", awaits[1]["query"], detail)
+        self.assertEqual(cleanups, [(7, "tool_timeout")], detail)
+        self.assertTrue(any(item["path"] == "/abandon" for item in seen), detail)
+
+    @slow_test
+    async def test_credential_401_retry_drops_stale_wait_ms_and_cleans_up(
+        self,
+    ) -> None:
+        message, seen, cleanups = await self._credential_replay("401")
+        self._assert_replay_is_a_timeout(message, seen, cleanups)
+
+    @slow_test
+    async def test_reaccreditation_replay_drops_stale_wait_ms_and_cleans_up(
+        self,
+    ) -> None:
+        message, seen, cleanups = await self._credential_replay("reaccreditation")
+        self._assert_replay_is_a_timeout(message, seen, cleanups)
+
+    @slow_test
+    async def test_eight_long_polls_do_not_block_the_ninth_result(self) -> None:
+        # Sol r4 F-08: the default executor is fixed at 8 threads here, so the
+        # result does not depend on the host CPU count. Eight long-polls fill
+        # that executor on 3bfd5fc and the ninth, whose result is already
+        # stored, does not return inside its 400ms budget.
+        import concurrent.futures
+
+        from dayz_mcp import accredited_daemon_transport as transport
+
+        daemon = _Daemon()
+        closed = {"done": False}
+
+        def close_once() -> None:
+            if closed["done"]:
+                return
+            closed["done"] = True
+            daemon.close()
+
+        self.addCleanup(close_once)
+        _host, port = daemon.httpd.server_address
+        ids = [daemon.enqueue() for _ in range(9)]
+        started = {"n": 0}
+        started_lock = threading.Lock()
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            if path == "/await":
+                with started_lock:
+                    started["n"] += 1
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=dict(query),
+                body=body,
+                headers=dict(headers),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+
+        async def await_id(command_id: int, timeout_s: float) -> dict:
+            return await runtime._await_result(
+                "camera_get", command_id, "client", timeout_s
+            )
+
+        def verify(*_args, **_kwargs) -> bool:
+            return True
+
+        blockers: list[asyncio.Task] = []
+        try:
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", verify
+            ):
+                blockers = [
+                    asyncio.create_task(await_id(command_id, 3.0))
+                    for command_id in ids[:8]
+                ]
+                limit = time.monotonic() + 2.0
+                while time.monotonic() < limit and started["n"] < 8:
+                    await asyncio.sleep(0.02)
+                self.assertGreaterEqual(started["n"], 8, started["n"])
+                await asyncio.sleep(0.05)
+                code, stored = daemon.state.store_result(
+                    {"id": ids[8], "ok": 1, "marker": 9}
+                )
+                self.assertEqual(code, 200, stored)
+                started_at = time.monotonic()
+                result = await asyncio.wait_for(
+                    await_id(ids[8], 0.4), timeout=0.5
+                )
+            # y belongs to surface_query, so camera_get's prune drops it.
+            self.assertEqual(result.get("marker"), 9, result)
+            self.assertLess(time.monotonic() - started_at, 0.4)
+        finally:
+            close_once()
+            for task in blockers:
+                task.cancel()
+            if blockers:
+                await asyncio.gather(*blockers, return_exceptions=True)
+
+    @slow_test
+    async def test_raised_long_poll_releases_its_slot(self) -> None:
+        # Eight long-polls sit on an 8-thread default executor. A ninth call
+        # must still start at once. After one of those waits raises, a later
+        # call must be able to send wait_ms again.
+        import concurrent.futures
+
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        hold = threading.Event()
+        boom = threading.Event()
+        self.addCleanup(hold.set)
+        self.addCleanup(boom.set)
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(copied)
+            command_id = copied.get("id")
+            if command_id == "9":
+                raise RuntimeError("boom")
+            if "wait_ms" not in copied:
+                return 200, {"status": "done", "result": {"ok": 1, "y": 1}}
+            if command_id == "10":
+                return 200, {"status": "done", "result": {"ok": 1, "y": 10}}
+            if command_id == "1":
+                if not boom.wait(timeout=3.0):
+                    raise AssertionError("id 1 was not signalled")
+                raise RuntimeError("slot")
+            hold.wait(timeout=3.0)
+            return 200, {"status": "pending"}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+        blockers: list[asyncio.Task] = []
+        try:
+            blockers = [
+                asyncio.create_task(
+                    runtime._await_result("camera_get", command_id, "client", 3.0)
+                )
+                for command_id in range(1, 9)
+            ]
+            limit = time.monotonic() + 2.0
+            while time.monotonic() < limit:
+                with seen_lock:
+                    entered = sum(1 for query in seen if "wait_ms" in query)
+                if entered >= 8:
+                    break
+                await asyncio.sleep(0.02)
+            self.assertGreaterEqual(entered, 8, seen)
+            with self.assertRaises(RuntimeError) as caught:
+                await asyncio.wait_for(
+                    runtime._await_result("camera_get", 9, "client", 3.0),
+                    timeout=0.3,
+                )
+            self.assertEqual(str(caught.exception), "boom")
+            boom.set()
+            with self.assertRaises(RuntimeError) as slot_error:
+                await asyncio.wait_for(blockers[0], timeout=1.0)
+            self.assertEqual(str(slot_error.exception), "slot")
+            await runtime._await_result("camera_get", 10, "client", 3.0)
+            with seen_lock:
+                follower = [query for query in seen if query.get("id") == "10"]
+            self.assertTrue(follower, seen)
+            self.assertIn("wait_ms", follower[0], follower)
+        finally:
+            hold.set()
+            boom.set()
+            for task in blockers:
+                task.cancel()
+            if blockers:
+                await asyncio.gather(*blockers, return_exceptions=True)
+
+    @slow_test
+    async def test_accreditation_longer_than_the_margin_stays_timeout_waiting(
+        self,
+    ) -> None:
+        # Sol r5 F-03: budget 1.5s, accreditation 1.2s on the first /await.
+        # HEAD sends wait_ms around 497, the socket dies after accreditation,
+        # and the call ends as daemon_response_ambiguous with no tool_timeout.
+        from dayz_mcp import accredited_daemon_transport as transport
+        from dayz_mcp.session_coordination import ClientIdentity
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        _host, port = daemon.httpd.server_address
+        seen: list[dict[str, object]] = []
+        cleanups: list[tuple[object, object]] = []
+
+        def slow_verify(*_args, **_kwargs) -> bool:
+            time.sleep(1.2)
+            return True
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            copied = dict(query or {})
+            if path == "/enqueue":
+                seen.append({"path": path, "query": copied})
+                return 200, b'{"id": 7}'
+            if path == "/abandon":
+                seen.append({"path": path, "query": copied})
+                return 200, b'{"status":"abandoned"}'
+            if path != "/await":
+                seen.append({"path": path, "query": copied})
+                return 200, b"{}"
+            seen.append({"path": path, "query": copied})
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=copied,
+                body=body,
+                headers=dict(headers or {}),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._control = SimpleNamespace(
+            active_lease_token=None, active_ticket=None
+        )
+        runtime.identity = ClientIdentity.from_payload(_HOLDER["identity"])
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        async def no_status(*_args, **_kwargs):
+            return None
+
+        runtime._liveness_message = liveness
+        runtime.bridge_status_payload = no_status
+        real_cleanup = server._shielded_broker_cleanup
+
+        async def spy_cleanup(bound, command_id, reason, budget_deadline=None):
+            cleanups.append((command_id, reason))
+            return await real_cleanup(
+                bound, command_id, reason, budget_deadline
+            )
+
+        with mock.patch.object(server, "_shielded_broker_cleanup", spy_cleanup):
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", slow_verify
+            ):
+                with self.assertRaises(server.ToolError) as caught:
+                    await runtime.call_bridge("camera_get", {}, "client", 1.5)
+        message = str(caught.exception)
+        detail = (message, seen, cleanups)
+        self.assertTrue(message.startswith("timeout waiting"), detail)
+        self.assertNotIn("daemon_response_ambiguous", message)
+        awaits = [item for item in seen if item["path"] == "/await"]
+        self.assertTrue(awaits, detail)
+        self.assertIn("wait_ms", awaits[0]["query"], detail)
+        self.assertEqual(cleanups, [(7, "tool_timeout")], detail)
+        self.assertTrue(any(item["path"] == "/abandon" for item in seen), detail)
+
+    @slow_test
+    async def test_cancelled_long_polls_do_not_block_the_next_result(self) -> None:
+        # Sol r5 F-09: cancelling the coroutine frees the slot while the
+        # private-pool thread is still in HTTP. The next call, budget 1.4s,
+        # takes that slot, queues, and never issues the query.
+        import concurrent.futures
+
+        from dayz_mcp import accredited_daemon_transport as transport
+
+        daemon = _Daemon()
+        closed = {"done": False}
+
+        def close_once() -> None:
+            if closed["done"]:
+                return
+            closed["done"] = True
+            daemon.close()
+
+        self.addCleanup(close_once)
+        _host, port = daemon.httpd.server_address
+        ids = [daemon.enqueue() for _ in range(9)]
+        started = {"n": 0}
+        started_lock = threading.Lock()
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            if path == "/await":
+                with started_lock:
+                    started["n"] += 1
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=dict(query),
+                body=body,
+                headers=dict(headers),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+
+        async def await_id(command_id: int, timeout_s: float) -> dict:
+            return await runtime._await_result(
+                "camera_get", command_id, "client", timeout_s
+            )
+
+        def verify(*_args, **_kwargs) -> bool:
+            return True
+
+        blockers: list[asyncio.Task] = []
+        try:
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", verify
+            ):
+                blockers = [
+                    asyncio.create_task(await_id(command_id, 3.0))
+                    for command_id in ids[:8]
+                ]
+                limit = time.monotonic() + 2.0
+                while time.monotonic() < limit and started["n"] < 8:
+                    await asyncio.sleep(0.02)
+                self.assertGreaterEqual(started["n"], 8, started["n"])
+                for task in blockers:
+                    task.cancel()
+                # The coroutines must finish (and, on 80940d3, free the slot)
+                # while the private-pool threads are still blocked in HTTP.
+                await asyncio.gather(*blockers, return_exceptions=True)
+                code, stored = daemon.state.store_result(
+                    {"id": ids[8], "ok": 1, "marker": 9}
+                )
+                self.assertEqual(code, 200, stored)
+                started_at = time.monotonic()
+                result = await asyncio.wait_for(
+                    await_id(ids[8], 1.4), timeout=1.6
+                )
+            self.assertEqual(result.get("marker"), 9, result)
+            self.assertLess(time.monotonic() - started_at, 1.4)
+        finally:
+            close_once()
+            for task in blockers:
+                task.cancel()
+            if blockers:
+                await asyncio.gather(*blockers, return_exceptions=True)
+
+    @slow_test
+    async def test_cancelling_queued_work_releases_the_slot(self) -> None:
+        # Sol r6 F-11: one cancelled hop still leaves seven slots, so a later
+        # wait_ms does not prove that hop gave its slot back. Eight queued
+        # hops take every slot. Cancelling them before they start must restore
+        # the semaphore to its initial value, and eight later calls must all
+        # send wait_ms. The cancelled hops must not send a query.
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        hold = threading.Event()
+        running = {"n": 0}
+        self.addCleanup(hold.set)
+
+        def block() -> None:
+            with seen_lock:
+                running["n"] += 1
+            hold.wait(timeout=3.0)
+
+        executor = server._client_long_poll_executor_handle()
+        _executor, slots = server._client_long_poll_resources()
+        self.assertEqual(slots._value, slots._initial_value, slots)
+        parked = [executor.submit(block) for _ in range(8)]
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit and running["n"] < 8:
+            await asyncio.sleep(0.02)
+        self.assertGreaterEqual(running["n"], 8, running["n"])
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(copied)
+            command_id = int(copied.get("id", "0"))
+            if 9 <= command_id <= 16:
+                return 200, {
+                    "status": "done",
+                    "result": {"ok": 1, "marker": command_id},
+                }
+            hold.wait(timeout=3.0)
+            return 200, {"status": "pending"}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        queued = [
+            asyncio.create_task(
+                runtime._await_result("camera_get", command_id, "client", 3.0)
+            )
+            for command_id in range(1, 9)
+        ]
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit and slots._value != 0:
+            await asyncio.sleep(0.02)
+        self.assertEqual(slots._value, 0, slots)
+        with seen_lock:
+            self.assertEqual(seen, [], seen)
+        for task in queued:
+            task.cancel()
+        await asyncio.gather(*queued, return_exceptions=True)
+        self.assertEqual(slots._value, slots._initial_value, slots)
+        hold.set()
+        for future in parked:
+            future.result(timeout=2.0)
+        followers = [
+            asyncio.create_task(
+                runtime._await_result("camera_get", command_id, "client", 3.0)
+            )
+            for command_id in range(9, 17)
+        ]
+        await asyncio.gather(*followers)
+        with seen_lock:
+            by_id: dict[str, list[dict[str, str]]] = {}
+            for query in seen:
+                by_id.setdefault(str(query.get("id")), []).append(query)
+        cancelled = [str(command_id) for command_id in range(1, 9) if str(command_id) in by_id]
+        self.assertEqual(cancelled, [], seen)
+        for command_id in range(9, 17):
+            queries = by_id.get(str(command_id), [])
+            self.assertTrue(queries, seen)
+            self.assertIn("wait_ms", queries[0], queries)
+        self.assertEqual(slots._value, slots._initial_value, slots)
+
+    @slow_test
+    async def test_submit_failure_returns_the_slot_and_drops_the_queued_hop(
+        self,
+    ) -> None:
+        # Sol r6 F-10: submit queues the hop and then raises (the private
+        # thread fails to start). The slot must come back, that queued hop
+        # must not send /await, and the call must still deliver the result
+        # on the shared executor without wait_ms.
+        import concurrent.futures
+
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        hold = threading.Event()
+        running = {"n": 0}
+        submits = {"n": 0}
+        self.addCleanup(hold.set)
+
+        def block() -> None:
+            with seen_lock:
+                running["n"] += 1
+            hold.wait(timeout=3.0)
+
+        executor = server._client_long_poll_executor_handle()
+        _executor, slots = server._client_long_poll_resources()
+        self.assertEqual(slots._value, slots._initial_value, slots)
+        before = slots._value
+        parked = [executor.submit(block) for _ in range(8)]
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit and running["n"] < 8:
+            await asyncio.sleep(0.02)
+        self.assertGreaterEqual(running["n"], 8, running["n"])
+
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        warmed = [pool.submit(lambda: None) for _ in range(8)]
+        for item in warmed:
+            item.result(timeout=2.0)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(copied)
+            if copied.get("id") == "1":
+                return 200, {"status": "done", "result": {"ok": 1, "marker": 1}}
+            hold.wait(timeout=3.0)
+            return 200, {"status": "pending"}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        original_submit = executor.submit
+
+        def broken_submit(fn, /, *args, **kwargs):
+            submits["n"] += 1
+            original_submit(fn, *args, **kwargs)
+            raise RuntimeError("private thread failed to start")
+
+        executor.submit = broken_submit
+        try:
+            result = await runtime._await_result("camera_get", 1, "client", 3.0)
+            self.assertEqual(submits["n"], 1, submits["n"])
+            self.assertEqual(result.get("marker"), 1, result)
+            self.assertEqual(slots._value, before, slots)
+        finally:
+            executor.submit = original_submit
+            hold.set()
+            for future in parked:
+                future.result(timeout=2.0)
+            executor.submit(lambda: None).result(timeout=2.0)
+        with seen_lock:
+            detail = list(seen)
+        self.assertEqual(len(detail), 1, detail)
+        self.assertEqual(detail[0].get("id"), "1", detail)
+        self.assertNotIn("wait_ms", detail[0], detail)
+        self.assertEqual(slots._value, before, slots)
+
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
     def _runtime(self, state: loopback.ServerState):

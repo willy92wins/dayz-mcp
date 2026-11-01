@@ -85,7 +85,7 @@ from dayz_mcp.agent_loop import (
     with_next_step,
 )
 from dayz_mcp.knowledge import register_knowledge_tools
-from dayz_mcp.occupant_seat import occupant_client_seated
+from dayz_mcp.occupant_seat import occupant_client_seated, occupant_client_seated_strict
 from dayz_mcp.peer_liveness import (
     PEER_STALE_S,
     client_peer_probeable as _client_peer_probeable,
@@ -115,6 +115,7 @@ from dayz_mcp.loopback import (
     ACTOR_EMOTE_WAIT_SLACK_S,
     ACTOR_EMOTES,
     AWAIT_LONG_POLL_FIELD,
+    AWAIT_LONG_POLL_MAX_IN_FLIGHT,
     AWAIT_LONG_POLL_MAX_S,
     BOT_START_ACTIONS,
     BOT_TTL_MAX_S,
@@ -716,6 +717,14 @@ POLL_INTERVAL_S = 0.05
 # AWAIT_LONG_POLL_BUDGET_MARGIN_S the client omits wait_ms and sleeps
 # POLL_INTERVAL_S, so the budget ends as "timeout waiting…".
 AWAIT_LONG_POLL_BUDGET_MARGIN_S = 1.0
+# Long-polls do not take threads from the loop's default executor. That pool
+# is min(32, cpu+4) and every other client call shares it, so eight waits
+# would leave the next call queued until a wait ended. These waits run on a
+# private pool of this many threads (the daemon's in-flight cap, not a CPU
+# count). A non-blocking slot is taken before submit and released when the
+# hop returns, raises, or the task is cancelled. No free slot: this hop omits
+# wait_ms and uses the default executor for the immediate poll.
+AWAIT_CLIENT_LONG_POLL_SLOTS = AWAIT_LONG_POLL_MAX_IN_FLIGHT
 _BROKER_CLEANUP_BUDGET_S = 2.0
 _BROKER_ADMISSION_ERRORS = frozenset(
     {
@@ -1717,6 +1726,68 @@ def _status_disowns_lease(status: object, lease_id: object) -> bool:
         return False
     named = own.get("lease_id")
     return isinstance(named, str) and bool(named) and named != lease_id
+
+
+def _await_replay_query(
+    path: str, query: dict[str, str] | None
+) -> dict[str, str]:
+    """Query for every resend of this call.
+
+    wait_ms is valid only for the first transmission of /await. Daemon
+    recovery, a 401 retry and a reaccreditation replay all drop it and poll
+    at once; the caller's loop chooses a fresh wait_ms from the deadline it
+    still has. This is the only place that knows the field. Other paths are
+    copied unchanged.
+    """
+    copied = dict(query or {})
+    if path == "/await":
+        copied.pop("wait_ms", None)
+    return copied
+
+
+_client_long_poll_guard = threading.Lock()
+_client_long_poll_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_client_long_poll_slots: threading.BoundedSemaphore | None = None
+
+
+def _client_long_poll_resources() -> tuple[
+    concurrent.futures.ThreadPoolExecutor, threading.BoundedSemaphore
+]:
+    global _client_long_poll_executor, _client_long_poll_slots
+    executor = _client_long_poll_executor
+    slots = _client_long_poll_slots
+    if executor is not None and slots is not None:
+        return executor, slots
+    with _client_long_poll_guard:
+        if _client_long_poll_executor is None or _client_long_poll_slots is None:
+            _client_long_poll_slots = threading.BoundedSemaphore(
+                AWAIT_CLIENT_LONG_POLL_SLOTS
+            )
+            _client_long_poll_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=AWAIT_CLIENT_LONG_POLL_SLOTS,
+                # Not the dayz-mcp- prefix: fixture teardown joins every
+                # thread with that prefix, and these workers stay up for the
+                # process.
+                thread_name_prefix="await-long-poll",
+            )
+        assert _client_long_poll_executor is not None
+        assert _client_long_poll_slots is not None
+        return _client_long_poll_executor, _client_long_poll_slots
+
+
+def _try_acquire_client_long_poll_slot() -> bool:
+    _executor, slots = _client_long_poll_resources()
+    return bool(slots.acquire(blocking=False))
+
+
+def _release_client_long_poll_slot() -> None:
+    _executor, slots = _client_long_poll_resources()
+    slots.release()
+
+
+def _client_long_poll_executor_handle() -> concurrent.futures.ThreadPoolExecutor:
+    executor, _slots = _client_long_poll_resources()
+    return executor
 
 
 class ClientRuntime:
@@ -2729,13 +2800,19 @@ class ClientRuntime:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
         deadline = self._time_fn() + float(timeout)
+        sent = dict(query or {})
         refresh_kwargs: dict[str, object] = {}
         if self._allow_stale_policy:
             refresh_kwargs["allow_stale_policy"] = True
+        # The provider replays this snapshot on a 401 or a reaccreditation.
+        # It does not know which paths carry a one-shot field.
+        replay = _await_replay_query(path, sent)
+        if replay != sent:
+            refresh_kwargs["replay_query"] = replay
         status, response_body = self._credential_provider.request_with_refresh(
             method=method,
             path=path,
-            query=dict(query or {}),
+            query=sent,
             body=data,
             headers=headers,
             deadline=deadline,
@@ -2770,6 +2847,16 @@ class ClientRuntime:
                 raise ToolError("daemon_unavailable")
             return remaining
 
+        def raise_ambiguous() -> None:
+            # The sealed transport turns a socket that dies after the request
+            # into an ambiguous failure. Once this /await's own deadline is
+            # already spent, that failure is the caller's timeout and the
+            # tool_timeout cleanup must run. A real transport error while
+            # budget remains stays ambiguous.
+            if path == "/await" and call_deadline - self._time_fn() <= 0.0:
+                raise _CallBudgetExpired()
+            raise ToolError("daemon_response_ambiguous")
+
         try:
             return self._request_once(
                 method, path, payload, query, remaining_timeout()
@@ -2784,7 +2871,7 @@ class ClientRuntime:
                 and error.http_bytes_sent == 0
             )
             if not retryable:
-                raise ToolError("daemon_response_ambiguous") from None
+                raise_ambiguous()
             try:
                 daemon_ready = self._ensure_daemon(call_deadline)
             except (ConnectionError, OSError):
@@ -2796,26 +2883,14 @@ class ClientRuntime:
                     raise _CallBudgetExpired() from None
                 raise ToolError(self._daemon_missing_error()) from None
             try:
-                # wait_ms was chosen before this recovery. The sealed transport
-                # resends that query and only shortens the socket, so a slow
-                # _ensure_daemon makes the daemon outwait the socket and the
-                # call surfaces daemon_response_ambiguous, skipping the
-                # tool_timeout cleanup. Drop wait_ms on this /await retry: it
-                # is the immediate poll, and the caller's loop chooses a fresh
-                # wait_ms from the deadline it still has.
-                retry_query = query
-                if (
-                    path == "/await"
-                    and isinstance(query, dict)
-                    and "wait_ms" in query
-                ):
-                    retry_query = {
-                        key: value
-                        for key, value in query.items()
-                        if key != "wait_ms"
-                    }
+                # This hop is a resend. _await_replay_query drops wait_ms so
+                # the first transmission of the recovery is the immediate poll.
                 return self._request_once(
-                    method, path, payload, retry_query, remaining_timeout()
+                    method,
+                    path,
+                    payload,
+                    _await_replay_query(path, query),
+                    remaining_timeout(),
                 )
             except daemon_credential.CredentialRefreshError as retry_error:
                 raise ToolError(
@@ -2829,7 +2904,7 @@ class ClientRuntime:
                     and retry_error.http_bytes_sent == 0
                 )
                 if not retry_safe:
-                    raise ToolError("daemon_response_ambiguous") from None
+                    raise_ambiguous()
                 if path == "/await":
                     raise _CallBudgetExpired() from None
                 raise ToolError("daemon_unavailable") from None
@@ -2978,24 +3053,63 @@ class ClientRuntime:
             if deadline - self._time_fn() <= 0.0:
                 break
 
-            def issue() -> tuple[int, dict[str, Any]]:
-                # Worker thread. Queue time on the default executor is already
-                # spent, so wait_ms comes from the deadline at this instant,
-                # not from the remaining the async loop measured. Same margin:
-                # inside the last AWAIT_LONG_POLL_BUDGET_MARGIN_S the request
-                # goes out without wait_ms (the 50ms poll below).
+            # Take the slot before submit. The private pool is the same size,
+            # so a taken slot has a free thread and the worker starts at once.
+            # The slot stays with that work until the future finishes: it
+            # returns, it raises, or it is cancelled before it starts.
+            # Cancelling this coroutine does not free it while the thread is
+            # still in HTTP. If submit queues the hop and then raises, the
+            # slot is returned once, that hop sends nothing, and this call
+            # continues without wait_ms. No slot, or no room for the margin:
+            # immediate poll on the shared executor, which stays free of
+            # long-polls.
+            use_long_poll = False
+            if (
+                deadline - self._time_fn()
+                > AWAIT_LONG_POLL_BUDGET_MARGIN_S
+            ):
+                use_long_poll = _try_acquire_client_long_poll_slot()
+
+            # submit() puts the work item on the queue before it starts a
+            # thread. A start failure leaves that item queued and raises.
+            # The hop waits here until this call either arms it or abandons
+            # it, so the queued item cannot send after the call has moved on.
+            hop_lock = threading.Lock()
+            hop = {"abandoned": False, "released": False}
+            hop_ready = threading.Event()
+
+            def release_slot(_done: object = None) -> None:
+                with hop_lock:
+                    if hop["released"]:
+                        return
+                    hop["released"] = True
+                _release_client_long_poll_slot()
+
+            def issue(long_poll: bool) -> tuple[int, dict[str, Any]]:
+                # Worker thread. wait_ms comes from the deadline at this
+                # instant. A long-poll is allowed only when this hop owns a
+                # slot. Inside the last AWAIT_LONG_POLL_BUDGET_MARGIN_S the
+                # request goes out without wait_ms.
+                if long_poll:
+                    hop_ready.wait()
+                    with hop_lock:
+                        abandoned = hop["abandoned"]
+                    if abandoned:
+                        release_slot()
+                        return (0, {"status": "abandoned"})
                 remaining_now = deadline - self._time_fn()
                 if remaining_now <= 0.0:
                     raise _CallBudgetExpired()
                 query = {"id": str(command_id), "remove": "1"}
-                wait_s = min(
-                    remaining_now - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
-                    AWAIT_LONG_POLL_MAX_S,
-                )
-                if wait_s > 0.0:
-                    wait_ms = int(wait_s * 1000)
-                    if wait_ms > 0:
-                        query["wait_ms"] = str(wait_ms)
+                if long_poll:
+                    wait_s = min(
+                        remaining_now - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
+                        AWAIT_LONG_POLL_MAX_S,
+                    )
+                    if wait_s > 0.0:
+                        wait_ms = int(wait_s * 1000)
+                        if wait_ms > 0:
+                            query["wait_ms"] = str(wait_ms)
                 return self._call(
                     "GET" if holder is None else "POST",
                     "/await",
@@ -3006,7 +3120,27 @@ class ClientRuntime:
                 )
 
             try:
-                status, payload = await asyncio.to_thread(issue)
+                if use_long_poll:
+                    try:
+                        future = _client_long_poll_executor_handle().submit(
+                            issue, True
+                        )
+                    except Exception:
+                        with hop_lock:
+                            hop["abandoned"] = True
+                        hop_ready.set()
+                        release_slot()
+                        status, payload = await asyncio.to_thread(issue, False)
+                    else:
+                        # Done on the worker when the call finishes, and on
+                        # the loop when the future is cancelled before it
+                        # starts. release_slot is idempotent: the abandoned
+                        # hop also calls it, and that second call is a no-op.
+                        future.add_done_callback(release_slot)
+                        hop_ready.set()
+                        status, payload = await asyncio.wrap_future(future)
+                else:
+                    status, payload = await asyncio.to_thread(issue, False)
             except _CallBudgetExpired:
                 break
             if status == 404 and holder is not None:
@@ -7085,9 +7219,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_attach.item_object_id, and only that id removes the item. "
             "Spawn with "
             "ECE_NOPERSISTENCY_WORLD so the object is not saved into a later "
-            "run. Deleting a seated "
-            "transport after vehicle_get_in_client needs care: the bridge "
-            "requests a dismount from all crew positions in the deletion hierarchy, "
+            "run. In the live profile (even with admin), or when the serving "
+            "daemon's profile cannot be verified, vehicle_seat_unverified "
+            "(deleted=0) refuses every object_id without querying client telemetry "
+            "or sending the delete. Live forbids the client seat read; server "
+            "in_vehicle=false and absent/stale client polls cannot prove that "
+            "a client-owned seat is empty. Outside live, deleting a seated "
+            "transport needs care: vehicle_client_seated "
+            "(deleted=0) refuses the delete before sending it to the server when "
+            "client vehicle_telemetry detects a client-owned seat "
+            "(vehicle_get_in_client). Telemetry has no server registry object_id, "
+            "so this conservatively blocks every object_id while that seat is occupied. "
+            "Exit through the client exit flow and confirm seated=false before "
+            "retrying, or use vehicle_enter for server-authoritative seating. "
+            "Outside live, unreadable status, an absent/stale or unprobeable client, "
+            "or telemetry without a readable boolean seated flag returns "
+            "vehicle_seat_unverified with deleted=0 and sends no delete; "
+            "a telemetry call error propagates without deleting. "
+            "For server-visible occupants the bridge requests a dismount from "
+            "all crew positions in the deletion hierarchy, "
             "waits for the occupants to leave, and rechecks on a later server tick "
             "before deleting. An invalid exit command or occupants still present "
             "after 5 s returns vehicle_eject_failed (raw bridge deleted=0); the object "
@@ -7110,6 +7260,78 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
+            try:
+                # ClientRuntime also learns the serving profile from this read.
+                status = await runtime.bridge_status_payload()
+            except Exception:
+                status = None
+                if _is_client_authority(config, runtime):
+                    _forget_serving_live_profile(runtime)
+            if _serving_live_enabled(config, runtime):
+                # Server-only player reads do not establish the client seat
+                # (see the query_player_state caveat). No poll is not no seat.
+                return {
+                    "ok": False,
+                    "error": "vehicle_seat_unverified",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "The live profile, or an unknown serving profile, has "
+                        "no permitted read that verifies the client-owned seat. "
+                        "Server in_vehicle=false and absent/stale client polls "
+                        "do not prove an empty seat. All object_ids are refused "
+                        "without client telemetry or deletion; a permitted "
+                        "seat verification is required before live deletion "
+                        "can be supported."
+                    ),
+                }
+            if not _client_peer_probeable(status):
+                # Poll failures only retry/back off; they do not vacate the seat
+                # (addon/scripts/5_Mission/MCPClientBridge.c:1038-1067).
+                return {
+                    "ok": False,
+                    "error": "vehicle_seat_unverified",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "Unreadable bridge status or an absent/stale client does "
+                        "not prove an empty seat. Restore a probeable client and "
+                        "verify its seat before retrying deletion."
+                    ),
+                }
+            telemetry = await runtime.call_bridge(
+                "vehicle_telemetry", {}, "client", _timeout(timeout_s)
+            )
+            client_seated = occupant_client_seated_strict(telemetry)
+            if client_seated is None:
+                return {
+                    "ok": False,
+                    "error": "vehicle_seat_unverified",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "Client telemetry must contain a readable boolean seated "
+                        "flag (true/false or integer 0/1) before deletion can be "
+                        "retried. Unreadable telemetry does not prove an empty seat."
+                    ),
+                }
+            # Client telemetry has no server registry id. Refuse every
+            # target rather than guess whether its hierarchy holds this seat.
+            if client_seated:
+                return {
+                    "ok": False,
+                    "error": "vehicle_client_seated",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "Deleting while the client owns a seated vehicle can "
+                        "crash the client. Use the client exit flow and confirm "
+                        "seated=false before retrying, or use vehicle_enter "
+                        "for server-authoritative seating. Telemetry cannot "
+                        "safely match the seat to object_id, so all deletes "
+                        "are refused while this client-owned seat is occupied."
+                    ),
+                }
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
 
     @app.tool(
@@ -7504,8 +7726,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "occupant_client_seated when the player is a client-owned seated "
             "occupant (vehicle_get_in_client): teleporting that transport "
             "desyncs client and server. One car per run — there is no get-out "
-            "after vehicle_get_in_client; tear down with object_delete of the "
-            "in-session world_spawn object_id (that id does not survive the "
+            "tool after vehicle_get_in_client. Confirm the client exit before "
+            "object_delete of the in-session world_spawn object_id; otherwise "
+            "it refuses with vehicle_client_seated (that id does not survive the "
             "run; deleting a seated transport needs care). The Python "
             "occupant_client_seated precheck calls client vehicle_telemetry "
             "only when that peer is probing; without a client peer it is "
@@ -7557,8 +7780,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "hint": (
                             "player_teleport of a client-owned seated occupant "
                             "desyncs client and server. One car per run: there is "
-                            "no get-out after vehicle_get_in_client; tear down "
-                            "with object_delete of the in-session fixture "
+                            "no get-out tool after vehicle_get_in_client. Confirm "
+                            "the client exit before object_delete of the in-session "
+                            "fixture; otherwise it refuses with vehicle_client_seated "
                             "(object_id does not survive the run)."
                         ),
                     }
@@ -10226,14 +10450,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ActionSwitchLights reads this client seat and the vehicle's power; "
             "the lights toggle in the action's server step, which reads "
             "vehicle_enter's server seat, so a lights test takes both seats. "
-            "One car per run: there is no get-out after this seat; "
+            "One car per run: there is no get-out tool after this seat; "
             "player_teleport of the occupant returns occupant_client_seated. "
             "vehicle_enter runs no client get-in: after a get-out with "
             "action_use ActionGetOutTransport, vehicle_enter in a second car "
-            "seats only the server's player there. Tear down with object_delete of the "
-            "in-session world_spawn object_id — that id does not survive the "
-            "run. Deleting a seated transport needs care (it ejects; a stale "
-            "or guessed object_id is not that fixture)."
+            "seats only the server's player there. Confirm the client exit before "
+            "object_delete of the in-session world_spawn object_id — that id "
+            "does not survive the run. Deleting a seated transport needs care: "
+            "vehicle_client_seated refuses deletion while the client owns the "
+            "seat; the server eject only sees server crew. Use vehicle_enter "
+            "for server-authoritative seating."
         )
     )
     async def vehicle_get_in_client(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -10401,7 +10627,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Abort, so the stop result is what you read. This only clears "
             "trace/control: it does not eject the driver or passengers and "
             "does not delete the vehicle. Use object_delete of the registered "
-            "fixture id for teardown; it checks every occupant before deletion."
+            "fixture id for teardown after confirming the client exit; "
+            "vehicle_client_seated refuses deletion of a client-owned seat. "
+            "Server-visible occupants are ejected before deletion."
         )
     )
     async def vehicle_release(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
