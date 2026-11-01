@@ -568,7 +568,16 @@ class RealGrabScriptTest(unittest.TestCase):
         ]
         if frame_count > 1:
             cmd += ["-FrameCount", str(frame_count), "-FrameIntervalMs", "10"]
-        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        # Same environment as production (_run_window_captures): an inherited
+        # PSModulePath (pwsh 7 on CI) breaks module autoload in Windows
+        # PowerShell, and Get-FileHash is then "not recognized".
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=mcp_capture._grab_subprocess_env(),
+        )
         parsed: list[dict] = []
         for raw in completed.stdout.splitlines():
             line = raw.strip()
@@ -602,6 +611,7 @@ class RealGrabScriptTest(unittest.TestCase):
             ],
             capture_output=True,
             timeout=120,
+            env=mcp_capture._grab_subprocess_env(),
         )
         detail = f"stdout={completed.stdout!r} stderr={completed.stderr!r} rc={completed.returncode}"
         self.assertEqual(0, completed.returncode, detail)
@@ -629,6 +639,7 @@ class RealGrabScriptTest(unittest.TestCase):
             ],
             capture_output=True,
             timeout=120,
+            env=mcp_capture._grab_subprocess_env(),
         )
         detail = f"stdout={completed.stdout!r} stderr={completed.stderr!r} rc={completed.returncode}"
         self.assertEqual(0, completed.returncode, detail)
