@@ -296,7 +296,7 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
             sig,
             ns,
             members=set(re.findall(r"\bm_\w+", body)),
-            class_types=("MCPClientPollCallback",),
+            class_types=("array", "MCPClientPollCallback"),
         )
     call_re = re.compile(r"(?<!\.)\b([A-Za-z_]\w*)\s*\(")
     helper_queue = [method_body(source, sig) for sig in (CONSTRUCTOR_SIGNATURE, START_POLL_SIGNATURE)]
@@ -324,7 +324,7 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
                 helper_sig,
                 ns,
                 members=set(re.findall(r"\bm_\w+", helper_body)),
-                class_types=("MCPClientPollCallback",),
+                class_types=("array", "MCPClientPollCallback"),
             )
             helper_queue.append(helper_body)
 
@@ -500,6 +500,19 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "\t\treturn m_PollCapabilities;\n"
             "\t}\n\n"
         )
+        param_transform_decl = (
+            "\tprotected int ReviewParamTransform(string value)\n"
+            "\t{\n"
+            "\t\tvalue.ToUpper();\n"
+            "\t\treturn value.Length();\n"
+            "\t}\n\n"
+        )
+        indexed_caps_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            '\t\treviewBox.Insert("");\n'
+            "\t\treviewBox[0] = m_PollCapabilities;\n"
+            "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
+        )
         controls = {
             "copy_to_local_in_constructor": source.replace(
                 init_line, init_line + "\t\tstring capsCopy = m_PollCapabilities;\n", 1
@@ -546,6 +559,17 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
                 "\t\tint seen = ObservePollCaps(m_PollCapabilities);\n"
                 + wire_line,
                 1,
+            ),
+            "param_transform_helper_in_poll": source.replace(
+                ctor_head, param_transform_decl + ctor_head, 1
+            ).replace(
+                wire_line,
+                "\t\tint reviewParamLen = ReviewParamTransform(m_PollCapabilities);\n"
+                + wire_line,
+                1,
+            ),
+            "indexed_assign_then_transform_element_in_poll": source.replace(
+                wire_line, indexed_caps_block + wire_line, 1
             ),
         }
         for label, variant in controls.items():
@@ -642,6 +666,22 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             ),
             "cache_passed_to_dump_stack_string_out_param": source.replace(
                 CACHE_INIT, CACHE_INIT + "\n\t\tDumpStackString(m_PollCapabilities);", 1
+            ),
+            "cache_bridge_array_indexed_dump_stack_string": source.replace(
+                try_init_head,
+                try_init_head
+                + "\t\tarray<ref MCPClientBridge> reviewBridges = new array<ref MCPClientBridge>;\n"
+                + "\t\treviewBridges.Insert(this);\n"
+                + "\t\tDumpStackString(reviewBridges[0].m_PollCapabilities);\n",
+                1,
+            ),
+            "cache_bridge_array_get_dump_stack_string": source.replace(
+                try_init_head,
+                try_init_head
+                + "\t\tarray<ref MCPClientBridge> reviewBridges = new array<ref MCPClientBridge>;\n"
+                + "\t\treviewBridges.Insert(this);\n"
+                + "\t\tDumpStackString(reviewBridges.Get(0).m_PollCapabilities);\n",
+                1,
             ),
             "cache_passed_to_out_param": source.replace(
                 CACHE_INIT, CACHE_INIT + "\n\t\tg_Game.GetVersion(m_PollCapabilities);", 1

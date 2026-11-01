@@ -25,8 +25,9 @@ Enforce behaviour kept on purpose:
   classes (EnforceArray, EnforceMap, fake_class);
 - a `vector` is copied on every assignment, as Enforce copies the value type, and
   `v[i]` reads or writes one component;
-- a `string` is likewise copied on every assignment (Enforce strings are a
-  value type), so mutating a local copy never mutates the source string;
+- a `string` is likewise copied on every assignment, on every indexed
+  assignment and whenever it is passed by value (Enforce strings are a
+  value type), so mutating a copy never mutates the source string;
 - the class members a body uses bare are named in `members`, become globals of
   the namespace, and may be assigned.
 """
@@ -473,6 +474,33 @@ def _callee_param_modes(
     return None
 
 
+def _member_argument_is_unresolved(expr: str, esc: str) -> bool:
+    """True when `expr` hands the cached member itself to a callee in a form
+    the gate cannot resolve as a by-value read: neither the bare member (or
+    ``this.<member>``, with one optional index) nor a classified read on it.
+    A larger expression that only reads the member into a temporary (an
+    operator at the top level, or a read method on the member) is a by-value
+    read and returns False."""
+    if re.search(rf"\b{esc}\b", expr) is None:
+        return False
+    if re.match(
+        rf"(?:(?:out|inout)\s+)?(?:this\s*\.\s*)?{esc}"
+        rf"(?:\s*\[.*\])?\s*\.\s*[A-Za-z_]\w*\s*\(",
+        expr,
+        re.DOTALL,
+    ):
+        return False
+    depth = 0
+    for char in expr:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0 and char in "+-*/%<>=!&|?:":
+            return False
+    return True
+
+
 def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
     """Fail unless `member` (in string-blanked, comment-free source) is only
     ever assigned once, never mutated, and only read through verified calls.
@@ -482,6 +510,11 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
     member passed with an explicit out/inout keyword, and the member passed
     as exactly one argument to a callee that is unverified, or whose
     parameter at that position is out/inout, or that takes fewer parameters.
+    The member reached through any receiver other than the bare member or
+    ``this.<member>`` (an indexed receiver, a ``.Get(i)`` receiver, another
+    object or a bridge alias), and an argument that hands the member itself
+    to a callee in any other unresolved form, are likewise rejected: the
+    gate only ever resolves the whole access as a by-value read, or fails.
     A read through a catalogued string method, a copy to a local and a
     by-value argument to a verified callee are allowed.
     """
@@ -500,6 +533,14 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
     assign_count = 0
     for match in token_re.finditer(masked):
         pos = match.start()
+        if masked[:pos].rstrip().endswith(".") and (
+            re.search(r"(?<![\w.\]\)])this\s*\.\s*$", masked[:pos]) is None
+        ):
+            raise AssertionError(
+                f"{member} must not be reached through another object, an "
+                "indexed receiver or a bridge alias; only the bare member "
+                f"or this.{member} resolves as a read"
+            )
         stack: list[int] = []
         for idx, ch in enumerate(masked[:pos]):
             if ch == "(":
@@ -605,8 +646,9 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
                     ):
                         expr = expr[1:-1].strip()
                     if re.fullmatch(
-                        rf"(?:(?:out|inout)\s+)?(?:[A-Za-z_]\w*(?:\s*\(\s*\))?\s*\.\s*)*{esc}(?:\s*\[[^\]]*\])?",
+                        rf"(?:(?:out|inout)\s+)?(?:this\s*\.\s*)?{esc}(?:\s*\[.*\])?",
                         expr,
+                        re.DOTALL,
                     ):
                         signatures = _callee_param_modes(callee, declared)
                         if signatures is None:
@@ -620,6 +662,11 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
                                     f"{member} must not be passed to out/inout parameter "
                                     f"{arg_idx} of {callee}()"
                                 )
+                    elif _member_argument_is_unresolved(expr, esc):
+                        raise AssertionError(
+                            f"{member} passed to {callee}() in a form that "
+                            f"cannot be resolved as a by-value read: {expr!r}"
+                        )
                     break
             break
 
@@ -953,6 +1000,11 @@ def python_source(
     if members:
         lines.append(f"    global {', '.join(sorted(members))}")
     lines.append("    _loops = [0]")
+    # Enforce passes strings by value: the callee works on its own copy, so
+    # a mutating method on a parameter cannot reach the caller's string.
+    for param in params:
+        if local_types.get(param) == "string":
+            lines.append(f"    {param} = _string_copy({param})")
     for out, out_type in outs:
         lines.append(f"    {out} = {_default(out_type, class_types)}")
     returns = ", ".join(out for out, _type in outs)
@@ -1026,9 +1078,11 @@ def python_source(
             if "." not in target and base not in declared and base not in members:
                 raise AssertionError(f"assignment to undeclared {target} in {name}")
             if "[" in target:
+                # An indexed element holds a string by value too: copy it,
+                # or transforming the element would transform the source.
                 return (
                     f"{_expression(target, out_functions)} = "
-                    f"{_expression(assignment.group('value'), out_functions)}"
+                    f"_string_copy({_expression(assignment.group('value'), out_functions)})"
                 )
             out_call = render_out_call([target], assignment.group("value"))
             return out_call or f"{target} = {render_value(target, assignment.group('value'))}"

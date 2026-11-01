@@ -253,7 +253,7 @@ def _execute_translated_poll_ach(source: str, cleaned: str, masked: str) -> str:
             sig,
             ns,
             members=set(re.findall(r"\bm_\w+", body)),
-            class_types=("MCPPollCallback",),
+            class_types=("array", "MCPPollCallback"),
         )
     call_re = re.compile(r"(?<!\.)\b([A-Za-z_]\w*)\s*\(")
     helper_queue = [method_body(source, sig) for sig in ("void MCPBridge()", "protected void StartPoll()")]
@@ -281,7 +281,7 @@ def _execute_translated_poll_ach(source: str, cleaned: str, masked: str) -> str:
                 helper_sig,
                 ns,
                 members=set(re.findall(r"\bm_\w+", helper_body)),
-                class_types=("MCPPollCallback",),
+                class_types=("array", "MCPPollCallback"),
             )
             helper_queue.append(helper_body)
 
@@ -419,6 +419,19 @@ class ArgContractHashTest(unittest.TestCase):
             "\t\treturn m_PollArgContractHash;\n"
             "\t}\n\n"
         )
+        param_transform_decl = (
+            "\tprotected int ReviewParamTransform(string value)\n"
+            "\t{\n"
+            "\t\tvalue.ToUpper();\n"
+            "\t\treturn value.Length();\n"
+            "\t}\n\n"
+        )
+        indexed_hash_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            '\t\treviewBox.Insert("");\n'
+            "\t\treviewBox[0] = m_PollArgContractHash;\n"
+            "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
+        )
         controls = {
             "copy_to_local_in_constructor": source.replace(
                 cache_init, cache_init + "\t\tstring achCopy = m_PollArgContractHash;\n", 1
@@ -465,6 +478,17 @@ class ArgContractHashTest(unittest.TestCase):
                 "\t\tint seen = ObserveContractHash(m_PollArgContractHash);\n"
                 + ach_wire,
                 1,
+            ),
+            "param_transform_helper_in_poll": source.replace(
+                ctor_head, param_transform_decl + ctor_head, 1
+            ).replace(
+                ach_wire,
+                "\t\tint reviewParamLen = ReviewParamTransform(m_PollArgContractHash);\n"
+                + ach_wire,
+                1,
+            ),
+            "indexed_assign_then_transform_element_in_poll": source.replace(
+                ach_wire, indexed_hash_block + ach_wire, 1
             ),
         }
         for label, variant in controls.items():
@@ -534,6 +558,22 @@ class ArgContractHashTest(unittest.TestCase):
             ),
             "ach_cache_passed_to_dump_stack_string_out_param": source.replace(
                 cache_init, cache_init + "\t\tDumpStackString(m_PollArgContractHash);\n", 1
+            ),
+            "ach_cache_bridge_array_indexed_dump_stack_string": source.replace(
+                try_init_head,
+                try_init_head
+                + "\t\tarray<ref MCPBridge> reviewBridges = new array<ref MCPBridge>;\n"
+                + "\t\treviewBridges.Insert(this);\n"
+                + "\t\tDumpStackString(reviewBridges[0].m_PollArgContractHash);\n",
+                1,
+            ),
+            "ach_cache_bridge_array_get_dump_stack_string": source.replace(
+                try_init_head,
+                try_init_head
+                + "\t\tarray<ref MCPBridge> reviewBridges = new array<ref MCPBridge>;\n"
+                + "\t\treviewBridges.Insert(this);\n"
+                + "\t\tDumpStackString(reviewBridges.Get(0).m_PollArgContractHash);\n",
+                1,
             ),
             "ach_cache_passed_to_out_param": source.replace(
                 cache_init, cache_init + "\t\tg_Game.GetVersion(m_PollArgContractHash);\n", 1

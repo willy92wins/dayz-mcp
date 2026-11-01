@@ -544,7 +544,7 @@ def _execute_translated_poll_caps(source: str, clean: str) -> list[str]:
                 helper_sig,
                 ns,
                 members=set(re.findall(r"\bm_\w+", helper_body)),
-                class_types=("MCPPollCallback",),
+                class_types=("array", "MCPPollCallback"),
             )
             helper_queue.append(helper_body)
 
@@ -555,7 +555,7 @@ def _execute_translated_poll_caps(source: str, clean: str) -> list[str]:
             sig,
             ns,
             members=set(re.findall(r"\bm_\w+", body)),
-            class_types=("MCPPollCallback",),
+            class_types=("array", "MCPPollCallback"),
         )
 
     ns["MCPBridge"]()
@@ -759,6 +759,19 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "\t\treturn m_PollCapabilities;\n"
             "\t}\n\n"
         )
+        param_transform_decl = (
+            "\tprotected int ReviewParamTransform(string value)\n"
+            "\t{\n"
+            "\t\tvalue.ToUpper();\n"
+            "\t\treturn value.Length();\n"
+            "\t}\n\n"
+        )
+        indexed_caps_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            '\t\treviewBox.Insert("");\n'
+            "\t\treviewBox[0] = m_PollCapabilities;\n"
+            "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
+        )
         fixture_controls = {
             "copy_to_local_in_constructor": fixture.replace(
                 fixture_init, fixture_init + "\t\tstring capsCopy = m_PollCapabilities;\n", 1
@@ -800,6 +813,17 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 "\t\tint observed = ObserveCaps(m_PollCapabilities);\n"
                 + fixture_wire,
                 1,
+            ),
+            "param_transform_helper_in_poll": fixture.replace(
+                fixture_ctor, param_transform_decl + fixture_ctor, 1
+            ).replace(
+                fixture_wire,
+                "\t\tint reviewParamLen = ReviewParamTransform(m_PollCapabilities);\n"
+                + fixture_wire,
+                1,
+            ),
+            "indexed_assign_then_transform_element_in_poll": fixture.replace(
+                fixture_wire, indexed_caps_block + fixture_wire, 1
             ),
         }
         for label, variant in fixture_controls.items():
@@ -847,6 +871,17 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 + fixture_wire,
                 1,
             ),
+            "live_param_transform_helper_in_poll": live.replace(
+                "\tvoid MCPBridge()\n", param_transform_decl + "\tvoid MCPBridge()\n", 1
+            ).replace(
+                fixture_wire,
+                "\t\tint reviewParamLen = ReviewParamTransform(m_PollCapabilities);\n"
+                + fixture_wire,
+                1,
+            ),
+            "live_indexed_assign_then_transform_element_in_poll": live.replace(
+                fixture_wire, indexed_caps_block + fixture_wire, 1
+            ),
         }
         for label, variant in live_controls.items():
             with self.subTest(target="live", control=label):
@@ -870,6 +905,22 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "\tprotected void MutateInOut(inout string value)\n"
             "\t{\n"
             '\t\tvalue = "";\n'
+            "\t}\n\n"
+        )
+        bridge_array_try_init = (
+            "\tprotected void TryInit()\n"
+            "\t{\n"
+            "\t\tarray<ref MCPBridge> reviewBridges = new array<ref MCPBridge>;\n"
+            "\t\treviewBridges.Insert(this);\n"
+            "\t\tDumpStackString(reviewBridges[0].m_PollCapabilities);\n"
+            "\t}\n\n"
+        )
+        bridge_array_get_try_init = (
+            "\tprotected void TryInit()\n"
+            "\t{\n"
+            "\t\tarray<ref MCPBridge> reviewBridges = new array<ref MCPBridge>;\n"
+            "\t\treviewBridges.Insert(this);\n"
+            "\t\tDumpStackString(reviewBridges.Get(0).m_PollCapabilities);\n"
             "\t}\n\n"
         )
         entities_branch = (
@@ -952,6 +1003,12 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             ),
             "cache_caps_passed_to_dump_stack_string_out_param": source.replace(
                 caps_cache_init, caps_cache_init + "\t\tDumpStackString(m_PollCapabilities);\n"
+            ),
+            "cache_caps_bridge_array_indexed_dump_stack_string": source.replace(
+                ctor_head, bridge_array_try_init + ctor_head
+            ),
+            "cache_caps_bridge_array_get_dump_stack_string": source.replace(
+                ctor_head, bridge_array_get_try_init + ctor_head
             ),
             "cache_caps_passed_to_engine_out_param": source.replace(
                 caps_cache_init, caps_cache_init + "\t\tg_Game.GetVersion(m_PollCapabilities);\n"
