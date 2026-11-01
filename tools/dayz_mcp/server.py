@@ -21,6 +21,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
+from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
@@ -76,7 +77,13 @@ from dayz_mcp.action_hold import (
     parse_action_selector,
     validate_hold_budget,
 )
-from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS, next_step, ok_next_step, with_next_step
+from dayz_mcp.agent_loop import (
+    PUBLIC_NEXT_TOOLS,
+    filter_next_step_text,
+    next_step,
+    ok_next_step,
+    with_next_step,
+)
 from dayz_mcp.knowledge import register_knowledge_tools
 from dayz_mcp.occupant_seat import occupant_client_seated
 from dayz_mcp.peer_liveness import (
@@ -89,6 +96,7 @@ from dayz_mcp.lease_result_ttl import (
     LEASE_LOCAL_TOOL,
     LEASE_TTL_OBSERVE_TOOL,
     install_lease_ttl_annotation,
+    is_internal_probe,
     observe_caller_presence,
 )
 from dayz_mcp.server_freshness import (
@@ -360,6 +368,279 @@ if os.name == "nt":
 playbook_tool_mod.load_runner()
 # Freeze at import, before build_app can be delayed or repeated.
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
+
+
+def _live_from_status_payload(payload: Any) -> bool | None:
+    """Live profile published by the serving daemon on /status, or None."""
+    if not isinstance(payload, dict):
+        return None
+    live = payload.get("live_profile")
+    return live if isinstance(live, bool) else None
+
+
+def _serving_state(runtime: Any) -> Any:
+    loopback = getattr(runtime, "loopback", None)
+    if loopback is not None:
+        return getattr(loopback, "state", None)
+    try:
+        return getattr(runtime, "state", None)
+    except Exception:
+        return None
+
+
+def _serving_live_known(runtime: Any) -> bool:
+    """True when the serving authority's live profile has been observed."""
+    if runtime is None:
+        return False
+    live = getattr(_serving_state(runtime), "live_profile", None)
+    if isinstance(live, bool):
+        return True
+    return isinstance(getattr(runtime, "_serving_live_profile", None), bool)
+
+
+def _is_client_authority(config: Any, runtime: Any) -> bool:
+    if runtime is None:
+        return False
+    if getattr(config, "mode", None) == "client":
+        return True
+    # Bare ClientRuntime instances carry the serving-profile cache.
+    return hasattr(runtime, "_serving_live_profile") or hasattr(
+        runtime, "_serving_live_generation"
+    )
+
+
+def _serving_live_unknown(config: Any, runtime: Any) -> bool:
+    """True for a client daemon whose profile has not been confirmed."""
+    if runtime is None or _serving_live_known(runtime):
+        return False
+    return _is_client_authority(config, runtime)
+
+
+def _forget_serving_live_profile(runtime: Any) -> None:
+    """Drop a cached serving profile so it reads as unknown (fail-closed).
+
+    A failed probe must not keep serving hints from a profile learned
+    from an earlier daemon: unknown resolves to the restrictive set in
+    _serving_live_enabled / _install_next_step_profile_filter.
+    """
+    if runtime is None:
+        return
+    try:
+        if hasattr(runtime, "_serving_live_profile"):
+            runtime._serving_live_profile = None
+    except Exception:
+        pass
+
+
+async def _refresh_serving_live_profile_no_spawn(
+    runtime: Any, timeout_s: float
+) -> None:
+    """Revalidate the serving profile without ever spawning a daemon.
+
+    Prefers an instance-level ``bridge_status_payload`` double (tests),
+    then ``ClientRuntime.probe_serving_live_profile_no_spawn`` (direct
+    ``GET /status`` via ``_request_once``, no ``_ensure_daemon``), then
+    ``_daemon_healthy`` in a thread, then a non-client fake's status.
+    """
+    if runtime is None:
+        return
+    instance_dict = getattr(runtime, "__dict__", None)
+    mocked = (
+        instance_dict.get("bridge_status_payload")
+        if isinstance(instance_dict, dict)
+        else None
+    )
+    if callable(mocked):
+        try:
+            try:
+                result = mocked(timeout_s=timeout_s)
+            except TypeError:
+                result = mocked()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        learn = getattr(runtime, "_learn_serving_live_profile", None)
+        if callable(learn) and isinstance(result, dict):
+            learn(result)
+        else:
+            _forget_serving_live_profile(runtime)
+        return
+    probe = getattr(runtime, "probe_serving_live_profile_no_spawn", None)
+    if callable(probe):
+        try:
+            result = probe(timeout_s=timeout_s)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+        return
+    healthy = getattr(runtime, "_daemon_healthy", None)
+    if callable(healthy):
+        deadline = time.monotonic() + float(timeout_s)
+        try:
+            healthy_ok = await asyncio.to_thread(healthy, deadline)
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        if not healthy_ok:
+            _forget_serving_live_profile(runtime)
+        return
+    status_fn = getattr(runtime, "bridge_status_payload", None)
+    if callable(status_fn) and not _is_client_authority(None, runtime):
+        try:
+            try:
+                result = status_fn(timeout_s=timeout_s)
+            except TypeError:
+                result = status_fn()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        learn = getattr(runtime, "_learn_serving_live_profile", None)
+        if callable(learn) and isinstance(result, dict):
+            learn(result)
+        else:
+            _forget_serving_live_profile(runtime)
+
+
+def _serving_live_enabled(config: Any, runtime: Any = None) -> bool:
+    """Whether the authority serving this server enforces the B4 live profile.
+
+    The authority is the ServerState that will accept the commands: the
+    in-process state in embedded mode, or the daemon a client reuses,
+    learned from that daemon's own /status payload (see
+    ClientRuntime._learn_serving_live_profile and _run_daemon). The local
+    process environment is never consulted: a reused daemon fixed its
+    profile from its own environment at spawn (daemon.build_server_state),
+    which may differ from this client's. An explicit ServerConfig boolean
+    is only the pre-serving fallback (embedded construction, tests); with
+    no authority observed and no explicit value the profile is off, which
+    is the serving state's own default.
+    """
+    if runtime is not None:
+        live = getattr(_serving_state(runtime), "live_profile", None)
+        if isinstance(live, bool):
+            return live
+        cached = getattr(runtime, "_serving_live_profile", None)
+        if isinstance(cached, bool):
+            return cached
+        # Fail-closed: a client daemon whose profile is unknown (old
+        # daemon without live_profile, or a failed probe) is treated
+        # as live/restrictive until its profile is confirmed.
+        if _serving_live_unknown(config, runtime):
+            return True
+    explicit = getattr(config, "live_profile", None)
+    if isinstance(explicit, bool):
+        return explicit
+    return False
+
+
+def _effective_next_tools(
+    config: Any, runtime: Any = None
+) -> frozenset[str]:
+    """Hint tools for one server: tool pack intersected with the live profile."""
+    return tool_pack_mod.effective_next_tools(
+        config.tool_pack, live_enabled=_serving_live_enabled(config, runtime)
+    )
+
+
+def _profile_ok_next_step(
+    result: dict[str, Any],
+    cmd: str,
+    pack: str = "full",
+    allowed: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """_with_ok_next_step with the hint filtered to the effective profile (C4).
+
+    A next_step outside the effective set (for example dayz_test_run under
+    --tool-pack admin, or any knowledge hint while the daemon live profile
+    is on) is replaced by the next public tool the set does expose, or
+    dropped when there is none. The full pack with the profile off keeps
+    the hint exactly as before.
+    """
+    payload = _with_ok_next_step(result, cmd)
+    if not isinstance(payload, dict):
+        return payload
+    existing = payload.get("next_step")
+    if not isinstance(existing, str):
+        return payload
+    if allowed is None:
+        allowed = tool_pack_mod.next_step_tools(pack)
+    if existing in allowed:
+        return payload
+    follow = ok_next_step(
+        cmd, mutating=command_requires_lease(cmd), allowed=allowed
+    )
+    payload = dict(payload)
+    if follow is None:
+        payload.pop("next_step", None)
+    else:
+        payload["next_step"] = follow
+    return payload
+
+
+def _install_next_step_profile_filter(
+    app: FastMCP,
+    allowed: frozenset[str] | Callable[[], frozenset[str]],
+    *,
+    runtime: Any = None,
+    config: Any = None,
+) -> None:
+    """Filter error next_step tokens at the MCP boundary (C4).
+
+    Error text is built where the profile is unknown (the knowledge
+    remedies are import-time constants naming dayz_knowledge_prepare /
+    dayz_knowledge_status), so success-path filtering cannot reach it.
+    Installed after the lease-TTL decorator and before the freshness
+    wrapper, so every error result that leaves over MCP is rewritten and
+    the freshness marker is still appended outermost. The allowed set is
+    resolved per error from the serving authority, not frozen at
+    build_app time: in client mode a daemon reused by this process may
+    enforce a different profile than this process was configured with,
+    so a client authority is revalidated from that daemon's /status
+    before filtering, bound to its daemon generation. The probe never
+    spawns a daemon and is skipped when the error carries no hint.
+    An unknown profile is restrictive (fail-closed) until confirmed.
+    """
+    installed = app._mcp_server
+    handlers = installed.request_handlers
+    original = handlers[mcp_types.CallToolRequest]
+
+    async def handler(
+        request: mcp_types.CallToolRequest,
+    ) -> mcp_types.ServerResult:
+        if is_internal_probe(request):
+            return await original(request)
+        response = await original(request)
+        result = response.root
+        if not isinstance(result, mcp_types.CallToolResult) or not result.isError:
+            return response
+        has_hint = any(
+            isinstance(block, mcp_types.TextContent) and "next_step=" in block.text
+            for block in result.content
+        )
+        if not has_hint:
+            return response
+        if runtime is not None and _is_client_authority(config, runtime):
+            try:
+                await _refresh_serving_live_profile_no_spawn(
+                    runtime, LIVENESS_STATUS_TIMEOUT_S
+                )
+            except Exception:
+                pass
+        resolved = allowed() if callable(allowed) else allowed
+        if runtime is not None and _serving_live_unknown(config, runtime):
+            resolved = resolved & tool_pack_mod.LIVE_NEXT_TOOLS
+        for block in result.content:
+            if isinstance(block, mcp_types.TextContent):
+                block.text = filter_next_step_text(block.text, resolved)
+        return response
+
+    handlers[mcp_types.CallToolRequest] = handler
+
 
 UiClickMode = Literal["direct", "complete"]
 InventoryAttachDest = Literal["attachment", "cargo"]
@@ -853,6 +1134,13 @@ class ServerConfig:
     auto_spawn_daemon: bool = True
     # Opt-in small-model surface. The full public registry remains the default.
     tool_pack: str = "full"
+    # B4 live profile as declared for this server (None: no declaration).
+    # Only a pre-serving fallback for next_step hints (C4): the profile
+    # that actually filters hints is read from the serving authority
+    # (the in-process ServerState, or a reused daemon's /status), never
+    # from this process's environment.
+    live_profile: bool | None = None
+    live_admin_enabled: bool | None = None
     # Client mode lists a compact catalog until a lease is held and relies on the
     # host re-listing after tools/list_changed. Claude Code does not (#93, e7ef),
     # so client_platform claude lists everything from the start whatever this
@@ -1075,11 +1363,23 @@ class Runtime:
         self.loopback = None
 
     def status(self) -> dict[str, Any]:
-        return core.build_status(
+        payload = core.build_status(
             self.state.status_snapshot(),
             require_version=self.config.require_version,
             expected_game_version=self.config.expected_game_version,
         )
+        # The serving state is the authority clients learn the profile
+        # from (C4); publish it next to the rest of /status. A state
+        # without a boolean profile (test doubles, older states) is
+        # unknown, not full: fail closed as live/restrictive, matching
+        # _serving_live_enabled, and keep admin disabled.
+        live = getattr(self.state, "live_profile", None)
+        payload["live_profile"] = live if isinstance(live, bool) else True
+        admin = getattr(self.state, "live_admin_enabled", None)
+        payload["live_admin_enabled"] = (
+            admin if isinstance(admin, bool) else False
+        )
+        return payload
 
     def _version_state_for(self, version: str | None) -> tuple[str, str]:
         return core.version_state_for(
@@ -1190,7 +1490,11 @@ class Runtime:
             raise
         finally:
             _drop_broker_admit(self, command_id)
-        return _with_bridge_success_hints(self, cmd, result)
+        return _profile_ok_next_step(
+            _with_bridge_success_hints(self, cmd, result),
+            cmd,
+            allowed=_effective_next_tools(self.config, runtime=self),
+        )
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         self.touch()
@@ -1414,6 +1718,111 @@ class ClientRuntime:
     # answer for the closed default.
     _allow_stale_policy: bool = False
     _carrier_io_hook: Callable[[int, bool], None] | None = None
+    # Live profile of the daemon that actually serves this client, learned
+    # from that daemon's /status (C4). None until a serving daemon answers:
+    # a reused daemon fixed its profile at spawn, so the client's own
+    # config/environment must not stand in for it.
+    _serving_live_profile: bool | None = None
+    _serving_live_generation: str | None = None
+
+    def _learn_serving_live_profile(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        generation = payload.get("daemon_generation")
+        gen = generation if isinstance(generation, str) and generation else None
+        cached_gen = getattr(self, "_serving_live_generation", None)
+        if gen is not None and cached_gen is not None and gen != cached_gen:
+            # New daemon generation: the cached profile belonged to the
+            # previous daemon and must not be reused.
+            self._serving_live_profile = None
+            self._serving_live_generation = gen
+        live = _live_from_status_payload(payload)
+        if live is None:
+            # Unknown for this generation stays unknown (fail-closed):
+            # a payload that teaches nothing must not confirm a profile
+            # cached from an earlier daemon.
+            self._serving_live_profile = None
+            if gen is not None:
+                self._serving_live_generation = gen
+            return
+        self._serving_live_profile = live
+        if gen is not None:
+            self._serving_live_generation = gen
+        elif cached_gen is None:
+            self._serving_live_generation = None
+
+    def _probe_serving_live_profile_sync(self, timeout_s: float) -> bool:
+        """GET /status without spawning; True when a payload was learned.
+
+        Any failure forgets the cached profile (fail-closed): a stale
+        full profile must not keep authorising hints after the probe
+        that was supposed to revalidate it has failed.
+        """
+        if getattr(self, "_probe", None) is not None:
+            try:
+                deadline = self._time_fn() + float(timeout_s)
+                healthy = bool(self._daemon_healthy(deadline))
+            except Exception:
+                _forget_serving_live_profile(self)
+                return False
+            if not healthy:
+                _forget_serving_live_profile(self)
+            return healthy
+        if getattr(self, "_credential_provider", None) is None:
+            _forget_serving_live_profile(self)
+            return False
+        try:
+            status, payload = self._request_once(
+                "GET", "/status", timeout=float(timeout_s)
+            )
+        except Exception:
+            _forget_serving_live_profile(self)
+            return False
+        if status != 200:
+            _forget_serving_live_profile(self)
+            return False
+        try:
+            self._learn_serving_live_profile(payload)
+        except Exception:
+            _forget_serving_live_profile(self)
+            return False
+        return True
+
+    async def probe_serving_live_profile_no_spawn(
+        self, *, timeout_s: float = LIVENESS_STATUS_TIMEOUT_S
+    ) -> bool:
+        """No-spawn revalidation of the serving profile (C4 r4).
+
+        An instance-level ``bridge_status_payload`` double is honoured
+        so tests can inject the daemon's answer without a subprocess;
+        the real path uses ``_request_once`` directly and never calls
+        ``_ensure_daemon`` / ``_call`` (which would autospawn).
+        """
+        instance_dict = getattr(self, "__dict__", None)
+        mocked = (
+            instance_dict.get("bridge_status_payload")
+            if isinstance(instance_dict, dict)
+            else None
+        )
+        if callable(mocked):
+            try:
+                try:
+                    result = mocked(timeout_s=timeout_s)
+                except TypeError:
+                    result = mocked()
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception:
+                _forget_serving_live_profile(self)
+                return False
+            if isinstance(result, dict):
+                self._learn_serving_live_profile(result)
+                return True
+            _forget_serving_live_profile(self)
+            return False
+        return await asyncio.to_thread(
+            self._probe_serving_live_profile_sync, float(timeout_s)
+        )
 
     def __init__(
         self,
@@ -2206,6 +2615,7 @@ class ClientRuntime:
             expected_generation=None,
         ):
             raise ToolError("daemon_health_invalid_response")
+        self._learn_serving_live_profile(payload)
         return True
 
     def _daemon_missing_error(self) -> str:
@@ -2490,7 +2900,11 @@ class ClientRuntime:
                 if str(exc).startswith("timeout waiting"):
                     await _shielded_broker_cleanup(self, command_id, "tool_timeout")
                 raise
-            return _with_bridge_success_hints(self, cmd, result)
+            return _profile_ok_next_step(
+                _with_bridge_success_hints(self, cmd, result),
+                cmd,
+                allowed=_effective_next_tools(self.config, runtime=self),
+            )
         finally:
             self._allow_stale_policy = previous
             _drop_broker_admit(self, command_id)
@@ -2849,6 +3263,7 @@ class ClientRuntime:
         )
         if status != 200:
             raise ToolError(str(payload.get("error") or payload))
+        self._learn_serving_live_profile(payload)
         # B1: compare capabilities (ach) before ready when tools are supplied.
         if registered_tools is not None:
             payload = _with_capability_comparison(
@@ -5207,11 +5622,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         client = _client_runtime()
         steam_view = await _observe_steam_app_view()
         async with client.tool_lock:
-            return _with_ok_next_step(
+            return _profile_ok_next_step(
                 _annotate_steam_app_view(
                     await client.session_acquire(purpose.strip()), steam_view
                 ),
                 "session_acquire",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5222,11 +5638,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_ticket")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
+            return _profile_ok_next_step(
                 await client.session_wait(
                     ticket, _require_range(timeout_s, 0.0, 30.0, "bad_wait_timeout")
                 ),
                 "session_wait",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5270,11 +5687,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         # tools/list_changed for the revealed catalog is sent by
         # _install_catalog_change_notice once this call returns.
-        return _with_ok_next_step(
+        return _profile_ok_next_step(
             _annotate_steam_app_view(
                 _annotate_caller_tool_registry(payload, caller_stale), steam_view
             ),
             "session_acquire_wait",
+            allowed=_effective_next_tools(config, runtime=runtime),
         )
 
     app.add_tool(
@@ -5291,8 +5709,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_ticket")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_cancel(ticket), "session_cancel"
+            return _profile_ok_next_step(
+                await client.session_cancel(ticket),
+                "session_cancel",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5311,8 +5731,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_lease_token")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_heartbeat(lease_token), "session_heartbeat"
+            return _profile_ok_next_step(
+                await client.session_heartbeat(lease_token),
+                "session_heartbeat",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5326,8 +5748,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_lease_token")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_release(lease_token), "session_release"
+            return _profile_ok_next_step(
+                await client.session_release(lease_token),
+                "session_release",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5384,8 +5808,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 status, caller_session or None
             )
             await _attach_revalidated_runs_retired_recently(client, status)
-            return _with_ok_next_step(
-                _annotate_steam_app_view(status, steam_view), "session_status"
+            return _profile_ok_next_step(
+                _annotate_steam_app_view(status, steam_view),
+                "session_status",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -10727,6 +11153,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # (including errors, images, and lists) can carry lease_ttl_s and freshness
     # still sees the decorated result.
     install_lease_ttl_annotation(app, runtime)
+    _install_next_step_profile_filter(
+        app,
+        lambda: _effective_next_tools(config, runtime=runtime),
+        runtime=runtime,
+        config=config,
+    )
     observe_server_sources = install_result_freshness(app, server_sources)
     _original_list_tools = app.list_tools
 
@@ -10872,6 +11304,37 @@ def run_supervisor(argv: list[str], *, idle_timeout_s: float = 0.0) -> int:
     return 0
 
 
+def _run_daemon(config: ServerConfig) -> int:
+    """Daemon entry point: publish the serving live profile on /status (C4).
+
+    The daemon is the authority a client reuses, and it fixed its profile
+    at spawn (daemon.build_server_state). Wrapping its status provider
+    here, at the entry point this module owns, lets every client learn
+    that profile from the daemon that answers instead of inferring it
+    from its own environment.
+    """
+    original = daemon.make_status_provider
+
+    def make_status_provider(cfg: Any, state: Any) -> Callable[[], dict]:
+        provider = original(cfg, state)
+
+        def status_provider() -> dict:
+            payload = dict(provider())
+            payload["live_profile"] = bool(getattr(state, "live_profile", False))
+            payload["live_admin_enabled"] = bool(
+                getattr(state, "live_admin_enabled", False)
+            )
+            return payload
+
+        return status_provider
+
+    daemon.make_status_provider = make_status_provider  # type: ignore[method-assign]
+    try:
+        return daemon.run_daemon(config)
+    finally:
+        daemon.make_status_provider = original  # type: ignore[method-assign]
+
+
 def run(argv: list[str] | None = None) -> int:
     config = parse_args(argv)
     if config.supervised:
@@ -10881,7 +11344,7 @@ def run(argv: list[str] | None = None) -> int:
             idle_timeout_s=config.idle_timeout_s if config.mode == "client" else 0.0,
         )
     if config.mode == "daemon":
-        return daemon.run_daemon(config)
+        return _run_daemon(config)
 
     app, runtime = build_app(config)
     if config.mode == "embedded":
