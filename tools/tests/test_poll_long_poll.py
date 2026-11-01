@@ -125,6 +125,28 @@ class _Daemon:
                 exc.close()
 
 
+class _DeliveryRead(list):
+    """Client queue that reports the read which decides this GET's body.
+
+    ``_expire_stale_commands`` walks the same list earlier, still under the
+    lock that later copies it. Signaling there would let the enqueue land
+    inside that copy. The delivery copy, and the walk a waiting GET does
+    before ``Condition.wait``, are the reads that decide the body.
+    """
+
+    def __init__(self, read: threading.Event) -> None:
+        super().__init__()
+        self._read = read
+
+    def __iter__(self):
+        if (
+            not self._read.is_set()
+            and sys._getframe(1).f_code.co_name != "_expire_stale_commands"
+        ):
+            self._read.set()
+        return list.__iter__(self)
+
+
 def _on_wait(state: loopback.ServerState, peer: str, callback) -> threading.Event:
     """Fire once the peer's /poll has released the lock inside Condition.wait."""
 
@@ -182,16 +204,21 @@ class PollLongPollTest(unittest.TestCase):
                 self.assertLess(elapsed, 0.2)
 
     def test_absent_wait_ms_does_not_see_a_command_enqueued_after_it(self) -> None:
+        # The enqueue waits until this GET has copied the queue. A sleep
+        # cannot promise that: a slow accept delivers the command.
+        read = threading.Event()
+        self.daemon.state._legacy_queues["client"] = _DeliveryRead(read)
         errors: list[BaseException] = []
 
         def late() -> None:
             try:
-                time.sleep(0.05)
+                if not read.wait(2.0):
+                    raise AssertionError("poll did not read the queue")
                 self.daemon.enqueue()
             except BaseException as exc:
                 errors.append(exc)
 
-        worker = threading.Thread(target=late)
+        worker = threading.Thread(target=late, daemon=True)
         worker.start()
         self.addCleanup(lambda: worker.join(timeout=2))
         elapsed, status, raw = self._read({"peer": "client"})
