@@ -7308,7 +7308,6 @@ class MCPBridge : Managed
 			return false;
 		}
 
-		m_Jobs.Remove(command.id);
 		// A non-EntityAI root can still own a Transport through AddChild.
 		// Like inventory rollback, preserve it if an exit needs another frame;
 		// return its id so a later object_delete can complete the cleanup.
@@ -7316,11 +7315,15 @@ class MCPBridge : Managed
 		eject.Add(spawned);
 		if (!eject.Begin(m_Tick) || eject.HasOccupants())
 		{
+			// Keep the retained object discoverable before retiring its spawn job.
+			RegisterSpawnScene(command);
+			m_Jobs.Remove(command.id);
 			result.ok = false;
 			result.error = "vehicle_eject_failed";
 			result.object_id = command.id;
 			return true;
 		}
+		m_Jobs.Remove(command.id);
 		m_RuntimeObjects.Remove(command.id);
 		if (spawned)
 		{

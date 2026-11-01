@@ -14,6 +14,7 @@ class MCPVehicleEject
 	protected static ref array<int> s_ClearTicks;
 	protected ref array<Object> m_Roots;
 	protected ref array<Transport> m_Vehicles;
+	protected ref array<Transport> m_PreviousVehicles;
 	protected ref array<Human> m_Occupants;
 	protected ref array<Human> m_Humans;
 	protected ref array<Man> m_Players;
@@ -31,6 +32,7 @@ class MCPVehicleEject
 		if (!s_ClearTicks) { s_ClearTicks = new array<int>(); }
 		m_Roots = new array<Object>();
 		m_Vehicles = new array<Transport>();
+		m_PreviousVehicles = new array<Transport>();
 		m_Occupants = new array<Human>();
 		m_Humans = new array<Human>();
 		m_Players = new array<Man>();
@@ -149,7 +151,17 @@ class MCPVehicleEject
 		m_Nodes.Clear();
 		m_InventoryVisited.Clear();
 		m_Humans.Clear();
+		// Protect only vehicles still under the roots. Keep the previous scan only
+		// to detect additions; pending exits remain in the separate static history.
+		m_PreviousVehicles.Clear();
 		int index = 0;
+		while (index < m_Vehicles.Count())
+		{
+			m_PreviousVehicles.Insert(m_Vehicles.Get(index));
+			index = index + 1;
+		}
+		m_Vehicles.Clear();
+		index = 0;
 		while (index < m_Roots.Count())
 		{
 			Object root = m_Roots.Get(index);
@@ -166,7 +178,7 @@ class MCPVehicleEject
 			if (vehicle && m_Vehicles.Find(vehicle) < 0)
 			{
 				m_Vehicles.Insert(vehicle);
-				m_ClearTick = -1;
+				if (m_PreviousVehicles.Find(vehicle) < 0) { m_ClearTick = -1; }
 			}
 			EntityAI entity = EntityAI.Cast(node);
 			if (entity && m_InventoryVisited.Find(entity) < 0)

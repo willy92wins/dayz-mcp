@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-11-01 02:37:11 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-11-01 03:03:33 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.
@@ -59,7 +59,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 2 KB
 - `scripts/5_Mission/MCPMessages.c` - 45 KB
-- `scripts/5_Mission/MCPVehicleEject.c` - 11 KB
+- `scripts/5_Mission/MCPVehicleEject.c` - 12 KB
 - `scripts/5_Mission/MissionGameplay.c` - 800 B
 - `scripts/5_Mission/MissionServer.c` - 2 KB
 

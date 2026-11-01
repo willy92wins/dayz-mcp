@@ -129,6 +129,32 @@ class DeleteBridgeIntegrationTest(unittest.TestCase):
         self.assertEqual(self.bridge.game.deleted, [car])
         self.assertTrue(self.bridge.posted[-1].ok)
 
+    def test_object_deletes_empty_root_after_vehicle_detaches_and_is_occupied(self) -> None:
+        from tests import test_298_vehicle_eject as eject
+
+        root = eject.Entity()
+        car = eject.Vehicle()
+        root.attach(car)
+        players = []
+        self.bridge.ns["MCPVehicleEject"] = lambda: eject.helper(players=players)
+        self.bridge.ns["m_RuntimeObjects"].Insert(7, root)
+        self.assertFalse(self._delete()[0])
+        self.assertEqual(self.bridge.game.deleted, [])
+
+        root.attach()
+        car.parent = None
+        occupant = eject.Human(car, 0)
+        players.append(occupant)
+        self.bridge._run_jobs_at(0.1)
+
+        self.assertEqual(self.bridge.game.deleted, [root])
+        self.assertFalse(self.bridge.ns["m_RuntimeObjects"].Contains(7))
+        result = self.bridge.posted[0]
+        self.assertEqual((result.ok, result.error.text, result.object_id, result.deleted),
+                         (True, "", 7, 1))
+        self.assertIs(car.crew[0], occupant)
+        self.assertEqual(occupant.command.requests, 0)
+
     def test_scene_preflight_refusal_deletes_nothing_including_nonvehicles(self) -> None:
         car = self._car()
         car.eject_allowed = False

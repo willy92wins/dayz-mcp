@@ -27,7 +27,9 @@ class LogString(EnforceString):
 def spawn_lifetime_rollback(spawned):
     """Run the production rollback and eject helper; only the engine is fake."""
     jobs, objects, deleted = EnforceMap(), EnforceMap(), []
-    command = SimpleNamespace(id=37, args=SimpleNamespace(lifetime_s_set=True, lifetime_s=60.0))
+    command = SimpleNamespace(id=37, args=SimpleNamespace(
+        lifetime_s_set=True, lifetime_s=60.0, scene_id=EnforceString.of(""),
+    ))
     result = SimpleNamespace(ok=True, error=EnforceString.of(""), object_id=0)
     jobs.Insert(command.id, SimpleNamespace(subject=spawned))
     objects.Insert(command.id, spawned)
@@ -41,6 +43,10 @@ def spawn_lifetime_rollback(spawned):
         "GetGame": lambda: SimpleNamespace(ObjectDelete=deleted.append),
         "Log": lambda line: None,
     }
+    translate(
+        BRIDGE, "protected void RegisterSpawnScene(MCPCommand command)",
+        namespace, class_types=("MCPJob",), members=("m_Jobs",),
+    )
     apply = translate(
         BRIDGE, "protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)",
         namespace, class_types=("MCPJob", "Object", "EntityAI", "MCPVehicleEject"),

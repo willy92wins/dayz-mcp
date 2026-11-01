@@ -12,6 +12,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from mcp import types
 from mcp.server.fastmcp.exceptions import ToolError
 
 from dayz_mcp import server
@@ -92,6 +93,60 @@ class VehicleDeleteContractTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime, "loopback", SimpleNamespace(state=fake_state)):
             result = await self.runtime.wait_for_result("object_delete", 17, "server", 8.0)
         self.assertEqual(result, {"id": 17, "ok": 1, "object_id": 7, "deleted": 0})
+
+    async def test_public_spawn_rollback_error_keeps_id_and_scene_registration(self) -> None:
+        from tests import test_scene_verbs as scenes
+        from tests.enforce_subset_helpers import EnforceArray, EnforceString
+
+        bridge = scenes.SceneBridgeExecutionTest(methodName="runTest")
+        bridge.setUpClass()
+        bridge.setUp()
+        root = scenes._Entity("Barrel_Green", entity=False)
+        car = scenes._Entity("CivilianSedan", parent=root)
+        car.occupants = [object()]
+
+        async def call_bridge(verb, args, peer, timeout_s):
+            self.assertEqual((verb, peer), ("world_spawn", "server"))
+            command = bridge._command(37, args["scene_id"])
+            command.cmd = EnforceString.of(verb)
+            command.args.type = EnforceString.of(args["type"])
+            command.args.pos = EnforceArray(args["pos"])
+            command.args.lifetime_s = args["lifetime_s"]
+            command.args.lifetime_s_set = args["lifetime_s_set"]
+            result = bridge.ns["MCPResult"]()
+            with patch.object(bridge.game, "CreateObjectEx", return_value=root):
+                self.assertTrue(bridge.ns["WorldSpawnBranch"](command, result))
+            wire = {
+                "id": command.id, "ok": result.ok,
+                "error": result.error.text, "object_id": result.object_id,
+            }
+            state = SimpleNamespace(take_result=Mock(return_value=wire))
+            with patch.object(self.runtime, "loopback", SimpleNamespace(state=state)):
+                return await self.runtime.wait_for_result(verb, command.id, peer, timeout_s)
+
+        request = types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name="world_spawn", arguments={
+                "type": "Barrel_Green", "pos": [10.0, 2.0, 20.0],
+                "lifetime_s": 60.0, "scene_id": "retained", "timeout_s": 1.0,
+            }),
+        )
+        with patch.object(self.runtime, "call_bridge", side_effect=call_bridge):
+            response = await self.app._mcp_server.request_handlers[types.CallToolRequest](request)
+        result = response.root
+        self.assertTrue(result.isError)
+        text = "".join(block.text for block in result.content if isinstance(block, types.TextContent))
+        with self.subTest(surface="public MCP error"):
+            self.assertIn("vehicle_eject_failed; object_id=37", text)
+        with self.subTest(surface="scene registration"):
+            entries = bridge._entries("retained")
+            self.assertIsNotNone(entries)
+            self.assertEqual(entries.Count(), 1)
+            self.assertEqual(entries.Get(0).object_id, 37)
+            self.assertIs(entries.Get(0).obj, root)
+        self.assertIs(bridge.ns["m_RuntimeObjects"].Get(37), root)
+        self.assertFalse(bridge.ns["m_Jobs"].Contains(37))
+        self.assertEqual(bridge.game.deleted, [])
 
     async def test_scene_ejection_failure_is_not_reported_as_success(self) -> None:
         wire = {

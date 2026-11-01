@@ -135,7 +135,7 @@ class Human(Node):
 
 MEMBERS = (
     "s_PendingVehicles", "s_PendingOccupants", "s_ClearTicks",
-    "m_Roots", "m_Vehicles", "m_Occupants", "m_Humans", "m_Players", "m_Nodes", "m_Inventory",
+    "m_Roots", "m_Vehicles", "m_PreviousVehicles", "m_Occupants", "m_Humans", "m_Players", "m_Nodes", "m_Inventory",
     "m_InventoryVisited", "m_Siblings", "m_ClearTick", "m_Begun",
 )
 SIGNATURES = (
