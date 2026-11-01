@@ -3058,8 +3058,11 @@ class ClientRuntime:
             # The slot stays with that work until the future finishes: it
             # returns, it raises, or it is cancelled before it starts.
             # Cancelling this coroutine does not free it while the thread is
-            # still in HTTP. No slot, or no room for the margin: immediate
-            # poll on the shared executor, which stays free of long-polls.
+            # still in HTTP. If submit queues the hop and then raises, the
+            # slot is returned once, that hop sends nothing, and this call
+            # continues without wait_ms. No slot, or no room for the margin:
+            # immediate poll on the shared executor, which stays free of
+            # long-polls.
             use_long_poll = False
             if (
                 deadline - self._time_fn()
@@ -3067,11 +3070,33 @@ class ClientRuntime:
             ):
                 use_long_poll = _try_acquire_client_long_poll_slot()
 
+            # submit() puts the work item on the queue before it starts a
+            # thread. A start failure leaves that item queued and raises.
+            # The hop waits here until this call either arms it or abandons
+            # it, so the queued item cannot send after the call has moved on.
+            hop_lock = threading.Lock()
+            hop = {"abandoned": False, "released": False}
+            hop_ready = threading.Event()
+
+            def release_slot(_done: object = None) -> None:
+                with hop_lock:
+                    if hop["released"]:
+                        return
+                    hop["released"] = True
+                _release_client_long_poll_slot()
+
             def issue(long_poll: bool) -> tuple[int, dict[str, Any]]:
                 # Worker thread. wait_ms comes from the deadline at this
                 # instant. A long-poll is allowed only when this hop owns a
                 # slot. Inside the last AWAIT_LONG_POLL_BUDGET_MARGIN_S the
                 # request goes out without wait_ms.
+                if long_poll:
+                    hop_ready.wait()
+                    with hop_lock:
+                        abandoned = hop["abandoned"]
+                    if abandoned:
+                        release_slot()
+                        return (0, {"status": "abandoned"})
                 remaining_now = deadline - self._time_fn()
                 if remaining_now <= 0.0:
                     raise _CallBudgetExpired()
@@ -3096,15 +3121,24 @@ class ClientRuntime:
 
             try:
                 if use_long_poll:
-                    future = _client_long_poll_executor_handle().submit(
-                        issue, True
-                    )
-                    # Done on the worker when the call finishes, and on the
-                    # loop when the future is cancelled before it starts.
-                    future.add_done_callback(
-                        lambda _done: _release_client_long_poll_slot()
-                    )
-                    status, payload = await asyncio.wrap_future(future)
+                    try:
+                        future = _client_long_poll_executor_handle().submit(
+                            issue, True
+                        )
+                    except Exception:
+                        with hop_lock:
+                            hop["abandoned"] = True
+                        hop_ready.set()
+                        release_slot()
+                        status, payload = await asyncio.to_thread(issue, False)
+                    else:
+                        # Done on the worker when the call finishes, and on
+                        # the loop when the future is cancelled before it
+                        # starts. release_slot is idempotent: the abandoned
+                        # hop also calls it, and that second call is a no-op.
+                        future.add_done_callback(release_slot)
+                        hop_ready.set()
+                        status, payload = await asyncio.wrap_future(future)
                 else:
                     status, payload = await asyncio.to_thread(issue, False)
             except _CallBudgetExpired:

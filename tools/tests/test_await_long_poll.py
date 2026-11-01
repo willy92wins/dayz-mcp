@@ -1553,9 +1553,11 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
 
     @slow_test
     async def test_cancelling_queued_work_releases_the_slot(self) -> None:
-        # The private pool is full of blockers that hold no slot, so this
-        # long-poll is queued and has not entered _call. Cancelling it must
-        # free the slot, and the cancelled work must not send a query.
+        # Sol r6 F-11: one cancelled hop still leaves seven slots, so a later
+        # wait_ms does not prove that hop gave its slot back. Eight queued
+        # hops take every slot. Cancelling them before they start must restore
+        # the semaphore to its initial value, and eight later calls must all
+        # send wait_ms. The cancelled hops must not send a query.
         seen: list[dict[str, str]] = []
         seen_lock = threading.Lock()
         hold = threading.Event()
@@ -1568,6 +1570,8 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
             hold.wait(timeout=3.0)
 
         executor = server._client_long_poll_executor_handle()
+        _executor, slots = server._client_long_poll_resources()
+        self.assertEqual(slots._value, slots._initial_value, slots)
         parked = [executor.submit(block) for _ in range(8)]
         limit = time.monotonic() + 2.0
         while time.monotonic() < limit and running["n"] < 8:
@@ -1579,8 +1583,12 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
             copied = dict(query or {})
             with seen_lock:
                 seen.append(copied)
-            if copied.get("id") == "2":
-                return 200, {"status": "done", "result": {"ok": 1, "marker": 2}}
+            command_id = int(copied.get("id", "0"))
+            if 9 <= command_id <= 16:
+                return 200, {
+                    "status": "done",
+                    "result": {"ok": 1, "marker": command_id},
+                }
             hold.wait(timeout=3.0)
             return 200, {"status": "pending"}
 
@@ -1593,25 +1601,128 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
             return "status unavailable"
 
         runtime._liveness_message = liveness
-        queued = asyncio.create_task(
-            runtime._await_result("camera_get", 1, "client", 3.0)
-        )
-        await asyncio.sleep(0.1)
+        queued = [
+            asyncio.create_task(
+                runtime._await_result("camera_get", command_id, "client", 3.0)
+            )
+            for command_id in range(1, 9)
+        ]
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit and slots._value != 0:
+            await asyncio.sleep(0.02)
+        self.assertEqual(slots._value, 0, slots)
         with seen_lock:
             self.assertEqual(seen, [], seen)
-        queued.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await queued
+        for task in queued:
+            task.cancel()
+        await asyncio.gather(*queued, return_exceptions=True)
+        self.assertEqual(slots._value, slots._initial_value, slots)
         hold.set()
         for future in parked:
             future.result(timeout=2.0)
-        await runtime._await_result("camera_get", 2, "client", 3.0)
+        followers = [
+            asyncio.create_task(
+                runtime._await_result("camera_get", command_id, "client", 3.0)
+            )
+            for command_id in range(9, 17)
+        ]
+        await asyncio.gather(*followers)
         with seen_lock:
-            cancelled = [query for query in seen if query.get("id") == "1"]
-            follower = [query for query in seen if query.get("id") == "2"]
+            by_id: dict[str, list[dict[str, str]]] = {}
+            for query in seen:
+                by_id.setdefault(str(query.get("id")), []).append(query)
+        cancelled = [str(command_id) for command_id in range(1, 9) if str(command_id) in by_id]
         self.assertEqual(cancelled, [], seen)
-        self.assertTrue(follower, seen)
-        self.assertIn("wait_ms", follower[0], follower)
+        for command_id in range(9, 17):
+            queries = by_id.get(str(command_id), [])
+            self.assertTrue(queries, seen)
+            self.assertIn("wait_ms", queries[0], queries)
+        self.assertEqual(slots._value, slots._initial_value, slots)
+
+    @slow_test
+    async def test_submit_failure_returns_the_slot_and_drops_the_queued_hop(
+        self,
+    ) -> None:
+        # Sol r6 F-10: submit queues the hop and then raises (the private
+        # thread fails to start). The slot must come back, that queued hop
+        # must not send /await, and the call must still deliver the result
+        # on the shared executor without wait_ms.
+        import concurrent.futures
+
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        hold = threading.Event()
+        running = {"n": 0}
+        submits = {"n": 0}
+        self.addCleanup(hold.set)
+
+        def block() -> None:
+            with seen_lock:
+                running["n"] += 1
+            hold.wait(timeout=3.0)
+
+        executor = server._client_long_poll_executor_handle()
+        _executor, slots = server._client_long_poll_resources()
+        self.assertEqual(slots._value, slots._initial_value, slots)
+        before = slots._value
+        parked = [executor.submit(block) for _ in range(8)]
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit and running["n"] < 8:
+            await asyncio.sleep(0.02)
+        self.assertGreaterEqual(running["n"], 8, running["n"])
+
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        warmed = [pool.submit(lambda: None) for _ in range(8)]
+        for item in warmed:
+            item.result(timeout=2.0)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(copied)
+            if copied.get("id") == "1":
+                return 200, {"status": "done", "result": {"ok": 1, "marker": 1}}
+            hold.wait(timeout=3.0)
+            return 200, {"status": "pending"}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        original_submit = executor.submit
+
+        def broken_submit(fn, /, *args, **kwargs):
+            submits["n"] += 1
+            original_submit(fn, *args, **kwargs)
+            raise RuntimeError("private thread failed to start")
+
+        executor.submit = broken_submit
+        try:
+            result = await runtime._await_result("camera_get", 1, "client", 3.0)
+            self.assertEqual(submits["n"], 1, submits["n"])
+            self.assertEqual(result.get("marker"), 1, result)
+            self.assertEqual(slots._value, before, slots)
+        finally:
+            executor.submit = original_submit
+            hold.set()
+            for future in parked:
+                future.result(timeout=2.0)
+            executor.submit(lambda: None).result(timeout=2.0)
+        with seen_lock:
+            detail = list(seen)
+        self.assertEqual(len(detail), 1, detail)
+        self.assertEqual(detail[0].get("id"), "1", detail)
+        self.assertNotIn("wait_ms", detail[0], detail)
+        self.assertEqual(slots._value, before, slots)
 
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
