@@ -801,6 +801,40 @@ class CrashRecoveryTest(_Case):
         self.assertTrue(any("profiles_dir_not_plain" in item for item in errors))
         self.assertEqual(not_dir.read_text(encoding="utf-8"), "x")
 
+    def test_missing_profiles_dir_still_clears_the_absolute_mission(self) -> None:
+        profiles = self._tmp() / "missing-profiles"
+        mission = self._tmp() / "mission"
+        mission_cfg = mission / "dayz_mcp.json"
+        _write(mission_cfg, {"profile": "test", "keep": "mission"})
+        fresh = _state()
+        errors = fresh.recover_crashed_profile(str(profiles), str(mission))
+        self.assertEqual(errors, [])
+        self.assertFalse(profiles.exists())
+        restored = _load(mission_cfg)
+        self.assertEqual(restored, {"keep": "mission"})
+        self.assertNotEqual((restored or {}).get("profile"), "test")
+
+    def test_lifecycle_recovery_clears_a_mission_when_the_profiles_dir_is_gone(self) -> None:
+        profiles = self._tmp() / "missing-profiles"
+        mission = self._tmp() / "mission"
+        mission_cfg = mission / "dayz_mcp.json"
+        _write(mission_cfg, {"profile": "test", "keep": "mission"})
+
+        class Manifest:
+            def list_runs(self) -> list[dict[str, str]]:
+                return [{"profiles": str(profiles), "mission": str(mission), "state": "EXITED"}]
+
+            def get(self, run_id: str) -> dict[str, str]:
+                return {"profiles": str(profiles), "mission": str(mission)}
+
+        fresh = _state()
+        fresh.lifecycle = SimpleNamespace(manifest=Manifest())
+        self.assertEqual(fresh.profile_release_errors, [])
+        self.assertFalse(profiles.exists())
+        restored = _load(mission_cfg)
+        self.assertEqual(restored, {"keep": "mission"})
+        self.assertNotEqual((restored or {}).get("profile"), "test")
+
 
 class FailClosedAbuseTest(_Case):
     def test_relative_profiles_dir_is_refused(self) -> None:
@@ -1580,6 +1614,182 @@ class ProfileRestoreFailureVisibilityTest(_Case):
         handler._handle_status()
         self.assertEqual(replies[0][0], 200)
         self.assertNotIn("profile_restore_errors", replies[0][1])
+
+    def test_unreadable_config_is_not_a_clean_stop(self) -> None:
+        from dayz_mcp import dayz_test_worker
+
+        _profiles, config, _original = self._crash_installer()
+        before = config.read_bytes()
+        state = _state()
+        key = loopback._profile_config_key(config)
+        state._profile_holders[key] = {(_RUN, "server")}
+        state._profile_paths[key] = str(config)
+
+        class Lifecycle:
+            def stop_run(self, client: object, token: object, run_id: object) -> dict:
+                state.retire_run(str(run_id), "stopped")
+                return {
+                    "_http_status": 200,
+                    "ok": True,
+                    "run_id": run_id,
+                    "state": "EXITED",
+                    "stop_method": "no_live_owned",
+                    "error": "run_processes_gone",
+                }
+
+        state.lifecycle = Lifecycle()
+        real_read = Path.read_text
+
+        def deny_read(path: Path, *args: object, **kwargs: object) -> str:
+            if path.name == "dayz_mcp.json":
+                raise PermissionError(13, "Access is denied")
+            return real_read(path, *args, **kwargs)
+
+        def deny_replace(src: str, dst: str) -> None:
+            raise _permission(99)
+
+        with (
+            patch.object(Path, "read_text", deny_read),
+            patch.object(runtime_state.os, "replace", deny_replace),
+        ):
+            status, payload = self._reply(state, "stop")
+        self.assertEqual(status, 500)
+        self.assertEqual(payload.get("ok"), False)
+        self.assertEqual(payload.get("error"), "profile_restore_failed")
+        self.assertNotEqual(payload.get("state"), "EXITED")
+        self.assertNotIn("stop_method", payload)
+        self.assertFalse(dayz_test_worker._successful_run(payload, _RUN, "EXITED"))
+        self.assertFalse(dayz_test_worker._run_already_gone(payload, _RUN))
+        self.assertTrue(
+            any("PermissionError" in item for item in payload["profile_restore_errors"])
+        )
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_worker_kill_does_not_accept_adopt_while_restore_is_pending(self) -> None:
+        import asyncio
+
+        from dayz_mcp import dayz_test_request, dayz_test_worker, native_broker_protocol
+
+        profiles, config, original = self._crash_installer()
+        run_id = "12345678-1234-4234-8234-1234567890ab"
+        policy = dayz_test_request.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=r"P:\ExampleMod",
+            default_base_mods=("@CF", "@Dabs Framework", "@VPPAdminTools"),
+            mission_roots=(
+                r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions",
+            ),
+            mod_roots=(r"P:\Mods",),
+        )
+        runtime = dayz_test_worker.WorkerRuntimePolicy(
+            dev_root=policy.dev_root,
+            mod=policy.mod,
+            diag_executable=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe",
+            game_directory=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
+            mission_aliases=(
+                (
+                    "chernarus",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\dayzOffline.chernarusplus",
+                ),
+                (
+                    "livonia",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\dayzOffline.enoch",
+                ),
+                (
+                    "sakhal",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\dayzOffline.sakhal",
+                ),
+            ),
+            mods_root=r"P:\Mods",
+            build_temp_root=r"P:\temp",
+            build_source_basename=None,
+        )
+        fresh = _state()
+        calls: list[str] = []
+
+        class Manifest:
+            def list_runs(self) -> list[dict[str, str]]:
+                return [{"profiles": str(profiles), "mission": "", "state": "RUNNING_IDLE"}]
+
+            def get(self, requested: str) -> dict[str, str]:
+                return {"profiles": str(profiles), "mission": ""}
+
+        class Lifecycle:
+            manifest = Manifest()
+
+            def adopt_run(self, client: object, token: object, requested: object) -> dict:
+                calls.append("adopt")
+                return {"_http_status": 409, "error": "run_processes_gone"}
+
+            def stop_run(self, client: object, token: object, requested: object) -> dict:
+                calls.append("stop")
+                fresh.retire_run(str(requested), "stopped")
+                return {
+                    "_http_status": 200,
+                    "ok": True,
+                    "run_id": requested,
+                    "state": "EXITED",
+                    "stop_method": "no_live_owned",
+                    "error": "run_processes_gone",
+                }
+
+        seen: list[dict] = []
+
+        class Broker:
+            async def invoke(self, frame: bytes) -> dict[str, object]:
+                request = native_broker_protocol.decode_request(frame)
+                command = request.payload.get("command")
+                self_command = command if isinstance(command, str) else ""
+                _status, payload = self_test._reply(
+                    fresh,
+                    self_command,
+                    {
+                        "identity": _IDENTITY,
+                        "lease_token": "token",
+                        "run_id": request.payload.get("run_id"),
+                    },
+                )
+                seen.append(payload)
+                return payload
+
+        self_test = self
+        raw = json.dumps(
+            {
+                "version": 1,
+                "dev_root": policy.dev_root,
+                "mod": policy.mod,
+                "mode": "offline",
+                "kill": True,
+                "run_id": run_id,
+            }
+        ).encode("utf-8")
+        parsed = dayz_test_request.parse_dayz_test_request(raw, policies=(policy,))
+
+        def deny_replace(src: str, dst: str) -> None:
+            raise _permission(99)
+
+        with patch.object(runtime_state.os, "replace", deny_replace):
+            fresh.lifecycle = Lifecycle()
+            self.assertEqual(_load(config)["profile"], "test")
+            self.assertTrue(any("PermissionError" in item for item in fresh.profile_release_errors))
+            with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+                asyncio.run(
+                    dayz_test_worker.execute_dayz_test_worker(
+                        parsed.canonical_bytes,
+                        request_sha256=parsed.sha256,
+                        request_policies=(policy,),
+                        runtime_policy=runtime,
+                        broker=Broker(),
+                    )
+                )
+        self.assertEqual(raised.exception.code, "run_not_adoptable")
+        self.assertEqual(calls, ["adopt", "stop"])
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertEqual(seen[0].get("error"), "profile_restore_failed")
+        self.assertFalse(dayz_test_worker._run_already_gone(seen[0], run_id))
+        self.assertEqual(_load(config)["profile"], "test")
+        self.assertEqual(original["url"], (_load(config) or {})["url"])
 
 
 class DocsContractTest(unittest.TestCase):

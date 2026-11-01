@@ -2771,17 +2771,25 @@ def _mission_scan_blocked(profiles_dir: Path) -> bool:
 
 
 def _pending_path_proven_clean(path: Path) -> bool:
-    """True only when this pending path is a plain file that is not ``profile=test``.
+    """True only when a completed read shows this plain file is not ``profile=test``.
 
     A missing path, a reparse point or a file we cannot read is an incomplete
-    inspection, not proof that the flag is gone.
+    inspection, not proof that the flag is gone. ``_profile_is_test`` swallows
+    ``OSError``, so a ``PermissionError`` from the read must not be asked that
+    question: lstat succeeding is not a read.
     """
     info = _lstat_or_none(path)
     if info is None or _is_reparse(info) or not stat.S_ISREG(info.st_mode):
         return False
     if info.st_size > _PROFILE_PRIOR_MAX_BYTES:
         return False
-    return not _profile_is_test(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return True
+    return payload.get("profile") != "test"
 
 
 def _fail_release_for_profile(result: dict) -> None:
@@ -2794,6 +2802,22 @@ def _fail_release_for_profile(result: dict) -> None:
         result["state"] = "UNRECONCILED"
     if result.get("stop_method") == "no_live_owned":
         result.pop("stop_method", None)
+
+
+def _worker_reads_already_gone(result: dict, run_id: object) -> bool:
+    """True when ``dayz_test_worker._run_already_gone`` would skip ``stop``.
+
+    ``adopt`` is not a release, but that helper treats ``EXITED``,
+    ``run_processes_gone``, ``run_not_found`` and ``no_live_owned`` as a stop
+    that already finished. The worker then returns success without calling
+    ``stop``, so the restore never runs.
+    """
+    if result.get("state") == "EXITED" and result.get("run_id") in {run_id, None}:
+        return True
+    error = result.get("error")
+    if error in _RELEASE_ALREADY_GONE_ERRORS:
+        return True
+    return result.get("stop_method") == "no_live_owned"
 
 
 def _masks_clean_exit(run: dict) -> bool:
@@ -3858,16 +3882,13 @@ class ServerState:
     ) -> None:
         config = profiles_dir / _PROFILE_CONFIG_NAME
         try:
-            if not _plain_dir(profiles_dir):
-                if profiles_dir.exists() or profiles_dir.is_symlink():
-                    self._note_profile_release_error(
-                        config, ValueError("profiles_dir_not_plain")
-                    )
-                return
             mission_list: list[str | None] = []
             for item in (mission, *extra_missions):
                 if item not in mission_list:
                     mission_list.append(item)
+            # A disappeared profiles directory is not a clean tree. The
+            # absolute mission is named on its own and is inspected even
+            # when the leaf cannot be stated.
             mission_clear = True
             for item in mission_list:
                 if not self._mission_profiles_clear(profiles_dir, item):
@@ -3876,6 +3897,12 @@ class ServerState:
                 self._clear_profile_pending(
                     profiles_dir.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME
                 )
+            if not _plain_dir(profiles_dir):
+                if profiles_dir.exists() or profiles_dir.is_symlink():
+                    self._note_profile_release_error(
+                        config, ValueError("profiles_dir_not_plain")
+                    )
+                return
             for candidate in _configs_near(profiles_dir):
                 self._finish_profile_restore(
                     candidate, owned=True, mission_clear=mission_clear
@@ -3888,17 +3915,17 @@ class ServerState:
     ) -> None:
         try:
             parent = config_path.parent
+            mission_clear = self._mission_profiles_clear(parent, mission)
+            if mission_clear:
+                self._clear_profile_pending(
+                    parent.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME
+                )
             if not _plain_dir(parent):
                 if parent.exists() or parent.is_symlink():
                     self._note_profile_release_error(
                         config_path, ValueError("profiles_dir_not_plain")
                     )
                 return
-            mission_clear = self._mission_profiles_clear(parent, mission)
-            if mission_clear:
-                self._clear_profile_pending(
-                    parent.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME
-                )
             self._finish_profile_restore(
                 config_path, owned=owned, mission_clear=mission_clear
             )
@@ -8807,6 +8834,9 @@ class Handler(BaseHTTPRequestHandler):
         # A start refused before admission must stay exactly {"error": ...}.
         # Stop, close and reap are the release the operator reads: a
         # PermissionError from the profile replace is part of that body.
+        # adopt is not a release, but the worker treats its already-gone
+        # errors as a finished stop and never calls stop. Those answers are
+        # neutralized the same way while the restore is still pending.
         sealed_start = action == "start" and "error" in result and "run_id" not in result
         if not sealed_start:
             pending_fn = getattr(self.state, "_profile_pending_messages", None)
@@ -8819,18 +8849,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not flag_remains:
                     if isinstance(remembered, set):
                         remembered.clear()
-                elif action in {"stop", "close", "reap"}:
-                    _fail_release_for_profile(result)
-                    if status < 400:
-                        status = 500
+                else:
                     run_id = result.get("run_id")
                     if not isinstance(run_id, str) or not run_id:
                         run_id = body.get("run_id")
-                    if isinstance(remembered, set) and isinstance(run_id, str) and run_id:
-                        remembered.add(run_id)
-                    for message in pending:
-                        self._log("PROFILE " + message)
-                    self._audit_profile_pending(pending)
+                    neutralize = action in {"stop", "close", "reap"} or (
+                        action == "adopt"
+                        and _worker_reads_already_gone(result, run_id)
+                    )
+                    if neutralize:
+                        _fail_release_for_profile(result)
+                        if status < 400:
+                            status = 500
+                        if (
+                            isinstance(remembered, set)
+                            and isinstance(run_id, str)
+                            and run_id
+                        ):
+                            remembered.add(run_id)
+                        for message in pending:
+                            self._log("PROFILE " + message)
+                        self._audit_profile_pending(pending)
                 if flag_remains and action == "status":
                     _mask_profile_failure_runs(
                         result, body.get("run_id"), remembered
