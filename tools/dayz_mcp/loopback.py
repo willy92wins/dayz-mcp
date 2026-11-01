@@ -8388,6 +8388,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self.parse_request():
                 return
+            # A defect means the parser dropped every later field. That
+            # partial view is not a keep-alive decision, and it is made
+            # before body consumption or Connection tokens are considered.
+            if self._header_parse_incomplete():
+                self._force_close = True
             self._note_body_if_absent()
             if self._server_stopping():
                 self._refuse_during_stop()
@@ -8414,6 +8419,9 @@ class Handler(BaseHTTPRequestHandler):
         this path is the same bytes as before. The game bridge never takes it.
         """
         self._keepalive_ok = False
+        if self._header_parse_incomplete():
+            self._force_close = True
+            return
         try:
             bridged = path in GAME_BRIDGE_HTTP_PATHS
         except Exception:
@@ -8522,6 +8530,32 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             return None
         return length
+
+    def _header_parse_incomplete(self) -> bool:
+        """True when header parsing recorded a defect or cannot be trusted.
+
+        The email parser keeps fields before a broken line, records a
+        defect, and omits the rest. That partial set must not decide
+        framing or keep-alive. A mapping with no defects attribute was
+        not parsed (tests call do_POST with a dict). Any failure to read
+        the defect list is incomplete too.
+        """
+        try:
+            headers = self.headers
+        except Exception:
+            return True
+        if headers is None:
+            return True
+        try:
+            if not hasattr(headers, "defects"):
+                return False
+            defects = headers.defects
+        except Exception:
+            return True
+        try:
+            return len(defects) != 0
+        except Exception:
+            return True
 
     def _connection_tokens(self, headers: object) -> set[str] | None:
         """Union of every Connection token. None if a value cannot be read.
@@ -8720,10 +8754,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, body: dict) -> None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        # One decision for every JSON reply. Keep-alive needs the flag,
-        # no forced close, and a single unambiguous length. Early 403/404,
-        # a present Transfer-Encoding (even blank) and a repeated
+        # One decision for every JSON reply. A header-parse defect closes
+        # before any other persistence check. Keep-alive then needs the
+        # flag, no forced close, and a single unambiguous length. Early
+        # 403/404, a present Transfer-Encoding (even blank) and a repeated
         # Content-Length close.
+        if self._header_parse_incomplete():
+            self._force_close = True
         try:
             framing_ok = self._unambiguous_body_length() is not None
         except Exception:

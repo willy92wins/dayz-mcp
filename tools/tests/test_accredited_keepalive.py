@@ -704,6 +704,28 @@ class KeepaliveTransportTests(unittest.TestCase):
                 self.assertIs(response.will_close, False)
                 self.assertFalse(accredited_keepalive._response_is_reusable(response))
 
+    def test_broken_header_line_hides_later_fields_and_is_not_reusable(self) -> None:
+        """F10: a line the parser drops hides later fields. Do not reuse."""
+        hidden = (
+            ("connection_close", b"Connection: close\r\n"),
+            ("empty_transfer_encoding", b"Transfer-Encoding:\r\n"),
+            ("second_content_length", b"Content-Length: 2\r\n"),
+        )
+        for name, tail in hidden:
+            with self.subTest(hidden=name):
+                raw = (
+                    b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                    b"Connection: keep-alive\r\nX-broken\r\n" + tail + b"\r\n{}"
+                )
+                response = _parsed_response(raw)
+                self.assertTrue(response.headers.defects, response.headers.defects)
+                # http.client never saw the hidden field, so it stays open.
+                self.assertIs(response.will_close, False)
+                self.assertFalse(
+                    accredited_keepalive._response_is_reusable(response),
+                    response.headers.defects,
+                )
+
 
 def _read_http(sock: socket.socket, buffered: bytes = b"") -> tuple[bytes, dict[str, str], bytes, bytes]:
     data = buffered
@@ -1259,6 +1281,55 @@ class DaemonKeepaliveTests(unittest.TestCase):
                 self.assertTrue(status.startswith(b"HTTP/1.0 200"), status)
                 self.assertNotIn("keep-alive", headers.get("connection", "").lower())
                 self.assertIsInstance(json.loads(body.decode("utf-8")), dict)
+
+    def test_broken_header_line_does_not_desync_keepalive(self) -> None:
+        """F10: a header the parser could not read whole must close."""
+        cases = (
+            ("space_before_colon", ["Content-Length : 2"]),
+            (
+                "broken_line_between_lengths",
+                ["Content-Length: 0", "X-broken", "Content-Length: 2"],
+            ),
+        )
+        for name, extra in cases:
+            with self.subTest(framing=name):
+                sock = socket.create_connection((self.host, self.port), timeout=2.0)
+                try:
+                    sock.settimeout(2.0)
+                    sock.sendall(
+                        self._request_with_headers("POST", "/enqueue", extra, b"{}")
+                    )
+                    status, headers, body, rest = _read_http(sock)
+                    self.assertEqual(status.split()[1], b"400", status)
+                    connection = headers.get("connection", "").lower()
+                    stayed_open = (
+                        "keep-alive" in connection and "close" not in connection
+                    )
+                    if stayed_open:
+                        sock.sendall(
+                            self._raw(
+                                "GET",
+                                "/status",
+                                protocol="HTTP/1.1",
+                                connection="keep-alive",
+                            )
+                        )
+                        status2, _headers2, body2, _rest = _read_http(sock, rest)
+                        self.assertTrue(status2.startswith(b"HTTP/1.0 200"), status2)
+                        self.assertIsInstance(json.loads(body2.decode("utf-8")), dict)
+                        self.fail("broken header block kept the connection")
+                    self.assertEqual(
+                        json.loads(body.decode("utf-8")).get("error"),
+                        "not_whitelisted",
+                    )
+                    self.assertNotIn("keep-alive", connection)
+                    try:
+                        extra_byte = sock.recv(1)
+                    except TimeoutError:
+                        self.fail("server left the connection open")
+                    self.assertEqual(extra_byte, b"")
+                finally:
+                    sock.close()
 
     def _request_with_headers(
         self,

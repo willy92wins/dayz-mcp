@@ -256,16 +256,41 @@ def _response_framing_allows_reuse(headers: object) -> bool:
     return length >= 0
 
 
+def _response_headers_complete(headers: object) -> bool:
+    """False when parsing recorded a defect or the defect list cannot be read.
+
+    A broken line makes the parser omit every later field after recording
+    the defect. That partial view is not reusable. Objects without a
+    defects attribute are test doubles, not parsed responses.
+    """
+    try:
+        if not hasattr(headers, "defects"):
+            return True
+        defects = headers.defects  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    try:
+        return len(defects) == 0
+    except Exception:
+        return False
+
+
 def _response_is_reusable(response: object) -> bool:
     """True only for an explicit keep-alive response with one framed body.
 
     A missing attribute is not reusable: the caller drops the socket.
+    A header-parse defect is decided first: the socket is not reused.
     Connection is every instance; any close token wins. Keep-alive counts
     only when it was asked for and close was not.
     """
     try:
-        will_close = response.will_close  # type: ignore[attr-defined]
         headers = response.headers  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    if not _response_headers_complete(headers):
+        return False
+    try:
+        will_close = response.will_close  # type: ignore[attr-defined]
     except Exception:
         return False
     if will_close is not False:
