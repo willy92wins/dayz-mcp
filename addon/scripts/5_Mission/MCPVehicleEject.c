@@ -56,13 +56,21 @@ class MCPVehicleEject
 		return m_Occupants.Count() > 0;
 	}
 
-	protected bool IsClear(Human occupant)
+	protected bool IsClear(Transport vehicle, Human occupant)
 	{
-		if (!occupant) { return true; }
-		// A manually extracted corpse may finish normally: death clears the cached
-		// transport (dayzplayerimplement.c:737). Unconscious recovery can re-enter it.
-		if (occupant.IsUnconscious()) { return false; }
-		if (occupant.GetCommand_Vehicle() || Transport.Cast(occupant.GetParent())) { return false; }
+		if (!vehicle || !occupant) { return true; }
+		// A former occupant may already be in another vehicle; only this pair blocks.
+		HumanCommandVehicle command = occupant.GetCommand_Vehicle();
+		if (command && command.GetTransport() == vehicle) { return false; }
+		if (occupant.GetParent() == vehicle) { return false; }
+		int seats = vehicle.CrewSize();
+		if (seats < 0) { return false; }
+		int seat = 0;
+		while (seat < seats)
+		{
+			if (vehicle.CrewMember(seat) == occupant) { return false; }
+			seat = seat + 1;
+		}
 		return true;
 	}
 
@@ -92,7 +100,7 @@ class MCPVehicleEject
 			Human occupant = s_PendingOccupants.Get(index);
 			bool completed = false;
 			if (!vehicle || !occupant) { completed = true; }
-			else if (IsClear(occupant))
+			else if (IsClear(vehicle, occupant))
 			{
 				int clearTick = s_ClearTicks.Get(index);
 				if (clearTick < 0) { s_ClearTicks.Set(index, tick); }
@@ -273,10 +281,15 @@ class MCPVehicleEject
 		while (occupantIndex < m_Occupants.Count())
 		{
 			Human priorOccupant = m_Occupants.Get(occupantIndex);
-			if (priorOccupant)
+			vehicleIndex = 0;
+			while (vehicleIndex < m_Vehicles.Count())
 			{
-				if (priorOccupant.IsUnconscious()) { occupied = true; }
-				if (priorOccupant.GetCommand_Vehicle() || Transport.Cast(priorOccupant.GetParent())) { occupied = true; }
+				if (!IsClear(m_Vehicles.Get(vehicleIndex), priorOccupant))
+				{
+					occupied = true;
+					Remember(m_Vehicles.Get(vehicleIndex), priorOccupant);
+				}
+				vehicleIndex = vehicleIndex + 1;
 			}
 			occupantIndex = occupantIndex + 1;
 		}

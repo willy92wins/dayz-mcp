@@ -143,7 +143,7 @@ SIGNATURES = (
     "void Add(Object root)",
     "bool HasVehicles()",
     "bool HasOccupants()",
-    "protected bool IsClear(Human occupant)",
+    "protected bool IsClear(Transport vehicle, Human occupant)",
     "protected void Remember(Transport vehicle, Human occupant)",
     "protected void CollectPending(int tick)",
     "protected bool QueueNode(IEntity node)",
@@ -243,16 +243,19 @@ class EjectExecutionTest(unittest.TestCase):
         self.assertEqual(passenger.command.requests, 0)
         self.assertFalse(gate.Ready(1))
 
-    def test_unconscious_mid_exit_never_authorizes_deletion(self):
+    def test_unconscious_mid_exit_blocks_while_still_associated(self):
         car = Vehicle()
         occupant = Human(car, 1)
         gate = helper()
         gate.Add(car)
         self.assertTrue(gate.Begin(0))
-        occupant.leave(car)
+        car.crew[1] = None
         occupant.unconscious = True
         self.assertFalse(gate.Ready(2))
         self.assertFalse(gate.Ready(3))
+        occupant.leave(car)
+        self.assertFalse(gate.Ready(4))
+        self.assertTrue(gate.Ready(5))
 
     def test_dead_crew_refuses_but_extracted_corpse_allows_retry_after_cooldown(self):
         shared = {}
@@ -377,6 +380,81 @@ class EjectExecutionTest(unittest.TestCase):
                 self.assertFalse(retry.Ready(12))
                 self.assertTrue(retry.Ready(13))
 
+    def test_transfer_to_other_vehicle_allows_delete_and_retry_after_extra_tick(self):
+        for observe_exit in (False, True):
+            for discard_first in (False, True):
+                with self.subTest(observe_exit=observe_exit, discard_first=discard_first):
+                    shared = {}
+                    car_a, car_b = Vehicle(), Vehicle()
+                    person = Human(car_a, 2)
+                    first = helper(shared=shared)
+                    first.Add(car_a)
+                    self.assertTrue(first.Begin(0))
+                    person.leave(car_a)
+                    if observe_exit:
+                        self.assertFalse(first.Ready(1))
+                    person.parent = car_b
+                    person.command = Command(car_b)
+                    car_b.crew[2] = person
+                    if discard_first:
+                        del first  # timed-out/refused deletion loses its instance
+                    else:
+                        self.assertFalse(first.Ready(1))
+                    retry = helper(shared=shared)
+                    retry.Add(car_a)
+                    self.assertTrue(retry.Begin(1))
+                    self.assertTrue(retry.HasOccupants())  # shared cooldown, not B
+                    self.assertFalse(retry.Ready(1))
+                    self.assertFalse(retry.Ready(1))
+                    self.assertTrue(retry.Ready(2))
+                    if not discard_first:
+                        self.assertTrue(first.Ready(2))
+                    for name in ("s_PendingVehicles", "s_PendingOccupants", "s_ClearTicks"):
+                        self.assertEqual(shared[name], [], name)
+                    later = helper(shared=shared)
+                    later.Add(car_a)
+                    self.assertTrue(later.Begin(2))
+                    self.assertFalse(later.HasOccupants())
+                    self.assertEqual(person.command.requests, 0)
+                    self.assertIs(car_b.crew[2], person)
+
+    def test_transfer_still_blocks_if_other_vehicle_is_protected(self):
+        for association in ("command", "parent", "crew"):
+            with self.subTest(association=association):
+                shared = {}
+                car_a, car_b = Vehicle(), Vehicle()
+                person = Human(car_a, 2)
+                gate = helper(shared=shared)
+                gate.Add(car_a)
+                gate.Add(car_b)
+                self.assertTrue(gate.Begin(0))
+                person.leave(car_a)
+                self.assertFalse(gate.Ready(1))
+                if association == "command":
+                    person.command = Command(car_b)
+                elif association == "parent":
+                    person.parent = car_b
+                else:
+                    car_b.crew[2] = person
+                self.assertFalse(gate.Ready(2))
+                self.assertFalse(gate.Ready(3))
+                retry = None
+                if association != "crew":
+                    retry = helper(shared=shared)
+                    retry.Add(car_a)
+                    retry.Add(car_b)
+                    self.assertTrue(retry.Begin(3))
+                    self.assertTrue(retry.HasOccupants())
+                    self.assertFalse(retry.Ready(3))
+                    self.assertFalse(retry.Ready(4))
+                person.leave(car_b)
+                self.assertFalse(gate.Ready(5))
+                if retry is not None:
+                    self.assertFalse(retry.Ready(5))
+                    self.assertTrue(retry.Ready(6))
+                self.assertTrue(gate.Ready(6))
+                self.assertEqual(shared["s_PendingOccupants"], [])
+
     def test_pending_prune_keeps_vehicle_occupant_pairs_correlated(self):
         shared = {}
         cars = [Vehicle(), Vehicle()]
@@ -489,7 +567,7 @@ class EjectMutationTest(unittest.TestCase):
     def test_behavioral_cases_reject_representative_unsafe_mutants(self):
         source = SOURCE.read_text(encoding="utf-8")
         mutants = (
-            ("first_seat_only", "while (seat < seats)", "while (seat < 1)",
+            ("first_seat_only", "\t\t\twhile (seat < seats)", "\t\t\twhile (seat < 1)",
              "test_every_seat_including_gaps_and_last_seat_gets_one_request"),
             ("skip_transport_match", "if (command.GetTransport() != vehicle) { return false; }", "",
              "test_preflight_refuses_all_before_ejecting_any_if_a_command_is_invalid"),
@@ -497,12 +575,14 @@ class EjectMutationTest(unittest.TestCase):
              "test_preflight_refuses_all_before_ejecting_any_if_a_command_is_invalid"),
             ("same_tick_ready", "return tick > m_ClearTick;", "return tick >= m_ClearTick;",
              "test_empty_vehicle_still_requires_an_extra_tick"),
-            ("skip_pending_command", "priorOccupant.GetCommand_Vehicle() || Transport.Cast(priorOccupant.GetParent())",
-             "Transport.Cast(priorOccupant.GetParent())",
+            ("skip_pending_command", "if (command && command.GetTransport() == vehicle) { return false; }", "",
              "test_empty_seats_do_not_hide_pending_command_or_parent"),
-            ("skip_parent", "priorOccupant.GetCommand_Vehicle() || Transport.Cast(priorOccupant.GetParent())",
-             "priorOccupant.GetCommand_Vehicle()",
+            ("skip_parent", "if (occupant.GetParent() == vehicle) { return false; }", "",
              "test_empty_seats_do_not_hide_pending_command_or_parent"),
+            ("unrelated_command_blocks", "command && command.GetTransport() == vehicle", "command",
+             "test_transfer_to_other_vehicle_allows_delete_and_retry_after_extra_tick"),
+            ("unrelated_parent_blocks", "occupant.GetParent() == vehicle", "Transport.Cast(occupant.GetParent())",
+             "test_transfer_to_other_vehicle_allows_delete_and_retry_after_extra_tick"),
             ("skip_inventory", "if (entity && m_InventoryVisited.Find(entity) < 0)", "if (false)",
              "test_vehicle_inserted_into_root_after_begin_is_not_missed"),
             ("skip_rescan", "if (!Collect()) { m_ClearTick = -1; return false; }", "",
@@ -511,8 +591,8 @@ class EjectMutationTest(unittest.TestCase):
              "test_failed_inventory_read_and_cycles_fail_closed"),
             ("forget_pending_exit", "Remember(vehicle, occupant);", "",
              "test_second_guard_or_retry_keeps_exit_pending_after_crew_slot_clears"),
-            ("forget_late_exit", "occupied = true;\n\t\t\t\t\t\tRemember(vehicle, occupant);",
-             "occupied = true;", "test_late_entrant_is_shared_with_a_second_guard"),
+            ("forget_transferred_exit", "Remember(m_Vehicles.Get(vehicleIndex), priorOccupant);", "",
+             "test_transfer_still_blocks_if_other_vehicle_is_protected"),
             ("same_frame_prune", "else if (tick > clearTick) { completed = true; }",
              "else if (tick >= clearTick) { completed = true; }",
              "test_three_guards_in_the_exit_tick_cannot_bypass_shared_cooldown"),

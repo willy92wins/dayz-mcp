@@ -59,7 +59,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 2 KB
 - `scripts/5_Mission/MCPMessages.c` - 45 KB
-- `scripts/5_Mission/MCPVehicleEject.c` - 9 KB
+- `scripts/5_Mission/MCPVehicleEject.c` - 10 KB
 - `scripts/5_Mission/MissionGameplay.c` - 800 B
 - `scripts/5_Mission/MissionServer.c` - 2 KB
 
