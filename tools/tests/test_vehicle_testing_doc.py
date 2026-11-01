@@ -225,6 +225,29 @@ class VehicleReleaseNotGetOutDocsTest(unittest.TestCase):
             "registered in-session fixture id -- the release does not "
             "eject anybody")
 
+    def test_raw_http_helper_is_not_recommended_for_the_safe_ladder(self) -> None:
+        section = _section(_doc(), "## Standard test ladder")
+        self.assertNotIn(
+            "Steps 2-9 are exactly", section,
+            "the helper still force-deletes after an unconfirmed exit; "
+            "it is not equivalent to the stop-on-refused-exit ladder")
+        self.assertRegex(
+            section,
+            r"Do not use[\s\S]*?g0_abba_gate\.py[\s\S]*?until[\s\S]*?exit",
+            "the ladder must withdraw its helper recommendation until "
+            "the helper stops on an unconfirmed exit")
+
+    def test_site_gate_is_not_recommended_for_client_teardown(self) -> None:
+        section = _section(_doc(), "## Certified canonical site")
+        self.assertNotIn(
+            "Run the gate with:", section,
+            "the site gate delegates cleanup to the same forced-delete helper")
+        self.assertRegex(
+            section,
+            r"Do not run[\s\S]*?g0_site_gate\.py[\s\S]*?until[\s\S]*?exit",
+            "site certification must withdraw its gate recommendation until "
+            "the shared cleanup stops on an unconfirmed exit")
+
 
 if __name__ == "__main__":
     unittest.main()

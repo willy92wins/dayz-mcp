@@ -7022,14 +7022,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_attach.item_object_id, and only that id removes the item. "
             "Spawn with "
             "ECE_NOPERSISTENCY_WORLD so the object is not saved into a later "
-            "run. Deleting a seated transport needs care: vehicle_client_seated "
+            "run. In the live profile (even with admin), or when the serving "
+            "daemon's profile cannot be verified, vehicle_seat_unverified "
+            "(deleted=0) refuses every object_id without querying client telemetry "
+            "or sending the delete. Live forbids the client seat read; server "
+            "in_vehicle=false and absent/stale client polls cannot prove that "
+            "a client-owned seat is empty. Outside live, deleting a seated "
+            "transport needs care: vehicle_client_seated "
             "(deleted=0) refuses the delete before sending it to the server when "
             "client vehicle_telemetry detects a client-owned seat "
             "(vehicle_get_in_client). Telemetry has no server registry object_id, "
             "so this conservatively blocks every object_id while that seat is occupied. "
             "Exit through the client exit flow and confirm seated=false before "
             "retrying, or use vehicle_enter for server-authoritative seating. "
-            "As with player_teleport, an unprobeable client or unreadable telemetry "
+            "Outside live, as with player_teleport, an unprobeable client or "
+            "unreadable telemetry "
             "payload does not establish a seated occupant and does not block; "
             "a telemetry call error propagates without deleting. "
             "For server-visible occupants the bridge requests a dismount from "
@@ -7056,7 +7063,32 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
-            if await _runtime_client_peer_probeable(runtime):
+            try:
+                # ClientRuntime also learns the serving profile from this read.
+                status = await runtime.bridge_status_payload()
+            except Exception:
+                status = None
+                if _is_client_authority(config, runtime):
+                    _forget_serving_live_profile(runtime)
+            if _serving_live_enabled(config, runtime):
+                # Server-only player reads do not establish the client seat
+                # (see the query_player_state caveat). No poll is not no seat.
+                return {
+                    "ok": False,
+                    "error": "vehicle_seat_unverified",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "The live profile, or an unknown serving profile, has "
+                        "no permitted read that verifies the client-owned seat. "
+                        "Server in_vehicle=false and absent/stale client polls "
+                        "do not prove an empty seat. All object_ids are refused "
+                        "without client telemetry or deletion; a permitted "
+                        "seat verification is required before live deletion "
+                        "can be supported."
+                    ),
+                }
+            if _client_peer_probeable(status):
                 telemetry = await runtime.call_bridge(
                     "vehicle_telemetry", {}, "client", _timeout(timeout_s)
                 )
