@@ -30,9 +30,34 @@ no-replica-motion sample this file carries was taken on a client-get-in-only
 ladder like the client one below. Whether the server side follows the
 client-owned car is read per run, with the server/client position comparison
 of the server-side ladder; an accepted enter is not replication evidence.
-The sanctioned scenario teardown is therefore `object_delete` of the fixture with the
-ejection verified via telemetry (`not_seated`; 13/13 clean across two
-sessions), which `finish_site` reports as `OK_FORCED_DELETE`.
+The historical scenario teardown used `object_delete` of the fixture with
+ejection verified via telemetry (`not_seated`; 13/13 clean across those two
+sessions), which `finish_site` reports as `OK_FORCED_DELETE`. Those observations
+do not establish that deleting an occupied vehicle is safe on DayZ 1.30.
+
+Issue #298 records a vanilla 1.30 NULL exception in `CarScript.EngineGetRPM`
+from `CarHud.RefreshVehicleHud` after an occupied vehicle is deleted, followed
+by the client ceasing to poll. The bridge workaround requests a dismount from
+all crew positions, including passengers, before `object_delete` or
+`scene_clear` deletes any vehicle in the deletion hierarchy. It waits for the
+occupants to leave and rechecks on a later server tick before deletion. That
+delay separates the exit and deletion across frames; it does not prove that
+the client has received the exit or refreshed its HUD.
+
+An invalid exit command or an exit that has not completed after 5 s returns
+`vehicle_eject_failed`. The vehicle and its registry id remain for retry;
+`scene_clear` deletes nothing on this refusal. Its raw bridge result records
+survivors in `errors`/`error_ids`; the MCP tool reports the error token, so use
+`scene_entities` to inspect surviving entries. Some occupants may already have left. The `scene_shared`
+check runs before any dismount request. Synchronous inventory cleanup also
+refuses deletion while an exit is pending. `vehicle_release` still only clears
+trace/control and does not eject the driver or passengers.
+
+**Requires a new PBO. Compilation and in-game validation are pending.** The
+offline checks do not verify server/client exit replication or continued
+client polling. On the next authorized game test, record the deployed PBO
+hash, check all occupants are out, and verify that the client HUD and polling
+continue after deletion; an error is a refused cleanup, not a successful exit.
 
 Surface limits that shape site choice:
 
@@ -78,7 +103,7 @@ session lease when all of:
 | CANOPY | The `place_safely` canopy gate at the player point **and** the car point, both before the teleport: `scene_raycast` (`geom`, from y+30 to y-5) must land within 0.05 m of `surface_query` y. A raw `[x, 0, z]` teleport buried the player inside a building on 2026-08-24 (fb-20260824-115220-1bc1); the same gate also rejects water (the ray stops on the surface plane above the seabed) and tree canopies |
 | PRECHECK | `player_teleport` to the surface y lands within 30 m; the corridor band (|dx| <= 25 m, -10..+160 m along +Z) is enumerated by three r=65 spheres at dz 20/85/150, each queried at its local surface y. Fail-closed: a sphere whose surface probe or entity query fails, whose reply is not `ok`, whose `count_total` is missing, or whose truncation (`count_total > rows`) is not proven irrelevant by the farthest returned row (>= 45 m, nearest-first ordering) makes the corridor **unverified**. Zero blocking entities in the band. Passable by measured exception: `BushSoft_*` (a sedan drives through soft bushes) and config-less ground props (`GetType()` empty with engine `classname` `Object` — 83-88 of ~85 in-band rows on the certified runway, at terrain height; everything real carries a config type). Any other entity, `BushHard_*` included, blocks |
 | DRIVE | `delta_2s_xz > 1.0 m` (the product-spec G0 contract) and `delta_5s_xz >= 10 m` at throttle 1.0, with the 20 Hz trace integrity gates green (owner stable, net id stable, sample cadence) |
-| EXIT | `finish_site` ends `"OK"` or `"OK_FORCED_DELETE"`: the scenario tears down verifiably — either the get-out action succeeded, or the fixture delete ejected the player and telemetry confirmed `not_seated`. The get-out action itself is site-independently blocked on this stand (see "The exit reality" above) and does not discriminate sites. A `CLEANUP_DEGRADED` finish aborts the remaining candidates: their evidence would run on contaminated state |
+| EXIT | `finish_site` ends `"OK"` or `"OK_FORCED_DELETE"`: the scenario tears down verifiably — the get-out action or the bridge's eject-before-delete sequence completed and telemetry confirmed `not_seated`; the client must continue polling. The old forced-delete observations do not certify the DayZ 1.30 workaround (see "The exit reality" above). A `vehicle_eject_failed` or `CLEANUP_DEGRADED` finish aborts the remaining candidates: their evidence would run on contaminated state |
 
 A certified row also requires the exact bridge PBO SHA-256 (the gate
 refuses to run without one) and a confirmed session release — an
@@ -146,7 +171,9 @@ broker daemon over raw authenticated HTTP and never launches DayZ itself).
    and `object_delete` of the fixture (`vehicle_release` only aborts the
    trace and clears the drive-control state,
    `MCPClientBridge.c:3151-3157` — it is not a get-out); verify the ejection
-   via telemetry (`not_seated`), then `restore_gameplay`.
+   via telemetry (`not_seated`) and continued client polling, then
+   `restore_gameplay`. A `vehicle_eject_failed` result leaves the fixture
+   registered; stop the ladder and diagnose the refused exit before retrying.
 10. Release the session lease.
 
 A vehicle field arrives only from a verb that fills it. `seated`, `seat`,
@@ -223,9 +250,11 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: `vehicle_release`, then
    `object_delete` of the registered fixture id — the release only clears
-   trace/control (`MCPClientBridge.c:3151-3157`), the delete performs the
-   ejection, verified via telemetry (`not_seated`) — then
-   `restore_gameplay` and the session release.
+   trace/control (`MCPClientBridge.c:3151-3157`), and the bridge must confirm
+   every occupant has left before deleting. Verify via telemetry
+   (`not_seated`) and continued client polling, then `restore_gameplay` and
+   the session release. Stop the ladder on `vehicle_eject_failed`; keep the
+   registered fixture id for a retry after resolving the blocked exit.
 
 ## Session shape
 

@@ -1588,6 +1588,9 @@ class MCPJob
 	// scene_clear: the counts so far and the entries whose delete is read back.
 	ref MCPSceneClear scene_clear;
 	ref array<ref MCPSceneEntry> scene_pending;
+	// #298: server deletion waits for every vehicle occupant, then another tick.
+	ref MCPVehicleEject delete_eject;
+	ref array<Object> delete_targets;
 	// actor_emote: end is the request to end the playing emote; the times are
 	// client GetTickTime seconds of the request and of the start and the end
 	// the job saw, and wait_s the seconds after the request in which it

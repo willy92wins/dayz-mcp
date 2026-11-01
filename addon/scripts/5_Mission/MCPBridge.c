@@ -937,8 +937,6 @@ class MCPBridge : Managed
 		int objectId = command.args.object_id;
 		result.object_id = objectId;
 		result.deleted = 0;
-		MCPBotControl.OnObjectGone(this, objectId);
-		MCPSurvivorDrive.OnObjectGone(this, objectId);
 
 		if (!m_RuntimeObjects || !m_RuntimeObjects.Contains(objectId))
 		{
@@ -947,6 +945,32 @@ class MCPBridge : Managed
 		}
 
 		Object target = m_RuntimeObjects.Get(objectId);
+		MCPVehicleEject eject = new MCPVehicleEject();
+		eject.Add(target);
+		if (!eject.Begin(m_Tick))
+		{
+			result.ok = false;
+			result.error = "vehicle_eject_failed";
+			return true;
+		}
+		if (eject.HasVehicles())
+		{
+			MCPJob job = new MCPJob();
+			job.id = command.id;
+			job.kind = "object_delete";
+			job.args = command.args;
+			job.subject = target;
+			job.delete_eject = eject;
+			job.deadline_s = m_ElapsedS + JOB_TIMEOUT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_Jobs.Insert(job.id, job);
+			return false;
+		}
+
+		MCPBotControl.OnObjectGone(this, objectId);
+		MCPSurvivorDrive.OnObjectGone(this, objectId);
 		m_RuntimeObjects.Remove(objectId);
 		if (target)
 		{
@@ -956,6 +980,52 @@ class MCPBridge : Managed
 
 		result.ok = true;
 		return true;
+	}
+
+	// #298: OnTick processes jobs before new commands (OnTick above), so the
+	// eject guard observes separate simulation ticks, not several callbacks in
+	// one frame. Ready also requires a full extra tick after observing exit.
+	// No CallLater owns an untracked delete: a timeout leaves the object and id.
+	protected bool IsObjectDeleteReady(MCPJob job)
+	{
+		if (m_ElapsedS > job.deadline_s)
+		{
+			job.error = "vehicle_eject_failed";
+			return true;
+		}
+		if (!job.delete_eject.Ready(m_Tick))
+		{
+			return false;
+		}
+		int objectId = job.args.object_id;
+		if (m_RuntimeObjects.Get(objectId) != job.subject)
+		{
+			job.error = "vehicle_eject_failed";
+			return true;
+		}
+		MCPBotControl.OnObjectGone(this, objectId);
+		MCPSurvivorDrive.OnObjectGone(this, objectId);
+		m_RuntimeObjects.Remove(objectId);
+		if (job.subject)
+		{
+			GetGame().ObjectDelete(job.subject);
+			job.phase = 1;
+		}
+		return true;
+	}
+
+	protected void PostObjectDelete(MCPJob job)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.object_id = job.args.object_id;
+		result.deleted = job.phase;
+		result.ok = job.error == "";
+		result.error = job.error;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		PostResult(result);
 	}
 
 	// inventory_move (fb-20261024-212316-17fa). authority=client issues the
@@ -2189,8 +2259,9 @@ class MCPBridge : Managed
 	// that id still names it. A delete reaches past its object: the engine deletes
 	// what the object holds with it (vanilla object.c, IsPendingDeletion: "a parent
 	// is being deleted, since the children will be deleted first", :212-215 in
-	// 1.30, :218-221 in 1.29), and deleting a vehicle ejects its crew
-	// (docs/VEHICLE_TESTING.md, OK_FORCED_DELETE). So before anything is deleted
+	// 1.30, :218-221 in 1.29). #298: a vehicle's crew must leave before deletion;
+	// relying on vanilla forced deletion can break the 1.30 client HUD. Before
+	// anything is deleted
 	// the call is refused whole with scene_shared when a live object of this scene
 	// and a live object of another scene are in one hierarchy, one carrying the
 	// other at any depth (SceneCarrier); the reply names the first pair found. An
@@ -2295,9 +2366,12 @@ class MCPBridge : Managed
 		job = new MCPJob();
 		job.id = command.id;
 		job.kind = "scene_clear";
+		job.args = command.args;
 		job.scene_clear = report;
 		job.scene_pending = new array<ref MCPSceneEntry>();
 		deleteNow = new array<Object>();
+		job.delete_targets = deleteNow;
+		job.delete_eject = new MCPVehicleEject();
 		entries = m_Scenes.Get(command.args.scene_id);
 		if (entries)
 		{
@@ -2311,13 +2385,7 @@ class MCPBridge : Managed
 				}
 				else
 				{
-					if (m_RuntimeObjects.Get(entry.object_id) == entry.obj)
-					{
-						MCPBotControl.OnObjectGone(this, entry.object_id);
-						MCPSurvivorDrive.OnObjectGone(this, entry.object_id);
-						m_RuntimeObjects.Remove(entry.object_id);
-					}
-
+					job.delete_eject.Add(entry.obj);
 					if (SceneHolderIndex(entry.obj, mine) < 0)
 					{
 						deleteNow.Insert(entry.obj);
@@ -2328,13 +2396,6 @@ class MCPBridge : Managed
 
 				index = index + 1;
 			}
-		}
-
-		index = 0;
-		while (index < deleteNow.Count())
-		{
-			GetGame().ObjectDelete(deleteNow.Get(index));
-			index = index + 1;
 		}
 
 		if (job.scene_pending.Count() == 0)
@@ -2348,10 +2409,134 @@ class MCPBridge : Managed
 		job.tick_poll_sent = result.tick_poll_sent;
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
+		if (!job.delete_eject.Begin(m_Tick))
+		{
+			job.error = "vehicle_eject_failed";
+			PostSceneClear(job);
+			return false;
+		}
+		if (!job.delete_eject.HasVehicles())
+		{
+			DeleteSceneObjects(job);
+		}
 		m_Jobs.Insert(job.id, job);
 
 		Log("job queued id=" + job.id + " kind=scene_clear pending=" + job.scene_pending.Count() + " delete=" + deleteNow.Count());
 		return false;
+	}
+
+	// Called only after the all-object eject preflight/observation succeeds.
+	// Registry removal remains after that gate, so refusal can be retried.
+	protected void DeleteSceneObjects(MCPJob job)
+	{
+		int index = 0;
+		MCPSceneEntry entry;
+		while (index < job.scene_pending.Count())
+		{
+			entry = job.scene_pending.Get(index);
+			if (entry.obj && m_RuntimeObjects.Get(entry.object_id) == entry.obj)
+			{
+				MCPBotControl.OnObjectGone(this, entry.object_id);
+				MCPSurvivorDrive.OnObjectGone(this, entry.object_id);
+				m_RuntimeObjects.Remove(entry.object_id);
+			}
+			index = index + 1;
+		}
+		index = 0;
+		while (index < job.delete_targets.Count())
+		{
+			if (job.delete_targets.Get(index))
+			{
+				GetGame().ObjectDelete(job.delete_targets.Get(index));
+			}
+			index = index + 1;
+		}
+		job.phase = 1;
+	}
+
+	// The scene can change while occupants animate out. Recheck the same
+	// cross-scene ownership boundary and rebuild roots before the first delete,
+	// including a held item that became detached during the wait.
+	protected bool RefreshSceneDeleteTargets(MCPJob job)
+	{
+		array<Object> mine = new array<Object>();
+		array<int> mineIds = new array<int>();
+		array<Object> others = new array<Object>();
+		array<int> otherIds = new array<int>();
+		array<string> otherScenes = new array<string>();
+		array<ref MCPSceneEntry> entries;
+		MCPSceneEntry entry;
+		int index = 0;
+		int sceneIndex = 0;
+		int found = -1;
+		string sceneKey;
+		while (index < job.scene_pending.Count())
+		{
+			entry = job.scene_pending.Get(index);
+			if (entry.obj)
+			{
+				mine.Insert(entry.obj);
+				mineIds.Insert(entry.object_id);
+			}
+			index = index + 1;
+		}
+		while (sceneIndex < m_Scenes.Count())
+		{
+			sceneKey = m_Scenes.GetKey(sceneIndex);
+			if (sceneKey != job.args.scene_id)
+			{
+				entries = m_Scenes.GetElement(sceneIndex);
+				index = 0;
+				while (index < entries.Count())
+				{
+					entry = entries.Get(index);
+					if (entry.obj)
+					{
+						others.Insert(entry.obj);
+						otherIds.Insert(entry.object_id);
+						otherScenes.Insert(sceneKey);
+					}
+					index = index + 1;
+				}
+			}
+			sceneIndex = sceneIndex + 1;
+		}
+		index = 0;
+		while (index < others.Count())
+		{
+			found = SceneCarrierIndex(others.Get(index), mine);
+			if (found >= 0)
+			{
+				job.error = "scene_shared";
+				job.scene_clear.carrier_id = mineIds.Get(found);
+				job.scene_clear.carrier_scene_id = job.args.scene_id;
+				job.scene_clear.carried_id = otherIds.Get(index);
+				job.scene_clear.carried_scene_id = otherScenes.Get(index);
+				return false;
+			}
+			index = index + 1;
+		}
+		job.delete_targets.Clear();
+		index = 0;
+		while (index < mine.Count())
+		{
+			found = SceneCarrierIndex(mine.Get(index), others);
+			if (found >= 0)
+			{
+				job.error = "scene_shared";
+				job.scene_clear.carrier_id = otherIds.Get(found);
+				job.scene_clear.carrier_scene_id = otherScenes.Get(found);
+				job.scene_clear.carried_id = mineIds.Get(index);
+				job.scene_clear.carried_scene_id = job.args.scene_id;
+				return false;
+			}
+			if (SceneHolderIndex(mine.Get(index), mine) < 0)
+			{
+				job.delete_targets.Insert(mine.Get(index));
+			}
+			index = index + 1;
+		}
+		return true;
 	}
 
 	// 5a21: what carries obj one level up, or null. An EntityAI's inventory parent
@@ -2402,9 +2587,8 @@ class MCPBridge : Managed
 	// 5a21: the index in holders of the nearest object that holds obj in its
 	// inventory at any depth (EntityAI.GetHierarchyParent, one level at a time),
 	// or -1. The engine deletes what an object holds with it. A vehicle's crew is
-	// not in its inventory, and deleting the vehicle ejects it rather than
-	// deleting it (docs/VEHICLE_TESTING.md, OK_FORCED_DELETE), so a seated object
-	// is not held.
+	// not in its inventory, so a seated object is not held. #298 explicitly
+	// waits for the crew to leave before the vehicle can be deleted.
 	protected int SceneHolderIndex(Object obj, array<Object> holders)
 	{
 		EntityAI entity = EntityAI.Cast(obj);
@@ -2454,6 +2638,23 @@ class MCPBridge : Managed
 	{
 		MCPSceneEntry entry;
 		int index = 0;
+		if (job.phase == 0)
+		{
+			if (m_ElapsedS > job.deadline_s)
+			{
+				job.error = "vehicle_eject_failed";
+				return true;
+			}
+			if (!job.delete_eject.Ready(m_Tick))
+			{
+				return false;
+			}
+			if (!RefreshSceneDeleteTargets(job))
+			{
+				return true;
+			}
+			DeleteSceneObjects(job);
+		}
 
 		while (index < job.scene_pending.Count())
 		{
@@ -2496,7 +2697,8 @@ class MCPBridge : Managed
 		}
 
 		result.id = job.id;
-		result.ok = true;
+		result.ok = job.error == "";
+		result.error = job.error;
 		result.scene_clear = report;
 		result.tick_poll_sent = job.tick_poll_sent;
 		result.tick_poll_callback = job.tick_poll_callback;
@@ -4594,7 +4796,15 @@ class MCPBridge : Managed
 		}
 
 		cleared = new array<EntityAI>();
-		ClearLoadout(target, cleared);
+		if (!ClearLoadout(target, cleared))
+		{
+			result.ok = false;
+			result.error = "vehicle_eject_failed";
+			result.deleted = 0;
+			result.cleanup_complete = false;
+			result.uid = clearedUid;
+			return true;
+		}
 		if (cleared.Count() == 0)
 		{
 			result.ok = true;
@@ -4759,13 +4969,14 @@ class MCPBridge : Managed
 	// with them. Each deleted object is added to cleared first, so the walk
 	// never reads a list it is changing; the engine nulls those references
 	// once an object is gone (the stale read hands_take makes).
-	protected void ClearLoadout(PlayerBase target, array<EntityAI> cleared)
+	protected bool ClearLoadout(PlayerBase target, array<EntityAI> cleared)
 	{
 		GameInventory inventory = target.GetInventory();
 		EntityAI hands = target.GetItemInHands();
 		EntityAI attachment = null;
 		int count = 0;
 		int i = 0;
+		MCPVehicleEject eject = new MCPVehicleEject();
 
 		if (inventory)
 		{
@@ -4785,6 +4996,19 @@ class MCPBridge : Managed
 			cleared.Insert(hands);
 		}
 
+		// Mods can attach a Transport to an inventory entity. This synchronous
+		// cleanup cannot confirm an animated exit: request it, preserve every
+		// item, and let the caller retry after leaving. Never delete in its frame.
+		i = 0;
+		while (i < cleared.Count())
+		{
+			eject.Add(cleared.Get(i));
+			i = i + 1;
+		}
+		if (!eject.Begin(m_Tick) || eject.HasOccupants())
+		{
+			return false;
+		}
 		i = 0;
 		while (i < cleared.Count())
 		{
@@ -4794,6 +5018,22 @@ class MCPBridge : Managed
 			}
 			i = i + 1;
 		}
+		return true;
+	}
+
+	// Failed inventory creates normally produce an unoccupied item. Guard the
+	// exceptional mod-created Transport too, without scheduling a blind delete
+	// after this command has already reported its failure.
+	protected bool DeleteLoadoutRollback(EntityAI item)
+	{
+		MCPVehicleEject eject = new MCPVehicleEject();
+		eject.Add(item);
+		if (!eject.Begin(m_Tick) || eject.HasOccupants())
+		{
+			return false;
+		}
+		GetGame().ObjectDelete(item);
+		return true;
 	}
 
 	// Creates args.loadout_items in order, then reads the target back.
@@ -4891,8 +5131,11 @@ class MCPBridge : Managed
 			}
 			if (target.GetItemInHands() != item)
 			{
-				GetGame().ObjectDelete(item);
 				error = "cannot_attach";
+				if (!DeleteLoadoutRollback(item))
+				{
+					error = "vehicle_eject_failed";
+				}
 				return null;
 			}
 			return item;
@@ -4929,8 +5172,11 @@ class MCPBridge : Managed
 			}
 			if (inventory.FindAttachment(slotId) != item)
 			{
-				GetGame().ObjectDelete(item);
 				error = "cannot_attach";
+				if (!DeleteLoadoutRollback(item))
+				{
+					error = "vehicle_eject_failed";
+				}
 				return null;
 			}
 			return item;
@@ -4954,8 +5200,11 @@ class MCPBridge : Managed
 		}
 		if (!inventory.HasEntityInCargo(item))
 		{
-			GetGame().ObjectDelete(item);
 			error = "no_room";
+			if (!DeleteLoadoutRollback(item))
+			{
+				error = "vehicle_eject_failed";
+			}
 			return null;
 		}
 		return item;
@@ -7027,8 +7276,8 @@ class MCPBridge : Managed
 	// then SetLifetime (entityai.c:3377-3387), make lifetime_s both the entity's
 	// own maximum and what remains of it. Those setters are EntityAI protos: an
 	// object that is not an EntityAI has no economy lifetime to set, so it is
-	// deleted and the command refused with lifetime_unsupported, rather than
-	// answered ok for a lifetime that was never set. Returns true when that
+	// deleted when safe and the command refused with lifetime_unsupported,
+	// rather than answered ok for a lifetime that was never set. Returns true when that
 	// refusal is to be posted now; false leaves the reply to the spawn job.
 	protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)
 	{
@@ -7059,6 +7308,21 @@ class MCPBridge : Managed
 			return false;
 		}
 
+		// A non-EntityAI root can still own a Transport through AddChild.
+		// Like inventory rollback, preserve it if an exit needs another frame;
+		// return its id so a later object_delete can complete the cleanup.
+		MCPVehicleEject eject = new MCPVehicleEject();
+		eject.Add(spawned);
+		if (!eject.Begin(m_Tick) || eject.HasOccupants())
+		{
+			// Keep the retained object discoverable before retiring its spawn job.
+			RegisterSpawnScene(command);
+			m_Jobs.Remove(command.id);
+			result.ok = false;
+			result.error = "vehicle_eject_failed";
+			result.object_id = command.id;
+			return true;
+		}
 		m_Jobs.Remove(command.id);
 		m_RuntimeObjects.Remove(command.id);
 		if (spawned)
@@ -7372,7 +7636,11 @@ class MCPBridge : Managed
 
 	protected bool IsJobReady(MCPJob job)
 	{
-		if (job.kind == "spawn")
+		if (job.kind == "object_delete")
+		{
+			return IsObjectDeleteReady(job);
+		}
+		else if (job.kind == "spawn")
 		{
 			return IsSpawnReady(job);
 		}
@@ -7553,6 +7821,11 @@ class MCPBridge : Managed
 		if (job.kind == "seat")
 		{
 			PostSeatSuccess(job);
+			return;
+		}
+		if (job.kind == "object_delete")
+		{
+			PostObjectDelete(job);
 			return;
 		}
 		if (job.kind == "loadout_clear")
@@ -7757,6 +8030,12 @@ class MCPBridge : Managed
 
 	protected void PostJobTimeout(MCPJob job)
 	{
+		if (job.kind == "object_delete")
+		{
+			job.error = "vehicle_eject_failed";
+			PostObjectDelete(job);
+			return;
+		}
 		// 5a21: at its deadline a scene_clear answers its counts; an object still
 		// there is one of its errors, not a timeout of the whole call.
 		if (job.kind == "scene_clear")
