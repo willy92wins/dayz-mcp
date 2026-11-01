@@ -8,6 +8,7 @@ names the ticket makes mandatory for the client are spelled out.
 """
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -21,15 +22,20 @@ from tests.bridge_client_capabilities_helpers import (
     announced_literals,
     dispatch_census,
 )
+from tests.enforce_subset_helpers import clean
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
+CONSTRUCTOR_SIGNATURE = "void MCPClientBridge()"
 START_POLL_SIGNATURE = "protected void StartPoll()"
 
 # Mandatory members of the client announcement (fb-20260829-023649-8f8c, step 8).
 REQUIRED_CLIENT_CAPS = ("key_press", "player_respawn", "ui_dialog")
 
-ANNOUNCE_LINE = 'request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);'
+CACHE_DECL = "protected string m_PollCapabilities;"
+CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);"
+ANNOUNCE_LINE = 'request = request + "&caps=" + m_PollCapabilities;'
+_CACHE_ASSIGN_RE = re.compile(r"\bm_PollCapabilities\s*=(?!=)")
 
 
 def chunk_at_commas(names: list[str], limit: int = MAX_LITERAL_CHARS) -> list[str]:
@@ -70,13 +76,29 @@ def verify_announcement_matches_dispatcher(source: str) -> None:
 
 
 def verify_poll_wire(source: str) -> None:
-    start_poll = _method_body(source, START_POLL_SIGNATURE)
+    cleaned = clean(source)
+    if cleaned.count(CACHE_DECL) != 1:
+        raise AssertionError("MCPClientBridge must declare m_PollCapabilities once")
+    constructor = _method_body(cleaned, CONSTRUCTOR_SIGNATURE)
+    if constructor.count(CACHE_INIT) != 1:
+        raise AssertionError(f"MCPClientBridge() missing {CACHE_INIT!r}")
+    init_at = constructor.index(CACHE_INIT)
+    if constructor[:init_at].count("{") != constructor[:init_at].count("}"):
+        raise AssertionError("m_PollCapabilities init in MCPClientBridge() must be unconditional")
+    if len(_CACHE_ASSIGN_RE.findall(cleaned)) != 1:
+        raise AssertionError("m_PollCapabilities must not be reassigned after construction")
+    start_poll = _method_body(cleaned, START_POLL_SIGNATURE)
+    if "CLIENT_POLL_CAPS" in start_poll:
+        raise AssertionError("StartPoll must reuse cached m_PollCapabilities")
     for needle in ('"poll?peer=client&key="', '"&ver="', ANNOUNCE_LINE, "m_PollCtx.GET(m_PollCallback, request);"):
         if needle not in start_poll:
             raise AssertionError(f"StartPoll missing {needle!r}")
-    if start_poll.index(ANNOUNCE_LINE) > start_poll.index("m_PollCtx.GET(m_PollCallback, request);"):
+    announce_at = start_poll.index(ANNOUNCE_LINE)
+    if start_poll[:announce_at].count("{") != start_poll[:announce_at].count("}"):
+        raise AssertionError("caps announcement in StartPoll must be unconditional")
+    if announce_at > start_poll.index("m_PollCtx.GET(m_PollCallback, request);"):
         raise AssertionError("caps must be appended before the GET is issued")
-    if start_poll.index('"&ver="') > start_poll.index(ANNOUNCE_LINE):
+    if start_poll.index('"&ver="') > announce_at:
         raise AssertionError("caps travel alongside ver (after it)")
 
 
@@ -204,6 +226,15 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "announce_duplicate": with_caps(sorted(names + [names[0]])),
             "announce_uppercase": with_caps(sorted([names[0].upper()] + names[1:])),
             "announce_dropped_from_poll": source.replace("\t\t" + ANNOUNCE_LINE + "\n", "", 1),
+            "cache_decl_dropped": source.replace("\t" + CACHE_DECL + "\n", "", 1),
+            "cache_init_dropped_from_constructor": source.replace("\t\t" + CACHE_INIT + "\n", "", 1),
+            "cache_init_not_encoded": source.replace(CACHE_INIT, "m_PollCapabilities = CLIENT_POLL_CAPS;", 1),
+            "cache_overwritten_in_poll": source.replace(
+                "\t\t" + ANNOUNCE_LINE, '\t\tm_PollCapabilities = "";\n\t\t' + ANNOUNCE_LINE, 1
+            ),
+            "poll_recomputes_caps_each_time": source.replace(
+                ANNOUNCE_LINE, 'request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);', 1
+            ),
         }
         for label, mutant in mutants.items():
             with self.subTest(mutant=label):

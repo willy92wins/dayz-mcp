@@ -91,6 +91,9 @@ class MCPBridge : Managed
 	protected string m_Key;
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
+	// Pre-encoded once from SERVER_CAPABILITIES and SERVER_ARG_CONTRACT_HASH; key and inst are not cached.
+	protected string m_PollCapabilities;
+	protected string m_PollArgContractHash;
 	protected float m_PollHz;
 	protected float m_Accum;
 	// Seconds since the last unconfigured TryInit. The first attempt does not wait.
@@ -155,6 +158,8 @@ class MCPBridge : Managed
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
+		m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);
+		m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
 		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_Configured = false;
@@ -395,8 +400,8 @@ class MCPBridge : Managed
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
-		request = request + "&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
+		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&ach=" + m_PollArgContractHash;
 		request = request + LoadCounterQuery();
 		if (m_PeerInstance != "")
 		{

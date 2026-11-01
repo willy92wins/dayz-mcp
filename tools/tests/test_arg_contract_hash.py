@@ -21,13 +21,17 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import loopback, server as server_module
 from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import clean, method_body
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 _HASH_DECL = re.compile(
     r'\bconst\s+string\s+SERVER_ARG_CONTRACT_HASH\s*=\s*"([0-9a-f]{16})"\s*;'
 )
-_ACH_WIRE = '"&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH)'
+_ACH_CACHE_DECL = "protected string m_PollArgContractHash;"
+_ACH_CACHE_INIT = "m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);"
+_ACH_CACHE_ASSIGN = re.compile(r"\bm_PollArgContractHash\s*=(?!=)")
+_ACH_WIRE = 'request = request + "&ach=" + m_PollArgContractHash;'
 
 
 class ArgContractHashTest(unittest.TestCase):
@@ -64,10 +68,35 @@ class ArgContractHashTest(unittest.TestCase):
 
     def test_enforce_declares_and_wires_the_same_hash(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        match = _HASH_DECL.search(source)
+        cleaned = clean(source)
+        match = _HASH_DECL.search(cleaned)
         self.assertIsNotNone(match, "SERVER_ARG_CONTRACT_HASH declaration missing")
         self.assertEqual(match.group(1), server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        self.assertIn(_ACH_WIRE, source)
+        self.assertEqual(cleaned.count(_ACH_CACHE_DECL), 1)
+        constructor = method_body(source, "void MCPBridge()")
+        self.assertEqual(constructor.count(_ACH_CACHE_INIT), 1)
+        init_at = constructor.index(_ACH_CACHE_INIT)
+        self.assertEqual(
+            constructor[:init_at].count("{"),
+            constructor[:init_at].count("}"),
+            "m_PollArgContractHash init in MCPBridge() must be unconditional",
+        )
+        self.assertEqual(
+            len(_ACH_CACHE_ASSIGN.findall(cleaned)),
+            1,
+            "m_PollArgContractHash must not be reassigned after construction",
+        )
+        start_poll = method_body(source, "protected void StartPoll()")
+        self.assertNotIn("SERVER_ARG_CONTRACT_HASH", start_poll)
+        self.assertEqual(start_poll.count(_ACH_WIRE), 1)
+        ach_at = start_poll.index(_ACH_WIRE)
+        self.assertEqual(
+            start_poll[:ach_at].count("{"),
+            start_poll[:ach_at].count("}"),
+            "ach= announcement in StartPoll must be unconditional",
+        )
+        self.assertLess(ach_at, start_poll.index('if (m_PeerInstance != "")'))
+        self.assertLess(ach_at, start_poll.index("m_Ctx.GET(cb, request);"))
 
     def test_matching_hash_with_full_census_is_match(self) -> None:
         census = sorted(server_module._BRIDGE_COMMAND_TOOLS["server"])

@@ -485,6 +485,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected string m_Key;
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
+	// Pre-encoded once from CLIENT_POLL_CAPS; key and inst are not cached.
+	protected string m_PollCapabilities;
 	protected float m_PollHz;
 	protected float m_Accum;
 	// Seconds since the last unconfigured TryInit. The first attempt does not wait.
@@ -567,6 +569,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
+		m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);
 		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_PollInFlightS = 0.0;
@@ -896,7 +899,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
-		request = request + "&caps=" + EncodeQueryValue(CLIENT_POLL_CAPS);
+		request = request + "&caps=" + m_PollCapabilities;
 		request = request + LoadCounterQuery();
 		m_PollCtx.GET(m_PollCallback, request);
 	}

@@ -70,6 +70,7 @@ def _bridge_harness(name: str) -> dict:
         m_Jobs=EnforceArray(), m_PollCallback=object(),
         m_Polls=0, m_SincePollS=0.0, m_LastPollIntervalS=0.0,
         m_Key=EnforceString.of("k"), m_PeerInstance=EnforceString.of(""),
+        m_PollCapabilities=EnforceString.of(""), m_PollArgContractHash=EnforceString.of(""),
         m_ResultDropLogged=False, m_Tick=1, m_TickPollCallback=0,
         m_PollInFlight=True, m_Backoff=0.0, GetGame=lambda: game,
         TickCount=lambda prev: clock.ticks - prev,
@@ -339,6 +340,79 @@ class LoadCountersTest(unittest.TestCase):
             self.assertIn('&cc=" + m_Cmds + "&cb=" + m_CmdBytes + "&bms=" + m_BusyMs + "&lcp=" + m_LastCmdsPerPoll', text, name)
             self.assertIn("m_InitAttempts = NextLoadCounter(m_InitAttempts);", text, name)
             self.assertIn("m_Polls = NextLoadCounter(m_Polls);", text, name)
+
+    def test_start_poll_reuses_preencoded_constants_and_keeps_exact_wire_query(self) -> None:
+        for name, caps_const in (("MCPBridge.c", "SERVER_CAPABILITIES"), ("MCPClientBridge.c", "CLIENT_POLL_CAPS")):
+            with self.subTest(bridge=name):
+                source = (_MISSION / name).read_text(encoding="utf-8")
+                ns = _bridge_harness(name)
+                wire_str = ns["_S"]
+                encode_sig = "protected string EncodeQueryValue(string value)"
+                encode_body = re.sub(
+                    r"\b(\w+)\s*/\s*(\w+)",
+                    r"IntDivide(\1, \2)",
+                    method_body(source, encode_sig),
+                )
+                real_encode = translate(encode_sig + "\n{" + encode_body + "}\n", encode_sig, dict(ns))
+                caps_decl = re.search(rf"const string {caps_const} = ([^;]+);", source)
+                self.assertIsNotNone(caps_decl)
+                assert caps_decl is not None
+                caps_raw = "".join(re.findall(r'"([^"\n]*)"', caps_decl[1]))
+                encoded_caps = real_encode(wire_str.of(caps_raw))
+                ns["m_PollCapabilities"] = encoded_caps
+                if name == "MCPBridge.c":
+                    ach_decl = re.search(r'const string SERVER_ARG_CONTRACT_HASH = "([^"]+)";', source)
+                    self.assertIsNotNone(ach_decl)
+                    assert ach_decl is not None
+                    encoded_ach = real_encode(wire_str.of(ach_decl[1]))
+                    ns["m_PollArgContractHash"] = encoded_ach
+                load_wire = b"&ia=1&pc=1&lpims=0&cc=0&cb=0&bms=0&lcp=0"
+                ns["LoadCounterQuery"] = lambda _lw=load_wire: EnforceString(_lw)
+                encode_calls: list[bytes] = []
+                ns["EncodeQueryValue"] = lambda value, _enc=real_encode, _calls=encode_calls: (
+                    _calls.append(value.data) or _enc(value)
+                )
+
+                ns["m_Key"] = EnforceString.of("k1")
+                ns["m_PeerInstance"] = EnforceString.of("")
+                ns["StartPoll"]()
+                self.assertEqual(encode_calls, [])
+                if name == "MCPBridge.c":
+                    expected_no_inst = (
+                        b"poll?key=k1&ver=12~1.30&caps="
+                        + encoded_caps.data
+                        + b"&ach="
+                        + encoded_ach.data
+                        + load_wire
+                    )
+                else:
+                    expected_no_inst = (
+                        b"poll?peer=client&key=k1&ver=12~1.30&caps="
+                        + encoded_caps.data
+                        + load_wire
+                    )
+                self.assertEqual(ns["polls"][-1], expected_no_inst)
+
+                ns["m_Key"] = EnforceString.of("k2")
+                ns["m_PeerInstance"] = wire_str.of("inst/1")
+                ns["StartPoll"]()
+                self.assertEqual(encode_calls, [b"inst/1"])
+                if name == "MCPBridge.c":
+                    expected_with_inst = (
+                        b"poll?key=k2&ver=12~1.30&caps="
+                        + encoded_caps.data
+                        + b"&ach="
+                        + encoded_ach.data
+                        + load_wire
+                        + b"&inst=inst%2F1"
+                    )
+                else:
+                    expected_with_inst = (
+                        b"poll?peer=client&key=k2&ver=12~1.30&inst=inst%2F1&caps="
+                        + encoded_caps.data
+                        + load_wire
+                    )
+                self.assertEqual(ns["polls"][-1], expected_with_inst)
 
     def test_bridge_counters_saturate_at_a_fixed_cap(self) -> None:
         for name in ("MCPBridge.c", "MCPClientBridge.c"):

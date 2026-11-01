@@ -19,9 +19,11 @@ as a literal and checks it against the live source:
   one would only be rejected by the Enforce compiler, which this text parser
   cannot observe. Chunk boundaries fall on commas so every piece is itself a
   readable sub-list;
-* ``StartPoll`` must append ``&caps=`` through ``EncodeQueryValue`` after
+* ``MCPBridge()`` must encode ``SERVER_CAPABILITIES`` once through
+  ``EncodeQueryValue`` into ``m_PollCapabilities`` (never reassigned elsewhere),
+  and ``StartPoll`` must append ``&caps=`` from that cached member after
   ``ver`` and before the optional ``inst`` block, so a peer that has no
-  instance still announces.
+  instance still announces without re-encoding on every poll.
 
 The expected census is never derived from ``loopback.SERVER_COMMANDS``, from
 the app, or from the announcement itself. ``exec_enforce`` is a dispatcher
@@ -42,8 +44,11 @@ from tests._addon_paths import addon_root
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 
 DISPATCH_SIGNATURE = "protected void Dispatch(MCPCommand command)"
+CONSTRUCTOR_SIGNATURE = "void MCPBridge()"
 START_POLL_SIGNATURE = "protected void StartPoll()"
-CAPS_WIRE = '"&caps=" + EncodeQueryValue(SERVER_CAPABILITIES)'
+CAPS_CACHE_DECL = "protected string m_PollCapabilities;"
+CAPS_CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);"
+CAPS_WIRE = '"&caps=" + m_PollCapabilities'
 VER_WIRE = '"&ver=" + GetPollVersion()'
 INSTANCE_GUARD = 'if (m_PeerInstance != "")'
 POLL_GET = "m_Ctx.GET(cb, request);"
@@ -111,6 +116,7 @@ EXPECTED_SERVER_CAPABILITIES = (
 
 _COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
 _CAPS_DECLARATION = re.compile(r"\bconst\s+string\s+SERVER_CAPABILITIES\s*=\s*([^;]*);")
+_CAPS_CACHE_ASSIGN = re.compile(r"\bm_PollCapabilities\s*=(?!=)")
 _STRING_CHUNK = re.compile(r'"([^"\\\n]*)"')
 _BRANCH_HEAD = re.compile(r'(?:if|else\s+if)\s*\(\s*command\.cmd\s*==\s*"([^"]*)"\s*\)')
 _FIRST_BRANCH = re.compile(r'\bif\s*\(\s*command\.cmd\s*==\s*"')
@@ -229,15 +235,30 @@ def _assert_grammar(test: unittest.TestCase, names: list[str]) -> None:
 
 
 def _assert_announced_on_every_poll(test: unittest.TestCase, clean: str) -> None:
+    test.assertEqual(clean.count(CAPS_CACHE_DECL), 1, "m_PollCapabilities must be declared once")
+    constructor = _method_body(clean, CONSTRUCTOR_SIGNATURE)
+    test.assertEqual(
+        constructor.count(CAPS_CACHE_INIT),
+        1,
+        "MCPBridge() must encode SERVER_CAPABILITIES into m_PollCapabilities once",
+    )
+    init_at = constructor.index(CAPS_CACHE_INIT)
+    init_depth = constructor[:init_at].count("{") - constructor[:init_at].count("}")
+    test.assertEqual(init_depth, 0, "m_PollCapabilities init must be unconditional in MCPBridge()")
+    test.assertEqual(
+        len(_CAPS_CACHE_ASSIGN.findall(clean)),
+        1,
+        "m_PollCapabilities must not be reassigned after construction",
+    )
     start_poll = _method_body(clean, START_POLL_SIGNATURE)
-    test.assertEqual(start_poll.count(CAPS_WIRE), 1, "caps must go through EncodeQueryValue exactly once")
+    test.assertNotIn("SERVER_CAPABILITIES", start_poll, "StartPoll must reuse cached m_PollCapabilities")
+    test.assertEqual(start_poll.count(CAPS_WIRE), 1, "caps must append m_PollCapabilities exactly once")
     caps_at = start_poll.index(CAPS_WIRE)
     test.assertLess(start_poll.index(VER_WIRE), caps_at, "caps must follow ver")
     test.assertLess(caps_at, start_poll.index(INSTANCE_GUARD), "caps must precede the optional inst block")
     test.assertLess(caps_at, start_poll.index(POLL_GET), "caps must be appended before the GET")
     depth = start_poll[:caps_at].count("{") - start_poll[:caps_at].count("}")
     test.assertEqual(depth, 0, "caps must be unconditional, not nested in a guard")
-    test.assertNotIn('"&caps=" + SERVER_CAPABILITIES', start_poll)
 
 
 def _assert_contract(test: unittest.TestCase, source: str, expected: tuple[str, ...]) -> list[str]:
@@ -279,13 +300,19 @@ def _known_good_source() -> str:
 	protected const int MAX_PENDING = 32;
 	// caps: one entry per Dispatch() branch, sorted ascending, short literals joined by +.
 	protected const string SERVER_CAPABILITIES = "alpha," + "entities_query," + "zulu";
+	protected string m_PollCapabilities;
+
+	void MCPBridge()
+	{
+		m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);
+	}
 
 	protected void StartPoll()
 	{
 		MCPPollCallback cb = new MCPPollCallback(this);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);
+		request = request + "&caps=" + m_PollCapabilities;
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
@@ -403,7 +430,9 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
     def test_mutants_are_rejected(self) -> None:
         source = _known_good_source()
         caps_line = '\tprotected const string SERVER_CAPABILITIES = "alpha," + "entities_query," + "zulu";\n'
-        caps_wire = "\t\trequest = request + \"&caps=\" + EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_decl = "\tprotected string m_PollCapabilities;\n"
+        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
         entities_branch = (
             '\t\telse if (command.cmd == "entities_query")\n'
             "\t\t{\n"
@@ -417,7 +446,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             '\t\t\tresult.error = "unknown_command";\n'
             "\t\t}\n"
         )
-        for needle in (caps_line, caps_wire, entities_branch, terminal_else):
+        for needle in (caps_line, caps_cache_decl, caps_cache_init, caps_wire, entities_branch, terminal_else):
             self.assertEqual(source.count(needle), 1, needle)
         header_only = source.index('else if (command.cmd == "entities_query")') + len('else if (command.cmd == "entities_query")')
         mutants = {
@@ -436,6 +465,16 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "caps_chunks_juxtaposed_without_plus": _with_initializer(source, '"alpha," "entities_query," "zulu"'),
             "caps_initializer_uses_a_variable": _with_initializer(source, '"alpha," + middle + "zulu"'),
             "caps_initializer_calls_a_function": _with_initializer(source, 'Join("alpha,", "entities_query,zulu")'),
+            "cache_caps_decl_absent": source.replace(caps_cache_decl, ""),
+            "cache_caps_init_absent": source.replace(caps_cache_init, ""),
+            "cache_caps_not_encoded": source.replace(caps_cache_init, "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"),
+            "cache_caps_init_guarded": source.replace(
+                caps_cache_init, "\t\tif (g_Game)\n\t\t{\n\t" + caps_cache_init + "\t\t}\n"
+            ),
+            "cache_caps_overwritten": source.replace(caps_wire, '\t\tm_PollCapabilities = "alpha";\n' + caps_wire),
+            "poll_recomputes_caps_each_time": source.replace(
+                caps_wire, '\t\trequest = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);\n'
+            ),
             "poll_without_caps": source.replace(caps_wire, ""),
             "poll_caps_not_encoded": source.replace(caps_wire, '\t\trequest = request + "&caps=" + SERVER_CAPABILITIES;\n'),
             "poll_caps_inside_instance_guard": source.replace(caps_wire, "").replace(
