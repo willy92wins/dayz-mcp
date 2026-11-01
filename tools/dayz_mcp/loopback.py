@@ -3141,6 +3141,11 @@ class ServerState:
         self._audit_degraded_count = 0
         self._poll_delay_ms = 0
         self._last_poll_at: dict[str, float | None] = {"server": None, "client": None}
+        # Arrival of the latest GET /poll that blocked for this peer. Other
+        # GETs measure the reconnect gap against the later of this and
+        # _last_poll_at. It is not a poll stamp: those are still written
+        # when the GET answers. Empty unless a GET is or was retained.
+        self._poll_hold_arrival: dict[str, float] = {}
         self._poll_versions: dict[str, str | None] = {"server": None, "client": None}
         # Last load counters a poll announced (ia/pc/lpims). None until a poll
         # carries all three; an older PBO leaves them None. The reading belongs
@@ -3702,6 +3707,7 @@ class ServerState:
         for peer in peers:
             self._last_poll_at[peer] = None
             self._bound_last_poll_at[peer] = None
+            self._poll_hold_arrival.pop(peer, None)
 
     def confirm(self, instance: str, record: object) -> None:
         pid = getattr(record, "pid", None)
@@ -6895,22 +6901,27 @@ class ServerState:
 
     def _wait_for_peer_command(
         self, peer: str, instance: str | None, wait_s: float
-    ) -> tuple[float, frozenset[int]] | None:
+    ) -> tuple[float, frozenset[int], float | None] | None:
         """Block until peer has a queued command, the daemon stops, or wait_s ends.
 
-        The lock is not held across the wait. Nothing here counts as a poll:
-        liveness, attribution, caps, the reaper and the load counters stay
-        with the single record_poll that follows. A non-positive, non-finite
-        or bool wait returns before taking the lock. A peer that already has
-        a retained wait does not take another: the slot is non-blocking, and
+        The lock is not held across the wait. Liveness, attribution, caps,
+        the reaper and the load counters stay with the single record_poll
+        that follows. Before the first wait, the arrival is published on
+        _poll_hold_arrival so any other GET of this peer measures its
+        reconnect gap against this arrival while the GET is still retained.
+        That publish is not a poll stamp. A non-positive, non-finite or bool
+        wait returns before taking the lock. A peer that already has a
+        retained wait does not take another: the slot is non-blocking, and
         this call returns so record_poll answers immediately. The slot is
         released when the wait ends, raises, or shutdown wakes it.
 
-        Returns (arrival_at, identities of legacy commands already queued) only
-        when this call blocks. arrival_at is the state clock just before the
-        wait, so the wait itself is not part of the reconnect gap. None when
-        it does not block, including every wait_s <= 0: record_poll then
-        measures as it did with no wait.
+        Returns (arrival_at, identities of legacy commands already queued,
+        presence observed before this arrival was published) only when this
+        call blocks. arrival_at is the state clock just before the wait, so
+        the wait itself is not part of this GET's reconnect gap. The presence
+        is the later of _last_poll_at and any earlier retained arrival, and
+        does not include this GET. None when it does not block, including
+        every wait_s <= 0: record_poll then measures as it did with no wait.
         """
 
         if (
@@ -6936,8 +6947,10 @@ class ServerState:
             if not slot.acquire(blocking=False):
                 return None
         # Set only once we are committed to Condition.wait. Commands queued
-        # after this snapshot arrived during the hold.
-        arrival: tuple[float, frozenset[int]] | None = None
+        # after this snapshot arrived during the hold. Presence is published
+        # here, still under the lock and before the wait, so another GET can
+        # see it in the window before this one answers.
+        arrival: tuple[float, frozenset[int], float | None] | None = None
         try:
             deadline = time.monotonic() + wait_s
             with self._lock:
@@ -6952,13 +6965,19 @@ class ServerState:
                     if remaining <= 0.0:
                         return arrival
                     if arrival is None:
-                        arrival = (
-                            self._now(),
-                            frozenset(
-                                id(command)
-                                for command in self._legacy_queues[peer]
-                            ),
+                        arrival_at = self._now()
+                        present = frozenset(
+                            id(command)
+                            for command in self._legacy_queues[peer]
                         )
+                        baseline = self._last_poll_at.get(peer)
+                        in_flight = self._poll_hold_arrival.get(peer)
+                        if in_flight is not None and (
+                            baseline is None or in_flight > baseline
+                        ):
+                            baseline = in_flight
+                        self._poll_hold_arrival[peer] = arrival_at
+                        arrival = (arrival_at, present, baseline)
                     cv.wait(timeout=remaining)
                     if self._stopping:
                         return arrival
@@ -6988,11 +7007,14 @@ class ServerState:
         # does, exactly once. held is None when this GET did not block
         # (wait_s <= 0, a command already queued, no slot, shutdown): every
         # measurement below then uses `now`, the same reads as a poll with no
-        # wait. When it blocked, held is the state clock and the identities of
-        # legacy commands already queued just before the wait. Gap, TTL, reap
-        # and the pid window use that arrival, so the hold is not silence and
-        # is not age. Reconnect flush may drop only those already-queued
-        # commands. The stamps this poll leaves are still taken when it answers.
+        # wait, plus a retained arrival of this peer when one is published.
+        # When it blocked, held is (arrival clock, identities of legacy
+        # commands already queued, presence observed before that arrival was
+        # published). The reconnect gap uses that arrival and that presence.
+        # Reconnect flush may drop only commands already queued at arrival.
+        # Command TTL and the operation reaper use the clock just before
+        # delivery. The bound pid window stays at arrival. The stamps this
+        # poll leaves are still taken when it answers.
         held = self._wait_for_peer_command(peer, instance, wait_s)
 
         discarded_exec: list[tuple[str, str, int]] = []
@@ -7005,7 +7027,11 @@ class ServerState:
             if self.version_validator is not None
             else None
         )
-        self.reap_expired_commands(self._now() if held is None else held[0])
+        # Absolute deadlines use the clock at delivery. The arrival clock is
+        # earlier than a command enqueued during the hold, so reaping at
+        # arrival would hand out an operation that has already expired.
+        # A poll that did not wait already reaped at this same clock.
+        self.reap_expired_commands(self._now())
         token, token_class = classify_instance_token(instance)
         if source_pid is not None and source_creation_time is None:
             source_creation_time = self._lookup_creation_time(source_pid)
@@ -7014,10 +7040,22 @@ class ServerState:
         with self._lock:
             now = self._now()
             # Arrival when this GET waited; otherwise the same `now` as before.
+            # The gap uses it. TTL below uses `now` either way.
             decision_at = now if held is None else held[0]
             if coordination is not None:
                 self._publish_due_deferred_closes_locked(deferred_quarantine)
             prev_poll = self._last_poll_at.get(peer)
+            if held is None:
+                # No-op when nobody is retained: the gap stays the gap of a
+                # poll that never waits. A retained arrival counts from the
+                # moment that GET arrived, not from when it answers.
+                in_flight = self._poll_hold_arrival.get(peer)
+                if in_flight is not None and (
+                    prev_poll is None or in_flight > prev_poll
+                ):
+                    prev_poll = in_flight
+            else:
+                prev_poll = held[2]
             self._poll_versions[peer] = version
             self._last_poll_at[peer] = now
             bind_label = BINDING_LEGACY
@@ -7027,7 +7065,7 @@ class ServerState:
                 self._bound_queues.values()
             ):
                 self._expire_stale_commands(
-                    stale_queue, decision_at, discarded_exec, finished_operations
+                    stale_queue, now, discarded_exec, finished_operations
                 )
 
             if token_class == "instance_malformed":
@@ -7081,7 +7119,7 @@ class ServerState:
                                 )
                         queue = self._bound_queues.setdefault(token, [])
                         self._expire_stale_commands(
-                            queue, decision_at, discarded_exec, finished_operations
+                            queue, now, discarded_exec, finished_operations
                         )
             else:
                 self._peer_last_class[peer] = BINDING_LEGACY
@@ -7103,7 +7141,7 @@ class ServerState:
                             finished_operations,
                         )
                 self._expire_stale_commands(
-                    queue, decision_at, discarded_exec, finished_operations
+                    queue, now, discarded_exec, finished_operations
                 )
 
             # After the whole binding chain: the census belongs to THIS poll,

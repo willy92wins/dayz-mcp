@@ -1155,6 +1155,212 @@ class PollArrivalHygieneTest(unittest.TestCase):
         self.assertIsNone(state.take_result(new_id))
 
 
+class PollReconnectPresenceTest(unittest.TestCase):
+    """F7. A retained GET is presence from its arrival for every other GET."""
+
+    def _state(self, clock: _Clock) -> loopback.ServerState:
+        return loopback.ServerState("poll-presence-key", time_fn=clock)
+
+    def test_second_get_does_not_flush_the_command_that_woke_the_first(self) -> None:
+        # A gap that is already open before every arrival still drops the
+        # command that was queued in that gap. This GET does not wait.
+        clock = _Clock()
+        state = self._state(clock)
+        state.record_poll("client")
+        _status, old = state.enqueue_command(
+            "camera_get", {}, peer="client", operation_timeout_s=30
+        )
+        old_id = old["id"]
+        clock.advance(loopback.PEER_RECONNECT_GAP_S + 0.5)
+        status, poll = state.record_poll(
+            "client", wait_s=loopback.POLL_LONG_POLL_MAX_S
+        )
+        self.assertEqual(status, 200, poll)
+        self.assertEqual(poll["commands"], [])
+        flushed = state.take_result(old_id)
+        self.assertIsNotNone(flushed)
+        assert flushed is not None
+        self.assertEqual(flushed.get("error"), "peer_reconnect_flush")
+
+        # Sol's race. Last poll 9.5s ago, GET A retained, camera_get 0.6s
+        # later, GET B runs before A reacquires the lock. The command is
+        # delivered to A or to B and is not a peer_reconnect_flush.
+        clock = _Clock()
+        state = self._state(clock)
+        state.record_poll("client")
+        clock.advance(loopback.PEER_RECONNECT_GAP_S - 0.5)
+        box_a: dict = {}
+        box_b: dict = {}
+        cv = state._command_cv["client"]
+        real_release = cv._release_save
+        entered = threading.Event()
+
+        def release_save():
+            saved = real_release()
+            if entered.is_set():
+                return saved
+            entered.set()
+            try:
+                clock.advance(0.6)
+                status_enq, payload = state.enqueue_command(
+                    "camera_get", {}, peer="client", operation_timeout_s=30
+                )
+                box_b["enqueue_status"] = status_enq
+                box_b["enqueue_payload"] = payload
+                box_b["result"] = state.record_poll("client")
+            except BaseException as exc:
+                box_b["error"] = exc
+            return saved
+
+        cv._release_save = release_save
+        self.addCleanup(lambda: setattr(cv, "_release_save", real_release))
+
+        def run_a() -> None:
+            try:
+                # The race is the first release, before A takes the lock
+                # again. 50ms only caps the empty follow-up wait once B
+                # has already answered.
+                box_a["result"] = state.record_poll("client", wait_s=0.05)
+            except BaseException as exc:
+                box_a["error"] = exc
+
+        thread = threading.Thread(target=run_a, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: thread.join(timeout=2.0))
+        self.assertTrue(entered.wait(2.0), "poll did not wait")
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", box_a, box_a.get("error"))
+        self.assertNotIn("error", box_b, box_b.get("error"))
+        self.assertGreater(clock.t - 1000.0, loopback.PEER_RECONNECT_GAP_S)
+        self.assertEqual(box_b.get("enqueue_status"), 200, box_b)
+        status_a, poll_a = box_a["result"]
+        status_b, poll_b = box_b["result"]
+        self.assertEqual(status_a, 200, poll_a)
+        self.assertEqual(status_b, 200, poll_b)
+        command_id = box_b["enqueue_payload"]["id"]
+        delivered = [
+            command["id"]
+            for command in list(poll_a["commands"]) + list(poll_b["commands"])
+        ]
+        stored = state.take_result(command_id)
+        self.assertIn(
+            command_id,
+            delivered,
+            f"command was not delivered: A={poll_a!r} B={poll_b!r} stored={stored!r}",
+        )
+        self.assertEqual(delivered.count(command_id), 1, delivered)
+        self.assertIsNone(stored, stored)
+
+
+class PollDeliveryDeadlineTest(unittest.TestCase):
+    """F8. TTL and operation deadlines are judged when the command is delivered."""
+
+    def _state(self, clock: _Clock) -> loopback.ServerState:
+        return loopback.ServerState("poll-deadline-key", time_fn=clock)
+
+    def _enqueue_during_wait(
+        self,
+        state: loopback.ServerState,
+        clock: _Clock,
+        timeout_s: float,
+        advance: float,
+    ) -> tuple[dict, dict]:
+        box: dict = {}
+        spawned: dict = {}
+        cv = state._command_cv["client"]
+        real_release = cv._release_save
+        entered = threading.Event()
+
+        def release_save():
+            saved = real_release()
+            if entered.is_set():
+                return saved
+            entered.set()
+            status, payload = state.enqueue_command(
+                "camera_get", {}, peer="client", operation_timeout_s=timeout_s
+            )
+            clock.advance(advance)
+            spawned["status"] = status
+            spawned["payload"] = payload
+            return saved
+
+        cv._release_save = release_save
+        self.addCleanup(lambda: setattr(cv, "_release_save", real_release))
+
+        def run() -> None:
+            try:
+                box["result"] = state.record_poll(
+                    "client", wait_s=loopback.POLL_LONG_POLL_MAX_S
+                )
+            except BaseException as exc:
+                box["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: thread.join(timeout=2.0))
+        self.assertTrue(entered.wait(2.0), "poll did not wait")
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", box, box.get("error"))
+        self.assertEqual(spawned.get("status"), 200, spawned)
+        return box, spawned
+
+    def test_waiting_get_does_not_deliver_an_already_expired_command(self) -> None:
+        # A poll that does not wait already drops a deadline that has passed.
+        clock = _Clock()
+        state = self._state(clock)
+        _status, payload = state.enqueue_command(
+            "camera_get", {}, peer="client", operation_timeout_s=0.05
+        )
+        clock.advance(0.12)
+        status, poll = state.record_poll("client")
+        self.assertEqual(status, 200, poll)
+        self.assertEqual(poll["commands"], [])
+        self.assertIsNone(state.take_result(payload["id"]))
+        self.assertNotIn(payload["id"], state._broker_rows)
+
+        # The same budget, still inside it when the waiting GET delivers.
+        clock = _Clock()
+        state = self._state(clock)
+        box, spawned = self._enqueue_during_wait(state, clock, 30, 0.12)
+        status, poll = box["result"]
+        self.assertEqual(status, 200, poll)
+        command_id = spawned["payload"]["id"]
+        self.assertEqual([command["id"] for command in poll["commands"]], [command_id])
+        self.assertIsNone(state.take_result(command_id))
+
+        # 50ms budget, clock 120ms later, while the GET was retained.
+        clock = _Clock()
+        state = self._state(clock)
+        box, spawned = self._enqueue_during_wait(state, clock, 0.05, 0.12)
+        status, poll = box["result"]
+        self.assertEqual(status, 200, poll)
+        command_id = spawned["payload"]["id"]
+        self.assertEqual(
+            [command["id"] for command in poll["commands"]],
+            [],
+            poll,
+        )
+        self.assertNotIn(command_id, state._broker_rows)
+        self.assertIsNone(state.take_result(command_id))
+
+        # TTL uses that same delivery clock, not the arrival of the GET.
+        clock = _Clock()
+        state = self._state(clock)
+        box, spawned = self._enqueue_during_wait(
+            state, clock, 0.0, loopback.COMMAND_TTL_S + 1.0
+        )
+        status, poll = box["result"]
+        self.assertEqual(status, 200, poll)
+        self.assertEqual(poll["commands"], [])
+        command_id = spawned["payload"]["id"]
+        stored = state.take_result(command_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.get("error"), "stale_discarded")
+
+
 def _load_poll_bench():
     path = Path(__file__).resolve().parents[1] / "checks" / "poll_long_poll_bench.py"
     spec = importlib.util.spec_from_file_location("poll_long_poll_bench_under_test", path)
