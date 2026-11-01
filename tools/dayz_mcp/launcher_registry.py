@@ -418,15 +418,12 @@ def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
     wrapper): a free lock reads and caches the canonical registry as
     `open_approved_launcher` does. A busy lock
     (`launcher_registry_busy`) falls back to the last registry read
-    with success in this process, verified against the current
-    canonical registry (P3d): registry updates replace that file
-    atomically, so it is re-read without the lock and only what it
-    still approves is opened, without holding the lock; a launcher
-    revoked since the cache was taken is not opened. With no cache,
-    or when the current registry cannot be read to verify the cache,
-    the busy error propagates (fail-closed). Every other error
-    propagates too. An acquired lock is always released when opening
-    fails, whatever the exception.
+    with success in this process, opened from the cached entries
+    without holding the lock; with no cache the busy error propagates.
+    Known limit: a launcher revoked after the cache was taken stays in
+    this process's cache until restart. Every other error propagates
+    too. An acquired lock is always released when opening fails,
+    whatever the exception.
     """
     from dayz_mcp.registry_lock import acquire_registry_lock
 
@@ -439,12 +436,7 @@ def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
         cached = _cached_approved_registry()
         if cached is None:
             raise
-        try:
-            current = _read_canonical_registry()
-        except ValueError:
-            raise RuntimeError("launcher_registry_busy") from error
-        _cache_approved_registry(current)
-        return _open_from_approved(current, launcher_id)
+        return _open_from_approved(cached, launcher_id)
     try:
         approved = _read_canonical_registry()
         _cache_approved_registry(approved)
