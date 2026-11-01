@@ -551,8 +551,8 @@ def _enrich_active_run_result(
 # taken while the call built, or while it waited for the lease.
 BOX_TAKEN_DURING_BUILD = "box_taken_during_build"
 BOX_TAKEN_BEFORE_LAUNCH = "box_taken_before_launch"
-# What dayz_test_run changes to launch again without rebuilding: build or
-# clean starts a build, and pack_only needs one.
+# Retry with build disabled and its modifiers reset. clean never starts a
+# build on its own; pack_only requires build=true.
 BOX_TAKEN_NO_REBUILD = {"build": False, "clean": False, "pack_only": False}
 _BOX_TAKEN_HINT = {
     BOX_TAKEN_DURING_BUILD: (

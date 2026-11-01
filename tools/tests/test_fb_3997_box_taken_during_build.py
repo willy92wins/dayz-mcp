@@ -911,6 +911,20 @@ class BoxTakenDuringBuildTest(unittest.IsolatedAsyncioTestCase):
             {"tool": "dayz_test_run", "same_args": True, "on_busy": "queue"},
         )
 
+    async def test_clean_without_build_reports_box_taken_before_launch(self) -> None:
+        async def execute(attempt: int) -> dict[str, object]:
+            self._take_box()
+            return _refused()
+
+        payload = await self._call(execute, build=False, clean=True)
+
+        self.assertEqual(payload["reason"], "box_taken_before_launch")
+        self.assertNotIn("build=false", payload["hint"])
+        self.assertEqual(
+            payload["queue_offer"]["retry"],
+            {"tool": "dayz_test_run", "same_args": True, "on_busy": "queue"},
+        )
+
     async def test_a_box_already_claimed_when_the_call_starts_keeps_its_answer(
         self,
     ) -> None:
