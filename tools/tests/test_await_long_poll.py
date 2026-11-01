@@ -851,6 +851,130 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
         finally:
             release()
 
+    @slow_test
+    async def test_stale_wait_ms_on_recovered_retry_stays_timeout_waiting(
+        self,
+    ) -> None:
+        # Sol r3 F-06: budget 1.5s, the first /await fails before any byte,
+        # recovery takes 1.1s, accreditation 200ms. On 7d4cc4e the retry
+        # resends the original wait_ms (about 497) with about 397ms left
+        # before accreditation, so the socket dies as daemon_response_ambiguous
+        # and call_bridge skips the tool_timeout cleanup.
+        from dayz_mcp import accredited_daemon_transport as transport
+        from dayz_mcp.session_coordination import ClientIdentity
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        _host, port = daemon.httpd.server_address
+        seen: list[dict[str, object]] = []
+        cleanups: list[tuple[object, object]] = []
+        await_attempts = {"n": 0}
+        recoveries = {"n": 0}
+
+        def ensure_daemon(deadline=None) -> bool:
+            recoveries["n"] += 1
+            if recoveries["n"] == 1:
+                time.sleep(1.1)
+            if deadline is not None and time.monotonic() >= float(deadline):
+                return False
+            return True
+
+        def slow_verify(*_args, **_kwargs) -> bool:
+            time.sleep(0.2)
+            return True
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            del method, body
+            copied = dict(query or {})
+            if path == "/enqueue":
+                seen.append({"path": path, "query": copied, "http": False})
+                return 200, b'{"id": 7}'
+            if path == "/abandon":
+                seen.append({"path": path, "query": copied, "http": False})
+                return 200, b'{"status":"abandoned"}'
+            if path != "/await":
+                seen.append({"path": path, "query": copied, "http": False})
+                return 200, b"{}"
+            await_attempts["n"] += 1
+            if await_attempts["n"] == 1:
+                seen.append({"path": path, "query": copied, "http": False})
+                raise transport.AccreditedTransportError(
+                    "daemon_transport_failure",
+                    request_stage="pre_request",
+                    http_bytes_sent=0,
+                )
+            seen.append({"path": path, "query": copied, "http": True})
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method="GET",
+                path=path,
+                query=copied,
+                body=None,
+                headers=dict(headers or {}),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._control = SimpleNamespace(
+            active_lease_token=None, active_ticket=None
+        )
+        runtime.identity = ClientIdentity.from_payload(_HOLDER["identity"])
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = ensure_daemon
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        async def no_status(*_args, **_kwargs):
+            return None
+
+        runtime._liveness_message = liveness
+        runtime.bridge_status_payload = no_status
+        real_cleanup = server._shielded_broker_cleanup
+
+        async def spy_cleanup(bound, command_id, reason, budget_deadline=None):
+            cleanups.append((command_id, reason))
+            return await real_cleanup(
+                bound, command_id, reason, budget_deadline
+            )
+
+        with mock.patch.object(server, "_shielded_broker_cleanup", spy_cleanup):
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", slow_verify
+            ):
+                with self.assertRaises(server.ToolError) as caught:
+                    await runtime.call_bridge("camera_get", {}, "client", 1.5)
+        message = str(caught.exception)
+        detail = (message, seen, cleanups, recoveries["n"])
+        self.assertTrue(message.startswith("timeout waiting"), detail)
+        self.assertNotIn("daemon_response_ambiguous", message)
+        sent = [item for item in seen if item["http"]]
+        self.assertTrue(sent, detail)
+        self.assertTrue(
+            all("wait_ms" not in item["query"] for item in sent), detail
+        )
+        self.assertEqual(cleanups, [(7, "tool_timeout")], detail)
+        self.assertTrue(any(item["path"] == "/abandon" for item in seen), detail)
+
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
     def _runtime(self, state: loopback.ServerState):

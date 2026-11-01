@@ -2796,8 +2796,26 @@ class ClientRuntime:
                     raise _CallBudgetExpired() from None
                 raise ToolError(self._daemon_missing_error()) from None
             try:
+                # wait_ms was chosen before this recovery. The sealed transport
+                # resends that query and only shortens the socket, so a slow
+                # _ensure_daemon makes the daemon outwait the socket and the
+                # call surfaces daemon_response_ambiguous, skipping the
+                # tool_timeout cleanup. Drop wait_ms on this /await retry: it
+                # is the immediate poll, and the caller's loop chooses a fresh
+                # wait_ms from the deadline it still has.
+                retry_query = query
+                if (
+                    path == "/await"
+                    and isinstance(query, dict)
+                    and "wait_ms" in query
+                ):
+                    retry_query = {
+                        key: value
+                        for key, value in query.items()
+                        if key != "wait_ms"
+                    }
                 return self._request_once(
-                    method, path, payload, query, remaining_timeout()
+                    method, path, payload, retry_query, remaining_timeout()
                 )
             except daemon_credential.CredentialRefreshError as retry_error:
                 raise ToolError(
