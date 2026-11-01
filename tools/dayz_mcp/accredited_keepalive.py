@@ -205,22 +205,75 @@ def _candidate_unusable(
     return _socket_already_readable(sock)
 
 
+def _response_connection_tokens(headers: object) -> set[str] | None:
+    """Union of every Connection token. None if the headers cannot be read.
+
+    Tokens are comma-separated and compared without regard to case.
+    A message without get_all stores one value; HTTPMessage stores them all.
+    """
+    try:
+        if hasattr(headers, "get_all"):
+            values = headers.get_all("Connection")  # type: ignore[attr-defined]
+            if values is None:
+                values = []
+        else:
+            raw = headers.get("Connection", "")  # type: ignore[attr-defined]
+            values = [] if raw is None else [raw]
+    except Exception:
+        return None
+    tokens: set[str] = set()
+    for value in values:
+        text = value if isinstance(value, str) else str(value)
+        for part in text.split(","):
+            token = part.strip().lower()
+            if token:
+                tokens.add(token)
+    return tokens
+
+
+def _response_framing_allows_reuse(headers: object) -> bool:
+    """True only for one non-negative Content-Length and no Transfer-Encoding.
+
+    Messages without get_all cannot tell a missing field from a default
+    and are not on-wire responses. The production parser has get_all, and
+    a present Transfer-Encoding counts even when its value is blank.
+    """
+    if not hasattr(headers, "get_all"):
+        return True
+    try:
+        transfer = headers.get_all("Transfer-Encoding")  # type: ignore[attr-defined]
+        lengths = headers.get_all("Content-Length")  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    if transfer is not None and len(transfer) > 0:
+        return False
+    if lengths is None or len(lengths) != 1:
+        return False
+    try:
+        length = int(str(lengths[0]).strip())
+    except (TypeError, ValueError):
+        return False
+    return length >= 0
+
+
 def _response_is_reusable(response: object) -> bool:
-    """True only for an explicit keep-alive response. Anything else closes.
+    """True only for an explicit keep-alive response with one framed body.
 
     A missing attribute is not reusable: the caller drops the socket.
+    Connection is every instance; any close token wins. Keep-alive counts
+    only when it was asked for and close was not.
     """
     try:
         will_close = response.will_close  # type: ignore[attr-defined]
-        raw = response.headers.get("connection", "")  # type: ignore[attr-defined]
+        headers = response.headers  # type: ignore[attr-defined]
     except Exception:
         return False
     if will_close is not False:
         return False
-    if not isinstance(raw, str):
-        raw = str(raw)
-    tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
-    return "keep-alive" in tokens and "close" not in tokens
+    tokens = _response_connection_tokens(headers)
+    if tokens is None or "keep-alive" not in tokens or "close" in tokens:
+        return False
+    return _response_framing_allows_reuse(headers)
 
 
 def _open_accredited(

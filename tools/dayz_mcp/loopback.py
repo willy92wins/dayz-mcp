@@ -8424,14 +8424,18 @@ class Handler(BaseHTTPRequestHandler):
         # it (tests call do_POST directly) has nothing to decide from.
         if getattr(self, "request_version", "") != "HTTP/1.1":
             return
+        # Every Connection instance. close on any of them wins, and a
+        # blank value is not a request to stay open. Unreadable headers
+        # do not arm keep-alive.
         try:
-            raw = self.headers.get("Connection", "")
+            tokens = self._connection_tokens(self.headers)
         except Exception:
             return
-        if not isinstance(raw, str):
-            return
-        tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
-        if "keep-alive" in tokens and "close" not in tokens:
+        if (
+            tokens is not None
+            and "keep-alive" in tokens
+            and "close" not in tokens
+        ):
             self._keepalive_ok = True
 
     def _server_stopping(self) -> bool:
@@ -8491,12 +8495,14 @@ class Handler(BaseHTTPRequestHandler):
     def _unambiguous_body_length(self) -> int | None:
         """One declared body length, or None when the framing cannot be kept.
 
-        None covers Transfer-Encoding (this server does not read chunked
-        bodies), more than one Content-Length, and a length that is not a
+        None covers a present Transfer-Encoding (this server does not read
+        chunked bodies; an empty or whitespace-only value is still the
+        field), more than one Content-Length, and a length that is not a
         single non-negative integer. Two Content-Length fields close the
         connection even when the numbers match: RFC 9112 requires rejecting
         conflicting values, and identical repeats are still not one length
-        (recipients disagree on which field wins). 0 is an empty body.
+        (recipients disagree on which field wins). A stored Content-Length
+        whose value is empty is present, not absent. 0 is an empty body.
         """
         try:
             headers = self.headers
@@ -8517,27 +8523,46 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return length
 
-    def _transfer_encoding_present(self, headers: object) -> bool:
-        if hasattr(headers, "get_all"):
-            values = headers.get_all("Transfer-Encoding")
-            if not values:
-                return False
-            return any(str(value).strip() for value in values)
-        raw = headers.get("Transfer-Encoding", "")
-        return bool(str(raw).strip()) if raw is not None else False
+    def _connection_tokens(self, headers: object) -> set[str] | None:
+        """Union of every Connection token. None if a value cannot be read.
 
-    def _content_length_values(self, headers: object) -> list[object] | None:
+        Tokens are comma-separated and compared without regard to case.
+        A non-string value fails closed so the socket is not kept.
+        """
+        try:
+            values = self._header_instances(headers, "Connection")
+        except Exception:
+            return None
+        tokens: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                return None
+            for part in value.split(","):
+                token = part.strip().lower()
+                if token:
+                    tokens.add(token)
+        return tokens
+
+    def _header_instances(self, headers: object, name: str) -> list[object]:
+        """Every stored value of one field. Empty when the field is absent.
+
+        A blank value is still an instance. Presence is the length of this
+        list, not whether any value has text, and not the first value.
+        """
         if hasattr(headers, "get_all"):
-            values = headers.get_all("Content-Length")
+            values = headers.get_all(name)
             if values is None:
                 return []
             return list(values)
-        if "Content-Length" not in headers:
+        if name not in headers:
             return []
-        raw = headers.get("Content-Length")
-        if raw is None:
-            return []
-        return [raw]
+        return [headers.get(name)]
+
+    def _transfer_encoding_present(self, headers: object) -> bool:
+        return len(self._header_instances(headers, "Transfer-Encoding")) > 0
+
+    def _content_length_values(self, headers: object) -> list[object] | None:
+        return self._header_instances(headers, "Content-Length")
 
     def _note_body_if_absent(self) -> None:
         """An unambiguous length of 0 is already fully consumed.
@@ -8697,7 +8722,8 @@ class Handler(BaseHTTPRequestHandler):
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         # One decision for every JSON reply. Keep-alive needs the flag,
         # no forced close, and a single unambiguous length. Early 403/404,
-        # chunked bodies and repeated Content-Length values close.
+        # a present Transfer-Encoding (even blank) and a repeated
+        # Content-Length close.
         try:
             framing_ok = self._unambiguous_body_length() is not None
         except Exception:

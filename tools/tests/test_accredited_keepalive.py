@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import json
 import socket
 import tempfile
@@ -91,6 +92,26 @@ class _Response:
 
     def read(self, size: int) -> bytes:
         return self._body
+
+
+class _BytesSocket:
+    """Socket whose makefile is the raw HTTP response bytes."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def makefile(self, mode: str = "rb", buffering: int = -1, **_kwargs: object):
+        return io.BytesIO(self._payload)
+
+    def close(self) -> None:
+        return None
+
+
+def _parsed_response(raw: bytes) -> http.client.HTTPResponse:
+    response = http.client.HTTPResponse(_BytesSocket(raw))
+    response.begin()
+    response.read()
+    return response
 
 
 class _Socket:
@@ -625,6 +646,64 @@ class KeepaliveTransportTests(unittest.TestCase):
         self.assertEqual(len(live), 2)
         self.assertEqual(self.walks, 6)
 
+    def test_response_close_after_keep_alive_is_not_reusable(self) -> None:
+        """F9: a later Connection: close is part of the response, not ignored."""
+        cases = (
+            (
+                "keep_alive_then_close",
+                b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                b"Connection: keep-alive\r\nConnection: close\r\n\r\n{}",
+                False,
+            ),
+            (
+                "close_then_keep_alive",
+                b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                b"Connection: close\r\nConnection: keep-alive\r\n\r\n{}",
+                False,
+            ),
+            (
+                "explicit_keep_alive",
+                b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                b"Connection: keep-alive\r\n\r\n{}",
+                True,
+            ),
+        )
+        for name, raw, reusable in cases:
+            with self.subTest(connection=name):
+                response = _parsed_response(raw)
+                if name == "keep_alive_then_close":
+                    # http.client itself only consults the first Connection.
+                    self.assertIs(response.will_close, False)
+                self.assertIs(
+                    accredited_keepalive._response_is_reusable(response),
+                    reusable,
+                )
+
+    def test_response_ambiguous_framing_is_not_reusable(self) -> None:
+        """A present Transfer-Encoding or a repeated Content-Length is not one length."""
+        cases = (
+            (
+                "empty_transfer_encoding",
+                b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                b"Transfer-Encoding:\r\nConnection: keep-alive\r\n\r\n{}",
+            ),
+            (
+                "whitespace_transfer_encoding",
+                b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                b"Transfer-Encoding: \t\r\nConnection: keep-alive\r\n\r\n{}",
+            ),
+            (
+                "repeated_content_length",
+                b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                b"Content-Length: 2\r\nConnection: keep-alive\r\n\r\n{}",
+            ),
+        )
+        for name, raw in cases:
+            with self.subTest(framing=name):
+                response = _parsed_response(raw)
+                self.assertIs(response.will_close, False)
+                self.assertFalse(accredited_keepalive._response_is_reusable(response))
+
 
 def _read_http(sock: socket.socket, buffered: bytes = b"") -> tuple[bytes, dict[str, str], bytes, bytes]:
     data = buffered
@@ -1105,6 +1184,81 @@ class DaemonKeepaliveTests(unittest.TestCase):
         for name, payload in cases:
             with self.subTest(framing=name):
                 self._assert_payload_does_not_desync(payload)
+
+    def test_blank_transfer_encoding_does_not_desync_keepalive(self) -> None:
+        """F8: Transfer-Encoding with no coding is still present and must close."""
+        cases = (
+            ("empty", ["Transfer-Encoding:"]),
+            ("whitespace", ["Transfer-Encoding: \t"]),
+            ("repeated_blank", ["Transfer-Encoding:", "Transfer-Encoding: \t"]),
+        )
+        for name, extra in cases:
+            with self.subTest(framing=name):
+                sock = socket.create_connection((self.host, self.port), timeout=2.0)
+                try:
+                    sock.settimeout(2.0)
+                    sock.sendall(
+                        self._request_with_headers("POST", "/enqueue", extra, b"{}")
+                    )
+                    status, headers, body, rest = _read_http(sock)
+                    self.assertEqual(status.split()[1], b"400", status)
+                    connection = headers.get("connection", "").lower()
+                    stayed_open = (
+                        "keep-alive" in connection and "close" not in connection
+                    )
+                    if stayed_open:
+                        sock.sendall(
+                            self._raw(
+                                "GET",
+                                "/status",
+                                protocol="HTTP/1.1",
+                                connection="keep-alive",
+                            )
+                        )
+                        status2, _headers2, body2, _rest = _read_http(sock, rest)
+                        self.assertTrue(status2.startswith(b"HTTP/1.0 200"), status2)
+                        self.assertIsInstance(json.loads(body2.decode("utf-8")), dict)
+                        self.fail("blank Transfer-Encoding kept the connection")
+                    self.assertEqual(
+                        json.loads(body.decode("utf-8")),
+                        {"error": "bad_content_length"},
+                    )
+                    self.assertNotIn("keep-alive", connection)
+                    try:
+                        extra_byte = sock.recv(1)
+                    except TimeoutError:
+                        self.fail("server left the connection open")
+                    self.assertEqual(extra_byte, b"")
+                finally:
+                    sock.close()
+
+    def test_connection_close_after_keep_alive_closes(self) -> None:
+        """F9: Connection: close on any instance makes the daemon close."""
+        target = "/status?" + urllib.parse.urlencode({"key": self.key})
+        cases = {
+            "keep_alive_then_close": (
+                f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Connection: keep-alive\r\nConnection: close\r\n\r\n"
+            ),
+            "close_then_keep_alive": (
+                f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Connection: close\r\nConnection: keep-alive\r\n\r\n"
+            ),
+            "mixed_case": (
+                f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Connection: Keep-Alive\r\nConnection: Close\r\n\r\n"
+            ),
+            "close_in_the_same_field": (
+                f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                "Connection: keep-alive, close\r\n\r\n"
+            ),
+        }
+        for name, payload in cases.items():
+            with self.subTest(connection=name):
+                status, headers, body = self._exchange(payload.encode("ascii"))
+                self.assertTrue(status.startswith(b"HTTP/1.0 200"), status)
+                self.assertNotIn("keep-alive", headers.get("connection", "").lower())
+                self.assertIsInstance(json.loads(body.decode("utf-8")), dict)
 
     def _request_with_headers(
         self,
