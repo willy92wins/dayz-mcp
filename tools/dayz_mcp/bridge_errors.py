@@ -582,6 +582,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     actor_emote is the ninth: emote_rejected, no_emote_playing and
     emote_timed_out carry observed=emote_state= (rejected or timed_out).
 
+    world_spawn's vehicle_eject_failed carries the retained object_id so an
+    MCP caller can retry cleanup after its unsupported-lifetime rollback.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -594,6 +597,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     it would replay caller input (possibly sensitive, unbounded) into an
     error message.
     """
+    if cmd == "world_spawn" and str(result.get("error") or "") == "vehicle_eject_failed":
+        object_id = result.get("object_id")
+        if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
+            return f"object_id={object_id}"
     if cmd == "vehicle_prepare_fixture" and str(result.get("error") or "") == "fixture_not_ready":
         return _fixture_not_ready_detail(result)
     if cmd == "vehicle_door" and str(result.get("error") or "") == "door_missing":
@@ -653,7 +660,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # scene_clear/scene_shared, which carries the pair that blocked it,
     # object_set_health/health_not_applied, which carries observed= with its
     # after read-back,
-    # and actor_emote, whose refusals carry observed=emote_state=.
+    # actor_emote, whose refusals carry observed=emote_state=,
+    # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
     if code in {"binding_retired", "run_not_owned"}:

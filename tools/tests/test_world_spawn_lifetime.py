@@ -191,8 +191,10 @@ class SpawnLifetimeEnforceContractTest(unittest.TestCase):
                 self.assertIn(statement, refusal)
         self.assertTrue(refusal.rstrip().endswith("return true;"))
         self.assertEqual(_if_block(self.apply, "spawned").strip(), "GetGame().ObjectDelete(spawned);")
-        # The deleted object is not handed back: object_id stays 0 on the refusal.
-        self.assertNotIn("object_id", self.apply)
+        # Only a refused unsafe rollback returns the preserved object's id.
+        blocked = _if_block(self.apply, "!eject.Begin(m_Tick) || eject.HasOccupants()")
+        self.assertIn("result.object_id = command.id;", blocked)
+        self.assertNotIn("object_id", self.apply.replace(blocked, ""))
 
     def test_the_reply_reads_the_entity_lifetime_when_flagged(self) -> None:
         post = _method_body(self.bridge, "protected void PostJobSuccess(MCPJob job)")
