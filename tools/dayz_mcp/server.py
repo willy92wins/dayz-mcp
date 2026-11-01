@@ -2847,6 +2847,16 @@ class ClientRuntime:
                 raise ToolError("daemon_unavailable")
             return remaining
 
+        def raise_ambiguous() -> None:
+            # The sealed transport turns a socket that dies after the request
+            # into an ambiguous failure. Once this /await's own deadline is
+            # already spent, that failure is the caller's timeout and the
+            # tool_timeout cleanup must run. A real transport error while
+            # budget remains stays ambiguous.
+            if path == "/await" and call_deadline - self._time_fn() <= 0.0:
+                raise _CallBudgetExpired()
+            raise ToolError("daemon_response_ambiguous")
+
         try:
             return self._request_once(
                 method, path, payload, query, remaining_timeout()
@@ -2861,7 +2871,7 @@ class ClientRuntime:
                 and error.http_bytes_sent == 0
             )
             if not retryable:
-                raise ToolError("daemon_response_ambiguous") from None
+                raise_ambiguous()
             try:
                 daemon_ready = self._ensure_daemon(call_deadline)
             except (ConnectionError, OSError):
@@ -2894,7 +2904,7 @@ class ClientRuntime:
                     and retry_error.http_bytes_sent == 0
                 )
                 if not retry_safe:
-                    raise ToolError("daemon_response_ambiguous") from None
+                    raise_ambiguous()
                 if path == "/await":
                     raise _CallBudgetExpired() from None
                 raise ToolError("daemon_unavailable") from None
@@ -3045,8 +3055,11 @@ class ClientRuntime:
 
             # Take the slot before submit. The private pool is the same size,
             # so a taken slot has a free thread and the worker starts at once.
-            # No slot, or no room for the margin: immediate poll on the shared
-            # executor, which stays free of long-polls.
+            # The slot stays with that work until the future finishes: it
+            # returns, it raises, or it is cancelled before it starts.
+            # Cancelling this coroutine does not free it while the thread is
+            # still in HTTP. No slot, or no room for the margin: immediate
+            # poll on the shared executor, which stays free of long-polls.
             use_long_poll = False
             if (
                 deadline - self._time_fn()
@@ -3083,20 +3096,19 @@ class ClientRuntime:
 
             try:
                 if use_long_poll:
-                    status, payload = (
-                        await asyncio.get_running_loop().run_in_executor(
-                            _client_long_poll_executor_handle(),
-                            issue,
-                            True,
-                        )
+                    future = _client_long_poll_executor_handle().submit(
+                        issue, True
                     )
+                    # Done on the worker when the call finishes, and on the
+                    # loop when the future is cancelled before it starts.
+                    future.add_done_callback(
+                        lambda _done: _release_client_long_poll_slot()
+                    )
+                    status, payload = await asyncio.wrap_future(future)
                 else:
                     status, payload = await asyncio.to_thread(issue, False)
             except _CallBudgetExpired:
                 break
-            finally:
-                if use_long_poll:
-                    _release_client_long_poll_slot()
             if status == 404 and holder is not None:
                 # A daemon from before inbox 6310 has no POST /await.
                 holder = None

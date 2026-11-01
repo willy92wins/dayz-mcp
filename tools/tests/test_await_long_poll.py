@@ -1337,6 +1337,282 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
             if blockers:
                 await asyncio.gather(*blockers, return_exceptions=True)
 
+    @slow_test
+    async def test_accreditation_longer_than_the_margin_stays_timeout_waiting(
+        self,
+    ) -> None:
+        # Sol r5 F-03: budget 1.5s, accreditation 1.2s on the first /await.
+        # HEAD sends wait_ms around 497, the socket dies after accreditation,
+        # and the call ends as daemon_response_ambiguous with no tool_timeout.
+        from dayz_mcp import accredited_daemon_transport as transport
+        from dayz_mcp.session_coordination import ClientIdentity
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        _host, port = daemon.httpd.server_address
+        seen: list[dict[str, object]] = []
+        cleanups: list[tuple[object, object]] = []
+
+        def slow_verify(*_args, **_kwargs) -> bool:
+            time.sleep(1.2)
+            return True
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            copied = dict(query or {})
+            if path == "/enqueue":
+                seen.append({"path": path, "query": copied})
+                return 200, b'{"id": 7}'
+            if path == "/abandon":
+                seen.append({"path": path, "query": copied})
+                return 200, b'{"status":"abandoned"}'
+            if path != "/await":
+                seen.append({"path": path, "query": copied})
+                return 200, b"{}"
+            seen.append({"path": path, "query": copied})
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=copied,
+                body=body,
+                headers=dict(headers or {}),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._control = SimpleNamespace(
+            active_lease_token=None, active_ticket=None
+        )
+        runtime.identity = ClientIdentity.from_payload(_HOLDER["identity"])
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        async def no_status(*_args, **_kwargs):
+            return None
+
+        runtime._liveness_message = liveness
+        runtime.bridge_status_payload = no_status
+        real_cleanup = server._shielded_broker_cleanup
+
+        async def spy_cleanup(bound, command_id, reason, budget_deadline=None):
+            cleanups.append((command_id, reason))
+            return await real_cleanup(
+                bound, command_id, reason, budget_deadline
+            )
+
+        with mock.patch.object(server, "_shielded_broker_cleanup", spy_cleanup):
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", slow_verify
+            ):
+                with self.assertRaises(server.ToolError) as caught:
+                    await runtime.call_bridge("camera_get", {}, "client", 1.5)
+        message = str(caught.exception)
+        detail = (message, seen, cleanups)
+        self.assertTrue(message.startswith("timeout waiting"), detail)
+        self.assertNotIn("daemon_response_ambiguous", message)
+        awaits = [item for item in seen if item["path"] == "/await"]
+        self.assertTrue(awaits, detail)
+        self.assertIn("wait_ms", awaits[0]["query"], detail)
+        self.assertEqual(cleanups, [(7, "tool_timeout")], detail)
+        self.assertTrue(any(item["path"] == "/abandon" for item in seen), detail)
+
+    @slow_test
+    async def test_cancelled_long_polls_do_not_block_the_next_result(self) -> None:
+        # Sol r5 F-09: cancelling the coroutine frees the slot while the
+        # private-pool thread is still in HTTP. The next call, budget 1.4s,
+        # takes that slot, queues, and never issues the query.
+        import concurrent.futures
+
+        from dayz_mcp import accredited_daemon_transport as transport
+
+        daemon = _Daemon()
+        closed = {"done": False}
+
+        def close_once() -> None:
+            if closed["done"]:
+                return
+            closed["done"] = True
+            daemon.close()
+
+        self.addCleanup(close_once)
+        _host, port = daemon.httpd.server_address
+        ids = [daemon.enqueue() for _ in range(9)]
+        started = {"n": 0}
+        started_lock = threading.Lock()
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            if path == "/await":
+                with started_lock:
+                    started["n"] += 1
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=dict(query),
+                body=body,
+                headers=dict(headers),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+
+        async def await_id(command_id: int, timeout_s: float) -> dict:
+            return await runtime._await_result(
+                "camera_get", command_id, "client", timeout_s
+            )
+
+        def verify(*_args, **_kwargs) -> bool:
+            return True
+
+        blockers: list[asyncio.Task] = []
+        try:
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", verify
+            ):
+                blockers = [
+                    asyncio.create_task(await_id(command_id, 3.0))
+                    for command_id in ids[:8]
+                ]
+                limit = time.monotonic() + 2.0
+                while time.monotonic() < limit and started["n"] < 8:
+                    await asyncio.sleep(0.02)
+                self.assertGreaterEqual(started["n"], 8, started["n"])
+                for task in blockers:
+                    task.cancel()
+                # The coroutines must finish (and, on 80940d3, free the slot)
+                # while the private-pool threads are still blocked in HTTP.
+                await asyncio.gather(*blockers, return_exceptions=True)
+                code, stored = daemon.state.store_result(
+                    {"id": ids[8], "ok": 1, "marker": 9}
+                )
+                self.assertEqual(code, 200, stored)
+                started_at = time.monotonic()
+                result = await asyncio.wait_for(
+                    await_id(ids[8], 1.4), timeout=1.6
+                )
+            self.assertEqual(result.get("marker"), 9, result)
+            self.assertLess(time.monotonic() - started_at, 1.4)
+        finally:
+            close_once()
+            for task in blockers:
+                task.cancel()
+            if blockers:
+                await asyncio.gather(*blockers, return_exceptions=True)
+
+    @slow_test
+    async def test_cancelling_queued_work_releases_the_slot(self) -> None:
+        # The private pool is full of blockers that hold no slot, so this
+        # long-poll is queued and has not entered _call. Cancelling it must
+        # free the slot, and the cancelled work must not send a query.
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        hold = threading.Event()
+        running = {"n": 0}
+        self.addCleanup(hold.set)
+
+        def block() -> None:
+            with seen_lock:
+                running["n"] += 1
+            hold.wait(timeout=3.0)
+
+        executor = server._client_long_poll_executor_handle()
+        parked = [executor.submit(block) for _ in range(8)]
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit and running["n"] < 8:
+            await asyncio.sleep(0.02)
+        self.assertGreaterEqual(running["n"], 8, running["n"])
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(copied)
+            if copied.get("id") == "2":
+                return 200, {"status": "done", "result": {"ok": 1, "marker": 2}}
+            hold.wait(timeout=3.0)
+            return 200, {"status": "pending"}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        queued = asyncio.create_task(
+            runtime._await_result("camera_get", 1, "client", 3.0)
+        )
+        await asyncio.sleep(0.1)
+        with seen_lock:
+            self.assertEqual(seen, [], seen)
+        queued.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await queued
+        hold.set()
+        for future in parked:
+            future.result(timeout=2.0)
+        await runtime._await_result("camera_get", 2, "client", 3.0)
+        with seen_lock:
+            cancelled = [query for query in seen if query.get("id") == "1"]
+            follower = [query for query in seen if query.get("id") == "2"]
+        self.assertEqual(cancelled, [], seen)
+        self.assertTrue(follower, seen)
+        self.assertIn("wait_ms", follower[0], follower)
+
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
     def _runtime(self, state: loopback.ServerState):
