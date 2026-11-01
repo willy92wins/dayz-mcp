@@ -11,9 +11,10 @@ used, so load_tests and the rest of discovery stay in place.
 
 Each direct child of that suite is kept. The shard runs that original object
 once, on one shard, in discovery order. Flattening is only for counting and
-grouping, so a load_tests suite keeps its own run(). Counting descends every
-BaseTestSuite, not only TestSuite: a BaseTestSuite is not a TestSuite, and
-stopping there would name the cases inside it after the suite. If two
+grouping, so a load_tests suite keeps its own run(). Counting descends every suite
+unittest would: suite.py _isnotsuite calls iter() and treats TypeError as a
+case. An iterable adapter that is not a BaseTestSuite is still a suite, and
+stopping there would name its cases after the adapter. If two
 children share a test module, they stay on the same shard too: splitting
 either one would split a module. A child with no leaves is not a module and
 does not move the balance. It runs on the shard of the nearest preceding
@@ -78,20 +79,22 @@ def discover_suite() -> unittest.TestSuite:
     )
 
 
-def iter_tests(
-    item: unittest.BaseTestSuite | unittest.case.TestCase,
-) -> Iterator[unittest.case.TestCase]:
-    """Yield leaf tests, descending every BaseTestSuite.
+def iter_tests(item: object) -> Iterator[unittest.case.TestCase]:
+    """Yield leaf tests, using the same suite test as unittest.suite._isnotsuite.
 
-    TestSuite is a BaseTestSuite (unittest/__init__.py imports both from
-    suite.py). A nested BaseTestSuite is not a TestSuite. Treating it as a
-    leaf would attribute its cases to the suite's module.
+    iter() raising TypeError means a case. Anything else is a suite, including
+    an adapter that does not inherit BaseTestSuite. A one-character str yields
+    itself; that cycle is not another suite.
     """
-    if isinstance(item, unittest.BaseTestSuite):
-        for child in item:
-            yield from iter_tests(child)
+    try:
+        children = iter(item)  # type: ignore[arg-type]
+    except TypeError:
+        yield item  # type: ignore[misc]
         return
-    yield item
+    for child in children:
+        if child is item:
+            continue
+        yield from iter_tests(child)
 
 
 def module_of(test: unittest.case.TestCase) -> str:

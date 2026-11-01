@@ -69,13 +69,16 @@ spec.loader.exec_module(module)
 
 
 def leaves(item):
+    # Same rule as unittest.suite._isnotsuite, not tests._shard.iter_tests.
     pending = [item]
     while pending:
         current = pending.pop()
-        if isinstance(current, unittest.BaseTestSuite):
-            pending.extend(reversed(tuple(current)))
+        try:
+            children = tuple(current)
+        except TypeError:
+            yield current
             continue
-        yield current
+        pending.extend(reversed([child for child in children if child is not current]))
 
 
 def module_name(test):
@@ -234,20 +237,23 @@ def _discovered_child_ids(suite: unittest.TestSuite) -> list[int]:
     return [id(child) for child in suite]
 
 
-def _suite_leaves(item: unittest.TestSuite | unittest.case.TestCase):
-    """Leaf tests under item, including those nested in a BaseTestSuite.
+def _suite_leaves(item: object):
+    """Leaf tests under item, descending every iterable suite.
 
-    Iterative on purpose. This is not tests._shard.iter_tests: the partition
-    checks grade the runner against this walk, so a runner that stops at
-    TestSuite cannot supply the expected set.
+    Iterative on purpose, and not tests._shard.iter_tests. The rule matches
+    unittest.suite._isnotsuite: iter() raising TypeError means a case.
+    Anything iterable is a suite, BaseTestSuite or not. A one-character str
+    yields itself and is not walked again.
     """
-    pending: list[unittest.TestSuite | unittest.case.TestCase] = [item]
+    pending: list[object] = [item]
     while pending:
         current = pending.pop()
-        if isinstance(current, unittest.BaseTestSuite):
-            pending.extend(reversed(tuple(current)))
+        try:
+            children = tuple(current)  # type: ignore[arg-type]
+        except TypeError:
+            yield current
             continue
-        yield current
+        pending.extend(reversed([child for child in children if child is not current]))
 
 
 def _one_test_suite(module_name: str) -> unittest.TestSuite:
@@ -846,6 +852,209 @@ class ShardRunnerParityTest(unittest.TestCase):
             (1, 1, (0, 0, 0, 1), True, True, 1),
             detail,
         )
+
+    def test_iterable_adapter_keeps_a_module_on_one_shard(self) -> None:
+        """An iterable adapter that is not a BaseTestSuite still hides a case.
+
+        unittest treats anything iter() accepts as a suite (suite.py
+        _isnotsuite). One hook nests that adapter around a case of the shared
+        module; the other hook holds a second case. Discover runs the module
+        and class fixtures once. The shards must too.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-adapter-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            log_path = root / "fixtures.log"
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "cases.py",
+                """
+                import os
+                import unittest
+
+                def _mark(kind):
+                    with open(os.environ["SHARD_FIXTURE_LOG"], "a", encoding="utf-8") as handle:
+                        handle.write(kind + "\\n")
+
+                def setUpModule():
+                    _mark("module-setup")
+
+                def tearDownModule():
+                    _mark("module-teardown")
+
+                class Shared(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        _mark("class-setup")
+
+                    @classmethod
+                    def tearDownClass(cls):
+                        _mark("class-teardown")
+
+                    def test_one(self):
+                        _mark("ran-one")
+
+                    def test_two(self):
+                        _mark("ran-two")
+                """,
+            )
+            _write(
+                root / "tests" / "test_adapt.py",
+                """
+                import unittest
+                from tests.cases import Shared
+
+                class Adapter:
+                    def __init__(self, inner):
+                        self._inner = inner
+
+                    def __iter__(self):
+                        return iter(self._inner)
+
+                    def __call__(self, result):
+                        return self._inner(result)
+
+                def load_tests(loader, tests, pattern):
+                    inner = unittest.TestSuite()
+                    inner.addTest(Shared("test_one"))
+                    outer = unittest.TestSuite()
+                    outer.addTest(Adapter(inner))
+                    return outer
+                """,
+            )
+            _write(
+                root / "tests" / "test_direct.py",
+                """
+                import unittest
+                from tests.cases import Shared
+
+                def load_tests(loader, tests, pattern):
+                    outer = unittest.TestSuite()
+                    outer.addTest(Shared("test_two"))
+                    return outer
+                """,
+            )
+            for name in ("test_pad1", "test_pad2"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class Pad(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            env = _fresh_env()
+            env["SHARD_FIXTURE_LOG"] = str(log_path)
+            (root / "_drive.py").write_text(_DRIVER, encoding="utf-8")
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            control = log_path.read_text(encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            codes: list[int] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(root / "_run.py"), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+            shard_log = log_path.read_text(encoding="utf-8")
+        detail = f"discover={discover.returncode} shards={codes}\n{discover.stderr}\n{shard_log}"
+        self.assertEqual(discover.returncode, 0, detail)
+        for label in ("module-setup", "module-teardown", "class-setup", "class-teardown"):
+            self.assertEqual(control.count(label), 1, f"control {label}\n{detail}")
+            self.assertEqual(shard_log.count(label), 1, f"shards {label}\n{detail}")
+        self.assertEqual(shard_log.count("ran-one"), 1, detail)
+        self.assertEqual(shard_log.count("ran-two"), 1, detail)
+
+    def test_empty_iterable_adapter_does_not_pass_a_shard(self) -> None:
+        """An empty iterable adapter is a suite with no tests, not a passing run.
+
+        Three ordinary modules fill three shards. The adapter used to count as
+        a leaf, land on the remaining shard, print Ran 0 tests and exit 0.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-empty-adapter-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            log_path = root / "fixtures.log"
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "test_empty.py",
+                """
+                import os
+
+                class EmptyAdapter:
+                    def __iter__(self):
+                        return iter(())
+
+                    def __call__(self, result):
+                        with open(os.environ["SHARD_FIXTURE_LOG"], "a", encoding="utf-8") as handle:
+                            handle.write("empty-adapter\\n")
+                        return result
+
+                def load_tests(loader, tests, pattern):
+                    return EmptyAdapter()
+                """,
+            )
+            for name in ("test_m1", "test_m2", "test_m3"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class One(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            env = _fresh_env()
+            env["SHARD_FIXTURE_LOG"] = str(log_path)
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            control = log_path.read_text(encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            codes: list[int] = []
+            errs: list[str] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(root / "_run.py"), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+                errs.append(run.stderr)
+            shard_log = log_path.read_text(encoding="utf-8")
+        zero_codes = [code for code, err in zip(codes, errs, strict=True) if "Ran 0 tests" in err]
+        detail = (
+            f"discover={discover.returncode} shards={codes} zero={zero_codes}\n"
+            f"control={control!r} shards_log={shard_log!r}\n" + "\n".join(errs)
+        )
+        self.assertEqual(zero_codes, [], detail)
+        self.assertEqual(control.count("empty-adapter"), 1, detail)
+        self.assertEqual(shard_log.count("empty-adapter"), 1, detail)
+        self.assertEqual(discover.returncode, 0, detail)
 
 
 if __name__ == "__main__":
