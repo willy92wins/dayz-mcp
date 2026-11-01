@@ -2689,10 +2689,13 @@ def _read_prior(path: Path) -> dict | None:
     payload = _read_json_object(path)
     if payload is None or payload.get("version") != _PROFILE_PRIOR_VERSION:
         return None
-    if "prepared_sha256" in payload:
-        fingerprint = payload["prepared_sha256"]
-        if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
-            return None
+    if "previous_prepared_sha256" in payload and "prepared_sha256" not in payload:
+        return None
+    for field in ("prepared_sha256", "previous_prepared_sha256"):
+        if field in payload:
+            fingerprint = payload[field]
+            if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+                return None
     kind = payload.get("kind")
     if kind == "absent":
         return payload
@@ -3453,6 +3456,37 @@ class ServerState:
                 or not self.key
             ):
                 raise BindingPrepareError("instance_endpoint_mismatch")
+            if (
+                not endpoint_ok
+                and previous_prior is not None
+                and previous_prior.get("prepared_sha256") is not None
+            ):
+                # Do not invalidate an earlier loan by stamping a new instance
+                # for a different endpoint. Reconcile it before refusing launch;
+                # an absent prior must stay absent, without seeding a new config.
+                with self._lock:
+                    if key in self._profile_holders or self._profile_preparing.get(key) != 1:
+                        raise BindingPrepareError("instance_endpoint_mismatch")
+                before = len(self.profile_release_errors)
+                missions: list[str | None] = [None]
+                for directory, known_missions in self._lifecycle_restore_targets(self.lifecycle):
+                    if _profile_config_key(directory) == _profile_config_key(config_path.parent):
+                        missions.extend(mission for mission in known_missions if mission not in missions)
+                if self._profile_errors_since(before):
+                    raise BindingPrepareError("instance_config_missing")
+                mission_clear = all(
+                    self._mission_profiles_clear(config_path.parent, mission) for mission in missions
+                )
+                if self._apply_profile_prior(
+                    config_path, owned=False, allow_delete=mission_clear
+                ) != "applied":
+                    raise BindingPrepareError("instance_config_missing")
+                self._delete_prior_sidecar(config_path)
+                sidecar = _profile_prior_path(config_path)
+                if sidecar.exists() or sidecar.is_symlink():
+                    raise BindingPrepareError("instance_config_missing")
+                self._clear_profile_pending(config_path)
+                raise BindingPrepareError("instance_endpoint_mismatch")
             minted = str(uuid.uuid4())
             if not _valid_uuid4(minted):
                 minted = str(uuid.uuid4())
@@ -3469,6 +3503,17 @@ class ServerState:
             prepared_bytes = (
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
             ).encode("utf-8")
+            if prior.get("prepared_sha256") is not None and previous_bytes is not None:
+                # Recheck after _ensure_profile_prior: a new installer document
+                # must not acquire the old loan's restoration authority.
+                previous_fingerprint = hashlib.sha256(previous_bytes).hexdigest()
+                if previous_fingerprint not in (
+                    prior.get("prepared_sha256"), prior.get("previous_prepared_sha256")
+                ):
+                    raise BindingPrepareError("instance_config_missing")
+                # Keep the old proof until the replacement is durable, even
+                # across a crash. Do not accumulate earlier generations.
+                prior["previous_prepared_sha256"] = previous_fingerprint
             prior["prepared_sha256"] = hashlib.sha256(prepared_bytes).hexdigest()
             if not _profile_payload_fits(payload) or not _profile_payload_fits(prior):
                 raise BindingPrepareError("instance_config_missing")
@@ -3496,6 +3541,9 @@ class ServerState:
                 raise BindingPrepareError("instance_config_mismatch") from exc
             if not isinstance(reread, dict) or reread.get("instance") != minted:
                 raise BindingPrepareError("instance_config_mismatch")
+            if endpoint_ok and "previous_prepared_sha256" in prior:
+                prior.pop("previous_prepared_sha256")
+                atomic_write_json(_profile_prior_path(config_path), prior)
             # A default instance seals instance even for an installer endpoint
             # lifecycle will refuse. It keeps url/key and never borrows profile.
             with self._lock:
@@ -3909,8 +3957,10 @@ class ServerState:
             existing is not None
             and document is not None
             and document.get("profile") == "test"
-            and existing.get("prepared_sha256")
-            == hashlib.sha256(config_path.read_bytes()).hexdigest()
+            and existing.get("prepared_sha256") is not None
+            and hashlib.sha256(config_path.read_bytes()).hexdigest() in (
+                existing.get("prepared_sha256"), existing.get("previous_prepared_sha256")
+            )
         ):
             payload = dict(existing)
             saved = payload.get("document")
@@ -4050,11 +4100,16 @@ class ServerState:
             return "absent"
         kind = prior.get("kind")
         try:
-            fingerprint = prior.get("prepared_sha256")
+            fingerprint = (
+                hashlib.sha256(config_path.read_bytes()).hexdigest()
+                if current_text is not None else None
+            )
             if (
-                current_text is None
-                or not isinstance(fingerprint, str)
-                or fingerprint != hashlib.sha256(config_path.read_bytes()).hexdigest()
+                fingerprint is None
+                or not isinstance(prior.get("prepared_sha256"), str)
+                or fingerprint not in (
+                    prior.get("prepared_sha256"), prior.get("previous_prepared_sha256")
+                )
             ):
                 raise ValueError("profile_prior_config_mismatch")
             if kind == "present" and preserve_instance is not None:
