@@ -351,7 +351,9 @@ MAX_RESULTS = MAX_QUEUE * 4
 # ceiling closes the accepted socket without a worker (reject, do not queue):
 # Handler.timeout already bounds each worker's duration, not concurrency.
 # A /poll that passes wait_ms holds one of those two sockets for at most
-# POLL_LONG_POLL_MAX_S. That bound does not change this pool size.
+# POLL_LONG_POLL_MAX_S, and only one such wait per peer
+# (POLL_LONG_POLL_MAX_IN_FLIGHT_PER_PEER). That bound does not change this
+# pool size.
 MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # Ceiling for one GET/POST /await?wait_ms= hold. Each wait occupies one of the
 # workers above. The pool is one POST /wait (up to 30s) per queued session plus
@@ -377,9 +379,10 @@ AWAIT_LONG_POLL_FIELD = "await_long_poll"
 # How many /await waits may hold a worker at once. The pool is 96
 # (MAX_SESSION_QUEUE + 32). 64 of those are the session waits. Of the 32 left
 # for /poll, /result, /enqueue, /status and a short burst, long-polls may take
-# 8. 8 is well under 32, and 64 + 8 leaves 24 workers, so those three routes
-# keep a worker even when every session wait and every allowed long-poll is in
-# flight. A request that does not get a slot does not wait and omits
+# 8. 8 is well under 32, and 64 + 8 leaves 24 workers. /poll retains at most
+# one wait per peer, so /result and /enqueue still have a worker when every
+# session wait, every /await long-poll and both /poll waits are in flight.
+# A request that does not get a slot does not wait and omits
 # await_long_poll, and the client returns to its 50ms poll.
 AWAIT_LONG_POLL_MAX_IN_FLIGHT = 8
 # Ceiling for one GET /poll?wait_ms= hold. At most 1s: 800 ms stays under the
@@ -388,10 +391,18 @@ AWAIT_LONG_POLL_MAX_IN_FLIGHT = 8
 # under Handler.timeout (35s) and under the /await cap above, so a held poll
 # does not take the worker the game needs for POST /result. The two /poll
 # sockets are already counted in MAX_HTTP_WORKERS; this cap does not grow the
-# pool. Absent or unusable wait_ms does not wait. 800 is an integer so the
-# clamp does not depend on 0.8 * 1000.
+# pool. It limits duration, not how many waits run at once: that is one
+# retained wait per peer, below. Absent or unusable wait_ms does not wait.
+# 800 is an integer so the clamp does not depend on 0.8 * 1000.
 POLL_LONG_POLL_MAX_MS = 800
 POLL_LONG_POLL_MAX_S = POLL_LONG_POLL_MAX_MS / 1000.0
+# One retained GET /poll wait per peer. acquire(blocking=False): the HTTP
+# worker is already running, and a second poll of that peer answers at once
+# instead of taking another worker for the cap. Released when the wait ends,
+# the wait raises, or cancel_pending wakes it. Two peers are two workers.
+# 64 session waits + AWAIT_LONG_POLL_MAX_IN_FLIGHT + 2 leaves 22, so /result
+# and /enqueue keep a worker.
+POLL_LONG_POLL_MAX_IN_FLIGHT_PER_PEER = 1
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -3065,6 +3076,12 @@ class ServerState:
         self._command_cv = {
             "server": threading.Condition(self._lock),
             "client": threading.Condition(self._lock),
+        }
+        # Taken only for a positive /poll wait, one per peer, without blocking.
+        # A full slot answers immediately (the same record_poll as wait_s 0).
+        self._poll_long_poll_slots = {
+            peer: threading.BoundedSemaphore(POLL_LONG_POLL_MAX_IN_FLIGHT_PER_PEER)
+            for peer in VALID_PEERS
         }
         self._fenced_runs: set[str] = set()
         self._next_id = 1
@@ -6884,7 +6901,10 @@ class ServerState:
         The lock is not held across the wait. Nothing here counts as a poll:
         liveness, attribution, caps, the reaper and the load counters stay
         with the single record_poll that follows. A non-positive, non-finite
-        or bool wait returns before taking the lock.
+        or bool wait returns before taking the lock. A peer that already has
+        a retained wait does not take another: the slot is non-blocking, and
+        this call returns so record_poll answers immediately. The slot is
+        released when the wait ends, raises, or shutdown wakes it.
         """
 
         if (
@@ -6898,24 +6918,38 @@ class ServerState:
             wait_s = POLL_LONG_POLL_MAX_S
         if peer not in self._command_cv:
             return
-        deadline = time.monotonic() + wait_s
+        slot = self._poll_long_poll_slots.get(peer)
+        if slot is None:
+            return
         with self._lock:
             if self._stopping:
                 return
             ready = self._poll_command_ready_locked(peer, instance)
             if ready is None or ready:
                 return
-            cv = self._command_cv[peer]
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    return
-                cv.wait(timeout=remaining)
+            if not slot.acquire(blocking=False):
+                return
+        try:
+            deadline = time.monotonic() + wait_s
+            with self._lock:
                 if self._stopping:
                     return
                 ready = self._poll_command_ready_locked(peer, instance)
                 if ready is None or ready:
                     return
+                cv = self._command_cv[peer]
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        return
+                    cv.wait(timeout=remaining)
+                    if self._stopping:
+                        return
+                    ready = self._poll_command_ready_locked(peer, instance)
+                    if ready is None or ready:
+                        return
+        finally:
+            slot.release()
 
     def record_poll(
         self,
@@ -8574,22 +8608,21 @@ def _parse_await_wait_s(qs: dict[str, list[str]]) -> tuple[float, bool]:
 
 
 def _parse_poll_wait_s(qs: dict[str, list[str]]) -> float:
-    """Seconds to hold GET /poll. Absent or unusable wait_ms does not wait.
+    """Seconds to hold GET /poll. Absent or non-ASCII wait_ms does not wait.
 
-    A digit string longer than 7 characters, or above POLL_LONG_POLL_MAX_MS,
-    clamps to that cap. "0" is requested and does not wait. The response body
-    stays {"commands": ...}; unlike /await, nothing marks that the budget
-    was spent.
+    One to nine ASCII digits. The value is capped at POLL_LONG_POLL_MAX_MS.
+    "00000000" is 0ms and "00000001" is 1ms. str.isdigit() accepts "²", and
+    int("²") raises; that string is not a wait. "0" does not wait. The
+    response body stays {"commands": ...}; unlike /await, nothing marks that
+    the budget was spent.
     """
 
     values = qs.get("wait_ms")
     if not values:
         return 0.0
     raw = values[0]
-    if not isinstance(raw, str) or not raw.isdigit():
+    if not isinstance(raw, str) or re.fullmatch(r"[0-9]{1,9}", raw) is None:
         return 0.0
-    if len(raw) > 7:
-        return POLL_LONG_POLL_MAX_S
     millis = int(raw)
     if millis > POLL_LONG_POLL_MAX_MS:
         millis = POLL_LONG_POLL_MAX_MS

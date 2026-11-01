@@ -8,6 +8,7 @@ loopback port: it does not launch DayZ and does not bind port 8765.
 from __future__ import annotations
 
 import ast
+import http.client
 import inspect
 import json
 import threading
@@ -103,6 +104,23 @@ class _Daemon:
         if status != 200 or not isinstance(payload, dict):
             raise AssertionError(f"enqueue failed: {status} {payload!r}")
         return payload
+
+    def post_json(self, path: str, payload: dict, timeout: float = 2.0) -> tuple[int, bytes]:
+        url = self.base + path + "?" + urllib.parse.urlencode({"key": self.key})
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return int(response.status), response.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                return int(exc.code), exc.read()
+            finally:
+                exc.close()
 
 
 def _on_wait(state: loopback.ServerState, peer: str, callback) -> threading.Event:
@@ -522,6 +540,433 @@ class PollLongPollTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(raw, _EMPTY)
         self.assertLess(time.monotonic() - released, 0.4)
+
+
+def _poll_call(
+    daemon: _Daemon, peer: str, sink: list, lock: threading.Lock
+) -> None:
+    started = time.monotonic()
+    try:
+        status, raw = daemon.open({"peer": peer, "wait_ms": "800"}, timeout=3.0)
+        error: BaseException | None = None
+    except BaseException as exc:
+        status, raw, error = 0, b"", exc
+    elapsed = time.monotonic() - started
+    with lock:
+        sink.append((peer, status, raw, elapsed, error))
+
+
+class PollWaitMsParseTest(unittest.TestCase):
+    """F2/F3. ASCII digits only; the numeric value is the wait, not the length."""
+
+    def setUp(self) -> None:
+        self.daemon = _Daemon()
+        self.addCleanup(self.daemon.close)
+
+    def test_zero_padded_wait_ms_is_the_numeric_value(self) -> None:
+        self.assertEqual(loopback._parse_poll_wait_s({"wait_ms": ["00000000"]}), 0.0)
+        self.assertEqual(
+            loopback._parse_poll_wait_s({"wait_ms": ["00000001"]}), 0.001
+        )
+        for raw_wait in ("00000000", "00000001"):
+            with self.subTest(wait_ms=raw_wait):
+                elapsed, status, raw = self._read(raw_wait)
+                self.assertEqual(status, 200, raw)
+                self.assertEqual(raw, _EMPTY)
+                self.assertLess(elapsed, 0.2)
+
+    def test_superscript_wait_ms_does_not_raise(self) -> None:
+        # "²" passes str.isdigit and int() raises. It is not a wait.
+        self.assertEqual(loopback._parse_poll_wait_s({"wait_ms": ["²"]}), 0.0)
+        elapsed, status, raw = self._read("²")
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(raw, _EMPTY)
+        self.assertLess(elapsed, 0.2)
+
+    def _read(self, raw_wait: str) -> tuple[float, int, bytes]:
+        started = time.monotonic()
+        status, raw = self.daemon.open(
+            {"peer": "client", "wait_ms": raw_wait}, timeout=2.0
+        )
+        return time.monotonic() - started, status, raw
+
+
+class PollQuotaTest(unittest.TestCase):
+    """F1. One retained GET /poll wait per peer. The rest answer immediately."""
+
+    def setUp(self) -> None:
+        self.daemon = _Daemon()
+        self.addCleanup(self.daemon.close)
+
+    def _delivered_result_id(self) -> int:
+        payload = self.daemon.enqueue()
+        command_id = payload.get("id")
+        self.assertIsInstance(command_id, int)
+        assert isinstance(command_id, int)
+        code, polled = self.daemon.state.record_poll("client")
+        self.assertEqual(code, 200, polled)
+        self.assertEqual(polled["commands"][0]["cmd"], "camera_get")
+        return command_id
+
+    def _watch(self, peer: str) -> tuple[threading.Event, dict[str, int]]:
+        """Count entries into this peer's Condition.wait. One retained poll."""
+
+        cv = self.daemon.state._command_cv[peer]
+        real_release = cv._release_save
+        entered = threading.Event()
+        count = {"n": 0}
+
+        def release_save():
+            saved = real_release()
+            count["n"] += 1
+            entered.set()
+            return saved
+
+        cv._release_save = release_save
+        return entered, count
+
+    def _start_poll(
+        self,
+        peer: str,
+        done: list[tuple],
+        lock: threading.Lock,
+        threads: list[threading.Thread],
+    ) -> threading.Thread:
+        thread = threading.Thread(
+            target=_poll_call, args=(self.daemon, peer, done, lock)
+        )
+        threads.append(thread)
+        thread.start()
+        return thread
+
+    def _rows(self, done: list[tuple], lock: threading.Lock, peer: str) -> list[tuple]:
+        with lock:
+            return [row for row in done if row[0] == peer]
+
+    def _assert_immediate(self, rows: list[tuple], expected: int) -> None:
+        self.assertEqual(len(rows), expected, rows)
+        for row in rows:
+            self.assertIsNone(row[4], row)
+            self.assertEqual(row[1], 200, row)
+            self.assertEqual(row[2], _EMPTY)
+            # Under the 0.8s cap, so a poll that actually waited still fails.
+            self.assertLess(row[3], 0.5, row)
+
+    def test_one_retained_poll_per_peer_and_result_still_answers(self) -> None:
+        # The holder is inside Condition.wait before the extras connect.
+        # Firing them all at once counts not-yet-accepted sockets as retained.
+        command_id = self._delivered_result_id()
+        client_entered, client_waits = self._watch("client")
+        server_entered, server_waits = self._watch("server")
+        lock = threading.Lock()
+        done: list[tuple] = []
+        threads: list[threading.Thread] = []
+        self.addCleanup(self._join, threads)
+
+        client_holder = self._start_poll("client", done, lock, threads)
+        self.assertTrue(client_entered.wait(2.0), "client poll did not wait")
+        self.assertEqual(client_waits["n"], 1)
+        extra_n = 8
+        for _ in range(extra_n):
+            self._start_poll("client", done, lock, threads)
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline and len(self._rows(done, lock, "client")) < extra_n:
+            time.sleep(0.01)
+        self._assert_immediate(self._rows(done, lock, "client"), extra_n)
+        self.assertEqual(client_waits["n"], 1, "more than one client /poll waited")
+        self.assertTrue(client_holder.is_alive())
+
+        server_holder = self._start_poll("server", done, lock, threads)
+        self.assertTrue(server_entered.wait(2.0), "server poll did not wait")
+        self._start_poll("server", done, lock, threads)
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline and len(self._rows(done, lock, "server")) < 1:
+            time.sleep(0.01)
+        self._assert_immediate(self._rows(done, lock, "server"), 1)
+        self.assertEqual(server_waits["n"], 1, "server /poll was not its own slot")
+        self.assertTrue(server_holder.is_alive())
+
+        status, raw = self.daemon.post_json("/result", {"id": command_id, "ok": 1})
+        self.assertEqual(status, 200, raw)
+        body = json.loads(raw)
+        self.assertTrue(body.get("ok"), body)
+        self.assertFalse(body.get("discarded", False), body)
+        stored = self.daemon.state.take_result(command_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.get("ok"), 1)
+
+        self.daemon.enqueue()
+        client_holder.join(timeout=2.0)
+        self.assertFalse(client_holder.is_alive())
+        again_entered, _again_waits = self._watch("client")
+        self._start_poll("client", done, lock, threads)
+        self.assertTrue(again_entered.wait(1.0), "poll slot was not released after the wait")
+        self.daemon.state.cancel_pending()
+        self._join(threads)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+
+    def test_slot_is_released_when_the_wait_raises(self) -> None:
+        cv = self.daemon.state._command_cv["client"]
+
+        def boom(timeout: float | None = None) -> None:
+            raise RuntimeError("injected wait failure")
+
+        cv.wait = boom  # type: ignore[method-assign]
+        try:
+            # Python 3.14 raises RemoteDisconnected from getresponse(); urllib
+            # does not wrap that call as URLError.
+            with self.assertRaises(
+                (http.client.RemoteDisconnected, urllib.error.URLError)
+            ):
+                self.daemon.open({"peer": "client", "wait_ms": "200"}, timeout=2.0)
+        finally:
+            del cv.wait
+        entered, waits = self._watch("client")
+        lock = threading.Lock()
+        done: list[tuple] = []
+        threads: list[threading.Thread] = []
+        self.addCleanup(self._join, threads)
+        holder = self._start_poll("client", done, lock, threads)
+        self.assertTrue(entered.wait(1.0), "a later /poll could not take the slot")
+        self.assertEqual(waits["n"], 1)
+        self._start_poll("client", done, lock, threads)
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline and len(self._rows(done, lock, "client")) < 1:
+            time.sleep(0.01)
+        self._assert_immediate(self._rows(done, lock, "client"), 1)
+        self.assertEqual(waits["n"], 1)
+        self.assertTrue(holder.is_alive())
+        self.daemon.state.cancel_pending()
+        self._join(threads)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+
+    @slow_test
+    def test_session_waits_await_and_two_polls_leave_result_and_enqueue(self) -> None:
+        from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+
+        # 64 session waits + 8 /await + one /poll per peer. The two routes
+        # still need a worker after that.
+        free = (
+            loopback.MAX_HTTP_WORKERS
+            - loopback.MAX_SESSION_QUEUE
+            - loopback.AWAIT_LONG_POLL_MAX_IN_FLIGHT
+            - 2
+        )
+        self.assertGreaterEqual(free, 2, free)
+        command_id = self._delivered_result_id()
+        ids = {"n": 0}
+
+        def next_id() -> str:
+            ids["n"] += 1
+            return f"poll-quota-ticket-{ids['n']}"
+
+        coordinator = SessionCoordinator(
+            token_fn=lambda: "poll-quota-holder-token",
+            id_fn=next_id,
+            audit=lambda _event: True,
+            cleanup=lambda _session_id, _lease_id, _reason, _vehicle_active: {},
+        )
+        self.daemon.state.coordination = coordinator
+        holder_payload = {
+            "platform": "codex",
+            "pid": 1,
+            "ppid": 0,
+            "started_at_utc": "2026-11-01T00:00:00Z",
+            "session_id": "poll-quota-holder",
+            "task_label": "holder",
+        }
+        holder = ClientIdentity.from_payload(holder_payload)
+        status, active = coordinator.acquire(holder, "hold the lease")
+        self.assertEqual(status, 200, active)
+        lease_token = active.get("lease_token")
+        self.assertIsInstance(lease_token, str)
+        tickets: list[tuple[dict, str]] = []
+        session_waits = loopback.MAX_SESSION_QUEUE
+        for index in range(session_waits):
+            client = ClientIdentity.from_payload(
+                {
+                    "platform": "codex",
+                    "pid": 1000 + index,
+                    "ppid": 1,
+                    "started_at_utc": "2026-11-01T00:00:00Z",
+                    "session_id": f"poll-quota-waiter-{index}",
+                    "task_label": "waiter",
+                }
+            )
+            queued_status, queued = coordinator.enqueue(
+                client, "queued", f"op-{index}"
+            )
+            self.assertEqual(queued_status, 202, queued)
+            ticket = queued.get("ticket")
+            self.assertIsInstance(ticket, str)
+            assert isinstance(ticket, str)
+            tickets.append((client.to_payload(), ticket))
+
+        entered = threading.Event()
+        entered_count = {"n": 0}
+        entered_lock = threading.Lock()
+        original_wait = coordinator.wait
+
+        def counting_wait(client, ticket_id, timeout_s):
+            with entered_lock:
+                entered_count["n"] += 1
+                if entered_count["n"] >= session_waits:
+                    entered.set()
+            return original_wait(client, ticket_id, timeout_s)
+
+        coordinator.wait = counting_wait  # type: ignore[method-assign]
+        wait_timeout_s = 4.0
+        wait_threads: list[threading.Thread] = []
+
+        def session_wait(identity: dict, ticket: str) -> None:
+            url = (
+                self.daemon.base
+                + "/session/wait?"
+                + urllib.parse.urlencode({"key": self.daemon.key})
+            )
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(
+                    {
+                        "identity": identity,
+                        "ticket": ticket,
+                        "timeout_s": wait_timeout_s,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=wait_timeout_s + 3.0):
+                    return
+            except Exception:
+                return
+
+        for identity, ticket in tickets:
+            thread = threading.Thread(target=session_wait, args=(identity, ticket))
+            wait_threads.append(thread)
+            thread.start()
+        self.assertTrue(entered.wait(5.0), "session waits did not enter")
+
+        await_held = loopback.AWAIT_LONG_POLL_MAX_IN_FLIGHT
+        await_entered = threading.Event()
+        await_count = {"n": 0}
+        original_await = self.daemon.state.await_stored_result
+
+        def counting_await(command_id_arg, remove=False, wait_s=0.0, cancel=None):
+            with entered_lock:
+                await_count["n"] += 1
+                if await_count["n"] >= await_held:
+                    await_entered.set()
+            return original_await(command_id_arg, remove, wait_s, cancel)
+
+        self.daemon.state.await_stored_result = counting_await  # type: ignore[method-assign]
+        await_threads = [
+            threading.Thread(
+                target=self._await_held, name=f"await-{index}"
+            )
+            for index in range(await_held)
+        ]
+        for thread in await_threads:
+            thread.start()
+        self.assertTrue(await_entered.wait(2.0), "await waits did not enter")
+
+        # One retained /poll per peer, then a few more of the same peer.
+        # Those must answer at once. 64 + 8 + 2 stay held, inside the 96
+        # workers, so /result and /enqueue still have one. Launching every
+        # spare worker at once is rejected or still sitting in accept(); that
+        # is not a retained /poll.
+        client_entered, client_waits = self._watch("client")
+        server_entered, server_waits = self._watch("server")
+        lock = threading.Lock()
+        done: list[tuple] = []
+        poll_threads: list[threading.Thread] = []
+
+        def _join_holders() -> None:
+            self.daemon.state.cancel_pending()
+            for thread in poll_threads:
+                thread.join(timeout=2.0)
+            for thread in await_threads:
+                thread.join(timeout=3.0)
+            for thread in wait_threads:
+                thread.join(timeout=wait_timeout_s + 2.0)
+
+        self.addCleanup(_join_holders)
+        client_holder = self._start_poll("client", done, lock, poll_threads)
+        self.assertTrue(client_entered.wait(2.0), "client poll did not wait")
+        server_holder = self._start_poll("server", done, lock, poll_threads)
+        self.assertTrue(server_entered.wait(2.0), "server poll did not wait")
+        self.assertEqual(client_waits["n"], 1)
+        self.assertEqual(server_waits["n"], 1)
+        extra_n = 4
+        for _ in range(extra_n):
+            self._start_poll("client", done, lock, poll_threads)
+        self._start_poll("server", done, lock, poll_threads)
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            client_done = len(self._rows(done, lock, "client"))
+            server_done = len(self._rows(done, lock, "server"))
+            if client_done >= extra_n and server_done >= 1:
+                break
+            time.sleep(0.01)
+        self._assert_immediate(self._rows(done, lock, "client"), extra_n)
+        self._assert_immediate(self._rows(done, lock, "server"), 1)
+        self.assertEqual(client_waits["n"], 1)
+        self.assertEqual(server_waits["n"], 1)
+        self.assertTrue(client_holder.is_alive())
+        self.assertTrue(server_holder.is_alive())
+
+        result_status, result_raw = self.daemon.post_json(
+            "/result", {"id": command_id, "ok": 1}, timeout=2.0
+        )
+        self.assertEqual(result_status, 200, result_raw)
+        result_body = json.loads(result_raw)
+        self.assertTrue(result_body.get("ok"), result_body)
+        enqueue_status, enqueue_raw = self.daemon.post_json(
+            "/enqueue",
+            {
+                "cmd": "query_all_players",
+                "args": {},
+                "peer": "server",
+                "identity": holder_payload,
+                "lease_token": lease_token,
+                "operation_timeout_s": 30,
+            },
+            timeout=2.0,
+        )
+        self.assertEqual(enqueue_status, 200, enqueue_raw)
+        enqueue_body = json.loads(enqueue_raw)
+        self.assertIsInstance(enqueue_body.get("id"), int)
+        self.daemon.state.cancel_pending()
+        self._join(poll_threads)
+        for thread in await_threads:
+            thread.join(timeout=3.0)
+        for thread in wait_threads:
+            thread.join(timeout=wait_timeout_s + 2.0)
+        self.assertFalse(any(thread.is_alive() for thread in poll_threads))
+        self.assertFalse(any(thread.is_alive() for thread in await_threads))
+        self.assertFalse(any(thread.is_alive() for thread in wait_threads))
+
+    def _await_held(self) -> None:
+        url = (
+            self.daemon.base
+            + "/await?"
+            + urllib.parse.urlencode(
+                {"key": self.daemon.key, "id": "999999", "wait_ms": "2000"}
+            )
+        )
+        request = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=5.0):
+                return
+        except Exception:
+            return
+
+    @staticmethod
+    def _join(threads: list[threading.Thread]) -> None:
+        for thread in threads:
+            thread.join(timeout=2.0)
 
 
 if __name__ == "__main__":
