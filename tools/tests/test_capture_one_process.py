@@ -98,6 +98,59 @@ class _BatchGrab:
         self.killed = True
 
 
+class _RealHashBatchGrab(_BatchGrab):
+    """_BatchGrab variant publishing the REAL SHA-256 of each PNG written.
+
+    _BatchGrab publishes synthetic hashes (f"{index:064x}"), which is fine
+    for the indexed direct-write scheme. The arbitrary-destination rename
+    path must be checked against real file hashes (F-04): every destination
+    has to end with its own frame's bytes and the published hash.
+    """
+
+    def __init__(self, cmd: list[str], levels: tuple[int, ...], fail_at: int | None = None) -> None:
+        frame_count = int(_arg(cmd, "-FrameCount")) if "-FrameCount" in cmd else 1
+        pattern = _arg(cmd, "-FramePattern") if "-FramePattern" in cmd else ""
+        capture = _arg(cmd, "-CapturePng")
+        self.returncode: int | None = 0
+        self.killed = False
+        self.wait_timeouts: list[float | None] = []
+        lines = ['{"phase":"started"}']
+        for index in range(frame_count):
+            if fail_at is not None and index == fail_at:
+                payload: dict[str, object] = {
+                    "ok": False, "error": "printwindow_failed", "method": "printwindow",
+                    "window": dict(WINDOW), "stats": None, "sha256": "",
+                    "client": dict(CLIENT), "clientStats": None,
+                }
+                if frame_count > 1:
+                    payload["frameIndex"] = index
+                lines.append(json.dumps(payload))
+                break
+            level = levels[index] if index < len(levels) else 100
+            if pattern:
+                pattern_dir = os.path.dirname(pattern)
+                pattern_name = os.path.basename(pattern).replace("{0}", str(index))
+                path = os.path.join(pattern_dir, pattern_name) if pattern_dir else pattern_name
+            else:
+                path = capture
+            Image.new("RGB", (16, 16), (level, level, level)).save(path, format="PNG")
+            with open(path, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest().upper()
+            payload = {
+                "ok": True, "error": "", "method": "printwindow",
+                "window": dict(WINDOW),
+                "stats": {"meanBrightness": float(level), "nonBlackRatio": 1.0},
+                "sha256": digest,
+                "client": dict(CLIENT),
+                "clientStats": {"meanBrightness": float(level), "nonBlackRatio": 1.0},
+            }
+            if frame_count > 1:
+                payload["frameIndex"] = index
+            lines.append(json.dumps(payload))
+        self.stdout = io.StringIO("\n".join(lines) + "\n")
+        self.stderr = io.StringIO("")
+
+
 class _HangingGrab:
     def __init__(self, stdout: str) -> None:
         self.stdout = io.StringIO(stdout)
@@ -285,6 +338,71 @@ class CaptureOneProcessTest(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(tmp, "literal0")))
             self.assertFalse(os.path.exists(os.path.join(tmp, "literal1")))
 
+    def test_permuted_destinations_keep_their_own_frames(self) -> None:
+        """F-04: intermediates (a_0/a_1/a_2.png) must never collide with
+        destinations. Permuted a.png, a_2.png, a_1.png used to overwrite a
+        pending frame and still return three ok:true with a_2.png missing
+        and a_1.png wrong. Now every destination must end with its own
+        frame's bytes and published SHA-256, or the capture errors."""
+        cases = [
+            ("a.png", "a_2.png", "a_1.png"),
+            ("a_1.png", "a_0.png", "a_2.png"),
+            ("b.png", "b_0.png", "b_1.png"),
+        ]
+        levels = (40, 120, 200)
+        for names in cases:
+            with self.subTest(names=names), tempfile.TemporaryDirectory() as tmp:
+                popen = mock.Mock(side_effect=lambda cmd, **kw: _RealHashBatchGrab(cmd, levels))
+                probe, popen_patch = self._patched(popen)
+                paths = [os.path.join(tmp, name) for name in names]
+                with probe, popen_patch:
+                    results = mcp_capture._run_window_captures(
+                        paths, process_name="DayZDiag_x64", timeout_s=8.0
+                    )
+                self.assertEqual([True, True, True], [r.get("ok") for r in results], results)
+                for index, path in enumerate(paths):
+                    self.assertTrue(os.path.exists(path), path)
+                    with open(path, "rb") as handle:
+                        digest = hashlib.sha256(handle.read()).hexdigest()
+                    self.assertEqual(
+                        digest, str(results[index].get("sha256", "")).lower(), path
+                    )
+                    with Image.open(path) as img:
+                        self.assertEqual(
+                            (levels[index],) * 3, img.convert("RGB").getpixel((0, 0)), path
+                        )
+
+    def test_mismatched_published_hash_after_rename_is_an_error(self) -> None:
+        """F-04: the final check runs AFTER all moves. A published sha256
+        that does not match the destination bytes must never stay ok:true,
+        and the public error carries no host path."""
+        popen = mock.Mock(side_effect=lambda cmd, **kw: _BatchGrab(cmd, (100, 120)))
+        probe, popen_patch = self._patched(popen)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [os.path.join(tmp, "dest_a.png"), os.path.join(tmp, "dest_b.png")]
+            with probe, popen_patch:
+                results = mcp_capture._run_window_captures(
+                    paths, process_name="DayZDiag_x64", timeout_s=8.0
+                )
+            self.assertTrue(any(r.get("ok") is not True for r in results), results)
+            for result in results:
+                if result.get("ok") is not True:
+                    self.assertNotIn(tmp, str(result.get("error")))
+
+    def test_grab_script_revalidates_window_identity_per_frame(self) -> None:
+        """F-05 (source): every frame revalidates the chosen HWND against
+        the saved pid/class and the active class filter with real Win32
+        APIs, and a change emits the public window_identity_changed error."""
+        with open(mcp_capture.GRAB_SCRIPT, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("IsWindow", text)
+        self.assertIn("GetWindowThreadProcessId", text)
+        self.assertIn("GetClassName", text)
+        self.assertIn("Test-WindowIdentity", text)
+        self.assertIn("window_identity_changed", text)
+        capture_fn = text[text.index("function Capture-OneFrame"):]
+        self.assertIn("Test-WindowIdentity", capture_fn)
+
     def test_grab_script_emits_started_once_in_source(self) -> None:
         with open(mcp_capture.GRAB_SCRIPT, encoding="utf-8") as handle:
             text = handle.read()
@@ -362,6 +480,35 @@ class RealGrabScriptTest(unittest.TestCase):
         self.assertEqual("Á ñ", payload.get("sampleTitle"))
         self.assertIs(payload.get("framePathBracesOk"), True)
         self.assertEqual(r"C:\Temp\literal{0}\frame_3.png", payload.get("framePathBraces"))
+
+    @slow_test
+    def test_selftest_exercises_window_identity_revalidation(self) -> None:
+        """F-05: -SelfTest exercises the REAL Test-WindowIdentity against a
+        real window from [MCPGrab]::List(): identity validates against
+        itself and is rejected with an altered expected pid or class.
+        Still exactly one JSON line, existing cases preserved."""
+        if shutil.which("powershell") is None:
+            self.skipTest("powershell not available on this host")
+        completed = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", mcp_capture.GRAB_SCRIPT, "-SelfTest",
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        detail = f"stdout={completed.stdout!r} stderr={completed.stderr!r} rc={completed.returncode}"
+        self.assertEqual(0, completed.returncode, detail)
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        self.assertEqual(1, len(lines), detail)
+        payload = json.loads(lines[-1].decode("cp1252"))
+        self.assertIs(payload.get("ok"), True, detail)
+        if payload.get("windowIdentityState") == "skipped_no_window":
+            self.skipTest("no real window available for identity check: " + detail)
+        self.assertEqual("exercised", payload.get("windowIdentityState"), detail)
+        self.assertIs(payload.get("windowIdentitySelf"), True, detail)
+        self.assertIs(payload.get("windowIdentityWrongPidRejected"), True, detail)
+        self.assertIs(payload.get("windowIdentityWrongClassRejected"), True, detail)
 
     @slow_test
     def test_real_script_emits_result_line_per_frame(self) -> None:

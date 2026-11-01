@@ -31,7 +31,10 @@
 # template containing "{0}" for the frame index; without it, frame 0 is
 # -CapturePng and later frames insert "_<index>" before the extension. With
 # -FrameCount 1 (or the new parameters omitted) output and behaviour are
-# exactly the single-frame behaviour above (no frameIndex field).
+# exactly the single-frame behaviour above (no frameIndex field). Every
+# frame (single-frame included) first revalidates the chosen HWND's
+# identity (IsWindow + owning pid + class, see IdentityMatches): a change
+# emits error window_identity_changed and cuts the capture.
 [CmdletBinding(DefaultParameterSetName='Capture')]
 param(
   [string]$ProcessName = 'DayZDiag_x64',
@@ -73,6 +76,7 @@ public class MCPGrab {
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
@@ -108,6 +112,24 @@ public class MCPGrab {
       return true;
     }, IntPtr.Zero);
     return res;
+  }
+
+  public static string ClassOf(IntPtr h) {
+    var sb = new StringBuilder(256); GetClassNameW(h, sb, 256); return sb.ToString();
+  }
+
+  // Per-frame identity revalidation (F-05). Win32 signatures:
+  //   BOOL  IsWindow(HWND hWnd);
+  //   DWORD GetWindowThreadProcessId(HWND hWnd, LPDWORD lpdwProcessId);
+  //   int   GetClassNameW(HWND hWnd, LPWSTR lpClassName, int nMaxCount);
+  // A destroyed window's HWND can be recycled by Windows (see IsWindow
+  // docs), so "still a window" alone is not enough: the owning pid and
+  // the class must still be the ones saved at selection time.
+  public static bool IdentityMatches(IntPtr h, uint expectedPid, string expectedClass) {
+    if (!IsWindow(h)) return false;
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid != expectedPid) return false;
+    return ClassOf(h) == expectedClass;
   }
 
   // Live window rect (it may have moved/restored since enumeration).
@@ -254,6 +276,13 @@ function Get-FramePath($index) {
   return $name
 }
 
+function Test-WindowIdentity {
+  param([IntPtr]$Handle, [uint32]$ExpectedPid, [string]$ExpectedClass, [string]$ClassFilter = '')
+  if (-not [MCPGrab]::IdentityMatches($Handle, $ExpectedPid, $ExpectedClass)) { return $false }
+  if ($ClassFilter -ne '') { return ([MCPGrab]::ClassOf($Handle) -eq $ClassFilter) }
+  return $true
+}
+
 function Client-Stats($bmp, $client) {
   if (-not $bmp -or -not $client) { return [double[]]@(0.0, 0.0) }
   return [MCPGrab]::StatsRegion(
@@ -315,10 +344,33 @@ if ($SelfTest) {
       $FramePattern = $savedFramePattern
     }
     $framePathBracesOk = ($framePathBraces -eq 'C:\Temp\literal{0}\frame_3.png')
-    $ok = (-not ($cases.Values -contains $false)) -and $framePathBracesOk
+    # F-05: exercise the real per-frame identity revalidation against a
+    # real window from List(): it must accept its own pid/class and reject
+    # an altered expected pid or class. Separate payload fields, NOT new
+    # `cases` entries, so the pinned cases contract stays as-is. With no
+    # window at all the exercise is reported skipped and does not fail.
+    $identityState = 'skipped_no_window'
+    $identitySelf = $false
+    $identityWrongPidRejected = $false
+    $identityWrongClassRejected = $false
+    $identityWin = @([MCPGrab]::List() | Where-Object { $_.H -ne [IntPtr]::Zero } | Select-Object -First 1)
+    if ($identityWin.Count -gt 0) {
+      $iw = $identityWin[0]
+      $wrongPid = [uint32]0
+      if ($iw.Pid -ne [uint32]::MaxValue) { $wrongPid = [uint32]($iw.Pid + 1) }
+      $identitySelf = [bool](Test-WindowIdentity $iw.H ([uint32]$iw.Pid) ([string]$iw.Cls) ([string]$iw.Cls))
+      $identityWrongPidRejected = [bool](-not (Test-WindowIdentity $iw.H $wrongPid ([string]$iw.Cls) ([string]$iw.Cls)))
+      $identityWrongClassRejected = [bool](-not (Test-WindowIdentity $iw.H ([uint32]$iw.Pid) ([string]$iw.Cls + '_altered') ([string]$iw.Cls)))
+      $identityState = 'exercised'
+    }
+    $identityOk = ($identityState -eq 'skipped_no_window') -or ($identitySelf -and $identityWrongPidRejected -and $identityWrongClassRejected)
+    $ok = (-not ($cases.Values -contains $false)) -and $framePathBracesOk -and $identityOk
     $selfPayload = [pscustomobject]@{
       ok = $ok; error = $(if ($ok) { '' } else { 'self_test_failed' }); cases = $cases
       sampleTitle = $sampleTitle; framePathBraces = $framePathBraces; framePathBracesOk = [bool]$framePathBracesOk
+      windowIdentityState = $identityState; windowIdentitySelf = [bool]$identitySelf
+      windowIdentityWrongPidRejected = [bool]$identityWrongPidRejected
+      windowIdentityWrongClassRejected = [bool]$identityWrongClassRejected
     }
     Write-AsciiJsonLine $selfPayload
     if (-not $ok) { exit 1 }
@@ -428,6 +480,16 @@ function Save-And-Emit($bmp, $method, $geometry, $targetPath, $frameIndex) {
 # via AttachThreadInput has killed the live DayZ client (ficha 8f76).
 # Method=foreground remains an explicit opt-in for operators who accept that risk.
 function Capture-OneFrame($targetPath, $frameIndex) {
+  # F-05: revalidate the chosen window's identity on EVERY frame (this
+  # shared path also covers FrameCount=1, whose only change is this
+  # check). Windows may recycle a destroyed window's HWND, so a later
+  # frame could otherwise capture another window and credit it to the
+  # client selected once at start-up. A change fails this frame like any
+  # other frame failure, cutting the capture.
+  if (-not (Test-WindowIdentity $chosen.H ([uint32]$chosen.Pid) ([string]$chosen.Cls) ([string]$WindowClass))) {
+    Emit $false 'window_identity_changed' '' $null $null '' $null $null $frameIndex
+    return $false
+  }
   if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
     $geometry = Get-CaptureGeometry
     $bmp = [MCPGrab]::CapturePrintWindow($chosen.H, $geometry.width, $geometry.height)

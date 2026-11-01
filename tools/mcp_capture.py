@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1590,8 +1591,25 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
     output_path = output_paths[0]
     frame_pattern = ""
     frame_targets: list[str] = list(output_paths)
+    staging_dir: str | None = None
     if frame_count > 1:
         frame_pattern, frame_targets = _frame_pattern_for(output_paths)
+        if frame_targets != list(output_paths):
+            # F-04: pattern-derived intermediates (a_0/a_1/a_2.png) must
+            # never collide with a requested destination (a_1/a_2.png may
+            # BE one). Write them into a private staging directory instead
+            # and move them onto the destinations afterwards.
+            staging_dir = tempfile.mkdtemp(prefix="mcp_capture_frames_")
+            pattern_name = os.path.basename(frame_pattern)
+            frame_pattern = os.path.join(staging_dir, pattern_name)
+            frame_targets = [
+                os.path.join(staging_dir, pattern_name.replace("{0}", str(index)))
+                for index in range(frame_count)
+            ]
+
+    def _drop_staging() -> None:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
     cmd = [
         "powershell",
         "-NoProfile",
@@ -1635,8 +1653,10 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
     try:
         proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
+        _drop_staging()
         return [{"ok": False, "error": "capture_backend_failed:command_not_found"}]
     except OSError as exc:
+        _drop_staging()
         return [{"ok": False, "error": f"capture_backend_failed: {exc}"}]
 
     stdout_lines: list[str] = []
@@ -1679,8 +1699,11 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
             "".join(stdout_lines), "".join(stderr_chunks), frame_targets
         )
         if frame_targets != list(output_paths):
-            # Script wrote pattern-derived siblings; move them onto the
-            # requested paths and re-check those destinations.
+            # Script wrote pattern-derived files in the private staging
+            # directory; move them onto the requested paths FIRST and verify
+            # the destinations only after every move (F-04): a check
+            # interleaved with the moves could be invalidated by a later
+            # move overwriting an already-checked destination.
             moved: list[dict[str, Any]] = []
             for index, result in enumerate(results):
                 if result.get("ok") is True:
@@ -1695,15 +1718,31 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
                         except OSError:
                             moved.append({"ok": False, "error": "capture_backend_failed: rename_failed"})
                             break
-                    if not os.path.exists(destination):
-                        moved.append({"ok": False, "error": "capture_backend_failed: missing_png"})
-                        break
                 moved.append(result)
                 if result.get("ok") is not True:
                     break
+            else:
+                # No break: all frames moved. Final check, after all moves:
+                # each destination exists and its SHA-256 matches the hash
+                # published for its frame (case-insensitive: Get-FileHash
+                # emits upper-case hex). Public errors carry no host path.
+                for index, result in enumerate(moved):
+                    destination = output_paths[index]
+                    expected = result.get("sha256")
+                    try:
+                        actual = _file_sha256(destination) if os.path.exists(destination) else None
+                    except OSError:
+                        actual = None
+                    if actual is None:
+                        moved[index] = {"ok": False, "error": "capture_backend_failed: missing_png"}
+                        return moved[: index + 1]
+                    if not isinstance(expected, str) or not expected or actual != expected.lower():
+                        moved[index] = {"ok": False, "error": "capture_backend_failed: hash_mismatch"}
+                        return moved[: index + 1]
             return moved
         return results
     finally:
+        _drop_staging()
         for reader in readers:
             reader.join(timeout=2.0)
         for stream in (proc.stdout, proc.stderr):
