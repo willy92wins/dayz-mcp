@@ -978,6 +978,58 @@ class LoadCountersTest(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self._run_translated_constructor_and_polls(name, mutant, expected_caps_raw)
 
+    def test_translated_poll_allows_copy_transform_and_hex_read_of_cache(self) -> None:
+        server_source = (_MISSION / "MCPBridge.c").read_text(encoding="utf-8")
+        client_source = (_MISSION / "MCPClientBridge.c").read_text(encoding="utf-8")
+        server_caps_raw = ",".join(_dispatch_branches(server_source)).encode("ascii")
+        client_caps_raw = ",".join(_dispatch_branches(client_source)).encode("ascii")
+        server_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        server_ach_init = "\t\tm_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n"
+        client_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);\n"
+        positives = (
+            (
+                "MCPBridge.c",
+                server_caps_raw,
+                server_source.replace(
+                    server_caps_init,
+                    server_caps_init
+                    + "\t\tstring reviewCopy = m_PollCapabilities;\n"
+                    + "\t\treviewCopy.ToUpper();\n"
+                    + "\t\tint reviewHex = m_PollCapabilities.HexToInt();\n",
+                    1,
+                ),
+            ),
+            (
+                "MCPBridge.c",
+                server_caps_raw,
+                server_source.replace(
+                    server_ach_init,
+                    server_ach_init
+                    + "\t\tstring reviewCopy = m_PollArgContractHash;\n"
+                    + "\t\treviewCopy.ToUpper();\n"
+                    + "\t\tint reviewHex = m_PollArgContractHash.HexToInt();\n",
+                    1,
+                ),
+            ),
+            (
+                "MCPClientBridge.c",
+                client_caps_raw,
+                client_source.replace(
+                    client_caps_init,
+                    client_caps_init
+                    + "\t\tstring reviewCopy = m_PollCapabilities;\n"
+                    + "\t\treviewCopy.ToUpper();\n"
+                    + "\t\tint reviewHex = m_PollCapabilities.HexToInt();\n",
+                    1,
+                ),
+            ),
+        )
+        for name, expected_caps_raw, variant in positives:
+            with self.subTest(bridge=name):
+                base = server_source if name == "MCPBridge.c" else client_source
+                self.assertNotEqual(variant, base)
+                self._run_translated_constructor_and_polls(name, variant, expected_caps_raw)
+
     def test_bridge_counters_saturate_at_a_fixed_cap(self) -> None:
         for name in ("MCPBridge.c", "MCPClientBridge.c"):
             text = (_MISSION / name).read_text(encoding="utf-8")
