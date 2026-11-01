@@ -1276,6 +1276,11 @@ class ApprovedRegistryCacheAuditTest(unittest.TestCase):
             dayz_test_tool.open_approved_launcher_async,
             launcher_registry.open_approved_launcher_async,
         )
+        # Compat seam: the patched name binds the async variant too.
+        self.assertIs(
+            dayz_test_tool.open_approved_launcher,
+            launcher_registry.open_approved_launcher_async,
+        )
 
     def test_duplicate_id_is_not_approved(self) -> None:
         # :321: exactly one match is required.
@@ -1314,6 +1319,18 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
         launcher_registry._clear_approved_registry_cache_for_test()
         if self._saved_cache is not None:
             launcher_registry._cache_approved_registry(self._saved_cache)
+
+    async def test_open_launcher_accepts_sync_test_double(self) -> None:
+        # Seam compat: a synchronous context manager patched over
+        # dayz_test_tool.open_approved_launcher (the existing test
+        # doubles) is entered synchronously by _open_launcher.
+        opened = _FakeOpenedLauncher()
+        with mock.patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=opened
+        ):
+            async with dayz_test_tool._open_launcher() as result:
+                self.assertIs(result, opened)
+        self.assertTrue(opened.closed)
 
     async def test_async_open_retries_busy_with_awaited_backoff(self) -> None:
         clock = _FakeAsyncClock()

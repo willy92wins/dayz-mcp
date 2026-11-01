@@ -10,7 +10,7 @@ import os
 import re
 import time
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Protocol
@@ -26,6 +26,24 @@ from dayz_mcp import (
     secure_launcher,
 )
 from dayz_mcp.launcher_registry import open_approved_launcher_async
+
+# Compat seam (A3 FIX 9): existing tests patch `open_approved_launcher`
+# in this module with a synchronous context manager. Production binds
+# the name to the async variant; `_open_launcher` accepts either
+# context-manager protocol, so those doubles keep working unchanged.
+open_approved_launcher = open_approved_launcher_async
+
+
+@asynccontextmanager
+async def _open_launcher():
+    """Open the approved launcher without blocking the event loop."""
+    context = open_approved_launcher("dayz-test-v1")
+    if hasattr(context, "__aenter__"):
+        async with context as opened:
+            yield opened
+    else:
+        with context as opened:
+            yield opened
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.client_steam_bootstrap import (
@@ -2358,7 +2376,7 @@ async def _execute_preflight(
             stamped, defaulted, project_mod_replaced=project_mod_override
         )
 
-    async with open_approved_launcher_async("dayz-test-v1") as opened:
+    async with _open_launcher() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             raw_request, policy = build_run_request(
@@ -2706,7 +2724,7 @@ async def execute_dayz_test_run(
         )
     preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
-    async with open_approved_launcher_async("dayz-test-v1") as opened:
+    async with _open_launcher() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             request_arguments: dict[str, object] = {
@@ -3228,7 +3246,7 @@ async def execute_dayz_test_stop(
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")
-    async with open_approved_launcher_async("dayz-test-v1") as opened:
+    async with _open_launcher() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
