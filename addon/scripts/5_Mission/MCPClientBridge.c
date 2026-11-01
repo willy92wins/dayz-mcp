@@ -487,9 +487,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected string m_PollVersion;
 	protected float m_PollHz;
 	protected float m_Accum;
+	// Seconds since the last unconfigured TryInit. The first attempt does not wait.
+	protected float m_InitAccumS;
 	// Backoff at which a poll failure stops looking transient and the credential on
 	// disk is re-read.
 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
+	// Unconfigured TryInit period. A queued CallLater would outlive ShutdownInstance.
+	protected const float INIT_RETRY_S = 1.0;
 	protected const float POLL_WATCHDOG_S = 30.0;
 	protected float m_Backoff;
 	protected int m_Tick;
@@ -500,7 +504,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
-	// Same load counters as MCPBridge (A1). The client poll carries them too.
+	// Same load counters as MCPBridge (A1). ia counts real TryInit attempts,
+	// not frames (A2). The client poll carries them too.
 	// Saturate at the same cap: a wrapped negative drops the whole triple.
 	protected const int LOAD_COUNTER_CAP = 2000000000;
 	// TickCount reports 100 ns CPU ticks: 10,000 ticks per millisecond.
@@ -555,6 +560,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		m_PollHz = 5.0;
 		m_Accum = 0.0;
+		m_InitAccumS = 0.0;
 		m_Backoff = 0.0;
 		m_Tick = 0;
 		m_ActionHoldCommandId = -1;
@@ -672,7 +678,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (!m_Configured)
 		{
-			TryInit();
+			m_InitAccumS = m_InitAccumS + timeslice;
+			if (m_InitAttempts == 0 || m_InitAccumS >= INIT_RETRY_S)
+			{
+				m_InitAccumS = 0.0;
+				TryInit();
+			}
 			return;
 		}
 
