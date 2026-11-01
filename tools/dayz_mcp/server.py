@@ -1700,16 +1700,31 @@ def _status_disowns_lease(status: object, lease_id: object) -> bool:
     return isinstance(named, str) and bool(named) and named != lease_id
 
 
+# Same function object orphan_guard bound with its from-import, captured
+# here at import. Comparing the live from-import to the live sealed
+# attribute is wrong: a test that patches only the sealed attribute makes
+# the two differ, and the branch then calls the original from-import.
+# Production calls neither patch. The from-import check has to stay because
+# client tests replace that binding and must not enter the pool; a sealed
+# attribute patch leaves the from-import on this snapshot and falls through,
+# and keepalive_daemon_http_request calls that substitute instead of pooling.
+_ORIGINAL_VERIFIED_DAEMON_HTTP_REQUEST = (
+    accredited_daemon_transport.verified_daemon_http_request
+)
+
+
 def _client_keepalive_request(**kwargs):
     """MCP client hop. A test that replaced the sealed transport is called as-is.
 
     ``orphan_guard.verified_daemon_http_request`` is a from-import. Patching
-    that binding must not fall through into the pool, and patching the sealed
-    module attribute is handled inside ``keepalive_daemon_http_request``.
+    that binding must not fall through into the pool. Patching only the
+    sealed module attribute leaves this from-import on the import snapshot,
+    so the call enters ``keepalive_daemon_http_request``, which uses the
+    substitute and does not pool.
     """
-    patched = orphan_guard.verified_daemon_http_request
-    if patched is not accredited_daemon_transport.verified_daemon_http_request:
-        return patched(**kwargs)
+    bound = orphan_guard.verified_daemon_http_request
+    if bound is not _ORIGINAL_VERIFIED_DAEMON_HTTP_REQUEST:
+        return bound(**kwargs)
     return accredited_keepalive.keepalive_daemon_http_request(**kwargs)
 
 

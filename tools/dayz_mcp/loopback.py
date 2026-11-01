@@ -351,8 +351,8 @@ MAX_RESULTS = MAX_QUEUE * 4
 # headroom for a short legitimate burst while waits are held. Exceeding the
 # ceiling closes the accepted socket without a worker (reject, do not queue).
 # A request that has started is still bounded by Handler.timeout. An idle
-# keep-alive holds one of these workers only until KEEPALIVE_IDLE_S, not for
-# that 35s long-poll budget.
+# keep-alive holds one of these workers only until the next request line or
+# KEEPALIVE_IDLE_S, and only while it owns one MAX_IDLE_KEEPALIVES slot.
 MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # The game bridge polls /poll and posts /result. /set_poll_delay is the same
 # socket family. None of them may keep the connection.
@@ -360,9 +360,28 @@ GAME_BRIDGE_HTTP_PATHS = frozenset({"/poll", "/result", "/set_poll_delay"})
 # Longer than the client's 5s idle discard (accredited_keepalive
 # IDLE_REUSE_LIMIT_S; this module does not import it) and far below
 # Handler.timeout. The client closes when it discards, which frees the
-# worker before this cap. 64 idle MCP sessions can hold 64 of the 96
-# workers for at most 8s; a burst reuses that one worker.
+# worker before this cap.
 KEEPALIVE_IDLE_S = 8.0
+# How many answered connections may sit idle at once. Each one keeps a
+# worker until the next request line or KEEPALIVE_IDLE_S. The +32 margin
+# above MAX_SESSION_QUEUE is the whole remainder of MAX_HTTP_WORKERS (96).
+# PR #306 parks 8 POST /await waits on this same pool. Two /poll sockets,
+# one /result and one /enqueue still need a worker when those waits and
+# every idle slot are taken:
+#   96 - 64 - 8 - 2 - 1 - 1 = 20.
+# The claim is non-blocking. No free slot means the response closes.
+_AWAIT_WAIT_RESERVE = 8
+_POLL_WORKER_RESERVE = 2
+_RESULT_WORKER_RESERVE = 1
+_ENQUEUE_WORKER_RESERVE = 1
+MAX_IDLE_KEEPALIVES = (
+    MAX_HTTP_WORKERS
+    - MAX_SESSION_QUEUE
+    - _AWAIT_WAIT_RESERVE
+    - _POLL_WORKER_RESERVE
+    - _RESULT_WORKER_RESERVE
+    - _ENQUEUE_WORKER_RESERVE
+)
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -8312,18 +8331,25 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 35.0
     _keepalive_ok = False
     _force_close = False
+    # False until this request has no body, or _read_json has read its
+    # Content-Length. A response before that closes. Missing means closed.
+    _body_fully_consumed = False
+    _idle_slot_held = False
 
     def log_message(self, format: str, *args: object) -> None:
         return
 
     def handle(self) -> None:
         self.close_connection = True
-        self.handle_one_request()
-        while not self.close_connection:
-            self._arm_keepalive_idle_read()
-            if self.close_connection:
-                return
+        try:
             self.handle_one_request()
+            while not self.close_connection:
+                self._arm_keepalive_idle_read()
+                if self.close_connection:
+                    return
+                self.handle_one_request()
+        finally:
+            self._release_idle_keepalive_slot()
 
     def _arm_keepalive_idle_read(self) -> None:
         try:
@@ -8336,6 +8362,7 @@ class Handler(BaseHTTPRequestHandler):
         # CPython 3.14, plus the idle-timeout restore below.
         self._keepalive_ok = False
         self._force_close = False
+        self._body_fully_consumed = False
         try:
             self.raw_requestline = self.rfile.readline(65537)
             if len(self.raw_requestline) > 65536:
@@ -8347,6 +8374,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self.raw_requestline:
                 self.close_connection = True
                 return
+            # The next request has arrived: this socket is not idle any more.
+            self._release_idle_keepalive_slot()
             try:
                 self.connection.settimeout(self.timeout)
             except OSError:
@@ -8354,6 +8383,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self.parse_request():
                 return
+            self._note_body_if_absent()
             mname = "do_" + self.command
             if not hasattr(self, mname):
                 self.send_error(
@@ -8376,16 +8406,49 @@ class Handler(BaseHTTPRequestHandler):
         this path is the same bytes as before. The game bridge never takes it.
         """
         self._keepalive_ok = False
-        if path in GAME_BRIDGE_HTTP_PATHS:
+        try:
+            bridged = path in GAME_BRIDGE_HTTP_PATHS
+        except Exception:
             return
-        if self.request_version != "HTTP/1.1":
+        if bridged:
             return
-        raw = self.headers.get("Connection", "")
+        # parse_request is what sets request_version. A handler built without
+        # it (tests call do_POST directly) has nothing to decide from.
+        if getattr(self, "request_version", "") != "HTTP/1.1":
+            return
+        try:
+            raw = self.headers.get("Connection", "")
+        except Exception:
+            return
         if not isinstance(raw, str):
-            raw = str(raw)
+            return
         tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
         if "keep-alive" in tokens and "close" not in tokens:
             self._keepalive_ok = True
+
+    def _note_body_if_absent(self) -> None:
+        """No Content-Length and no chunked body means there is nothing to read.
+
+        Anything else stays unconsumed until _read_json has taken exactly
+        Content-Length bytes. Unreadable framing fails closed.
+        """
+        self._body_fully_consumed = False
+        try:
+            transfer = self.headers.get("Transfer-Encoding", "")
+            if not isinstance(transfer, str) or transfer.strip():
+                return
+            if "Content-Length" not in self.headers:
+                self._body_fully_consumed = True
+                return
+            raw_length = self.headers.get("Content-Length")
+        except Exception:
+            return
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            return
+        if length == 0:
+            self._body_fully_consumed = True
 
     @property
     def state(self) -> ServerState:
@@ -8506,6 +8569,9 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) != length:
             self._reject_unread_body(400, "bad_body_length")
             return None
+        # The bytes are consumed even when the JSON itself is rejected.
+        # _force_close still makes that rejection drop the connection.
+        self._body_fully_consumed = True
 
         try:
             text = raw.decode("utf-8")
@@ -8532,7 +8598,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, body: dict) -> None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        persist = self._keepalive_ok and not self._force_close
+        # One decision for every JSON reply. Early 403/404 never mark the
+        # body consumed, so they close. Invalid JSON sets _force_close.
+        persist = (
+            getattr(self, "_keepalive_ok", False)
+            and not getattr(self, "_force_close", True)
+            and getattr(self, "_body_fully_consumed", False)
+        )
+        if persist and not self._claim_idle_keepalive_slot():
+            persist = False
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -8542,6 +8616,28 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         self.end_headers()
         self.wfile.write(data)
+
+    def _claim_idle_keepalive_slot(self) -> bool:
+        """Non-blocking. No slot, or no quota on this server, means close."""
+        if self._idle_slot_held:
+            return True
+        try:
+            acquired = self.server._idle_keepalive_slots.acquire(blocking=False)
+        except Exception:
+            return False
+        if not acquired:
+            return False
+        self._idle_slot_held = True
+        return True
+
+    def _release_idle_keepalive_slot(self) -> None:
+        if not self._idle_slot_held:
+            return
+        self._idle_slot_held = False
+        try:
+            self.server._idle_keepalive_slots.release()
+        except Exception:
+            return
 
     def _log(self, message: str) -> None:
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
@@ -9686,6 +9782,7 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        self._idle_keepalive_slots = threading.BoundedSemaphore(MAX_IDLE_KEEPALIVES)
         self._human_input_diagnostic = threading.BoundedSemaphore(1)
         super().__init__(*args, **kwargs)
 

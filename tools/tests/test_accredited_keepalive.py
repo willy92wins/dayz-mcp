@@ -19,6 +19,7 @@ from dayz_mcp import accredited_daemon_transport, accredited_keepalive, loopback
 from dayz_mcp.daemon_credential import RefreshingDaemonCredential
 from dayz_mcp.daemon_policy import AccreditedDaemonPolicy
 from dayz_mcp.native_process_guard import identity_hashes
+from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
 from tests.fence_helpers import INST_SERVER, bind_both_peers
 
 
@@ -438,6 +439,42 @@ class KeepaliveTransportTests(unittest.TestCase):
             )
         self.assertEqual((status, body), (200, b"{}"))
         self.assertEqual(calls, ["/status"])
+
+    def test_both_transport_patch_variants_call_the_substitute(self) -> None:
+        """F3: the from-import and the sealed attribute each reach the double."""
+
+        def exercise(target: object, attribute: str) -> None:
+            calls: list[str] = []
+
+            def fake(**kwargs: object) -> tuple[int, bytes]:
+                calls.append(str(kwargs["path"]))
+                return 200, b"{}"
+
+            with patch.object(target, attribute, fake):
+                status, body = server._client_keepalive_request(
+                    host="127.0.0.1",
+                    port=PORT,
+                    key="top-secret",
+                    method="GET",
+                    path="/status",
+                    query={},
+                    body=None,
+                    headers={},
+                    deadline=10.0,
+                    expected_executable=EXECUTABLE,
+                    expected_argv=_argv(PORT),
+                    expected_cwd=CWD,
+                )
+            self.assertEqual((status, body), (200, b"{}"))
+            self.assertEqual(calls, ["/status"])
+
+        with self.subTest(patch="orphan_guard binding"):
+            exercise(server.orphan_guard, "verified_daemon_http_request")
+        with self.subTest(patch="sealed module attribute"):
+            exercise(
+                accredited_daemon_transport,
+                "verified_daemon_http_request",
+            )
 
     def test_reused_socket_reset_does_not_duplicate_enqueue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -869,3 +906,176 @@ class DaemonKeepaliveTests(unittest.TestCase):
             self.assertIsInstance(json.loads(body.decode("utf-8")), dict)
         self.assertEqual(len(live), 1)
         self.assertEqual(len(walks), 3)
+
+    def test_early_post_reject_does_not_leave_the_body_for_the_next_request(
+        self,
+    ) -> None:
+        """F1: a POST refused before its body is read must not desync keep-alive."""
+        cases = (
+            ("/no-such-route", False),
+            ("/lifecycle/start", True),
+            ("/admin/reconcile", True),
+        )
+        for path, live in cases:
+            with self.subTest(path=path):
+                self.state.live_profile = live
+                try:
+                    self._assert_rejected_post_does_not_desync(path)
+                finally:
+                    self.state.live_profile = False
+
+    def _assert_rejected_post_does_not_desync(self, path: str) -> None:
+        sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        try:
+            sock.settimeout(2.0)
+            sock.sendall(
+                self._raw(
+                    "POST",
+                    path,
+                    protocol="HTTP/1.1",
+                    connection="keep-alive",
+                    body=b"{}",
+                )
+            )
+            status, headers, _payload, rest = _read_http(sock)
+            self.assertIn(status.split()[1], (b"403", b"404"))
+            connection = headers.get("connection", "").lower()
+            stayed_open = "keep-alive" in connection and "close" not in connection
+            if not stayed_open:
+                self.assertNotIn("keep-alive", connection)
+                return
+            sock.sendall(
+                self._raw(
+                    "GET",
+                    "/status",
+                    protocol="HTTP/1.1",
+                    connection="keep-alive",
+                )
+            )
+            status2, _headers2, body2, _rest = _read_http(sock, rest)
+            self.assertTrue(status2.startswith(b"HTTP/1.0 200"), status2)
+            self.assertIsInstance(json.loads(body2.decode("utf-8")), dict)
+        finally:
+            sock.close()
+
+    def test_poll_answers_while_waits_and_idle_keepalives_fill_the_pool(self) -> None:
+        """F2: idle keep-alives must not spend the workers /poll still needs."""
+        coordinator = SessionCoordinator(audit=lambda _event: True)
+        self.state.coordination = coordinator
+        holder = ClientIdentity(
+            "codex", 1, 1, "2026-07-14T20:00:00Z", "session-holder", "hold"
+        )
+        status, _payload = coordinator.acquire(holder, "hold the slot")
+        self.assertEqual(status, 200)
+        queued: list[tuple[ClientIdentity, str]] = []
+        for index in range(loopback.MAX_SESSION_QUEUE):
+            client = ClientIdentity(
+                "codex",
+                1000 + index,
+                1,
+                "2026-07-14T20:00:00Z",
+                f"session-{index}",
+                "wait",
+            )
+            admitted, payload = coordinator.enqueue(
+                client, "queued", f"op-{index}"
+            )
+            self.assertEqual(admitted, 202, payload)
+            ticket = payload.get("ticket")
+            self.assertIsInstance(ticket, str)
+            queued.append((client, str(ticket)))
+
+        errors: list[BaseException] = []
+        sent = [threading.Event() for _ in queued]
+
+        def hold_wait(
+            client: ClientIdentity, ticket: str, sent_event: threading.Event
+        ) -> None:
+            sock: socket.socket | None = None
+            try:
+                sock = socket.create_connection((self.host, self.port), timeout=2.0)
+                body = json.dumps(
+                    {
+                        "identity": client.to_payload(),
+                        "ticket": ticket,
+                        "timeout_s": 5.0,
+                    }
+                ).encode("utf-8")
+                sock.settimeout(8.0)
+                sock.sendall(
+                    self._raw(
+                        "POST",
+                        "/session/wait",
+                        protocol="HTTP/1.0",
+                        connection=None,
+                        body=body,
+                    )
+                )
+                sent_event.set()
+                _read_http(sock)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                sent_event.set()
+                if sock is not None:
+                    sock.close()
+
+        threads = [
+            threading.Thread(
+                target=hold_wait, args=(*item, sent[index]), daemon=True
+            )
+            for index, item in enumerate(queued)
+        ]
+        idle: list[socket.socket] = []
+        try:
+            for thread in threads:
+                thread.start()
+            self.assertTrue(all(event.wait(3.0) for event in sent))
+            time.sleep(0.4)
+            margin = loopback.MAX_HTTP_WORKERS - loopback.MAX_SESSION_QUEUE
+            for _ in range(margin):
+                sock = socket.create_connection((self.host, self.port), timeout=2.0)
+                idle.append(sock)
+                sock.settimeout(2.0)
+                sock.sendall(
+                    self._raw(
+                        "GET",
+                        "/status",
+                        protocol="HTTP/1.1",
+                        connection="keep-alive",
+                    )
+                )
+                status_line, response_headers, status_body, _rest = _read_http(sock)
+                self.assertTrue(status_line.startswith(b"HTTP/1.0 200"), status_line)
+                self.assertIsInstance(json.loads(status_body.decode("utf-8")), dict)
+                # Leave the socket up when the daemon kept it. A closed one
+                # has already returned its worker.
+                if "keep-alive" not in response_headers.get("connection", "").lower():
+                    sock.close()
+                    idle.remove(sock)
+            poll = socket.create_connection((self.host, self.port), timeout=2.0)
+            try:
+                poll.settimeout(2.0)
+                poll.sendall(
+                    self._raw(
+                        "GET",
+                        "/poll",
+                        protocol="HTTP/1.1",
+                        connection="close",
+                        query={"inst": INST_SERVER},
+                    )
+                )
+                poll_status, _poll_headers, poll_body, _rest = _read_http(poll)
+            finally:
+                poll.close()
+            self.assertTrue(poll_status.startswith(b"HTTP/1.0 200"), poll_status)
+            self.assertIn(b"commands", poll_body)
+        finally:
+            for sock in idle:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            for thread in threads:
+                thread.join(timeout=8.0)
+        self.assertEqual(errors, [])
