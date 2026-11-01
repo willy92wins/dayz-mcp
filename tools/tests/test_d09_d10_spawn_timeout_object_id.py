@@ -1,7 +1,7 @@
 """A failed bridge result must carry its object_id to the caller.
 
 The bridge answers a spawn that timed out with ``ok:0, error:"timeout"`` AND the
-id of the object it did create (``MCPBridge.c:3272``). Python used to build the
+id of the object it did create (``MCPBridge.c:8090``). Python used to build the
 ToolError from the error string alone, so the handle was dropped and a retry
 spawned a second, undeletable object.
 

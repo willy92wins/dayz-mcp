@@ -608,7 +608,7 @@ class MCPToolsTest(unittest.IsolatedAsyncioTestCase):
     @slow_test
     async def test_camera_set_look_at_alias_is_normalized_for_the_wire(self) -> None:
         # `lookat` is the value the game matches on
-        # (MCPClientBridge.c:1741), but the vector argument beside it is spelled
+        # (MCPClientBridge.c:6788), but the vector argument beside it is spelled
         # `look_at`, so callers reach for the underscore and get a bare bad_args.
         # The alias must be NORMALIZED, not merely accepted: every branch forwards
         # cam_mode verbatim, so passing the caller's spelling through would trade a

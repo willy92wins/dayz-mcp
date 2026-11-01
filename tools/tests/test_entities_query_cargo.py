@@ -5,7 +5,7 @@ Run:
 
 WHAT THE BRIDGE SENDS -- no game, no bridge, no lease.
 MCPEntityHit declares `bool has_cargo` (addon/scripts/5_Mission/MCPMessages.c:360) and
-DispatchEntitiesQuery fills it with HasCargoCapacity (MCPBridge.c:1422, defined :1441-1456
+DispatchEntitiesQuery fills it with HasCargoCapacity (MCPBridge.c:5437, defined :5456-5471
 as EntityAI.Cast -> GetInventory() -> GetCargo() != null). Every test here replaces
 runtime.call_bridge with a fake that returns literal row dicts, the same seam
 tests/test_lote_v_products.py:64-80 already uses, so the rows below ARE the wire and
