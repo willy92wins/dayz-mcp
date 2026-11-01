@@ -20,6 +20,16 @@
 #     client:{left,top,width,height}, clientStats:{meanBrightness,nonBlackRatio} }
 # Callers that read the last JSON line ignore the phase line. SelfTest stays
 # one JSON line and does not emit the phase line.
+#
+# Multi-frame (perf/capture-one-process): with -FrameCount N (N > 1) Add-Type and
+# window resolution happen once, then N frames are captured in this same process,
+# sleeping -FrameIntervalMs between frames. One {"phase":"started"} line is still
+# emitted once, followed by one JSON line per frame with the same schema plus
+# frameIndex (0-based). Frame files are named by -FramePattern, a full path
+# template containing "{0}" for the frame index; without it, frame 0 is
+# -CapturePng and later frames insert "_<index>" before the extension. With
+# -FrameCount 1 (or the new parameters omitted) output and behaviour are
+# exactly the single-frame behaviour above (no frameIndex field).
 [CmdletBinding(DefaultParameterSetName='Capture')]
 param(
   [string]$ProcessName = 'DayZDiag_x64',
@@ -36,7 +46,17 @@ param(
   #                        robust to the launcher-pid-vs-window-pid mismatch and excludes other clients
   #                        (LFQuad uses -port=2302). Resolved to the matching pid set via CIM.
   [int]$ClientPid = 0,
-  [string]$CmdLineMatch = ''
+  [string]$CmdLineMatch = '',
+  # Window class the candidate filter matches. Default 'DayZ' is the legacy
+  # filter; other values (e.g. 'Shell_TrayWnd') only serve tests/tools that
+  # grab a known non-DayZ window with the same capture pipeline.
+  [string]$WindowClass = 'DayZ',
+  # Multi-frame in one process. FrameCount <= 1 keeps the legacy single-frame
+  # behaviour exactly. FramePattern names frame i as (FramePattern -f i) style
+  # substitution of "{0}"; empty derives names from CapturePng (see header).
+  [int]$FrameCount = 1,
+  [int]$FrameIntervalMs = 120,
+  [string]$FramePattern = ''
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -162,11 +182,44 @@ public class MCPGrab {
 }
 "@
 
-function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats) {
-  [pscustomobject]@{
+function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats, $frameIndex = -1) {
+  $payload = [pscustomobject]@{
     ok = $ok; error = $err; method = $method; window = $window; stats = $stats; sha256 = $sha
     client = $client; clientStats = $clientStats
-  } | ConvertTo-Json -Compress
+  }
+  if ($FrameCount -gt 1) {
+    $payload | Add-Member -NotePropertyName frameIndex -NotePropertyValue ([int]$frameIndex)
+  }
+  $json = $payload | ConvertTo-Json -Compress
+  # Write the result line straight to the raw stdout handle, like the
+  # {"phase":"started"} line below, and never to the success pipeline: inside
+  # Capture-OneFrame anything on that pipeline becomes part of the function's
+  # return value, so a caller that discards it ([void](...)) or assigns it
+  # ($ok = Capture-OneFrame ...) would swallow the result line entirely and
+  # turn the success value into an always-truthy array. Raw stdout keeps the
+  # protocol identical for top-level and in-function calls alike, and leaves
+  # Capture-OneFrame returning exactly $true/$false.
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json + "`n")
+    $rawOut = [Console]::OpenStandardOutput()
+    $rawOut.Write($bytes, 0, $bytes.Length)
+    $rawOut.Flush()
+  } catch {
+    try { [Console]::Out.WriteLine($json); [Console]::Out.Flush() } catch {}
+  }
+}
+
+function Get-FramePath($index) {
+  if ($FramePattern -ne '') {
+    return $FramePattern.Replace('{0}', [string]$index)
+  }
+  if ($index -eq 0) { return $CapturePng }
+  $dir = [System.IO.Path]::GetDirectoryName($CapturePng)
+  $stem = [System.IO.Path]::GetFileNameWithoutExtension($CapturePng)
+  $ext = [System.IO.Path]::GetExtension($CapturePng)
+  $name = "${stem}_${index}${ext}"
+  if ($dir) { return [System.IO.Path]::Combine($dir, $name) }
+  return $name
 }
 
 function Client-Stats($bmp, $client) {
@@ -245,7 +298,7 @@ try {
 } catch {}
 
 $wins  = [MCPGrab]::List()
-$shown = $wins | Where-Object { $_.Vis -and $_.Wd -gt 0 -and $_.Ht -gt 0 -and $_.Cls -eq 'DayZ' -and $_.Cls -ne 'ConsoleWindowClass' }
+$shown = $wins | Where-Object { $_.Vis -and $_.Wd -gt 0 -and $_.Ht -gt 0 -and $_.Cls -eq $WindowClass -and $_.Cls -ne 'ConsoleWindowClass' }
 
 # Build the candidate window set in priority order; each selector narrows to the target client and
 # excludes other DayZ clients (e.g. LFQuad). Fall through to the next only if a selector yields no
@@ -282,7 +335,7 @@ if (-not $chosen -and $CmdLineMatch -eq '' -and $ClientPid -le 0) {
 }
 
 if (-not $chosen) {
-  Emit $false $selErr '' $null $null '' $null $null
+  Emit $false $selErr '' $null $null '' $null $null 0
   exit 0
 }
 
@@ -308,42 +361,61 @@ function Get-CaptureGeometry() {
   }
 }
 
-function Save-And-Emit($bmp, $method, $geometry) {
+function Save-And-Emit($bmp, $method, $geometry, $targetPath, $frameIndex) {
   $st = [MCPGrab]::Stats($bmp)
   $clientSt = Client-Stats $bmp $geometry.client
-  $bmp.Save($CapturePng, [System.Drawing.Imaging.ImageFormat]::Png)
+  $bmp.Save($targetPath, [System.Drawing.Imaging.ImageFormat]::Png)
   $bmp.Dispose()
-  $sha = (Get-FileHash -LiteralPath $CapturePng -Algorithm SHA256).Hash
+  $sha = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash
   $stats = [pscustomobject]@{ meanBrightness = $st[0]; nonBlackRatio = $st[1] }
   $clientStats = [pscustomobject]@{ meanBrightness = $clientSt[0]; nonBlackRatio = $clientSt[1] }
-  Emit $true '' $method $geometry.window $stats $sha $geometry.client $clientStats
+  Emit $true '' $method $geometry.window $stats $sha $geometry.client $clientStats $frameIndex
 }
 
+# One frame: geometry, capture, save and hash. Window resolution and Add-Type
+# above happen once for the whole run; only this repeats per frame.
 # auto/printwindow: PrintWindow first (occlusion-robust, no focus theft). auto
 # then falls back to CopyFromScreen WITHOUT SetForegroundWindow: ForceForeground
 # via AttachThreadInput has killed the live DayZ client (ficha 8f76).
 # Method=foreground remains an explicit opt-in for operators who accept that risk.
-if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
-  $geometry = Get-CaptureGeometry
-  $bmp = [MCPGrab]::CapturePrintWindow($chosen.H, $geometry.width, $geometry.height)
-  if ($Method -eq 'printwindow') {
-    if ($bmp) { Save-And-Emit $bmp 'printwindow' $geometry; exit 0 } else { Emit $false 'printwindow_failed' 'printwindow' $geometry.window $null '' $geometry.client $null; exit 0 }
+function Capture-OneFrame($targetPath, $frameIndex) {
+  if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
+    $geometry = Get-CaptureGeometry
+    $bmp = [MCPGrab]::CapturePrintWindow($chosen.H, $geometry.width, $geometry.height)
+    if ($Method -eq 'printwindow') {
+      if ($bmp) { Save-And-Emit $bmp 'printwindow' $geometry $targetPath $frameIndex; return $true } else { Emit $false 'printwindow_failed' 'printwindow' $geometry.window $null '' $geometry.client $null $frameIndex; return $false }
+    }
+    if (Is-Live $bmp $geometry.client) { Save-And-Emit $bmp 'printwindow' $geometry $targetPath $frameIndex; return $true }
+    if ($bmp) { $bmp.Dispose() }
   }
-  if (Is-Live $bmp $geometry.client) { Save-And-Emit $bmp 'printwindow' $geometry; exit 0 }
-  if ($bmp) { $bmp.Dispose() }
-}
 
-if ($Method -eq 'foreground') {
-  [MCPGrab]::ForceForeground($chosen.H)
-  Start-Sleep -Milliseconds $ForegroundSettleMs
+  if ($Method -eq 'foreground') {
+    [MCPGrab]::ForceForeground($chosen.H)
+    Start-Sleep -Milliseconds $ForegroundSettleMs
+    $geometry = Get-CaptureGeometry
+    $bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
+    if ($bmp) { Save-And-Emit $bmp 'foreground' $geometry $targetPath $frameIndex; return $true } else { Emit $false 'foreground_failed' 'foreground' $geometry.window $null '' $geometry.client $null $frameIndex; return $false }
+  }
+
+  # screen: plain CopyFromScreen (baseline / last resort).
   $geometry = Get-CaptureGeometry
   $bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
-  if ($bmp) { Save-And-Emit $bmp 'foreground' $geometry; exit 0 } else { Emit $false 'foreground_failed' 'foreground' $geometry.window $null '' $geometry.client $null; exit 0 }
+  if ($bmp) { Save-And-Emit $bmp 'screen' $geometry $targetPath $frameIndex; return $true }
+  Emit $false 'all_methods_failed' '' $geometry.window $null '' $geometry.client $null $frameIndex
+  return $false
 }
 
-# screen: plain CopyFromScreen (baseline / last resort).
-$geometry = Get-CaptureGeometry
-$bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
-if ($bmp) { Save-And-Emit $bmp 'screen' $geometry; exit 0 }
-Emit $false 'all_methods_failed' '' $geometry.window $null '' $geometry.client $null
+if ($FrameCount -le 1) {
+  [void](Capture-OneFrame $CapturePng 0)
+  exit 0
+}
+$intervalMs = $FrameIntervalMs
+if ($intervalMs -lt 0) { $intervalMs = 0 }
+for ($frameIndex = 0; $frameIndex -lt $FrameCount; $frameIndex++) {
+  if ($frameIndex -gt 0 -and $intervalMs -gt 0) { Start-Sleep -Milliseconds $intervalMs }
+  # Emit writes to raw stdout, so this is a scalar [bool], not the old
+  # always-truthy array of pipeline output plus the return value.
+  $okFrame = Capture-OneFrame (Get-FramePath $frameIndex) $frameIndex
+  if (-not $okFrame) { exit 0 }
+}
 exit 0

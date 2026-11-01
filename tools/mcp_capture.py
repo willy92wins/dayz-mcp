@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1434,6 +1435,82 @@ def _capture_payload_from_output(stdout: str, stderr: str, output_path: str) -> 
     return payload
 
 
+def _capture_payloads_from_output(
+    stdout: str, stderr: str, output_paths: list[str]
+) -> list[dict[str, Any]]:
+    """Parse one JSON result line per frame (multi-frame grab).
+
+    Lines are matched to frames by their ``frameIndex`` when present, else by
+    order. A failure line stops the list at that frame (the caller cuts on the
+    first failure, as the per-process loop did). With a single output path this
+    is exactly :func:`_capture_payload_from_output` over the whole output.
+    """
+    if len(output_paths) <= 1:
+        return [
+            _capture_payload_from_output(
+                stdout, stderr, output_paths[0] if output_paths else ""
+            )
+        ]
+    parsed_lines: list[dict[str, Any]] = []
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line or _capture_reported_started(line):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed_lines.append(parsed)
+    if not parsed_lines:
+        detail = stderr.strip()
+        return [{"ok": False, "error": f"capture_backend_failed: {detail or 'no_json'}"}]
+    by_index: dict[int, dict[str, Any]] = {}
+    for position, payload in enumerate(parsed_lines):
+        index = payload.get("frameIndex")
+        if not isinstance(index, int) or isinstance(index, bool):
+            index = position
+        by_index.setdefault(index, payload)
+    results: list[dict[str, Any]] = []
+    for index, output_path in enumerate(output_paths):
+        payload = by_index.get(index)
+        if payload is None:
+            results.append({"ok": False, "error": "capture_backend_failed: missing_frame_result"})
+            break
+        payload = dict(payload)
+        payload.pop("frameIndex", None)
+        if payload.get("ok") is True and not os.path.exists(output_path):
+            payload = {"ok": False, "error": "capture_backend_failed: missing_png"}
+        results.append(payload)
+        if payload.get("ok") is not True:
+            break
+    return results
+
+
+def _frame_pattern_for(output_paths: list[str]) -> tuple[str, list[str]]:
+    """``-FramePattern`` template and the files the script will write for it.
+
+    When the requested paths already follow an indexed scheme (``frame_0.png``,
+    ``frame_1.png``, ...) the template reproduces them exactly. Otherwise the
+    script writes ``<stem>_<i><ext>`` siblings and the caller renames them onto
+    the requested paths.
+    """
+    first = output_paths[0]
+    directory = os.path.dirname(first)
+    stem, ext = os.path.splitext(os.path.basename(first))
+
+    indexed_stem = re.sub(r"\d+$", "{0}", stem) if re.search(r"\d+$", stem) else None
+    if indexed_stem is not None:
+        pattern = os.path.join(directory, indexed_stem + ext) if directory else indexed_stem + ext
+        targets = [pattern.replace("{0}", str(i)) for i in range(len(output_paths))]
+        if targets == list(output_paths):
+            return pattern, targets
+    pattern_stem = f"{stem}_{{0}}"
+    pattern = os.path.join(directory, pattern_stem + ext) if directory else pattern_stem + ext
+    targets = [pattern.replace("{0}", str(i)) for i in range(len(output_paths))]
+    return pattern, targets
+
+
 def _kill_capture_process(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
@@ -1468,11 +1545,40 @@ def _read_capture_stderr(stream: Any, chunks: list[str]) -> None:
         return
 
 
-def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
+def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "", frame_interval_s: float = DEFAULT_FRAME_INTERVAL_S) -> list[dict[str, Any]]:
+    """Grab ``len(output_paths)`` frames in ONE powershell.exe process.
+
+    Returns one backend payload per frame, in frame order, stopping at the
+    first failure (that payload is the last element). ``timeout_s`` is the
+    per-frame capture budget: after the ``{"phase":"started"}`` line (bounded
+    separately by CAPTURE_START_BUDGET_S) the process gets
+    ``timeout_s * frame_count``. With one output path the command line and the
+    parsing are exactly the legacy single-frame ones (no new switches).
+    """
+    if not output_paths:
+        return [{"ok": False, "error": "capture_backend_failed: no_output"}]
+    # Compatibility seam: callers/tests that replaced _run_window_capture with
+    # a per-frame double keep working through it. Production code (and tests
+    # that simulate Popen) takes the single-process path below.
+    patched = globals().get("_run_window_capture")
+    if patched is not None and patched is not _RUN_WINDOW_CAPTURE_IMPL:
+        results: list[dict[str, Any]] = []
+        for path in output_paths:
+            result = patched(path, process_name=process_name, timeout_s=timeout_s, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
+            results.append(result)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                break
+        return results
     if probe_input_desktop() == "locked":
-        return {"ok": False, "error": "session_locked"}
+        return [{"ok": False, "error": "session_locked"}]
     if not os.path.exists(GRAB_SCRIPT):
-        return {"ok": False, "error": f"capture_backend_failed: grab script missing {GRAB_SCRIPT}"}
+        return [{"ok": False, "error": f"capture_backend_failed: grab script missing {GRAB_SCRIPT}"}]
+    frame_count = len(output_paths)
+    output_path = output_paths[0]
+    frame_pattern = ""
+    frame_targets: list[str] = list(output_paths)
+    if frame_count > 1:
+        frame_pattern, frame_targets = _frame_pattern_for(output_paths)
     cmd = [
         "powershell",
         "-NoProfile",
@@ -1487,6 +1593,15 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
         "-Method",
         method,
     ]
+    if frame_count > 1:
+        cmd += [
+            "-FrameCount",
+            str(frame_count),
+            "-FrameIntervalMs",
+            str(max(0, int(round(float(frame_interval_s) * 1000)))),
+            "-FramePattern",
+            frame_pattern,
+        ]
     # Prefer cmdline_match (robust to the launcher-pid != window-pid mismatch); fall back to client_pid.
     # Both eliminate the multi-client window collision by restricting the candidate windows.
     if cmdline_match:
@@ -1507,9 +1622,9 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
     try:
         proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
-        return {"ok": False, "error": "capture_backend_failed:command_not_found"}
+        return [{"ok": False, "error": "capture_backend_failed:command_not_found"}]
     except OSError as exc:
-        return {"ok": False, "error": f"capture_backend_failed: {exc}"}
+        return [{"ok": False, "error": f"capture_backend_failed: {exc}"}]
 
     stdout_lines: list[str] = []
     stderr_chunks: list[str] = []
@@ -1538,18 +1653,38 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
             started.wait(min(0.05, remaining))
         if proc.poll() is None and not started.is_set():
             _kill_capture_process(proc)
-            return {"ok": False, "error": "capture_start_timeout"}
+            return [{"ok": False, "error": "capture_start_timeout"}]
         if proc.poll() is None:
             try:
-                proc.wait(timeout=timeout_s)
+                proc.wait(timeout=timeout_s * frame_count)
             except subprocess.TimeoutExpired:
                 _kill_capture_process(proc)
-                return {"ok": False, "error": "capture_timeout"}
+                return [{"ok": False, "error": "capture_timeout"}]
         for reader in readers:
             reader.join(timeout=2.0)
-        return _capture_payload_from_output(
-            "".join(stdout_lines), "".join(stderr_chunks), output_path
+        results = _capture_payloads_from_output(
+            "".join(stdout_lines), "".join(stderr_chunks), frame_targets
         )
+        if frame_targets != list(output_paths):
+            # Script wrote pattern-derived siblings; move them onto the
+            # requested paths and re-check those destinations.
+            moved: list[dict[str, Any]] = []
+            for index, result in enumerate(results):
+                if result.get("ok") is True:
+                    source, destination = frame_targets[index], output_paths[index]
+                    if os.path.exists(source):
+                        try:
+                            os.replace(source, destination)
+                        except OSError:
+                            pass
+                    if not os.path.exists(destination):
+                        moved.append({"ok": False, "error": "capture_backend_failed: missing_png"})
+                        break
+                moved.append(result)
+                if result.get("ok") is not True:
+                    break
+            return moved
+        return results
     finally:
         for reader in readers:
             reader.join(timeout=2.0)
@@ -1560,6 +1695,22 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
                 stream.close()
             except Exception:
                 pass
+
+
+def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
+    """Single-frame grab: one process, legacy command line and parsing."""
+    results = _run_window_captures(
+        [output_path],
+        process_name=process_name,
+        timeout_s=timeout_s,
+        method=method,
+        client_pid=client_pid,
+        cmdline_match=cmdline_match,
+    )
+    return results[0] if results else {"ok": False, "error": "capture_backend_failed: no_json"}
+
+
+_RUN_WINDOW_CAPTURE_IMPL = _run_window_capture
 
 
 def grab_window_to_file(output_path: str, process_name: str = "DayZDiag_x64", method: str = DEFAULT_GRAB_METHOD, timeout_s: float = 8.0, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
@@ -1597,17 +1748,21 @@ def grab_stable_frame(
     with tempfile.TemporaryDirectory(prefix="mcp_capture_") as tmp_dir:
         captured: list[Image.Image] = []
         capture_results: list[dict[str, Any]] = []
-        for index in range(frame_count):
-            output_path = os.path.join(tmp_dir, f"frame_{index}.png")
-            result = _run_window_capture(output_path, process_name=process_name, timeout_s=8.0, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
-            if result.get("ok") is not True:
-                return _error(str(result.get("error") or "window_capture_failed"))
-            with Image.open(output_path) as img:
+        output_paths = [os.path.join(tmp_dir, f"frame_{index}.png") for index in range(frame_count)]
+        # One powershell.exe process for all frames: Add-Type and window
+        # resolution happen once in mcp-grab.ps1 and the inter-frame spacing
+        # (DEFAULT_FRAME_INTERVAL_S) is slept there, between captures.
+        results = _run_window_captures(output_paths, process_name=process_name, timeout_s=8.0, method=method, client_pid=client_pid, cmdline_match=cmdline_match, frame_interval_s=DEFAULT_FRAME_INTERVAL_S)
+        for index, result in enumerate(results):
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                error = result.get("error") if isinstance(result, dict) else None
+                return _error(str(error or "window_capture_failed"))
+            with Image.open(output_paths[index]) as img:
                 frame = img.convert("RGB").copy()
                 captured.append(frame)
                 capture_results.append(result)
-            if index + 1 < frame_count:
-                time.sleep(DEFAULT_FRAME_INTERVAL_S)
+        if len(captured) != frame_count:
+            return _error("window_capture_failed")
 
         pair_deltas = _adjacent_pair_deltas(captured)
         chosen_index = _stable_frame_index(captured, pair_deltas)
