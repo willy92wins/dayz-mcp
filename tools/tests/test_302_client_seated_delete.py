@@ -31,6 +31,12 @@ class ClientSeatedDeleteTest(unittest.IsolatedAsyncioTestCase):
             "object_delete", {"object_id": object_id, "timeout_s": 2.0}
         ))
 
+    def _assert_unverified(self, result: dict) -> None:
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "vehicle_seat_unverified")
+        self.assertEqual(result["object_id"], 7)
+        self.assertEqual(result["deleted"], 0)
+
     async def test_client_owned_seat_refuses_every_id_without_server_delete(self) -> None:
         # No registry id in telemetry: even an apparently unrelated target
         # cannot safely be excluded from the vehicle's deletion hierarchy.
@@ -58,6 +64,8 @@ class ClientSeatedDeleteTest(unittest.IsolatedAsyncioTestCase):
         for telemetry in (
             {"ok": 1, "seated": 0, "is_authority_owner": 0},
             {"ok": 1, "seated": 1, "is_owner": 0, "is_authority_owner": 1},
+            {"ok": True, "seated": False},
+            {"ok": True, "seated": True, "is_authority_owner": True},
         ):
             for deleted in (0, 1):
                 with self.subTest(telemetry=telemetry, deleted=deleted):
@@ -72,35 +80,45 @@ class ClientSeatedDeleteTest(unittest.IsolatedAsyncioTestCase):
                         ("object_delete", {"object_id": 7}, "server", 2.0),
                     ])
 
-    async def test_unreadable_telemetry_payload_matches_teleport_policy(self) -> None:
-        for telemetry in (None, {}, {"ok": 0}, "unreadable"):
+    async def test_unreadable_telemetry_payload_never_sends_delete(self) -> None:
+        for telemetry in (None, {}, {"ok": 0}, "unreadable", [], False, 0):
             with self.subTest(telemetry=telemetry):
                 reply = {"ok": 1, "object_id": 7, "deleted": 1}
                 call = AsyncMock(side_effect=lambda cmd, *_args:
                                  telemetry if cmd == "vehicle_telemetry" else reply)
                 with patch.object(self.runtime, "call_bridge", new=call):
                     result = await self._delete()
-                self.assertEqual(result, reply)
-                self.assertEqual(call.await_count, 2)
-                self.assertEqual(call.await_args.args,
-                                 ("object_delete", {"object_id": 7}, "server", 2.0))
+                self._assert_unverified(result)
+                call.assert_awaited_once_with("vehicle_telemetry", {}, "client", 2.0)
 
-    async def test_unprobeable_client_skips_telemetry_like_teleport(self) -> None:
-        for status in ({}, {"client_peer": {"last_poll_age_s": None}},
-                       {"client_peer": {"last_poll_age_s": 20.0}}):
+    async def test_non_boolean_seated_never_sends_delete(self) -> None:
+        for seated in (None, "false", "true", "0", "1", "", [], {}, -1, 2, 0.0, 1.0):
+            with self.subTest(seated=seated):
+                telemetry = {"ok": 1, "seated": seated, "is_authority_owner": 1}
+                call = AsyncMock(side_effect=lambda cmd, *_args:
+                                 telemetry if cmd == "vehicle_telemetry" else {"ok": 1, "deleted": 1})
+                with patch.object(self.runtime, "call_bridge", new=call):
+                    self._assert_unverified(await self._delete())
+                call.assert_awaited_once_with("vehicle_telemetry", {}, "client", 2.0)
+
+    async def test_unprobeable_client_never_probes_or_deletes(self) -> None:
+        for status in (None, {}, {"client_peer": {"last_poll_age_s": None}},
+                       {"client_peer": {"last_poll_age_s": 15.0}},
+                       {"client_peer": {"last_poll_age_s": 20.0}},
+                       {"client_peer": {"last_poll_age_s": 0.1, "binding_state": "AMBIGUOUS"}}):
             with self.subTest(status=status):
                 self.runtime.bridge_status_payload.return_value = status
                 reply = {"ok": 1, "object_id": 7, "deleted": 1}
                 with patch.object(self.runtime, "call_bridge", new=AsyncMock(return_value=reply)) as call:
-                    self.assertEqual(await self._delete(), reply)
-                call.assert_awaited_once_with("object_delete", {"object_id": 7}, "server", 2.0)
+                    self._assert_unverified(await self._delete())
+                call.assert_not_awaited()
 
-    async def test_status_error_skips_telemetry_like_teleport(self) -> None:
+    async def test_status_error_never_probes_or_deletes(self) -> None:
         self.runtime.bridge_status_payload.side_effect = RuntimeError("status unreadable")
         reply = {"ok": 1, "object_id": 7, "deleted": 1}
         with patch.object(self.runtime, "call_bridge", new=AsyncMock(return_value=reply)) as call:
-            self.assertEqual(await self._delete(), reply)
-        call.assert_awaited_once_with("object_delete", {"object_id": 7}, "server", 2.0)
+            self._assert_unverified(await self._delete())
+        call.assert_not_awaited()
 
     async def test_telemetry_transport_error_never_sends_delete(self) -> None:
         with patch.object(self.runtime, "call_bridge",

@@ -85,7 +85,7 @@ from dayz_mcp.agent_loop import (
     with_next_step,
 )
 from dayz_mcp.knowledge import register_knowledge_tools
-from dayz_mcp.occupant_seat import occupant_client_seated
+from dayz_mcp.occupant_seat import occupant_client_seated, occupant_client_seated_strict
 from dayz_mcp.peer_liveness import (
     PEER_STALE_S,
     client_peer_probeable as _client_peer_probeable,
@@ -7035,9 +7035,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "so this conservatively blocks every object_id while that seat is occupied. "
             "Exit through the client exit flow and confirm seated=false before "
             "retrying, or use vehicle_enter for server-authoritative seating. "
-            "Outside live, as with player_teleport, an unprobeable client or "
-            "unreadable telemetry "
-            "payload does not establish a seated occupant and does not block; "
+            "Outside live, unreadable status, an absent/stale or unprobeable client, "
+            "or telemetry without a readable boolean seated flag returns "
+            "vehicle_seat_unverified with deleted=0 and sends no delete; "
             "a telemetry call error propagates without deleting. "
             "For server-visible occupants the bridge requests a dismount from "
             "all crew positions in the deletion hierarchy, "
@@ -7088,27 +7088,53 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "can be supported."
                     ),
                 }
-            if _client_peer_probeable(status):
-                telemetry = await runtime.call_bridge(
-                    "vehicle_telemetry", {}, "client", _timeout(timeout_s)
-                )
-                # Client telemetry has no server registry id. Refuse every
-                # target rather than guess whether its hierarchy holds this seat.
-                if occupant_client_seated(telemetry):
-                    return {
-                        "ok": False,
-                        "error": "vehicle_client_seated",
-                        "object_id": parsed_id,
-                        "deleted": 0,
-                        "hint": (
-                            "Deleting while the client owns a seated vehicle can "
-                            "crash the client. Use the client exit flow and confirm "
-                            "seated=false before retrying, or use vehicle_enter "
-                            "for server-authoritative seating. Telemetry cannot "
-                            "safely match the seat to object_id, so all deletes "
-                            "are refused while this client-owned seat is occupied."
-                        ),
-                    }
+            if not _client_peer_probeable(status):
+                # Poll failures only retry/back off; they do not vacate the seat
+                # (addon/scripts/5_Mission/MCPClientBridge.c:1038-1067).
+                return {
+                    "ok": False,
+                    "error": "vehicle_seat_unverified",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "Unreadable bridge status or an absent/stale client does "
+                        "not prove an empty seat. Restore a probeable client and "
+                        "verify its seat before retrying deletion."
+                    ),
+                }
+            telemetry = await runtime.call_bridge(
+                "vehicle_telemetry", {}, "client", _timeout(timeout_s)
+            )
+            client_seated = occupant_client_seated_strict(telemetry)
+            if client_seated is None:
+                return {
+                    "ok": False,
+                    "error": "vehicle_seat_unverified",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "Client telemetry must contain a readable boolean seated "
+                        "flag (true/false or integer 0/1) before deletion can be "
+                        "retried. Unreadable telemetry does not prove an empty seat."
+                    ),
+                }
+            # Client telemetry has no server registry id. Refuse every
+            # target rather than guess whether its hierarchy holds this seat.
+            if client_seated:
+                return {
+                    "ok": False,
+                    "error": "vehicle_client_seated",
+                    "object_id": parsed_id,
+                    "deleted": 0,
+                    "hint": (
+                        "Deleting while the client owns a seated vehicle can "
+                        "crash the client. Use the client exit flow and confirm "
+                        "seated=false before retrying, or use vehicle_enter "
+                        "for server-authoritative seating. Telemetry cannot "
+                        "safely match the seat to object_id, so all deletes "
+                        "are refused while this client-owned seat is occupied."
+                    ),
+                }
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
 
     @app.tool(

@@ -26,15 +26,35 @@ exit the seat. If the exit is refused, stop the cleanup; do not use a raw
 server delete or `scene_clear` to bypass this guard. For server-authoritative
 seating use `vehicle_enter`; it does not itself perform a client exit.
 
-The guard reuses `occupant_client_seated`
-(`tools/dayz_mcp/occupant_seat.py:20-26`) and the same probe policy as
-`player_teleport`: absent/stale client or unreadable status skips the probe;
-a returned payload without a readable `seated=true` does not block. This
-preserves server-only/on-foot cleanup when no seated client is observable.
-A readable seated flag with missing/unreadable authority **does** block.
-An exception from the telemetry call propagates without sending a delete.
-This inherited fallback is not proof that deletion is safe with unavailable
-telemetry, nor does a precheck prevent a seat change after the observation.
+Outside live, the guard returns `ok=false`, `error=vehicle_seat_unverified`,
+`deleted=0` and the requested `object_id`, without sending a delete, when:
+
+- Reading bridge status fails, including in embedded mode.
+- The client is absent, stale or otherwise not probeable. No telemetry probe
+  is sent in this case.
+- Telemetry is not a dictionary, lacks `seated`, or has a non-boolean
+  `seated` value. Valid wire booleans are `true`/`false` and integer `0`/`1`
+  (Enforce encoding, `tools/dayz_mcp/world_results.py:133-135`); strings,
+  floats, null and other values are unreadable.
+
+There is no established exception for an absent/stale client: probeability
+only checks binding and poll age (`tools/dayz_mcp/peer_liveness.py:14-38`).
+The addon poll failure path only retries with backoff, without vacating the
+seat or revoking ownership (`addon/scripts/5_Mission/MCPClientBridge.c:1038-1067`).
+No poll is not proof of an empty seat, even outside live.
+
+Deletion uses `occupant_client_seated_strict`
+(`tools/dayz_mcp/occupant_seat.py:29`); `player_teleport` retains its existing
+permissive predicate and probe policy. A readable seated flag with
+missing/unreadable authority **does** block. A verified on-foot or
+authority-owned seat preserves the server delete reply. An exception from
+the telemetry call propagates without sending a delete.
+
+**TOCTOU window:** the telemetry check and delete are separate bridge calls.
+`runtime.tool_lock` serializes tool calls on that runtime and is held across
+both operations; it does not lock manual player input. Within that serialized
+flow, only manual player input could seat the player between the check and
+delete. **Operators must not interact with the vehicle during delete.**
 
 The reported #302 runs `59b8dbc7` and `0761a892` crashed natively after
 client-only seating and deletion, even though the server's crew was empty.
