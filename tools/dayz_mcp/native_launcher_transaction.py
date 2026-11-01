@@ -549,7 +549,12 @@ def evaluate_vpp_preflight(
     hint = VPP_PREFLIGHT_HINT
 
     requested = [
-        entry for entry in effective_mod_entries(payload) if _is_vpp_candidate(entry)
+        entry
+        for entry in (
+            *effective_mod_entries(payload),
+            *payload.get("server_only_mods", []),
+        )
+        if _is_vpp_candidate(entry)
     ]
     if not requested:
         return VppPreflightResult(

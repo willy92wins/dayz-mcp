@@ -180,6 +180,49 @@ class VppPreflightDecisionTest(unittest.TestCase):
         self.assertEqual(result.missing, ())
         self.assertEqual(result.warnings, ())
 
+    def test_admin_tools_in_server_only_mods_pass_a_healthy_workspace(self) -> None:
+        for mode in ("all", "server"):
+            with self.subTest(mode=mode):
+                policy = _policy()
+                files = _healthy(policy)
+                result = self._result(
+                    policy=policy,
+                    files=files,
+                    version=3,
+                    mode=mode,
+                    extra_mods=["@DayZ_MCP"],
+                    server_only_mods=["@VPPAdminTools"],
+                )
+
+                self.assertIsNone(result.error_code)
+                self.assertEqual(result.missing, ())
+                self.assertEqual(result.warnings, ())
+                self.assertIn(
+                    ntpath.join(policy.dev_root, "_server", "serverDZ.cfg"),
+                    files.reads,
+                )
+
+    def test_server_only_admin_tools_with_password_enabled_are_refused(self) -> None:
+        for mode in ("all", "server"):
+            with self.subTest(mode=mode):
+                policy = _policy()
+                files = _healthy(policy)
+                config = ntpath.join(policy.dev_root, "_server", "serverDZ.cfg")
+                files.files[ntpath.normcase(config)] = "vppDisablePassword = 0;\n"
+                result = self._result(
+                    policy=policy,
+                    files=files,
+                    version=3,
+                    mode=mode,
+                    extra_mods=["@DayZ_MCP"],
+                    server_only_mods=["@VPPAdminTools"],
+                )
+
+                self.assertEqual(result.error_code, transaction.VPP_PREFLIGHT_FAILED)
+                self.assertEqual(result.missing, ("vpp_disable_password",))
+                self.assertEqual(result.warnings, ())
+                self.assertIn(config, files.reads)
+
     def test_admin_tools_in_base_mods_count_as_requested(self) -> None:
         result = self._result(
             mode="all",
