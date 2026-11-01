@@ -82,9 +82,9 @@ class VehicleDeleteContractTest(unittest.IsolatedAsyncioTestCase):
                     actual = _content_json(
                         await self.app.call_tool("object_delete", {"object_id": 7, "timeout_s": 8.0})
                     )
-                self.assertEqual([item.args for item in call.await_args_list], [
-                    ("vehicle_telemetry", {}, "client", 8.0),
-                    ("object_delete", {"object_id": 7}, "server", 8.0),
+                self.assertEqual([(item.args, item.kwargs) for item in call.await_args_list], [
+                    (("vehicle_telemetry", {}, "client", 8.0), {}),
+                    (("object_delete", {"object_id": 7}, "server", 8.0), {}),
                 ])
                 self.assertEqual(actual, reply)
 
