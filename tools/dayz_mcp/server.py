@@ -702,11 +702,15 @@ _CARRIER_REFRESH_S = 5.0
 MIN_IDLE_RETIREMENT_S = SESSION_TTL_S + 5.0
 POLL_INTERVAL_S = 0.05
 # Do not long-poll in the last stretch of the caller's budget. wait_ms is
-# chosen before accreditation, and the sealed transport then recomputes only
-# the socket timeout (accredited_daemon_transport.verified_daemon_http_request).
-# A fixed 150ms did not cover a slower accreditation: the socket died first,
+# chosen on the worker thread from that deadline at the instant the request
+# is about to be sent, so time already queued on the default executor is
+# spent. The sealed transport then recomputes only the socket timeout
+# (accredited_daemon_transport.verified_daemon_http_request). Choosing
+# wait_ms before asyncio.to_thread let a saturated executor send a wait
+# longer than the budget left after accreditation: the socket died first,
 # the call surfaced daemon_response_ambiguous, and the cleanup that runs for
-# "timeout waiting…" did not run. Long-poll only when
+# "timeout waiting…" did not run. A fixed 150ms margin failed the same way
+# on a slower accreditation. Long-poll only when
 # wait_s = min(remaining - AWAIT_LONG_POLL_BUDGET_MARGIN_S, AWAIT_LONG_POLL_MAX_S)
 # is still long enough to send a positive wait_ms. Inside the last
 # AWAIT_LONG_POLL_BUDGET_MARGIN_S the client omits wait_ms and sleeps
@@ -2953,30 +2957,38 @@ class ClientRuntime:
         if isinstance(lease_token, str):
             holder = {"identity": self.identity.to_payload(), "lease_token": lease_token}
         while True:
-            remaining = deadline - self._time_fn()
-            if remaining <= 0.0:
+            if deadline - self._time_fn() <= 0.0:
                 break
-            query = {"id": str(command_id), "remove": "1"}
-            # Last AWAIT_LONG_POLL_BUDGET_MARGIN_S: no wait_ms, then the 50ms
-            # sleep below. Earlier: wait_s = min(remaining - margin, cap).
-            wait_s = min(
-                remaining - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
-                AWAIT_LONG_POLL_MAX_S,
-            )
-            if wait_s > 0.0:
-                wait_ms = int(wait_s * 1000)
-                if wait_ms > 0:
-                    query["wait_ms"] = str(wait_ms)
-            try:
-                status, payload = await asyncio.to_thread(
-                    self._call,
+
+            def issue() -> tuple[int, dict[str, Any]]:
+                # Worker thread. Queue time on the default executor is already
+                # spent, so wait_ms comes from the deadline at this instant,
+                # not from the remaining the async loop measured. Same margin:
+                # inside the last AWAIT_LONG_POLL_BUDGET_MARGIN_S the request
+                # goes out without wait_ms (the 50ms poll below).
+                remaining_now = deadline - self._time_fn()
+                if remaining_now <= 0.0:
+                    raise _CallBudgetExpired()
+                query = {"id": str(command_id), "remove": "1"}
+                wait_s = min(
+                    remaining_now - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
+                    AWAIT_LONG_POLL_MAX_S,
+                )
+                if wait_s > 0.0:
+                    wait_ms = int(wait_s * 1000)
+                    if wait_ms > 0:
+                        query["wait_ms"] = str(wait_ms)
+                return self._call(
                     "GET" if holder is None else "POST",
                     "/await",
                     holder,
                     query,
-                    remaining,
+                    remaining_now,
                     deadline,
                 )
+
+            try:
+                status, payload = await asyncio.to_thread(issue)
             except _CallBudgetExpired:
                 break
             if status == 404 and holder is not None:

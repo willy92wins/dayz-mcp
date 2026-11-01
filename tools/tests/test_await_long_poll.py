@@ -726,6 +726,131 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(message.startswith("timeout waiting"), message)
         self.assertNotIn("daemon_response_ambiguous", message)
 
+    @slow_test
+    async def test_saturated_executor_with_slow_accreditation_stays_timeout_waiting(
+        self,
+    ) -> None:
+        # Sol r2 F-03: budget 1.5s, the default executor held for 1.1s,
+        # accreditation 200ms. On e2e345d, wait_ms baked before to_thread was
+        # 499 and the call ended as daemon_response_ambiguous. The worker
+        # must choose wait_ms from the deadline it still has, and the error
+        # must stay "timeout waiting…".
+        from dayz_mcp import accredited_daemon_transport as transport
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        _host, port = daemon.httpd.server_address
+        hold = threading.Event()
+        entered: list[int] = []
+        entered_lock = threading.Lock()
+
+        def block() -> None:
+            with entered_lock:
+                entered.append(1)
+            hold.wait(timeout=5.0)
+
+        def release() -> None:
+            hold.set()
+
+        self.addCleanup(release)
+
+        async def occupy(count: int) -> tuple[int, list[asyncio.Task]]:
+            tasks = [
+                asyncio.create_task(asyncio.to_thread(block)) for _ in range(count)
+            ]
+            last = -1
+            stable = 0.0
+            deadline = time.monotonic() + 2.0
+            occupied = 0
+            while time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+                with entered_lock:
+                    occupied = len(entered)
+                if occupied > 0 and occupied == last:
+                    stable += 0.02
+                    if stable >= 0.12:
+                        break
+                else:
+                    stable = 0.0
+                    last = occupied
+            else:
+                release()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self.fail(f"default executor did not fill; entered={occupied}")
+            return occupied, tasks
+
+        pool, probes = await occupy(40)
+        self.assertGreaterEqual(pool, 2)
+        release()
+        await asyncio.gather(*probes, return_exceptions=True)
+        hold.clear()
+        with entered_lock:
+            entered.clear()
+        occupied, blockers = await occupy(pool)
+        self.assertGreaterEqual(occupied, pool)
+
+        def slow_verify(*_args, **_kwargs) -> bool:
+            time.sleep(0.2)
+            return True
+
+        seen: list[dict[str, str]] = []
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            seen.append(dict(query))
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=dict(query),
+                body=body,
+                headers=dict(headers),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        try:
+            with mock.patch.object(
+                transport, "_connected_daemon_identity_verified", slow_verify
+            ):
+                with self.assertRaises(server.ToolError) as caught:
+                    task = asyncio.create_task(
+                        runtime._await_result("camera_get", 7, "client", 1.5)
+                    )
+                    await asyncio.sleep(1.1)
+                    release()
+                    await task
+            message = str(caught.exception)
+            self.assertTrue(message.startswith("timeout waiting"), (message, seen))
+            self.assertNotIn("daemon_response_ambiguous", message)
+        finally:
+            release()
+
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
     def _runtime(self, state: loopback.ServerState):
