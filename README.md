@@ -477,8 +477,9 @@ For the edit-run loop there is a fast tier. With `DAYZ_MCP_FAST_TESTS=1` the
 tests marked `@slow_test` in `tools/tests/_tiers.py` skip with their reason: a
 few hundred that start real processes or wait on real time, and most of the
 suite's run time. The rest runs in about a minute. It is a subset, not a
-verdict: CI runs the whole suite on every pull request, and that run is the
-one that has to pass.
+verdict: CI runs the whole suite on every pull request, as four shards per
+interpreter (`python -B -m tests._shard <i>/4` from `tools/`), and that run
+is the one that has to pass.
 
 ```powershell
 $env:DAYZ_MCP_FAST_TESTS = "1"
