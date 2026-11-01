@@ -4635,7 +4635,7 @@ async def execute_dayz_test_close(
         payload["close_order"] = logout_report["close_order"]
         payload["logout_wait_s"] = logout_report["logout_wait_s"]
         payload["logout_players"] = logout_report["logout_players"]
-        if graceful and logout_report["timed_out"] is True:
+        if logout_report["timed_out"] is True:
             payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
     elif graceful:
         server_watch = watches.get("server")

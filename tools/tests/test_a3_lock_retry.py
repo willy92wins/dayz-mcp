@@ -809,7 +809,25 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
         runtime.lifecycle_reap = lifecycle_reap
         return runtime
 
-    async def _close_with_ticker(self, runtime) -> tuple[dict[str, object], list, bool, float]:
+    _LOOP_STALL_LIMIT_S = 0.2
+
+    def _assert_loop_responsive(
+        self, timer_latency: float, max_tick_gap: float
+    ) -> None:
+        self.assertLess(
+            timer_latency,
+            self._LOOP_STALL_LIMIT_S,
+            f"first 10 ms timer latency {timer_latency:.3f}s: event loop stalled",
+        )
+        self.assertLess(
+            max_tick_gap,
+            self._LOOP_STALL_LIMIT_S,
+            f"max tick gap {max_tick_gap:.3f}s: event loop stalled",
+        )
+
+    async def _close_with_ticker(
+        self, runtime
+    ) -> tuple[dict[str, object], float, float, float]:
         ticks: list[float] = []
 
         async def ticker() -> None:
@@ -818,27 +836,38 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
 
         loop = asyncio.get_running_loop()
-        timer_fired: list[bool] = []
-        loop.call_later(0.01, lambda: timer_fired.append(True))
-        task = asyncio.create_task(ticker())
+        timer_at: list[float] = []
         started = time.monotonic()
+        loop.call_later(0.01, lambda: timer_at.append(time.monotonic()))
+        task = asyncio.create_task(ticker())
         try:
             result = await dayz_test_tool.execute_dayz_test_close(
                 runtime, _CLOSE_RUN_ID, graceful_timeout_s=0.6
             )
         finally:
             task.cancel()
-        return result, ticks, bool(timer_fired), time.monotonic() - started
+        elapsed = time.monotonic() - started
+        timer_latency = (
+            timer_at[0] - started if timer_at else float("inf")
+        )
+        points = [started, *ticks]
+        max_tick_gap = (
+            max(b - a for a, b in zip(points, points[1:]))
+            if len(points) > 1
+            else float("inf")
+        )
+        return result, timer_latency, max_tick_gap, elapsed
 
     async def test_close_busy_no_cache_returns_promptly_and_waits_logout(self) -> None:
         self._write(self.server_rpt, "boot\n")
         self._write(self.client_rpt, "boot client\n")
         runtime = self._runtime(append_logout=False)
-        result, ticks, timer_fired, elapsed = await self._close_with_ticker(runtime)
-        # The busy lock never stalls the loop: the 10 ms timer fires and
-        # the 10 ms ticker keeps ticking while close waits.
-        self.assertTrue(timer_fired)
-        self.assertGreater(len(ticks), 0)
+        result, timer_latency, max_tick_gap, elapsed = (
+            await self._close_with_ticker(runtime)
+        )
+        # The busy lock never stalls the loop: the 10 ms timer fires
+        # promptly and the 10 ms ticker never gaps during close.
+        self._assert_loop_responsive(timer_latency, max_tick_gap)
         self.assertLess(elapsed, 3.0)
         self.assertTrue(all(c["exclusive"] is False for c in self.acquire_calls))
         # Conservative default: with no policy the server close still
@@ -849,6 +878,11 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
         delta = runtime.close_at[1][1] - runtime.close_at[0][1]
         self.assertGreaterEqual(delta, 0.4)
         self.assertGreaterEqual(float(result["logout_wait_s"]), 0.4)
+        # P2: the logout timeout warns even without a policy, where
+        # graceful is False (no RPT watches / missing roles).
+        self.assertEqual(
+            result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED]
+        )
 
     async def test_close_busy_with_cache_waits_for_connected_logout(self) -> None:
         self._write(self.server_rpt, "boot\n" + _CLOSE_CONNECT + _CLOSE_LINK)
@@ -874,9 +908,10 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
                 dayz_test_tool, "_semantic_policies", return_value=[self.policy]
             ),
         ):
-            result, ticks, timer_fired, elapsed = await self._close_with_ticker(runtime)
-        self.assertTrue(timer_fired)
-        self.assertGreater(len(ticks), 0)
+            result, timer_latency, max_tick_gap, elapsed = (
+                await self._close_with_ticker(runtime)
+            )
+        self._assert_loop_responsive(timer_latency, max_tick_gap)
         self.assertLess(elapsed, 3.0)
         self.assertTrue(all(c["exclusive"] is False for c in self.acquire_calls))
         self.assertEqual(
@@ -888,7 +923,32 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
             result["logout_players"],
             [{"player": "Ada", "logout_finished": False}],
         )
-        self.assertIn("player_state_not_saved", str(result.get("warnings")))
+        self.assertEqual(
+            result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED]
+        )
+
+    async def test_close_loop_gate_rejects_injected_sync_pause(self) -> None:
+        # P3 negative control: a 1 s synchronous pause on the loop
+        # (as a blocking registry call would cause) must fail the
+        # responsiveness gate used by the two tests above.
+        self._write(self.server_rpt, "boot\n")
+        self._write(self.client_rpt, "boot client\n")
+        runtime = self._runtime(append_logout=False)
+
+        def blocking_policy(_run: object) -> None:
+            time.sleep(1.0)
+            return None
+
+        with mock.patch.object(
+            dayz_test_tool, "_close_project_policy", side_effect=blocking_policy
+        ):
+            _result, timer_latency, max_tick_gap, _elapsed = (
+                await self._close_with_ticker(runtime)
+            )
+        self.assertGreaterEqual(timer_latency, 0.9)
+        self.assertGreaterEqual(max_tick_gap, 0.9)
+        with self.assertRaises(AssertionError):
+            self._assert_loop_responsive(timer_latency, max_tick_gap)
 
 
 if __name__ == "__main__":
