@@ -69,12 +69,23 @@ class VehicleDeleteContractTest(unittest.IsolatedAsyncioTestCase):
         for deleted in (0, 1):
             with self.subTest(deleted=deleted):
                 reply = {"id": 17, "ok": 1, "object_id": 7, "deleted": deleted}
-                call = AsyncMock(return_value=copy.deepcopy(reply))
-                with patch.object(self.runtime, "call_bridge", new=call):
+                call = AsyncMock(side_effect=[
+                    {"ok": 1, "seated": False},
+                    copy.deepcopy(reply),
+                ])
+                with (
+                    patch.object(self.runtime, "bridge_status_payload", new=AsyncMock(
+                        return_value={"client_peer": {"last_poll_age_s": 0.1}}
+                    )),
+                    patch.object(self.runtime, "call_bridge", new=call),
+                ):
                     actual = _content_json(
                         await self.app.call_tool("object_delete", {"object_id": 7, "timeout_s": 8.0})
                     )
-                call.assert_awaited_once_with("object_delete", {"object_id": 7}, "server", 8.0)
+                self.assertEqual([(item.args, item.kwargs) for item in call.await_args_list], [
+                    (("vehicle_telemetry", {}, "client", 8.0), {}),
+                    (("object_delete", {"object_id": 7}, "server", 8.0), {}),
+                ])
                 self.assertEqual(actual, reply)
 
     async def test_ejection_failure_is_an_error_and_keeps_the_object_id(self) -> None:
