@@ -350,6 +350,8 @@ MAX_RESULTS = MAX_QUEUE * 4
 # headroom for a short legitimate burst while waits are held. Exceeding the
 # ceiling closes the accepted socket without a worker (reject, do not queue):
 # Handler.timeout already bounds each worker's duration, not concurrency.
+# A /poll that passes wait_ms holds one of those two sockets for at most
+# POLL_LONG_POLL_MAX_S. That bound does not change this pool size.
 MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # Ceiling for one GET/POST /await?wait_ms= hold. Each wait occupies one of the
 # workers above. The pool is one POST /wait (up to 30s) per queued session plus
@@ -364,6 +366,8 @@ MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # hold the worker for the cap. Handler.timeout does not interrupt
 # Condition.wait (it is not a socket read); a stop that skips cancel_pending
 # is still bounded by this cap.
+# GET /poll has its own hold, POLL_LONG_POLL_MAX_S, on a different condition.
+# That hold does not change the pool either.
 AWAIT_LONG_POLL_MAX_S = 2.0
 # Present on a pending /await body only after that wait budget was spent with
 # no result. Absent means "answer was immediate" (no wait_ms, an older daemon,
@@ -378,6 +382,16 @@ AWAIT_LONG_POLL_FIELD = "await_long_poll"
 # flight. A request that does not get a slot does not wait and omits
 # await_long_poll, and the client returns to its 50ms poll.
 AWAIT_LONG_POLL_MAX_IN_FLIGHT = 8
+# Ceiling for one GET /poll?wait_ms= hold. At most 1s: 800 ms stays under the
+# game's 10s Rest read timeout (the bridge cannot raise it), and delay_ms can
+# still add 5s after delivery, so the handler finishes in about 5.8s. That is
+# under Handler.timeout (35s) and under the /await cap above, so a held poll
+# does not take the worker the game needs for POST /result. The two /poll
+# sockets are already counted in MAX_HTTP_WORKERS; this cap does not grow the
+# pool. Absent or unusable wait_ms does not wait. 800 is an integer so the
+# clamp does not depend on 0.8 * 1000.
+POLL_LONG_POLL_MAX_MS = 800
+POLL_LONG_POLL_MAX_S = POLL_LONG_POLL_MAX_MS / 1000.0
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -3045,6 +3059,13 @@ class ServerState:
         self._await_long_poll_slots = threading.BoundedSemaphore(
             AWAIT_LONG_POLL_MAX_IN_FLIGHT
         )
+        # /poll long-poll. Not _result_cv: enqueue must not wake /await, and a
+        # command for one peer must not wake the other. Same RLock, so notify
+        # cannot land between the emptiness check and wait.
+        self._command_cv = {
+            "server": threading.Condition(self._lock),
+            "client": threading.Condition(self._lock),
+        }
         self._fenced_runs: set[str] = set()
         self._next_id = 1
         self._legacy_queues: dict[str, list[dict]] = {"server": [], "client": []}
@@ -5777,6 +5798,7 @@ class ServerState:
             }
             self._hold_by_command[command_id] = minted_hold_id
         queue.append(command)
+        self._wake_command_waiters_locked(peer)
         enqueued_at = self._now()
         self._enqueued_at[command_id] = enqueued_at
         if operation_timeout_s > 0.0:
@@ -5978,6 +6000,7 @@ class ServerState:
                             peer, fence_instance
                         )
                         queue.append(command)
+                        self._wake_command_waiters_locked(peer)
                         self._remember_broker_row_locked(
                             command_id,
                             cmd="exec_enforce",
@@ -6423,6 +6446,7 @@ class ServerState:
             "_broker_pin": copy.deepcopy(pin),
         }
         queue.append(command)
+        self._wake_command_waiters_locked(peer)
         self._enqueued_at[close_id] = self._now()
         binding = self._bindings.get(instance)
         self._seal_command(close_id, instance, binding)
@@ -6705,6 +6729,7 @@ class ServerState:
             "_broker_pin": copy.deepcopy(pin),
         }
         queue.append(command)
+        self._wake_command_waiters_locked(release_peer)
         enqueued_at = self._now()
         self._enqueued_at[release_id] = enqueued_at
         # Same dispatch exception as owner cleanup: delivery does not claim a
@@ -6816,6 +6841,82 @@ class ServerState:
             commands.update(EXEC_COMMANDS)
         return commands
 
+    def _poll_command_ready_locked(
+        self, peer: str, instance: str | None
+    ) -> bool | None:
+        """Whether this poll may wait, and whether a command is already queued.
+
+        Caller holds self._lock. None: do not wait. The token is malformed, or
+        it names an instance this peer is not accredited to deliver (no BOUND
+        binding covers the peer). Waiting cannot make that poll deliver.
+        True: a command for this peer is already on the queue record_poll
+        would read, including one delivery will discard. False: that queue has
+        nothing for this peer yet. A legacy poll watches the legacy queue even
+        when the peer is BOUND; a bound poll watches only its own queue.
+        """
+
+        token, token_class = classify_instance_token(instance)
+        if token_class == "instance_malformed":
+            return None
+        if token is None:
+            queue = self._legacy_queues.get(peer)
+        else:
+            binding = self._bindings.get(token)
+            if (
+                binding is None
+                or binding.state != BINDING_BOUND
+                or not self._peer_covers(binding, peer)
+            ):
+                return None
+            queue = self._bound_queues.get(token)
+        if not queue:
+            return False
+        for command in queue:
+            if peer_for_command(str(command.get("cmd") or "")) == peer:
+                return True
+        return False
+
+    def _wait_for_peer_command(
+        self, peer: str, instance: str | None, wait_s: float
+    ) -> None:
+        """Block until peer has a queued command, the daemon stops, or wait_s ends.
+
+        The lock is not held across the wait. Nothing here counts as a poll:
+        liveness, attribution, caps, the reaper and the load counters stay
+        with the single record_poll that follows. A non-positive, non-finite
+        or bool wait returns before taking the lock.
+        """
+
+        if (
+            isinstance(wait_s, bool)
+            or not isinstance(wait_s, (int, float))
+            or not math.isfinite(wait_s)
+            or wait_s <= 0.0
+        ):
+            return
+        if wait_s > POLL_LONG_POLL_MAX_S:
+            wait_s = POLL_LONG_POLL_MAX_S
+        if peer not in self._command_cv:
+            return
+        deadline = time.monotonic() + wait_s
+        with self._lock:
+            if self._stopping:
+                return
+            ready = self._poll_command_ready_locked(peer, instance)
+            if ready is None or ready:
+                return
+            cv = self._command_cv[peer]
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return
+                cv.wait(timeout=remaining)
+                if self._stopping:
+                    return
+                ready = self._poll_command_ready_locked(peer, instance)
+                if ready is None or ready:
+                    return
+
     def record_poll(
         self,
         peer: str,
@@ -6826,9 +6927,15 @@ class ServerState:
         caps: str | None = None,
         ach: str | None = None,
         load: dict[str, int | float] | None = None,
+        wait_s: float = 0.0,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
+
+        # One GET, one record of this poll. The wait does not touch liveness,
+        # attribution, caps, the reaper or the load counters; the body below
+        # does, exactly once, on wake, on timeout and when wait_s is 0.
+        self._wait_for_peer_command(peer, instance, wait_s)
 
         discarded_exec: list[tuple[str, str, int]] = []
         finished_operations: list[
@@ -7389,6 +7496,12 @@ class ServerState:
     def _wake_result_waiters_locked(self) -> None:
         # Caller holds self._lock. Used when no new row was stored (shutdown).
         self._result_cv.notify_all()
+
+    def _wake_command_waiters_locked(self, peer: str) -> None:
+        # Caller holds self._lock. Wakes GET /poll waits for this peer only.
+        cv = self._command_cv.get(peer)
+        if cv is not None:
+            cv.notify_all()
 
     def store_result(
         self, body: dict, instance: str | None = None
@@ -8414,8 +8527,11 @@ class ServerState:
                     queue, reason, discarded_exec, finished_operations
                 )
             # Queued commands already woke their waiters via the synthetic
-            # result. This covers an /await for an id that was not queued.
+            # result. This covers an /await for an id that was not queued,
+            # and a GET /poll still held on either peer.
             self._wake_result_waiters_locked()
+            self._wake_command_waiters_locked("server")
+            self._wake_command_waiters_locked("client")
         for expr, main_fn, command_id in discarded_exec:
             try:
                 if self.exec_audit is not None:
@@ -8455,6 +8571,31 @@ def _parse_await_wait_s(qs: dict[str, list[str]]) -> tuple[float, bool]:
     if millis <= 0:
         return 0.0, True
     return millis / 1000.0, True
+
+
+def _parse_poll_wait_s(qs: dict[str, list[str]]) -> float:
+    """Seconds to hold GET /poll. Absent or unusable wait_ms does not wait.
+
+    A digit string longer than 7 characters, or above POLL_LONG_POLL_MAX_MS,
+    clamps to that cap. "0" is requested and does not wait. The response body
+    stays {"commands": ...}; unlike /await, nothing marks that the budget
+    was spent.
+    """
+
+    values = qs.get("wait_ms")
+    if not values:
+        return 0.0
+    raw = values[0]
+    if not isinstance(raw, str) or not raw.isdigit():
+        return 0.0
+    if len(raw) > 7:
+        return POLL_LONG_POLL_MAX_S
+    millis = int(raw)
+    if millis > POLL_LONG_POLL_MAX_MS:
+        millis = POLL_LONG_POLL_MAX_MS
+    if millis <= 0:
+        return 0.0
+    return millis / 1000.0
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -9426,6 +9567,7 @@ class Handler(BaseHTTPRequestHandler):
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
         )
+        wait_s = _parse_poll_wait_s(qs)
         status, payload = self.state.record_poll(
             peer,
             version,
@@ -9434,6 +9576,7 @@ class Handler(BaseHTTPRequestHandler):
             caps=caps_raw,
             ach=ach_raw,
             load=load,
+            wait_s=wait_s,
         )
         if status != 200:
             self._json(status, payload)
