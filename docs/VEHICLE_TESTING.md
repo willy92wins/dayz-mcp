@@ -45,16 +45,20 @@ No poll is not proof of an empty seat, even outside live.
 
 Deletion uses `occupant_client_seated_strict`
 (`tools/dayz_mcp/occupant_seat.py:29`); `player_teleport` retains its existing
-permissive predicate and probe policy. A readable seated flag with
-missing/unreadable authority **does** block. A verified on-foot or
-authority-owned seat preserves the server delete reply. An exception from
-the telemetry call propagates without sending a delete.
+permissive predicate and probe policy. Missing/unreadable `is_authority_owner`
+**does** block when `seated=true`; `seated=false` permits deletion even if
+`is_authority_owner` is absent. A verified on-foot or authority-owned seat
+preserves the server delete reply. An exception from the telemetry call
+propagates without sending a delete.
 
 **TOCTOU window:** the telemetry check and delete are separate bridge calls.
 `runtime.tool_lock` serializes tool calls on that runtime and is held across
-both operations; it does not lock manual player input. Within that serialized
-flow, only manual player input could seat the player between the check and
-delete. **Operators must not interact with the vehicle during delete.**
+both operations; it does not lock manual player input or prevent previously
+started actions from progressing. `action_use` can return success while an
+action is still running (`addon/scripts/5_Mission/MCPClientBridge.c:4657-4674`).
+Manual input or an earlier action could seat the player between the check and
+delete. **Before deletion, ensure no actions are pending or in progress;
+operators must not interact with the vehicle during delete.**
 
 The reported #302 runs `59b8dbc7` and `0761a892` crashed natively after
 client-only seating and deletion, even though the server's crew was empty.

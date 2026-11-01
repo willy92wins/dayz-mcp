@@ -41,7 +41,7 @@ class ClientSeatedDeleteTest(unittest.IsolatedAsyncioTestCase):
         # No registry id in telemetry: even an apparently unrelated target
         # cannot safely be excluded from the vehicle's deletion hierarchy.
         for object_id in (7, 99):
-            for authority in (0, False, None):
+            for authority in (0, False):
                 with self.subTest(object_id=object_id, authority=authority):
                     telemetry = {
                         "ok": 1, "seated": 1, "is_owner": 1,
@@ -95,6 +95,41 @@ class ClientSeatedDeleteTest(unittest.IsolatedAsyncioTestCase):
         for seated in (None, "false", "true", "0", "1", "", [], {}, -1, 2, 0.0, 1.0):
             with self.subTest(seated=seated):
                 telemetry = {"ok": 1, "seated": seated, "is_authority_owner": 1}
+                call = AsyncMock(side_effect=lambda cmd, *_args:
+                                 telemetry if cmd == "vehicle_telemetry" else {"ok": 1, "deleted": 1})
+                with patch.object(self.runtime, "call_bridge", new=call):
+                    self._assert_unverified(await self._delete())
+                call.assert_awaited_once_with("vehicle_telemetry", {}, "client", 2.0)
+
+    async def test_non_boolean_authority_never_sends_delete(self) -> None:
+        for authority in (1.0, 0.0, None, "false", "true", "0", "1", "", [], {}, -1, 2):
+            for seated in (0, 1):
+                with self.subTest(authority=authority, seated=seated):
+                    telemetry = {"ok": 1, "seated": seated, "is_authority_owner": authority}
+                    call = AsyncMock(side_effect=lambda cmd, *_args:
+                                     telemetry if cmd == "vehicle_telemetry" else {"ok": 1, "deleted": 1})
+                    with patch.object(self.runtime, "call_bridge", new=call):
+                        self._assert_unverified(await self._delete())
+                    call.assert_awaited_once_with("vehicle_telemetry", {}, "client", 2.0)
+
+    async def test_non_boolean_or_failed_ok_never_sends_delete(self) -> None:
+        for ok in (1.0, 0.0, None, "false", "true", "0", "1", "", [], {}, -1, 2, 0, False):
+            for seated in (0, 1):
+                with self.subTest(ok=ok, seated=seated):
+                    telemetry = {"ok": ok, "seated": seated, "is_authority_owner": 1}
+                    call = AsyncMock(side_effect=lambda cmd, *_args:
+                                     telemetry if cmd == "vehicle_telemetry" else {"ok": 1, "deleted": 1})
+                    with patch.object(self.runtime, "call_bridge", new=call):
+                        self._assert_unverified(await self._delete())
+                    call.assert_awaited_once_with("vehicle_telemetry", {}, "client", 2.0)
+
+    async def test_missing_required_flag_never_sends_delete(self) -> None:
+        for telemetry in (
+            {"seated": 0, "is_authority_owner": 1},
+            {"ok": 1, "is_authority_owner": 1},
+            {"ok": 1, "seated": 1},
+        ):
+            with self.subTest(telemetry=telemetry):
                 call = AsyncMock(side_effect=lambda cmd, *_args:
                                  telemetry if cmd == "vehicle_telemetry" else {"ok": 1, "deleted": 1})
                 with patch.object(self.runtime, "call_bridge", new=call):

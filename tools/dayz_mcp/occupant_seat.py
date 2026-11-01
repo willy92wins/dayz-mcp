@@ -31,11 +31,19 @@ def occupant_client_seated_strict(telemetry: object) -> bool | None:
 
     Enforce bools also arrive as integer 0/1 (world_results.py:133-135).
     Keep the permissive teleport predicate unchanged; deletion must not
-    mistake malformed telemetry for an empty seat.
+    mistake malformed telemetry for an empty seat. Authority may be
+    omitted only when a successful read confirms seated=false.
     """
     if not isinstance(telemetry, dict):
         return None
-    seated = telemetry.get("seated")
-    if not isinstance(seated, bool) and not (type(seated) is int and seated in (0, 1)):
+    for field in ("ok", "seated"):
+        value = telemetry.get(field)
+        if type(value) not in (bool, int) or value not in (0, 1):
+            return None
+    if not telemetry["ok"]:
         return None
-    return occupant_client_seated(telemetry)
+    authority = telemetry.get("is_authority_owner")
+    if telemetry["seated"] or "is_authority_owner" in telemetry:
+        if type(authority) not in (bool, int) or authority not in (0, 1):
+            return None
+    return bool(telemetry["seated"] and not authority)
