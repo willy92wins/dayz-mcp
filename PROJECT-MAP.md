@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-11-01 03:03:33 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-11-01 14:37:44 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.
@@ -91,17 +91,11 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `AUDITORIA_2026-08-23.md` - 26 KB, touched 2026-11-01 (UTC)
-- `AUDITORIA_ANGULOS_ADICIONALES_2026-08-23.md` - 20 KB, touched 2026-11-01 (UTC)
-- `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-11-01 (UTC)
-- `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-11-01 (UTC)
-- `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 129 KB, touched 2026-11-01 (UTC)
+- `CHANGELOG.md` - 130 KB, touched 2026-11-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-01 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-11-01 (UTC)
 - `GATES.md` - 4 KB, touched 2026-11-01 (UTC)
-- `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-11-01 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-11-01 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-11-01 (UTC)
 - `README.md` - 34 KB, touched 2026-11-01 (UTC)
