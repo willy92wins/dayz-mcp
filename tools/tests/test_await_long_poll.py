@@ -1724,6 +1724,214 @@ class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("wait_ms", detail[0], detail)
         self.assertEqual(slots._value, before, slots)
 
+    def _park_private_pool(self) -> tuple[object, list, threading.Event, dict[str, int]]:
+        hold = threading.Event()
+        running = {"n": 0}
+        seen_lock = threading.Lock()
+        self.addCleanup(hold.set)
+
+        def block() -> None:
+            with seen_lock:
+                running["n"] += 1
+            hold.wait(timeout=3.0)
+
+        executor = server._client_long_poll_executor_handle()
+        parked = [executor.submit(block) for _ in range(8)]
+        return executor, parked, hold, running
+
+    async def _wait_until_parked(self, running: dict[str, int], lock: threading.Lock) -> None:
+        limit = time.monotonic() + 2.0
+        while time.monotonic() < limit:
+            with lock:
+                count = running["n"]
+            if count >= 8:
+                return
+            await asyncio.sleep(0.02)
+        self.fail(running["n"])
+
+    @slow_test
+    async def test_submit_failure_pending_fallback_does_not_let_the_orphan_consume(
+        self,
+    ) -> None:
+        # Sol r7 F-10: submit queues the hop and raises. The fallback returns
+        # pending, the next iteration rebinds the abandon flag, and the orphan
+        # then consumes the result with remove=1. Publishing at 150ms must
+        # still reach this call, and only one /await may take it.
+        import concurrent.futures
+
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        box = {"ready": False, "taken": 0}
+        submits = {"n": 0}
+        executor, parked, hold, running = self._park_private_pool()
+        await self._wait_until_parked(running, seen_lock)
+
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        warmed = [pool.submit(lambda: None) for _ in range(8)]
+        for item in warmed:
+            item.result(timeout=2.0)
+        loop.set_default_executor(pool)
+        self.addCleanup(pool.shutdown, wait=False, cancel_futures=True)
+
+        def publish() -> None:
+            time.sleep(0.15)
+            with seen_lock:
+                box["ready"] = True
+
+        threading.Thread(target=publish, daemon=True).start()
+
+        def release_after_rebind() -> None:
+            limit = time.monotonic() + 2.0
+            while time.monotonic() < limit:
+                with seen_lock:
+                    rebound = submits["n"] >= 2 and box["ready"]
+                if rebound:
+                    time.sleep(0.02)
+                    hold.set()
+                    return
+                time.sleep(0.01)
+            hold.set()
+
+        threading.Thread(target=release_after_rebind, daemon=True).start()
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(copied)
+                if (
+                    copied.get("id") == "1"
+                    and box["ready"]
+                    and box["taken"] == 0
+                ):
+                    box["taken"] = 1
+                    return 200, {
+                        "status": "done",
+                        "result": {"ok": 1, "marker": 1},
+                    }
+            return 200, {"status": "pending"}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        original_submit = executor.submit
+
+        def broken_submit(fn, /, *args, **kwargs):
+            future = original_submit(fn, *args, **kwargs)
+            with seen_lock:
+                submits["n"] += 1
+                first = submits["n"] == 1
+            if first:
+                raise RuntimeError("private thread failed to start")
+            return future
+
+        executor.submit = broken_submit
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                runtime._await_result("camera_get", 1, "client", 1.5),
+                timeout=3.0,
+            )
+        finally:
+            executor.submit = original_submit
+            hold.set()
+            for future in parked:
+                future.result(timeout=2.0)
+        self.assertEqual(result.get("marker"), 1, result)
+        self.assertLess(time.monotonic() - started, 1.5)
+        with seen_lock:
+            detail = list(seen)
+            taken = box["taken"]
+        waited = [query for query in detail if "wait_ms" in query]
+        self.assertEqual(taken, 1, detail)
+        self.assertEqual(len(waited), 1, detail)
+
+    @slow_test
+    async def test_submit_failure_last_second_does_not_stick_the_orphan(
+        self,
+    ) -> None:
+        # Same failed submit and pending fallback, but the next iteration is
+        # already inside the last second, so it does not long-poll. The
+        # orphan must finish without sending, and no private-pool thread may
+        # stay blocked on an event after the call returns.
+        import sys
+
+        seen: list[dict[str, str]] = []
+        seen_lock = threading.Lock()
+        clock = {"t": 10.0}
+        executor, parked, hold, running = self._park_private_pool()
+        await self._wait_until_parked(running, seen_lock)
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            copied = dict(query or {})
+            with seen_lock:
+                seen.append(dict(copied))
+                first = len(seen) == 1
+            if first:
+                # 1.2s budget, 0.4s left: the next loop is not a long-poll.
+                clock["t"] = 10.8
+                return 200, {"status": "pending"}
+            if "wait_ms" in copied:
+                return 200, {"status": "pending"}
+            return 200, {"status": "done", "result": {"ok": 1, "marker": 1}}
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = lambda: clock["t"]
+        runtime._broker_admits = {}
+        runtime._call = _call
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        original_submit = executor.submit
+
+        def broken_submit(fn, /, *args, **kwargs):
+            original_submit(fn, *args, **kwargs)
+            raise RuntimeError("private thread failed to start")
+
+        executor.submit = broken_submit
+        stuck: list[threading.Event] = []
+        try:
+            result = await asyncio.wait_for(
+                runtime._await_result("camera_get", 1, "client", 1.2),
+                timeout=2.0,
+            )
+            self.assertEqual(result.get("marker"), 1, result)
+        finally:
+            executor.submit = original_submit
+            hold.set()
+            for future in parked:
+                future.result(timeout=2.0)
+            await asyncio.sleep(0.15)
+            frames = sys._current_frames()
+            for thread in threading.enumerate():
+                if not thread.name.startswith("await-long-poll"):
+                    continue
+                frame = frames.get(thread.ident)
+                while frame is not None:
+                    if frame.f_code.co_name == "wait":
+                        candidate = frame.f_locals.get("self")
+                        if isinstance(candidate, threading.Event):
+                            stuck.append(candidate)
+                            break
+                    frame = frame.f_back
+            for event in stuck:
+                event.set()
+        self.assertEqual(stuck, [], stuck)
+        with seen_lock:
+            detail = list(seen)
+        self.assertTrue(detail, detail)
+        self.assertFalse(any("wait_ms" in query for query in detail), detail)
+
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
     def _runtime(self, state: loopback.ServerState):

@@ -1785,6 +1785,83 @@ def _release_client_long_poll_slot() -> None:
     slots.release()
 
 
+class _AwaitHop:
+    """One private-pool ``/await`` submission.
+
+    The wait loop rebinds its locals every iteration. This object is created
+    for that submission and passed into the worker, so a hop queued by a
+    failed ``submit`` cannot observe the next iteration's flag or event.
+    """
+
+    __slots__ = ("abandoned", "released", "lock", "ready")
+
+    def __init__(self) -> None:
+        self.abandoned = False
+        self.released = False
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+
+    def abandon(self) -> None:
+        with self.lock:
+            self.abandoned = True
+        # Signalled on every abandon, including when the next iteration is
+        # already inside the last second and never arms a hop of its own.
+        self.ready.set()
+
+    def release_slot(self, _done: object = None) -> None:
+        with self.lock:
+            if self.released:
+                return
+            self.released = True
+        _release_client_long_poll_slot()
+
+
+def _issue_await_hop(
+    runtime: Any,
+    deadline: float,
+    command_id: int,
+    holder: dict[str, Any] | None,
+    long_poll: bool,
+    hop: _AwaitHop | None,
+) -> tuple[int, dict[str, Any]]:
+    """Send one ``/await``. ``holder`` and ``hop`` are this submission's.
+
+    ``holder`` is the value at submit time: the loop later rebinds it to
+    ``None`` on a 404, and an in-flight hop must keep the body it was given.
+    """
+
+    if long_poll:
+        if hop is None:
+            raise RuntimeError("long-poll hop missing")
+        hop.ready.wait()
+        with hop.lock:
+            abandoned = hop.abandoned
+        if abandoned:
+            hop.release_slot()
+            return (0, {"status": "abandoned"})
+    remaining_now = deadline - runtime._time_fn()
+    if remaining_now <= 0.0:
+        raise _CallBudgetExpired()
+    query: dict[str, str] = {"id": str(command_id), "remove": "1"}
+    if long_poll:
+        wait_s = min(
+            remaining_now - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
+            AWAIT_LONG_POLL_MAX_S,
+        )
+        if wait_s > 0.0:
+            wait_ms = int(wait_s * 1000)
+            if wait_ms > 0:
+                query["wait_ms"] = str(wait_ms)
+    return runtime._call(
+        "GET" if holder is None else "POST",
+        "/await",
+        holder,
+        query,
+        remaining_now,
+        deadline,
+    )
+
+
 def _client_long_poll_executor_handle() -> concurrent.futures.ThreadPoolExecutor:
     executor, _slots = _client_long_poll_resources()
     return executor
@@ -3072,75 +3149,49 @@ class ClientRuntime:
 
             # submit() puts the work item on the queue before it starts a
             # thread. A start failure leaves that item queued and raises.
-            # The hop waits here until this call either arms it or abandons
-            # it, so the queued item cannot send after the call has moved on.
-            hop_lock = threading.Lock()
-            hop = {"abandoned": False, "released": False}
-            hop_ready = threading.Event()
-
-            def release_slot(_done: object = None) -> None:
-                with hop_lock:
-                    if hop["released"]:
-                        return
-                    hop["released"] = True
-                _release_client_long_poll_slot()
-
-            def issue(long_poll: bool) -> tuple[int, dict[str, Any]]:
-                # Worker thread. wait_ms comes from the deadline at this
-                # instant. A long-poll is allowed only when this hop owns a
-                # slot. Inside the last AWAIT_LONG_POLL_BUDGET_MARGIN_S the
-                # request goes out without wait_ms.
-                if long_poll:
-                    hop_ready.wait()
-                    with hop_lock:
-                        abandoned = hop["abandoned"]
-                    if abandoned:
-                        release_slot()
-                        return (0, {"status": "abandoned"})
-                remaining_now = deadline - self._time_fn()
-                if remaining_now <= 0.0:
-                    raise _CallBudgetExpired()
-                query = {"id": str(command_id), "remove": "1"}
-                if long_poll:
-                    wait_s = min(
-                        remaining_now - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
-                        AWAIT_LONG_POLL_MAX_S,
-                    )
-                    if wait_s > 0.0:
-                        wait_ms = int(wait_s * 1000)
-                        if wait_ms > 0:
-                            query["wait_ms"] = str(wait_ms)
-                return self._call(
-                    "GET" if holder is None else "POST",
-                    "/await",
-                    holder,
-                    query,
-                    remaining_now,
-                    deadline,
-                )
-
+            # The hop object below belongs to that submission alone.
             try:
                 if use_long_poll:
+                    hop = _AwaitHop()
                     try:
                         future = _client_long_poll_executor_handle().submit(
-                            issue, True
+                            _issue_await_hop,
+                            self,
+                            deadline,
+                            command_id,
+                            holder,
+                            True,
+                            hop,
                         )
                     except Exception:
-                        with hop_lock:
-                            hop["abandoned"] = True
-                        hop_ready.set()
-                        release_slot()
-                        status, payload = await asyncio.to_thread(issue, False)
+                        hop.abandon()
+                        hop.release_slot()
+                        status, payload = await asyncio.to_thread(
+                            _issue_await_hop,
+                            self,
+                            deadline,
+                            command_id,
+                            holder,
+                            False,
+                            None,
+                        )
                     else:
-                        # Done on the worker when the call finishes, and on
-                        # the loop when the future is cancelled before it
-                        # starts. release_slot is idempotent: the abandoned
-                        # hop also calls it, and that second call is a no-op.
-                        future.add_done_callback(release_slot)
-                        hop_ready.set()
+                        # Done when the call finishes, and when the future is
+                        # cancelled before it starts. release_slot is
+                        # idempotent: abandon also calls it.
+                        future.add_done_callback(hop.release_slot)
+                        hop.ready.set()
                         status, payload = await asyncio.wrap_future(future)
                 else:
-                    status, payload = await asyncio.to_thread(issue, False)
+                    status, payload = await asyncio.to_thread(
+                        _issue_await_hop,
+                        self,
+                        deadline,
+                        command_id,
+                        holder,
+                        False,
+                        None,
+                    )
             except _CallBudgetExpired:
                 break
             if status == 404 and holder is not None:
