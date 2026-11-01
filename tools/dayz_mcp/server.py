@@ -28,6 +28,8 @@ from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 import mcp_capture
 from dayz_mcp import (
+    accredited_daemon_transport,
+    accredited_keepalive,
     core,
     daemon,
     daemon_credential,
@@ -1698,6 +1700,19 @@ def _status_disowns_lease(status: object, lease_id: object) -> bool:
     return isinstance(named, str) and bool(named) and named != lease_id
 
 
+def _client_keepalive_request(**kwargs):
+    """MCP client hop. A test that replaced the sealed transport is called as-is.
+
+    ``orphan_guard.verified_daemon_http_request`` is a from-import. Patching
+    that binding must not fall through into the pool, and patching the sealed
+    module attribute is handled inside ``keepalive_daemon_http_request``.
+    """
+    patched = orphan_guard.verified_daemon_http_request
+    if patched is not accredited_daemon_transport.verified_daemon_http_request:
+        return patched(**kwargs)
+    return accredited_keepalive.keepalive_daemon_http_request(**kwargs)
+
+
 class ClientRuntime:
     """Client-mode runtime: proxies bridge calls over HTTP to the broker daemon.
 
@@ -1909,11 +1924,9 @@ class ClientRuntime:
         self._credential_provider = (
             daemon_credential.RefreshingDaemonCredential(
                 policy=daemon_policy,
-                request_fn=lambda **kwargs: (
-                    orphan_guard.verified_daemon_http_request(
-                        time_fn=self._time_fn,
-                        **kwargs,
-                    )
+                request_fn=lambda **kwargs: _client_keepalive_request(
+                    time_fn=self._time_fn,
+                    **kwargs,
                 ),
             )
         )

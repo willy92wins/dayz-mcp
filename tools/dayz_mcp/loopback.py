@@ -20,6 +20,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Mapping
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -348,9 +349,20 @@ MAX_RESULTS = MAX_QUEUE * 4
 # each queued session may hold one POST /wait. Add 2 game-bridge /poll
 # sockets, the active session's /enqueue+/await, /status probes, and
 # headroom for a short legitimate burst while waits are held. Exceeding the
-# ceiling closes the accepted socket without a worker (reject, do not queue):
-# Handler.timeout already bounds each worker's duration, not concurrency.
+# ceiling closes the accepted socket without a worker (reject, do not queue).
+# A request that has started is still bounded by Handler.timeout. An idle
+# keep-alive holds one of these workers only until KEEPALIVE_IDLE_S, not for
+# that 35s long-poll budget.
 MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
+# The game bridge polls /poll and posts /result. /set_poll_delay is the same
+# socket family. None of them may keep the connection.
+GAME_BRIDGE_HTTP_PATHS = frozenset({"/poll", "/result", "/set_poll_delay"})
+# Longer than the client's 5s idle discard (accredited_keepalive
+# IDLE_REUSE_LIMIT_S; this module does not import it) and far below
+# Handler.timeout. The client closes when it discards, which frees the
+# worker before this cap. 64 idle MCP sessions can hold 64 of the 96
+# workers for at most 8s; a burst reuses that one worker.
+KEEPALIVE_IDLE_S = 8.0
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -8294,11 +8306,86 @@ class Handler(BaseHTTPRequestHandler):
     # bounded — including the request-line read that otherwise holds a worker
     # thread forever when a local client connects and sends nothing. 35s sits
     # strictly above the POST /wait long-poll ceiling so a max-length wait still
-    # has headroom on the same socket.
+    # has headroom on the same socket. Between keep-alive requests the wait
+    # is KEEPALIVE_IDLE_S; this 35s bound is restored once a request line
+    # has been read, before the body and before POST /await.
     timeout = 35.0
+    _keepalive_ok = False
+    _force_close = False
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def handle(self) -> None:
+        self.close_connection = True
+        self.handle_one_request()
+        while not self.close_connection:
+            self._arm_keepalive_idle_read()
+            if self.close_connection:
+                return
+            self.handle_one_request()
+
+    def _arm_keepalive_idle_read(self) -> None:
+        try:
+            self.connection.settimeout(KEEPALIVE_IDLE_S)
+        except OSError:
+            self.close_connection = True
+
+    def handle_one_request(self) -> None:
+        # Same request dispatch as http.server.BaseHTTPRequestHandler in
+        # CPython 3.14, plus the idle-timeout restore below.
+        self._keepalive_ok = False
+        self._force_close = False
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+            if len(self.raw_requestline) > 65536:
+                self.requestline = ""
+                self.request_version = ""
+                self.command = ""
+                self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+                return
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                self.close_connection = True
+                return
+            if not self.parse_request():
+                return
+            mname = "do_" + self.command
+            if not hasattr(self, mname):
+                self.send_error(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    "Unsupported method (%r)" % self.command,
+                )
+                return
+            method = getattr(self, mname)
+            method()
+            self.wfile.flush()
+        except TimeoutError as exc:
+            self.log_error("Request timed out: %r", exc)
+            self.close_connection = True
+            return
+
+    def _consider_keepalive(self, path: str) -> None:
+        """Arm keep-alive only for an authenticated client that asked for it.
+
+        protocol_version stays HTTP/1.0, so a response that does not take
+        this path is the same bytes as before. The game bridge never takes it.
+        """
+        self._keepalive_ok = False
+        if path in GAME_BRIDGE_HTTP_PATHS:
+            return
+        if self.request_version != "HTTP/1.1":
+            return
+        raw = self.headers.get("Connection", "")
+        if not isinstance(raw, str):
+            raw = str(raw)
+        tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
+        if "keep-alive" in tokens and "close" not in tokens:
+            self._keepalive_ok = True
 
     @property
     def state(self) -> ServerState:
@@ -8309,6 +8396,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query, keep_blank_values=True)
         if not self._authorized(qs):
             return
+        self._consider_keepalive(parsed.path)
 
         if parsed.path == "/poll":
             self._handle_poll(qs)
@@ -8331,6 +8419,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query, keep_blank_values=True)
         if not self._authorized(qs):
             return
+        self._consider_keepalive(parsed.path)
 
         if parsed.path == "/enqueue":
             self.state.touch_client()
@@ -8384,6 +8473,8 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self, qs: dict[str, list[str]]) -> bool:
         supplied = qs.get("key", [""])[0]
         if not hmac.compare_digest(supplied, self.state.key):
+            # POST has not read the body. Keep-alive would desynchronise it.
+            self._force_close = True
             self._json(401, {"error": "unauthorized"})
             return False
         if (
@@ -8398,45 +8489,57 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(raw_length)
         except (TypeError, ValueError):
-            self._json(400, {"error": "bad_content_length"})
+            self._reject_unread_body(400, "bad_content_length")
             return None
         if length < 0:
-            self._json(400, {"error": "bad_content_length"})
+            self._reject_unread_body(400, "bad_content_length")
             return None
         if length > MAX_BODY_BYTES:
-            # HTTP/1.0, no keep-alive: 413 without reading the body is safe.
-            # A client still sending >1 MiB may see RST instead of the 413 body.
-            self._json(413, {"error": "body_too_large"})
+            # The body is not read. That is safe only because this response
+            # closes the connection, including when the client sent HTTP/1.1
+            # and Connection: keep-alive. A client still sending >1 MiB may
+            # see RST instead of the 413 body.
+            self._reject_unread_body(413, "body_too_large")
             return None
 
         raw = self.rfile.read(length)
         if len(raw) != length:
-            self._json(400, {"error": "bad_body_length"})
+            self._reject_unread_body(400, "bad_body_length")
             return None
 
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            self._json(400, {"error": "bad_json"})
+            self._reject_unread_body(400, "bad_json")
             return None
 
         try:
             body = json.loads(text or "{}")
         except json.JSONDecodeError:
-            self._json(400, {"error": "bad_json"})
+            self._reject_unread_body(400, "bad_json")
             return None
 
         if not isinstance(body, dict):
-            self._json(400, {"error": "bad_json_type"})
+            self._reject_unread_body(400, "bad_json_type")
             return None
 
         return body
 
+    def _reject_unread_body(self, code: int, error: str) -> None:
+        """Close. The body is missing, short, or not the JSON object we asked for."""
+        self._force_close = True
+        self._json(code, {"error": error})
+
     def _json(self, code: int, body: dict) -> None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        persist = self._keepalive_ok and not self._force_close
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        if persist:
+            self.send_header("Connection", "keep-alive")
+        else:
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(data)
 
