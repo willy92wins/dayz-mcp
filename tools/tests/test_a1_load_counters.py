@@ -195,6 +195,7 @@ class LoadCountersTest(unittest.TestCase):
                     ns["DrainPending"]()
                 self.assertEqual(ns["m_Polls"], 32)
                 self.assertEqual(len(ns["polls"]), 32)
+                self.assertTrue(all(b"&wait_ms=800" in item for item in ns["polls"]))
                 self.assertAlmostEqual(ns["m_LastPollIntervalS"], 0.3)
                 self.assertEqual([ns[key] for key in ("m_Cmds", "m_CmdBytes", "m_BusyMs", "m_LastCmdsPerPoll")], before)
                 ns["commands"] = [_command(6)]

@@ -202,9 +202,9 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
 
     The Enforce dispatch closes the verdict blind: RestoreGameplay() and
     ReleaseCamera() return nothing and result.ok = true is unconditional
-    (MCPClientBridge.c:706-711), while both have exits that do nothing at all
-    (if (!mission) return; at :3919-3922; the m_ControlsSuppressed guard at
-    :3924). Ficha fb-20260903-125244-4f83. The separate gameplay_state reader
+    (MCPClientBridge.c:1281-1283), while both have exits that do nothing at all
+    (if (!mission) return; at :8291-8294; the m_ControlsSuppressed guard at
+    :8296). Ficha fb-20260903-125244-4f83. The separate gameplay_state reader
     exposes controls, HUD and the bridge simulation flag; restore_gameplay's
     automatic verification still re-reads only camera_get, so that is the one postcondition this
     layer may claim -- and the only ground on which it may answer ok.
@@ -322,7 +322,7 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
     @slow_test
     async def test_a_probe_that_could_not_look_fails_closed(self) -> None:
         # camera.ok=false is BuildCameraResult's client_not_in_game exit
-        # (MCPClientBridge.c:3654-3660): the probe answered, and its answer is
+        # (MCPClientBridge.c:7115-7121): the probe answered, and its answer is
         # "I could not look", which is not a released camera.
         app, runtime = self._app()
         with patch.object(

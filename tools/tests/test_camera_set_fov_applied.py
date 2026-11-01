@@ -1,9 +1,9 @@
 """Ticket 983a: camera_set echoes the FOV it applied as fov_applied.
 
 The wire has no engine FOV getter (Camera.GetCurrentFOV froze the client
-render after camera_set, MCPClientBridge.c:4773-4776), so a successful
+render after camera_set, MCPClientBridge.c:5734-5737), so a successful
 apply echoes the value the setter path received, in radians, and fov=0
-reaches no SetFOV at all (MCPClientBridge.c:5417/:5461), reported as an
+reaches no SetFOV at all (MCPClientBridge.c:6380/:6429), reported as an
 explicit null. The ~68.5 degrees vertical at 1920x1080 default is an
 owner-provided contextual measurement (run 8834df0e, 2026-10-04),
 documented in the tool description and never read back from the engine.
@@ -32,7 +32,7 @@ SERVER = _TOOLS_DIR / "dayz_mcp" / "server.py"
 
 def _success_wire(applied_mode: str) -> dict[str, Any]:
     # The bridge answers a successful apply with int ok=1 and the shared
-    # camera observation (MCPClientBridge.c:5477, BuildCameraResult). That
+    # camera observation (MCPClientBridge.c:6458, BuildCameraResult). That
     # nested legacy camera is an MCPCamera, which declares `float fov`
     # (MCPMessages.c:357), so the serialized object carries fov 0.0: no getter
     # ever fills it.
@@ -71,7 +71,7 @@ class CameraSetFovAppliedTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_983a_camera_set_echoes_positive_fov(self) -> None:
         # Every cam_mode reaches SetFOV through the same validated value
-        # (args["fov"], MCPClientBridge.c:5796), so the echo is that value in
+        # (args["fov"], MCPClientBridge.c:6849), so the echo is that value in
         # radians, whatever mode applied it.
         cases = [
             ("orient", {"cam_mode": "orient", "cam_pos": [1.0, 2.0, 3.0], "cam_orientation": [10.0, 20.0, 30.0]}, 1.05),
