@@ -114,6 +114,8 @@ from dayz_mcp.loopback import (
     ACTOR_EMOTE_WAIT_MIN_S,
     ACTOR_EMOTE_WAIT_SLACK_S,
     ACTOR_EMOTES,
+    AWAIT_LONG_POLL_FIELD,
+    AWAIT_LONG_POLL_MAX_S,
     BOT_START_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
@@ -126,6 +128,7 @@ from dayz_mcp.loopback import (
     SPAWN_BATCH_PER_TICK_MAX,
     SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
     LoopbackServer,
+    ResultWaitCancel,
     _FENCE_OMITTED,
     is_printable_input_name,
     is_scene_id,
@@ -699,6 +702,12 @@ _CARRIER_REFRESH_S = 5.0
 # reviews F1 and F6 of #255).
 MIN_IDLE_RETIREMENT_S = SESSION_TTL_S + 5.0
 POLL_INTERVAL_S = 0.05
+# The /await HTTP deadline is the caller's remaining budget, and that budget
+# also pays for accreditation before the daemon starts waiting. Asking the
+# daemon to hold for the whole remainder makes the socket time out first;
+# the accredited transport then reports daemon_response_ambiguous instead of
+# a finished pending body. 150ms covers that accreditation and the response.
+AWAIT_LONG_POLL_TRANSPORT_SLACK_S = 0.15
 _BROKER_CLEANUP_BUDGET_S = 2.0
 _BROKER_ADMISSION_ERRORS = frozenset(
     {
@@ -1520,6 +1529,12 @@ class Runtime:
 
     async def wait_for_result(self, cmd: str, command_id: int, peer: str, timeout_s: float) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
+        # A real ServerState waits on its condition. Test doubles that only
+        # implement take_result keep the 50ms poll: passing wait_s into those
+        # callables would not match their (command_id, remove) shape.
+        wait_until = getattr(self.state, "wait_until_command_result", None)
+        long_wait = callable(wait_until)
+        cancel = ResultWaitCancel() if long_wait else None
         while time.monotonic() < deadline:
             result = self.state.take_result(command_id, remove=True)
             if result is not None:
@@ -1529,9 +1544,27 @@ class Runtime:
                 if not result.get("ok"):
                     raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
             try:
-                await asyncio.sleep(POLL_INTERVAL_S)
+                if long_wait and cancel is not None:
+                    kind = await asyncio.to_thread(
+                        wait_until,
+                        command_id,
+                        min(remaining, AWAIT_LONG_POLL_MAX_S),
+                        cancel,
+                    )
+                    if kind == "stopped":
+                        break
+                else:
+                    await asyncio.sleep(min(POLL_INTERVAL_S, remaining))
             except asyncio.CancelledError:
+                # to_thread keeps running after the task is cancelled. Trip the
+                # token under the state lock so that thread returns without
+                # consuming, then drop the queued command.
+                if cancel is not None:
+                    cancel.trip(self.state)
                 self.state.abandon_command(command_id, "tool_cancelled")
                 raise
 
@@ -2939,13 +2972,22 @@ class ClientRuntime:
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break
+            query = {"id": str(command_id), "remove": "1"}
+            wait_s = min(remaining, AWAIT_LONG_POLL_MAX_S)
+            # Leave the slack inside this same deadline. The cap already
+            # leaves it when the deadline is further out than 2s + slack.
+            if remaining - wait_s < AWAIT_LONG_POLL_TRANSPORT_SLACK_S:
+                wait_s = remaining - AWAIT_LONG_POLL_TRANSPORT_SLACK_S
+            wait_ms = int(wait_s * 1000)
+            if wait_ms > 0:
+                query["wait_ms"] = str(wait_ms)
             try:
                 status, payload = await asyncio.to_thread(
                     self._call,
                     "GET" if holder is None else "POST",
                     "/await",
                     holder,
-                    {"id": str(command_id), "remove": "1"},
+                    query,
                     remaining,
                     deadline,
                 )
@@ -2964,6 +3006,11 @@ class ClientRuntime:
                 if "human_input" in payload:
                     pruned["human_input"] = payload["human_input"]
                 return pruned
+            # The field means this daemon already waited out wait_ms. An old
+            # daemon omits it and still needs the poll sleep. Without the
+            # field an immediate pending must not hot-loop.
+            if status == 200 and payload.get(AWAIT_LONG_POLL_FIELD) is True:
+                continue
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break

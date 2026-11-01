@@ -1341,11 +1341,25 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
                 "human_input": block,
             }
 
+        def _await_query(query: object, command_id: str) -> None:
+            self.assertIsInstance(query, dict)
+            assert isinstance(query, dict)
+            self.assertEqual(query.get("id"), command_id)
+            self.assertEqual(query.get("remove"), "1")
+            wait_ms = query.get("wait_ms")
+            self.assertIsInstance(wait_ms, str)
+            assert isinstance(wait_ms, str)
+            self.assertTrue(wait_ms.isdigit(), wait_ms)
+            self.assertGreaterEqual(int(wait_ms), 1)
+            self.assertLessEqual(int(wait_ms), 2000)
+            self.assertEqual(set(query), {"id", "remove", "wait_ms"})
+
         runtime._call = _call_with_block
         waited = await runtime._await_result("surface_query", 1, "server", 1.0)
-        self.assertEqual(
-            calls, [("POST", "/await", holder, {"id": "1", "remove": "1"})]
-        )
+        self.assertEqual(len(calls), 1)
+        method, path, payload, query = calls[0]
+        self.assertEqual((method, path, payload), ("POST", "/await", holder))
+        _await_query(query, "1")
         self.assertEqual(waited["y"], 12.5)
         self.assertNotIn("clicked", waited)
         self.assertIn("human_input", waited)
@@ -1358,7 +1372,10 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
         calls.clear()
         runtime._call = _call_plain
         plain = await runtime._await_result("surface_query", 2, "server", 1.0)
-        self.assertEqual(calls, [("GET", "/await", None, {"id": "2", "remove": "1"})])
+        self.assertEqual(len(calls), 1)
+        method, path, payload, query = calls[0]
+        self.assertEqual((method, path, payload), ("GET", "/await", None))
+        _await_query(query, "2")
         self.assertNotIn("human_input", plain)
         self.assertEqual(plain["y"], 12.5)
 
@@ -1387,13 +1404,11 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
             old = await runtime._await_result("surface_query", 4, "server", 1.0)
         except ToolError as exc:
             self.fail(f"the 404 did not fall back to GET: {exc!r}")
-        self.assertEqual(
-            calls,
-            [
-                ("POST", "/await", holder, {"id": "4", "remove": "1"}),
-                ("GET", "/await", None, {"id": "4", "remove": "1"}),
-            ],
-        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][:3], ("POST", "/await", holder))
+        self.assertEqual(calls[1][:3], ("GET", "/await", None))
+        _await_query(calls[0][3], "4")
+        _await_query(calls[1][3], "4")
         self.assertEqual(old["y"], 12.5)
         self.assertNotIn("human_input", old)
 
