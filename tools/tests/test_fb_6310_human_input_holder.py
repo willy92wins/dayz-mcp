@@ -1418,6 +1418,9 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
         app, runtime = build_app(
             ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
         )
+        runtime.bridge_status_payload = mock.AsyncMock(
+            return_value={"client_peer": {"last_poll_age_s": 0.1}}
+        )
         block = {
             "signal": "ok",
             "runs": [
@@ -1473,6 +1476,8 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
         }
 
         async def fake_call_bridge(cmd, args, peer, timeout_s, expected_fence=None):
+            if cmd == "vehicle_telemetry":
+                return {"ok": 1, "seated": False}
             row = {"ok": 1, "cmd": cmd, "human_input": blocks[cmd]}
             if cmd == "object_delete":
                 row["deleted"] = 1
@@ -1495,7 +1500,10 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
                 "object_delete", {"object_id": 7, "timeout_s": 1.0}
             )
         )
-        self.assertEqual(deleted.get("human_input"), block)
+        self.assertEqual(
+            deleted,
+            {"ok": 1, "cmd": "object_delete", "human_input": block, "deleted": 1},
+        )
         focused = _content_json(
             await app.call_tool("ui_focus", {"path": "root", "timeout_s": 1.0})
         )

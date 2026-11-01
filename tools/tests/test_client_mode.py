@@ -845,9 +845,25 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         # The observable is the MCP contract, not the HTTP layer. With no
         # lease held, query_all_players completes; the mutating verbs below are
         # the negative control -- without them a fully broken gate still passes.
-        srv = self._daemon()
+        srv = self._daemon(live_profile=False)
+        # The fixture bypasses _run_daemon's profile publication
+        # (server.py:11443-11449). Confirm non-live so #302 reaches the lease gate.
+        status_provider = srv.httpd.status_provider
+
+        def status_with_profile() -> dict:
+            return {**status_provider(), "live_profile": srv.state.live_profile}
+
+        srv.httpd.status_provider = status_with_profile
         self._peer(srv, "server", _VALID_PEER_VERSION)
-        self._peer(srv, "client", _VALID_PEER_VERSION)
+        client_peer = self._peer(srv, "client", _VALID_PEER_VERSION)
+
+        def client_response(command: dict) -> dict:
+            result = client_peer._default(command)
+            if command["cmd"] == "vehicle_telemetry":
+                result["seated"] = 0
+            return result
+
+        client_peer.responder = client_response
         config = ServerConfig(
             mode="client", key=srv.key, port=srv.port,
             client_platform="codex", log_sink=lambda _m: None,
@@ -859,6 +875,7 @@ class ClientModeTest(unittest.IsolatedAsyncioTestCase):
         self._attach_fixture_transport(runtime, srv)
         self.assertIsNone(runtime.active_lease_token)
         await self._wait_bridge_ready(runtime)
+        self.assertIs(runtime._serving_live_profile, False)
 
         read = _content_json(
             await app.call_tool("query_all_players", {"timeout_s": 2.0})

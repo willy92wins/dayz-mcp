@@ -19,7 +19,22 @@
 #   { ok, error, method, window:{pid,class,title,left,top,width,height}, stats:{meanBrightness,nonBlackRatio}, sha256,
 #     client:{left,top,width,height}, clientStats:{meanBrightness,nonBlackRatio} }
 # Callers that read the last JSON line ignore the phase line. SelfTest stays
-# one JSON line and does not emit the phase line.
+# one JSON line and does not emit the phase line. Every JSON line is pure
+# ASCII (non-ASCII escaped as \uXXXX by ConvertTo-AsciiJson) so it decodes
+# identically under any reader code page.
+#
+# Multi-frame (perf/capture-one-process): with -FrameCount N (N > 1) Add-Type and
+# window resolution happen once, then N frames are captured in this same process,
+# sleeping -FrameIntervalMs between frames. One {"phase":"started"} line is still
+# emitted once, followed by one JSON line per frame with the same schema plus
+# frameIndex (0-based). Frame files are named by -FramePattern, a full path
+# template containing "{0}" for the frame index; without it, frame 0 is
+# -CapturePng and later frames insert "_<index>" before the extension. With
+# -FrameCount 1 (or the new parameters omitted) output and behaviour are
+# exactly the single-frame behaviour above (no frameIndex field). Every
+# frame (single-frame included) first revalidates the chosen HWND's
+# identity (IsWindow + owning pid + class, see IdentityMatches): a change
+# emits error window_identity_changed and cuts the capture.
 [CmdletBinding(DefaultParameterSetName='Capture')]
 param(
   [string]$ProcessName = 'DayZDiag_x64',
@@ -36,7 +51,17 @@ param(
   #                        robust to the launcher-pid-vs-window-pid mismatch and excludes other clients
   #                        (LFQuad uses -port=2302). Resolved to the matching pid set via CIM.
   [int]$ClientPid = 0,
-  [string]$CmdLineMatch = ''
+  [string]$CmdLineMatch = '',
+  # Window class the candidate filter matches. Default 'DayZ' is the legacy
+  # filter; other values (e.g. 'Shell_TrayWnd') only serve tests/tools that
+  # grab a known non-DayZ window with the same capture pipeline.
+  [string]$WindowClass = 'DayZ',
+  # Multi-frame in one process. FrameCount <= 1 keeps the legacy single-frame
+  # behaviour exactly. FramePattern names frame i as (FramePattern -f i) style
+  # substitution of "{0}"; empty derives names from CapturePng (see header).
+  [int]$FrameCount = 1,
+  [int]$FrameIntervalMs = 120,
+  [string]$FramePattern = ''
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -51,6 +76,7 @@ public class MCPGrab {
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
@@ -86,6 +112,24 @@ public class MCPGrab {
       return true;
     }, IntPtr.Zero);
     return res;
+  }
+
+  public static string ClassOf(IntPtr h) {
+    var sb = new StringBuilder(256); GetClassNameW(h, sb, 256); return sb.ToString();
+  }
+
+  // Per-frame identity revalidation (F-05). Win32 signatures:
+  //   BOOL  IsWindow(HWND hWnd);
+  //   DWORD GetWindowThreadProcessId(HWND hWnd, LPDWORD lpdwProcessId);
+  //   int   GetClassNameW(HWND hWnd, LPWSTR lpClassName, int nMaxCount);
+  // A destroyed window's HWND can be recycled by Windows (see IsWindow
+  // docs), so "still a window" alone is not enough: the owning pid and
+  // the class must still be the ones saved at selection time.
+  public static bool IdentityMatches(IntPtr h, uint expectedPid, string expectedClass) {
+    if (!IsWindow(h)) return false;
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid != expectedPid) return false;
+    return ClassOf(h) == expectedClass;
   }
 
   // Live window rect (it may have moved/restored since enumeration).
@@ -162,11 +206,81 @@ public class MCPGrab {
 }
 "@
 
-function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats) {
-  [pscustomobject]@{
+function ConvertTo-AsciiJson($payload) {
+  # ConvertTo-Json on Windows PowerShell 5.1 leaves non-ASCII characters raw.
+  # The Python reader decodes stdout with the host locale (cp1252 here), where
+  # raw UTF-8 bytes such as 0x81 are undefined and the decode raises, losing
+  # the whole capture. Escape every non-ASCII code unit as a \uXXXX sequence:
+  # the line is pure ASCII, decodes identically under any code page, and
+  # json.loads still returns the original text. Surrogate pairs become two
+  # \uXXXX escapes, which JSON parsers recombine.
+  $json = $payload | ConvertTo-Json -Compress
+  $builder = [System.Text.StringBuilder]::new($json.Length)
+  foreach ($char in $json.ToCharArray()) {
+    $code = [int]$char
+    if ($code -gt 127) {
+      [void]$builder.AppendFormat('\u{0:x4}', $code)
+    } else {
+      [void]$builder.Append($char)
+    }
+  }
+  return $builder.ToString()
+}
+
+function Write-AsciiJsonLine($payload) {
+  $json = ConvertTo-AsciiJson $payload
+  # Write the result line straight to the raw stdout handle, like the
+  # {"phase":"started"} line below, and never to the success pipeline: inside
+  # Capture-OneFrame anything on that pipeline becomes part of the function's
+  # return value, so a caller that discards it ([void](...)) or assigns it
+  # ($ok = Capture-OneFrame ...) would swallow the result line entirely and
+  # turn the success value into an always-truthy array. Raw stdout keeps the
+  # protocol identical for top-level and in-function calls alike, and leaves
+  # Capture-OneFrame returning exactly $true/$false.
+  try {
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($json + "`n")
+    $rawOut = [Console]::OpenStandardOutput()
+    $rawOut.Write($bytes, 0, $bytes.Length)
+    $rawOut.Flush()
+  } catch {
+    try { [Console]::Out.WriteLine($json); [Console]::Out.Flush() } catch {}
+  }
+}
+
+function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats, $frameIndex = -1) {
+  $payload = [pscustomobject]@{
     ok = $ok; error = $err; method = $method; window = $window; stats = $stats; sha256 = $sha
     client = $client; clientStats = $clientStats
-  } | ConvertTo-Json -Compress
+  }
+  if ($FrameCount -gt 1) {
+    $payload | Add-Member -NotePropertyName frameIndex -NotePropertyValue ([int]$frameIndex)
+  }
+  Write-AsciiJsonLine $payload
+}
+
+function Get-FramePath($index) {
+  if ($FramePattern -ne '') {
+    # Substitute the index only in the file name: a directory may literally
+    # contain "{0}" (e.g. a TEMP folder) and must never be reinterpreted.
+    $frameDir = [System.IO.Path]::GetDirectoryName($FramePattern)
+    $frameName = [System.IO.Path]::GetFileName($FramePattern).Replace('{0}', [string]$index)
+    if ($frameDir) { return [System.IO.Path]::Combine($frameDir, $frameName) }
+    return $frameName
+  }
+  if ($index -eq 0) { return $CapturePng }
+  $dir = [System.IO.Path]::GetDirectoryName($CapturePng)
+  $stem = [System.IO.Path]::GetFileNameWithoutExtension($CapturePng)
+  $ext = [System.IO.Path]::GetExtension($CapturePng)
+  $name = "${stem}_${index}${ext}"
+  if ($dir) { return [System.IO.Path]::Combine($dir, $name) }
+  return $name
+}
+
+function Test-WindowIdentity {
+  param([IntPtr]$Handle, [uint32]$ExpectedPid, [string]$ExpectedClass, [string]$ClassFilter = '')
+  if (-not [MCPGrab]::IdentityMatches($Handle, $ExpectedPid, $ExpectedClass)) { return $false }
+  if ($ClassFilter -ne '') { return ([MCPGrab]::ClassOf($Handle) -eq $ClassFilter) }
+  return $true
 }
 
 function Client-Stats($bmp, $client) {
@@ -217,8 +331,48 @@ if ($SelfTest) {
       ratio_boundary_strict = [bool](-not (Test-LiveStats ([double[]]@(3.0, 0.02))))
       above_boundaries_live = [bool](Test-LiveStats ([double[]]@(2.0001, 0.0201)))
     }
-    $ok = -not ($cases.Values -contains $false)
-    [pscustomobject]@{ ok = $ok; error = $(if ($ok) { '' } else { 'self_test_failed' }); cases = $cases } | ConvertTo-Json -Compress
+    # ASCII-escape regression sample: built from code points so this file
+    # stays pure ASCII itself. Emitted through the same Write-AsciiJsonLine
+    # path as Emit, so a reader under any code page recovers it via JSON.
+    $sampleTitle = [string]::Concat([char]0x00C1, ' ', [char]0x00F1)
+    $savedFramePattern = $FramePattern
+    try {
+      $FramePattern = 'C:\Temp\literal{0}\frame_{0}.png'
+      $framePathBraces = Get-FramePath 3
+    }
+    finally {
+      $FramePattern = $savedFramePattern
+    }
+    $framePathBracesOk = ($framePathBraces -eq 'C:\Temp\literal{0}\frame_3.png')
+    # F-05: exercise the real per-frame identity revalidation against a
+    # real window from List(): it must accept its own pid/class and reject
+    # an altered expected pid or class. Separate payload fields, NOT new
+    # `cases` entries, so the pinned cases contract stays as-is. With no
+    # window at all the exercise is reported skipped and does not fail.
+    $identityState = 'skipped_no_window'
+    $identitySelf = $false
+    $identityWrongPidRejected = $false
+    $identityWrongClassRejected = $false
+    $identityWin = @([MCPGrab]::List() | Where-Object { $_.H -ne [IntPtr]::Zero } | Select-Object -First 1)
+    if ($identityWin.Count -gt 0) {
+      $iw = $identityWin[0]
+      $wrongPid = [uint32]0
+      if ($iw.Pid -ne [uint32]::MaxValue) { $wrongPid = [uint32]($iw.Pid + 1) }
+      $identitySelf = [bool](Test-WindowIdentity $iw.H ([uint32]$iw.Pid) ([string]$iw.Cls) ([string]$iw.Cls))
+      $identityWrongPidRejected = [bool](-not (Test-WindowIdentity $iw.H $wrongPid ([string]$iw.Cls) ([string]$iw.Cls)))
+      $identityWrongClassRejected = [bool](-not (Test-WindowIdentity $iw.H ([uint32]$iw.Pid) ([string]$iw.Cls + '_altered') ([string]$iw.Cls)))
+      $identityState = 'exercised'
+    }
+    $identityOk = ($identityState -eq 'skipped_no_window') -or ($identitySelf -and $identityWrongPidRejected -and $identityWrongClassRejected)
+    $ok = (-not ($cases.Values -contains $false)) -and $framePathBracesOk -and $identityOk
+    $selfPayload = [pscustomobject]@{
+      ok = $ok; error = $(if ($ok) { '' } else { 'self_test_failed' }); cases = $cases
+      sampleTitle = $sampleTitle; framePathBraces = $framePathBraces; framePathBracesOk = [bool]$framePathBracesOk
+      windowIdentityState = $identityState; windowIdentitySelf = [bool]$identitySelf
+      windowIdentityWrongPidRejected = [bool]$identityWrongPidRejected
+      windowIdentityWrongClassRejected = [bool]$identityWrongClassRejected
+    }
+    Write-AsciiJsonLine $selfPayload
     if (-not $ok) { exit 1 }
     exit 0
   }
@@ -245,7 +399,7 @@ try {
 } catch {}
 
 $wins  = [MCPGrab]::List()
-$shown = $wins | Where-Object { $_.Vis -and $_.Wd -gt 0 -and $_.Ht -gt 0 -and $_.Cls -eq 'DayZ' -and $_.Cls -ne 'ConsoleWindowClass' }
+$shown = $wins | Where-Object { $_.Vis -and $_.Wd -gt 0 -and $_.Ht -gt 0 -and $_.Cls -eq $WindowClass -and $_.Cls -ne 'ConsoleWindowClass' }
 
 # Build the candidate window set in priority order; each selector narrows to the target client and
 # excludes other DayZ clients (e.g. LFQuad). Fall through to the next only if a selector yields no
@@ -282,7 +436,7 @@ if (-not $chosen -and $CmdLineMatch -eq '' -and $ClientPid -le 0) {
 }
 
 if (-not $chosen) {
-  Emit $false $selErr '' $null $null '' $null $null
+  Emit $false $selErr '' $null $null '' $null $null 0
   exit 0
 }
 
@@ -308,42 +462,71 @@ function Get-CaptureGeometry() {
   }
 }
 
-function Save-And-Emit($bmp, $method, $geometry) {
+function Save-And-Emit($bmp, $method, $geometry, $targetPath, $frameIndex) {
   $st = [MCPGrab]::Stats($bmp)
   $clientSt = Client-Stats $bmp $geometry.client
-  $bmp.Save($CapturePng, [System.Drawing.Imaging.ImageFormat]::Png)
+  $bmp.Save($targetPath, [System.Drawing.Imaging.ImageFormat]::Png)
   $bmp.Dispose()
-  $sha = (Get-FileHash -LiteralPath $CapturePng -Algorithm SHA256).Hash
+  $sha = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash
   $stats = [pscustomobject]@{ meanBrightness = $st[0]; nonBlackRatio = $st[1] }
   $clientStats = [pscustomobject]@{ meanBrightness = $clientSt[0]; nonBlackRatio = $clientSt[1] }
-  Emit $true '' $method $geometry.window $stats $sha $geometry.client $clientStats
+  Emit $true '' $method $geometry.window $stats $sha $geometry.client $clientStats $frameIndex
 }
 
+# One frame: geometry, capture, save and hash. Window resolution and Add-Type
+# above happen once for the whole run; only this repeats per frame.
 # auto/printwindow: PrintWindow first (occlusion-robust, no focus theft). auto
 # then falls back to CopyFromScreen WITHOUT SetForegroundWindow: ForceForeground
 # via AttachThreadInput has killed the live DayZ client (ficha 8f76).
 # Method=foreground remains an explicit opt-in for operators who accept that risk.
-if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
-  $geometry = Get-CaptureGeometry
-  $bmp = [MCPGrab]::CapturePrintWindow($chosen.H, $geometry.width, $geometry.height)
-  if ($Method -eq 'printwindow') {
-    if ($bmp) { Save-And-Emit $bmp 'printwindow' $geometry; exit 0 } else { Emit $false 'printwindow_failed' 'printwindow' $geometry.window $null '' $geometry.client $null; exit 0 }
+function Capture-OneFrame($targetPath, $frameIndex) {
+  # F-05: revalidate the chosen window's identity on EVERY frame (this
+  # shared path also covers FrameCount=1, whose only change is this
+  # check). Windows may recycle a destroyed window's HWND, so a later
+  # frame could otherwise capture another window and credit it to the
+  # client selected once at start-up. A change fails this frame like any
+  # other frame failure, cutting the capture.
+  if (-not (Test-WindowIdentity $chosen.H ([uint32]$chosen.Pid) ([string]$chosen.Cls) ([string]$WindowClass))) {
+    Emit $false 'window_identity_changed' '' $null $null '' $null $null $frameIndex
+    return $false
   }
-  if (Is-Live $bmp $geometry.client) { Save-And-Emit $bmp 'printwindow' $geometry; exit 0 }
-  if ($bmp) { $bmp.Dispose() }
-}
+  if ($Method -eq 'printwindow' -or $Method -eq 'auto') {
+    $geometry = Get-CaptureGeometry
+    $bmp = [MCPGrab]::CapturePrintWindow($chosen.H, $geometry.width, $geometry.height)
+    if ($Method -eq 'printwindow') {
+      if ($bmp) { Save-And-Emit $bmp 'printwindow' $geometry $targetPath $frameIndex; return $true } else { Emit $false 'printwindow_failed' 'printwindow' $geometry.window $null '' $geometry.client $null $frameIndex; return $false }
+    }
+    if (Is-Live $bmp $geometry.client) { Save-And-Emit $bmp 'printwindow' $geometry $targetPath $frameIndex; return $true }
+    if ($bmp) { $bmp.Dispose() }
+  }
 
-if ($Method -eq 'foreground') {
-  [MCPGrab]::ForceForeground($chosen.H)
-  Start-Sleep -Milliseconds $ForegroundSettleMs
+  if ($Method -eq 'foreground') {
+    [MCPGrab]::ForceForeground($chosen.H)
+    Start-Sleep -Milliseconds $ForegroundSettleMs
+    $geometry = Get-CaptureGeometry
+    $bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
+    if ($bmp) { Save-And-Emit $bmp 'foreground' $geometry $targetPath $frameIndex; return $true } else { Emit $false 'foreground_failed' 'foreground' $geometry.window $null '' $geometry.client $null $frameIndex; return $false }
+  }
+
+  # screen: plain CopyFromScreen (baseline / last resort).
   $geometry = Get-CaptureGeometry
   $bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
-  if ($bmp) { Save-And-Emit $bmp 'foreground' $geometry; exit 0 } else { Emit $false 'foreground_failed' 'foreground' $geometry.window $null '' $geometry.client $null; exit 0 }
+  if ($bmp) { Save-And-Emit $bmp 'screen' $geometry $targetPath $frameIndex; return $true }
+  Emit $false 'all_methods_failed' '' $geometry.window $null '' $geometry.client $null $frameIndex
+  return $false
 }
 
-# screen: plain CopyFromScreen (baseline / last resort).
-$geometry = Get-CaptureGeometry
-$bmp = [MCPGrab]::CaptureScreen($geometry.left, $geometry.top, $geometry.width, $geometry.height)
-if ($bmp) { Save-And-Emit $bmp 'screen' $geometry; exit 0 }
-Emit $false 'all_methods_failed' '' $geometry.window $null '' $geometry.client $null
+if ($FrameCount -le 1) {
+  [void](Capture-OneFrame $CapturePng 0)
+  exit 0
+}
+$intervalMs = $FrameIntervalMs
+if ($intervalMs -lt 0) { $intervalMs = 0 }
+for ($frameIndex = 0; $frameIndex -lt $FrameCount; $frameIndex++) {
+  if ($frameIndex -gt 0 -and $intervalMs -gt 0) { Start-Sleep -Milliseconds $intervalMs }
+  # Emit writes to raw stdout, so this is a scalar [bool], not the old
+  # always-truthy array of pipeline output plus the return value.
+  $okFrame = Capture-OneFrame (Get-FramePath $frameIndex) $frameIndex
+  if (-not $okFrame) { exit 0 }
+}
 exit 0

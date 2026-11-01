@@ -6,6 +6,8 @@ import io
 import json
 import math
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1434,6 +1436,142 @@ def _capture_payload_from_output(stdout: str, stderr: str, output_path: str) -> 
     return payload
 
 
+def _capture_payloads_from_output(
+    stdout: str, stderr: str, output_paths: list[str]
+) -> list[dict[str, Any]]:
+    """Parse one JSON result line per frame (multi-frame grab).
+
+    Lines are matched to frames by their ``frameIndex`` when present, else by
+    order. A failure line stops the list at that frame (the caller cuts on the
+    first failure, as the per-process loop did). With a single output path this
+    is exactly :func:`_capture_payload_from_output` over the whole output.
+    """
+    if len(output_paths) <= 1:
+        return [
+            _capture_payload_from_output(
+                stdout, stderr, output_paths[0] if output_paths else ""
+            )
+        ]
+    parsed_lines: list[dict[str, Any]] = []
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line or _capture_reported_started(line):
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            parsed_lines.append(parsed)
+    if not parsed_lines:
+        detail = stderr.strip()
+        return [{"ok": False, "error": f"capture_backend_failed: {detail or 'no_json'}"}]
+    by_index: dict[int, dict[str, Any]] = {}
+    for position, payload in enumerate(parsed_lines):
+        index = payload.get("frameIndex")
+        if not isinstance(index, int) or isinstance(index, bool):
+            index = position
+        by_index.setdefault(index, payload)
+    results: list[dict[str, Any]] = []
+    for index, output_path in enumerate(output_paths):
+        payload = by_index.get(index)
+        if payload is None:
+            results.append({"ok": False, "error": "capture_backend_failed: missing_frame_result"})
+            break
+        payload = dict(payload)
+        payload.pop("frameIndex", None)
+        if payload.get("ok") is True and not os.path.exists(output_path):
+            payload = {"ok": False, "error": "capture_backend_failed: missing_png"}
+        results.append(payload)
+        if payload.get("ok") is not True:
+            break
+    return results
+
+
+def _frame_pattern_for(output_paths: list[str]) -> tuple[str, list[str]]:
+    """``-FramePattern`` template and the files the script will write for it.
+
+    When the requested paths already follow an indexed scheme (``frame_0.png``,
+    ``frame_1.png``, ...) the template reproduces them exactly. Otherwise the
+    script writes ``<stem>_<i><ext>`` siblings and the caller renames them onto
+    the requested paths.
+    """
+    first = output_paths[0]
+    directory = os.path.dirname(first)
+    stem, ext = os.path.splitext(os.path.basename(first))
+
+    # Substitute the index only in the file name, never in the directory: a
+    # directory may literally contain "{0}" (e.g. under a TEMP such as
+    # C:\Temp\literal{0}\...) and must stay literal, exactly as the grab
+    # script's Get-FramePath treats the pattern it receives.
+    def _targets(pattern_name: str) -> list[str]:
+        return [
+            os.path.join(directory, pattern_name.replace("{0}", str(i)))
+            if directory
+            else pattern_name.replace("{0}", str(i))
+            for i in range(len(output_paths))
+        ]
+
+    indexed_stem = re.sub(r"\d+$", "{0}", stem) if re.search(r"\d+$", stem) else None
+    if indexed_stem is not None:
+        pattern_name = indexed_stem + ext
+        pattern = os.path.join(directory, pattern_name) if directory else pattern_name
+        targets = _targets(pattern_name)
+        if targets == list(output_paths):
+            return pattern, targets
+    pattern_name = f"{stem}_{{0}}" + ext
+    pattern = os.path.join(directory, pattern_name) if directory else pattern_name
+    targets = _targets(pattern_name)
+    return pattern, targets
+
+
+def _destination_dir(path: str) -> str:
+    return os.path.dirname(os.path.abspath(path))
+
+
+def _publish_staged_frame(
+    source: str, destination: str, staging_by_dir: dict[str, str]
+) -> None:
+    """Publish one staged frame onto its destination (same-volume replace).
+
+    Tries a direct ``os.replace`` first. When that fails and the staged file
+    is not already beside this destination (a destination on another volume
+    than the script's staging directory), copies the frame into this
+    destination's own staging directory -- created beside the destination,
+    so on its volume -- and replaces from there. Raises ``OSError`` when
+    publishing fails either way; the caller maps it to a public error with
+    no host path.
+    """
+    try:
+        os.replace(source, destination)
+        return
+    except OSError:
+        dest_dir = _destination_dir(destination)
+        source_abs = os.path.abspath(source)
+        # Already staged beside this destination: the replace was already
+        # same-volume, so its failure is a real rename failure.
+        if os.path.dirname(os.path.dirname(source_abs)) == dest_dir:
+            raise
+        dest_staging = staging_by_dir.get(dest_dir)
+        if dest_staging is None:
+            dest_staging = tempfile.mkdtemp(
+                prefix="mcp_capture_frames_", dir=dest_dir
+            )
+            staging_by_dir[dest_dir] = dest_staging
+        staged_copy = os.path.join(
+            dest_staging, f"publish_{os.path.basename(source_abs)}"
+        )
+        try:
+            shutil.copyfile(source, staged_copy)
+            os.replace(staged_copy, destination)
+        except OSError:
+            try:
+                os.remove(staged_copy)
+            except OSError:
+                pass
+            raise
+
+
 def _kill_capture_process(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
@@ -1468,11 +1606,84 @@ def _read_capture_stderr(stream: Any, chunks: list[str]) -> None:
         return
 
 
-def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
+def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "", frame_interval_s: float = DEFAULT_FRAME_INTERVAL_S) -> list[dict[str, Any]]:
+    """Grab ``len(output_paths)`` frames in ONE powershell.exe process.
+
+    Returns one backend payload per frame, in frame order, stopping at the
+    first failure (that payload is the last element). ``timeout_s`` is the
+    per-frame capture budget: after the ``{"phase":"started"}`` line (bounded
+    separately by CAPTURE_START_BUDGET_S) the process gets
+    ``timeout_s * frame_count``. With one output path the command line and the
+    parsing are exactly the legacy single-frame ones (no new switches).
+    """
+    if not output_paths:
+        return [{"ok": False, "error": "capture_backend_failed: no_output"}]
+    # Compatibility seam: callers/tests that replaced _run_window_capture with
+    # a per-frame double keep working through it. Production code (and tests
+    # that simulate Popen) takes the single-process path below.
+    patched = globals().get("_run_window_capture")
+    if patched is not None and patched is not _RUN_WINDOW_CAPTURE_IMPL:
+        results: list[dict[str, Any]] = []
+        for path in output_paths:
+            result = patched(path, process_name=process_name, timeout_s=timeout_s, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
+            results.append(result)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                break
+        return results
     if probe_input_desktop() == "locked":
-        return {"ok": False, "error": "session_locked"}
+        return [{"ok": False, "error": "session_locked"}]
     if not os.path.exists(GRAB_SCRIPT):
-        return {"ok": False, "error": f"capture_backend_failed: grab script missing {GRAB_SCRIPT}"}
+        return [{"ok": False, "error": f"capture_backend_failed: grab script missing {GRAB_SCRIPT}"}]
+    frame_count = len(output_paths)
+    output_path = output_paths[0]
+    frame_pattern = ""
+    frame_targets: list[str] = list(output_paths)
+    staging_dir: str | None = None
+    staging_by_dir: dict[str, str] = {}
+    if frame_count > 1:
+        frame_pattern, frame_targets = _frame_pattern_for(output_paths)
+        if frame_targets != list(output_paths):
+            # F-04/F-06: pattern-derived intermediates (a_0/a_1/a_2.png)
+            # must never collide with a requested destination (a_1/a_2.png
+            # may BE one), and publishing uses os.replace, which fails
+            # across volumes -- so staging in the default TEMP broke
+            # destinations on another volume. Stage beside the
+            # destinations instead: one private staging directory in each
+            # distinct destination directory (same volume as its
+            # destinations). The script writes into the first one; frames
+            # for other directories are republished through their own
+            # directory's staging (see _publish_staged_frame). A
+            # destination directory that admits no staging beside it is a
+            # public error with no host path, before any process starts.
+            try:
+                for destination in output_paths:
+                    dest_dir = _destination_dir(destination)
+                    if dest_dir not in staging_by_dir:
+                        staging_by_dir[dest_dir] = tempfile.mkdtemp(
+                            prefix="mcp_capture_frames_", dir=dest_dir
+                        )
+            except OSError:
+                for created_dir in staging_by_dir.values():
+                    shutil.rmtree(created_dir, ignore_errors=True)
+                return [
+                    {"ok": False, "error": "capture_backend_failed: staging_failed"}
+                ]
+            staging_dir = staging_by_dir[_destination_dir(output_paths[0])]
+            pattern_name = os.path.basename(frame_pattern)
+            frame_pattern = os.path.join(staging_dir, pattern_name)
+            frame_targets = [
+                os.path.join(staging_dir, pattern_name.replace("{0}", str(index)))
+                for index in range(frame_count)
+            ]
+
+    def _drop_staging() -> None:
+        # Clean every staging directory, including any a publish step
+        # created lazily; runs on success and on every error path.
+        for created_dir in dict.fromkeys(
+            [staging_dir, *staging_by_dir.values()]
+        ):
+            if created_dir is not None:
+                shutil.rmtree(created_dir, ignore_errors=True)
     cmd = [
         "powershell",
         "-NoProfile",
@@ -1487,6 +1698,15 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
         "-Method",
         method,
     ]
+    if frame_count > 1:
+        cmd += [
+            "-FrameCount",
+            str(frame_count),
+            "-FrameIntervalMs",
+            str(max(0, int(round(float(frame_interval_s) * 1000)))),
+            "-FramePattern",
+            frame_pattern,
+        ]
     # Prefer cmdline_match (robust to the launcher-pid != window-pid mismatch); fall back to client_pid.
     # Both eliminate the multi-client window collision by restricting the candidate windows.
     if cmdline_match:
@@ -1507,9 +1727,11 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
     try:
         proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
-        return {"ok": False, "error": "capture_backend_failed:command_not_found"}
+        _drop_staging()
+        return [{"ok": False, "error": "capture_backend_failed:command_not_found"}]
     except OSError as exc:
-        return {"ok": False, "error": f"capture_backend_failed: {exc}"}
+        _drop_staging()
+        return [{"ok": False, "error": f"capture_backend_failed: {exc}"}]
 
     stdout_lines: list[str] = []
     stderr_chunks: list[str] = []
@@ -1538,19 +1760,65 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
             started.wait(min(0.05, remaining))
         if proc.poll() is None and not started.is_set():
             _kill_capture_process(proc)
-            return {"ok": False, "error": "capture_start_timeout"}
+            return [{"ok": False, "error": "capture_start_timeout"}]
         if proc.poll() is None:
             try:
-                proc.wait(timeout=timeout_s)
+                proc.wait(timeout=timeout_s * frame_count)
             except subprocess.TimeoutExpired:
                 _kill_capture_process(proc)
-                return {"ok": False, "error": "capture_timeout"}
+                return [{"ok": False, "error": "capture_timeout"}]
         for reader in readers:
             reader.join(timeout=2.0)
-        return _capture_payload_from_output(
-            "".join(stdout_lines), "".join(stderr_chunks), output_path
+        results = _capture_payloads_from_output(
+            "".join(stdout_lines), "".join(stderr_chunks), frame_targets
         )
+        if frame_targets != list(output_paths):
+            # Script wrote pattern-derived files in the private staging
+            # directory; move them onto the requested paths FIRST and verify
+            # the destinations only after every move (F-04): a check
+            # interleaved with the moves could be invalidated by a later
+            # move overwriting an already-checked destination.
+            moved: list[dict[str, Any]] = []
+            for index, result in enumerate(results):
+                if result.get("ok") is True:
+                    source, destination = frame_targets[index], output_paths[index]
+                    if source != destination:
+                        # A failed rename is a failure: an older capture may
+                        # already sit at the destination, so its existence
+                        # proves nothing about this frame. The public error
+                        # carries no host path.
+                        try:
+                            _publish_staged_frame(
+                                source, destination, staging_by_dir
+                            )
+                        except OSError:
+                            moved.append({"ok": False, "error": "capture_backend_failed: rename_failed"})
+                            break
+                moved.append(result)
+                if result.get("ok") is not True:
+                    break
+            else:
+                # No break: all frames moved. Final check, after all moves:
+                # each destination exists and its SHA-256 matches the hash
+                # published for its frame (case-insensitive: Get-FileHash
+                # emits upper-case hex). Public errors carry no host path.
+                for index, result in enumerate(moved):
+                    destination = output_paths[index]
+                    expected = result.get("sha256")
+                    try:
+                        actual = _file_sha256(destination) if os.path.exists(destination) else None
+                    except OSError:
+                        actual = None
+                    if actual is None:
+                        moved[index] = {"ok": False, "error": "capture_backend_failed: missing_png"}
+                        return moved[: index + 1]
+                    if not isinstance(expected, str) or not expected or actual != expected.lower():
+                        moved[index] = {"ok": False, "error": "capture_backend_failed: hash_mismatch"}
+                        return moved[: index + 1]
+            return moved
+        return results
     finally:
+        _drop_staging()
         for reader in readers:
             reader.join(timeout=2.0)
         for stream in (proc.stdout, proc.stderr):
@@ -1560,6 +1828,22 @@ def _run_window_capture(output_path: str, process_name: str, timeout_s: float, m
                 stream.close()
             except Exception:
                 pass
+
+
+def _run_window_capture(output_path: str, process_name: str, timeout_s: float, method: str = DEFAULT_GRAB_METHOD, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
+    """Single-frame grab: one process, legacy command line and parsing."""
+    results = _run_window_captures(
+        [output_path],
+        process_name=process_name,
+        timeout_s=timeout_s,
+        method=method,
+        client_pid=client_pid,
+        cmdline_match=cmdline_match,
+    )
+    return results[0] if results else {"ok": False, "error": "capture_backend_failed: no_json"}
+
+
+_RUN_WINDOW_CAPTURE_IMPL = _run_window_capture
 
 
 def grab_window_to_file(output_path: str, process_name: str = "DayZDiag_x64", method: str = DEFAULT_GRAB_METHOD, timeout_s: float = 8.0, client_pid: int = 0, cmdline_match: str = "") -> dict[str, Any]:
@@ -1597,17 +1881,21 @@ def grab_stable_frame(
     with tempfile.TemporaryDirectory(prefix="mcp_capture_") as tmp_dir:
         captured: list[Image.Image] = []
         capture_results: list[dict[str, Any]] = []
-        for index in range(frame_count):
-            output_path = os.path.join(tmp_dir, f"frame_{index}.png")
-            result = _run_window_capture(output_path, process_name=process_name, timeout_s=8.0, method=method, client_pid=client_pid, cmdline_match=cmdline_match)
-            if result.get("ok") is not True:
-                return _error(str(result.get("error") or "window_capture_failed"))
-            with Image.open(output_path) as img:
+        output_paths = [os.path.join(tmp_dir, f"frame_{index}.png") for index in range(frame_count)]
+        # One powershell.exe process for all frames: Add-Type and window
+        # resolution happen once in mcp-grab.ps1 and the inter-frame spacing
+        # (DEFAULT_FRAME_INTERVAL_S) is slept there, between captures.
+        results = _run_window_captures(output_paths, process_name=process_name, timeout_s=8.0, method=method, client_pid=client_pid, cmdline_match=cmdline_match, frame_interval_s=DEFAULT_FRAME_INTERVAL_S)
+        for index, result in enumerate(results):
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                error = result.get("error") if isinstance(result, dict) else None
+                return _error(str(error or "window_capture_failed"))
+            with Image.open(output_paths[index]) as img:
                 frame = img.convert("RGB").copy()
                 captured.append(frame)
                 capture_results.append(result)
-            if index + 1 < frame_count:
-                time.sleep(DEFAULT_FRAME_INTERVAL_S)
+        if len(captured) != frame_count:
+            return _error("window_capture_failed")
 
         pair_deltas = _adjacent_pair_deltas(captured)
         chosen_index = _stable_frame_index(captured, pair_deltas)
