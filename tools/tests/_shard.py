@@ -11,16 +11,21 @@ used, so load_tests and the rest of discovery stay in place.
 
 Each direct child of that suite is kept. The shard runs that original object
 once, on one shard, in discovery order. Flattening is only for counting and
-grouping, so a load_tests suite keeps its own run(). Counting descends every suite
-unittest would: suite.py _isnotsuite calls iter() and treats TypeError as a
-case. An iterable adapter that is not a BaseTestSuite is still a suite, and
-stopping there would name its cases after the adapter. If two
-children share a test module, they stay on the same shard too: splitting
-either one would split a module. A child with no leaves is not a module and
-does not move the balance. It runs on the shard of the nearest preceding
-child that has leaves, or on shard 1 when none precedes it (the tests package
-is usually that child). A shard with no tests exits 1 even after those
-suites have run.
+grouping, so a load_tests suite keeps its own run(). Only a tree that can be
+walked twice without changing it is partitioned. The root must be exactly the
+loader's default suite type. Leaves are TestCase objects: an iterable TestCase
+stays that case, because unittest calls it and does not run what it yields.
+Every other suite must yield the same objects on two walks, whether it is a
+BaseTestSuite or a repeatable adapter. A one-pass iterable (iter(x) is x, a
+generator, or two walks that differ) or any other construct is refused on
+every shard, by name and module, and nothing is run. If two children share a
+test module, they stay on the same shard too: splitting either one would split
+a module. A child with no leaves is not a module and does not move the
+balance. It runs on the shard of the nearest preceding child that has leaves,
+or on shard 1 when none precedes it (the tests package is usually that
+child). A shard whose run executed no tests exits 1. The check is
+result.testsRun == 0 with nothing skipped, which is what the unittest CLI has
+done since 3.12, and it is applied here on 3.11 as well.
 
 Warnings follow unittest's CLI (TestProgram): 'default' when the process has
 no -W and no PYTHONWARNINGS; those filters stay in place when it does.
@@ -33,8 +38,9 @@ toward the lower shard index. Grouping only chooses the shard. Inside a
 shard the original children run in discovery order, even when one module's
 suites were not contiguous.
 
-Exit 0 when every selected test passes. Exit 1 when a test fails or the shard
-has no tests. Exit 2 when the arguments are wrong.
+Exit 0 when every selected test passes. Exit 1 when a test fails, the shard
+executed no tests, or the tree cannot be partitioned. Exit 2 when the
+arguments are wrong.
 """
 
 from __future__ import annotations
@@ -79,22 +85,139 @@ def discover_suite() -> unittest.TestSuite:
     )
 
 
-def iter_tests(item: object) -> Iterator[unittest.case.TestCase]:
-    """Yield leaf tests, using the same suite test as unittest.suite._isnotsuite.
+class UnsupportedSuite(Exception):
+    """The tree cannot be partitioned without changing what unittest runs."""
 
-    iter() raising TypeError means a case. Anything else is a suite, including
-    an adapter that does not inherit BaseTestSuite. A one-character str yields
-    itself; that cycle is not another suite.
+
+def _type_name(kind: type) -> str:
+    """Module and qualname, the name a refusal prints."""
+    module = getattr(kind, "__module__", None) or "?"
+    qual = getattr(kind, "__qualname__", None) or kind.__name__
+    return f"{module}.{qual}"
+
+
+def _construct_name(obj: object) -> str:
+    """Module and qualname of obj's type."""
+    return _type_name(type(obj))
+
+
+def _default_suite_type() -> type:
+    """The suite class a fresh loader uses before load_tests changes it."""
+    return unittest.TestLoader().suiteClass
+
+
+def admission_problems(suite: object) -> list[str]:
+    """Why this tree cannot be partitioned, or an empty list when it can.
+
+    Admitted: a root of exactly the default suite type, TestCase leaves, and
+    suites that walk twice to the same objects. An iterable TestCase is a leaf.
+    unittest calls that object; the iteration is not the tests it runs, and
+    walking it would both mis-count and could consume a one-shot iterator
+    before the one iter() the parent suite performs.
     """
+    expected = _default_suite_type()
+    if type(suite) is not expected:
+        return [
+            "refusing to partition "
+            f"{_construct_name(suite)}: discovery root is not the default "
+            f"suite type {_type_name(expected)}"
+        ]
+    problems: list[str] = []
+    _admit_walk(suite, problems, set())
+    return problems
+
+
+def _admit_walk(item: object, problems: list[str], stack: set[int]) -> None:
+    if isinstance(item, unittest.case.TestCase):
+        return
+    if id(item) in stack:
+        return
+    children = _repeatable_children(item, problems)
+    if children is None:
+        return
+    stack.add(id(item))
+    try:
+        for child in children:
+            _admit_walk(child, problems, stack)
+            if problems:
+                return
+    finally:
+        stack.discard(id(item))
+
+
+def _repeatable_children(item: object, problems: list[str]) -> tuple[object, ...] | None:
+    """Children when two walks yield the same objects. None if item is refused.
+
+    A self-yield (iter('a') is the character 'a') is not another suite.
+    """
+    try:
+        first_iter = iter(item)  # type: ignore[arg-type]
+    except TypeError:
+        problems.append(
+            f"refusing to partition {_construct_name(item)}: "
+            "not a TestCase and not a suite"
+        )
+        return None
+    if first_iter is item:
+        problems.append(
+            f"refusing to partition {_construct_name(item)}: "
+            "single-pass iterable (iter(x) is x)"
+        )
+        return None
+    first = tuple(first_iter)
+    try:
+        second_iter = iter(item)  # type: ignore[arg-type]
+    except TypeError:
+        problems.append(
+            f"refusing to partition {_construct_name(item)}: "
+            "iteration is not repeatable"
+        )
+        return None
+    if second_iter is item:
+        problems.append(
+            f"refusing to partition {_construct_name(item)}: "
+            "single-pass iterable (iter(x) is x)"
+        )
+        return None
+    second = tuple(second_iter)
+    if len(first) != len(second) or any(left is not right for left, right in zip(first, second)):
+        problems.append(
+            f"refusing to partition {_construct_name(item)}: "
+            "two walks do not yield the same objects"
+        )
+        return None
+    return tuple(child for child in first if child is not item)
+
+
+def iter_tests(item: object) -> Iterator[unittest.case.TestCase]:
+    """Yield TestCase leaves under an already-admitted tree.
+
+    Does not iterate a TestCase. A suite on the current path is a cycle, not
+    another copy of its tests.
+    """
+    yield from _iter_tests(item, set())
+
+
+def _iter_tests(item: object, stack: set[int]) -> Iterator[unittest.case.TestCase]:
+    if isinstance(item, unittest.case.TestCase):
+        yield item
+        return
+    if id(item) in stack:
+        return
     try:
         children = iter(item)  # type: ignore[arg-type]
     except TypeError:
-        yield item  # type: ignore[misc]
         return
-    for child in children:
-        if child is item:
-            continue
-        yield from iter_tests(child)
+    if children is item:
+        return
+    stack.add(id(item))
+    try:
+        for child in children:
+            if child is item:
+                continue
+            yield from _iter_tests(child, stack)
+    finally:
+        stack.discard(id(item))
 
 
 def module_of(test: unittest.case.TestCase) -> str:
@@ -123,7 +246,13 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
     group of the nearest preceding child that has leaves, so it runs on that
     child's shard. With no such predecessor it is its own group and
     assign_groups pins that group to shard 1.
+
+    Raises UnsupportedSuite when the tree is outside the admitted model.
+    Nothing is grouped in that case, so no shard can run a partial tree.
     """
+    problems = admission_problems(suite)
+    if problems:
+        raise UnsupportedSuite("\n".join(problems))
     # modules, leaf tests (counting only), and the original child object.
     children: list[
         tuple[list[str], list[unittest.case.TestCase], unittest.TestSuite | unittest.case.TestCase]
@@ -362,8 +491,8 @@ def run_assigned(
     if not chosen:
         print(f"shard {index}/{count} has no tests", file=sys.stderr)
         return 1
-    # The gate is the tests, not the suite objects. A shard that only holds
-    # suites still runs those suites (each child runs once) and then exits 1.
+    # --list does not execute, so it uses the admitted leaves. A run does not:
+    # unittest's CLI (main.py, since 3.12) treats testsRun == 0 as no tests.
     has_tests = any(group.tests for group in chosen)
     if list_only:
         if not has_tests:
@@ -389,10 +518,15 @@ def run_assigned(
         # load_tests suite's own run() (suite.py).
         suite.addTest(original)
     result = unittest.TextTestRunner(verbosity=1, warnings=_runner_warnings()).run(suite)
-    if not has_tests:
+    # Same order as TestProgram.runTests: a failure wins, then no tests ran.
+    # Exit 1 on both, including on 3.11 where the CLI does not do this itself.
+    # Skips with testsRun == 0 follow the CLI and are not "no tests".
+    if not result.wasSuccessful():
+        return 1
+    if result.testsRun == 0 and len(result.skipped) == 0:
         print(f"shard {index}/{count} has no tests", file=sys.stderr)
         return 1
-    return 0 if result.wasSuccessful() else 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -410,7 +544,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
-    groups = groups_from_suite(discover_suite())
+    try:
+        groups = groups_from_suite(discover_suite())
+    except UnsupportedSuite as exc:
+        print(exc, file=sys.stderr)
+        return 1
     return run_assigned(groups, index=index, count=count, list_only=list_only)
 
 

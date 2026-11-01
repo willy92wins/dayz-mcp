@@ -31,8 +31,15 @@ spec = importlib.util.spec_from_file_location("shard_under_test", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 suite = unittest.TestLoader().discover("tests", pattern="test*.py", top_level_dir=".")
+try:
+    groups = module.groups_from_suite(suite)
+except Exception as exc:
+    if type(exc).__name__ != "UnsupportedSuite":
+        raise
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
 code = module.run_assigned(
-    module.groups_from_suite(suite), index=1, count=1, list_only=False
+    groups, index=1, count=1, list_only=False
 )
 raise SystemExit(code)
 """
@@ -47,8 +54,15 @@ spec = importlib.util.spec_from_file_location("shard_under_test", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 suite = unittest.TestLoader().discover("tests", pattern="test*.py", top_level_dir=".")
+try:
+    groups = module.groups_from_suite(suite)
+except Exception as exc:
+    if type(exc).__name__ != "UnsupportedSuite":
+        raise
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
 code = module.run_assigned(
-    module.groups_from_suite(suite),
+    groups,
     index=int(sys.argv[2]),
     count=int(sys.argv[3]),
     list_only=False,
@@ -68,17 +82,50 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+def stable_children(item, stack):
+    # Independent of tests._shard. A TestCase is the object unittest calls.
+    # A suite counts only when two walks yield the same objects. One pass is
+    # not an expectation: walking it changes the run.
+    if isinstance(item, unittest.case.TestCase):
+        return None
+    if id(item) in stack:
+        return ()
+    try:
+        first_iter = iter(item)
+    except TypeError:
+        return None
+    if first_iter is item:
+        raise RuntimeError(
+            "single-pass iterable %s.%s" % (type(item).__module__, type(item).__qualname__)
+        )
+    first = tuple(first_iter)
+    second_iter = iter(item)
+    if second_iter is item:
+        raise RuntimeError(
+            "single-pass iterable %s.%s" % (type(item).__module__, type(item).__qualname__)
+        )
+    second = tuple(second_iter)
+    if len(first) != len(second) or any(left is not right for left, right in zip(first, second)):
+        raise RuntimeError(
+            "two walks differ %s.%s" % (type(item).__module__, type(item).__qualname__)
+        )
+    return tuple(child for child in first if child is not item)
+
+
 def leaves(item):
-    # Same rule as unittest.suite._isnotsuite, not tests._shard.iter_tests.
-    pending = [item]
+    pending = [(item, ())]
     while pending:
-        current = pending.pop()
+        current, stack = pending.pop()
         try:
-            children = tuple(current)
-        except TypeError:
+            children = stable_children(current, stack)
+        except RuntimeError as exc:
+            print("UNWALKABLE %s" % exc)
+            raise SystemExit(1)
+        if children is None:
             yield current
             continue
-        pending.extend(reversed([child for child in children if child is not current]))
+        deeper = stack + (id(current),)
+        pending.extend(reversed([(child, deeper) for child in children]))
 
 
 def module_name(test):
@@ -237,23 +284,55 @@ def _discovered_child_ids(suite: unittest.TestSuite) -> list[int]:
     return [id(child) for child in suite]
 
 
-def _suite_leaves(item: object):
-    """Leaf tests under item, descending every iterable suite.
+def _stable_suite_children(item: object, stack: tuple[int, ...]) -> tuple[object, ...] | None:
+    """Children of a repeatable suite, or None when item is a leaf.
 
-    Iterative on purpose, and not tests._shard.iter_tests. The rule matches
-    unittest.suite._isnotsuite: iter() raising TypeError means a case.
-    Anything iterable is a suite, BaseTestSuite or not. A one-character str
-    yields itself and is not walked again.
+    Not tests._shard. A TestCase is the object unittest calls, even if it
+    iterates. Two walks must yield the same objects before those objects are
+    expectations. A one-pass iterable raises: the walk would change the run,
+    so it is not a source of expected tests.
     """
-    pending: list[object] = [item]
+    if isinstance(item, unittest.case.TestCase):
+        return None
+    if id(item) in stack:
+        return ()
+    try:
+        first_iter = iter(item)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+    kind = type(item)
+    label = f"{kind.__module__}.{kind.__qualname__}"
+    if first_iter is item:
+        raise RuntimeError(f"single-pass iterable {label}")
+    first = tuple(first_iter)
+    try:
+        second_iter = iter(item)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise RuntimeError(f"iteration is not repeatable {label}") from exc
+    if second_iter is item:
+        raise RuntimeError(f"single-pass iterable {label}")
+    second = tuple(second_iter)
+    if len(first) != len(second) or any(left is not right for left, right in zip(first, second)):
+        raise RuntimeError(f"two walks differ {label}")
+    return tuple(child for child in first if child is not item)
+
+
+def _suite_leaves(item: object):
+    """Leaf tests under item.
+
+    Iterative on purpose, and not tests._shard.iter_tests. Expectations come
+    from a walk that can be repeated. The regression tests observe the
+    processes, not this list.
+    """
+    pending: list[tuple[object, tuple[int, ...]]] = [(item, ())]
     while pending:
-        current = pending.pop()
-        try:
-            children = tuple(current)  # type: ignore[arg-type]
-        except TypeError:
+        current, stack = pending.pop()
+        children = _stable_suite_children(current, stack)
+        if children is None:
             yield current
             continue
-        pending.extend(reversed([child for child in children if child is not current]))
+        deeper = stack + (id(current),)
+        pending.extend(reversed([(child, deeper) for child in children]))
 
 
 def _one_test_suite(module_name: str) -> unittest.TestSuite:
@@ -1055,6 +1134,238 @@ class ShardRunnerParityTest(unittest.TestCase):
         self.assertEqual(control.count("empty-adapter"), 1, detail)
         self.assertEqual(shard_log.count("empty-adapter"), 1, detail)
         self.assertEqual(discover.returncode, 0, detail)
+
+    def test_one_pass_adapter_is_refused_not_skipped(self) -> None:
+        """A generator held by an adapter runs once under unittest and must not vanish.
+
+        Walking it to partition consumes the generator. Discover still records
+        the failure. No shard may exit 0, and the refusal must name the adapter.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-oneshot-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "test_boom.py",
+                """
+                import unittest
+
+                class Boom(unittest.TestCase):
+                    def test_fails(self):
+                        self.fail("boom-marker")
+
+                class OneShot:
+                    def __init__(self, source):
+                        self._source = source
+
+                    def __iter__(self):
+                        return self._source
+
+                    def __call__(self, result):
+                        for test in self._source:
+                            test(result)
+                        return result
+
+                def load_tests(loader, tests, pattern):
+                    case = Boom("test_fails")
+
+                    def source():
+                        yield case
+
+                    outer = unittest.TestSuite()
+                    outer.addTest(OneShot(source()))
+                    return outer
+                """,
+            )
+            for name in ("test_p1", "test_p2", "test_p3", "test_p4"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class Pad(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            env = _fresh_env()
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            codes: list[int] = []
+            errs: list[str] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(root / "_run.py"), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+                errs.append(run.stderr)
+        detail = f"discover={discover.returncode} shards={codes}\n{discover.stderr}\n" + "\n".join(errs)
+        self.assertNotEqual(discover.returncode, 0, detail)
+        self.assertIn("boom-marker", discover.stderr, detail)
+        self.assertTrue(all(code != 0 for code in codes), detail)
+        self.assertTrue(
+            all("tests.test_boom.OneShot" in err for err in errs),
+            detail,
+        )
+
+    def test_iterable_testcase_matches_unittest_discover(self) -> None:
+        """An empty iterable TestCase still runs. The shard must match discover.
+
+        unittest calls the case. A structural count of its iteration sees no
+        tests and fails the shard after the case has passed.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-itercase-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            log_path = root / "fixtures.log"
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "test_itercase.py",
+                """
+                import os
+                import unittest
+
+                class IteratesEmpty(unittest.TestCase):
+                    def __iter__(self):
+                        return iter(())
+
+                    def test_runs(self):
+                        with open(os.environ["SHARD_FIXTURE_LOG"], "a", encoding="utf-8") as handle:
+                            handle.write("ran-iterable\\n")
+                """,
+            )
+            env = _fresh_env()
+            env["SHARD_FIXTURE_LOG"] = str(log_path)
+            (root / "_drive.py").write_text(_DRIVER, encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            control = log_path.read_text(encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            whole = subprocess.run(
+                [sys.executable, "-B", str(root / "_drive.py"), str(_SHARD_FILE)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            shard_log = log_path.read_text(encoding="utf-8")
+        detail = (
+            f"discover={discover.returncode} shard={whole.returncode}\n"
+            f"control={control!r} shard_log={shard_log!r}\n"
+            f"{discover.stderr}\n{whole.stderr}"
+        )
+        self.assertEqual(control.count("ran-iterable"), 1, detail)
+        self.assertEqual(shard_log.count("ran-iterable"), 1, detail)
+        self.assertEqual(discover.returncode, 0, detail)
+        self.assertEqual(whole.returncode, discover.returncode, detail)
+
+    def test_custom_suite_class_root_is_refused(self) -> None:
+        """loader.suiteClass replaces discovery's root. That root must not vanish.
+
+        The hook runs after the module suites exist, so only the root has the
+        subclass. Discover records its error. Shards must not exit 0.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-suiteclass-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            for name in ("test_a", "test_b", "test_c"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class Pad(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            _write(
+                root / "tests" / "test_zhook.py",
+                """
+                import sys
+                import unittest
+
+                class MarkingSuite(unittest.TestSuite):
+                    def run(self, result, debug=False):
+                        super().run(result, debug)
+
+                        class Probe(unittest.TestCase):
+                            def runTest(self):
+                                pass
+
+                        try:
+                            raise RuntimeError("suiteclass-marker")
+                        except RuntimeError:
+                            result.addError(Probe(), sys.exc_info())
+
+                class Hook(unittest.TestCase):
+                    def test_ok(self):
+                        pass
+
+                def load_tests(loader, tests, pattern):
+                    loader.suiteClass = MarkingSuite
+                    return tests
+                """,
+            )
+            env = _fresh_env()
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            codes: list[int] = []
+            errs: list[str] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(root / "_run.py"), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+                errs.append(run.stderr)
+        detail = f"discover={discover.returncode} shards={codes}\n{discover.stderr}\n" + "\n".join(errs)
+        self.assertNotEqual(discover.returncode, 0, detail)
+        self.assertIn("suiteclass-marker", discover.stderr, detail)
+        self.assertTrue(all(code != 0 for code in codes), detail)
+        self.assertTrue(
+            all("tests.test_zhook.MarkingSuite" in err for err in errs),
+            detail,
+        )
+
+    @slow_test
+    def test_real_suite_is_admitted(self) -> None:
+        """tests/ is inside the model. A blind partition is not that check."""
+        admit = getattr(_shard, "admission_problems", None)
+        self.assertTrue(
+            callable(admit),
+            "runner has no admission check; it partitions every tree",
+        )
+        self.assertEqual(admit(_shard.discover_suite()), [])
 
 
 if __name__ == "__main__":
