@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import copy
 import errno
+import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
+import stat
 import sys
 import threading
 import time
@@ -65,6 +68,17 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
     public_audit_stage,
 )
+
+_LOG = logging.getLogger(__name__)
+# dayz_mcp.json.profile-prior sits beside the bridge config. version 1.
+_PROFILE_CONFIG_NAME = "dayz_mcp.json"
+_PROFILE_PRIOR_VERSION = 1
+_PROFILE_PRIOR_MAX_BYTES = 1_048_576
+_REPARSE_ATTRIBUTE = 0x400
+_PREPRUNE_SLOT_COUNT = 10
+# dayz_test_worker._run_already_gone treats these as a stop that already
+# finished. A release that left profile=test must not answer with them.
+_RELEASE_ALREADY_GONE_ERRORS = frozenset({"run_processes_gone", "run_not_found"})
 
 
 SERVER_COMMANDS = {
@@ -2612,6 +2626,315 @@ def _load_from_poll_query(
     return load
 
 
+def _profile_config_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _profile_prior_path(config_path: Path) -> Path:
+    return config_path.with_name(config_path.name + ".profile-prior")
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except OSError:
+        return None
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    return bool(getattr(info, "st_file_attributes", 0) & _REPARSE_ATTRIBUTE)
+
+
+def _plain_dir(path: Path) -> bool:
+    info = _lstat_or_none(path)
+    return info is not None and not _is_reparse(info) and stat.S_ISDIR(info.st_mode)
+
+
+def _plain_file(path: Path) -> bool:
+    info = _lstat_or_none(path)
+    return info is not None and not _is_reparse(info) and stat.S_ISREG(info.st_mode)
+
+
+def _profile_is_test(path: Path) -> bool:
+    document = _read_json_object(path)
+    return isinstance(document, dict) and document.get("profile") == "test"
+
+
+def _read_profile_text(path: Path) -> str | None:
+    """Only FileNotFoundError proves absence; every other failed read is dirty."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("profile_config_not_plain")
+    if info.st_size > _PROFILE_PRIOR_MAX_BYTES:
+        raise ValueError("profile_config_too_large")
+    return path.read_text(encoding="utf-8")
+
+
+def _read_profile_document(path: Path) -> dict | None:
+    text = _read_profile_text(path)
+    if text is None:
+        return None
+    document = json.loads(text)
+    if not isinstance(document, dict):
+        raise ValueError("profile_config_not_object")
+    return document
+
+
+def _read_prior(path: Path) -> dict | None:
+    payload = _read_json_object(path)
+    if payload is None or payload.get("version") != _PROFILE_PRIOR_VERSION:
+        return None
+    if "previous_prepared_sha256" in payload and "prepared_sha256" not in payload:
+        return None
+    for field in ("prepared_sha256", "previous_prepared_sha256"):
+        if field in payload:
+            fingerprint = payload[field]
+            if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+                return None
+    kind = payload.get("kind")
+    if kind == "absent":
+        return payload
+    if kind == "present" and isinstance(payload.get("document"), dict):
+        return payload
+    return None
+
+
+def _profile_json_size(payload: object) -> int:
+    """Byte size of the document ``atomic_write_json`` would persist."""
+    return len(
+        (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+    )
+
+
+def _profile_payload_fits(payload: object) -> bool:
+    return _profile_json_size(payload) <= _PROFILE_PRIOR_MAX_BYTES
+
+
+def _read_json_object(path: Path) -> dict | None:
+    """A small plain JSON object, or None when it is missing or not one."""
+    info = _lstat_or_none(path)
+    if info is None or _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_size > _PROFILE_PRIOR_MAX_BYTES:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _prior_payload(document: dict | None, *, kind: str) -> dict:
+    payload: dict[str, object] = {"version": _PROFILE_PRIOR_VERSION, "kind": kind}
+    if document is not None:
+        payload["document"] = document
+    return payload
+
+
+def _configs_near(profiles_dir: Path) -> list[Path]:
+    """This profiles leaf, plus the same leaf under the other role root.
+
+    ``dev_root/_server/<leaf>`` and ``dev_root/_client/<leaf>`` belong to one
+    run. Other leaves are other instances and are not touched. A reparse
+    point is not a leaf. A crash keeps the other role's sidecar even when
+    the manifest names a single profiles folder.
+    """
+    configs = [profiles_dir / _PROFILE_CONFIG_NAME]
+    parent = profiles_dir.parent
+    if parent.name.casefold() not in {"_server", "_client"}:
+        return configs
+    if not _plain_dir(parent):
+        return configs
+    project = parent.parent
+    if not _plain_dir(project):
+        return configs
+    leaf = profiles_dir.name
+    seen = {_profile_config_key(configs[0])}
+    for role in ("_server", "_client"):
+        role_root = project / role
+        if not _plain_dir(role_root):
+            continue
+        leaf_dir = role_root / leaf
+        if not _plain_dir(leaf_dir):
+            continue
+        config = leaf_dir / _PROFILE_CONFIG_NAME
+        key = _profile_config_key(config)
+        if key in seen:
+            continue
+        seen.add(key)
+        configs.append(config)
+    return configs
+
+
+def _profile_restore_audit_event(message: str) -> dict[str, object]:
+    """The runtime audit writer requires ``reason`` and ``duration_s``."""
+    return {
+        "event": "profile_restore_failed",
+        "message": message,
+        "reason": "profile_restore_failed",
+        "duration_s": 0,
+    }
+
+
+def _mission_scan_blocked(profiles_dir: Path) -> bool:
+    """True when ``_server``/``_client`` or the project is a reparse point.
+
+    Prepare accepts a plain leaf under those ancestors. Skipping ``mpmissions``
+    then looks like a clean tree and a seeded config can be deleted while a
+    mission copy still says ``profile=test``.
+    """
+    parent = profiles_dir.parent
+    if parent.name.casefold() not in {"_server", "_client"}:
+        return False
+    if _lstat_or_none(parent) is not None and not _plain_dir(parent):
+        return True
+    project = parent.parent
+    return _lstat_or_none(project) is not None and not _plain_dir(project)
+
+
+def _pending_path_proven_clean(path: Path) -> bool:
+    """True only when a completed read shows this plain file is not ``profile=test``.
+
+    A missing path, a reparse point or a file we cannot read is an incomplete
+    inspection, not proof that the flag is gone. ``_profile_is_test`` swallows
+    ``OSError``, so a ``PermissionError`` from the read must not be asked that
+    question: lstat succeeding is not a read.
+    """
+    info = _lstat_or_none(path)
+    if info is None or _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+        return False
+    if info.st_size > _PROFILE_PRIOR_MAX_BYTES:
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("profile") != "test"
+
+
+def _fail_release_for_profile(result: dict) -> None:
+    """Keep a failed profile restore from reading as a finished stop."""
+    result["ok"] = False
+    error = result.get("error")
+    if not isinstance(error, str) or error in _RELEASE_ALREADY_GONE_ERRORS:
+        result["error"] = "profile_restore_failed"
+    if result.get("state") == "EXITED":
+        result["state"] = "UNRECONCILED"
+    if result.get("stop_method") == "no_live_owned":
+        result.pop("stop_method", None)
+
+
+def _worker_reads_already_gone(result: dict, run_id: object) -> bool:
+    """True when ``dayz_test_worker._run_already_gone`` would skip ``stop``.
+
+    ``adopt`` is not a release, but that helper treats ``EXITED``,
+    ``run_processes_gone``, ``run_not_found`` and ``no_live_owned`` as a stop
+    that already finished. The worker then returns success without calling
+    ``stop``, so the restore never runs.
+    """
+    if result.get("state") == "EXITED" and result.get("run_id") in {run_id, None}:
+        return True
+    error = result.get("error")
+    if error in _RELEASE_ALREADY_GONE_ERRORS:
+        return True
+    return result.get("stop_method") == "no_live_owned"
+
+
+def _masks_clean_exit(run: dict) -> bool:
+    if run.get("state") == "EXITED":
+        return True
+    processes = run.get("processes")
+    return isinstance(processes, list) and not processes
+
+
+def _mask_profile_failure_runs(
+    result: dict, requested_run_id: object, remembered: object
+) -> None:
+    """A status row must not look already gone while ``profile=test`` remains.
+
+    The worker's status reconciliation treats a missing run, ``EXITED``, and an
+    empty process list on the transient states as success. ``dayz_test_stop``
+    does the same for ``EXITED`` or any empty process list.
+    """
+    # dayz_test_close accepts any retired event, independently of runs/state.
+    # No retired diagnostic can certify a close while restoration is dirty.
+    result.pop("retired_run_diagnostics", None)
+    runs = result.get("runs")
+    if not isinstance(runs, list):
+        return
+    masked: list[object] = []
+    seen: set[str] = set()
+    for run in runs:
+        if isinstance(run, dict) and _masks_clean_exit(run):
+            run = dict(run)
+            run["state"] = "UNRECONCILED"
+            run["processes"] = None
+        if isinstance(run, dict) and isinstance(run.get("run_id"), str):
+            seen.add(run["run_id"])
+        masked.append(run)
+    extras: list[str] = []
+    if isinstance(requested_run_id, str) and requested_run_id:
+        extras.append(requested_run_id)
+    elif isinstance(remembered, (set, list, tuple)):
+        for item in remembered:
+            if isinstance(item, str) and item:
+                extras.append(item)
+    for run_id in extras:
+        if run_id in seen:
+            continue
+        seen.add(run_id)
+        masked.append(
+            {"run_id": run_id, "state": "UNRECONCILED", "processes": None}
+        )
+    result["runs"] = masked
+
+
+def _mission_configs(profiles_dir: Path, mission: str | None) -> list[Path]:
+    """``dayz_mcp.json`` files the bridge can read as ``$mission:``."""
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = _profile_config_key(path)
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(path)
+
+    if isinstance(mission, str) and mission:
+        explicit = Path(mission)
+        if explicit.is_absolute():
+            if explicit.name.casefold() == _PROFILE_CONFIG_NAME:
+                add(explicit)
+            else:
+                add(explicit / _PROFILE_CONFIG_NAME)
+    parent = profiles_dir.parent
+    if (
+        parent.name.casefold() in {"_server", "_client"}
+        and _plain_dir(parent)
+        and _plain_dir(parent.parent)
+        and _plain_dir(parent.parent / "mpmissions")
+    ):
+        missions = parent.parent / "mpmissions"
+        entries = list(os.scandir(missions))
+        for entry in entries:
+            child = Path(entry.path)
+            if _plain_dir(child):
+                add(child / _PROFILE_CONFIG_NAME)
+    return found
+
+
 class ServerState:
     """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
 
@@ -2646,6 +2969,16 @@ class ServerState:
         self.coordination_fault_store: object | None = None
         self.lifecycle_recovery_fault_store: object | None = None
         self.audit_writer: object | None = None
+        # profile=test is borrowed for the life of the harness instance.
+        # Holders and the preparing count are in-memory; the prior file is
+        # the sidecar next to dayz_mcp.json so a new process can still restore.
+        self._profile_holders: dict[str, set[tuple[str, str]]] = {}
+        self._profile_paths: dict[str, str] = {}
+        self._profile_preparing: dict[str, int] = {}
+        self.profile_release_errors: list[str] = []
+        self._profile_pending_errors: dict[str, str] = {}
+        self._profile_pending_paths: dict[str, str] = {}
+        self._profile_failed_run_ids: set[str] = set()
         self.lifecycle: object | None = None
         # 296b r3: which client launch owns which new ErrorMessage dump. Shared
         # by every MCP process; in memory only.
@@ -2744,6 +3077,19 @@ class ServerState:
         self._version_blocked_instances: set[str] = set()
         self._lease_close_outcomes: list[dict[str, object]] = []
         self._lease_close_ignored = 0
+
+    def __setattr__(self, name: str, value: object) -> None:
+        super().__setattr__(name, value)
+        # Daemon startup assigns lifecycle after crash recovery has rewritten
+        # the manifest. A prior left by the dead process is restored here.
+        # This process's own holders stay until their release: the instance
+        # is still live. The bridge reads the flag once per mission, so a
+        # restored file does not clear godmode until that mission restarts.
+        if name != "lifecycle" or value is None:
+            return
+        if not hasattr(self, "_profile_holders"):
+            return
+        self._recover_profiles_from_lifecycle(value)
 
     def _now(self) -> float:
         return self._time_fn()
@@ -2981,7 +3327,7 @@ class ServerState:
         return config_path.is_file()
 
     def _provision_named_profile_leaf(
-        self, profiles_dir: Path, role: str, expected_dir: str
+        self, profiles_dir: Path, role: str, expected_dir: str, *, create: bool = True
     ) -> None:
         """Create only the named leaf under an existing role root.
 
@@ -3022,6 +3368,8 @@ class ServerState:
                 or not isinstance(self.config_port, int)
             ):
                 raise BindingPrepareError("instance_config_missing")
+            if not create:
+                return
             try:
                 profiles_dir.mkdir(parents=False)
             except FileExistsError:
@@ -3060,63 +3408,200 @@ class ServerState:
                 raise BindingPrepareError("instance_config_missing") from exc
             if Path(profiles_dir).name.casefold() != expected_dir.casefold():
                 raise BindingPrepareError("instance_profile_owner_mismatch")
-            self._provision_named_profile_leaf(Path(profiles_dir), role, expected_dir)
-            if config_path.is_file():
-                try:
-                    existing = json.loads(config_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError) as exc:
-                    raise BindingPrepareError("instance_config_missing") from exc
-                expected_url = "http://127.0.0.1:" + str(self.config_port) + "/"
+            self._provision_named_profile_leaf(
+                Path(profiles_dir), role, expected_dir, create=False
+            )
+        # Record the installer file (or its absence) before profile=test is
+        # written. A failed prepare rolls that write back: the launch error
+        # must not leave profile=test on disk.
+        key = _profile_config_key(config_path)
+        with self._lock:
+            self._profile_preparing[key] = self._profile_preparing.get(key, 0) + 1
+        failed = True
+        prior_attempted = False
+        try:
+            if _mission_scan_blocked(config_path.parent):
+                raise BindingPrepareError("instance_config_missing")
+            try:
+                payload = _read_profile_document(config_path)
+                prior = self._ensure_profile_prior(config_path)
+                previous_bytes = config_path.read_bytes() if payload is not None else None
+                previous_prior = _read_prior(_profile_prior_path(config_path))
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise BindingPrepareError("instance_config_missing") from exc
+            if payload is None:
                 if (
-                    not isinstance(existing, dict)
+                    not self.key
                     or not isinstance(self.config_port, int)
                     or isinstance(self.config_port, bool)
-                    or existing.get("url") != expected_url
-                    or existing.get("key") != self.key
+                    or (token is None and not _plain_dir(config_path.parent))
                 ):
-                    raise BindingPrepareError("instance_endpoint_mismatch")
-        if not config_path.is_file() and not self._seed_bridge_config(config_path):
-            raise BindingPrepareError("instance_config_missing")
-        try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise BindingPrepareError("instance_config_missing") from exc
-        if not isinstance(payload, dict):
-            raise BindingPrepareError("instance_config_missing")
-        minted = str(uuid.uuid4())
-        if not _valid_uuid4(minted):
+                    raise BindingPrepareError("instance_config_missing")
+                payload = {
+                    "url": "http://127.0.0.1:" + str(self.config_port) + "/",
+                    "key": self.key,
+                    "pollHz": 5,
+                }
+            port = self.config_port
+            endpoint_ok = True
+            if isinstance(port, int) and not isinstance(port, bool) and self.key:
+                endpoint_ok = (
+                    payload.get("url") == "http://127.0.0.1:" + str(port) + "/"
+                    and payload.get("key") == self.key
+                )
+            if token is not None and (
+                not endpoint_ok
+                or not isinstance(port, int)
+                or isinstance(port, bool)
+                or not self.key
+            ):
+                raise BindingPrepareError("instance_endpoint_mismatch")
+            if (
+                not endpoint_ok
+                and previous_prior is not None
+                and previous_prior.get("prepared_sha256") is not None
+            ):
+                # Do not invalidate an earlier loan by stamping a new instance
+                # for a different endpoint. Reconcile it before refusing launch;
+                # an absent prior must stay absent, without seeding a new config.
+                with self._lock:
+                    if key in self._profile_holders or self._profile_preparing.get(key) != 1:
+                        raise BindingPrepareError("instance_endpoint_mismatch")
+                before = len(self.profile_release_errors)
+                missions: list[str | None] = [None]
+                for directory, known_missions in self._lifecycle_restore_targets(self.lifecycle):
+                    if _profile_config_key(directory) == _profile_config_key(config_path.parent):
+                        missions.extend(mission for mission in known_missions if mission not in missions)
+                if self._profile_errors_since(before):
+                    raise BindingPrepareError("instance_config_missing")
+                mission_clear = all(
+                    self._mission_profiles_clear(config_path.parent, mission) for mission in missions
+                )
+                if self._apply_profile_prior(
+                    config_path, owned=False, allow_delete=mission_clear
+                ) != "applied":
+                    raise BindingPrepareError("instance_config_missing")
+                self._delete_prior_sidecar(config_path)
+                sidecar = _profile_prior_path(config_path)
+                if sidecar.exists() or sidecar.is_symlink():
+                    raise BindingPrepareError("instance_config_missing")
+                self._clear_profile_pending(config_path)
+                raise BindingPrepareError("instance_endpoint_mismatch")
             minted = str(uuid.uuid4())
-        # B1: every launch this harness prepares is a test run, even on a
-        # config the installer wrote without a profile, so godmode and its
-        # refill stay on by default exactly as harness runs had them.
-        payload["profile"] = "test"
-        payload["instance"] = minted
-        atomic_write_json(config_path, payload)
-        try:
-            reread = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise BindingPrepareError("instance_config_mismatch") from exc
-        if not isinstance(reread, dict) or reread.get("instance") != minted:
-            raise BindingPrepareError("instance_config_mismatch")
-        with self._lock:
-            self._station_epoch += 1
-            self._bindings[minted] = Binding(
-                instance=minted,
-                run_id=run_id,
-                role=role,
-                epoch=self._station_epoch,
-                pid=None,
-                creation_time_utc=None,
-                state=BINDING_STARTING,
-            )
-            self._role_index[(run_id, role)] = minted
-            self._bound_queues.setdefault(minted, [])
-            self._ever_bound = True
-            # Forget leftover poll clocks from a dead pre-launch peer so
-            # status ages are None until THIS generation polls
-            # (fb-20260917-100411-5edf).
-            self._forget_peer_poll_clocks_locked(role)
-        return minted
+            if not _valid_uuid4(minted):
+                minted = str(uuid.uuid4())
+            # B1: every launch this harness prepares is a test run, even on a
+            # config the installer wrote without a profile, so godmode and its
+            # refill stay on by default exactly as harness runs had them.
+            # Release puts the prior file back. The bridge reads the flag
+            # once per mission, so the restore takes effect on the next one.
+            if endpoint_ok:
+                payload["profile"] = "test"
+            elif payload.get("profile") == "test":
+                payload.pop("profile")
+            payload["instance"] = minted
+            prepared_bytes = (
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            if prior.get("prepared_sha256") is not None and previous_bytes is not None:
+                # Recheck after _ensure_profile_prior: a new installer document
+                # must not acquire the old loan's restoration authority.
+                previous_fingerprint = hashlib.sha256(previous_bytes).hexdigest()
+                if previous_fingerprint not in (
+                    prior.get("prepared_sha256"), prior.get("previous_prepared_sha256")
+                ):
+                    raise BindingPrepareError("instance_config_missing")
+                # Keep the old proof until the replacement is durable, even
+                # across a crash. Do not accumulate earlier generations.
+                prior["previous_prepared_sha256"] = previous_fingerprint
+            prior["prepared_sha256"] = hashlib.sha256(prepared_bytes).hexdigest()
+            if not _profile_payload_fits(payload) or not _profile_payload_fits(prior):
+                raise BindingPrepareError("instance_config_missing")
+            if prior.get("kind") == "present":
+                # A failed launch must durably retain the minted token too.
+                # Reserve that room now, before publishing either document.
+                failed_launch_prior = dict(
+                    prior, document=dict(prior["document"], instance=minted)
+                )
+                if not _profile_payload_fits(failed_launch_prior):
+                    raise BindingPrepareError("instance_config_missing")
+            # All validation precedes directory creation and both atomic writes.
+            if token is not None:
+                self._provision_named_profile_leaf(Path(profiles_dir), role, expected_dir)
+            if endpoint_ok:
+                prior_attempted = True
+                try:
+                    atomic_write_json(_profile_prior_path(config_path), prior)
+                except (OSError, RuntimeError) as exc:
+                    raise BindingPrepareError("instance_config_missing") from exc
+            atomic_write_json(config_path, payload)
+            try:
+                reread = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise BindingPrepareError("instance_config_mismatch") from exc
+            if not isinstance(reread, dict) or reread.get("instance") != minted:
+                raise BindingPrepareError("instance_config_mismatch")
+            if endpoint_ok and "previous_prepared_sha256" in prior:
+                prior.pop("previous_prepared_sha256")
+                atomic_write_json(_profile_prior_path(config_path), prior)
+            # A default instance seals instance even for an installer endpoint
+            # lifecycle will refuse. It keeps url/key and never borrows profile.
+            with self._lock:
+                if endpoint_ok:
+                    self._remember_profile_holder(config_path, run_id, role)
+                    self._station_epoch += 1
+                    self._bindings[minted] = Binding(
+                        instance=minted,
+                        run_id=run_id,
+                        role=role,
+                        epoch=self._station_epoch,
+                        pid=None,
+                        creation_time_utc=None,
+                        state=BINDING_STARTING,
+                    )
+                    self._role_index[(run_id, role)] = minted
+                    self._bound_queues.setdefault(minted, [])
+                    self._ever_bound = True
+                    # Forget leftover poll clocks from a dead pre-launch peer so
+                    # status ages are None until THIS generation polls
+                    # (fb-20260917-100411-5edf).
+                    self._forget_peer_poll_clocks_locked(role)
+            failed = False
+            return minted
+        finally:
+            with self._lock:
+                pending = self._profile_preparing.get(key, 0) - 1
+                if pending > 0:
+                    self._profile_preparing[key] = pending
+                else:
+                    self._profile_preparing.pop(key, None)
+                rollback = (
+                    failed
+                    and prior_attempted
+                    and key not in self._profile_preparing
+                )
+                held = key in self._profile_holders
+            if rollback:
+                try:
+                    try:
+                        current_bytes = config_path.read_bytes()
+                    except FileNotFoundError:
+                        current_bytes = None
+                    if current_bytes == previous_bytes:
+                        # The config write failed/no-oped. Keep a previous
+                        # loan recoverable instead of leaving its new hash.
+                        if previous_prior is None:
+                            self._unlink_plain(_profile_prior_path(config_path))
+                        else:
+                            atomic_write_json(_profile_prior_path(config_path), previous_prior)
+                    elif not held:
+                        mission = None
+                        pairs = self._lifecycle_profile_dirs(run_id)
+                        if pairs:
+                            mission = pairs[0][1]
+                        self._restore_profile_config(config_path, owned=True, mission=mission)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._note_profile_release_error(config_path, exc)
 
     def _forget_peer_poll_clocks_locked(self, role: str) -> None:
         if role == "offline":
@@ -3171,6 +3656,10 @@ class ServerState:
                 close_outcomes = self._drain_close_outcomes_locked()
         self._flush_queue_discards(discarded_exec, finished_operations)
         self._flush_close_outcomes(close_outcomes)
+        self._release_harness_profile(
+            run_id, role, sweep=False,
+            preserve_instance=instance if reason == "launch_failed" else None,
+        )
 
     def retire_run(self, run_id: str, reason: str) -> None:
         self._fence_delivered_holds(run_id=run_id)
@@ -3190,6 +3679,587 @@ class ServerState:
             close_outcomes = self._drain_close_outcomes_locked()
         self._flush_queue_discards(discarded_exec, finished_operations)
         self._flush_close_outcomes(close_outcomes)
+        self._release_harness_profile(run_id, None, sweep=True)
+
+    def recover_crashed_profile(
+        self, profiles_dir: str, mission_dir: str | None = None
+    ) -> list[str]:
+        """Restore ``profile=test`` left by a harness process that died.
+
+        ``profiles_dir`` is the absolute profiles folder. Returns the errors
+        this call recorded. Empty means the file was restored or removed and
+        no mission copy still says ``profile=test``. A ``PermissionError``
+        from the replace is one of those errors: the release does not report
+        success while ``profile=test`` is still on disk.
+        """
+        if (
+            not isinstance(profiles_dir, str)
+            or not profiles_dir
+            or not Path(profiles_dir).is_absolute()
+        ):
+            self._note_profile_release_error(
+                Path(profiles_dir) if isinstance(profiles_dir, str) else Path("."),
+                ValueError("profiles_dir"),
+            )
+            return list(self.profile_release_errors[-1:])
+        before = len(self.profile_release_errors)
+        self._restore_profile_tree(Path(profiles_dir), mission_dir)
+        return self.profile_release_errors[before:]
+
+    def _recover_profiles_from_lifecycle(self, lifecycle: object) -> None:
+        for profiles_dir, missions in self._lifecycle_restore_targets(lifecycle):
+            primary = missions[0] if missions else None
+            try:
+                self._restore_profile_tree(
+                    profiles_dir, primary, extra_missions=missions[1:]
+                )
+            except Exception as exc:
+                self._note_profile_release_error(profiles_dir, exc)
+
+    def _lifecycle_restore_targets(
+        self, lifecycle: object
+    ) -> list[tuple[Path, tuple[str | None, ...]]]:
+        grouped: dict[str, list[object]] = {}
+
+        def add(profiles: object, mission: object) -> None:
+            if (
+                not isinstance(profiles, str)
+                or not profiles
+                or not Path(profiles).is_absolute()
+            ):
+                return
+            key = _profile_config_key(Path(profiles))
+            entry = grouped.get(key)
+            if entry is None:
+                entry = [Path(profiles), []]
+                grouped[key] = entry
+            mission_dir = mission if isinstance(mission, str) and mission else None
+            missions = entry[1]
+            if isinstance(missions, list) and mission_dir not in missions:
+                missions.append(mission_dir)
+
+        manifest = getattr(lifecycle, "manifest", None)
+        list_runs = getattr(manifest, "list_runs", None)
+        if callable(list_runs):
+            try:
+                runs = list_runs()
+            except Exception as exc:
+                self._note_profile_release_error(Path("."), exc)
+                runs = []
+            if isinstance(runs, list):
+                for run in runs:
+                    profiles = (
+                        run.get("profiles")
+                        if isinstance(run, dict)
+                        else getattr(run, "profiles", None)
+                    )
+                    mission = (
+                        run.get("mission")
+                        if isinstance(run, dict)
+                        else getattr(run, "mission", None)
+                    )
+                    add(profiles, mission)
+        for run in self._preprune_exited_runs(manifest):
+            add(run.get("profiles"), run.get("mission"))
+        targets: list[tuple[Path, tuple[str | None, ...]]] = []
+        for entry in grouped.values():
+            profiles_dir = entry[0]
+            missions = entry[1]
+            if not isinstance(profiles_dir, Path) or not isinstance(missions, list):
+                continue
+            targets.append((profiles_dir, tuple(missions)))
+        return targets
+
+    def _preprune_exited_runs(self, manifest: object) -> list[dict[str, object]]:
+        paths = getattr(manifest, "paths", None)
+        runs_path = getattr(paths, "runs_path", None)
+        if not isinstance(runs_path, Path):
+            return []
+        names = [runs_path.name + ".bak-preprune"] + [
+            f"{runs_path.name}.bak-preprune.{index}"
+            for index in range(2, _PREPRUNE_SLOT_COUNT + 1)
+        ]
+        found: list[dict[str, object]] = []
+        for name in names:
+            backup = runs_path.with_name(name)
+            if not _plain_file(backup):
+                continue
+            try:
+                text = backup.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                self._note_profile_release_error(backup, exc)
+                continue
+            try:
+                payload = json.loads(text)
+            except ValueError as exc:
+                self._note_profile_release_error(backup, exc)
+                continue
+            if not isinstance(payload, dict):
+                self._note_profile_release_error(
+                    backup, ValueError("profile_backup_invalid")
+                )
+                continue
+            runs = payload.get("runs")
+            if not isinstance(runs, list):
+                self._note_profile_release_error(
+                    backup, ValueError("profile_backup_invalid")
+                )
+                continue
+            for run in runs:
+                if isinstance(run, dict) and run.get("state") == "EXITED":
+                    found.append(run)
+        return found
+
+    def _release_harness_profile(
+        self, run_id: object, role: str | None, *, sweep: bool,
+        preserve_instance: str | None = None,
+    ) -> None:
+        if not isinstance(run_id, str) or not run_id:
+            return
+        pairs = self._lifecycle_profile_dirs(run_id)
+        mission = pairs[0][1] if pairs else None
+        with self._lock:
+            paths = self._take_profile_holders(run_id, role)
+        if not sweep:
+            for path in paths:
+                self._restore_profile_config(
+                    path, owned=True, mission=mission, preserve_instance=preserve_instance
+                )
+            return
+        # The run is over. Sweep from the paths this process held, not only
+        # from the manifest: the other role's leaf is a sibling even when
+        # lifecycle is missing. A manifest entry still covers a crash that
+        # left no in-memory holder.
+        seen: set[str] = set()
+        for path in paths:
+            profiles_dir = path.parent
+            key = _profile_config_key(profiles_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            self._restore_profile_tree(profiles_dir, mission)
+        for profiles_dir, mission_dir in pairs:
+            key = _profile_config_key(profiles_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            self._restore_profile_tree(profiles_dir, mission_dir)
+
+    def _lifecycle_profile_dirs(self, run_id: str) -> list[tuple[Path, str | None]]:
+        lifecycle = self.lifecycle
+        manifest = getattr(lifecycle, "manifest", None)
+        getter = getattr(manifest, "get", None)
+        if not callable(getter):
+            return []
+        try:
+            run = getter(run_id)
+        except Exception:
+            return []
+        profiles = run.get("profiles") if isinstance(run, dict) else getattr(run, "profiles", None)
+        mission = run.get("mission") if isinstance(run, dict) else getattr(run, "mission", None)
+        if not isinstance(profiles, str) or not profiles or not Path(profiles).is_absolute():
+            return []
+        mission_dir = mission if isinstance(mission, str) and mission else None
+        return [(Path(profiles), mission_dir)]
+
+    def _remember_profile_holder(self, config_path: Path, run_id: str, role: str) -> None:
+        # Caller holds self._lock.
+        key = _profile_config_key(config_path)
+        self._profile_holders.setdefault(key, set()).add((run_id, role))
+        self._profile_paths[key] = str(config_path)
+
+    def _take_profile_holders(self, run_id: str, role: str | None) -> list[Path]:
+        # Caller holds self._lock.
+        released: list[Path] = []
+        for key, holders in list(self._profile_holders.items()):
+            if role is None:
+                holders.difference_update(
+                    {pair for pair in holders if pair[0] == run_id}
+                )
+            else:
+                holders.discard((run_id, role))
+            if holders:
+                continue
+            self._profile_holders.pop(key, None)
+            raw = self._profile_paths.pop(key, None)
+            if isinstance(raw, str) and raw:
+                released.append(Path(raw))
+        return released
+
+    def _profile_blocked(self, config_path: Path) -> bool:
+        key = _profile_config_key(config_path)
+        with self._lock:
+            return key in self._profile_holders or key in self._profile_preparing
+
+    def _note_profile_release_error(self, config: Path, exc: BaseException) -> None:
+        message = (
+            f"profile_restore_failed path={config} {type(exc).__name__}: {exc}"
+        )
+        key = _profile_config_key(config)
+        with self._lock:
+            self.profile_release_errors.append(message)
+            self._profile_pending_errors[key] = message
+            self._profile_pending_paths[key] = str(config)
+        writer = self.audit_writer
+        write = getattr(writer, "write", None)
+        if callable(write):
+            try:
+                write(_profile_restore_audit_event(message))
+            except Exception:
+                pass
+        _LOG.error("%s", message)
+
+    def _profile_errors_since(self, before: int) -> list[str]:
+        with self._lock:
+            if before < 0 or before > len(self.profile_release_errors):
+                before = 0
+            return list(self.profile_release_errors[before:])
+
+    def _profile_pending_messages(self) -> list[str]:
+        with self._lock:
+            return list(self._profile_pending_errors.values())
+
+    def _clear_profile_pending(self, config_path: Path) -> None:
+        key = _profile_config_key(config_path)
+        with self._lock:
+            self._profile_pending_errors.pop(key, None)
+            self._profile_pending_paths.pop(key, None)
+
+    def _pending_profile_test_remains(self) -> bool:
+        with self._lock:
+            paths = [Path(raw) for raw in self._profile_pending_paths.values()]
+        return any(not _pending_path_proven_clean(path) for path in paths)
+
+    def _ensure_profile_prior(self, config_path: Path) -> dict:
+        """Validate and return the prior without writing anything.
+
+        Only a matching fingerprint can carry a prior across preparations.
+        Otherwise the current document is the new baseline. Legacy sidecars
+        can be replaced by prepare, but cannot authorize crash restoration.
+        Prepare persists the returned sidecar using ``atomic_write_json``.
+        """
+        parent = config_path.parent
+        if not _plain_dir(parent):
+            if parent.exists() or parent.is_symlink():
+                raise BindingPrepareError("instance_config_missing")
+            return _prior_payload(None, kind="absent")
+        if (config_path.exists() or config_path.is_symlink()) and not _plain_file(config_path):
+            raise BindingPrepareError("instance_config_missing")
+        sidecar = _profile_prior_path(config_path)
+        if (sidecar.exists() or sidecar.is_symlink()) and not _plain_file(sidecar):
+            raise BindingPrepareError("instance_config_missing")
+        sidecar_text = _read_profile_text(sidecar)
+        existing = _read_prior(sidecar) if sidecar_text is not None else None
+        if sidecar_text is not None and existing is None:
+            raise BindingPrepareError("instance_config_missing")
+        document = _read_profile_document(config_path)
+        if (
+            existing is not None
+            and document is not None
+            and document.get("profile") == "test"
+            and existing.get("prepared_sha256") is not None
+            and hashlib.sha256(config_path.read_bytes()).hexdigest() in (
+                existing.get("prepared_sha256"), existing.get("previous_prepared_sha256")
+            )
+        ):
+            payload = dict(existing)
+            saved = payload.get("document")
+            if isinstance(saved, dict) and saved.get("profile") == "test":
+                payload["document"] = dict(saved)
+                payload["document"].pop("profile", None)
+        elif document is not None:
+            if document.get("profile") == "test":
+                document = dict(document)
+                document.pop("profile", None)
+            payload = _prior_payload(document, kind="present")
+        else:
+            payload = _prior_payload(None, kind="absent")
+        if not _profile_payload_fits(payload):
+            raise BindingPrepareError("instance_config_missing")
+        return payload
+
+    def _restore_profile_tree(
+        self,
+        profiles_dir: Path,
+        mission: str | None,
+        extra_missions: tuple[str | None, ...] = (),
+    ) -> None:
+        config = profiles_dir / _PROFILE_CONFIG_NAME
+        try:
+            mission_list: list[str | None] = []
+            for item in (mission, *extra_missions):
+                if item not in mission_list:
+                    mission_list.append(item)
+            # A disappeared profiles directory is not a clean tree. The
+            # absolute mission is named on its own and is inspected even
+            # when the leaf cannot be stated.
+            mission_clear = True
+            for item in mission_list:
+                if not self._mission_profiles_clear(profiles_dir, item):
+                    mission_clear = False
+            if mission_clear:
+                self._clear_profile_pending(
+                    profiles_dir.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME
+                )
+            if not _plain_dir(profiles_dir):
+                if profiles_dir.exists() or profiles_dir.is_symlink():
+                    self._note_profile_release_error(
+                        config, ValueError("profiles_dir_not_plain")
+                    )
+                return
+            for candidate in _configs_near(profiles_dir):
+                self._finish_profile_restore(
+                    candidate, owned=True, mission_clear=mission_clear
+                )
+        except Exception as exc:
+            self._note_profile_release_error(config, exc)
+
+    def _restore_profile_config(
+        self, config_path: Path, *, owned: bool, mission: str | None = None,
+        preserve_instance: str | None = None,
+    ) -> None:
+        try:
+            parent = config_path.parent
+            mission_clear = self._mission_profiles_clear(parent, mission)
+            if mission_clear:
+                self._clear_profile_pending(
+                    parent.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME
+                )
+            if not _plain_dir(parent):
+                if parent.exists() or parent.is_symlink():
+                    self._note_profile_release_error(
+                        config_path, ValueError("profiles_dir_not_plain")
+                    )
+                return
+            self._finish_profile_restore(
+                config_path, owned=owned, mission_clear=mission_clear,
+                preserve_instance=preserve_instance,
+            )
+        except Exception as exc:
+            self._note_profile_release_error(config_path, exc)
+
+    def _finish_profile_restore(
+        self, config_path: Path, *, owned: bool, mission_clear: bool,
+        preserve_instance: str | None = None,
+    ) -> None:
+        if self._profile_blocked(config_path):
+            return
+        status = self._apply_profile_prior(
+            config_path, owned=owned, allow_delete=mission_clear,
+            preserve_instance=preserve_instance,
+        )
+        if status == "applied" and mission_clear:
+            self._delete_prior_sidecar(config_path)
+        if status in {"applied", "absent"}:
+            self._clear_profile_pending(config_path)
+
+    def _apply_profile_prior(
+        self, config_path: Path, *, owned: bool, allow_delete: bool = True,
+        preserve_instance: str | None = None,
+    ) -> str:
+        """``applied``, ``absent`` (nothing owed) or ``failed``.
+
+        The replace uses the hash-checked ``runtime_state._atomic_write_text``
+        underneath ``atomic_write_json``: a temporary file in the same
+        directory, then ``os.replace``, with its bounded ``PermissionError``
+        retry. This is not a second retry loop. The holder map is the existing
+        ``ServerState._lock``; the file
+        replace does not run while that lock is held.
+
+        ``allow_delete`` is false while a ``$mission:`` copy is unresolved.
+        Keep the borrowed bytes with their fingerprint until the whole tree
+        can be restored, rather than exposing the mission copy or losing
+        the ownership proof needed by a later recovery.
+        """
+        sidecar = _profile_prior_path(config_path)
+        try:
+            current_text = _read_profile_text(config_path)
+            prior_text = _read_profile_text(sidecar)
+            current = None if current_text is None else json.loads(current_text)
+            if current_text is not None and not isinstance(current, dict):
+                raise ValueError("profile_config_not_object")
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._note_profile_release_error(config_path, exc)
+            return "failed"
+        prior = _read_prior(sidecar) if prior_text is not None else None
+        if prior_text is None:
+            self._clear_profile_pending(sidecar)
+        if prior is None:
+            if prior_text is not None:
+                self._note_profile_release_error(
+                    config_path, ValueError("profile_prior_invalid")
+                )
+                return "failed"
+            if owned and current is not None and current.get("profile") == "test":
+                self._note_profile_release_error(
+                    config_path, ValueError("profile_prior_missing")
+                )
+                if not self._strip_profile_test(config_path):
+                    return "failed"
+                return "failed"
+            return "absent"
+        kind = prior.get("kind")
+        try:
+            fingerprint = (
+                hashlib.sha256(config_path.read_bytes()).hexdigest()
+                if current_text is not None else None
+            )
+            if (
+                fingerprint is None
+                or not isinstance(prior.get("prepared_sha256"), str)
+                or fingerprint not in (
+                    prior.get("prepared_sha256"), prior.get("previous_prepared_sha256")
+                )
+            ):
+                raise ValueError("profile_prior_config_mismatch")
+            if kind == "present" and preserve_instance is not None:
+                document = dict(prior["document"])
+                if document.get("instance") != preserve_instance:
+                    document["instance"] = preserve_instance
+                    prior = dict(prior, document=document)
+                    if not _profile_payload_fits(prior):
+                        raise ValueError("profile_prior_too_large")
+                    from dayz_mcp.runtime_state import atomic_write_json
+
+                    # Keep launch-failure fencing durable if restoration must
+                    # wait for permissions, a mission repair or daemon restart.
+                    atomic_write_json(sidecar, prior)
+            # Keep the borrowed bytes and their fingerprint together until all
+            # mission copies are clean. A partial restore cannot be replayed.
+            if not allow_delete:
+                raise ValueError("profile_delete_blocked")
+            if kind == "absent":
+                self._unlink_plain(config_path, expected_sha256=fingerprint)
+            elif kind == "present":
+                document = prior.get("document")
+                if not isinstance(document, dict):
+                    raise ValueError("profile_prior_invalid")
+                document = dict(document)
+                if document.get("profile") == "test":
+                    document.pop("profile", None)
+                if preserve_instance is not None:
+                    document["instance"] = preserve_instance
+                from dayz_mcp.runtime_state import _atomic_write_text
+
+                text = json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n"
+                _atomic_write_text(config_path, text, expected_sha256=fingerprint.upper())
+            else:
+                raise ValueError("profile_prior_invalid")
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._note_profile_release_error(config_path, exc)
+            return "failed"
+        try:
+            restored = _read_profile_document(config_path)
+            if (kind == "absent" and restored is not None) or (
+                kind == "present" and restored != document
+            ):
+                raise ValueError("profile_test_remains_or_restore_mismatch")
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._note_profile_release_error(config_path, exc)
+            return "failed"
+        return "applied"
+
+    def _unlink_plain(self, path: Path, *, expected_sha256: str | None = None) -> None:
+        if expected_sha256 is not None:
+            from dayz_mcp.runtime_state import _observe_expected_target, _verify_expected_target
+
+            expected_sha256 = expected_sha256.upper()
+            identity = _observe_expected_target(path, expected_sha256)
+            _verify_expected_target(path, identity, expected_sha256)
+        if not path.exists() and not path.is_symlink():
+            return
+        if not _plain_file(path):
+            raise ValueError("profile_config_not_plain")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+
+    def _strip_profile_test(self, config_path: Path) -> bool:
+        from dayz_mcp.runtime_state import atomic_write_json
+
+        try:
+            document = _read_profile_document(config_path)
+            if document is None or document.get("profile") != "test":
+                return True
+            document.pop("profile", None)
+            atomic_write_json(config_path, document)
+            if _read_profile_document(config_path) != document:
+                raise ValueError("profile_test_remains_or_restore_mismatch")
+        except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+            self._note_profile_release_error(config_path, exc)
+            return False
+        return True
+
+    def _mission_profiles_clear(self, profiles_dir: Path, mission: str | None) -> bool:
+        """Strip ``profile=test`` from ``$mission:`` copies. True when none remain."""
+        try:
+            ok = self._strip_mission_profiles(profiles_dir, mission)
+            if _mission_scan_blocked(profiles_dir):
+                self._note_profile_release_error(
+                    profiles_dir.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME,
+                    ValueError("mission_scan_incomplete"),
+                )
+                return False
+            return ok and not self._mission_has_profile_test(profiles_dir, mission)
+        except OSError as exc:
+            self._note_profile_release_error(
+                profiles_dir.parent.parent / "mpmissions" / _PROFILE_CONFIG_NAME, exc
+            )
+            return False
+
+    def _mission_has_profile_test(self, profiles_dir: Path, mission: str | None) -> bool:
+        profile_key = _profile_config_key(profiles_dir / _PROFILE_CONFIG_NAME)
+        for config in _mission_configs(profiles_dir, mission):
+            if _profile_config_key(config) == profile_key:
+                continue
+            if self._profile_blocked(config):
+                continue
+            try:
+                document = _read_profile_document(config)
+            except (OSError, UnicodeError, ValueError) as exc:
+                self._note_profile_release_error(config, exc)
+                return True
+            if document is not None and document.get("profile") == "test":
+                self._note_profile_release_error(config, ValueError("profile_test_remains"))
+                return True
+        return False
+
+    def _strip_mission_profiles(self, profiles_dir: Path, mission: str | None) -> bool:
+        ok = True
+        profile_key = _profile_config_key(profiles_dir / _PROFILE_CONFIG_NAME)
+        for config in _mission_configs(profiles_dir, mission):
+            if _profile_config_key(config) == profile_key or self._profile_blocked(config):
+                continue
+            try:
+                document = _read_profile_document(config)
+            except (OSError, UnicodeError, ValueError) as exc:
+                self._note_profile_release_error(
+                    config, ValueError(f"mission_profile_unreadable {type(exc).__name__}: {exc}")
+                )
+                ok = False
+                continue
+            if document is None or document.get("profile") != "test":
+                self._clear_profile_pending(config)
+                continue
+            if not self._strip_profile_test(config):
+                ok = False
+                continue
+            self._clear_profile_pending(config)
+        return ok
+
+    def _delete_prior_sidecar(self, config_path: Path) -> None:
+        sidecar = _profile_prior_path(config_path)
+        try:
+            if _plain_file(sidecar):
+                sidecar.unlink()
+            elif sidecar.exists() or sidecar.is_symlink():
+                return
+            self._clear_profile_pending(sidecar)
+        except FileNotFoundError:
+            self._clear_profile_pending(sidecar)
+        except OSError as exc:
+            self._note_profile_release_error(sidecar, exc)
 
     def install_bound_peer(
         self,
@@ -7017,7 +8087,7 @@ class ServerState:
                 ),
                 "unaccredited_polls_by_class": dict(self._unaccredited_poll_counts),
             }
-        return {
+        payload = {
             "peers": peers,
             "results_pending": results_pending,
             "last_client_request_at": last_client_request_at,
@@ -7025,6 +8095,10 @@ class ServerState:
             "fence": fence,
             "daemon_generation": self.daemon_generation,
         }
+        pending = self._profile_pending_messages()
+        if pending:
+            payload["profile_restore_errors"] = pending
+        return payload
 
     def _bound_instance_locked(self, peer: str) -> str | None:
         """The single BOUND instance that covers this peer, or None."""
@@ -7369,6 +8443,17 @@ class Handler(BaseHTTPRequestHandler):
     def _log(self, message: str) -> None:
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
         sink(message)
+
+    def _audit_profile_pending(self, messages: list[str]) -> None:
+        writer = getattr(self.state, "audit_writer", None)
+        write = getattr(writer, "write", None)
+        if not callable(write):
+            return
+        for message in messages:
+            try:
+                write(_profile_restore_audit_event(message))
+            except Exception:
+                pass
 
     def _log_human_input_block_failed(self) -> None:
         # After the answer: at most one diagnostic thread waits on the sink.
@@ -7763,6 +8848,8 @@ class Handler(BaseHTTPRequestHandler):
             payload["retired_run_diagnostics"] = _retired_run_diagnostics_payload(
                 self.state, client
             )
+            if self.state._pending_profile_test_remains():
+                payload.pop("retired_run_diagnostics", None)
 
         if action in {"acquire", "wait"} and status == 200:
             payload = self._adopt_on_grant(client, payload)
@@ -7890,7 +8977,50 @@ class Handler(BaseHTTPRequestHandler):
         result = dict(result)
         status = int(result.pop("_http_status", 200))
         result = self._persist_coordination(result)
-        if action == "start" and "error" in result and "run_id" not in result:
+        # A start refused before admission must stay exactly {"error": ...}.
+        # Stop, close and reap are the release the operator reads: a
+        # PermissionError from the profile replace is part of that body.
+        # adopt is not a release, but the worker treats its already-gone
+        # errors as a finished stop and never calls stop. Those answers are
+        # neutralized the same way while the restore is still pending.
+        sealed_start = action == "start" and "error" in result and "run_id" not in result
+        if not sealed_start:
+            pending_fn = getattr(self.state, "_profile_pending_messages", None)
+            pending = pending_fn() if callable(pending_fn) else []
+            if pending:
+                result["profile_restore_errors"] = pending
+                remains = getattr(self.state, "_pending_profile_test_remains", None)
+                flag_remains = callable(remains) and bool(remains())
+                remembered = getattr(self.state, "_profile_failed_run_ids", None)
+                if not flag_remains:
+                    if isinstance(remembered, set):
+                        remembered.clear()
+                else:
+                    run_id = result.get("run_id")
+                    if not isinstance(run_id, str) or not run_id:
+                        run_id = body.get("run_id")
+                    neutralize = action in {"stop", "close", "reap"} or (
+                        action == "adopt"
+                        and _worker_reads_already_gone(result, run_id)
+                    )
+                    if neutralize:
+                        _fail_release_for_profile(result)
+                        if status < 400:
+                            status = 500
+                        if (
+                            isinstance(remembered, set)
+                            and isinstance(run_id, str)
+                            and run_id
+                        ):
+                            remembered.add(run_id)
+                        for message in pending:
+                            self._log("PROFILE " + message)
+                        self._audit_profile_pending(pending)
+                if flag_remains and action == "status":
+                    _mask_profile_failure_runs(
+                        result, body.get("run_id"), remembered
+                    )
+        if sealed_start:
             # inbox 3997 (fb-20261001-000925-3997). A start refused before
             # admission created no run. Its only reader is the sealed
             # dayz_test_worker, which republishes active_run_exists only when
@@ -8093,6 +9223,10 @@ class Handler(BaseHTTPRequestHandler):
         payload["credential_recovery"] = (
             self.state.credential_recovery_snapshot()
         )
+        pending_fn = getattr(self.state, "_profile_pending_messages", None)
+        pending = pending_fn() if callable(pending_fn) else []
+        if pending:
+            payload["profile_restore_errors"] = pending
         self._json(200, payload)
 
     def _handle_poll(self, qs: dict[str, list[str]]) -> None:
