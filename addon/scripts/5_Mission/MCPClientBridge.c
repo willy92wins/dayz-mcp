@@ -422,7 +422,6 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected const int CAMERA_MODE_LOOKAT = 2;
 	protected const int CAMERA_MODE_MATRIX = 3;
 	protected const int CAMERA_MODE_FREE = 4;
-	protected const int CAMERA_PHASE_APPLY = 0;
 	protected const int CAMERA_PHASE_SETTLE = 1;
 	protected const int CAMERA_PHASE_REPORT = 2;
 	// f47b: OnTick calls a staticcamera release spends on FreeDebugCamera before
@@ -464,6 +463,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// the job releases the move itself and answers aborted. The tool waits
 	// hold_s plus the same 5 s.
 	protected const float PLAYER_MOVE_JOB_SLACK_S = 5.0;
+	// actor_emote's wait_s, the seconds its job watches m_bEmoteIsPlaying. Mirrored
+	// by ACTOR_EMOTE_WAIT_MIN_S and ACTOR_EMOTE_WAIT_MAX_S in loopback.py; a value
+	// outside is refused, never clamped.
+	protected const float ACTOR_EMOTE_WAIT_MIN_S = 0.5;
+	protected const float ACTOR_EMOTE_WAIT_MAX_S = 30.0;
 	//! Capability census announced on every poll as `caps=`: the exact set of
 	//! command.cmd branches Dispatch() handles before falling to unknown_command,
 	//! sorted bytewise and comma-separated. tools/tests/test_bridge_client_capabilities.py
@@ -471,7 +475,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,anim_timeline,camera_get,camera_set,engine_set,input_describe,input_trigger,key_press," + "player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -483,9 +487,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected string m_PollVersion;
 	protected float m_PollHz;
 	protected float m_Accum;
+	// Seconds since the last unconfigured TryInit. The first attempt does not wait.
+	protected float m_InitAccumS;
 	// Backoff at which a poll failure stops looking transient and the credential on
 	// disk is re-read.
 	protected const float KEY_RELOAD_BACKOFF_S = 4.0;
+	// Unconfigured TryInit period. A queued CallLater would outlive ShutdownInstance.
+	protected const float INIT_RETRY_S = 1.0;
 	protected const float POLL_WATCHDOG_S = 30.0;
 	protected float m_Backoff;
 	protected int m_Tick;
@@ -496,7 +504,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected float m_PollInFlightS;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
-	// Same load counters as MCPBridge (A1). The client poll carries them too.
+	// Same load counters as MCPBridge (A1). ia counts real TryInit attempts,
+	// not frames (A2). The client poll carries them too.
 	// Saturate at the same cap: a wrapped negative drops the whole triple.
 	protected const int LOAD_COUNTER_CAP = 2000000000;
 	// TickCount reports 100 ns CPU ticks: 10,000 ticks per millisecond.
@@ -522,6 +531,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected Camera m_CameraHandoffCam;
 	protected bool m_CameraHandoffPending;
 	protected int m_CameraHandoffTicks;
+	//! camera_path_play (d026): the current or last path, idle until the first
+	//! play, and the staticcamera a playing path moves (not ref, an entity the
+	//! world owns; m_ActiveCam holds it as an owned camera).
+	protected ref MCPCameraPath m_CameraPath;
+	protected Camera m_CameraPathCam;
+	//! The command id of the play that started m_CameraPath, the one
+	//! camera_path_release must name to stop it; 0 before the first play.
+	protected int m_CameraPathCommandId;
+	//! m_Tick when that play turned the path's camera on (TickCameraPath).
+	protected int m_CameraPathPlayTick;
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
@@ -541,6 +560,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		m_PollHz = 5.0;
 		m_Accum = 0.0;
+		m_InitAccumS = 0.0;
 		m_Backoff = 0.0;
 		m_Tick = 0;
 		m_ActionHoldCommandId = -1;
@@ -569,6 +589,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCamOwned = false;
 		m_CameraHandoffPending = false;
 		m_CameraHandoffTicks = 0;
+		m_CameraPath = new MCPCameraPath();
+		m_CameraPathCommandId = 0;
+		m_CameraPathPlayTick = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
 		m_Pending = new array<ref MCPCommand>();
@@ -644,6 +667,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Ahead of the job runner, so a restore_gameplay job posts in the very
 		// tick the camera handoff finishes (f47b). Returns at once when none runs.
 		TickCameraHandoff();
+		// camera_path_play moves its camera here on every frame, never from a
+		// job, by this frame's timeslice. Returns at once while no path plays.
+		TickCameraPath(timeslice);
 
 		if (m_JobRunner)
 		{
@@ -652,7 +678,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (!m_Configured)
 		{
-			TryInit();
+			m_InitAccumS = m_InitAccumS + timeslice;
+			if (m_InitAttempts == 0 || m_InitAccumS >= INIT_RETRY_S)
+			{
+				m_InitAccumS = 0.0;
+				TryInit();
+			}
 			return;
 		}
 
@@ -1127,6 +1158,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int weaponJobs;
 		int triggerJobs;
 		int moveJobs;
+		int emoteJobs;
 		if (!m_JobRunner)
 		{
 			return false;
@@ -1134,13 +1166,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
 		// Nor does an input_trigger click or hold, which waits on a key release,
-		// or a player_move hold, which waits on its release.
+		// a player_move hold, which waits on its release, or an actor_emote,
+		// which only watches m_bEmoteIsPlaying.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
 		blocking = blocking - weaponJobs - triggerJobs;
 		moveJobs = m_JobRunner.CountOfKind("player_move");
 		blocking = blocking - moveJobs;
+		emoteJobs = m_JobRunner.CountOfKind("actor_emote");
+		blocking = blocking - emoteJobs;
 		return blocking > 0;
 	}
 
@@ -1222,6 +1257,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		else if (command.cmd == "restore_gameplay")
 		{
+			// A playing camera_path_play ends aborted where its camera stands:
+			// RestoreGameplay leaves the camera, and its path, to the caller (d026).
+			StopCameraPath();
 			RestoreGameplay();
 			ReleaseCamera();
 			result.ok = true;
@@ -1356,6 +1394,30 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "action_hold_cancel")
 		{
 			postNow = DispatchActionHoldCancel(command, result);
+		}
+		else if (command.cmd == "actor_emote")
+		{
+			postNow = DispatchActorEmote(command, result);
+		}
+		else if (command.cmd == "camera_set_focus")
+		{
+			postNow = DispatchCameraSet(command, result);
+		}
+		else if (command.cmd == "camera_path_play")
+		{
+			postNow = DispatchCameraPathPlay(command, result);
+		}
+		else if (command.cmd == "camera_path_release")
+		{
+			postNow = DispatchCameraPathRelease(command, result);
+		}
+		else if (command.cmd == "hud_set")
+		{
+			postNow = DispatchHudSet(command, result);
+		}
+		else if (command.cmd == "gameplay_state")
+		{
+			postNow = DispatchGameplayState(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -1921,6 +1983,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		// camera_set_focus is camera_set plus SetFocus on the camera it applies
+		// (702f). The command name turns focus on, so camera_set never reads the
+		// focus fields and an older bridge answers unknown_command instead of
+		// dropping them.
+		bool focus = command.cmd == "camera_set_focus";
+		if (focus && !IsValidCameraFocus(command.args))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
 		if (HasExclusiveJob())
 		{
 			result.ok = false;
@@ -1928,12 +2002,26 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
+		// The camera is applied here, at dispatch, and the job only settles and
+		// reports: no job changes anything (d026). A failed apply hands
+		// gameplay back and answers at once with its error.
 		MCPJob job = new MCPJob();
 		job.id = command.id;
 		job.kind = "camera_set";
 		job.args = command.args;
-		job.phase = CAMERA_PHASE_APPLY;
+		job.camera_focus = focus;
+		bool applied = ApplyCameraSet(job);
+		if (!applied)
+		{
+			RestoreGameplay();
+			result.ok = false;
+			result.error = job.error;
+			return true;
+		}
+
+		job.phase = CAMERA_PHASE_SETTLE;
 		job.sample_s_target = ResolveSettleSeconds(command.args);
+		job.sample_start_s = m_JobRunner.GetElapsedS();
 		// Settle plus the same five seconds of apply/report slack. A fixed
 		// five-second deadline cancelled a 200-tick settle (10 s) unfinished.
 		job.deadline_s = m_JobRunner.GetElapsedS() + job.sample_s_target + CAMERA_JOB_TIMEOUT_S;
@@ -1944,6 +2032,304 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		Log("client job queued id=" + job.id + " kind=camera_set deadline_s=" + job.deadline_s);
 		return false;
+	}
+
+	// 702f: focus_distance in metres, finite and above 0, and focus_blur finite
+	// and 0 or more, the two arguments of Camera.SetFocus (camera.c:70-74).
+	// NaN fails every comparison, so it is tested first; float.MAX stands for
+	// an infinity, as the server's IsFiniteFloat does.
+	protected bool IsValidCameraFocus(MCPArgs args)
+	{
+		float distance;
+		float blur;
+		if (!args)
+		{
+			return false;
+		}
+
+		distance = args.focus_distance;
+		blur = args.focus_blur;
+		if (distance != distance || blur != blur)
+		{
+			return false;
+		}
+		if (distance <= 0.0 || distance >= float.MAX)
+		{
+			return false;
+		}
+		if (blur < 0.0 || blur >= float.MAX)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// camera_path_play answers at dispatch: play applies its first key, then TickCameraPath moves it.
+	// Refused/busy plays change nothing. state/stop require a matching path_id when given.
+	protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)
+	{
+		int replacedCommandId;
+		MCPCameraPath candidate;
+		Object cameraObject;
+		Camera cam;
+		FreeDebugCamera freeCam;
+		PlayerBase player;
+		string error;
+		string mode;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		mode = command.args.mode;
+		if (mode == "play")
+		{
+			candidate = new MCPCameraPath();
+			error = candidate.Load(command.args);
+			if (error != "")
+			{
+				result.ok = false;
+				result.error = error;
+				return true;
+			}
+			if (HasExclusiveJob())
+			{
+				result.ok = false;
+				result.error = "busy";
+				return true;
+			}
+
+			// The camera is made and checked before anything is torn down, so a
+			// play that fails here leaves everything as it was: the camera on
+			// screen, the controls, the HUD, the player simulation and the last
+			// path's state. Only the object it made, if any, is deleted.
+			cameraObject = g_Game.CreateObject("staticcamera", candidate.StartPosition(), true);
+			cam = Camera.Cast(cameraObject);
+			if (!cam)
+			{
+				if (cameraObject)
+				{
+					g_Game.ObjectDelete(cameraObject);
+				}
+				result.ok = false;
+				result.error = "camera_create_failed";
+				return true;
+			}
+
+			StopCameraPath();
+			FinishCameraHandoff();
+			SuppressGameplay();
+			// After a camera_set free the free camera is still on and the player
+			// simulation off (ApplyFreeCamera): both go back as the end of a
+			// handoff puts them, so the path's camera is the only one on.
+			freeCam = FreeDebugCamera.GetInstance();
+			if (freeCam && freeCam.IsActive())
+			{
+				freeCam.SetActive(false);
+			}
+			player = PlayerBase.Cast(GetGame().GetPlayer());
+			if (player && m_PlayerSimulationDisabled)
+			{
+				player.DisableSimulation(false);
+				m_PlayerSimulationDisabled = false;
+			}
+			DeleteOwnedCamera();
+
+			candidate.Begin();
+			candidate.Apply(cam);
+			cam.SetActive(true);
+			m_ActiveCam = cam;
+			m_ActiveCamOwned = true;
+			m_CameraPath = candidate;
+			m_CameraPathCam = cam;
+			replacedCommandId = m_CameraPathCommandId;
+			m_CameraPathCommandId = command.id;
+			m_CameraPathPlayTick = m_Tick;
+			Log("camera path playing id=" + command.id + " path_id=" + command.args.path_id + " duration_s=" + candidate.Duration());
+
+			result.camera_path = new MCPCameraPathState();
+			m_CameraPath.Fill(result.camera_path);
+			result.camera_path.command_id = m_CameraPathCommandId;
+			result.camera_path.replaced_command_id = replacedCommandId;
+			result.ok = true;
+			return true;
+		}
+
+		if (mode != "state" && mode != "stop")
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (!MCPCameraPath.IsValidPathId(command.args.path_id))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (command.args.path_id != "" && !m_CameraPath.HasPathId(command.args.path_id))
+		{
+			result.ok = false;
+			result.error = "path_not_found";
+			return true;
+		}
+
+		if (mode == "stop")
+		{
+			// The camera keeps the pose of the last frame the path applied.
+			StopCameraPath();
+		}
+
+		result.camera_path = new MCPCameraPathState();
+		m_CameraPath.Fill(result.camera_path);
+		result.camera_path.command_id = m_CameraPathCommandId;
+		result.ok = true;
+		return true;
+	}
+
+	// camera_path_release is public. Loopback also sends it when the owning
+	// lease ends or a delivered play is abandoned. Unlike mode=stop it releases the
+	// camera and restores gameplay. Only the matching playing command_id
+	// can be released, so a late release cannot end a later play. The result
+	// answers whether it matched.
+	protected bool DispatchCameraPathRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		result.matched = false;
+		if (m_CameraPath.IsPlaying() && m_CameraPathCommandId == command.args.command_id)
+		{
+			StopCameraPath();
+			m_CameraPathCommandId = 0;
+			ReleaseCamera();
+			RestoreGameplay();
+			result.matched = true;
+			result.ok = true;
+			// Like restore_gameplay (f47b): while the staticcamera handoff still
+			// holds the player simulation off, a job posts this reply once the
+			// handoff has finished, so gameplay_state read right after it sees
+			// the simulation back on (Sol P2, 263t2).
+			return !QueueCameraPathReleaseJob(command, result);
+		}
+		result.ok = true;
+		return true;
+	}
+
+	// Same wait as QueueRestoreGameplayJob, for a matched camera_path_release.
+	// The posted reply carries matched=true. True when queued.
+	protected bool QueueCameraPathReleaseJob(MCPCommand command, MCPResult result)
+	{
+		if (!m_CameraHandoffPending)
+		{
+			return false;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "camera_path_release";
+		job.deadline_s = m_JobRunner.GetElapsedS() + CAMERA_JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+
+		Log("client job queued id=" + job.id + " kind=camera_path_release deadline_s=" + job.deadline_s);
+		return true;
+	}
+
+	// hud_set (f427): the in-game HUD's player hide flags, the ones vanilla's
+	// UAUIQuickbarToggle key toggles (missiongameplay.c:542-557).
+	// ShowHudPlayer and ShowQuickbarPlayer set HUD_HIDE and QUICKBAR_HIDE to
+	// !visible (ingamehud.c:897-906). HUD_DISABLE, the options menu's flag, and
+	// the Hud.Show that camera_set's SuppressGameplay uses are not touched. The
+	// answer reads both flags back (ingamehudvisibility.c:120-126).
+	protected bool DispatchHudSet(MCPCommand command, MCPResult result)
+	{
+		Mission mission;
+		IngameHud hud;
+		IngameHudVisibility visibility;
+		MCPHudState state;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+
+		mission = GetGame().GetMission();
+		if (mission)
+		{
+			hud = IngameHud.Cast(mission.GetHud());
+		}
+		if (hud)
+		{
+			visibility = hud.GetHudVisibility();
+		}
+		if (!visibility)
+		{
+			result.ok = false;
+			result.error = "hud_unavailable";
+			return true;
+		}
+
+		hud.ShowHudPlayer(command.args.visible);
+		hud.ShowQuickbarPlayer(command.args.visible);
+
+		state = new MCPHudState();
+		state.hud_hide = visibility.IsContextFlagActive(EHudContextFlags.HUD_HIDE);
+		state.quickbar_hide = visibility.IsContextFlagActive(EHudContextFlags.QUICKBAR_HIDE);
+		state.visible = !state.hud_hide && !state.quickbar_hide;
+		result.hud = state;
+		result.ok = true;
+		return true;
+	}
+
+	// Vanilla missiongameplay.c:1119; ingamehud.c:373,1026;
+	// enwidgets.c:138. Read the widget Show changes, not the deprecated
+	// IsHudVisible stub. HUD_HIDE/QUICKBAR_HIDE remain separate context flags.
+	protected bool DispatchGameplayState(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		IngameHud hud = IngameHud.Cast(mission.GetHud());
+		IngameHudVisibility visibility;
+		Widget panel;
+		if (hud)
+		{
+			visibility = hud.GetHudVisibility();
+			panel = hud.GetHudPanelWidget();
+		}
+		if (!visibility || !panel)
+		{
+			result.ok = false;
+			result.error = "hud_unavailable";
+			return true;
+		}
+		MCPGameplayState state = new MCPGameplayState();
+		state.controls_suppressed = m_ControlsSuppressed;
+		state.engine_controls_disabled = mission.IsControlDisabled();
+		state.hud_shown = panel.IsVisible();
+		state.player_simulation_disabled = m_PlayerSimulationDisabled;
+		MCPHudState hudState = new MCPHudState();
+		hudState.hud_hide = visibility.IsContextFlagActive(EHudContextFlags.HUD_HIDE);
+		hudState.quickbar_hide = visibility.IsContextFlagActive(EHudContextFlags.QUICKBAR_HIDE);
+		hudState.visible = !hudState.hud_hide && !hudState.quickbar_hide;
+		result.gameplay = state;
+		result.hud = hudState;
+		result.ok = true;
+		return true;
 	}
 
 	protected bool DispatchCameraGet(MCPCommand command, MCPResult result)
@@ -5058,6 +5444,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			// Done once OnTick has finished the camera handoff (TickCameraHandoff).
 			return !m_CameraHandoffPending;
 		}
+		else if (job.kind == "camera_path_release")
+		{
+			// The same wait as restore_gameplay (Sol P2, 263t2).
+			return !m_CameraHandoffPending;
+		}
 		else if (job.kind == "input_trigger")
 		{
 			return ProcessInputTriggerJob(job);
@@ -5074,6 +5465,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessPlayerViewSetJob(job);
 		}
+		else if (job.kind == "actor_emote")
+		{
+			return ProcessActorEmoteJob(job);
+		}
 		else if (job.kind == "action_hold")
 		{
 			MCPHoldControl.Maintain();
@@ -5081,6 +5476,86 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		return false;
+	}
+
+	// One frame of the playing path: its clock moves by this frame's
+	// timeslice and the camera takes the pose at that time. A path is
+	// aborted, not moved, when its camera is no longer the bridge's (a
+	// camera_set, a restore, a release), when the engine no longer reports
+	// that camera active (camera_get makes the same IsActive check), or when
+	// the FreeDebugCamera singleton reports active: vanilla's developer free
+	// camera turns that singleton on from outside the bridge and leaves
+	// m_ActiveCam as it is (developerfreecamera.c:36-40, GetInstance at
+	// camera.c:84-90), and Camera.SetActive and IsActive (camera.c:45, :61)
+	// promise no exclusivity, so the path's camera may still read active.
+	// The same lines in 1.29 and 1.30. The bridge's own free camera is never
+	// on while a path plays: a camera_set and a restore stop the path first.
+	// Neither IsActive is read before the second OnTick after the play's
+	// dispatch (m_Tick counts OnTick calls, made once a frame from
+	// MissionGameplay.OnUpdate): those lines do not say when a SetActive shows
+	// in IsActive, here the play's SetActive(true) on its camera and
+	// SetActive(false) on a free camera left on, and a play dispatched from the
+	// poll callback ahead of OnTick shares the first OnTick's frame with them.
+	// The second OnTick comes a full frame later. The first still moves the path.
+	protected void TickCameraPath(float timeslice)
+	{
+		FreeDebugCamera freeCam;
+		MCPResult result;
+		if (!m_CameraPath || !m_CameraPath.IsPlaying())
+		{
+			return;
+		}
+		if (!m_CameraPathCam || m_ActiveCam != m_CameraPathCam)
+		{
+			StopCameraPath();
+			return;
+		}
+		if (m_Tick > m_CameraPathPlayTick + 1)
+		{
+			if (!m_CameraPathCam.IsActive())
+			{
+				StopCameraPath();
+				return;
+			}
+			freeCam = FreeDebugCamera.GetInstance();
+			if (freeCam && freeCam.IsActive())
+			{
+				StopCameraPath();
+				return;
+			}
+		}
+
+		m_CameraPath.Advance(timeslice);
+		m_CameraPath.Apply(m_CameraPathCam);
+		if (!m_CameraPath.IsPlaying())
+		{
+			// Keep the terminal path report, but relinquish camera ownership.
+			// The original play id also settles loopback lease cleanup, even
+			// if the immediate playing reply has already been consumed.
+			result = new MCPResult();
+			result.id = m_CameraPathCommandId;
+			result.ok = true;
+			result.camera_path = new MCPCameraPathState();
+			m_CameraPath.Fill(result.camera_path);
+			result.camera_path.command_id = m_CameraPathCommandId;
+			m_CameraPathCommandId = 0;
+			m_CameraPathCam = null;
+			ReleaseCamera();
+			RestoreGameplay();
+			PostResult(result);
+		}
+	}
+
+	// Ends a playing path as aborted where its camera stands now; a finished,
+	// aborted or idle path keeps its state. The camera stays as it is: it is
+	// m_ActiveCam, which camera_set and restore_gameplay release as usual.
+	protected void StopCameraPath()
+	{
+		if (m_CameraPath)
+		{
+			m_CameraPath.Abort();
+		}
+		m_CameraPathCam = null;
 	}
 
 	// A hold answers once its move is released. MaintainFromTick runs before
@@ -5224,24 +5699,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
+	// DispatchCameraSet applied the camera and queued this job in SETTLE; the
+	// job only waits out the settle and hands the report to MCP_PostJobSuccess.
+	// It reads nothing and does not end before the second OnTick after the
+	// dispatch (job.tick_dispatch is the dispatch's m_Tick), a full frame after
+	// the apply's SetActive, as TickCameraPath waits for a play's: an earlier
+	// CameraReadError could read the camera inactive and report the player view.
 	protected bool ProcessCameraSetJob(MCPJob job)
 	{
-		if (job.phase == CAMERA_PHASE_APPLY)
-		{
-			bool applied = ApplyCameraSet(job);
-			if (!applied)
-			{
-				RestoreGameplay();
-				return true;
-			}
-
-			job.sample_start_s = m_JobRunner.GetElapsedS();
-			job.phase = CAMERA_PHASE_SETTLE;
-			return false;
-		}
-
 		if (job.phase == CAMERA_PHASE_SETTLE)
 		{
+			if (m_Tick <= job.tick_dispatch + 1)
+			{
+				return false;
+			}
 			// Time-only settle. Camera.IsInterpolationComplete / GetCurrentFOV
 			// walk the same native camera object as GetCurrentCamera (SUB_BRZ
 			// 2026-09-08) and have frozen the client render after camera_set
@@ -5839,6 +6310,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		// A camera_set during a camera_path_play ends the path as aborted (d026).
+		StopCameraPath();
 		// A release still handing off would share the free camera and the player
 		// simulation with this apply: finish it first (f47b). No-op otherwise.
 		FinishCameraHandoff();
@@ -5888,6 +6361,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			cam.SetFOV(validation.fov);
 		}
+		// camera_set_focus only, with the arguments its dispatch checked (702f).
+		if (job.camera_focus)
+		{
+			cam.SetFocus(job.args.focus_distance, job.args.focus_blur);
+		}
 
 		cam.SetActive(true);
 		m_ActiveCam = cam;
@@ -5931,6 +6409,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (validation.fov > 0.0)
 		{
 			freeCam.SetFOV(validation.fov);
+		}
+		// The free camera is a singleton: the focus set here stays on it.
+		if (job.camera_focus)
+		{
+			freeCam.SetFocus(job.args.focus_distance, job.args.focus_blur);
 		}
 
 		freeCam.SetActive(true);
@@ -6032,6 +6515,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostResult(resultRestore);
 		}
 
+		// A matched camera_path_release's reply, posted once the camera handoff
+		// has finished (the dispatch posts the same reply itself when none ran).
+		if (job.kind == "camera_path_release")
+		{
+			MCPResult resultRelease = new MCPResult();
+			resultRelease.id = job.id;
+			resultRelease.ok = true;
+			resultRelease.matched = true;
+			resultRelease.tick_poll_sent = job.tick_poll_sent;
+			resultRelease.tick_poll_callback = job.tick_poll_callback;
+			resultRelease.tick_dispatch = job.tick_dispatch;
+			PostResult(resultRelease);
+		}
+
 		if (job.kind == "input_trigger")
 		{
 			PostInputTriggerJob(job);
@@ -6050,6 +6547,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "player_view_set")
 		{
 			PostPlayerViewSetJob(job);
+		}
+
+		// ProcessActorEmoteJob is done only when it saw the end.
+		if (job.kind == "actor_emote")
+		{
+			PostActorEmoteJob(job, true);
 		}
 
 		if (job.kind == "action_hold")
@@ -6156,6 +6659,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		// wait_s is over: started or timed_out.
+		if (job.kind == "actor_emote")
+		{
+			PostActorEmoteJob(job, false);
+			return;
+		}
+
 		if (job.kind == "action_hold")
 		{
 			PostActionHoldJob(job);
@@ -6168,6 +6678,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.id = job.id;
 		result.ok = false;
 		result.error = "timeout";
+		// A camera_path_release job is queued only for a matched release, which
+		// has already stopped the path, released the camera and restored
+		// gameplay; only the handoff wait timed out, so the match still holds.
+		if (job.kind == "camera_path_release")
+		{
+			result.matched = true;
+		}
 		result.tick_poll_sent = job.tick_poll_sent;
 		result.tick_poll_callback = job.tick_poll_callback;
 		result.tick_dispatch = job.tick_dispatch;
@@ -7036,6 +7553,399 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
+	// actor_emote (inbox 36fa): one emote on the local player through
+	// EmoteManager.CreateEmoteCBFromMenu, the call the gestures menu makes
+	// (1.29 and 1.30 gesturesmenu.c:655). EmoteManager.Update then sends the
+	// request and the server answers it as it answers a person's gesture
+	// (1.30 emotemanager.c:480, :538, :551). end asks the server to end the
+	// playing emote (EmoteManager.MCP_RequestEmoteEnd, MCP_Emote.c). Refused
+	// before anything is sent: a name outside the catalog or a wait_s outside
+	// 0.5..30 (bad_args), a local player that is not a PlayerBase (no_player;
+	// with no local player Dispatch answers client_not_in_game before this
+	// handler) or no emote manager (no_emote_manager); a new emote while
+	// IsEmotePlaying() reads true (an emote playing, a request pending or the
+	// player surrendered, 1.30 emotemanager.c:1328-1331), or one that
+	// CanPlayEmote and CanPlayEmoteClientCheck refuse (two of the checks
+	// SendEmoteRequestSync makes, 1.30 emotemanager.c:899), is emote_rejected;
+	// end while no emote plays (m_bEmoteIsPlaying false, a pending request
+	// included) is no_emote_playing. The job then watches m_bEmoteIsPlaying for
+	// wait_s (ProcessActorEmoteJob). An emote that is already playing is
+	// refused because the watch could not tell it from the new one; a pending
+	// request or a surrender the player made stays a refusal too (a request the
+	// server refused while surrendered would end in ClearSurrenderState,
+	// 1.30 emotemanager.c:314-315). So is any actor_emote, end included, while
+	// another one's job still watches: that emote may not play yet, and two
+	// jobs would watch the same flag.
+	protected bool DispatchActorEmote(MCPCommand command, MCPResult result)
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		int emoteId;
+		bool isEnd;
+		float waitS;
+		MCPJob job;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		isEnd = command.args.emote == "end";
+		emoteId = ActorEmoteId(command.args.emote);
+		if (!isEnd && emoteId <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		waitS = command.args.wait_s;
+		if (!IsStrictFinite(waitS) || waitS < ACTOR_EMOTE_WAIT_MIN_S || waitS > ACTOR_EMOTE_WAIT_MAX_S)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		if (m_JobRunner.CountOfKind("actor_emote") > 0)
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
+			return true;
+		}
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			result.ok = false;
+			result.error = "no_player";
+			return true;
+		}
+		emotes = player.GetEmoteManager();
+		if (!emotes)
+		{
+			result.ok = false;
+			result.error = "no_emote_manager";
+			return true;
+		}
+		if (isEnd)
+		{
+			if (!emotes.m_bEmoteIsPlaying)
+			{
+				result.ok = false;
+				result.error = "no_emote_playing";
+				result.emote_state = "rejected";
+				return true;
+			}
+			if (!emotes.MCP_RequestEmoteEnd())
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				return true;
+			}
+		}
+		else
+		{
+			if (emotes.IsEmotePlaying() || !emotes.CanPlayEmote(emoteId) || !emotes.CanPlayEmoteClientCheck(emoteId))
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				return true;
+			}
+			emotes.CreateEmoteCBFromMenu(emoteId);
+		}
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "actor_emote";
+		job.emote_end = isEnd;
+		job.emote_request_s = GetGame().GetTickTime();
+		job.wait_s = waitS;
+		job.deadline_s = m_JobRunner.GetElapsedS() + waitS;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	// actor_emote's closed catalog: each name is the EmoteConstants id of the
+	// same name, lowercase (1.30 constants.c:366-409), one that exists in 1.29
+	// and 1.30. Not the suicide emote (it kills the player) nor the debug id,
+	// nor vomit or surrender. vomit's EmoteStartOverride queues the vomit
+	// symptom, which has gameplay effects, in both versions
+	// (1.30 emoteclasses.c:753-768; 1.29 :760-775). surrender's differs by
+	// version: in 1.30 it only changes the surrender state and returns true
+	// (1.30 :449-453), so PlayEmote creates no callback
+	// (1.30 emotemanager.c:667-671); in 1.29 it plays its own surrender in and
+	// out callbacks (PlaySurrenderInOut, 1.29 emotemanager.c:1156, :1183,
+	// :1194) and changes the surrender state and the hands (1.29
+	// emoteclasses.c:449-460). In both the surrender state is one that
+	// IsEmotePlaying() reads, so every later emote, surrender included, would
+	// be emote_rejected: a surrender verb needs its own way out. The same names
+	// are ACTOR_EMOTES in loopback.py, plus end, which is not an id. 0 for any
+	// other name.
+	protected int ActorEmoteId(string emote)
+	{
+		if (emote == "greeting")
+		{
+			return EmoteConstants.ID_EMOTE_GREETING;
+		}
+		if (emote == "sos")
+		{
+			return EmoteConstants.ID_EMOTE_SOS;
+		}
+		if (emote == "heart")
+		{
+			return EmoteConstants.ID_EMOTE_HEART;
+		}
+		if (emote == "taunt")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNT;
+		}
+		if (emote == "lyingdown")
+		{
+			return EmoteConstants.ID_EMOTE_LYINGDOWN;
+		}
+		if (emote == "tauntkiss")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTKISS;
+		}
+		if (emote == "facepalm")
+		{
+			return EmoteConstants.ID_EMOTE_FACEPALM;
+		}
+		if (emote == "tauntelbow")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTELBOW;
+		}
+		if (emote == "thumb")
+		{
+			return EmoteConstants.ID_EMOTE_THUMB;
+		}
+		if (emote == "throat")
+		{
+			return EmoteConstants.ID_EMOTE_THROAT;
+		}
+		if (emote == "dance")
+		{
+			return EmoteConstants.ID_EMOTE_DANCE;
+		}
+		if (emote == "campfire")
+		{
+			return EmoteConstants.ID_EMOTE_CAMPFIRE;
+		}
+		if (emote == "sita")
+		{
+			return EmoteConstants.ID_EMOTE_SITA;
+		}
+		if (emote == "sitb")
+		{
+			return EmoteConstants.ID_EMOTE_SITB;
+		}
+		if (emote == "thumbdown")
+		{
+			return EmoteConstants.ID_EMOTE_THUMBDOWN;
+		}
+		if (emote == "dabbing")
+		{
+			return EmoteConstants.ID_EMOTE_DABBING;
+		}
+		if (emote == "timeout")
+		{
+			return EmoteConstants.ID_EMOTE_TIMEOUT;
+		}
+		if (emote == "clap")
+		{
+			return EmoteConstants.ID_EMOTE_CLAP;
+		}
+		if (emote == "point")
+		{
+			return EmoteConstants.ID_EMOTE_POINT;
+		}
+		if (emote == "silent")
+		{
+			return EmoteConstants.ID_EMOTE_SILENT;
+		}
+		if (emote == "salute")
+		{
+			return EmoteConstants.ID_EMOTE_SALUTE;
+		}
+		if (emote == "rps")
+		{
+			return EmoteConstants.ID_EMOTE_RPS;
+		}
+		if (emote == "watching")
+		{
+			return EmoteConstants.ID_EMOTE_WATCHING;
+		}
+		if (emote == "hold")
+		{
+			return EmoteConstants.ID_EMOTE_HOLD;
+		}
+		if (emote == "listening")
+		{
+			return EmoteConstants.ID_EMOTE_LISTENING;
+		}
+		if (emote == "pointself")
+		{
+			return EmoteConstants.ID_EMOTE_POINTSELF;
+		}
+		if (emote == "lookatme")
+		{
+			return EmoteConstants.ID_EMOTE_LOOKATME;
+		}
+		if (emote == "tauntthink")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTTHINK;
+		}
+		if (emote == "move")
+		{
+			return EmoteConstants.ID_EMOTE_MOVE;
+		}
+		if (emote == "down")
+		{
+			return EmoteConstants.ID_EMOTE_DOWN;
+		}
+		if (emote == "come")
+		{
+			return EmoteConstants.ID_EMOTE_COME;
+		}
+		if (emote == "rps_r")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_R;
+		}
+		if (emote == "rps_p")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_P;
+		}
+		if (emote == "rps_s")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_S;
+		}
+		if (emote == "nod")
+		{
+			return EmoteConstants.ID_EMOTE_NOD;
+		}
+		if (emote == "shake")
+		{
+			return EmoteConstants.ID_EMOTE_SHAKE;
+		}
+		if (emote == "shrug")
+		{
+			return EmoteConstants.ID_EMOTE_SHRUG;
+		}
+		return 0;
+	}
+
+	// actor_emote: the first tick m_bEmoteIsPlaying (1.30 emotemanager.c:127)
+	// reads true is the start, and a started emote that reads false again is
+	// finished. Its only writes are true once CreateEmoteCallback has the
+	// callback (1.30 :709-711) and false in OnEmoteEnd (1.30 :501-502), on this
+	// client too. A request still pending is not a start: IsEmotePlaying() also
+	// counts it (and the surrender state, 1.30 :1330), and a request the server
+	// refuses comes back as an INSTACANCEL (1.30 :537-552) that clears the
+	// pending flag with no callback (1.30 :304-312), which would read as
+	// started then finished. So the watch reads m_bEmoteIsPlaying alone, and
+	// such a request answers emote_timed_out. end starts nothing: it is
+	// finished once m_bEmoteIsPlaying reads false. No local player or emote
+	// manager reads as not playing.
+	// Times are GetTickTime seconds. A tick more than wait_s after the request
+	// records nothing and the watch goes on, so the job's deadline, wait_s
+	// after the request (MCP_PostJobTimeout, at the first runner tick past
+	// it), answers what was reached within wait_s; a tick at exactly wait_s
+	// still counts.
+	protected bool ProcessActorEmoteJob(MCPJob job)
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		bool playing;
+		float nowS;
+		nowS = GetGame().GetTickTime();
+		if (nowS - job.emote_request_s > job.wait_s)
+		{
+			return false;
+		}
+		playing = false;
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			emotes = player.GetEmoteManager();
+		}
+		if (emotes)
+		{
+			playing = emotes.m_bEmoteIsPlaying;
+		}
+		if (job.emote_end)
+		{
+			if (playing)
+			{
+				return false;
+			}
+			job.emote_finished_s = nowS;
+			return true;
+		}
+		if (playing)
+		{
+			if (!job.emote_started)
+			{
+				job.emote_started = true;
+				job.emote_started_s = nowS;
+			}
+			return false;
+		}
+		if (!job.emote_started)
+		{
+			return false;
+		}
+		job.emote_finished_s = nowS;
+		return true;
+	}
+
+	// actor_emote's answer. finished: the job saw the emote start and stop
+	// (for end, the playing emote stop) within wait_s. At the first tick past
+	// wait_s: started when it started within wait_s and did not stop within
+	// it, else emote_timed_out with emote_state timed_out. A new emote's
+	// request was sent, so it may still start later; for end the emote still
+	// plays, and the end may never have been sent (SendEmoteRequestSync's own
+	// checks, MCP_Emote.c).
+	// started_after_s and finished_after_s are GetTickTime seconds from the
+	// request; a time not reached stays 0 and the tool drops it.
+	protected void PostActorEmoteJob(MCPJob job, bool finished)
+	{
+		MCPResult result;
+		if (!job)
+		{
+			return;
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		if (job.emote_started)
+		{
+			result.started_after_s = job.emote_started_s - job.emote_request_s;
+		}
+		if (finished)
+		{
+			result.ok = true;
+			result.emote_state = "finished";
+			result.finished_after_s = job.emote_finished_s - job.emote_request_s;
+		}
+		else if (job.emote_started)
+		{
+			result.ok = true;
+			result.emote_state = "started";
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "emote_timed_out";
+			result.emote_state = "timed_out";
+		}
+		PostResult(result);
+	}
+
 	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
 	// the form the daemon and both installers write. It is the RestContext base
 	// that "poll?..." and "result?..." are appended to, so the final "/" belongs
@@ -7325,8 +8235,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void RestoreGameplay()
 	{
-		// Drops every override this bridge armed. Same method for the
-		// restore_gameplay command, vehicle get-in cleanup and shutdown.
+		// Drops every override this bridge armed on gameplay. Same method for the
+		// restore_gameplay command, vehicle get-in cleanup and shutdown. The
+		// camera is not gameplay: ReleaseCamera drops it, and a playing
+		// camera_path_play is stopped by the callers that run outside a job (the
+		// restore_gameplay dispatch and Shutdown), never from a job (d026).
 		MCPWeaponControl.ReleaseAll("cleared");
 		MCPLookAtControl.Release("restore");
 		// A held input_trigger key too. Shutdown releases first, as shutdown.
@@ -7707,6 +8620,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// Likewise for an active player_move, with one last best-effort send of
 		// its server release before the mission goes.
 		MCPPlayerMoveControl.ShutdownRelease();
+		// A playing camera_path_play ends with the mission (d026).
+		StopCameraPath();
 		RestoreGameplay();
 		// m_Shutdown is already set, so this finishes any camera handoff and
 		// deactivates and deletes at once (f47b).

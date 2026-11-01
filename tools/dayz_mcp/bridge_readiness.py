@@ -245,6 +245,8 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "scene_clear": ("scene_id",),
     "scene_entities": ("scene_id",),
     "server_perf": ("window_s",),
+    "survivor_drive": ("heading", "heading_set", "mode", "object_id", "speed", "speed_set"),
+    "survivor_drive_release": ("command_id", "object_id"),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
     # world_spawn joins for scene_id (165a): only this hash tells an older
     # bridge, which would leave the object out of the scene, from this one.
@@ -328,6 +330,8 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "scene_raycast": "scene_raycast",
         "server_perf": "server_perf",
         "surface_query": "surface_query",
+        "survivor_drive": "survivor_drive",
+        "survivor_drive_release": None,  # internal: the broker's drive cleanup
         "telemetry_read": "telemetry_read",
         "vehicle_door": "vehicle_door",
         "vehicle_enter": "vehicle_enter",
@@ -348,10 +352,16 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "action_use_component": "action_use",
         "action_use_door": "action_use",
         "action_use_target": "action_use",
+        "actor_emote": "actor_emote",
         "anim_timeline": "anim_timeline",
         "camera_get": "camera_get",
+        "camera_path_play": "camera_path_play",
+        "camera_path_release": "camera_path_release",
         "camera_set": "camera_set",
+        "camera_set_focus": "camera_set_focus",
         "engine_set": "engine_set",
+        "gameplay_state": "gameplay_state",
+        "hud_set": "hud_set",
         "input_describe": "input_describe",
         "input_trigger": "input_trigger",
         "key_press": "key_press",
@@ -430,6 +440,10 @@ def _compare_bridge_capabilities(
         and mapping[item] not in registered_tools
     )
     announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
+    # A play without its lease-end release cannot be admitted by loopback.
+    # Report the same capability requirement here instead of a false match.
+    if peer == "client" and "camera_path_release" not in announced_set:
+        announced_tools.discard("camera_path_play")
     not_announced = sorted(
         tool for tool in registered_bridge_tools if tool not in announced_tools
     )

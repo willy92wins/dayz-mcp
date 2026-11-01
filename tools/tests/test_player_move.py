@@ -647,7 +647,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only, and a
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "0401bed390754a55")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
@@ -1729,7 +1729,7 @@ class PlayerMovePayloadTest(unittest.TestCase):
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-16:],
+            result_prune.PRUNABLE_FIELDS[-19:],
             (
                 FIELD,
                 "player_trace",
@@ -1747,6 +1747,9 @@ class PlayerMovePayloadTest(unittest.TestCase):
                 "world_spawn_batch",
                 "scene_entities",
                 "scene_clear",
+                "camera_path",
+                "hud",
+                "gameplay",
             ),
         )
         self.assertEqual(

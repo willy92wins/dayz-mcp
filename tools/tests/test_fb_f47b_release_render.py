@@ -36,6 +36,7 @@ FINISH = "protected void FinishCameraHandoff()"
 QUEUE = "protected bool QueueRestoreGameplayJob(MCPCommand command, MCPResult result)"
 APPLY_STATIC = "protected bool ApplyCameraSet(MCPJob job)"
 APPLY_FREE = "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)"
+PATH_PLAY = "protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)"
 ON_TICK = "void OnTick(float timeslice)"
 CONSTRUCTOR = "void MCPClientBridge()"
 SHUTDOWN = "void Shutdown()"
@@ -224,14 +225,18 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
 
     def test_only_the_final_tick_turns_the_simulation_back_on_during_a_handoff(self) -> None:
         source = _source()
-        # Two statements turn the simulation back on: RestoreGameplay's, which a
-        # pending handoff skips, and FinishCameraHandoff's.
-        self.assertEqual(source.count("DisableSimulation(false)"), 2)
+        # Three statements turn the simulation back on: RestoreGameplay's, which a
+        # pending handoff skips, FinishCameraHandoff's, and a camera_path_play
+        # start's (d026), which comes after that start has finished any handoff.
+        self.assertEqual(source.count("DisableSimulation(false)"), 3)
         self.assertIn("player.DisableSimulation(false);", _body(_body(source, RESTORE_GAMEPLAY), SIM_ON_OUTSIDE_HANDOFF))
         self.assertIn("player.DisableSimulation(false);", _body(source, FINISH))
-        # The flag is cleared at birth and by those two statements only.
-        self.assertEqual(len(re.findall(r"\bm_PlayerSimulationDisabled\s*=\s*false;", source)), 3)
+        play = _body(source, PATH_PLAY)
+        self.assertLess(play.index("FinishCameraHandoff();"), play.index("player.DisableSimulation(false);"))
+        # The flag is cleared at birth and by those three statements only.
+        self.assertEqual(len(re.findall(r"\bm_PlayerSimulationDisabled\s*=\s*false;", source)), 4)
         self.assertIn("m_PlayerSimulationDisabled = false;", _body(source, CONSTRUCTOR))
+        self.assertIn("m_PlayerSimulationDisabled = false;", play)
         # Before the final tick, TickCameraHandoff only counts; FinishCameraHandoff
         # runs at CAMERA_HANDOFF_TICKS (or earlier from a camera_set apply or shutdown).
         tick = _body(source, TICK)
@@ -249,8 +254,8 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
         self.assertIn('m_JobRunner.CountExcluding("ui_dialog")', exclusive)
         self.assertNotIn("restore_gameplay", exclusive)
         self.assertIn("if (HasExclusiveJob())", _body(source, DISPATCH_SET))
-        # A camera_set that reaches apply anyway (the job timed out, or it was queued
-        # first) finishes the handoff before it touches a camera or the simulation.
+        # A camera_set that reaches apply anyway (the restore job timed out) finishes
+        # the handoff before it touches a camera or the simulation.
         apply = _body(source, APPLY_STATIC)
         finish = apply.index("FinishCameraHandoff();")
         self.assertLess(apply.index("ValidateCameraArgs(job.args)"), finish)
@@ -292,8 +297,9 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"\bm_CameraHandoffPending\s*=\s*false;", source)), 2)
         self.assertIn("m_CameraHandoffPending = false;", _body(source, CONSTRUCTOR))
         self.assertIn("m_CameraHandoffPending = false;", _body(source, FINISH))
-        # Every way a handoff ends goes through FinishCameraHandoff.
-        sites = {TICK: 1, RELEASE: 1, APPLY_STATIC: 1}
+        # Every way a handoff ends goes through FinishCameraHandoff; a camera_path_play
+        # start (d026) enters its staticcamera the way ApplyCameraSet does.
+        sites = {TICK: 1, RELEASE: 1, APPLY_STATIC: 1, PATH_PLAY: 1}
         for signature, count in sites.items():
             with self.subTest(site=signature):
                 self.assertEqual(_body(source, signature).count("FinishCameraHandoff();"), count)
@@ -302,12 +308,12 @@ class CameraReleaseHandoffSourceTest(unittest.TestCase):
     def test_round_one_retire_logic_is_gone(self) -> None:
         # The handoff deletes the staticcamera itself, so the retire-until-next-
         # camera_set state of round 1 (54c2508) went, and DeleteOwnedCamera is back on
-        # its three call sites.
+        # its three call sites, plus the camera_path_play start (d026).
         source = _source()
         for name in ("m_RetiredCam", "RetireOwnedCamera", "DeleteRetiredCamera"):
             with self.subTest(name=name):
                 self.assertNotIn(name, source)
-        sites = {APPLY_STATIC: 1, APPLY_FREE: 1, RELEASE: 1}
+        sites = {APPLY_STATIC: 1, APPLY_FREE: 1, RELEASE: 1, PATH_PLAY: 1}
         for signature, count in sites.items():
             with self.subTest(site=signature):
                 self.assertEqual(_body(source, signature).count("DeleteOwnedCamera();"), count)

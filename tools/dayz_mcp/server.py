@@ -21,6 +21,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Iterator, Literal
 
 import anyio
+from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
@@ -76,7 +77,13 @@ from dayz_mcp.action_hold import (
     parse_action_selector,
     validate_hold_budget,
 )
-from dayz_mcp.agent_loop import PUBLIC_NEXT_TOOLS, next_step, ok_next_step, with_next_step
+from dayz_mcp.agent_loop import (
+    PUBLIC_NEXT_TOOLS,
+    filter_next_step_text,
+    next_step,
+    ok_next_step,
+    with_next_step,
+)
 from dayz_mcp.knowledge import register_knowledge_tools
 from dayz_mcp.occupant_seat import occupant_client_seated
 from dayz_mcp.peer_liveness import (
@@ -89,6 +96,7 @@ from dayz_mcp.lease_result_ttl import (
     LEASE_LOCAL_TOOL,
     LEASE_TTL_OBSERVE_TOOL,
     install_lease_ttl_annotation,
+    is_internal_probe,
     observe_caller_presence,
 )
 from dayz_mcp.server_freshness import (
@@ -101,6 +109,11 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    ACTOR_EMOTE_END,
+    ACTOR_EMOTE_WAIT_MAX_S,
+    ACTOR_EMOTE_WAIT_MIN_S,
+    ACTOR_EMOTE_WAIT_SLACK_S,
+    ACTOR_EMOTES,
     BOT_START_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
@@ -111,6 +124,7 @@ from dayz_mcp.loopback import (
     SCENE_ID_MAX_CHARS,
     SPAWN_BATCH_ITEMS_MAX,
     SPAWN_BATCH_PER_TICK_MAX,
+    SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
     LoopbackServer,
     _FENCE_OMITTED,
     is_printable_input_name,
@@ -149,6 +163,7 @@ from dayz_mcp.session_coordination import (
 from dayz_mcp.steam_preflight import STEAM_APP_VIEW_STALE, observe_app_steam_view
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
+from dayz_mcp import camera_path as camera_path_contract
 from dayz_mcp import loadout as loadout_contract
 from dayz_mcp import player_move as player_move_contract
 from dayz_mcp import player_trace as player_trace_contract
@@ -354,6 +369,279 @@ playbook_tool_mod.load_runner()
 # Freeze at import, before build_app can be delayed or repeated.
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())
 
+
+def _live_from_status_payload(payload: Any) -> bool | None:
+    """Live profile published by the serving daemon on /status, or None."""
+    if not isinstance(payload, dict):
+        return None
+    live = payload.get("live_profile")
+    return live if isinstance(live, bool) else None
+
+
+def _serving_state(runtime: Any) -> Any:
+    loopback = getattr(runtime, "loopback", None)
+    if loopback is not None:
+        return getattr(loopback, "state", None)
+    try:
+        return getattr(runtime, "state", None)
+    except Exception:
+        return None
+
+
+def _serving_live_known(runtime: Any) -> bool:
+    """True when the serving authority's live profile has been observed."""
+    if runtime is None:
+        return False
+    live = getattr(_serving_state(runtime), "live_profile", None)
+    if isinstance(live, bool):
+        return True
+    return isinstance(getattr(runtime, "_serving_live_profile", None), bool)
+
+
+def _is_client_authority(config: Any, runtime: Any) -> bool:
+    if runtime is None:
+        return False
+    if getattr(config, "mode", None) == "client":
+        return True
+    # Bare ClientRuntime instances carry the serving-profile cache.
+    return hasattr(runtime, "_serving_live_profile") or hasattr(
+        runtime, "_serving_live_generation"
+    )
+
+
+def _serving_live_unknown(config: Any, runtime: Any) -> bool:
+    """True for a client daemon whose profile has not been confirmed."""
+    if runtime is None or _serving_live_known(runtime):
+        return False
+    return _is_client_authority(config, runtime)
+
+
+def _forget_serving_live_profile(runtime: Any) -> None:
+    """Drop a cached serving profile so it reads as unknown (fail-closed).
+
+    A failed probe must not keep serving hints from a profile learned
+    from an earlier daemon: unknown resolves to the restrictive set in
+    _serving_live_enabled / _install_next_step_profile_filter.
+    """
+    if runtime is None:
+        return
+    try:
+        if hasattr(runtime, "_serving_live_profile"):
+            runtime._serving_live_profile = None
+    except Exception:
+        pass
+
+
+async def _refresh_serving_live_profile_no_spawn(
+    runtime: Any, timeout_s: float
+) -> None:
+    """Revalidate the serving profile without ever spawning a daemon.
+
+    Prefers an instance-level ``bridge_status_payload`` double (tests),
+    then ``ClientRuntime.probe_serving_live_profile_no_spawn`` (direct
+    ``GET /status`` via ``_request_once``, no ``_ensure_daemon``), then
+    ``_daemon_healthy`` in a thread, then a non-client fake's status.
+    """
+    if runtime is None:
+        return
+    instance_dict = getattr(runtime, "__dict__", None)
+    mocked = (
+        instance_dict.get("bridge_status_payload")
+        if isinstance(instance_dict, dict)
+        else None
+    )
+    if callable(mocked):
+        try:
+            try:
+                result = mocked(timeout_s=timeout_s)
+            except TypeError:
+                result = mocked()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        learn = getattr(runtime, "_learn_serving_live_profile", None)
+        if callable(learn) and isinstance(result, dict):
+            learn(result)
+        else:
+            _forget_serving_live_profile(runtime)
+        return
+    probe = getattr(runtime, "probe_serving_live_profile_no_spawn", None)
+    if callable(probe):
+        try:
+            result = probe(timeout_s=timeout_s)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+        return
+    healthy = getattr(runtime, "_daemon_healthy", None)
+    if callable(healthy):
+        deadline = time.monotonic() + float(timeout_s)
+        try:
+            healthy_ok = await asyncio.to_thread(healthy, deadline)
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        if not healthy_ok:
+            _forget_serving_live_profile(runtime)
+        return
+    status_fn = getattr(runtime, "bridge_status_payload", None)
+    if callable(status_fn) and not _is_client_authority(None, runtime):
+        try:
+            try:
+                result = status_fn(timeout_s=timeout_s)
+            except TypeError:
+                result = status_fn()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            _forget_serving_live_profile(runtime)
+            return
+        learn = getattr(runtime, "_learn_serving_live_profile", None)
+        if callable(learn) and isinstance(result, dict):
+            learn(result)
+        else:
+            _forget_serving_live_profile(runtime)
+
+
+def _serving_live_enabled(config: Any, runtime: Any = None) -> bool:
+    """Whether the authority serving this server enforces the B4 live profile.
+
+    The authority is the ServerState that will accept the commands: the
+    in-process state in embedded mode, or the daemon a client reuses,
+    learned from that daemon's own /status payload (see
+    ClientRuntime._learn_serving_live_profile and _run_daemon). The local
+    process environment is never consulted: a reused daemon fixed its
+    profile from its own environment at spawn (daemon.build_server_state),
+    which may differ from this client's. An explicit ServerConfig boolean
+    is only the pre-serving fallback (embedded construction, tests); with
+    no authority observed and no explicit value the profile is off, which
+    is the serving state's own default.
+    """
+    if runtime is not None:
+        live = getattr(_serving_state(runtime), "live_profile", None)
+        if isinstance(live, bool):
+            return live
+        cached = getattr(runtime, "_serving_live_profile", None)
+        if isinstance(cached, bool):
+            return cached
+        # Fail-closed: a client daemon whose profile is unknown (old
+        # daemon without live_profile, or a failed probe) is treated
+        # as live/restrictive until its profile is confirmed.
+        if _serving_live_unknown(config, runtime):
+            return True
+    explicit = getattr(config, "live_profile", None)
+    if isinstance(explicit, bool):
+        return explicit
+    return False
+
+
+def _effective_next_tools(
+    config: Any, runtime: Any = None
+) -> frozenset[str]:
+    """Hint tools for one server: tool pack intersected with the live profile."""
+    return tool_pack_mod.effective_next_tools(
+        config.tool_pack, live_enabled=_serving_live_enabled(config, runtime)
+    )
+
+
+def _profile_ok_next_step(
+    result: dict[str, Any],
+    cmd: str,
+    pack: str = "full",
+    allowed: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """_with_ok_next_step with the hint filtered to the effective profile (C4).
+
+    A next_step outside the effective set (for example dayz_test_run under
+    --tool-pack admin, or any knowledge hint while the daemon live profile
+    is on) is replaced by the next public tool the set does expose, or
+    dropped when there is none. The full pack with the profile off keeps
+    the hint exactly as before.
+    """
+    payload = _with_ok_next_step(result, cmd)
+    if not isinstance(payload, dict):
+        return payload
+    existing = payload.get("next_step")
+    if not isinstance(existing, str):
+        return payload
+    if allowed is None:
+        allowed = tool_pack_mod.next_step_tools(pack)
+    if existing in allowed:
+        return payload
+    follow = ok_next_step(
+        cmd, mutating=command_requires_lease(cmd), allowed=allowed
+    )
+    payload = dict(payload)
+    if follow is None:
+        payload.pop("next_step", None)
+    else:
+        payload["next_step"] = follow
+    return payload
+
+
+def _install_next_step_profile_filter(
+    app: FastMCP,
+    allowed: frozenset[str] | Callable[[], frozenset[str]],
+    *,
+    runtime: Any = None,
+    config: Any = None,
+) -> None:
+    """Filter error next_step tokens at the MCP boundary (C4).
+
+    Error text is built where the profile is unknown (the knowledge
+    remedies are import-time constants naming dayz_knowledge_prepare /
+    dayz_knowledge_status), so success-path filtering cannot reach it.
+    Installed after the lease-TTL decorator and before the freshness
+    wrapper, so every error result that leaves over MCP is rewritten and
+    the freshness marker is still appended outermost. The allowed set is
+    resolved per error from the serving authority, not frozen at
+    build_app time: in client mode a daemon reused by this process may
+    enforce a different profile than this process was configured with,
+    so a client authority is revalidated from that daemon's /status
+    before filtering, bound to its daemon generation. The probe never
+    spawns a daemon and is skipped when the error carries no hint.
+    An unknown profile is restrictive (fail-closed) until confirmed.
+    """
+    installed = app._mcp_server
+    handlers = installed.request_handlers
+    original = handlers[mcp_types.CallToolRequest]
+
+    async def handler(
+        request: mcp_types.CallToolRequest,
+    ) -> mcp_types.ServerResult:
+        if is_internal_probe(request):
+            return await original(request)
+        response = await original(request)
+        result = response.root
+        if not isinstance(result, mcp_types.CallToolResult) or not result.isError:
+            return response
+        has_hint = any(
+            isinstance(block, mcp_types.TextContent) and "next_step=" in block.text
+            for block in result.content
+        )
+        if not has_hint:
+            return response
+        if runtime is not None and _is_client_authority(config, runtime):
+            try:
+                await _refresh_serving_live_profile_no_spawn(
+                    runtime, LIVENESS_STATUS_TIMEOUT_S
+                )
+            except Exception:
+                pass
+        resolved = allowed() if callable(allowed) else allowed
+        if runtime is not None and _serving_live_unknown(config, runtime):
+            resolved = resolved & tool_pack_mod.LIVE_NEXT_TOOLS
+        for block in result.content:
+            if isinstance(block, mcp_types.TextContent):
+                block.text = filter_next_step_text(block.text, resolved)
+        return response
+
+    handlers[mcp_types.CallToolRequest] = handler
+
+
 UiClickMode = Literal["direct", "complete"]
 InventoryAttachDest = Literal["attachment", "cargo"]
 UiReloadLayoutMode = Literal["reload", "close"]
@@ -387,6 +675,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # A mistyped scene_id key must not create a batch outside its scene, where
     # scene_clear never reaches it: an unknown key is refused, not dropped.
     "world_spawn_batch",
+    # A mistyped key (heading_deg=, timeout=) must not walk a survivor or
+    # play an emote on defaults: an unknown key is refused, not dropped.
+    "survivor_drive",
+    "actor_emote",
 )
 
 
@@ -842,6 +1134,13 @@ class ServerConfig:
     auto_spawn_daemon: bool = True
     # Opt-in small-model surface. The full public registry remains the default.
     tool_pack: str = "full"
+    # B4 live profile as declared for this server (None: no declaration).
+    # Only a pre-serving fallback for next_step hints (C4): the profile
+    # that actually filters hints is read from the serving authority
+    # (the in-process ServerState, or a reused daemon's /status), never
+    # from this process's environment.
+    live_profile: bool | None = None
+    live_admin_enabled: bool | None = None
     # Client mode lists a compact catalog until a lease is held and relies on the
     # host re-listing after tools/list_changed. Claude Code does not (#93, e7ef),
     # so client_platform claude lists everything from the start whatever this
@@ -1064,11 +1363,23 @@ class Runtime:
         self.loopback = None
 
     def status(self) -> dict[str, Any]:
-        return core.build_status(
+        payload = core.build_status(
             self.state.status_snapshot(),
             require_version=self.config.require_version,
             expected_game_version=self.config.expected_game_version,
         )
+        # The serving state is the authority clients learn the profile
+        # from (C4); publish it next to the rest of /status. A state
+        # without a boolean profile (test doubles, older states) is
+        # unknown, not full: fail closed as live/restrictive, matching
+        # _serving_live_enabled, and keep admin disabled.
+        live = getattr(self.state, "live_profile", None)
+        payload["live_profile"] = live if isinstance(live, bool) else True
+        admin = getattr(self.state, "live_admin_enabled", None)
+        payload["live_admin_enabled"] = (
+            admin if isinstance(admin, bool) else False
+        )
+        return payload
 
     def _version_state_for(self, version: str | None) -> tuple[str, str]:
         return core.version_state_for(
@@ -1179,7 +1490,11 @@ class Runtime:
             raise
         finally:
             _drop_broker_admit(self, command_id)
-        return _with_bridge_success_hints(self, cmd, result)
+        return _profile_ok_next_step(
+            _with_bridge_success_hints(self, cmd, result),
+            cmd,
+            allowed=_effective_next_tools(self.config, runtime=self),
+        )
 
     async def call_exec_enforce(self, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         self.touch()
@@ -1403,6 +1718,111 @@ class ClientRuntime:
     # answer for the closed default.
     _allow_stale_policy: bool = False
     _carrier_io_hook: Callable[[int, bool], None] | None = None
+    # Live profile of the daemon that actually serves this client, learned
+    # from that daemon's /status (C4). None until a serving daemon answers:
+    # a reused daemon fixed its profile at spawn, so the client's own
+    # config/environment must not stand in for it.
+    _serving_live_profile: bool | None = None
+    _serving_live_generation: str | None = None
+
+    def _learn_serving_live_profile(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        generation = payload.get("daemon_generation")
+        gen = generation if isinstance(generation, str) and generation else None
+        cached_gen = getattr(self, "_serving_live_generation", None)
+        if gen is not None and cached_gen is not None and gen != cached_gen:
+            # New daemon generation: the cached profile belonged to the
+            # previous daemon and must not be reused.
+            self._serving_live_profile = None
+            self._serving_live_generation = gen
+        live = _live_from_status_payload(payload)
+        if live is None:
+            # Unknown for this generation stays unknown (fail-closed):
+            # a payload that teaches nothing must not confirm a profile
+            # cached from an earlier daemon.
+            self._serving_live_profile = None
+            if gen is not None:
+                self._serving_live_generation = gen
+            return
+        self._serving_live_profile = live
+        if gen is not None:
+            self._serving_live_generation = gen
+        elif cached_gen is None:
+            self._serving_live_generation = None
+
+    def _probe_serving_live_profile_sync(self, timeout_s: float) -> bool:
+        """GET /status without spawning; True when a payload was learned.
+
+        Any failure forgets the cached profile (fail-closed): a stale
+        full profile must not keep authorising hints after the probe
+        that was supposed to revalidate it has failed.
+        """
+        if getattr(self, "_probe", None) is not None:
+            try:
+                deadline = self._time_fn() + float(timeout_s)
+                healthy = bool(self._daemon_healthy(deadline))
+            except Exception:
+                _forget_serving_live_profile(self)
+                return False
+            if not healthy:
+                _forget_serving_live_profile(self)
+            return healthy
+        if getattr(self, "_credential_provider", None) is None:
+            _forget_serving_live_profile(self)
+            return False
+        try:
+            status, payload = self._request_once(
+                "GET", "/status", timeout=float(timeout_s)
+            )
+        except Exception:
+            _forget_serving_live_profile(self)
+            return False
+        if status != 200:
+            _forget_serving_live_profile(self)
+            return False
+        try:
+            self._learn_serving_live_profile(payload)
+        except Exception:
+            _forget_serving_live_profile(self)
+            return False
+        return True
+
+    async def probe_serving_live_profile_no_spawn(
+        self, *, timeout_s: float = LIVENESS_STATUS_TIMEOUT_S
+    ) -> bool:
+        """No-spawn revalidation of the serving profile (C4 r4).
+
+        An instance-level ``bridge_status_payload`` double is honoured
+        so tests can inject the daemon's answer without a subprocess;
+        the real path uses ``_request_once`` directly and never calls
+        ``_ensure_daemon`` / ``_call`` (which would autospawn).
+        """
+        instance_dict = getattr(self, "__dict__", None)
+        mocked = (
+            instance_dict.get("bridge_status_payload")
+            if isinstance(instance_dict, dict)
+            else None
+        )
+        if callable(mocked):
+            try:
+                try:
+                    result = mocked(timeout_s=timeout_s)
+                except TypeError:
+                    result = mocked()
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception:
+                _forget_serving_live_profile(self)
+                return False
+            if isinstance(result, dict):
+                self._learn_serving_live_profile(result)
+                return True
+            _forget_serving_live_profile(self)
+            return False
+        return await asyncio.to_thread(
+            self._probe_serving_live_profile_sync, float(timeout_s)
+        )
 
     def __init__(
         self,
@@ -2195,6 +2615,7 @@ class ClientRuntime:
             expected_generation=None,
         ):
             raise ToolError("daemon_health_invalid_response")
+        self._learn_serving_live_profile(payload)
         return True
 
     def _daemon_missing_error(self) -> str:
@@ -2479,7 +2900,11 @@ class ClientRuntime:
                 if str(exc).startswith("timeout waiting"):
                     await _shielded_broker_cleanup(self, command_id, "tool_timeout")
                 raise
-            return _with_bridge_success_hints(self, cmd, result)
+            return _profile_ok_next_step(
+                _with_bridge_success_hints(self, cmd, result),
+                cmd,
+                allowed=_effective_next_tools(self.config, runtime=self),
+            )
         finally:
             self._allow_stale_policy = previous
             _drop_broker_admit(self, command_id)
@@ -2838,6 +3263,7 @@ class ClientRuntime:
         )
         if status != 200:
             raise ToolError(str(payload.get("error") or payload))
+        self._learn_serving_live_profile(payload)
         # B1: compare capabilities (ach) before ready when tools are supplied.
         if registered_tools is not None:
             payload = _with_capability_comparison(
@@ -5196,11 +5622,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         client = _client_runtime()
         steam_view = await _observe_steam_app_view()
         async with client.tool_lock:
-            return _with_ok_next_step(
+            return _profile_ok_next_step(
                 _annotate_steam_app_view(
                     await client.session_acquire(purpose.strip()), steam_view
                 ),
                 "session_acquire",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5211,11 +5638,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_ticket")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
+            return _profile_ok_next_step(
                 await client.session_wait(
                     ticket, _require_range(timeout_s, 0.0, 30.0, "bad_wait_timeout")
                 ),
                 "session_wait",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5259,11 +5687,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         # tools/list_changed for the revealed catalog is sent by
         # _install_catalog_change_notice once this call returns.
-        return _with_ok_next_step(
+        return _profile_ok_next_step(
             _annotate_steam_app_view(
                 _annotate_caller_tool_registry(payload, caller_stale), steam_view
             ),
             "session_acquire_wait",
+            allowed=_effective_next_tools(config, runtime=runtime),
         )
 
     app.add_tool(
@@ -5280,8 +5709,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_ticket")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_cancel(ticket), "session_cancel"
+            return _profile_ok_next_step(
+                await client.session_cancel(ticket),
+                "session_cancel",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5300,8 +5731,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_lease_token")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_heartbeat(lease_token), "session_heartbeat"
+            return _profile_ok_next_step(
+                await client.session_heartbeat(lease_token),
+                "session_heartbeat",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5315,8 +5748,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_lease_token")
         client = _client_runtime()
         async with client.tool_lock:
-            return _with_ok_next_step(
-                await client.session_release(lease_token), "session_release"
+            return _profile_ok_next_step(
+                await client.session_release(lease_token),
+                "session_release",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -5373,8 +5808,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 status, caller_session or None
             )
             await _attach_revalidated_runs_retired_recently(client, status)
-            return _with_ok_next_step(
-                _annotate_steam_app_view(status, steam_view), "session_status"
+            return _profile_ok_next_step(
+                _annotate_steam_app_view(status, steam_view),
+                "session_status",
+                allowed=_effective_next_tools(config, runtime=runtime),
             )
 
     @app.tool(
@@ -7181,13 +7618,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "PLAYER_BOT_TEST_SPAWN_OPEN_EAT, PLAYER_BOT_TEST_SWAP_G2H, "
             "PLAYER_BOT_TEST_SWAP_INTERNAL). ttl_s is how long the server keeps "
             "it running, from just above 0 to 30 seconds, default 5. A second "
-            "start while one is active is bot_busy. On 1.29, and on a 1.30 "
-            "build without the bot macros, the answer is bot_unavailable and "
-            "nothing is initialized. The answer is bot: object_id, action, "
-            "started, ttl_s. started means the bot FSM accepted the transition, "
-            "not that the action's effect happened. Errors: bad_args, "
-            "bot_unavailable, object_not_found, not_dummy_player, player_dead, "
-            "bot_busy, bot_action_rejected."
+            "start while one is active is bot_busy. A survivor that "
+            "survivor_drive walks is drive_busy and nothing changes: release "
+            "the drive first with survivor_drive(mode='release'). On 1.29, "
+            "and on a 1.30 build without the bot macros, the answer is "
+            "bot_unavailable and nothing is initialized. The answer is bot: "
+            "object_id, action, started, ttl_s. started means the bot FSM "
+            "accepted the transition, not that the action's effect happened. "
+            "Errors: bad_args, bot_unavailable, drive_busy, object_not_found, "
+            "not_dummy_player, player_dead, bot_busy, bot_action_rejected."
         )
     )
     async def bot_start(
@@ -7427,6 +7866,99 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["speed_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("infected_drive", args, "server", _timeout(timeout_s))
+
+    # Probe verb (inbox c801): walk a world_spawn survivor through its server
+    # input overrides, re-applied on every server bridge tick.
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Walk a survivor this bridge spawned (object_id "
+            "from world_spawn: a PlayerBase with no connected player) on the "
+            "server, through its HumanInputController alone: "
+            "OverrideMovementSpeed and OverrideMovementAngle ENABLED, the angle "
+            "recomputed on every server bridge tick from the survivor's own "
+            "heading, so it keeps walking toward heading. heading is compass "
+            "DEGREES (0 north = +Z, 90 east = +X), finite, within -"
+            f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g} to "
+            f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}; speed is walk, jog or "
+            "sprint (OverrideMovementSpeed 1, 2, 3, as player_move; not m/s). "
+            "A drive needs both; a new drive on a driven survivor replaces its "
+            "heading and speed. mode='release', with neither heading nor speed, "
+            "sets the overrides DISABLED and ends the drive; on a survivor that "
+            "is not driven it changes nothing. The end of the lease that sent "
+            "the drive ends it too: the broker queues its release "
+            "(survivor_drive_release), which stops the drive only while that "
+            "call's drive is the one set. A call that times out or is "
+            "cancelled after the server received it still runs, and its "
+            "release is queued only if its result is not stored yet and the "
+            "queue admits the release: once the result is stored, nothing is "
+            "queued and the drive keeps going until a mode='release' or the "
+            "end of the lease. Nothing else ends a drive but the survivor's "
+            "death, its object_delete and the bridge shutting down: until one "
+            "of those the survivor keeps walking. A probe like "
+            "infected_drive: if the survivor does not move, that is the "
+            "finding. The answer is pos_real, the survivor's position read "
+            "back on the call. Refused before anything changes: bad_args, "
+            "object_id_unknown, object_id_stale, bad_target (not a survivor), "
+            "refused_player_controlled (a connected player), player_dead, "
+            "bot_busy (a bot_start action runs on it), no_input_controller. "
+            "While driven, the survivor refuses bot_start the same way "
+            "(drive_busy) until mode='release'. A PBO without the verb: "
+            "bridge_capability_missing or arg_contract_mismatch, and nothing "
+            "is sent."
+        )
+    )
+    async def survivor_drive(
+        object_id: StrictInt,
+        heading: StrictFloat | None = None,
+        speed: StrictStr | None = None,
+        mode: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
+        args: dict[str, Any] = {"object_id": object_id}
+        if mode is not None:
+            if mode != "release":
+                raise ToolError(_bad_args("mode", mode, "be 'release' or omitted"))
+            if heading is not None:
+                raise ToolError(
+                    _bad_args("heading", heading, "be omitted when mode is 'release'")
+                )
+            if speed is not None:
+                raise ToolError(
+                    _bad_args("speed", speed, "be omitted when mode is 'release'")
+                )
+            args["mode"] = mode
+        else:
+            if heading is None:
+                raise ToolError(
+                    _bad_args("heading", heading, "be provided when mode is omitted")
+                )
+            if speed is None:
+                raise ToolError(
+                    _bad_args("speed", speed, "be provided when mode is omitted")
+                )
+            heading_error = _bad_args(
+                "heading",
+                heading,
+                "be a finite number of compass degrees within "
+                f"[-{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}, "
+                f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}]",
+            )
+            heading_value = _finite_float(heading, heading_error)
+            if abs(heading_value) > SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:
+                raise ToolError(heading_error)
+            if speed not in player_move_contract.SPEEDS:
+                raise ToolError(
+                    _bad_args("speed", speed, "be one of 'walk', 'jog' or 'sprint'")
+                )
+            # Each value travels with its presence flag (fb-20260930-065425-8779).
+            args["heading"] = heading_value
+            args["heading_set"] = True
+            args["speed"] = player_move_contract.SPEEDS[speed]
+            args["speed_set"] = True
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("survivor_drive", args, "server", _timeout(timeout_s))
 
     # Spawn into a player's inventory.
     @app.tool(
@@ -8580,12 +9112,28 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "run 8834df0e, 2026-10-04); fov=0 keeps the current FOV and does not "
         "guarantee resetting to that measured default, the singleton free "
         "camera included. "
+        "focus_distance (metres, above 0, also as the 32-bit float the bridge "
+        "reads) and focus_blur (0, or above 0 also as that float), each at most "
+        "1e9, go together or not at all; one without the other is bad_args. "
+        "Given, the applied camera also gets Camera.SetFocus(focus_distance, "
+        "focus_blur), its depth of field, and a successful apply echoes them as "
+        "top-level focus_applied {distance, blur}; omitted, the focus is left "
+        "as it is and focus_applied is null. focus_applied is an echo of the "
+        "values sent, not a read-back: Camera has no focus getter. Whether the "
+        "blur shows may depend on the client's depth-of-field video option, "
+        "which is not measured. The free camera is a singleton and keeps the "
+        "last focus set on it. A call with focus is refused as "
+        "bridge_capability_missing, with nothing sent, while the client bridge "
+        "bound to the run does not announce camera_set_focus, as one older than "
+        "this release does not; with no client bound, the loopback's binding "
+        "fence refuses it first (legacy_unbound in the plain case). "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
         "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV): "
         "settle_ticks * 0.05 seconds, and 0 keeps the default of three ticks (0.15 s). "
         "settle_ticks must be an integer from 0 to 600. timeout_s has to cover that "
         "settle plus bridge processing and transport. A timeout does not prove the "
-        "camera was not applied; the job may already have moved it. "
+        "camera was not applied: the bridge applies it when the command arrives, "
+        "before the settle. "
         "Use restore_gameplay to leave the scripted camera; camera_get.view is the observer."
     ))
     async def camera_set(
@@ -8597,6 +9145,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fov: StrictFloat = 0.0,
         settle_ticks: StrictInt = 3,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+        focus_distance: StrictFloat | None = None,
+        focus_blur: StrictFloat | None = None,
     ) -> dict[str, Any]:
         # The wire value is `lookat`, but the vector argument sitting
         # right beside it is `look_at`, so a caller naturally spells the mode
@@ -8645,13 +9195,48 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "(0 keeps the default of three ticks; each tick is 0.05 s)"
             )
         args["settle_ticks"] = settle_ticks
+        # 702f: the two Camera.SetFocus arguments travel together, on the
+        # camera_set_focus command, so a bridge that does not know them answers
+        # for the command instead of dropping them; camera_set never carries them.
+        command = "camera_set"
+        focus_applied: dict[str, float] | None = None
+        if (focus_distance is None) != (focus_blur is None):
+            raise ToolError(
+                "bad_args: focus_distance and focus_blur go together; give both or neither"
+            )
+        if focus_distance is not None and focus_blur is not None:
+            # The ingress makes the same check (camera_path.py): a finite
+            # Python float can still be infinite or 0 as the bridge's float.
+            distance = camera_path_contract.focus_distance(focus_distance)
+            if distance is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_distance",
+                        focus_distance,
+                        "be a number of metres above 0, also as a 32-bit float, "
+                        "and at most 1e9",
+                    )
+                )
+            blur = camera_path_contract.focus_blur(focus_blur)
+            if blur is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_blur",
+                        focus_blur,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
+            args["focus_distance"] = distance
+            args["focus_blur"] = blur
+            command = "camera_set_focus"
+            focus_applied = {"distance": distance, "blur": blur}
         async with runtime.tool_lock:
             result: dict[str, Any] | None = None
             failed = False
             reason: str | None = None
             try:
                 result = await runtime.call_bridge(
-                    "camera_set", args, "client", _timeout(timeout_s)
+                    command, args, "client", _timeout(timeout_s)
                 )
             except Exception as exc:
                 failed = True
@@ -8695,7 +9280,38 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         camera_observation = result.get("camera")
         if result.get("ok") and isinstance(camera_observation, dict) and camera_observation.get("ok"):
             result["fov_applied"] = fov_value if fov_value > 0.0 else None
+            # 702f: the same rule; omitted focus sent no SetFocus, an explicit null.
+            result["focus_applied"] = focus_applied
         return result
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Set the client camera and its depth of field. "
+        "Same modes, pose, FOV, settle and result as camera_set, with required "
+        "focus_distance and focus_blur. Distance is metres above 0; blur is "
+        "non-negative; both must remain valid as 32-bit floats and be at most "
+        "1e9. Uses camera_set_focus on the bridge. focus_applied echoes the "
+        "values sent to Camera.SetFocus, not a native readback. Visibility "
+        "of blur depends on the client's video options. Use restore_gameplay "
+        "to release the camera."
+    ))
+    async def camera_set_focus(
+        cam_mode: StrictStr,
+        focus_distance: StrictFloat,
+        focus_blur: StrictFloat,
+        cam_pos: list[StrictFloat] | None = None,
+        cam_orientation: list[StrictFloat] | None = None,
+        look_at: list[StrictFloat] | None = None,
+        cam_matrix: list[StrictFloat] | None = None,
+        fov: StrictFloat = 0.0,
+        settle_ticks: StrictInt = 3,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        return await camera_set(
+            cam_mode=cam_mode, cam_pos=cam_pos, cam_orientation=cam_orientation,
+            look_at=look_at, cam_matrix=cam_matrix, fov=fov,
+            settle_ticks=settle_ticks, timeout_s=timeout_s,
+            focus_distance=focus_distance, focus_blur=focus_blur,
+        )
 
     @app.tool(description=(
         "Read the client camera through camera_get. Observable trichotomy "
@@ -8719,6 +9335,118 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         args = {"cam_mode": cam_mode} if cam_mode else {}
         async with runtime.tool_lock:
             return await runtime.call_bridge("camera_get", args, "client", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Play a keyed camera path on the client, on the "
+            "scripted camera camera_set uses, entered the same way (HUD hidden, "
+            "controls off) and left with restore_gameplay. mode=play takes keys, "
+            f"{camera_path_contract.KEYS_MIN} to {camera_path_contract.KEYS_MAX} "
+            "objects {t, cam_pos, cam_orientation or look_at, fov}: t in seconds, "
+            "the first exactly 0, strictly increasing (also as the 32-bit "
+            "floats the bridge reads), the last at most "
+            f"{camera_path_contract.DURATION_MAX_S:g}; cam_pos [x, y, z]; "
+            "cam_orientation [yaw, pitch, roll] in degrees or look_at [x, y, z], "
+            "the same one on every key; fov in radians above 0 (also as a "
+            "32-bit float), on every key or on none (none keeps the camera's "
+            "FOV); every cam_pos, cam_orientation, look_at and fov number "
+            f"{camera_path_contract.MAGNITUDE_TEXT}. The client moves the camera "
+            "on every frame by its own frame time accumulated since play; there "
+            "is no Camera.InterpolateTo. easing=smooth (default) runs a "
+            "Catmull-Rom spline by time through the positions, with the end "
+            "tangents taken from the end segments; easing=linear interpolates "
+            "piecewise linearly. Orientation angles interpolate per component "
+            "the short way round, with the same easing; with look_at the point "
+            "interpolates like the positions and the camera faces it on every "
+            "frame; fov interpolates linearly. mode=state reads the current or "
+            "last path and mode=stop ends a playing path where its camera "
+            "stands and leaves that scripted camera mounted (it does not "
+            "restore gameplay); neither takes keys. Every mode answers camera_path {state, "
+            "t_s, duration_s, path_id}: state is idle (no play yet), playing, "
+            "finished or aborted, and t_s is the path time, at most duration_s. "
+            "A path that runs to its end releases the camera back to the "
+            "player and restores gameplay, as restore_gameplay does, which also "
+            "ends any running weapon, look-at, input_trigger or player_move "
+            "job; camera_set or restore_gameplay "
+            "during a path ends it aborted, and so do stop, the engine reporting "
+            "the path's camera inactive and vanilla's developer free camera "
+            "turned on; another camera turned on from outside the bridge ends it "
+            "only if the engine then reports the path's camera inactive. When the "
+            "lease that played it ends, the daemon queues an internal "
+            "camera_path_release for the client, which ends the path aborted when "
+            "the client runs it; nothing confirms that stop, and the daemon can "
+            "miss a play the client ran out of order or one that followed many "
+            "unanswered plays. path_id is an optional label of up to "
+            f"{camera_path_contract.PATH_ID_MAX_CHARS} characters from A-Z a-z "
+            "0-9 _ -; given to state or stop it must name the current or last "
+            "path. Read the pose with camera_get. Errors: bad_args (refused "
+            "before the camera moves; a play while a path plays replaces that "
+            "path and echoes camera_path.replaced_command_id), path_not_found, "
+            "busy (another client camera or "
+            "player job is running), client_not_in_game, camera_create_failed "
+            "(the staticcamera could not be made; nothing changed), "
+            "bridge_capability_missing (the client bridge bound to the run does "
+            "not announce both camera_path_play and camera_path_release, as one "
+            "older than this release does not; nothing is sent). With no client "
+            "bound, the loopback's binding fence refuses the call first "
+            "(legacy_unbound in the plain case)."
+        )
+    )
+    async def camera_path_play(
+        mode: StrictStr,
+        keys: list[dict[str, Any]] | None = None,
+        easing: StrictStr = "smooth",
+        path_id: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        try:
+            args = camera_path_contract.normalize_request(mode, keys, easing, path_id)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "camera_path_play", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Release the playing camera path identified by "
+        "command_id (camera_path.command_id returned by camera_path_play). "
+        "A positive integer is required. matched=true means it stopped that "
+        "play and released its camera and gameplay; false changes nothing "
+        "(already finished or another play is current). The daemon also uses "
+        "this bridge command internally when the owning lease ends."
+    ))
+    async def camera_path_release(
+        command_id: StrictInt,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        args = {"command_id": command_id}
+        if isinstance(command_id, bool) or not isinstance(command_id, int) or command_id <= 0:
+            raise ToolError("bad_args: command_id must be a positive integer")
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "camera_path_release", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        "Read local gameplay restore state. No lease; changes no state. "
+        "gameplay.controls_suppressed is the bridge's m_ControlsSuppressed; "
+        "engine_controls_disabled reads MissionGameplay.IsControlDisabled "
+        "(any active input exclude, restriction or legacy disable). "
+        "gameplay.hud_shown reads IngameHud.GetHudPanelWidget().IsVisible(), "
+        "the widget flag set by Hud.Show; it does not prove rendered visibility. "
+        "hud is MCPHudState: HUD_HIDE and QUICKBAR_HIDE read from vanilla's "
+        "context flags, with visible=true when neither is active. "
+        "gameplay.player_simulation_disabled is the bridge's "
+        "m_PlayerSimulationDisabled, not an engine simulation readback. "
+        "Use after restore_gameplay alongside camera_get. Errors: "
+        "client_not_in_game, hud_unavailable."
+    ))
+    async def gameplay_state(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("gameplay_state", {}, "client", _timeout(timeout_s))
 
     @app.tool(
         description=(
@@ -8782,7 +9510,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "script_camera while camera_set's camera is mounted "
             "(restore_gameplay first) and busy while an exclusive client job "
             "runs, such as camera_set or player_look_at (a ui_dialog, "
-            "weapon_action, input_trigger or player_move job does not count). "
+            "weapon_action, input_trigger, player_move or actor_emote job does not count). "
             "After the settle the view is already set, and no_player answers "
             "when the player is gone by then, script_camera when camera_set's "
             "camera is mounted by then."
@@ -8799,6 +9527,93 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "player_view_set", {"view": view}, "client", _timeout(timeout_s)
             )
 
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Play one emote (gesture) on the local player of "
+            "the managed client through EmoteManager.CreateEmoteCBFromMenu, the "
+            "call the gestures menu makes: the client asks the server, which "
+            "checks it and plays it on every peer as it does a person's "
+            "gesture. Only the local player, by this tool's scope: there is no "
+            "object_id. emote "
+            f"is one of {', '.join(ACTOR_EMOTES)}, or {ACTOR_EMOTE_END}, which "
+            "asks the server to end the emote that is playing (a looping one, "
+            "such as sita), as the client does to end one. wait_s (default 10, "
+            f"{ACTOR_EMOTE_WAIT_MIN_S:g} to {ACTOR_EMOTE_WAIT_MAX_S:g}) is how "
+            "long the client then watches EmoteManager.m_bEmoteIsPlaying, "
+            "which a request still pending does not set; the tool waits at "
+            f"least wait_s + {ACTOR_EMOTE_WAIT_SLACK_S:g} s for the answer. "
+            "The answer is emote_state: finished (it started and stopped within "
+            "wait_s; for end, the playing emote stopped within wait_s), sent on "
+            "the tick that sees the stop, or started (it started within wait_s "
+            "and had not stopped by then, as a looping emote does until end), "
+            "sent at the first client tick past wait_s, with started_after_s "
+            "and finished_after_s, client GetTickTime seconds from the "
+            "request, each absent when not reached (end has no "
+            "started_after_s). What the client sees after wait_s changes "
+            "nothing. A looping emote (greeting, sita, salute...) "
+            "answers started and plays until emote='end'; a one-time one (nod, "
+            "clap, shrug...) answers finished when it ends within wait_s. "
+            "emote_timed_out, "
+            "observed=emote_state=timed_out, also at the first client tick "
+            "past wait_s: it did not start within wait_s (the request was "
+            "sent, so a later start is possible), or for end the emote still "
+            "plays (the end may not have been sent: SendEmoteRequestSync also "
+            "asks CanStoreInputUserData and whether the playing emote can be "
+            "canceled normally). A call that times out or is cancelled after "
+            "the client received it still runs: the emote is not stopped. "
+            "Refused before "
+            "anything is sent, observed=emote_state=rejected: emote_rejected "
+            "when an emote is already playing, still requested or the player "
+            "surrendered (IsEmotePlaying(); end a playing one first), when "
+            "another actor_emote is still watching its own, end included (its "
+            "emote may not play yet; wait for that answer), or when the client "
+            "check refuses it (CanPlayEmote and CanPlayEmoteClientCheck, two "
+            "of the checks the request itself makes), and no_emote_playing for "
+            "end while no emote plays. Errors: bad_args "
+            "(it lists the allowed names), client_not_in_game, no_player, "
+            "no_emote_manager, emote_rejected, no_emote_playing, "
+            "emote_timed_out, and bridge_capability_missing from a PBO "
+            "without the verb, which is never handed it."
+        )
+    )
+    async def actor_emote(
+        emote: StrictStr,
+        wait_s: StrictFloat = 10.0,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if emote not in ACTOR_EMOTES and emote != ACTOR_EMOTE_END:
+            raise ToolError(
+                _bad_args(
+                    "emote",
+                    emote,
+                    "be one of " + ", ".join((*ACTOR_EMOTES, ACTOR_EMOTE_END)),
+                )
+            )
+        wait_error = _bad_args(
+            "wait_s",
+            wait_s,
+            "be a finite number of seconds within "
+            f"[{ACTOR_EMOTE_WAIT_MIN_S:g}, {ACTOR_EMOTE_WAIT_MAX_S:g}]",
+        )
+        wait = _finite_float(wait_s, wait_error)
+        if wait < ACTOR_EMOTE_WAIT_MIN_S or wait > ACTOR_EMOTE_WAIT_MAX_S:
+            raise ToolError(wait_error)
+        # The client answers at the first tick past wait_s at the latest; the
+        # transport waits wait_s plus the slack, as player_move does for
+        # hold_s.
+        timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
+        args = {"emote": emote, "wait_s": wait}
+        async with runtime.tool_lock:
+            result = await runtime.call_bridge("actor_emote", args, "client", timeout)
+        # MCPResult is one flat class: a time the watch did not reach arrives
+        # as 0 and is dropped here, by the state that says which were reached.
+        state = result.get("emote_state")
+        if state not in ("started", "finished") or emote == ACTOR_EMOTE_END:
+            result.pop("started_after_s", None)
+        if state != "finished":
+            result.pop("finished_after_s", None)
+        return result
+
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Restore local player simulation, input, HUD, and "
         "release the camera. camera_set has no off mode. The bridge closes this "
@@ -8808,9 +9623,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "(camera_released: true), camera_still_active when view='scripted' or "
         "viewport_moved, restore_unverified when the probe is illegible "
         "(ok=0). Do not treat a missing scripted camera as liberation. "
-        "Controls, HUD, simulation and render are NOT verified -- no reader for "
-        "controls, HUD or simulation exists on the wire, and the render is not "
-        "checked here -- and the ok names them in not_verified. Check the render "
+        "Controls, HUD, simulation and render are NOT verified by this tool, "
+        "and the ok names them in not_verified. Read controls, HUD and the "
+        "bridge's simulation flag with gameplay_state. Check the render "
         "with capture_screenshot with frames of at least 2: its warnings carry "
         "render_frozen_signal when max_adjacent_delta is below "
         f"{mcp_capture.RENDER_FROZEN_DELTA_EPS:g}, even with distinct_frames above 1, "
@@ -8852,6 +9667,40 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             confirmed["camera_released"] = True
             confirmed["not_verified"] = list(RESTORE_NOT_VERIFIED)
             return confirmed
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Hide or show the in-game HUD without touching "
+            "the controls. visible=false sets the two flags vanilla's hide-HUD "
+            "key sets, HUD_HIDE (the left and right HUD) and QUICKBAR_HIDE (the "
+            "quickbar), through IngameHud.ShowHudPlayer and ShowQuickbarPlayer; "
+            "visible=true clears them. HUD_DISABLE, the options menu's switch, "
+            "is not touched, and neither is the HUD hiding of camera_set's "
+            "scripted camera. The answer is hud {visible, hud_hide, "
+            "quickbar_hide}, read back with IsContextFlagActive after the call, "
+            "not an echo; visible is true when neither flag is set, and does "
+            "not cover the other reasons a HUD is hidden (the options menu, a "
+            "scripted camera, an open menu). restore_gameplay calls neither "
+            "setter, so hud_set(visible=true) is what brings the HUD back. "
+            "Errors: a visible that is not a bool is refused before anything "
+            "is sent (bad_args at the daemon), client_not_in_game (no client "
+            "in game; nothing changes), hud_unavailable (no in-game HUD), "
+            "bridge_capability_missing (the client bridge bound to the run does "
+            "not announce hud_set, as one older than this release does not; "
+            "nothing is sent). With no client bound, the loopback's binding "
+            "fence refuses the call first (legacy_unbound in the plain case)."
+        )
+    )
+    async def hud_set(
+        visible: StrictBool,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(visible, bool):
+            raise ToolError(_bad_args("visible", visible, "be a bool"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "hud_set", {"visible": visible}, "client", _timeout(timeout_s)
+            )
 
     @app.tool(description=(
         "Read GetInputByName for a UAInput name, and what the selected "
@@ -10304,6 +11153,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     # (including errors, images, and lists) can carry lease_ttl_s and freshness
     # still sees the decorated result.
     install_lease_ttl_annotation(app, runtime)
+    _install_next_step_profile_filter(
+        app,
+        lambda: _effective_next_tools(config, runtime=runtime),
+        runtime=runtime,
+        config=config,
+    )
     observe_server_sources = install_result_freshness(app, server_sources)
     _original_list_tools = app.list_tools
 
@@ -10449,6 +11304,37 @@ def run_supervisor(argv: list[str], *, idle_timeout_s: float = 0.0) -> int:
     return 0
 
 
+def _run_daemon(config: ServerConfig) -> int:
+    """Daemon entry point: publish the serving live profile on /status (C4).
+
+    The daemon is the authority a client reuses, and it fixed its profile
+    at spawn (daemon.build_server_state). Wrapping its status provider
+    here, at the entry point this module owns, lets every client learn
+    that profile from the daemon that answers instead of inferring it
+    from its own environment.
+    """
+    original = daemon.make_status_provider
+
+    def make_status_provider(cfg: Any, state: Any) -> Callable[[], dict]:
+        provider = original(cfg, state)
+
+        def status_provider() -> dict:
+            payload = dict(provider())
+            payload["live_profile"] = bool(getattr(state, "live_profile", False))
+            payload["live_admin_enabled"] = bool(
+                getattr(state, "live_admin_enabled", False)
+            )
+            return payload
+
+        return status_provider
+
+    daemon.make_status_provider = make_status_provider  # type: ignore[method-assign]
+    try:
+        return daemon.run_daemon(config)
+    finally:
+        daemon.make_status_provider = original  # type: ignore[method-assign]
+
+
 def run(argv: list[str] | None = None) -> int:
     config = parse_args(argv)
     if config.supervised:
@@ -10458,7 +11344,7 @@ def run(argv: list[str] | None = None) -> int:
             idle_timeout_s=config.idle_timeout_s if config.mode == "client" else 0.0,
         )
     if config.mode == "daemon":
-        return daemon.run_daemon(config)
+        return _run_daemon(config)
 
     app, runtime = build_app(config)
     if config.mode == "embedded":

@@ -274,6 +274,81 @@ def method_body(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated body: {signature}")
 
 
+_FIELD = re.compile(
+    r"^(?P<ref>ref\s+)?(?P<type>[A-Za-z_]\w*(?:\s*<[^;{}()=]*>)?)\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?:\s*=(?!=)\s*(?P<init>.+))?$"
+)
+_FIELD_ZEROES: dict[str, Any] = {"int": 0, "float": 0.0, "bool": False}
+
+
+def declared_fields(source: str, class_name: str) -> dict[str, Any]:
+    """Each field of `class <class_name>` in `source`, in order, with the value
+    a new instance holds: its initializer (true, false, a number or one string
+    literal with no quote and no backslash inside) when it has one, else
+    Enforce's zero: 0, 0.0, false, "", (0.0, 0.0, 0.0) for a vector and None
+    for a ref, an array or a class. The class must hold plain field
+    declarations only: a constructor, a method, a modifier or any other
+    initializer, such as a concatenation of literals, fails instead of being
+    guessed."""
+    text = clean(source)
+    heads = list(re.finditer(rf"(?m)^class {re.escape(class_name)}\b[^{{;]*\{{", text))
+    if len(heads) != 1:
+        raise AssertionError(f"class {class_name} declared {len(heads)} times")
+    statements: list[str] = []
+    buffer = ""
+    for token in _CHUNK_TOKENS.finditer(text, heads[0].end()):
+        value = token.group()
+        if value == "}":
+            break
+        if value == "{":
+            raise AssertionError(f"class {class_name} holds more than fields: {buffer.strip()!r}")
+        if value == ";":
+            statements.append(_squash(buffer))
+            buffer = ""
+        else:
+            buffer += value
+    else:
+        raise AssertionError(f"class {class_name} is not closed")
+    if buffer.strip():
+        raise AssertionError(f"class {class_name}: statement without a terminator {buffer.strip()!r}")
+    fields: dict[str, Any] = {}
+    for statement in statements:
+        match = _FIELD.match(statement)
+        if match is None:
+            raise AssertionError(f"class {class_name}: not a plain field: {statement!r}")
+        name = match.group("name")
+        if name in fields:
+            raise AssertionError(f"class {class_name}: {name} declared twice")
+        fields[name] = _field_value(class_name, match, statement)
+    return fields
+
+
+def _field_value(class_name: str, match: re.Match[str], statement: str) -> Any:
+    type_name = match.group("type")
+    init = match.group("init")
+    if init is None:
+        if match.group("ref") or "<" in type_name:
+            return None
+        if type_name in _FIELD_ZEROES:
+            return _FIELD_ZEROES[type_name]
+        if type_name == "string":
+            return EnforceString(b"")
+        if type_name == "vector":
+            return (0.0, 0.0, 0.0)
+        return None
+    init = init.strip()
+    if type_name == "bool" and init in ("true", "false"):
+        return init == "true"
+    if type_name == "int" and re.fullmatch(r"-?\d+", init):
+        return int(init)
+    if type_name == "float" and re.fullmatch(r"-?\d+(?:\.\d+)?", init):
+        return float(init)
+    # One literal: no quote inside, so "a" + "b" is not read as one string.
+    if type_name == "string" and re.fullmatch(r'"[ !#-~]*"', init) and "\\" not in init:
+        return EnforceString(init[1:-1].encode("ascii"))
+    raise AssertionError(f"class {class_name}: unsupported initializer in {statement!r}")
+
+
 def _squash(text: str) -> str:
     """Collapse each whitespace run outside string literals to one space."""
     parts: list[str] = []
