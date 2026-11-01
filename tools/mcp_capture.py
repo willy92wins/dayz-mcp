@@ -1525,6 +1525,53 @@ def _frame_pattern_for(output_paths: list[str]) -> tuple[str, list[str]]:
     return pattern, targets
 
 
+def _destination_dir(path: str) -> str:
+    return os.path.dirname(os.path.abspath(path))
+
+
+def _publish_staged_frame(
+    source: str, destination: str, staging_by_dir: dict[str, str]
+) -> None:
+    """Publish one staged frame onto its destination (same-volume replace).
+
+    Tries a direct ``os.replace`` first. When that fails and the staged file
+    is not already beside this destination (a destination on another volume
+    than the script's staging directory), copies the frame into this
+    destination's own staging directory -- created beside the destination,
+    so on its volume -- and replaces from there. Raises ``OSError`` when
+    publishing fails either way; the caller maps it to a public error with
+    no host path.
+    """
+    try:
+        os.replace(source, destination)
+        return
+    except OSError:
+        dest_dir = _destination_dir(destination)
+        source_abs = os.path.abspath(source)
+        # Already staged beside this destination: the replace was already
+        # same-volume, so its failure is a real rename failure.
+        if os.path.dirname(os.path.dirname(source_abs)) == dest_dir:
+            raise
+        dest_staging = staging_by_dir.get(dest_dir)
+        if dest_staging is None:
+            dest_staging = tempfile.mkdtemp(
+                prefix="mcp_capture_frames_", dir=dest_dir
+            )
+            staging_by_dir[dest_dir] = dest_staging
+        staged_copy = os.path.join(
+            dest_staging, f"publish_{os.path.basename(source_abs)}"
+        )
+        try:
+            shutil.copyfile(source, staged_copy)
+            os.replace(staged_copy, destination)
+        except OSError:
+            try:
+                os.remove(staged_copy)
+            except OSError:
+                pass
+            raise
+
+
 def _kill_capture_process(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
@@ -1592,14 +1639,36 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
     frame_pattern = ""
     frame_targets: list[str] = list(output_paths)
     staging_dir: str | None = None
+    staging_by_dir: dict[str, str] = {}
     if frame_count > 1:
         frame_pattern, frame_targets = _frame_pattern_for(output_paths)
         if frame_targets != list(output_paths):
-            # F-04: pattern-derived intermediates (a_0/a_1/a_2.png) must
-            # never collide with a requested destination (a_1/a_2.png may
-            # BE one). Write them into a private staging directory instead
-            # and move them onto the destinations afterwards.
-            staging_dir = tempfile.mkdtemp(prefix="mcp_capture_frames_")
+            # F-04/F-06: pattern-derived intermediates (a_0/a_1/a_2.png)
+            # must never collide with a requested destination (a_1/a_2.png
+            # may BE one), and publishing uses os.replace, which fails
+            # across volumes -- so staging in the default TEMP broke
+            # destinations on another volume. Stage beside the
+            # destinations instead: one private staging directory in each
+            # distinct destination directory (same volume as its
+            # destinations). The script writes into the first one; frames
+            # for other directories are republished through their own
+            # directory's staging (see _publish_staged_frame). A
+            # destination directory that admits no staging beside it is a
+            # public error with no host path, before any process starts.
+            try:
+                for destination in output_paths:
+                    dest_dir = _destination_dir(destination)
+                    if dest_dir not in staging_by_dir:
+                        staging_by_dir[dest_dir] = tempfile.mkdtemp(
+                            prefix="mcp_capture_frames_", dir=dest_dir
+                        )
+            except OSError:
+                for created_dir in staging_by_dir.values():
+                    shutil.rmtree(created_dir, ignore_errors=True)
+                return [
+                    {"ok": False, "error": "capture_backend_failed: staging_failed"}
+                ]
+            staging_dir = staging_by_dir[_destination_dir(output_paths[0])]
             pattern_name = os.path.basename(frame_pattern)
             frame_pattern = os.path.join(staging_dir, pattern_name)
             frame_targets = [
@@ -1608,8 +1677,13 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
             ]
 
     def _drop_staging() -> None:
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+        # Clean every staging directory, including any a publish step
+        # created lazily; runs on success and on every error path.
+        for created_dir in dict.fromkeys(
+            [staging_dir, *staging_by_dir.values()]
+        ):
+            if created_dir is not None:
+                shutil.rmtree(created_dir, ignore_errors=True)
     cmd = [
         "powershell",
         "-NoProfile",
@@ -1714,7 +1788,9 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
                         # proves nothing about this frame. The public error
                         # carries no host path.
                         try:
-                            os.replace(source, destination)
+                            _publish_staged_frame(
+                                source, destination, staging_by_dir
+                            )
                         except OSError:
                             moved.append({"ok": False, "error": "capture_backend_failed: rename_failed"})
                             break

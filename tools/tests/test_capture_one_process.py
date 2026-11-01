@@ -11,6 +11,7 @@ These tests simulate subprocess.Popen only: no PowerShell, no window.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -388,6 +389,138 @@ class CaptureOneProcessTest(unittest.TestCase):
             for result in results:
                 if result.get("ok") is not True:
                     self.assertNotIn(tmp, str(result.get("error")))
+
+    def test_cross_volume_temp_staging_publishes_permuted_destinations(self) -> None:
+        """F-06: destinations on a volume other than TEMP's publish fine.
+
+        Simulates Sol's filesystem split: a staged file directly under
+        TEMP (the old ``tempfile.mkdtemp()`` staging) is on volume C: and
+        cannot be ``os.replace``d onto a destination, while a file staged
+        beside the destination can. Destinations are also permuted
+        (a.png, a_2.png, a_1.png) so the intermediates still must not
+        coincide with a destination, and the real hashes pin the final
+        SHA-256 check after every move."""
+        levels = (40, 120, 200)
+        real_replace = os.replace
+        temp_root = os.path.normpath(tempfile.gettempdir())
+
+        def cross_volume_replace(src: object, dst: object) -> None:
+            rel = os.path.relpath(os.path.normpath(str(src)), temp_root)
+            if rel.split(os.sep)[0].startswith("mcp_capture_frames_"):
+                raise OSError(errno.EXDEV, "cross-device link")
+            real_replace(str(src), str(dst))
+
+        popen = mock.Mock(side_effect=lambda cmd, **kw: _RealHashBatchGrab(cmd, levels))
+        probe, popen_patch = self._patched(popen)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [os.path.join(tmp, name) for name in ("a.png", "a_2.png", "a_1.png")]
+            with probe, popen_patch, mock.patch.object(os, "replace", cross_volume_replace):
+                results = mcp_capture._run_window_captures(
+                    paths, process_name="DayZDiag_x64", timeout_s=8.0
+                )
+            self.assertEqual([True, True, True], [r.get("ok") for r in results], results)
+            cmd = popen.call_args.args[0]
+            pattern = _arg(cmd, "-FramePattern")
+            staging_dir = os.path.dirname(pattern)
+            # Staging sits beside the destinations, not under TEMP directly.
+            self.assertEqual(
+                os.path.normpath(tmp), os.path.normpath(os.path.dirname(staging_dir))
+            )
+            staged = {
+                os.path.join(
+                    staging_dir,
+                    os.path.basename(pattern).replace("{0}", str(index)),
+                )
+                for index in range(len(paths))
+            }
+            self.assertTrue(staged.isdisjoint(paths), staged)
+            for index, path in enumerate(paths):
+                self.assertTrue(os.path.exists(path), path)
+                with open(path, "rb") as handle:
+                    digest = hashlib.sha256(handle.read()).hexdigest()
+                self.assertEqual(digest, str(results[index].get("sha256", "")).lower(), path)
+                with Image.open(path) as img:
+                    self.assertEqual(
+                        (levels[index],) * 3, img.convert("RGB").getpixel((0, 0)), path
+                    )
+            self.assertEqual(
+                [],
+                [name for name in os.listdir(tmp) if name.startswith("mcp_capture_frames_")],
+            )
+
+    def test_destinations_on_different_volumes_each_publish_beside_their_destination(self) -> None:
+        """F-06: each destination is republished from staging on its own
+        volume. Simulated volumes are the destinations' directory trees:
+        ``os.replace`` from outside a destination's tree raises EXDEV, so
+        only a per-destination staging copy can publish the second frame."""
+        levels = (80, 160)
+        real_replace = os.replace
+
+        def per_volume_replace(src: object, dst: object) -> None:
+            dest_dir = os.path.dirname(os.path.abspath(str(dst)))
+            src_abs = os.path.abspath(str(src))
+            if os.path.commonpath([src_abs, dest_dir]) != dest_dir:
+                raise OSError(errno.EXDEV, "cross-device link")
+            real_replace(str(src), str(dst))
+
+        popen = mock.Mock(side_effect=lambda cmd, **kw: _RealHashBatchGrab(cmd, levels))
+        probe, popen_patch = self._patched(popen)
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_a = os.path.join(tmp, "vol_a")
+            dir_b = os.path.join(tmp, "vol_b")
+            os.makedirs(dir_a)
+            os.makedirs(dir_b)
+            paths = [os.path.join(dir_a, "a.png"), os.path.join(dir_b, "b.png")]
+            with probe, popen_patch, mock.patch.object(os, "replace", per_volume_replace):
+                results = mcp_capture._run_window_captures(
+                    paths, process_name="DayZDiag_x64", timeout_s=8.0
+                )
+            self.assertEqual([True, True], [r.get("ok") for r in results], results)
+            for index, path in enumerate(paths):
+                self.assertTrue(os.path.exists(path), path)
+                with open(path, "rb") as handle:
+                    digest = hashlib.sha256(handle.read()).hexdigest()
+                self.assertEqual(digest, str(results[index].get("sha256", "")).lower(), path)
+                with Image.open(path) as img:
+                    self.assertEqual(
+                        (levels[index],) * 3, img.convert("RGB").getpixel((0, 0)), path
+                    )
+            for directory in (dir_a, dir_b):
+                self.assertEqual(
+                    [],
+                    [
+                        name
+                        for name in os.listdir(directory)
+                        if name.startswith("mcp_capture_frames_")
+                    ],
+                )
+
+    def test_destination_that_admits_no_beside_staging_is_a_public_error(self) -> None:
+        """F-06: a destination directory that admits no staging beside it
+        fails before any process starts, with no host path in the error."""
+        real_mkdtemp = tempfile.mkdtemp
+
+        def deny_beside(*args: object, **kwargs: object) -> str:
+            if kwargs.get("dir") is not None:
+                raise PermissionError("staging denied")
+            return real_mkdtemp(*args, **kwargs)  # type: ignore[arg-type]
+
+        popen = mock.Mock(side_effect=lambda cmd, **kw: _RealHashBatchGrab(cmd, (100, 120)))
+        probe, popen_patch = self._patched(popen)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [os.path.join(tmp, "dest_a.png"), os.path.join(tmp, "dest_b.png")]
+            with probe, popen_patch, mock.patch.object(
+                tempfile, "mkdtemp", side_effect=deny_beside
+            ):
+                results = mcp_capture._run_window_captures(
+                    paths, process_name="DayZDiag_x64", timeout_s=8.0
+                )
+            self.assertEqual(
+                [{"ok": False, "error": "capture_backend_failed: staging_failed"}],
+                results,
+            )
+            self.assertNotIn(tmp, str(results[0].get("error")))
+            popen.assert_not_called()
 
     def test_grab_script_revalidates_window_identity_per_frame(self) -> None:
         """F-05 (source): every frame revalidates the chosen HWND against
