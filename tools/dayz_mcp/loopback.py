@@ -358,16 +358,26 @@ MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # a stored result could not be published until some worker timed out. 2s fits
 # the spare headroom and sits far under Handler.timeout (35s), which must stay
 # strictly above the /wait ceiling. The client reissues with whatever deadline
-# remains. LoopbackServer.stop() calls cancel_pending(), which sets _stopping
-# and notifies the condition, so a normal stop does not hold the worker for the
-# cap. Handler.timeout does not interrupt Condition.wait (it is not a socket
-# read); a stop that skips cancel_pending is still bounded by this cap.
+# remains. The cap limits duration, not how many waits run at once: that is
+# AWAIT_LONG_POLL_MAX_IN_FLIGHT. LoopbackServer.stop() calls cancel_pending(),
+# which sets _stopping and notifies the condition, so a normal stop does not
+# hold the worker for the cap. Handler.timeout does not interrupt
+# Condition.wait (it is not a socket read); a stop that skips cancel_pending
+# is still bounded by this cap.
 AWAIT_LONG_POLL_MAX_S = 2.0
 # Present on a pending /await body only after that wait budget was spent with
-# no result. Absent means "answer was immediate" (no wait_ms, or an older
-# daemon): the client keeps sleeping POLL_INTERVAL_S. Without wait_ms the
-# pending body stays {"status":"pending"}.
+# no result. Absent means "answer was immediate" (no wait_ms, an older daemon,
+# or this daemon had no free long-poll slot): the client keeps sleeping
+# POLL_INTERVAL_S. Without wait_ms the pending body stays {"status":"pending"}.
 AWAIT_LONG_POLL_FIELD = "await_long_poll"
+# How many /await waits may hold a worker at once. The pool is 96
+# (MAX_SESSION_QUEUE + 32). 64 of those are the session waits. Of the 32 left
+# for /poll, /result, /enqueue, /status and a short burst, long-polls may take
+# 8. 8 is well under 32, and 64 + 8 leaves 24 workers, so those three routes
+# keep a worker even when every session wait and every allowed long-poll is in
+# flight. A request that does not get a slot does not wait and omits
+# await_long_poll, and the client returns to its 50ms poll.
+AWAIT_LONG_POLL_MAX_IN_FLIGHT = 8
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -3030,6 +3040,11 @@ class ServerState:
         # Same lock as every _results write, so notify cannot be lost between
         # the emptiness check and Condition.wait.
         self._result_cv = threading.Condition(self._lock)
+        # Taken only for a positive /await wait, and only without blocking.
+        # The HTTP worker is already running; a full quota answers immediately.
+        self._await_long_poll_slots = threading.BoundedSemaphore(
+            AWAIT_LONG_POLL_MAX_IN_FLIGHT
+        )
         self._fenced_runs: set[str] = set()
         self._next_id = 1
         self._legacy_queues: dict[str, list[dict]] = {"server": [], "client": []}
@@ -7608,9 +7623,10 @@ class ServerState:
     ) -> str:
         """'ready', 'timeout', or 'stopped'. Does not consume the result.
 
-        Embedded wait_for_result uses this from a worker thread so the event
-        loop stays free. 'stopped' means cancel or server shutdown: the caller
-        must not spin.
+        'stopped' means cancel or server shutdown: the caller must not spin.
+        Embedded wait_for_result does not call this. A wait on the shared
+        executor held a pool thread, and a result published while that call
+        was still queued was only observed after the caller's deadline.
         """
         result, _owner, _exhausted = self.await_stored_result(
             command_id, False, wait_s, cancel
@@ -8419,19 +8435,19 @@ class ServerState:
 
 
 def _parse_await_wait_s(qs: dict[str, list[str]]) -> tuple[float, bool]:
-    """(seconds, requested). Unusable or absent wait_ms does not wait.
+    """(seconds, requested). Absent or non-ASCII wait_ms does not wait.
 
-    requested is True only for a digit string, including 0. The handler adds
-    AWAIT_LONG_POLL_FIELD only when the wait budget is then spent.
+    requested is True for one to nine ASCII digits, including 0. The value is
+    capped at AWAIT_LONG_POLL_MAX_S. "00000000" is 0ms and "00000001" is 1ms.
+    str.isdigit() accepts "²", and int("²") raises; that string is not a wait.
+    The handler adds AWAIT_LONG_POLL_FIELD only when the wait budget is spent.
     """
     values = qs.get("wait_ms")
     if not values:
         return 0.0, False
     raw = values[0]
-    if not isinstance(raw, str) or not raw.isdigit():
+    if not isinstance(raw, str) or re.fullmatch(r"[0-9]{1,9}", raw) is None:
         return 0.0, False
-    if len(raw) > 7:
-        return AWAIT_LONG_POLL_MAX_S, True
     millis = int(raw)
     cap_ms = int(AWAIT_LONG_POLL_MAX_S * 1000)
     if millis > cap_ms:
@@ -9341,9 +9357,22 @@ class Handler(BaseHTTPRequestHandler):
         # the non-destructive read for back-compat with the harness.
         remove = qs.get("remove", ["0"])[0] == "1"
         wait_s, wait_requested = _parse_await_wait_s(qs)
-        result, owner, exhausted = self.state.await_stored_result(
-            command_id, remove, wait_s
-        )
+        # The slot covers the wait, not the request. No slot: the same immediate
+        # pending body as a daemon that was not asked to wait, so the client
+        # sleeps instead of hammering a saturated pool.
+        held_slot = False
+        if wait_requested and wait_s > 0.0:
+            held_slot = self.state._await_long_poll_slots.acquire(blocking=False)
+            if not held_slot:
+                wait_s = 0.0
+                wait_requested = False
+        try:
+            result, owner, exhausted = self.state.await_stored_result(
+                command_id, remove, wait_s
+            )
+        finally:
+            if held_slot:
+                self.state._await_long_poll_slots.release()
         if holder is None:
             owner = None
         if result is None:

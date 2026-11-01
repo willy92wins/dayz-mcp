@@ -1,9 +1,10 @@
 """Latency and request count of GET /await, with and without wait_ms.
 
 Starts a loopback daemon on an ephemeral port. A stand-in for the game
-publishes one result after delay_s. The before path sends no wait_ms and
-sleeps 0.05s between polls, which is what a client does against a daemon
-that does not wait. The after path is ClientRuntime._await_result.
+collects the command with GET /poll and publishes it with POST /result,
+both over HTTP, after delay_s. The before path sends no wait_ms and sleeps
+0.05s between polls, which is what a client does against a daemon that does
+not wait. The after path is ClientRuntime._await_result.
 
 Does not launch DayZ, does not bind port 8765, and does not read
 %LOCALAPPDATA%.
@@ -70,16 +71,33 @@ class _Loopback:
         self.thread.join(timeout=3.0)
         self.httpd.server_close()
 
-    def get(self, query: dict[str, str], timeout: float) -> dict[str, Any]:
-        params = dict(query)
+    def exchange(
+        self,
+        method: str,
+        path: str,
+        query: dict[str, str] | None = None,
+        payload: dict | None = None,
+        timeout: float = 2.0,
+    ) -> dict[str, Any]:
+        params = dict(query or {})
         params["key"] = self.key
-        url = self.base + "/await?" + urllib.parse.urlencode(params)
-        request = urllib.request.Request(url, method="GET")
+        url = self.base + path + "?" + urllib.parse.urlencode(params)
+        data = None
+        headers: dict[str, str] = {}
+        if payload is not None:
+            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            url, data=data, headers=headers, method=method
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
         if not isinstance(body, dict):
-            raise RuntimeError(f"await body was {body!r}")
+            raise RuntimeError(f"{path} body was {body!r}")
         return body
+
+    def get(self, query: dict[str, str], timeout: float) -> dict[str, Any]:
+        return self.exchange("GET", "/await", query, timeout=timeout)
 
 
 def _enqueue(state: loopback.ServerState) -> int:
@@ -95,16 +113,40 @@ def _enqueue(state: loopback.ServerState) -> int:
 
 
 def _publish_later(
-    state: loopback.ServerState, command_id: int, delay_s: float
+    loop: _Loopback, command_id: int, delay_s: float
 ) -> tuple[threading.Thread, list[BaseException]]:
+    """What the game does: take the command with GET /poll, then POST /result."""
     errors: list[BaseException] = []
 
     def publish() -> None:
         try:
             time.sleep(delay_s)
-            code, stored = state.store_result({"id": command_id, "ok": 1})
-            if code != 200 or not isinstance(stored, dict) or stored.get("discarded"):
-                raise RuntimeError(f"store_result failed: {code} {stored!r}")
+            deadline = time.monotonic() + 2.0
+            while True:
+                polled = loop.exchange(
+                    "GET", "/poll", {"peer": "client"}, timeout=1.0
+                )
+                commands = polled.get("commands")
+                if not isinstance(commands, list):
+                    raise RuntimeError(f"poll body was {polled!r}")
+                if any(
+                    isinstance(command, dict) and command.get("id") == command_id
+                    for command in commands
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"poll did not deliver command {command_id}"
+                    )
+                time.sleep(0.01)
+            stored = loop.exchange(
+                "POST",
+                "/result",
+                payload={"id": command_id, "ok": 1},
+                timeout=2.0,
+            )
+            if stored.get("ok") is not True or stored.get("discarded"):
+                raise RuntimeError(f"POST /result failed: {stored!r}")
         except BaseException as exc:
             errors.append(exc)
 
@@ -116,7 +158,7 @@ def _publish_later(
 def _sample_before(loop: _Loopback, delay_s: float) -> tuple[float, int]:
     command_id = _enqueue(loop.state)
     deadline = time.monotonic() + delay_s + 3.0
-    publisher, errors = _publish_later(loop.state, command_id, delay_s)
+    publisher, errors = _publish_later(loop, command_id, delay_s)
     started = time.monotonic()
     requests = 0
     try:
@@ -166,7 +208,7 @@ async def _await_one(loop: _Loopback, delay_s: float) -> tuple[float, int]:
     runtime._broker_admits = {}
     runtime._call = _call
     runtime._liveness_message = _liveness
-    publisher, errors = _publish_later(loop.state, command_id, delay_s)
+    publisher, errors = _publish_later(loop, command_id, delay_s)
     started = time.monotonic()
     try:
         await runtime._await_result(

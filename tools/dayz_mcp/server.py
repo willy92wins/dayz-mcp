@@ -128,7 +128,6 @@ from dayz_mcp.loopback import (
     SPAWN_BATCH_PER_TICK_MAX,
     SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
     LoopbackServer,
-    ResultWaitCancel,
     _FENCE_OMITTED,
     is_printable_input_name,
     is_scene_id,
@@ -702,12 +701,17 @@ _CARRIER_REFRESH_S = 5.0
 # reviews F1 and F6 of #255).
 MIN_IDLE_RETIREMENT_S = SESSION_TTL_S + 5.0
 POLL_INTERVAL_S = 0.05
-# The /await HTTP deadline is the caller's remaining budget, and that budget
-# also pays for accreditation before the daemon starts waiting. Asking the
-# daemon to hold for the whole remainder makes the socket time out first;
-# the accredited transport then reports daemon_response_ambiguous instead of
-# a finished pending body. 150ms covers that accreditation and the response.
-AWAIT_LONG_POLL_TRANSPORT_SLACK_S = 0.15
+# Do not long-poll in the last stretch of the caller's budget. wait_ms is
+# chosen before accreditation, and the sealed transport then recomputes only
+# the socket timeout (accredited_daemon_transport.verified_daemon_http_request).
+# A fixed 150ms did not cover a slower accreditation: the socket died first,
+# the call surfaced daemon_response_ambiguous, and the cleanup that runs for
+# "timeout waiting…" did not run. Long-poll only when
+# wait_s = min(remaining - AWAIT_LONG_POLL_BUDGET_MARGIN_S, AWAIT_LONG_POLL_MAX_S)
+# is still long enough to send a positive wait_ms. Inside the last
+# AWAIT_LONG_POLL_BUDGET_MARGIN_S the client omits wait_ms and sleeps
+# POLL_INTERVAL_S, so the budget ends as "timeout waiting…".
+AWAIT_LONG_POLL_BUDGET_MARGIN_S = 1.0
 _BROKER_CLEANUP_BUDGET_S = 2.0
 _BROKER_ADMISSION_ERRORS = frozenset(
     {
@@ -1528,13 +1532,11 @@ class Runtime:
         return await self.wait_for_result("exec_enforce", command_id, "server", timeout_s)
 
     async def wait_for_result(self, cmd: str, command_id: int, peer: str, timeout_s: float) -> dict[str, Any]:
+        # In-process 50ms poll. Embedded mode pays neither HTTP nor accreditation,
+        # and this wait must not hold a thread of the shared default executor:
+        # with that pool full, a result published while the wait was queued was
+        # observed only after the deadline, and the call timed out.
         deadline = time.monotonic() + timeout_s
-        # A real ServerState waits on its condition. Test doubles that only
-        # implement take_result keep the 50ms poll: passing wait_s into those
-        # callables would not match their (command_id, remove) shape.
-        wait_until = getattr(self.state, "wait_until_command_result", None)
-        long_wait = callable(wait_until)
-        cancel = ResultWaitCancel() if long_wait else None
         while time.monotonic() < deadline:
             result = self.state.take_result(command_id, remove=True)
             if result is not None:
@@ -1544,27 +1546,9 @@ class Runtime:
                 if not result.get("ok"):
                     raise _bridge_error(result, cmd)
                 return result_prune.prune_unfilled_fields(cmd, result)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                break
             try:
-                if long_wait and cancel is not None:
-                    kind = await asyncio.to_thread(
-                        wait_until,
-                        command_id,
-                        min(remaining, AWAIT_LONG_POLL_MAX_S),
-                        cancel,
-                    )
-                    if kind == "stopped":
-                        break
-                else:
-                    await asyncio.sleep(min(POLL_INTERVAL_S, remaining))
+                await asyncio.sleep(POLL_INTERVAL_S)
             except asyncio.CancelledError:
-                # to_thread keeps running after the task is cancelled. Trip the
-                # token under the state lock so that thread returns without
-                # consuming, then drop the queued command.
-                if cancel is not None:
-                    cancel.trip(self.state)
                 self.state.abandon_command(command_id, "tool_cancelled")
                 raise
 
@@ -2973,14 +2957,16 @@ class ClientRuntime:
             if remaining <= 0.0:
                 break
             query = {"id": str(command_id), "remove": "1"}
-            wait_s = min(remaining, AWAIT_LONG_POLL_MAX_S)
-            # Leave the slack inside this same deadline. The cap already
-            # leaves it when the deadline is further out than 2s + slack.
-            if remaining - wait_s < AWAIT_LONG_POLL_TRANSPORT_SLACK_S:
-                wait_s = remaining - AWAIT_LONG_POLL_TRANSPORT_SLACK_S
-            wait_ms = int(wait_s * 1000)
-            if wait_ms > 0:
-                query["wait_ms"] = str(wait_ms)
+            # Last AWAIT_LONG_POLL_BUDGET_MARGIN_S: no wait_ms, then the 50ms
+            # sleep below. Earlier: wait_s = min(remaining - margin, cap).
+            wait_s = min(
+                remaining - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
+                AWAIT_LONG_POLL_MAX_S,
+            )
+            if wait_s > 0.0:
+                wait_ms = int(wait_s * 1000)
+                if wait_ms > 0:
+                    query["wait_ms"] = str(wait_ms)
             try:
                 status, payload = await asyncio.to_thread(
                     self._call,

@@ -135,6 +135,32 @@ class AwaitHttpTest(unittest.TestCase):
         self.assertEqual(raw, _PENDING)
         self.assertLess(elapsed, 0.2)
 
+    def test_superscript_and_zero_padded_wait_ms(self) -> None:
+        # "²" is a digit to str.isdigit and makes int() raise. Zero-padded
+        # ASCII is the numeric value, not the 2s length shortcut.
+        self.assertEqual(loopback._parse_await_wait_s({"wait_ms": ["²"]}), (0.0, False))
+        self.assertEqual(
+            loopback._parse_await_wait_s({"wait_ms": ["00000000"]}), (0.0, True)
+        )
+        self.assertEqual(
+            loopback._parse_await_wait_s({"wait_ms": ["00000001"]}), (0.001, True)
+        )
+        cases = (("²", False), ("00000000", False), ("00000001", True))
+        for raw_wait, expect_field in cases:
+            with self.subTest(wait_ms=raw_wait):
+                elapsed, status, raw = self._read(
+                    query={"id": "999999", "wait_ms": raw_wait},
+                    timeout=1.0,
+                )
+                self.assertEqual(status, 200, raw)
+                body = json.loads(raw)
+                self.assertEqual(body.get("status"), "pending", body)
+                self.assertLess(elapsed, 0.2)
+                if expect_field:
+                    self.assertIs(body.get(loopback.AWAIT_LONG_POLL_FIELD), True)
+                else:
+                    self.assertEqual(raw, _PENDING)
+
     def test_stored_result_returns_without_waiting_out_the_cap(self) -> None:
         command_id = self.daemon.enqueue()
         code, stored = self.daemon.state.store_result({"id": command_id, "ok": 1})
@@ -333,6 +359,205 @@ class AwaitHttpTest(unittest.TestCase):
         self.assertLess(outcome["elapsed"], 1.0)
 
 
+class AwaitQuotaTest(unittest.TestCase):
+    @slow_test
+    def test_result_is_stored_while_session_waits_and_long_polls_fill_the_pool(self) -> None:
+        from dayz_mcp.session_coordination import ClientIdentity, SessionCoordinator
+
+        session_waits = loopback.MAX_SESSION_QUEUE
+        await_waits = loopback.MAX_HTTP_WORKERS - loopback.MAX_SESSION_QUEUE
+        self.assertGreater(
+            await_waits, loopback.AWAIT_LONG_POLL_MAX_IN_FLIGHT
+        )
+        ids = {"n": 0}
+
+        def next_id() -> str:
+            ids["n"] += 1
+            return f"quota-ticket-{ids['n']}"
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        # camera_get needs no lease. Enqueue before coordination is attached:
+        # with a coordinator, enqueue_command requires an identity.
+        command_id = daemon.enqueue()
+        coordinator = SessionCoordinator(
+            token_fn=lambda: "quota-holder-token",
+            id_fn=next_id,
+            audit=lambda _event: True,
+            cleanup=lambda _session_id, _lease_id, _reason, _vehicle_active: {},
+        )
+        daemon.state.coordination = coordinator
+        holder = ClientIdentity.from_payload(
+            {
+                "platform": "codex",
+                "pid": 1,
+                "ppid": 0,
+                "started_at_utc": "2026-11-01T00:00:00Z",
+                "session_id": "quota-holder",
+                "task_label": "holder",
+            }
+        )
+        status, _active = coordinator.acquire(holder, "hold the lease")
+        self.assertEqual(status, 200, _active)
+        tickets: list[tuple[dict, str]] = []
+        for index in range(session_waits):
+            client = ClientIdentity.from_payload(
+                {
+                    "platform": "codex",
+                    "pid": 1000 + index,
+                    "ppid": 1,
+                    "started_at_utc": "2026-11-01T00:00:00Z",
+                    "session_id": f"quota-waiter-{index}",
+                    "task_label": "waiter",
+                }
+            )
+            queued_status, queued = coordinator.enqueue(
+                client, "queued", f"op-{index}"
+            )
+            self.assertEqual(queued_status, 202, queued)
+            ticket = queued.get("ticket")
+            self.assertIsInstance(ticket, str)
+            assert isinstance(ticket, str)
+            tickets.append((client.to_payload(), ticket))
+
+        entered = threading.Event()
+        entered_count = {"n": 0}
+        entered_lock = threading.Lock()
+        original_wait = coordinator.wait
+
+        def counting_wait(client, ticket_id, timeout_s):
+            with entered_lock:
+                entered_count["n"] += 1
+                if entered_count["n"] >= session_waits:
+                    entered.set()
+            return original_wait(client, ticket_id, timeout_s)
+
+        coordinator.wait = counting_wait  # type: ignore[method-assign]
+        wait_timeout_s = 4.0
+        wait_threads: list[threading.Thread] = []
+
+        def session_wait(identity: dict, ticket: str) -> None:
+            url = (
+                daemon.base
+                + "/session/wait?"
+                + urllib.parse.urlencode({"key": daemon.key})
+            )
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(
+                    {
+                        "identity": identity,
+                        "ticket": ticket,
+                        "timeout_s": wait_timeout_s,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=wait_timeout_s + 3.0):
+                    return
+            except Exception:
+                return
+
+        for identity, ticket in tickets:
+            thread = threading.Thread(target=session_wait, args=(identity, ticket))
+            wait_threads.append(thread)
+            thread.start()
+        self.assertTrue(entered.wait(5.0), "session waits did not enter")
+
+        await_bodies: list[tuple[int, dict]] = []
+        await_lock = threading.Lock()
+
+        def one_await() -> None:
+            try:
+                status_code, raw = daemon.open(
+                    "GET",
+                    {"id": "999999", "wait_ms": "2000"},
+                    timeout=5.0,
+                )
+                parsed = json.loads(raw.decode("utf-8"))
+            except Exception as exc:
+                status_code = 0
+                parsed = {"error": repr(exc)}
+            if not isinstance(parsed, dict):
+                parsed = {"error": repr(parsed)}
+            with await_lock:
+                await_bodies.append((status_code, parsed))
+
+        await_threads = [
+            threading.Thread(target=one_await) for _ in range(await_waits)
+        ]
+        for thread in await_threads:
+            thread.start()
+
+        def _join_holders() -> None:
+            daemon.state.cancel_pending()
+            for thread in await_threads:
+                thread.join(timeout=3.0)
+            for thread in wait_threads:
+                thread.join(timeout=wait_timeout_s + 2.0)
+
+        self.addCleanup(_join_holders)
+        overflow = await_waits - loopback.AWAIT_LONG_POLL_MAX_IN_FLIGHT
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            with await_lock:
+                immediate = sum(
+                    1
+                    for status_code, body in await_bodies
+                    if status_code == 200
+                    and loopback.AWAIT_LONG_POLL_FIELD not in body
+                )
+            if immediate >= overflow:
+                break
+            time.sleep(0.02)
+
+        self.assertTrue(
+            all(thread.is_alive() for thread in wait_threads),
+            "a session wait returned before POST /result",
+        )
+        result_url = (
+            daemon.base + "/result?" + urllib.parse.urlencode({"key": daemon.key})
+        )
+        result_request = urllib.request.Request(
+            result_url,
+            data=json.dumps({"id": command_id, "ok": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(result_request, timeout=2.0) as response:
+                result_status = int(response.status)
+                result_body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                result_status = int(exc.code)
+                result_body = json.loads(exc.read().decode("utf-8") or "{}")
+            finally:
+                exc.close()
+        self.assertEqual(result_status, 200, result_body)
+        self.assertTrue(result_body.get("ok"), result_body)
+        stored = daemon.state.take_result(command_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.get("ok"), 1)
+        with await_lock:
+            immediate = sum(
+                1
+                for status_code, body in await_bodies
+                if status_code == 200 and loopback.AWAIT_LONG_POLL_FIELD not in body
+            )
+        self.assertGreaterEqual(immediate, overflow, await_bodies)
+        daemon.state.cancel_pending()
+        for thread in await_threads:
+            thread.join(timeout=3.0)
+        for thread in wait_threads:
+            thread.join(timeout=wait_timeout_s + 2.0)
+        self.assertFalse(any(thread.is_alive() for thread in await_threads))
+        self.assertFalse(any(thread.is_alive() for thread in wait_threads))
+
+
 def _query_ok(case: unittest.TestCase, query: object, command_id: str) -> None:
     case.assertIsInstance(query, dict)
     assert isinstance(query, dict)
@@ -375,7 +600,7 @@ class ClientPollTest(unittest.IsolatedAsyncioTestCase):
 
         runtime = self._runtime(_call)
         with mock.patch.object(server.asyncio, "sleep", fake_sleep):
-            waited = await runtime._await_result("surface_query", 7, "client", 1.0)
+            waited = await runtime._await_result("surface_query", 7, "client", 3.5)
         self.assertEqual(waited["y"], 1)
         self.assertEqual(len(calls), 2)
         _query_ok(self, calls[0], "7")
@@ -389,7 +614,7 @@ class ClientPollTest(unittest.IsolatedAsyncioTestCase):
             (200, {"status": "done", "result": {"ok": 1, "y": 2}}),
         ]
         with mock.patch.object(server.asyncio, "sleep", fake_sleep):
-            waited = await runtime._await_result("surface_query", 8, "client", 1.0)
+            waited = await runtime._await_result("surface_query", 8, "client", 3.5)
         self.assertEqual(waited["y"], 2)
         self.assertEqual(len(calls), 2)
         _query_ok(self, calls[0], "8")
@@ -416,7 +641,7 @@ class ClientPollTest(unittest.IsolatedAsyncioTestCase):
 
         runtime._call = _call
         with mock.patch.object(server.asyncio, "sleep", fake_sleep):
-            waited = await runtime._await_result("surface_query", 4, "client", 1.0)
+            waited = await runtime._await_result("surface_query", 4, "client", 3.5)
         self.assertEqual(waited["y"], 4)
         self.assertEqual(slept, [])
         self.assertEqual(len(calls), 2)
@@ -424,6 +649,82 @@ class ClientPollTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1][0], "GET")
         _query_ok(self, calls[0][3], "4")
         _query_ok(self, calls[1][3], "4")
+
+    async def test_last_second_of_the_budget_does_not_send_wait_ms(self) -> None:
+        calls: list[object] = []
+
+        def _call(method, path, payload=None, query=None, *_args):
+            del method, path, payload
+            calls.append(query)
+            return 200, {"status": "done", "result": {"ok": 1, "y": 1}}
+
+        runtime = self._runtime(_call)
+        waited = await runtime._await_result("surface_query", 9, "client", 0.48)
+        self.assertEqual(waited["y"], 1)
+        self.assertIsInstance(calls[0], dict)
+        assert isinstance(calls[0], dict)
+        self.assertNotIn("wait_ms", calls[0])
+
+
+class SlowAccreditationTest(unittest.IsolatedAsyncioTestCase):
+    @slow_test
+    async def test_budget_expiry_stays_timeout_waiting(self) -> None:
+        from dayz_mcp import accredited_daemon_transport as transport
+
+        daemon = _Daemon()
+        self.addCleanup(daemon.close)
+        _host, port = daemon.httpd.server_address
+
+        def slow_verify(*_args, **_kwargs) -> bool:
+            time.sleep(0.2)
+            return True
+
+        def request_with_refresh(
+            *,
+            method,
+            path,
+            query,
+            body,
+            headers,
+            deadline,
+            **_kwargs,
+        ):
+            return transport.verified_daemon_http_request(
+                host="127.0.0.1",
+                port=int(port),
+                key=daemon.key,
+                method=method,
+                path=path,
+                query=dict(query),
+                body=body,
+                headers=dict(headers),
+                deadline=float(deadline),
+                expected_executable="dayz-mcp-test",
+                expected_argv=["dayz-mcp-test"],
+                expected_cwd="C:\\dayz-mcp-test",
+            )
+
+        runtime = object.__new__(server.ClientRuntime)
+        runtime._time_fn = time.monotonic
+        runtime._broker_admits = {}
+        runtime._allow_stale_policy = False
+        runtime._credential_provider = SimpleNamespace(
+            request_with_refresh=request_with_refresh
+        )
+        runtime._ensure_daemon = lambda _deadline: False
+
+        async def liveness(_peer: str) -> str:
+            return "status unavailable"
+
+        runtime._liveness_message = liveness
+        with mock.patch.object(
+            transport, "_connected_daemon_identity_verified", slow_verify
+        ):
+            with self.assertRaises(server.ToolError) as caught:
+                await runtime._await_result("camera_get", 7, "client", 0.48)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("timeout waiting"), message)
+        self.assertNotIn("daemon_response_ambiguous", message)
 
 
 class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
@@ -479,22 +780,98 @@ class EmbeddedWaitTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(command_id, queued)
         self.assertIsNone(state.take_result(command_id))
 
+    @slow_test
+    async def test_result_arrives_while_the_default_executor_is_full(self) -> None:
+        hold = threading.Event()
+        entered: list[int] = []
+        entered_lock = threading.Lock()
+
+        def block() -> None:
+            with entered_lock:
+                entered.append(1)
+            hold.wait(timeout=3.0)
+
+        blockers = [
+            asyncio.create_task(asyncio.to_thread(block)) for _ in range(40)
+        ]
+        last = -1
+        stable = 0.0
+        fill_deadline = time.monotonic() + 2.0
+        filled = False
+        while time.monotonic() < fill_deadline:
+            await asyncio.sleep(0.02)
+            with entered_lock:
+                count = len(entered)
+            if count > 0 and count == last:
+                stable += 0.02
+                if stable >= 0.15:
+                    filled = True
+                    break
+            else:
+                stable = 0.0
+                last = count
+        if not filled:
+            hold.set()
+            await asyncio.gather(*blockers, return_exceptions=True)
+            self.fail(f"default executor did not fill; entered={len(entered)}")
+
+        state = loopback.ServerState("embedded-key")
+        status, payload = state.enqueue_command(
+            "camera_get", {}, peer="client", operation_timeout_s=30
+        )
+        self.assertEqual(status, 200, payload)
+        command_id = int(payload["id"])
+        runtime = self._runtime(state)
+        started = time.monotonic()
+        task = asyncio.create_task(
+            runtime.wait_for_result("camera_get", command_id, "client", 0.4)
+        )
+        await asyncio.sleep(0.05)
+        code, stored = state.store_result({"id": command_id, "ok": 1})
+        self.assertEqual(code, 200, stored)
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=0.35)
+        except TimeoutError:
+            self.fail(
+                "embedded wait did not deliver a result published at 50ms "
+                f"before its 400ms timeout (elapsed={time.monotonic() - started:.3f})"
+            )
+        finally:
+            hold.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, *blockers, return_exceptions=True)
+        self.assertEqual(result["ok"], 1)
+        self.assertLess(time.monotonic() - started, 0.4)
+
 
 class BenchTest(unittest.TestCase):
-    @slow_test
-    def test_deferred_result_drops_from_about_twenty_requests_to_one_or_two(self) -> None:
+    def _load(self):
         path = Path(__file__).resolve().parents[1] / "checks" / "await_long_poll_bench.py"
         spec = importlib.util.spec_from_file_location("await_long_poll_bench", path)
         self.assertIsNotNone(spec)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module
+
+    @slow_test
+    def test_deferred_result_drops_from_about_twenty_requests_to_one_or_two(self) -> None:
+        module = self._load()
         report = asyncio.run(module.run_bench(delay_s=1.0, samples=7))
         print("BENCH " + json.dumps(report), flush=True)
         before = report["before"]["request_counts"]
         after = report["after"]["request_counts"]
         self.assertTrue(all(count >= 8 for count in before), before)
         self.assertTrue(all(count <= 2 for count in after), after)
+
+    @slow_test
+    def test_thirty_three_samples_do_not_fill_the_command_queue(self) -> None:
+        module = self._load()
+        report = asyncio.run(module.run_bench(delay_s=0.02, samples=33))
+        self.assertEqual(report["samples"], 33)
+        self.assertEqual(len(report["before"]["request_counts"]), 33)
+        self.assertEqual(len(report["after"]["request_counts"]), 33)
 
 
 if __name__ == "__main__":

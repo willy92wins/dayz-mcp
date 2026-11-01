@@ -1355,7 +1355,7 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(query), {"id", "remove", "wait_ms"})
 
         runtime._call = _call_with_block
-        waited = await runtime._await_result("surface_query", 1, "server", 1.0)
+        waited = await runtime._await_result("surface_query", 1, "server", 3.5)
         self.assertEqual(len(calls), 1)
         method, path, payload, query = calls[0]
         self.assertEqual((method, path, payload), ("POST", "/await", holder))
@@ -1371,7 +1371,7 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
 
         calls.clear()
         runtime._call = _call_plain
-        plain = await runtime._await_result("surface_query", 2, "server", 1.0)
+        plain = await runtime._await_result("surface_query", 2, "server", 3.5)
         self.assertEqual(len(calls), 1)
         method, path, payload, query = calls[0]
         self.assertEqual((method, path, payload), ("GET", "/await", None))
@@ -1388,7 +1388,7 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
 
         runtime._call = _call_error
         with self.assertRaises(ToolError):
-            await runtime._await_result("surface_query", 3, "server", 1.0)
+            await runtime._await_result("surface_query", 3, "server", 3.5)
 
         # A daemon from before this change answers POST /await with 404: the
         # client reads the same command with GET instead.
@@ -1401,7 +1401,7 @@ class HumanInputClientTest(unittest.IsolatedAsyncioTestCase):
         calls.clear()
         runtime._call = _call_old_daemon
         try:
-            old = await runtime._await_result("surface_query", 4, "server", 1.0)
+            old = await runtime._await_result("surface_query", 4, "server", 3.5)
         except ToolError as exc:
             self.fail(f"the 404 did not fall back to GET: {exc!r}")
         self.assertEqual(len(calls), 2)
