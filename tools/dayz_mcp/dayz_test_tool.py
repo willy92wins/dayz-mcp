@@ -10,7 +10,7 @@ import os
 import re
 import time
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Protocol
@@ -25,7 +25,25 @@ from dayz_mcp import (
     request_path_authority,
     secure_launcher,
 )
-from dayz_mcp.launcher_registry import open_approved_launcher
+from dayz_mcp.launcher_registry import open_approved_launcher_async
+
+# Compat seam (A3 FIX 9): existing tests patch `open_approved_launcher`
+# in this module with a synchronous context manager. Production binds
+# the name to the async variant; `_open_launcher` accepts either
+# context-manager protocol, so those doubles keep working unchanged.
+open_approved_launcher = open_approved_launcher_async
+
+
+@asynccontextmanager
+async def _open_launcher():
+    """Open the approved launcher without blocking the event loop."""
+    context = open_approved_launcher("dayz-test-v1")
+    if hasattr(context, "__aenter__"):
+        async with context as opened:
+            yield opened
+    else:
+        with context as opened:
+            yield opened
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.client_steam_bootstrap import (
@@ -2358,7 +2376,7 @@ async def _execute_preflight(
             stamped, defaulted, project_mod_replaced=project_mod_override
         )
 
-    with open_approved_launcher("dayz-test-v1") as opened:
+    async with _open_launcher() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             raw_request, policy = build_run_request(
@@ -2706,7 +2724,7 @@ async def execute_dayz_test_run(
         )
     preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
-    with open_approved_launcher("dayz-test-v1") as opened:
+    async with _open_launcher() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             request_arguments: dict[str, object] = {
@@ -3228,7 +3246,7 @@ async def execute_dayz_test_stop(
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")
-    with open_approved_launcher("dayz-test-v1") as opened:
+    async with _open_launcher() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
@@ -3464,9 +3482,18 @@ def _start_role_roots() -> dict[str, str] | None:
 def _close_project_policy(
     run: dict[str, object],
 ) -> dayz_test_request.RequestProjectPolicy | None:
-    """The sealed project policy, loaded the way stop does before artifacts."""
+    """The sealed project policy, loaded the way stop does before artifacts.
+
+    Non-blocking (A3 FIX 5): `try_open_approved_launcher` makes one
+    fail-fast lock attempt, so a busy registry never stalls the event
+    loop here; it opens from the last good cached registry instead,
+    and with no cache this returns None and the close falls back to
+    the conservative logout wait (see `_wait_for_connected_logouts`).
+    """
+    from dayz_mcp.launcher_registry import try_open_approved_launcher
+
     try:
-        with open_approved_launcher("dayz-test-v1") as opened:
+        with try_open_approved_launcher("dayz-test-v1") as opened:
             opened.validate_native_pe()
             with secure_launcher.load_verified_bundle(opened) as bundle:
                 policies = _semantic_policies(bundle.sealed_policies)
@@ -4089,11 +4116,22 @@ async def _wait_for_connected_logouts(
     only by their linked uid's logout after the pre-close boundary. Without
     that link the wait runs to the cap and the caller warns.
     """
-    if server_rpt is None:
-        return [], 0.0, False
     budget = min(_LOGOUT_WAIT_S, timeout_s)
     started = time.monotonic()
     deadline = started + budget
+    if server_rpt is None:
+        if not wait:
+            return [], 0.0, False
+        # Conservative default (A3 FIX 5): no server RPT to verify
+        # logouts against (e.g. the policy load hit a busy registry
+        # with no cached policy), so wait the whole budget before the
+        # server close instead of skipping the logout wait, and report
+        # a timeout so the caller warns player state may not be saved.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return [], max(0.0, time.monotonic() - started), True
+            await asyncio.sleep(min(_CLOSE_POLL_S, remaining))
     watch = _LogoutWatch(boundary)
 
     def _elapsed() -> float:
@@ -4374,6 +4412,7 @@ async def execute_dayz_test_close(
     process_roles = _launched_roles(run)
     start_roots = _start_role_roots()
     policy = _close_project_policy(run)
+    policy_missing = policy is None
     published = [
         role
         for role in process_roles
@@ -4615,7 +4654,16 @@ async def execute_dayz_test_close(
         payload["close_order"] = logout_report["close_order"]
         payload["logout_wait_s"] = logout_report["logout_wait_s"]
         payload["logout_players"] = logout_report["logout_players"]
-        if graceful and logout_report["timed_out"] is True:
+        # FIX 8: warn only when the logout wait timed out and the close
+        # is graceful, or when there was no sealed policy (the busy-
+        # registry fallback, where graceful is forced False although
+        # the budget was consumed). An ungraceful close with a policy
+        # (e.g. run_retired_elsewhere) must not warn. FIX 9 (P3c): a
+        # role_without_rpt close with a policy also warns on timeout:
+        # the missing RPT is why no logout could be verified.
+        if logout_report["timed_out"] is True and (
+            graceful or policy_missing or reason == "role_without_rpt"
+        ):
             payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
     elif graceful:
         server_watch = watches.get("server")

@@ -15,7 +15,10 @@ from typing import Sequence
 
 from dayz_mcp import launcher_registry
 from dayz_mcp.native_bundle import load_verified_bundle
-from dayz_mcp.registry_lock import _CANONICAL_LOCK, acquire_registry_lock
+from dayz_mcp.registry_lock import (
+    _CANONICAL_LOCK,
+    acquire_registry_lock_with_retry,
+)
 
 if os.name == "nt":
     from ctypes import wintypes
@@ -215,7 +218,7 @@ def _install_transition(
     }:
         _invalid("invalid_launcher_registry_update")
     entry = _validated_entry(bundle)
-    with acquire_registry_lock(exclusive=True, path=lock_path):
+    with acquire_registry_lock_with_retry(exclusive=True, path=lock_path):
         current_raw, current_identity = _read_pinned(registry_path)
         current_sha = _sha256(current_raw)
         _recover_prepared(receipts_path, current_sha, current_identity)
@@ -315,7 +318,7 @@ def _replace_transition(
     }:
         _invalid("invalid_launcher_registry_update")
     entry = _validated_entry(bundle)
-    with acquire_registry_lock(exclusive=True, path=lock_path):
+    with acquire_registry_lock_with_retry(exclusive=True, path=lock_path):
         current_raw, current_identity = _read_pinned(registry_path)
         current_sha = _sha256(current_raw)
         _recover_prepared(receipts_path, current_sha, current_identity)
@@ -442,7 +445,7 @@ def describe_registry_provenance(
         lock_path = _CANONICAL_LOCK
     if receipts_path is None:
         receipts_path = _CANONICAL_RECEIPTS
-    with acquire_registry_lock(exclusive=False, path=lock_path):
+    with acquire_registry_lock_with_retry(exclusive=False, path=lock_path):
         current_raw, current_identity = _read_pinned(registry_path)
         current_sha = _sha256(current_raw)
         anchors = 0
@@ -732,7 +735,7 @@ def _recover_prepared(
 def _rollback_transition(
     *, registry_path: Path, lock_path: Path, receipts_path: Path
 ) -> str:
-    with acquire_registry_lock(exclusive=True, path=lock_path):
+    with acquire_registry_lock_with_retry(exclusive=True, path=lock_path):
         current_raw, current_identity = _read_pinned(registry_path)
         current_sha = _sha256(current_raw)
         _recover_prepared(receipts_path, current_sha, current_identity)
