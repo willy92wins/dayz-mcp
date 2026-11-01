@@ -10,9 +10,15 @@ pattern="test*.py", top_level_dir="."), the same call the single full job
 used, so load_tests and the rest of discovery stay in place.
 
 Each direct child of that suite is one discovered module (a test file, or
-whatever load_tests returned for it). A child is never split. If two children
-share a test module, they stay on the same shard too: splitting either one
-would split a module. Children with no tests are not modules.
+the suite load_tests returned for it). A child is never split, and the shard
+runs that original suite object. Flattening is only for counting and
+grouping, so a load_tests suite keeps its own run(). If two children share a
+test module, they stay on the same shard too: splitting either one would
+split a module. A plain empty TestSuite is not a module. A custom suite with
+no leaf tests is still run.
+
+Warnings follow unittest's CLI (TestProgram): 'default' when the process has
+no -W and no PYTHONWARNINGS; those filters stay in place when it does.
 
 Shards are a deterministic longest-processing-time balance. A group's weight
 is its test count plus SLOW_TEST_WEIGHT times the @slow_test decorators in
@@ -45,10 +51,16 @@ _USAGE = "usage: python -B -m tests._shard [--list] <i>/<N>"
 
 
 class Group(NamedTuple):
-    """One unsplittable piece of the suite, in discovery order."""
+    """One unsplittable piece of the suite, in discovery order.
+
+    tests is the flattened leaves, used only to count and to name modules.
+    suites is the original discover or load_tests children, and those are
+    what a shard runs.
+    """
 
     modules: tuple[str, ...]
     tests: tuple[unittest.case.TestCase, ...]
+    suites: tuple[unittest.TestSuite | unittest.case.TestCase, ...]
 
 
 def discover_suite() -> unittest.TestSuite:
@@ -90,7 +102,10 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
     on two shards. A child that names several modules ties those modules
     together for the same reason.
     """
-    children: list[tuple[list[str], list[unittest.case.TestCase]]] = []
+    # modules, leaf tests (counting only), and the original child object.
+    children: list[
+        tuple[list[str], list[unittest.case.TestCase], unittest.TestSuite | unittest.case.TestCase]
+    ] = []
     parent: list[int] = []
     module_owner: dict[str, int] = {}
 
@@ -107,7 +122,9 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
 
     for child in suite:
         tests = list(iter_tests(child))
-        if not tests:
+        # The tests package is often an empty TestSuite. A load_tests hook may
+        # return a subclass whose run() is the behavior, even with no leaves.
+        if not tests and type(child) is unittest.TestSuite:
             continue
         modules: list[str] = []
         seen: set[str] = set()
@@ -116,8 +133,10 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
             if name not in seen:
                 seen.add(name)
                 modules.append(name)
+        if not modules:
+            modules.append(f"{type(child).__module__}.{type(child).__qualname__}")
         index = len(children)
-        children.append((modules, tests))
+        children.append((modules, tests, child))
         parent.append(index)
         for name in modules:
             owner = module_owner.get(name)
@@ -140,14 +159,16 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
         modules: list[str] = []
         seen_modules: set[str] = set()
         tests: list[unittest.case.TestCase] = []
+        suites: list[unittest.TestSuite | unittest.case.TestCase] = []
         for index in members[root]:
-            child_modules, child_tests = children[index]
+            child_modules, child_tests, child_suite = children[index]
             for name in child_modules:
                 if name not in seen_modules:
                     seen_modules.add(name)
                     modules.append(name)
             tests.extend(child_tests)
-        groups.append(Group(tuple(modules), tuple(tests)))
+            suites.append(child_suite)
+        groups.append(Group(tuple(modules), tuple(tests), tuple(suites)))
     return groups
 
 
@@ -255,11 +276,23 @@ def module_names(groups: Iterable[Group]) -> list[str]:
     return names
 
 
+def _runner_warnings() -> str | None:
+    """Same policy as unittest.main.TestProgram (main.py).
+
+    'default' when warnings were not configured. None leaves -W and
+    PYTHONWARNINGS alone: TextTestRunner only calls simplefilter when
+    warnings is set (runner.py).
+    """
+    if not sys.warnoptions:
+        return "default"
+    return None
+
+
 def run_assigned(
     groups: list[Group], *, index: int, count: int, list_only: bool
 ) -> int:
     chosen = assign_groups(groups, count)[index - 1]
-    if not chosen or not any(group.tests for group in chosen):
+    if not chosen or not any(group.suites for group in chosen):
         print(f"shard {index}/{count} has no tests", file=sys.stderr)
         return 1
     if list_only:
@@ -268,8 +301,11 @@ def run_assigned(
         return 0
     suite = unittest.TestSuite()
     for group in chosen:
-        suite.addTests(group.tests)
-    result = unittest.TextTestRunner(verbosity=1).run(suite)
+        for original in group.suites:
+            # addTest keeps the suite. addTests iterates it and would drop a
+            # load_tests suite's own run() (suite.py).
+            suite.addTest(original)
+    result = unittest.TextTestRunner(verbosity=1, warnings=_runner_warnings()).run(suite)
     return 0 if result.wasSuccessful() else 1
 
 

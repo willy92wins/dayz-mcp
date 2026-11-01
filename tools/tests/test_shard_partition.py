@@ -8,11 +8,33 @@ build the whole suite a second time.
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 
 from tests import _shard
 from tests._tiers import slow_test
+
+_SHARD_FILE = Path(__file__).resolve().parent / "_shard.py"
+_DRIVER = """\
+import importlib.util
+import sys
+import unittest
+
+spec = importlib.util.spec_from_file_location("shard_under_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+suite = unittest.TestLoader().discover("tests", pattern="test*.py", top_level_dir=".")
+code = module.run_assigned(
+    module.groups_from_suite(suite), index=1, count=1, list_only=False
+)
+raise SystemExit(code)
+"""
 
 
 class ShardSpecTest(unittest.TestCase):
@@ -90,6 +112,131 @@ class ShardPartitionTest(unittest.TestCase):
             test_count = sum(len(group.tests) for group in shard)
             parts.append(f"{index}: {len(names)} modules, {test_count} tests")
         print("SHARD_SIZES " + "; ".join(parts), flush=True)
+
+
+def _fresh_env() -> dict[str, str]:
+    """A child with no -W and no PYTHONWARNINGS, whatever this process inherited."""
+    env = os.environ.copy()
+    env.pop("PYTHONWARNINGS", None)
+    return env
+
+
+def _write(path: Path, source: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(source).lstrip("\n"), encoding="utf-8")
+
+
+def _toy_exit_codes(root: Path) -> tuple[int, str, int, str]:
+    """Exit code and stderr of unittest discover and of one shard, on `root`."""
+    driver = root / "_drive_shard.py"
+    driver.write_text(_DRIVER, encoding="utf-8")
+    env = _fresh_env()
+    discover = subprocess.run(
+        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    shard = subprocess.run(
+        [sys.executable, "-B", str(driver), str(_SHARD_FILE)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return discover.returncode, discover.stderr, shard.returncode, shard.stderr
+
+
+class ShardRunnerParityTest(unittest.TestCase):
+    def test_load_tests_suite_matches_unittest_discover(self) -> None:
+        """A load_tests suite that records an error in its own run().
+
+        The suite also holds a passing test. Flattening runs that test and
+        drops the suite's run(), so the shard exits 0 while discover exits 1.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-load-tests-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "test_hook.py",
+                """
+                import sys
+                import unittest
+
+                class PassingTest(unittest.TestCase):
+                    def test_passes(self):
+                        pass
+
+                class HookSuite(unittest.TestSuite):
+                    def run(self, result, debug=False):
+                        # Held before run(): TestSuite clears its slots after each test.
+                        case = next(iter(self))
+                        super().run(result, debug=debug)
+                        try:
+                            raise RuntimeError("load_tests suite ran")
+                        except RuntimeError:
+                            result.addError(case, sys.exc_info())
+                        return result
+
+                def load_tests(loader, tests, pattern):
+                    suite = HookSuite()
+                    suite.addTest(PassingTest("test_passes"))
+                    return suite
+                """,
+            )
+            discover_code, discover_err, shard_code, shard_err = _toy_exit_codes(root)
+        self.assertEqual(
+            shard_code,
+            discover_code,
+            f"discover={discover_code} shard={shard_code}\n"
+            f"--- discover stderr ---\n{discover_err}\n"
+            f"--- shard stderr ---\n{shard_err}",
+        )
+        self.assertEqual(discover_code, 1)
+        self.assertIn("load_tests suite ran", discover_err)
+        self.assertIn("load_tests suite ran", shard_err)
+
+    def test_deprecation_warning_matches_unittest_discover(self) -> None:
+        """Without -W, a DeprecationWarning must be emitted, as unittest's CLI does.
+
+        The probe records the warning and fails if the filter swallowed it.
+        It does not call simplefilter itself.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-warnings-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "test_warn.py",
+                """
+                import warnings
+                import unittest
+
+                class DeprecationFilterTest(unittest.TestCase):
+                    def test_deprecation_is_emitted(self):
+                        with warnings.catch_warnings(record=True) as caught:
+                            warnings.warn("shard-deprecation-probe", DeprecationWarning)
+                        emitted = [
+                            item for item in caught
+                            if issubclass(item.category, DeprecationWarning)
+                        ]
+                        if not emitted:
+                            self.fail("DeprecationWarning was not emitted")
+                """,
+            )
+            discover_code, discover_err, shard_code, shard_err = _toy_exit_codes(root)
+        self.assertEqual(
+            shard_code,
+            discover_code,
+            f"discover={discover_code} shard={shard_code}\n"
+            f"--- discover stderr ---\n{discover_err}\n"
+            f"--- shard stderr ---\n{shard_err}",
+        )
+        self.assertEqual(discover_code, 0)
+        self.assertNotIn("DeprecationWarning was not emitted", shard_err)
+        self.assertNotIn("DeprecationWarning was not emitted", discover_err)
 
 
 if __name__ == "__main__":
