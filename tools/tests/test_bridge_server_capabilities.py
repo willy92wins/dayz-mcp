@@ -36,9 +36,11 @@ from __future__ import annotations
 
 import re
 import unittest
+from types import SimpleNamespace
 from urllib.parse import parse_qs, unquote
 
 from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import EnforceArray, EnforceMap, EnforceString, translate
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
@@ -48,7 +50,7 @@ CONSTRUCTOR_SIGNATURE = "void MCPBridge()"
 START_POLL_SIGNATURE = "protected void StartPoll()"
 CAPS_CACHE_DECL = "protected string m_PollCapabilities;"
 CAPS_CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);"
-CAPS_WIRE = '"&caps=" + m_PollCapabilities'
+CAPS_WIRE = 'request = request + "&caps=" + m_PollCapabilities;'
 VER_WIRE = '"&ver=" + GetPollVersion()'
 INSTANCE_GUARD = 'if (m_PeerInstance != "")'
 POLL_GET = "m_Ctx.GET(cb, request);"
@@ -115,8 +117,23 @@ EXPECTED_SERVER_CAPABILITIES = (
 )
 
 _COMMENT_OR_STRING = re.compile(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*[\s\S]*?\*/')
+_STRING_LITERAL = re.compile(r'"(?:\\.|[^"\\\n])*"')
 _CAPS_DECLARATION = re.compile(r"\bconst\s+string\s+SERVER_CAPABILITIES\s*=\s*([^;]*);")
 _CAPS_CACHE_ASSIGN = re.compile(r"\bm_PollCapabilities\s*=(?!=)")
+_CAPS_CACHE_COMPOUND_ASSIGN = re.compile(r"\bm_PollCapabilities\s*(?:[+\-*/%|&^]|<<|>>)=(?!=)")
+_CAPS_CACHE_INC_DEC = re.compile(
+    r"(?:\+\+|--)\s*m_PollCapabilities\b|\bm_PollCapabilities\s*(?:\+\+|--)"
+)
+_CAPS_CACHE_METHOD_OR_INDEX = re.compile(r"\bm_PollCapabilities\s*[.\[]")
+_CAPS_CACHE_OUT_KW = re.compile(r"\b(?:out|inout)\s+m_PollCapabilities\b")
+_CAPS_CACHE_TOKEN = re.compile(r"\bm_PollCapabilities\b")
+_CONST_STRING_DECL = re.compile(r"\bconst\s+string\s+([A-Za-z_]\w*)\s*=\s*([^;]+);")
+_CONST_INT_DECL = re.compile(r"\bconst\s+int\s+([A-Za-z_]\w*)\s*=\s*(-?\d+)\s*;")
+_CONST_FLOAT_DECL = re.compile(r"\bconst\s+float\s+([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)\s*;")
+_DECLARED_MEMBER = re.compile(
+    r"\b(?:protected|private)\s+(?:static\s+)?(?P<ref>ref\s+)?"
+    r"(?P<type>[A-Za-z_]\w*(?:\s*<[^;{}()=]*>)?)\s+(?P<name>m_\w+)\s*;"
+)
 _STRING_CHUNK = re.compile(r'"([^"\\\n]*)"')
 _BRANCH_HEAD = re.compile(r'(?:if|else\s+if)\s*\(\s*command\.cmd\s*==\s*"([^"]*)"\s*\)')
 _FIRST_BRANCH = re.compile(r'\bif\s*\(\s*command\.cmd\s*==\s*"')
@@ -132,6 +149,11 @@ def _without_comments(source: str) -> str:
         return re.sub(r"[^\n]", " ", text)
 
     return _COMMENT_OR_STRING.sub(replace, source)
+
+
+def _blank_strings(clean: str) -> str:
+    """Blank string literal contents in comment-stripped source, keeping offsets."""
+    return _STRING_LITERAL.sub(lambda m: '"' + (" " * (len(m.group(0)) - 2)) + '"', clean)
 
 
 def _skip_ws(text: str, pos: int) -> int:
@@ -235,30 +257,238 @@ def _assert_grammar(test: unittest.TestCase, names: list[str]) -> None:
 
 
 def _assert_announced_on_every_poll(test: unittest.TestCase, clean: str) -> None:
+    masked = _blank_strings(clean)
     test.assertEqual(clean.count(CAPS_CACHE_DECL), 1, "m_PollCapabilities must be declared once")
+    decl_at = clean.index(CAPS_CACHE_DECL)
+    decl_depth = masked[:decl_at].count("{") - masked[:decl_at].count("}")
+    test.assertEqual(decl_depth, 1, "m_PollCapabilities must be a class member, not a local")
+    test.assertTrue(
+        masked[:decl_at].rstrip().endswith(("{", ";", "}")),
+        "m_PollCapabilities declaration must stand alone",
+    )
+
     constructor = _method_body(clean, CONSTRUCTOR_SIGNATURE)
+    constructor_masked = _blank_strings(constructor)
     test.assertEqual(
         constructor.count(CAPS_CACHE_INIT),
         1,
         "MCPBridge() must encode SERVER_CAPABILITIES into m_PollCapabilities once",
     )
     init_at = constructor.index(CAPS_CACHE_INIT)
-    init_depth = constructor[:init_at].count("{") - constructor[:init_at].count("}")
+    init_depth = constructor_masked[:init_at].count("{") - constructor_masked[:init_at].count("}")
     test.assertEqual(init_depth, 0, "m_PollCapabilities init must be unconditional in MCPBridge()")
+    init_prefix = constructor_masked[:init_at].rstrip()
+    test.assertTrue(
+        init_prefix == "" or init_prefix.endswith((";", "}")),
+        "m_PollCapabilities init must not hang off a braceless condition or expression",
+    )
+    test.assertIsNone(
+        re.search(r"\breturn\b", constructor_masked[:init_at]),
+        "no early return may precede m_PollCapabilities init in MCPBridge()",
+    )
+
+    test.assertIsNone(
+        _CAPS_CACHE_METHOD_OR_INDEX.search(masked),
+        "m_PollCapabilities must not have methods called on it or be indexed",
+    )
+    test.assertIsNone(
+        _CAPS_CACHE_COMPOUND_ASSIGN.search(masked),
+        "m_PollCapabilities must not be modified by compound assignment",
+    )
+    test.assertIsNone(
+        _CAPS_CACHE_INC_DEC.search(masked),
+        "m_PollCapabilities must not be incremented or decremented",
+    )
     test.assertEqual(
-        len(_CAPS_CACHE_ASSIGN.findall(clean)),
+        len(_CAPS_CACHE_ASSIGN.findall(masked)),
         1,
         "m_PollCapabilities must not be reassigned after construction",
     )
+    test.assertIsNone(
+        _CAPS_CACHE_OUT_KW.search(masked),
+        "m_PollCapabilities must not be passed as out/inout",
+    )
+    for match in _CAPS_CACHE_TOKEN.finditer(masked):
+        paren_depth = masked[: match.start()].count("(") - masked[: match.start()].count(")")
+        test.assertEqual(
+            paren_depth,
+            0,
+            "m_PollCapabilities must not appear inside parentheses or function arguments",
+        )
+
     start_poll = _method_body(clean, START_POLL_SIGNATURE)
-    test.assertNotIn("SERVER_CAPABILITIES", start_poll, "StartPoll must reuse cached m_PollCapabilities")
+    start_poll_masked = _blank_strings(start_poll)
+    test.assertNotIn("SERVER_CAPABILITIES", start_poll_masked, "StartPoll must reuse cached m_PollCapabilities")
     test.assertEqual(start_poll.count(CAPS_WIRE), 1, "caps must append m_PollCapabilities exactly once")
     caps_at = start_poll.index(CAPS_WIRE)
     test.assertLess(start_poll.index(VER_WIRE), caps_at, "caps must follow ver")
     test.assertLess(caps_at, start_poll.index(INSTANCE_GUARD), "caps must precede the optional inst block")
     test.assertLess(caps_at, start_poll.index(POLL_GET), "caps must be appended before the GET")
-    depth = start_poll[:caps_at].count("{") - start_poll[:caps_at].count("}")
+    depth = start_poll_masked[:caps_at].count("{") - start_poll_masked[:caps_at].count("}")
     test.assertEqual(depth, 0, "caps must be unconditional, not nested in a guard")
+    wire_prefix = start_poll_masked[:caps_at].rstrip()
+    test.assertTrue(
+        wire_prefix == "" or wire_prefix.endswith((";", "}")),
+        "caps append must not hang off a braceless condition",
+    )
+    test.assertEqual(
+        len(_CAPS_CACHE_TOKEN.findall(masked)),
+        3,
+        "m_PollCapabilities must appear only in declaration, constructor init, and StartPoll",
+    )
+
+
+def _execute_translated_poll_caps(source: str, clean: str) -> list[str]:
+    class WireString(EnforceString):
+        def __add__(self, other):
+            if isinstance(other, int):
+                return WireString(self.data + str(other).encode("ascii"))
+            if isinstance(other, EnforceString):
+                return WireString(self.data + other.data)
+            return NotImplemented
+
+        def ToUpper(self) -> int:
+            self.data = self.data.upper()
+            return len(self.data)
+
+        def ToLower(self) -> int:
+            self.data = self.data.lower()
+            return len(self.data)
+
+        def Replace(self, sample: EnforceString, replace: EnforceString) -> int:
+            if not sample.data:
+                return 0
+            count = self.data.count(sample.data)
+            self.data = self.data.replace(sample.data, replace.data)
+            return count
+
+        def TrimInPlace(self) -> None:
+            self.data = self.data.strip(b" \t\r\n")
+
+        def Set(self, index: int, value: EnforceString) -> None:
+            self.data = self.data[:index] + value.data[:1] + self.data[index + 1 :]
+
+        def Insert(self, index: int, value: EnforceString) -> None:
+            self.data = self.data[:index] + value.data + self.data[index:]
+
+    masked = _blank_strings(clean)
+    polls: list[bytes] = []
+    transport = SimpleNamespace(GET=lambda _cb, req: polls.append(req.data))
+    ns: dict = {
+        "_S": WireString,
+        "array": EnforceArray,
+        "map": EnforceMap,
+        "IntDivide": lambda v, d: v // d if v >= 0 else -(-v // d),
+        "g_Game": None,
+        "MCPTelemetryFixtureLine": object,
+        "MCPOnInventoryMoveRefused": object(),
+        "MCPPollCallback": lambda _owner: object(),
+        "GetPollVersion": lambda: WireString.of("12%7E1.30"),
+        "LoadCounterQuery": lambda: WireString.of(""),
+        "NextLoadCounter": lambda value: value + 1,
+        "this": object(),
+        "m_Key": WireString.of("k"),
+        "m_PeerInstance": WireString(b""),
+        "m_PollCapabilities": WireString(b""),
+        "m_PollArgContractHash": WireString(b""),
+        "m_CallbackRefs": EnforceArray(),
+        "m_Pending": EnforceArray(),
+        "m_Jobs": EnforceMap(),
+        "m_Polls": 0,
+        "m_SincePollS": 0.0,
+        "m_LastPollIntervalS": 0.0,
+        "m_Accum": 0.0,
+        "m_PollInFlight": False,
+        "m_Tick": 0,
+        "m_TickPollSent": 0,
+        "m_PollCallback": None,
+        "MAX_CALLBACK_REFS": 128,
+        "MAX_POLL_RESULTS": 64,
+    }
+    const_chunk_re = re.compile(r'"((?:\\.|[^"\\\n])*)"')
+    escape_re = re.compile(r"\\(.)")
+    escape_map = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+    for match in _CONST_INT_DECL.finditer(clean):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = int(match.group(2))
+    for match in _CONST_FLOAT_DECL.finditer(clean):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = float(match.group(2))
+    for match in _CONST_STRING_DECL.finditer(clean):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            cname, expr = match.group(1), match.group(2)
+            chunks = [
+                escape_re.sub(lambda m: escape_map.get(m.group(1), m.group(1)), raw)
+                for raw in const_chunk_re.findall(expr)
+            ]
+            glue = re.sub(r"\s+", "", const_chunk_re.sub("", expr))
+            if not chunks or glue != "+" * (len(chunks) - 1):
+                raise AssertionError(f"unsupported const string {cname}: {expr!r}")
+            ns[cname] = WireString.of("".join(chunks))
+    for match in _DECLARED_MEMBER.finditer(clean):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") != 1:
+            continue
+        mtype = match.group("type").strip()
+        mname = match.group("name")
+        if match.group("ref") or "<" in mtype:
+            ns[mname] = None
+        elif mtype == "int":
+            ns[mname] = 0
+        elif mtype == "float":
+            ns[mname] = 0.0
+        elif mtype == "bool":
+            ns[mname] = False
+        elif mtype == "string":
+            ns[mname] = WireString(b"")
+        else:
+            ns[mname] = None
+
+    encode_sig = "protected string EncodeQueryValue(string value)"
+    if encode_sig in clean:
+        encode_body = re.sub(
+            r"\b(\w+)\s*/\s*(\w+)",
+            r"IntDivide(\1, \2)",
+            _method_body(clean, encode_sig),
+        )
+        ns["EncodeQueryValue"] = translate(
+            encode_sig + "\n{" + encode_body + "}\n", encode_sig, dict(ns)
+        )
+    else:
+        ns["EncodeQueryValue"] = lambda value: WireString.of(_encode_query_value(value.text))
+
+    next_sig = "protected int NextLoadCounter(int value)"
+    if next_sig in clean:
+        next_body = _method_body(clean, next_sig)
+        translate(
+            next_sig + "\n{" + next_body + "}\n",
+            next_sig,
+            ns,
+            members=set(re.findall(r"\bm_\w+", next_body)),
+        )
+
+    for sig in (CONSTRUCTOR_SIGNATURE, START_POLL_SIGNATURE):
+        body = _method_body(clean, sig)
+        translate(
+            sig + "\n{" + body + "}\n",
+            sig,
+            ns,
+            members=set(re.findall(r"\bm_\w+", body)),
+            class_types=("MCPPollCallback",),
+        )
+
+    ns["MCPBridge"]()
+    ns["m_Key"] = WireString.of("k")
+    ns["m_Ctx"] = transport
+    ns["StartPoll"]()
+    if len(polls) != 1:
+        raise AssertionError(f"expected 1 poll GET, got {len(polls)}")
+    request = polls[0].decode("ascii")
+    if not request.startswith("poll?"):
+        raise AssertionError(f"unexpected poll path: {request!r}")
+    parsed = parse_qs(request[len("poll?") :], strict_parsing=True, keep_blank_values=True)
+    if "caps" not in parsed or len(parsed["caps"]) != 1:
+        raise AssertionError(f"missing single caps parameter in {request!r}")
+    return parsed["caps"][0].split(",") if parsed["caps"][0] else []
 
 
 def _assert_contract(test: unittest.TestCase, source: str, expected: tuple[str, ...]) -> list[str]:
@@ -270,6 +500,8 @@ def _assert_contract(test: unittest.TestCase, source: str, expected: tuple[str, 
     test.assertEqual(announced, sorted(dispatched), "announcement must be the sorted dispatcher census")
     test.assertEqual(announced, list(expected), "announcement must equal the literal expected census")
     _assert_announced_on_every_poll(test, clean)
+    wire_caps = _execute_translated_poll_caps(source, clean)
+    test.assertEqual(wire_caps, list(expected), "translated MCPBridge() + StartPoll() must emit expected caps")
     return dispatched
 
 
@@ -468,8 +700,48 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "cache_caps_decl_absent": source.replace(caps_cache_decl, ""),
             "cache_caps_init_absent": source.replace(caps_cache_init, ""),
             "cache_caps_not_encoded": source.replace(caps_cache_init, "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"),
+            "cache_caps_to_upper_after_init": source.replace(
+                caps_cache_init, caps_cache_init + "\t\tm_PollCapabilities.ToUpper();\n"
+            ),
+            "cache_caps_to_lower_in_poll": source.replace(
+                caps_wire, "\t\tm_PollCapabilities.ToLower();\n" + caps_wire
+            ),
+            "cache_caps_replace_after_init": source.replace(
+                caps_cache_init, caps_cache_init + '\t\tm_PollCapabilities.Replace("alpha", "beta");\n'
+            ),
+            "cache_caps_trim_in_place_after_init": source.replace(
+                caps_cache_init, caps_cache_init + "\t\tm_PollCapabilities.TrimInPlace();\n"
+            ),
+            "cache_caps_method_in_poll_expr": source.replace(
+                caps_wire, '\t\trequest = request + "&caps=" + m_PollCapabilities.Substring(0, 5);\n'
+            ),
+            "cache_caps_plus_equals_after_init": source.replace(
+                caps_cache_init, caps_cache_init + '\t\tm_PollCapabilities += "%2Cghost";\n'
+            ),
+            "cache_caps_passed_to_out_arg": source.replace(
+                caps_cache_init, caps_cache_init + "\t\tMutateOut(m_PollCapabilities);\n"
+            ),
+            "cache_caps_init_from_other_const": source.replace(
+                caps_line, caps_line + '\tprotected const string OTHER_CAPS = "alpha,entities_query,zulu";\n'
+            ).replace(caps_cache_init, "\t\tm_PollCapabilities = EncodeQueryValue(OTHER_CAPS);\n"),
+            "cache_caps_init_from_literal": source.replace(
+                caps_cache_init, '\t\tm_PollCapabilities = EncodeQueryValue("alpha,entities_query,zulu");\n'
+            ),
+            "cache_caps_init_from_preencoded_literal": source.replace(
+                caps_cache_init, '\t\tm_PollCapabilities = "alpha%2Centities_query%2Czulu";\n'
+            ),
             "cache_caps_init_guarded": source.replace(
                 caps_cache_init, "\t\tif (g_Game)\n\t\t{\n\t" + caps_cache_init + "\t\t}\n"
+            ),
+            "cache_caps_init_guarded_braceless": source.replace(
+                caps_cache_init, "\t\tif (g_Game)\n\t" + caps_cache_init
+            ),
+            "cache_caps_init_after_early_return": source.replace(
+                caps_cache_init, "\t\tif (!g_Game)\n\t\t{\n\t\t\treturn;\n\t\t}\n" + caps_cache_init
+            ),
+            "cache_caps_init_moved_outside_constructor": source.replace(caps_cache_init, "").replace(
+                "\tprotected void StartPoll()\n",
+                "\tprotected void TryInit()\n\t{\n" + caps_cache_init + "\t}\n\n\tprotected void StartPoll()\n",
             ),
             "cache_caps_overwritten": source.replace(caps_wire, '\t\tm_PollCapabilities = "alpha";\n' + caps_wire),
             "poll_recomputes_caps_each_time": source.replace(

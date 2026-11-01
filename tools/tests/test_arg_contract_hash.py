@@ -13,6 +13,8 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs
 
 # Make tools/ importable whether run via discover or by module name.
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -21,17 +23,252 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from dayz_mcp import loopback, server as server_module
 from tests._addon_paths import addon_root
-from tests.enforce_subset_helpers import clean, method_body
+from tests.enforce_subset_helpers import (
+    EnforceArray,
+    EnforceMap,
+    EnforceString,
+    clean,
+    method_body,
+    translate,
+)
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
+_STRING_LITERAL = re.compile(r'"(?:\\.|[^"\\\n])*"')
+_CONST_STRING_CHUNK = re.compile(r'"((?:\\.|[^"\\\n])*)"')
+_ESCAPE_SEQ = re.compile(r"\\(.)")
+_ESCAPE_MAP = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
 _HASH_DECL = re.compile(
     r'\bconst\s+string\s+SERVER_ARG_CONTRACT_HASH\s*=\s*"([0-9a-f]{16})"\s*;'
+)
+_CONST_STRING_DECL = re.compile(r"\bconst\s+string\s+([A-Za-z_]\w*)\s*=\s*([^;]+);")
+_CONST_INT_DECL = re.compile(r"\bconst\s+int\s+([A-Za-z_]\w*)\s*=\s*(-?\d+)\s*;")
+_CONST_FLOAT_DECL = re.compile(r"\bconst\s+float\s+([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)\s*;")
+_DECLARED_MEMBER = re.compile(
+    r"\b(?:protected|private)\s+(?:static\s+)?(?P<ref>ref\s+)?"
+    r"(?P<type>[A-Za-z_]\w*(?:\s*<[^;{}()=]*>)?)\s+(?P<name>m_\w+)\s*;"
 )
 _ACH_CACHE_DECL = "protected string m_PollArgContractHash;"
 _ACH_CACHE_INIT = "m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);"
 _ACH_CACHE_ASSIGN = re.compile(r"\bm_PollArgContractHash\s*=(?!=)")
+_ACH_CACHE_COMPOUND_ASSIGN = re.compile(
+    r"\bm_PollArgContractHash\s*(?:[+\-*/%|&^]|<<|>>)=(?!=)"
+)
+_ACH_CACHE_INC_DEC = re.compile(
+    r"(?:\+\+|--)\s*m_PollArgContractHash\b|\bm_PollArgContractHash\s*(?:\+\+|--)"
+)
+_ACH_CACHE_METHOD_OR_INDEX = re.compile(r"\bm_PollArgContractHash\s*[.\[]")
+_ACH_CACHE_OUT_KW = re.compile(r"\b(?:out|inout)\s+m_PollArgContractHash\b")
+_ACH_CACHE_TOKEN = re.compile(r"\bm_PollArgContractHash\b")
+_CAPS_WIRE = 'request = request + "&caps=" + m_PollCapabilities;'
 _ACH_WIRE = 'request = request + "&ach=" + m_PollArgContractHash;'
+
+
+def _blank_strings(cleaned: str) -> str:
+    return _STRING_LITERAL.sub(lambda m: '"' + (" " * (len(m.group(0)) - 2)) + '"', cleaned)
+
+
+def _parse_const_string_expr(name: str, expr: str) -> str:
+    chunks = [
+        _ESCAPE_SEQ.sub(lambda m: _ESCAPE_MAP.get(m.group(1), m.group(1)), raw)
+        for raw in _CONST_STRING_CHUNK.findall(expr)
+    ]
+    glue = re.sub(r"\s+", "", _CONST_STRING_CHUNK.sub("", expr))
+    if not chunks or glue != "+" * (len(chunks) - 1):
+        raise AssertionError(f"unsupported const string {name}: {expr!r}")
+    return "".join(chunks)
+
+
+def _execute_translated_poll_ach(source: str, cleaned: str, masked: str) -> str:
+    class WireString(EnforceString):
+        def __add__(self, other):
+            if isinstance(other, int):
+                return WireString(self.data + str(other).encode("ascii"))
+            if isinstance(other, EnforceString):
+                return WireString(self.data + other.data)
+            return NotImplemented
+
+        def ToUpper(self) -> int:
+            self.data = self.data.upper()
+            return len(self.data)
+
+        def ToLower(self) -> int:
+            self.data = self.data.lower()
+            return len(self.data)
+
+        def Replace(self, sample: EnforceString, replace: EnforceString) -> int:
+            if not sample.data:
+                return 0
+            count = self.data.count(sample.data)
+            self.data = self.data.replace(sample.data, replace.data)
+            return count
+
+        def TrimInPlace(self) -> None:
+            self.data = self.data.strip(b" \t\r\n")
+
+        def Set(self, index: int, value: EnforceString) -> None:
+            self.data = self.data[:index] + value.data[:1] + self.data[index + 1 :]
+
+        def Insert(self, index: int, value: EnforceString) -> None:
+            self.data = self.data[:index] + value.data + self.data[index:]
+
+    polls: list[bytes] = []
+    transport = SimpleNamespace(GET=lambda _cb, req: polls.append(req.data))
+    ns: dict = {
+        "_S": WireString,
+        "array": EnforceArray,
+        "map": EnforceMap,
+        "IntDivide": lambda v, d: v // d if v >= 0 else -(-v // d),
+        "g_Game": None,
+        "MCPTelemetryFixtureLine": object,
+        "MCPOnInventoryMoveRefused": object(),
+        "MCPPollCallback": lambda _owner: object(),
+        "GetPollVersion": lambda: WireString.of("12%7E1.30"),
+        "LoadCounterQuery": lambda: WireString.of(""),
+        "this": object(),
+    }
+    for match in _CONST_INT_DECL.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = int(match.group(2))
+    for match in _CONST_FLOAT_DECL.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = float(match.group(2))
+    for match in _CONST_STRING_DECL.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = WireString.of(
+                _parse_const_string_expr(match.group(1), match.group(2))
+            )
+    for match in _DECLARED_MEMBER.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") != 1:
+            continue
+        mtype = match.group("type").strip()
+        mname = match.group("name")
+        if match.group("ref") or "<" in mtype:
+            ns[mname] = None
+        elif mtype == "int":
+            ns[mname] = 0
+        elif mtype == "float":
+            ns[mname] = 0.0
+        elif mtype == "bool":
+            ns[mname] = False
+        elif mtype == "string":
+            ns[mname] = WireString(b"")
+        else:
+            ns[mname] = None
+
+    encode_sig = "protected string EncodeQueryValue(string value)"
+    encode_body = re.sub(
+        r"\b(\w+)\s*/\s*(\w+)",
+        r"IntDivide(\1, \2)",
+        method_body(source, encode_sig),
+    )
+    ns["EncodeQueryValue"] = translate(
+        encode_sig + "\n{" + encode_body + "}\n", encode_sig, dict(ns)
+    )
+    for sig in (
+        "protected int NextLoadCounter(int value)",
+        "void MCPBridge()",
+        "protected void StartPoll()",
+    ):
+        body = method_body(source, sig)
+        translate(
+            sig + "\n{" + body + "}\n",
+            sig,
+            ns,
+            members=set(re.findall(r"\bm_\w+", body)),
+            class_types=("MCPPollCallback",),
+        )
+    ns["MCPBridge"]()
+    ns["m_Key"] = WireString.of("k")
+    ns["m_Ctx"] = transport
+    ns["StartPoll"]()
+    if len(polls) != 1:
+        raise AssertionError(f"expected 1 server poll GET, got {len(polls)}")
+    request = polls[0].decode("ascii")
+    if not request.startswith("poll?"):
+        raise AssertionError(f"unexpected server poll path: {request!r}")
+    parsed = parse_qs(request[len("poll?") :], strict_parsing=True, keep_blank_values=True)
+    if "ach" not in parsed or len(parsed["ach"]) != 1:
+        raise AssertionError(f"missing single ach parameter in {request!r}")
+    return parsed["ach"][0]
+
+
+def verify_enforce_arg_contract_hash(source: str) -> None:
+    cleaned = clean(source)
+    masked = _blank_strings(cleaned)
+    matches = list(_HASH_DECL.finditer(cleaned))
+    if len(matches) != 1:
+        raise AssertionError("SERVER_ARG_CONTRACT_HASH must be declared exactly once")
+    if matches[0].group(1) != server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH:
+        raise AssertionError("SERVER_ARG_CONTRACT_HASH disagrees with Python contract hash")
+    hash_depth = masked[: matches[0].start()].count("{") - masked[: matches[0].start()].count("}")
+    if hash_depth != 1:
+        raise AssertionError("SERVER_ARG_CONTRACT_HASH must be a class constant on MCPBridge")
+
+    if cleaned.count(_ACH_CACHE_DECL) != 1:
+        raise AssertionError("m_PollArgContractHash must be declared exactly once")
+    decl_at = cleaned.index(_ACH_CACHE_DECL)
+    decl_depth = masked[:decl_at].count("{") - masked[:decl_at].count("}")
+    if decl_depth != 1 or not masked[:decl_at].rstrip().endswith(("{", ";", "}")):
+        raise AssertionError("m_PollArgContractHash must be a standalone class field")
+
+    constructor = method_body(source, "void MCPBridge()")
+    constructor_masked = _blank_strings(constructor)
+    if constructor.count(_ACH_CACHE_INIT) != 1:
+        raise AssertionError("MCPBridge() must encode SERVER_ARG_CONTRACT_HASH once")
+    init_at = constructor.index(_ACH_CACHE_INIT)
+    if constructor_masked[:init_at].count("{") != constructor_masked[:init_at].count("}"):
+        raise AssertionError("m_PollArgContractHash init in MCPBridge() must be unconditional")
+    init_prefix = constructor_masked[:init_at].rstrip()
+    if init_prefix != "" and not init_prefix.endswith((";", "}")):
+        raise AssertionError("m_PollArgContractHash init must not hang off a braceless condition")
+    if re.search(r"\breturn\b", constructor_masked[:init_at]) is not None:
+        raise AssertionError("no early return may precede m_PollArgContractHash init")
+
+    if _ACH_CACHE_METHOD_OR_INDEX.search(masked) is not None:
+        raise AssertionError("m_PollArgContractHash must not have methods called on it or be indexed")
+    if _ACH_CACHE_COMPOUND_ASSIGN.search(masked) is not None:
+        raise AssertionError("m_PollArgContractHash must not be modified by compound assignment")
+    if _ACH_CACHE_INC_DEC.search(masked) is not None:
+        raise AssertionError("m_PollArgContractHash must not be incremented or decremented")
+    if len(_ACH_CACHE_ASSIGN.findall(masked)) != 1:
+        raise AssertionError("m_PollArgContractHash must not be reassigned after construction")
+    if _ACH_CACHE_OUT_KW.search(masked) is not None:
+        raise AssertionError("m_PollArgContractHash must not be passed as out/inout")
+    for match in _ACH_CACHE_TOKEN.finditer(masked):
+        if masked[: match.start()].count("(") != masked[: match.start()].count(")"):
+            raise AssertionError("m_PollArgContractHash must not appear inside parentheses or call args")
+
+    start_poll = method_body(source, "protected void StartPoll()")
+    start_poll_masked = _blank_strings(start_poll)
+    if "SERVER_ARG_CONTRACT_HASH" in start_poll_masked:
+        raise AssertionError("StartPoll must reuse cached m_PollArgContractHash")
+    for needle in (_CAPS_WIRE, _ACH_WIRE, 'if (m_PeerInstance != "")', "m_Ctx.GET(cb, request);"):
+        if needle not in start_poll:
+            raise AssertionError(f"StartPoll missing {needle!r}")
+    if start_poll.count(_ACH_WIRE) != 1:
+        raise AssertionError("StartPoll must append m_PollArgContractHash once")
+    ach_at = start_poll.index(_ACH_WIRE)
+    if start_poll_masked[:ach_at].count("{") != start_poll_masked[:ach_at].count("}"):
+        raise AssertionError("ach= announcement in StartPoll must be unconditional")
+    wire_prefix = start_poll_masked[:ach_at].rstrip()
+    if wire_prefix != "" and not wire_prefix.endswith((";", "}")):
+        raise AssertionError("ach= announcement must not hang off a braceless condition")
+    if start_poll.index(_CAPS_WIRE) > ach_at:
+        raise AssertionError("ach= must follow caps=")
+    if ach_at > start_poll.index('if (m_PeerInstance != "")'):
+        raise AssertionError("ach= must precede optional inst= block")
+    if ach_at > start_poll.index("m_Ctx.GET(cb, request);"):
+        raise AssertionError("ach= must precede GET")
+    if len(_ACH_CACHE_TOKEN.findall(masked)) != 3:
+        raise AssertionError("m_PollArgContractHash must appear only in declaration, constructor, and StartPoll")
+
+    wire_ach = _execute_translated_poll_ach(source, cleaned, masked)
+    if wire_ach != server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH:
+        raise AssertionError(
+            f"translated MCPBridge() + StartPoll() emitted ach={wire_ach!r}, "
+            f"expected {server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH!r}"
+        )
 
 
 class ArgContractHashTest(unittest.TestCase):
@@ -68,35 +305,89 @@ class ArgContractHashTest(unittest.TestCase):
 
     def test_enforce_declares_and_wires_the_same_hash(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
-        cleaned = clean(source)
-        match = _HASH_DECL.search(cleaned)
-        self.assertIsNotNone(match, "SERVER_ARG_CONTRACT_HASH declaration missing")
-        self.assertEqual(match.group(1), server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        self.assertEqual(cleaned.count(_ACH_CACHE_DECL), 1)
-        constructor = method_body(source, "void MCPBridge()")
-        self.assertEqual(constructor.count(_ACH_CACHE_INIT), 1)
-        init_at = constructor.index(_ACH_CACHE_INIT)
-        self.assertEqual(
-            constructor[:init_at].count("{"),
-            constructor[:init_at].count("}"),
-            "m_PollArgContractHash init in MCPBridge() must be unconditional",
-        )
-        self.assertEqual(
-            len(_ACH_CACHE_ASSIGN.findall(cleaned)),
-            1,
-            "m_PollArgContractHash must not be reassigned after construction",
-        )
-        start_poll = method_body(source, "protected void StartPoll()")
-        self.assertNotIn("SERVER_ARG_CONTRACT_HASH", start_poll)
-        self.assertEqual(start_poll.count(_ACH_WIRE), 1)
-        ach_at = start_poll.index(_ACH_WIRE)
-        self.assertEqual(
-            start_poll[:ach_at].count("{"),
-            start_poll[:ach_at].count("}"),
-            "ach= announcement in StartPoll must be unconditional",
-        )
-        self.assertLess(ach_at, start_poll.index('if (m_PeerInstance != "")'))
-        self.assertLess(ach_at, start_poll.index("m_Ctx.GET(cb, request);"))
+        verify_enforce_arg_contract_hash(source)
+
+    def test_enforce_hash_cache_mutants_are_rejected(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        decl_line = f'\tprotected const string SERVER_ARG_CONTRACT_HASH = "{server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH}";\n'
+        cache_decl = "\t" + _ACH_CACHE_DECL + "\n"
+        cache_init = "\t\t" + _ACH_CACHE_INIT + "\n"
+        ach_wire = "\t\t" + _ACH_WIRE + "\n"
+        inst_wire = '\t\t\trequest = request + "&inst=" + EncodeQueryValue(m_PeerInstance);\n'
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        for needle in (decl_line, cache_decl, cache_init, ach_wire, inst_wire, try_init_head):
+            self.assertEqual(source.count(needle), 1, needle)
+
+        mutants = {
+            "ach_decl_wrong_hash": source.replace(
+                decl_line,
+                '\tprotected const string SERVER_ARG_CONTRACT_HASH = "deadbeefdeadbeef";\n',
+                1,
+            ),
+            "ach_cache_decl_absent": source.replace(cache_decl, "", 1),
+            "ach_cache_init_absent": source.replace(cache_init, "", 1),
+            "ach_cache_not_encoded": source.replace(
+                cache_init, "\t\tm_PollArgContractHash = SERVER_ARG_CONTRACT_HASH;\n", 1
+            ),
+            "ach_cache_to_upper_after_init": source.replace(
+                cache_init, cache_init + "\t\tm_PollArgContractHash.ToUpper();\n", 1
+            ),
+            "ach_cache_to_lower_in_poll": source.replace(
+                ach_wire, "\t\tm_PollArgContractHash.ToLower();\n" + ach_wire, 1
+            ),
+            "ach_cache_replace_after_init": source.replace(
+                cache_init, cache_init + '\t\tm_PollArgContractHash.Replace("86", "00");\n', 1
+            ),
+            "ach_cache_trim_in_place_after_init": source.replace(
+                cache_init, cache_init + "\t\tm_PollArgContractHash.TrimInPlace();\n", 1
+            ),
+            "ach_cache_set_after_init": source.replace(
+                cache_init, cache_init + '\t\tm_PollArgContractHash.Set(0, "0");\n', 1
+            ),
+            "ach_cache_plus_equals_after_init": source.replace(
+                cache_init, cache_init + '\t\tm_PollArgContractHash += "0";\n', 1
+            ),
+            "ach_cache_passed_to_out_param": source.replace(
+                cache_init, cache_init + "\t\tg_Game.GetVersion(m_PollArgContractHash);\n", 1
+            ),
+            "ach_cache_init_from_other_const": source.replace(
+                cache_init, "\t\tm_PollArgContractHash = EncodeQueryValue(VISIBILITY_HEAD_BONE);\n", 1
+            ),
+            "ach_cache_init_from_literal": source.replace(
+                cache_init, '\t\tm_PollArgContractHash = EncodeQueryValue("0000000000000000");\n', 1
+            ),
+            "ach_cache_init_from_preencoded_literal": source.replace(
+                cache_init,
+                f'\t\tm_PollArgContractHash = "{server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH}";\n',
+                1,
+            ),
+            "ach_cache_init_conditional": source.replace(
+                cache_init, "\t\tif (m_Configured)\n\t\t{\n\t" + cache_init + "\t\t}\n", 1
+            ),
+            "ach_cache_init_conditional_braceless": source.replace(
+                cache_init, "\t\tif (m_Configured)\n\t" + cache_init, 1
+            ),
+            "ach_cache_init_moved_outside_constructor": source.replace(cache_init, "", 1).replace(
+                try_init_head, try_init_head + cache_init, 1
+            ),
+            "ach_cache_overwritten_in_poll": source.replace(
+                ach_wire, '\t\tm_PollArgContractHash = "deadbeefdeadbeef";\n' + ach_wire, 1
+            ),
+            "poll_recomputes_ach_each_time": source.replace(
+                ach_wire,
+                '\t\trequest = request + "&ach=" + EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n',
+                1,
+            ),
+            "poll_drops_ach": source.replace(ach_wire, "", 1),
+            "poll_ach_inside_instance_guard": source.replace(ach_wire, "", 1).replace(
+                inst_wire, inst_wire + "\t" + ach_wire, 1
+            ),
+        }
+        for label, mutant in mutants.items():
+            with self.subTest(mutant=label):
+                self.assertNotEqual(mutant, source, "mutant anchor did not apply")
+                with self.assertRaises(AssertionError):
+                    verify_enforce_arg_contract_hash(mutant)
 
     def test_matching_hash_with_full_census_is_match(self) -> None:
         census = sorted(server_module._BRIDGE_COMMAND_TOOLS["server"])

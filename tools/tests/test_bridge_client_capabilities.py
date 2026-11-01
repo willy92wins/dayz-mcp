@@ -11,18 +11,19 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs
 
 from tests._addon_paths import addon_root
 from tests.bridge_client_capabilities_helpers import (
     CAPS_DECL_RE,
     LITERAL_RE,
     MAX_LITERAL_CHARS,
-    _method_body,
     announced_caps,
     announced_literals,
     dispatch_census,
 )
-from tests.enforce_subset_helpers import clean
+from tests.enforce_subset_helpers import EnforceArray, EnforceString, clean, method_body, translate
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
@@ -35,7 +36,26 @@ REQUIRED_CLIENT_CAPS = ("key_press", "player_respawn", "ui_dialog")
 CACHE_DECL = "protected string m_PollCapabilities;"
 CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);"
 ANNOUNCE_LINE = 'request = request + "&caps=" + m_PollCapabilities;'
+_STRING_LITERAL_RE = re.compile(r'"(?:\\.|[^"\\\n])*"')
 _CACHE_ASSIGN_RE = re.compile(r"\bm_PollCapabilities\s*=(?!=)")
+_CACHE_COMPOUND_ASSIGN_RE = re.compile(r"\bm_PollCapabilities\s*(?:[+\-*/%|&^]|<<|>>)=(?!=)")
+_CACHE_INC_DEC_RE = re.compile(
+    r"(?:\+\+|--)\s*m_PollCapabilities\b|\bm_PollCapabilities\s*(?:\+\+|--)"
+)
+_CACHE_METHOD_OR_INDEX_RE = re.compile(r"\bm_PollCapabilities\s*[.\[]")
+_CACHE_OUT_KW_RE = re.compile(r"\b(?:out|inout)\s+m_PollCapabilities\b")
+_CACHE_TOKEN_RE = re.compile(r"\bm_PollCapabilities\b")
+_CONST_STRING_DECL_RE = re.compile(r"\bconst\s+string\s+([A-Za-z_]\w*)\s*=\s*([^;]+);")
+_CONST_INT_DECL_RE = re.compile(r"\bconst\s+int\s+([A-Za-z_]\w*)\s*=\s*(-?\d+)\s*;")
+_CONST_FLOAT_DECL_RE = re.compile(r"\bconst\s+float\s+([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)\s*;")
+_DECLARED_MEMBER_RE = re.compile(
+    r"\b(?:protected|private)\s+(?:static\s+)?(?P<ref>ref\s+)?"
+    r"(?P<type>[A-Za-z_]\w*(?:\s*<[^;{}()=]*>)?)\s+(?P<name>m_\w+)\s*;"
+)
+
+
+def _blank_strings(cleaned: str) -> str:
+    return _STRING_LITERAL_RE.sub(lambda m: '"' + (" " * (len(m.group(0)) - 2)) + '"', cleaned)
 
 
 def chunk_at_commas(names: list[str], limit: int = MAX_LITERAL_CHARS) -> list[str]:
@@ -75,31 +95,201 @@ def verify_announcement_matches_dispatcher(source: str) -> None:
         raise AssertionError(f"announcement != dispatcher: missing={missing} extra={extra}")
 
 
+def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
+    class WireString(EnforceString):
+        def __add__(self, other):
+            if isinstance(other, int):
+                return WireString(self.data + str(other).encode("ascii"))
+            if isinstance(other, EnforceString):
+                return WireString(self.data + other.data)
+            return NotImplemented
+
+        def ToUpper(self) -> int:
+            self.data = self.data.upper()
+            return len(self.data)
+
+        def ToLower(self) -> int:
+            self.data = self.data.lower()
+            return len(self.data)
+
+        def Replace(self, sample: EnforceString, replace: EnforceString) -> int:
+            if not sample.data:
+                return 0
+            count = self.data.count(sample.data)
+            self.data = self.data.replace(sample.data, replace.data)
+            return count
+
+        def TrimInPlace(self) -> None:
+            self.data = self.data.strip(b" \t\r\n")
+
+        def Set(self, index: int, value: EnforceString) -> None:
+            self.data = self.data[:index] + value.data[:1] + self.data[index + 1 :]
+
+        def Insert(self, index: int, value: EnforceString) -> None:
+            self.data = self.data[:index] + value.data + self.data[index:]
+
+    masked = _blank_strings(cleaned)
+    messages_text = clean((BRIDGE_PATH.parent / "MCPMessages.c").read_text(encoding="utf-8"))
+    ver_match = re.search(r'\bconst\s+string\s+MCP_BRIDGE_VERSION\s*=\s*"([^"]+)"\s*;', messages_text)
+    if ver_match is None:
+        raise AssertionError("MCP_BRIDGE_VERSION missing in MCPMessages.c")
+    polls: list[bytes] = []
+    transport = SimpleNamespace(GET=lambda _cb, req: polls.append(req.data))
+    ns: dict = {
+        "_S": WireString,
+        "array": EnforceArray,
+        "IntDivide": lambda v, d: v // d if v >= 0 else -(-v // d),
+        "MCP_BRIDGE_VERSION": WireString.of(ver_match.group(1)),
+        "MCPCameraPath": object,
+        "MCPJobRunner": lambda: SimpleNamespace(Count=lambda: 0),
+        "MCPClientPollCallback": lambda _owner: object(),
+        "GetPollVersion": lambda: WireString.of("12%7E1.30"),
+        "LoadCounterQuery": lambda: WireString.of(""),
+        "this": object(),
+    }
+    const_chunk_re = re.compile(r'"((?:\\.|[^"\\\n])*)"')
+    escape_re = re.compile(r"\\(.)")
+    escape_map = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+    for match in _CONST_INT_DECL_RE.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = int(match.group(2))
+    for match in _CONST_FLOAT_DECL_RE.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            ns[match.group(1)] = float(match.group(2))
+    for match in _CONST_STRING_DECL_RE.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") <= 1:
+            cname, expr = match.group(1), match.group(2)
+            pieces = [
+                escape_re.sub(lambda m: escape_map.get(m.group(1), m.group(1)), raw)
+                for raw in const_chunk_re.findall(expr)
+            ]
+            glue = re.sub(r"\s+", "", const_chunk_re.sub("", expr))
+            if not pieces or glue != "+" * (len(pieces) - 1):
+                raise AssertionError(f"unsupported const string {cname}: {expr!r}")
+            ns[cname] = WireString.of("".join(pieces))
+    for match in _DECLARED_MEMBER_RE.finditer(cleaned):
+        if masked[: match.start()].count("{") - masked[: match.start()].count("}") != 1:
+            continue
+        mtype = match.group("type").strip()
+        mname = match.group("name")
+        if match.group("ref") or "<" in mtype:
+            ns[mname] = None
+        elif mtype == "int":
+            ns[mname] = 0
+        elif mtype == "float":
+            ns[mname] = 0.0
+        elif mtype == "bool":
+            ns[mname] = False
+        elif mtype == "string":
+            ns[mname] = WireString(b"")
+        else:
+            ns[mname] = None
+
+    encode_sig = "protected string EncodeQueryValue(string value)"
+    encode_body = re.sub(
+        r"\b(\w+)\s*/\s*(\w+)",
+        r"IntDivide(\1, \2)",
+        method_body(source, encode_sig),
+    )
+    ns["EncodeQueryValue"] = translate(
+        encode_sig + "\n{" + encode_body + "}\n", encode_sig, dict(ns)
+    )
+    for sig in (
+        CONSTRUCTOR_SIGNATURE,
+        "protected int NextLoadCounter(int value)",
+        "protected int OutstandingWork()",
+        "protected void EnsurePollCallback()",
+        "protected void HoldPollCallback()",
+        START_POLL_SIGNATURE,
+    ):
+        body = method_body(source, sig)
+        translate(
+            sig + "\n{" + body + "}\n",
+            sig,
+            ns,
+            members=set(re.findall(r"\bm_\w+", body)),
+            class_types=("MCPClientPollCallback",),
+        )
+    ns["MCPClientBridge"]()
+    ns["m_Key"] = WireString.of("k")
+    ns["m_PollCtx"] = transport
+    ns["StartPoll"]()
+    if len(polls) != 1:
+        raise AssertionError(f"expected 1 client poll GET, got {len(polls)}")
+    request = polls[0].decode("ascii")
+    if not request.startswith("poll?"):
+        raise AssertionError(f"unexpected client poll path: {request!r}")
+    parsed = parse_qs(request[len("poll?") :], strict_parsing=True, keep_blank_values=True)
+    if "caps" not in parsed or len(parsed["caps"]) != 1:
+        raise AssertionError(f"missing single caps parameter in {request!r}")
+    return parsed["caps"][0].split(",") if parsed["caps"][0] else []
+
+
 def verify_poll_wire(source: str) -> None:
     cleaned = clean(source)
+    masked = _blank_strings(cleaned)
     if cleaned.count(CACHE_DECL) != 1:
         raise AssertionError("MCPClientBridge must declare m_PollCapabilities once")
-    constructor = _method_body(cleaned, CONSTRUCTOR_SIGNATURE)
+    class_at = cleaned.index("class MCPClientBridge")
+    decl_at = cleaned.index(CACHE_DECL)
+    if decl_at < class_at:
+        raise AssertionError("m_PollCapabilities must be declared inside MCPClientBridge")
+    decl_depth = masked[class_at:decl_at].count("{") - masked[class_at:decl_at].count("}")
+    if decl_depth != 1 or not masked[:decl_at].rstrip().endswith(("{", ";", "}")):
+        raise AssertionError("m_PollCapabilities must be a standalone class field")
+
+    constructor = method_body(source, CONSTRUCTOR_SIGNATURE)
+    constructor_masked = _blank_strings(constructor)
     if constructor.count(CACHE_INIT) != 1:
         raise AssertionError(f"MCPClientBridge() missing {CACHE_INIT!r}")
     init_at = constructor.index(CACHE_INIT)
-    if constructor[:init_at].count("{") != constructor[:init_at].count("}"):
+    if constructor_masked[:init_at].count("{") != constructor_masked[:init_at].count("}"):
         raise AssertionError("m_PollCapabilities init in MCPClientBridge() must be unconditional")
-    if len(_CACHE_ASSIGN_RE.findall(cleaned)) != 1:
+    init_prefix = constructor_masked[:init_at].rstrip()
+    if init_prefix != "" and not init_prefix.endswith((";", "}")):
+        raise AssertionError("m_PollCapabilities init must not hang off a braceless condition")
+    if re.search(r"\breturn\b", constructor_masked[:init_at]) is not None:
+        raise AssertionError("no early return may precede m_PollCapabilities init")
+
+    if _CACHE_METHOD_OR_INDEX_RE.search(masked) is not None:
+        raise AssertionError("m_PollCapabilities must not have methods called on it or be indexed")
+    if _CACHE_COMPOUND_ASSIGN_RE.search(masked) is not None:
+        raise AssertionError("m_PollCapabilities must not be modified by compound assignment")
+    if _CACHE_INC_DEC_RE.search(masked) is not None:
+        raise AssertionError("m_PollCapabilities must not be incremented or decremented")
+    if len(_CACHE_ASSIGN_RE.findall(masked)) != 1:
         raise AssertionError("m_PollCapabilities must not be reassigned after construction")
-    start_poll = _method_body(cleaned, START_POLL_SIGNATURE)
-    if "CLIENT_POLL_CAPS" in start_poll:
+    if _CACHE_OUT_KW_RE.search(masked) is not None:
+        raise AssertionError("m_PollCapabilities must not be passed as out/inout")
+    for match in _CACHE_TOKEN_RE.finditer(masked):
+        if masked[: match.start()].count("(") != masked[: match.start()].count(")"):
+            raise AssertionError("m_PollCapabilities must not appear inside parentheses or call args")
+
+    start_poll = method_body(source, START_POLL_SIGNATURE)
+    start_poll_masked = _blank_strings(start_poll)
+    if "CLIENT_POLL_CAPS" in start_poll_masked:
         raise AssertionError("StartPoll must reuse cached m_PollCapabilities")
     for needle in ('"poll?peer=client&key="', '"&ver="', ANNOUNCE_LINE, "m_PollCtx.GET(m_PollCallback, request);"):
         if needle not in start_poll:
             raise AssertionError(f"StartPoll missing {needle!r}")
+    if start_poll.count(ANNOUNCE_LINE) != 1:
+        raise AssertionError("StartPoll must append m_PollCapabilities once")
     announce_at = start_poll.index(ANNOUNCE_LINE)
-    if start_poll[:announce_at].count("{") != start_poll[:announce_at].count("}"):
+    if start_poll_masked[:announce_at].count("{") != start_poll_masked[:announce_at].count("}"):
         raise AssertionError("caps announcement in StartPoll must be unconditional")
+    wire_prefix = start_poll_masked[:announce_at].rstrip()
+    if wire_prefix != "" and not wire_prefix.endswith((";", "}")):
+        raise AssertionError("caps announcement must not hang off a braceless condition")
     if announce_at > start_poll.index("m_PollCtx.GET(m_PollCallback, request);"):
         raise AssertionError("caps must be appended before the GET is issued")
     if start_poll.index('"&ver="') > announce_at:
         raise AssertionError("caps travel alongside ver (after it)")
+    if len(_CACHE_TOKEN_RE.findall(masked)) != 3:
+        raise AssertionError("m_PollCapabilities must appear only in declaration, constructor, and StartPoll")
+
+    wire_caps = _execute_translated_client_poll(source, cleaned)
+    if wire_caps != announced_caps(source):
+        raise AssertionError("translated MCPClientBridge() + StartPoll() caps differ from CLIENT_POLL_CAPS")
 
 
 class BridgeClientCapabilitiesTest(unittest.TestCase):
@@ -214,6 +404,9 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
         )
         self.assertEqual(source.count(terminal_else), 1)
 
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        self.assertEqual(source.count(try_init_head), 1)
+
         mutants = {
             "dispatcher_range_truncated_before_last_branch": source.replace(last_branch, "", 1),
             "dispatcher_without_terminal_else": source.replace(terminal_else, "", 1),
@@ -229,6 +422,47 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "cache_decl_dropped": source.replace("\t" + CACHE_DECL + "\n", "", 1),
             "cache_init_dropped_from_constructor": source.replace("\t\t" + CACHE_INIT + "\n", "", 1),
             "cache_init_not_encoded": source.replace(CACHE_INIT, "m_PollCapabilities = CLIENT_POLL_CAPS;", 1),
+            "cache_to_upper_after_init": source.replace(
+                CACHE_INIT, CACHE_INIT + "\n\t\tm_PollCapabilities.ToUpper();", 1
+            ),
+            "cache_to_lower_in_poll": source.replace(
+                "\t\t" + ANNOUNCE_LINE, "\t\tm_PollCapabilities.ToLower();\n\t\t" + ANNOUNCE_LINE, 1
+            ),
+            "cache_replace_after_init": source.replace(
+                CACHE_INIT, CACHE_INIT + '\n\t\tm_PollCapabilities.Replace("ui_dialog", "nope");', 1
+            ),
+            "cache_trim_in_place_after_init": source.replace(
+                CACHE_INIT, CACHE_INIT + "\n\t\tm_PollCapabilities.TrimInPlace();", 1
+            ),
+            "cache_method_in_poll_expr": source.replace(
+                ANNOUNCE_LINE, 'request = request + "&caps=" + m_PollCapabilities.Substring(0, 4);', 1
+            ),
+            "cache_plus_equals_after_init": source.replace(
+                CACHE_INIT, CACHE_INIT + '\n\t\tm_PollCapabilities += "%2Cextra";', 1
+            ),
+            "cache_passed_to_out_param": source.replace(
+                CACHE_INIT, CACHE_INIT + "\n\t\tg_Game.GetVersion(m_PollCapabilities);", 1
+            ),
+            "cache_init_from_other_const": source.replace(
+                CACHE_INIT, "m_PollCapabilities = EncodeQueryValue(MCP_BRIDGE_VERSION);", 1
+            ),
+            "cache_init_from_literal": source.replace(
+                CACHE_INIT, 'm_PollCapabilities = EncodeQueryValue("key_press,player_respawn,ui_dialog");', 1
+            ),
+            "cache_init_from_preencoded_literal": source.replace(
+                CACHE_INIT, 'm_PollCapabilities = "key_press%2Cplayer_respawn%2Cui_dialog";', 1
+            ),
+            "cache_init_conditional_in_constructor": source.replace(
+                "\t\t" + CACHE_INIT + "\n",
+                "\t\tif (m_Configured)\n\t\t{\n\t\t\t" + CACHE_INIT + "\n\t\t}\n",
+                1,
+            ),
+            "cache_init_conditional_braceless": source.replace(
+                "\t\t" + CACHE_INIT + "\n", "\t\tif (m_Configured)\n\t\t\t" + CACHE_INIT + "\n", 1
+            ),
+            "cache_init_moved_outside_constructor": source.replace(
+                "\t\t" + CACHE_INIT + "\n", "", 1
+            ).replace(try_init_head, try_init_head + "\t\t" + CACHE_INIT + "\n", 1),
             "cache_overwritten_in_poll": source.replace(
                 "\t\t" + ANNOUNCE_LINE, '\t\tm_PollCapabilities = "";\n\t\t' + ANNOUNCE_LINE, 1
             ),
