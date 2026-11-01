@@ -4394,6 +4394,7 @@ async def execute_dayz_test_close(
     process_roles = _launched_roles(run)
     start_roots = _start_role_roots()
     policy = _close_project_policy(run)
+    policy_missing = policy is None
     published = [
         role
         for role in process_roles
@@ -4635,7 +4636,12 @@ async def execute_dayz_test_close(
         payload["close_order"] = logout_report["close_order"]
         payload["logout_wait_s"] = logout_report["logout_wait_s"]
         payload["logout_players"] = logout_report["logout_players"]
-        if logout_report["timed_out"] is True:
+        # FIX 8: warn only when the logout wait timed out and the close
+        # is graceful, or when there was no sealed policy (the busy-
+        # registry fallback, where graceful is forced False although
+        # the budget was consumed). An ungraceful close with a policy
+        # (e.g. run_retired_elsewhere) must not warn.
+        if logout_report["timed_out"] is True and (graceful or policy_missing):
             payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
     elif graceful:
         server_watch = watches.get("server")

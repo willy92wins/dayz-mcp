@@ -846,11 +846,14 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             task.cancel()
-        elapsed = time.monotonic() - started
+        # Include the final instant: a stall after the last tick (e.g.
+        # during the server close) is only visible in last-tick -> end.
+        ended = time.monotonic()
+        elapsed = ended - started
         timer_latency = (
             timer_at[0] - started if timer_at else float("inf")
         )
-        points = [started, *ticks]
+        points = [started, *ticks, ended]
         max_tick_gap = (
             max(b - a for a, b in zip(points, points[1:]))
             if len(points) > 1
@@ -926,6 +929,73 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED]
         )
+
+    async def test_close_with_policy_ungraceful_retired_elsewhere_no_warn(
+        self,
+    ) -> None:
+        # FIX 8, other side of the busy-no-cache warning above: with a
+        # sealed policy the logout timeout alone must not warn when the
+        # close ends ungraceful because the run retired elsewhere.
+        self._write(self.server_rpt, "boot\n" + _CLOSE_CONNECT + _CLOSE_LINK)
+        self._write(self.client_rpt, "boot client\n")
+        launcher_registry._cache_approved_registry([_entry()])
+        opened = _FakeOpenedLauncher()
+
+        @contextmanager
+        def fake_bundle(_opened):
+            yield SimpleNamespace(sealed_policies=object())
+
+        runtime = self._runtime(append_logout=False)
+
+        async def reap_elsewhere(run_id: str):
+            runtime.retire_event = "lifecycle_stop_outcome"
+            return {"ok": True, "run_id": run_id, "state": "EXITED"}
+
+        runtime.lifecycle_reap = reap_elsewhere
+        with (
+            mock.patch.object(
+                launcher_registry, "_open_validated_entry", return_value=opened
+            ),
+            mock.patch.object(
+                dayz_test_tool.secure_launcher,
+                "load_verified_bundle",
+                side_effect=fake_bundle,
+            ),
+            mock.patch.object(
+                dayz_test_tool, "_semantic_policies", return_value=[self.policy]
+            ),
+        ):
+            result = await dayz_test_tool.execute_dayz_test_close(
+                runtime, _CLOSE_RUN_ID, graceful_timeout_s=0.6
+            )
+        self.assertFalse(result["graceful"])
+        self.assertEqual(result["reason"], "run_retired_elsewhere")
+        self.assertGreaterEqual(float(result["logout_wait_s"]), 0.4)
+        self.assertNotIn("warnings", result)
+
+    async def test_close_loop_gate_rejects_late_sync_pause(self) -> None:
+        # Sol r6 P2: a 1 s synchronous pause during the server close
+        # happens after the last ticker tick and after the first timer
+        # fired; only the interval to the final instant can catch it,
+        # so the gate must fail on the max tick gap alone.
+        self._write(self.server_rpt, "boot\n")
+        self._write(self.client_rpt, "boot client\n")
+        runtime = self._runtime(append_logout=False)
+        original_close_roles = runtime.lifecycle_close_roles
+
+        async def late_pause_close(run_id: str, roles: list[str]):
+            if list(roles) == ["server"]:
+                time.sleep(1.0)
+            return await original_close_roles(run_id, roles)
+
+        runtime.lifecycle_close_roles = late_pause_close
+        _result, timer_latency, max_tick_gap, _elapsed = (
+            await self._close_with_ticker(runtime)
+        )
+        self.assertLess(timer_latency, self._LOOP_STALL_LIMIT_S)
+        self.assertGreaterEqual(max_tick_gap, 0.9)
+        with self.assertRaises(AssertionError):
+            self._assert_loop_responsive(timer_latency, max_tick_gap)
 
     async def test_close_loop_gate_rejects_injected_sync_pause(self) -> None:
         # P3 negative control: a 1 s synchronous pause on the loop
