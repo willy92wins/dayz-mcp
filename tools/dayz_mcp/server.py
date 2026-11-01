@@ -3347,7 +3347,17 @@ EXTRA_MODS_DESCRIPTION = (
     "the policy defaults when the caller omits it) is not copied into "
     "extra_mods. base_mods and server_mods do not satisfy that gate, so "
     "that call stays bridge_mod_missing. bridge_mod_missing also remains "
-    "when the sealed request would reject the appended entry."
+    "when the sealed request would reject the appended entry. Declaring the "
+    "bridge in server_only_mods suppresses that default and satisfies the gate."
+)
+SERVER_ONLY_MODS_DESCRIPTION = (
+    "Mods loaded only by the server through -serverMod=, never through the "
+    "client's -mod=. Accepts the same folder names or absolute paths as "
+    "extra_mods. May include '@DayZ_MCP'; that suppresses the shared bridge "
+    "default. If the implicit project mod is listed, it is loaded only on "
+    "the server too. Duplicates and overlaps with base_mods (including policy "
+    "defaults), extra_mods or server_mods are rejected. Omit or pass [] to "
+    "keep the existing behavior. Repeat the list on mode=client reattachments."
 )
 CLIENT_START_BUDGET_MAX_S = 3600.0
 CLIENT_START_BUDGET_DESCRIPTION = (
@@ -3388,6 +3398,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
         ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
+        ("server_only_mods", SERVER_ONLY_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
         ("navmesh_data_server", NAVMESH_DATA_SERVER_DESCRIPTION),
         ("server_adminlog", SERVER_ADMINLOG_DESCRIPTION),
@@ -5902,6 +5913,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "that gate, so that call stays bridge_mod_missing. "
             "bridge_mod_missing also remains when the sealed request would "
             "reject the appended entry. "
+            "server_only_mods loads the listed mods exclusively through the "
+            "server's -serverMod=, including '@DayZ_MCP' when requested; "
+            "that declaration suppresses its shared default. Explicit "
+            "overlaps with other mod lists are rejected. "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             "sleeping). on_busy=\"queue\" waits in that FIFO (wait_for_box_s "
@@ -5983,6 +5998,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         extra_mods: list[str] | None = None,
         base_mods: list[str] | None = None,
         server_mods: list[str] | None = None,
+        server_only_mods: list[str] | None = None,
         no_base_mods: bool = False,
         no_file_patching: bool = False,
         port: StrictInt = 2302,
@@ -6086,6 +6102,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         extra_mods=extra_mods,
                         base_mods=base_mods,
                         server_mods=server_mods,
+                        server_only_mods=server_only_mods,
                         no_base_mods=no_base_mods,
                         no_file_patching=no_file_patching,
                         navmesh_data_server=navmesh_data_server,

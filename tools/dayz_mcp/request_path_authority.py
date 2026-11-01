@@ -679,12 +679,41 @@ def accredit_request_paths(
             handles.extend(opened)
             identities["mission"] = (mission_identity,)
 
-        for field in ("base_mods", "extra_mods", "server_mods"):
+        for field in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
+            if field == "server_only_mods" and not parsed.payload.get(field):
+                continue
             field_identities, opened = _accredit_mod_list(
                 parsed.payload.get(field), policy.mod_roots
             )
             handles.extend(opened)
             identities[field] = field_identities
+        server_only = set(identities.get("server_only_mods", ()))
+        if any(
+            server_only.intersection(identities[field])
+            for field in ("base_mods", "extra_mods", "server_mods")
+        ):
+            _invalid()
+        if server_only and parsed.payload.get("project_mod_override") is not True:
+            project_mod = "@" + policy.policy.mod
+            for root in policy.mod_roots:
+                original = ntpath.join(root.path, project_mod)
+                try:
+                    os.stat(original)
+                except FileNotFoundError:
+                    # A first build may not have deployed the project yet.
+                    continue
+                identity, opened = _accredit_absolute(original, policy.mod_roots)
+                handles.extend(opened)
+                for value, exclusive_identity in zip(
+                    parsed.payload["server_only_mods"], identities["server_only_mods"]
+                ):
+                    if identity != exclusive_identity:
+                        continue
+                    declared = value if ntpath.isabs(value) else ntpath.join(root.path, value)
+                    # The worker routes the implicit project by path. A physical
+                    # alias with another spelling would leave it on client -mod.
+                    if not _same_path(original, declared):
+                        _invalid()
         return AccreditedRequestPaths(identities, handles)
     except (OSError, TypeError, ValueError):
         for item in reversed(handles):

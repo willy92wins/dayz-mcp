@@ -13,6 +13,10 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | Mod source (censo Enforce) | `addon` |
 | Tools | `tools` |
 | Tests | `tools\tests` |
+| 296-servermod: parámetro MCP y composición de request | `tools/dayz_mcp/server.py`, `tools/dayz_mcp/dayz_test_tool.py` |
+| 296-servermod: payload v3 y acreditación de roles/rutas | `tools/dayz_mcp/dayz_test_request.py`, `tools/dayz_mcp/request_path_authority.py` |
+| 296-servermod: argv y provenance del sello de mods | `tools/dayz_mcp/dayz_test_worker.py`, `tools/dayz_mcp/dayz_test_storage.py` |
+| 296-servermod: pruebas públicas y preflight | `tools/tests/test_server_only_mods.py`; regresiones en `test_dayz_test_request.py`, `test_dayz_test_tool.py`, `test_dayz_test_worker.py`, `test_dayz_test_storage.py`, `test_request_path_authority.py` bajo `tools/tests/` |
 | B1-P2: préstamo de profile, transición recuperable y reconciliación de endpoint | `tools/dayz_mcp/loopback.py` |
 | B1-P2: regresiones de salida abrupta sin finally y prior presente/ausente | `tools/tests/test_b1p2_profile_not_persisted.py` |
 | Plans | `plans` |
@@ -96,7 +100,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-11-01 (UTC)
 - `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-11-01 (UTC)
 - `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 128 KB, touched 2026-11-01 (UTC)
+- `CHANGELOG.md` - 129 KB, touched 2026-11-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-01 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-11-01 (UTC)
@@ -104,7 +108,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF-ARCHIVE.md` - 272 KB, touched 2026-11-01 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-11-01 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-11-01 (UTC)
-- `README.md` - 34 KB, touched 2026-11-01 (UTC)
+- `README.md` - 36 KB, touched 2026-11-01 (UTC)
 
 ## Reparse points omitidos
 

@@ -11,6 +11,55 @@ from tests._source_snapshot import source_of
 
 
 class DayzTestRequestTests(unittest.TestCase):
+    def test_server_only_mods_v3_roundtrip_and_legacy_default(self) -> None:
+        from dayz_mcp import dayz_test_request as request
+        from tests.dayz_test_tool_helpers import _policy
+
+        policy = _policy()
+        base = {"version": 1, "dev_root": policy.dev_root, "mod": policy.mod}
+        legacy = request.parse_dayz_test_request(json.dumps(base).encode(), policies=(policy,))
+        for override in (False, True):
+            document = {
+                **base, "version": 3, "server_only_mods": ["@DayZ_MCP", "@Audit"],
+                "project_mod_override": override, "extra_mods": ["@Candidate"],
+            }
+            parsed = request.parse_dayz_test_request(json.dumps(document).encode(), policies=(policy,))
+            self.assertEqual(parsed.payload["version"], 3)
+            self.assertEqual(parsed.payload["server_only_mods"], ["@DayZ_MCP", "@Audit"])
+            self.assertEqual(request.parse_dayz_test_request(parsed.canonical_bytes, policies=(policy,)), parsed)
+        empty = request.parse_dayz_test_request(
+            json.dumps({**base, "version": 3, "server_only_mods": []}).encode(), policies=(policy,)
+        )
+        self.assertEqual(empty, legacy)
+        for version in (1, 2):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, ":unknown_key$"):
+                request.parse_dayz_test_request(
+                    json.dumps({**base, "version": version, "server_only_mods": ["@Audit"]}).encode(),
+                    policies=(policy,),
+                )
+
+    def test_server_only_mods_rejects_invalid_lists_and_role_conflicts(self) -> None:
+        from dayz_mcp import dayz_test_request as request
+        from tests.dayz_test_tool_helpers import _policy
+
+        policy = _policy()
+        base = {"version": 3, "dev_root": policy.dev_root, "mod": policy.mod}
+        for mods in (None, "@Audit", [1], ["@Audit", "@audit"], ["@A;@B"], ["../@A"], ["@A"] * 65):
+            with self.subTest(mods=mods), self.assertRaisesRegex(ValueError, ":mod_list_invalid$"):
+                request.parse_dayz_test_request(
+                    json.dumps({**base, "server_only_mods": mods}).encode(), policies=(policy,)
+                )
+        for field in ("base_mods", "extra_mods", "server_mods"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, ":server_only_mods_conflict$"):
+                request.parse_dayz_test_request(
+                    json.dumps({**base, "server_only_mods": ["@Audit"], field: ["@audit"]}).encode(),
+                    policies=(policy,),
+                )
+        with self.assertRaisesRegex(ValueError, ":server_only_mods_conflict$"):
+            request.parse_dayz_test_request(
+                json.dumps({**base, "server_only_mods": ["@CF"]}).encode(), policies=(policy,)
+            )
+
     def test_request_uses_current_mode_authority_for_each_parse(self) -> None:
         request_module = importlib.import_module("dayz_mcp.dayz_test_request")
         modes_module = importlib.import_module("dayz_mcp.dayz_test_modes")

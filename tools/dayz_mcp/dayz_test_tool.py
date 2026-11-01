@@ -90,7 +90,7 @@ _BRIDGE_MOD_NAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 # fb-20260909-213257-49a9: the token stays the prefix so existing matchers
 # keep working; the suffix names the accepted extra_mods form.
 _BAD_MOD = (
-    "bad_mod: extra_mods/base_mods/server_mods entries must be a single "
+    "bad_mod: extra_mods/base_mods/server_mods/server_only_mods entries must be a single "
     "folder name such as '@DayZ_MCP', or an absolute path inside the "
     "project's mod_roots; relative paths with '\\' or '/' are rejected"
 )
@@ -109,7 +109,7 @@ _SEALED_REQUEST_REJECTS_BRIDGE_DEFAULT = frozenset(
 _BRIDGE_MOD_MISSING = (
     "bridge_mod_missing: add extra_mods=['@DayZ_MCP'] "
     "(the folder name '@DayZ_MCP' must be explicit in extra_mods or as "
-    "the project mod; base_mods and server_mods do not count). "
+    "the project mod, or in server_only_mods; base_mods and server_mods do not count). "
     "dayz_test_run appends '@DayZ_MCP' to extra_mods by default; "
     "this call kept bridge_mod_missing because the sealed request "
     "would reject that appended entry"
@@ -363,6 +363,7 @@ def _extra_mods_with_bridge_default(
     project_mod: str,
     kill: bool,
     base_mods: list[str],
+    server_only_mods: list[str] | None = None,
     project_counts_as_bridge: bool = True,
 ) -> tuple[list[str] | None, tuple[str, ...]]:
     """Append @DayZ_MCP on extra_mods when this launch would miss the bridge.
@@ -384,6 +385,8 @@ def _extra_mods_with_bridge_default(
         del project_counts_as_bridge
         return extra_mods, ()
     if extra_mods is not None and any(_names_bridge(item) for item in extra_mods):
+        return extra_mods, ()
+    if any(_names_bridge(item) for item in (server_only_mods or [])):
         return extra_mods, ()
     if any(_names_bridge(item) for item in base_mods):
         return extra_mods, ()
@@ -437,6 +440,7 @@ def build_run_request(
     extra_mods: list[str] | None = None,
     base_mods: list[str] | None = None,
     server_mods: list[str] | None = None,
+    server_only_mods: list[str] | None = None,
     no_base_mods: bool = False,
     no_file_patching: bool = False,
     auto_remediate_steam: bool = False,
@@ -457,6 +461,7 @@ def build_run_request(
     public_extra = _public_mod_list(extra_mods, selected.mod_roots)
     public_base = _public_mod_list(base_mods, selected.mod_roots)
     public_server = _public_mod_list(server_mods, selected.mod_roots)
+    public_server_only = _public_mod_list(server_only_mods, selected.mod_roots)
     # Caller's entries are already validated. The default is one more folder
     # name on extra_mods, then the same parser. A size or list rejection that
     # appears only with that name is dropped and the bridge check below
@@ -472,6 +477,7 @@ def build_run_request(
         project_mod=selected.mod,
         kill=kill,
         base_mods=effective_base,
+        server_only_mods=public_server_only,
         project_counts_as_bridge=not project_mod_override,
     )
 
@@ -498,7 +504,7 @@ def build_run_request(
             "preflight": preflight,
             "run_id": run_id,
             "server_wait_s": server_wait_s,
-            "version": 2 if project_mod_override else 1,
+            "version": 3 if public_server_only is not None else (2 if project_mod_override else 1),
             "width": width,
         }
         if project_mod_override:
@@ -509,6 +515,8 @@ def build_run_request(
             document["base_mods"] = public_base
         if public_server is not None:
             document["server_mods"] = public_server
+        if public_server_only is not None:
+            document["server_only_mods"] = public_server_only
         if replace_if_not_polling_since is not None:
             # 79e2. Present only on the call that supersedes a live client, and only
             # once the gate has actually read the bridge: the value is the instant
@@ -575,6 +583,7 @@ def build_run_request(
     effective_mods = [
         *( [] if project_mod_override else [selected.mod] ),
         *(public_extra or []),
+        *(public_server_only or []),
     ]
     if not kill and not any(
         ntpath.basename(mod).casefold() in _BRIDGE_MOD_NAMES
@@ -2344,6 +2353,7 @@ async def _execute_preflight(
     extra_mods: list[str] | None,
     base_mods: list[str] | None,
     server_mods: list[str] | None,
+    server_only_mods: list[str] | None,
     no_base_mods: bool,
     no_file_patching: bool,
     port: int,
@@ -2392,6 +2402,7 @@ async def _execute_preflight(
                 extra_mods=extra_mods,
                 base_mods=base_mods,
                 server_mods=server_mods,
+                server_only_mods=server_only_mods,
                 no_base_mods=no_base_mods,
                 no_file_patching=no_file_patching,
                 navmesh_data_server=navmesh_data_server,
@@ -2666,6 +2677,7 @@ async def execute_dayz_test_run(
     extra_mods: list[str] | None = None,
     base_mods: list[str] | None = None,
     server_mods: list[str] | None = None,
+    server_only_mods: list[str] | None = None,
     no_base_mods: bool = False,
     no_file_patching: bool = False,
     port: int = 2302,
@@ -2709,6 +2721,7 @@ async def execute_dayz_test_run(
             extra_mods=extra_mods,
             base_mods=base_mods,
             server_mods=server_mods,
+            server_only_mods=server_only_mods,
             no_base_mods=no_base_mods,
             no_file_patching=no_file_patching,
             port=port,
@@ -2739,6 +2752,7 @@ async def execute_dayz_test_run(
                 "extra_mods": extra_mods,
                 "base_mods": base_mods,
                 "server_mods": server_mods,
+                "server_only_mods": server_only_mods,
                 "no_base_mods": no_base_mods,
                 "no_file_patching": no_file_patching,
                 "navmesh_data_server": navmesh_data_server,

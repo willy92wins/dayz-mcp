@@ -239,33 +239,44 @@ def modset_roles(
     extra_mods: Sequence[object],
     server_mods: Sequence[object],
     mods_root: str,
+    server_only_mods: Sequence[object] = (),
 ) -> dict[str, object]:
-    """The four roles, normalised, ready for ``modset_seal``.
+    """The four legacy roles and optional server-only role, normalised.
 
     `-mod=` and `-serverMod=` are two different argv (dayz_test_worker.py:235
     and :240-245) and BOTH load mods into the server, so they are sealed as
     separate roles: merging them would let a change confined to `server_mods`
     leave the seal unmoved.
+
+    Explicit server-only mods keep a distinct role. An empty optional role is
+    omitted so callers without it keep the historical hash input.
     """
     if project_mod is None:
         sealed_project: str | None = None
     else:
         sealed_project = normalize_mod_path(project_mod, mods_root).casefold()
-    return {
+    roles: dict[str, object] = {
         "base_mods": list(normalize_modset(base_mods, mods_root=mods_root)),
         "project_mod": sealed_project,
         "extra_mods": list(normalize_modset(extra_mods, mods_root=mods_root)),
         "server_mods": list(normalize_modset(server_mods, mods_root=mods_root)),
     }
+    server_only = list(normalize_modset(server_only_mods, mods_root=mods_root))
+    if server_only:
+        roles["server_only_mods"] = server_only
+    return roles
 
 
 def modset_seal(roles: Mapping[str, object]) -> str:
-    """sha256 of the canonical JSON of the four roles. Never of the joined string.
+    """sha256 of the canonical JSON of the roles. Never of the joined string.
 
     The `;` separator does not enter the seal, so a mod whose name contains a
     `;` cannot forge a collision.
     """
-    if not isinstance(roles, Mapping) or set(roles) != set(MODSET_ROLES):
+    if not isinstance(roles, Mapping) or set(roles) not in (
+        set(MODSET_ROLES),
+        set(MODSET_ROLES) | {"server_only_mods"},
+    ):
         raise StorageError("invalid_modset_roles")
     project_mod = roles["project_mod"]
     # null is the absent implicit project role (project_mod_override). A string
@@ -275,13 +286,14 @@ def modset_seal(roles: Mapping[str, object]) -> str:
     ):
         raise StorageError("invalid_modset_roles")
     sealed_roles: dict[str, object] = {"project_mod": project_mod}
-    for name in ("base_mods", "extra_mods", "server_mods"):
-        value = roles[name]
+    for name in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
+        value = roles.get(name, [])
         if not isinstance(value, (list, tuple)) or any(
             not isinstance(item, str) or not item for item in value
         ):
             raise StorageError("invalid_modset_roles")
-        sealed_roles[name] = list(value)
+        if name != "server_only_mods" or value:
+            sealed_roles[name] = list(value)
     document = {
         "schema_version": MARKER_SCHEMA_VERSION,
         "algorithm": MARKER_ALGORITHM,

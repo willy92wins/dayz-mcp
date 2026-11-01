@@ -285,6 +285,133 @@ class DayzTestWorkerTests(unittest.TestCase):
         without = [item for item in starts[2] if item != "-adminlog"]
         self.assertEqual(without, starts[0])
 
+    def test_server_only_mods_follow_legacy_server_mods_only_on_the_server(self) -> None:
+        broker = _Broker()
+        result = self._run(
+            _raw(
+                version=3,
+                mode="all",
+                server_mods=["@Legacy"],
+                server_only_mods=["@DayZ_MCP", r"P:\Mods\@OnlyB"],
+            ),
+            broker,
+        )
+        self.assertEqual(result.exit_code, 0)
+        starts = [
+            json.loads(request.stdin)
+            for request in broker.requests
+            if request.payload.get("command") == "start"
+        ]
+        self.assertEqual([start["role"] for start in starts], ["server", "client"])
+        shared = (
+            r"-mod=P:\Mods\@CF;P:\Mods\@Dabs Framework;"
+            r"P:\Mods\@VPPAdminTools;P:\Mods\@ExampleMod"
+        )
+        for start in starts:
+            self.assertEqual(
+                [arg for arg in start["argv"] if arg.startswith("-mod=")], [shared]
+            )
+        self.assertEqual(
+            [arg for arg in starts[0]["argv"] if arg.startswith("-serverMod=")],
+            [r"-serverMod=P:\Mods\@Legacy;P:\Mods\@DayZ_MCP;P:\Mods\@OnlyB"],
+        )
+        self.assertFalse(any(arg.startswith("-serverMod=") for arg in starts[1]["argv"]))
+
+    def test_server_only_mods_are_never_loaded_by_client_or_offline(self) -> None:
+        for mode in ("client", "offline"):
+            with self.subTest(mode=mode):
+                broker = _Broker()
+                options = {"run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"} if mode == "client" else {}
+                self._run(
+                    _raw(version=3, mode=mode, server_only_mods=["@Only"], **options),
+                    broker,
+                )
+                start = next(
+                    json.loads(request.stdin)
+                    for request in broker.requests
+                    if request.payload.get("command") == "start"
+                )
+                self.assertFalse(any(arg.startswith("-serverMod=") for arg in start["argv"]))
+                self.assertNotIn("@Only", ";".join(start["argv"]))
+
+    def test_server_only_implicit_project_is_removed_from_every_shared_mod_list(self) -> None:
+        for mode in ("all", "client", "offline"):
+            with self.subTest(mode=mode):
+                broker = _Broker()
+                options = {"run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"} if mode == "client" else {}
+                self._run(
+                    _raw(version=3, mode=mode, server_only_mods=["@ExampleMod"], **options),
+                    broker,
+                )
+                starts = [
+                    json.loads(request.stdin)
+                    for request in broker.requests
+                    if request.payload.get("command") == "start"
+                ]
+                for start in starts:
+                    self.assertEqual(
+                        [arg for arg in start["argv"] if arg.startswith("-mod=")],
+                        [r"-mod=P:\Mods\@CF;P:\Mods\@Dabs Framework;P:\Mods\@VPPAdminTools"],
+                    )
+                    expected = [r"-serverMod=P:\Mods\@ExampleMod"] if start["role"] == "server" else []
+                    self.assertEqual(
+                        [arg for arg in start["argv"] if arg.startswith("-serverMod=")],
+                        expected,
+                    )
+
+    def test_server_only_alias_duplicates_and_conflicts_fail_before_broker(self) -> None:
+        cases = (
+            {"server_only_mods": ["@X", r"P:\Mods\@x"]},
+            {"server_only_mods": [r"P:\Mods\@cf"]},
+            {"server_only_mods": ["@X"], "base_mods": [r"P:\Mods\@x"]},
+            {"server_only_mods": ["@X"], "extra_mods": [r"P:\Mods\@x"]},
+            {"server_only_mods": ["@X"], "server_mods": [r"P:\Mods\@x"]},
+        )
+        for mode in ("server", "all", "client"):
+            for values in cases:
+                with self.subTest(mode=mode, values=values):
+                    broker = _Broker()
+                    options = {"run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"} if mode == "client" else {}
+                    with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
+                        self._run(_raw(version=3, mode=mode, **values, **options), broker)
+                    self.assertEqual(raised.exception.code, "request_integrity_failed")
+                    self.assertEqual(broker.requests, [])
+
+    def test_empty_server_only_mods_keep_legacy_argv_and_seal(self) -> None:
+        for mode in ("server", "all", "client", "offline"):
+            with self.subTest(mode=mode):
+                launches = []
+                options = {"run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"} if mode == "client" else {}
+                for values in ({}, {"version": 3, "server_only_mods": []}):
+                    broker = _Broker()
+                    self._run(_raw(mode=mode, **values, **options), broker)
+                    launches.append([
+                        (start["argv"], start.get("storage_seal"))
+                        for request in broker.requests
+                        if request.payload.get("command") == "start"
+                        for start in [json.loads(request.stdin)]
+                    ])
+                self.assertEqual(launches[0], launches[1])
+
+    def test_effective_directories_include_server_only_mods_only_for_server_roles(self) -> None:
+        for mode in ("server", "all", "client", "offline"):
+            with self.subTest(mode=mode):
+                options = {"run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"} if mode == "client" else {}
+                parsed = dayz_test_request.parse_dayz_test_request(
+                    _raw(
+                        version=3,
+                        mode=mode,
+                        server_mods=["@Legacy"],
+                        server_only_mods=["@ExampleMod", "@Only"],
+                        **options,
+                    ),
+                    policies=(POLICY,),
+                )
+                expected = (r"P:\Mods\@CF", r"P:\Mods\@Dabs Framework", r"P:\Mods\@VPPAdminTools")
+                if mode in {"server", "all"}:
+                    expected += (r"P:\Mods\@Legacy", r"P:\Mods\@ExampleMod", r"P:\Mods\@Only")
+                self.assertEqual(dayz_test_worker._effective_directories(parsed.payload, RUNTIME), expected)
+
     def test_new_start_retries_same_recoverable_request_after_lost_response(self) -> None:
         broker = _Broker()
         broker.lose_first_new_start_response = True
@@ -1098,6 +1225,44 @@ class StorageSealTests(unittest.TestCase):
         first = self._starts(_Broker(), mode="server", extra_mods=["@LFQuad2"])
         second = self._starts(_Broker(), mode="server", server_mods=["@LFQuad2"])
         self.assertNotEqual(first[0]["storage_seal"], second[0]["storage_seal"])
+
+    def test_server_only_mods_change_the_seal_and_keep_their_own_role(self) -> None:
+        server_only = self._starts(
+            _Broker(), version=3, mode="server", server_only_mods=["@X"]
+        )[0]["storage_seal"]
+        for values in (
+            {},
+            {"server_mods": ["@X"]},
+            {"extra_mods": ["@X"]},
+            {"version": 3, "server_only_mods": ["@Y"]},
+        ):
+            with self.subTest(values=values):
+                other = self._starts(_Broker(), mode="server", **values)[0]["storage_seal"]
+                self.assertNotEqual(server_only, other)
+
+    def test_server_only_project_is_not_sealed_as_a_shared_project(self) -> None:
+        start = self._starts(
+            _Broker(), version=3, mode="server", server_only_mods=["@ExampleMod"]
+        )[0]
+        expected = hashlib.sha256(
+            json.dumps(
+                {
+                    "algorithm": "sha256",
+                    "schema_version": 1,
+                    "roles": {
+                        "base_mods": [r"p:\mods\@cf", r"p:\mods\@dabs framework", r"p:\mods\@vppadmintools"],
+                        "project_mod": None,
+                        "extra_mods": [],
+                        "server_mods": [],
+                        "server_only_mods": [r"p:\mods\@examplemod"],
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(start["storage_seal"], expected)
 
     def test_the_seal_is_the_one_the_storage_module_computes(self) -> None:
         # No mirror: the value in the request is the module's own answer.
