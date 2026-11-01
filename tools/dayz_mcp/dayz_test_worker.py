@@ -506,10 +506,30 @@ def _override(payload: dict[str, object]) -> bool:
     return payload.get("project_mod_override") is True
 
 
+def _shared_project_mod(
+    payload: dict[str, object], runtime: WorkerRuntimePolicy
+) -> str | None:
+    if _override(payload):
+        return None
+    project_mod = "@" + runtime.mod
+    project_identity = _mod_path(project_mod, runtime).casefold()
+    if any(
+        _mod_path(value, runtime).casefold() == project_identity
+        for value in payload.get("server_only_mods", [])
+    ):
+        return None
+    return project_mod
+
+
 def _mod_entries(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> list[str]:
+    try:
+        dayz_test_request.validate_server_only_mods(payload, runtime.mods_root)
+    except ValueError:
+        raise _failed("request_integrity_failed") from None
     values = [*list(payload.get("base_mods", []))]
-    if not _override(payload):
-        values.append("@" + runtime.mod)
+    project_mod = _shared_project_mod(payload, runtime)
+    if project_mod is not None:
+        values.append(project_mod)
     values.extend(list(payload.get("extra_mods", [])))
     return [_mod_path(value, runtime) for value in values]
 
@@ -620,7 +640,10 @@ def _start_core(
         if payload.get("server_adminlog") is True:
             argv.append("-adminlog")
         argv.append(f"-port={port}")
-        server_mods = list(payload.get("server_mods", []))
+        server_mods = [
+            *list(payload.get("server_mods", [])),
+            *list(payload.get("server_only_mods", [])),
+        ]
         if server_mods:
             argv.append(
                 "-serverMod="
@@ -705,10 +728,11 @@ def _modset_seal(
         return dayz_test_storage.modset_seal(
             dayz_test_storage.modset_roles(
                 base_mods=list(payload.get("base_mods", [])),
-                project_mod=None if _override(payload) else "@" + runtime.mod,
+                project_mod=_shared_project_mod(payload, runtime),
                 extra_mods=list(payload.get("extra_mods", [])),
                 server_mods=list(payload.get("server_mods", [])),
                 mods_root=runtime.mods_root,
+                server_only_mods=list(payload.get("server_only_mods", [])),
             )
         )
     except dayz_test_storage.StorageError:
@@ -732,7 +756,11 @@ def _effective_directories(
     directories = list(_mod_entries(payload, runtime))
     if payload.get("mode") in {"server", "all"}:
         directories.extend(
-            _mod_path(value, runtime) for value in list(payload.get("server_mods", []))
+            _mod_path(value, runtime)
+            for value in (
+                *list(payload.get("server_mods", [])),
+                *list(payload.get("server_only_mods", [])),
+            )
         )
     return tuple(directories)
 
@@ -1669,6 +1697,10 @@ async def execute_dayz_test_worker(
         raise _failed("request_integrity_failed")
     runtime = _validate_runtime(runtime_policy, parsed)
     payload = parsed.payload
+    try:
+        dayz_test_request.validate_server_only_mods(payload, runtime.mods_root)
+    except ValueError:
+        raise _failed("request_integrity_failed") from None
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()

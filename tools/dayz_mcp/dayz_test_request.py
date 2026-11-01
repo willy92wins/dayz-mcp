@@ -47,6 +47,7 @@ _REQUEST_KEYS_V1 = frozenset(
 # Version 1 stays this set. Version 2 adds exactly one closed field.
 _REQUEST_KEYS = _REQUEST_KEYS_V1
 _REQUEST_KEYS_V2 = _REQUEST_KEYS_V1 | {"project_mod_override"}
+_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods"}
 _BRIDGE_BASENAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 _INVALID_RUN_ID = "invalid_run_id"
@@ -96,6 +97,8 @@ _CANONICAL_KEYSETS = frozenset(
     for variant in (
         keys - omitted - extra - adminlog,
         (keys - omitted - extra - adminlog) | {"project_mod_override"},
+        (keys - omitted - extra - adminlog) | {"server_only_mods"},
+        (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods"},
     )
 )
 
@@ -114,6 +117,7 @@ REQUEST_REJECTION_REASONS = frozenset(
         "mode_unknown",
         "navmesh_data_server_requires_server_launch",
         "server_adminlog_requires_server",
+        "server_only_mods_conflict",
         "no_base_mods_conflict",
         "pack_only_requires_build",
         "payload_not_encodable",
@@ -174,7 +178,7 @@ def reject_original_project_directory(
     except StorageError:
         return
     listed: list[object] = []
-    for field in ("base_mods", "extra_mods", "server_mods"):
+    for field in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
         values = payload.get(field)
         if isinstance(values, list):
             listed.extend(values)
@@ -185,6 +189,32 @@ def reject_original_project_directory(
             continue
         if resolved == original:
             _invalid("project_mod_override_includes_original")
+
+
+def validate_server_only_mods(
+    payload: dict[str, object], mods_root: str | None = None
+) -> None:
+    """Reject overlapping declarations; resolve aliases when the runtime is known.
+
+    The implicit project and bridge defaults are routed separately. Explicit
+    lists must never silently lose an entry to a different role.
+    """
+    server_only = payload.get("server_only_mods", [])
+    if not server_only:
+        return
+    from dayz_mcp.dayz_test_storage import normalize_mod_path
+
+    def identity(value: str) -> str:
+        if mods_root is not None:
+            return normalize_mod_path(value, mods_root).casefold()
+        return ntpath.normpath(value).casefold()
+
+    exclusive = [identity(item) for item in server_only]
+    if len(exclusive) != len(set(exclusive)):
+        _invalid("mod_list_invalid")
+    for field in ("base_mods", "extra_mods", "server_mods"):
+        if set(exclusive).intersection(identity(item) for item in payload.get(field, [])):
+            _invalid("server_only_mods_conflict")
 
 
 def _invalid(reason: str) -> None:
@@ -406,8 +436,10 @@ def parse_dayz_test_request(
         allowed_keys = _REQUEST_KEYS_V1
     elif type(version) is int and version == 2:
         allowed_keys = _REQUEST_KEYS_V2
+    elif type(version) is int and version == 3:
+        allowed_keys = _REQUEST_KEYS_V3
     else:
-        if not set(value).issubset(_REQUEST_KEYS_V2):
+        if not set(value).issubset(_REQUEST_KEYS_V3):
             _invalid("unknown_key")
         _invalid("version_unsupported")
     if not set(value).issubset(allowed_keys):
@@ -434,6 +466,7 @@ def parse_dayz_test_request(
     extra_mods = value.get("extra_mods", [])
     base_mods = value.get("base_mods", list(policy.default_base_mods))
     server_mods = value.get("server_mods", [])
+    server_only_mods = value.get("server_only_mods", [])
     no_base_mods = value.get("no_base_mods", False)
     port = value.get("port", 2302)
     width = value.get("width", 1920)
@@ -449,8 +482,8 @@ def parse_dayz_test_request(
     auto_remediate_steam = value.get("auto_remediate_steam", False)
     navmesh_data_server = value.get("navmesh_data_server", False)
     server_adminlog = value.get("server_adminlog", False)
-    if version == 2:
-        project_mod_override = value.get("project_mod_override")
+    if version in (2, 3):
+        project_mod_override = value.get("project_mod_override", False if version == 3 else None)
         if type(project_mod_override) is not bool:
             _invalid("flag_not_boolean")
     else:
@@ -499,7 +532,13 @@ def parse_dayz_test_request(
         _invalid("source_outside_default")
     if not all(
         _valid_mod_list(candidate, policy.mod_roots)
-        for candidate in (extra_mods, base_mods, server_mods)
+        for candidate in (extra_mods, base_mods, server_mods, server_only_mods)
+    ):
+        _invalid("mod_list_invalid")
+    if server_only_mods and any(
+        ";" in item
+        for items in (extra_mods, base_mods, server_mods, server_only_mods)
+        for item in items
     ):
         _invalid("mod_list_invalid")
     if any(
@@ -617,11 +656,14 @@ def parse_dayz_test_request(
         "server_mods": list(server_mods),
         "server_wait_s": server_wait_s,
         "source": policy.default_source if source is None else source,
-        "version": 2 if project_mod_override else 1,
+        "version": 3 if server_only_mods else (2 if project_mod_override else 1),
         "width": width,
     }
     if not project_mod_override:
         payload.pop("project_mod_override")
+    if server_only_mods:
+        payload["server_only_mods"] = list(server_only_mods)
+        validate_server_only_mods(payload)
     if "shared_lock_root" in value:
         payload["shared_lock_root"] = shared_lock_root
     if "instance_token" in value:

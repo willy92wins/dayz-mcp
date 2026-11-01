@@ -107,6 +107,29 @@ class NormalizationTest(unittest.TestCase):
             storage.modset_seal(_roles(extra_mods=[], server_mods=["@X"])),
         )
 
+    def test_server_only_alias_and_absolute_path_have_the_same_seal(self) -> None:
+        roles = _roles(server_only_mods=["@ServerOnly"])
+        self.assertEqual(roles["server_only_mods"], [r"p:\mods\@serveronly"])
+        self.assertEqual(
+            storage.modset_seal(roles),
+            storage.modset_seal(
+                _roles(server_only_mods=[r"P:\Mods\@SERVERONLY"])
+            ),
+        )
+
+    def test_server_only_role_is_distinct_from_server_and_shared_roles(self) -> None:
+        server_only_seal = storage.modset_seal(
+            _roles(extra_mods=[], server_mods=[], server_only_mods=["@X"])
+        )
+        for roles in (
+            _roles(extra_mods=[], server_mods=[]),
+            _roles(extra_mods=[], server_mods=[], server_only_mods=["@Y"]),
+            _roles(extra_mods=[], server_mods=["@X"]),
+            _roles(extra_mods=["@X"], server_mods=[]),
+        ):
+            with self.subTest(roles=roles):
+                self.assertNotEqual(server_only_seal, storage.modset_seal(roles))
+
     def test_s5_the_seal_is_a_stable_sha256_of_canonical_json(self) -> None:
         roles = _roles()
         first = storage.modset_seal(roles)
@@ -129,6 +152,17 @@ class NormalizationTest(unittest.TestCase):
             ).encode("utf-8")
         ).hexdigest()
         self.assertEqual(first, expected)
+        empty_roles = _roles(server_only_mods=[])
+        self.assertNotIn("server_only_mods", empty_roles)
+        self.assertEqual(storage.modset_seal(empty_roles), expected)
+
+    def test_a_malformed_server_only_role_fails_closed(self) -> None:
+        for value in (None, "@X", {}, [None], [3], [""]):
+            with self.subTest(value=value):
+                roles = _roles()
+                roles["server_only_mods"] = value
+                with self.assertRaises(storage.StorageError):
+                    storage.modset_seal(roles)
 
     def test_the_separator_never_enters_the_seal(self) -> None:
         # A mod whose name carries the argv separator cannot forge a collision.
