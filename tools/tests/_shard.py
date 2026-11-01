@@ -12,8 +12,10 @@ used, so load_tests and the rest of discovery stay in place.
 Each direct child of that suite is kept. The shard runs that original object
 once, on one shard, in discovery order. Flattening is only for counting and
 grouping, so a load_tests suite keeps its own run(). Only a tree that can be
-walked twice without changing it is partitioned. The root must be exactly the
-loader's default suite type. Leaves are TestCase objects: an iterable TestCase
+walked twice without changing it is partitioned. The root's type must be
+exactly unittest.suite.TestSuite, captured when this module loads. A test's
+module is test.__class__.__module__, the read in suite.py. Leaves are
+TestCase objects: an iterable TestCase
 stays that case, because unittest calls it and does not run what it yields.
 Every other suite must yield the same objects on two walks, whether it is a
 BaseTestSuite or a repeatable adapter. A one-pass iterable (iter(x) is x, a
@@ -89,6 +91,11 @@ class UnsupportedSuite(Exception):
     """The tree cannot be partitioned without changing what unittest runs."""
 
 
+# The only root type discovery may use. Captured here, before any load_tests
+# can assign TestLoader.suiteClass on the class or on a loader.
+_TRUSTED_SUITE_TYPE = unittest.suite.TestSuite
+
+
 def _type_name(kind: type) -> str:
     """Module and qualname, the name a refusal prints."""
     module = getattr(kind, "__module__", None) or "?"
@@ -97,30 +104,24 @@ def _type_name(kind: type) -> str:
 
 
 def _construct_name(obj: object) -> str:
-    """Module and qualname of obj's type."""
-    return _type_name(type(obj))
-
-
-def _default_suite_type() -> type:
-    """The suite class a fresh loader uses before load_tests changes it."""
-    return unittest.TestLoader().suiteClass
+    """Module and qualname of the class unittest reads (obj.__class__)."""
+    return _type_name(obj.__class__)
 
 
 def admission_problems(suite: object) -> list[str]:
     """Why this tree cannot be partitioned, or an empty list when it can.
 
-    Admitted: a root of exactly the default suite type, TestCase leaves, and
+    Admitted: a root of exactly unittest.suite.TestSuite, TestCase leaves, and
     suites that walk twice to the same objects. An iterable TestCase is a leaf.
     unittest calls that object; the iteration is not the tests it runs, and
     walking it would both mis-count and could consume a one-shot iterator
     before the one iter() the parent suite performs.
     """
-    expected = _default_suite_type()
-    if type(suite) is not expected:
+    if type(suite) is not _TRUSTED_SUITE_TYPE:
         return [
             "refusing to partition "
-            f"{_construct_name(suite)}: discovery root is not the default "
-            f"suite type {_type_name(expected)}"
+            f"{_construct_name(suite)}: discovery root is not "
+            f"{_type_name(_TRUSTED_SUITE_TYPE)}"
         ]
     problems: list[str] = []
     _admit_walk(suite, problems, set())
@@ -226,7 +227,9 @@ def module_of(test: unittest.case.TestCase) -> str:
     An import or load_tests failure is reported as a synthetic case whose
     method name is the module that failed. That name is the module.
     """
-    cls = type(test)
+    # suite.py reads test.__class__, not type(test): a weakref.proxy keeps the
+    # case's class on __class__ and would otherwise be filed under weakref.
+    cls = test.__class__
     if cls.__module__ == "unittest.loader" and cls.__name__ in {"_FailedTest", "ModuleSkipped"}:
         method = getattr(test, "_testMethodName", None)
         if isinstance(method, str) and method:
@@ -281,7 +284,8 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
                 seen.add(name)
                 modules.append(name)
         if tests and not modules:
-            modules.append(f"{type(child).__module__}.{type(child).__qualname__}")
+            kind = child.__class__
+            modules.append(f"{kind.__module__}.{kind.__qualname__}")
         index = len(children)
         children.append((modules, tests, child))
         parent.append(index)

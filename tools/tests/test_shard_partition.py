@@ -96,18 +96,19 @@ def stable_children(item, stack):
         return None
     if first_iter is item:
         raise RuntimeError(
-            "single-pass iterable %s.%s" % (type(item).__module__, type(item).__qualname__)
+            "single-pass iterable %s.%s" % (item.__class__.__module__, item.__class__.__qualname__)
         )
     first = tuple(first_iter)
     second_iter = iter(item)
     if second_iter is item:
         raise RuntimeError(
-            "single-pass iterable %s.%s" % (type(item).__module__, type(item).__qualname__)
+            "single-pass iterable %s.%s"
+            % (item.__class__.__module__, item.__class__.__qualname__)
         )
     second = tuple(second_iter)
     if len(first) != len(second) or any(left is not right for left, right in zip(first, second)):
         raise RuntimeError(
-            "two walks differ %s.%s" % (type(item).__module__, type(item).__qualname__)
+            "two walks differ %s.%s" % (item.__class__.__module__, item.__class__.__qualname__)
         )
     return tuple(child for child in first if child is not item)
 
@@ -129,7 +130,8 @@ def leaves(item):
 
 
 def module_name(test):
-    kind = type(test)
+    # suite.py: test.__class__.__module__, not type(test).
+    kind = test.__class__
     if kind.__module__ == "unittest.loader" and kind.__name__ in {"_FailedTest", "ModuleSkipped"}:
         method = getattr(test, "_testMethodName", None)
         if isinstance(method, str) and method:
@@ -300,7 +302,7 @@ def _stable_suite_children(item: object, stack: tuple[int, ...]) -> tuple[object
         first_iter = iter(item)  # type: ignore[arg-type]
     except TypeError:
         return None
-    kind = type(item)
+    kind = item.__class__
     label = f"{kind.__module__}.{kind.__qualname__}"
     if first_iter is item:
         raise RuntimeError(f"single-pass iterable {label}")
@@ -1356,6 +1358,199 @@ class ShardRunnerParityTest(unittest.TestCase):
             all("tests.test_zhook.MarkingSuite" in err for err in errs),
             detail,
         )
+
+    def test_loader_class_suite_class_is_refused(self) -> None:
+        """type(loader).suiteClass still replaces the root. Every shard refuses.
+
+        The trusted type must not be read from a loader after this assignment.
+        Discover records the root's error. No shard may exit 0.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-class-suite-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            for name in ("test_a", "test_b", "test_c"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class Pad(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            _write(
+                root / "tests" / "test_zclass.py",
+                """
+                import sys
+                import unittest
+
+                class MarkingSuite(unittest.TestSuite):
+                    def run(self, result, debug=False):
+                        super().run(result, debug)
+
+                        class Probe(unittest.TestCase):
+                            def runTest(self):
+                                pass
+
+                        try:
+                            raise RuntimeError("class-suiteclass-marker")
+                        except RuntimeError:
+                            result.addError(Probe(), sys.exc_info())
+
+                class Hook(unittest.TestCase):
+                    def test_ok(self):
+                        pass
+
+                def load_tests(loader, tests, pattern):
+                    type(loader).suiteClass = MarkingSuite
+                    return tests
+                """,
+            )
+            env = _fresh_env()
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            codes: list[int] = []
+            errs: list[str] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(root / "_run.py"), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+                errs.append(run.stderr)
+        detail = f"discover={discover.returncode} shards={codes}\n{discover.stderr}\n" + "\n".join(errs)
+        self.assertNotEqual(discover.returncode, 0, detail)
+        self.assertIn("class-suiteclass-marker", discover.stderr, detail)
+        self.assertTrue(all(code != 0 for code in codes), detail)
+        self.assertTrue(all("tests.test_zclass.MarkingSuite" in err for err in errs), detail)
+
+    def test_weakref_proxy_keeps_the_module_together(self) -> None:
+        """weakref.proxy(case) belongs to the case's class module, not weakref.
+
+        unittest reads test.__class__.__module__. Discover runs the shared
+        fixtures once. The shards must too.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-proxy-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            log_path = root / "fixtures.log"
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "cases.py",
+                """
+                import os
+                import unittest
+
+                def _mark(kind):
+                    with open(os.environ["SHARD_FIXTURE_LOG"], "a", encoding="utf-8") as handle:
+                        handle.write(kind + "\\n")
+
+                def setUpModule():
+                    _mark("module-setup")
+
+                def tearDownModule():
+                    _mark("module-teardown")
+
+                class Shared(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        _mark("class-setup")
+
+                    @classmethod
+                    def tearDownClass(cls):
+                        _mark("class-teardown")
+
+                    def test_one(self):
+                        _mark("ran-one")
+
+                    def test_two(self):
+                        _mark("ran-two")
+                """,
+            )
+            _write(
+                root / "tests" / "test_a_proxy.py",
+                """
+                import unittest
+                import weakref
+                from tests.cases import Shared
+
+                _alive = []
+
+                def load_tests(loader, tests, pattern):
+                    case = Shared("test_one")
+                    _alive.append(case)
+                    outer = unittest.TestSuite()
+                    outer.addTest(weakref.proxy(case))
+                    return outer
+                """,
+            )
+            _write(
+                root / "tests" / "test_b_direct.py",
+                """
+                import unittest
+                from tests.cases import Shared
+
+                def load_tests(loader, tests, pattern):
+                    outer = unittest.TestSuite()
+                    outer.addTest(Shared("test_two"))
+                    return outer
+                """,
+            )
+            for name in ("test_p1", "test_p2"):
+                _write(
+                    root / "tests" / f"{name}.py",
+                    """
+                    import unittest
+
+                    class Pad(unittest.TestCase):
+                        def test_ok(self):
+                            pass
+                    """,
+                )
+            env = _fresh_env()
+            env["SHARD_FIXTURE_LOG"] = str(log_path)
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            control = log_path.read_text(encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            codes: list[int] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(root / "_run.py"), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                codes.append(run.returncode)
+            shard_log = log_path.read_text(encoding="utf-8")
+        detail = f"discover={discover.returncode} shards={codes}\n{discover.stderr}\n{shard_log}"
+        self.assertEqual(discover.returncode, 0, detail)
+        for label in ("module-setup", "module-teardown", "class-setup", "class-teardown"):
+            self.assertEqual(control.count(label), 1, f"control {label}\n{detail}")
+            self.assertEqual(shard_log.count(label), 1, f"shards {label}\n{detail}")
+        self.assertEqual(shard_log.count("ran-one"), 1, detail)
+        self.assertEqual(shard_log.count("ran-two"), 1, detail)
 
     @slow_test
     def test_real_suite_is_admitted(self) -> None:
