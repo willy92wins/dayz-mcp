@@ -13,6 +13,8 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | Mod source (censo Enforce) | `addon` |
 | Tools | `tools` |
 | Tests | `tools\tests` |
+| B1-P2: préstamo de profile, transición recuperable y reconciliación de endpoint | `tools/dayz_mcp/loopback.py` |
+| B1-P2: regresiones de salida abrupta sin finally y prior presente/ausente | `tools/tests/test_b1p2_profile_not_persisted.py` |
 | Plans | `plans` |
 | Reviews | `reviews` |
 | Decisions | `decisions` (ausente en este checkout) |
@@ -81,7 +83,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `AUDITORIA_MCP_2026-09-07.md` - 51 KB, touched 2026-09-30 (UTC)
 - `AUDITORIA_PROFUNDA_2026-08-22.md` - 45 KB, touched 2026-09-30 (UTC)
 - `AUDITORIA_SOBREINGENIERIA_RONDA2_2026-08-22.md` - 39 KB, touched 2026-09-30 (UTC)
-- `CHANGELOG.md` - 117 KB, touched 2026-10-31 (UTC)
+- `CHANGELOG.md` - 121 KB, touched 2026-11-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-09-30 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-10-17 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-10-29 (UTC)
