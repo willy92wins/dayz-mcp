@@ -7022,9 +7022,18 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "inventory_attach.item_object_id, and only that id removes the item. "
             "Spawn with "
             "ECE_NOPERSISTENCY_WORLD so the object is not saved into a later "
-            "run. Deleting a seated "
-            "transport after vehicle_get_in_client needs care: the bridge "
-            "requests a dismount from all crew positions in the deletion hierarchy, "
+            "run. Deleting a seated transport needs care: vehicle_client_seated "
+            "(deleted=0) refuses the delete before sending it to the server when "
+            "client vehicle_telemetry detects a client-owned seat "
+            "(vehicle_get_in_client). Telemetry has no server registry object_id, "
+            "so this conservatively blocks every object_id while that seat is occupied. "
+            "Exit through the client exit flow and confirm seated=false before "
+            "retrying, or use vehicle_enter for server-authoritative seating. "
+            "As with player_teleport, an unprobeable client or unreadable telemetry "
+            "payload does not establish a seated occupant and does not block; "
+            "a telemetry call error propagates without deleting. "
+            "For server-visible occupants the bridge requests a dismount from "
+            "all crew positions in the deletion hierarchy, "
             "waits for the occupants to leave, and rechecks on a later server tick "
             "before deleting. An invalid exit command or occupants still present "
             "after 5 s returns vehicle_eject_failed (raw bridge deleted=0); the object "
@@ -7047,6 +7056,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
+            if await _runtime_client_peer_probeable(runtime):
+                telemetry = await runtime.call_bridge(
+                    "vehicle_telemetry", {}, "client", _timeout(timeout_s)
+                )
+                # Client telemetry has no server registry id. Refuse every
+                # target rather than guess whether its hierarchy holds this seat.
+                if occupant_client_seated(telemetry):
+                    return {
+                        "ok": False,
+                        "error": "vehicle_client_seated",
+                        "object_id": parsed_id,
+                        "deleted": 0,
+                        "hint": (
+                            "Deleting while the client owns a seated vehicle can "
+                            "crash the client. Use the client exit flow and confirm "
+                            "seated=false before retrying, or use vehicle_enter "
+                            "for server-authoritative seating. Telemetry cannot "
+                            "safely match the seat to object_id, so all deletes "
+                            "are refused while this client-owned seat is occupied."
+                        ),
+                    }
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
 
     @app.tool(
@@ -7441,8 +7471,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "occupant_client_seated when the player is a client-owned seated "
             "occupant (vehicle_get_in_client): teleporting that transport "
             "desyncs client and server. One car per run — there is no get-out "
-            "after vehicle_get_in_client; tear down with object_delete of the "
-            "in-session world_spawn object_id (that id does not survive the "
+            "tool after vehicle_get_in_client. Confirm the client exit before "
+            "object_delete of the in-session world_spawn object_id; otherwise "
+            "it refuses with vehicle_client_seated (that id does not survive the "
             "run; deleting a seated transport needs care). The Python "
             "occupant_client_seated precheck calls client vehicle_telemetry "
             "only when that peer is probing; without a client peer it is "
@@ -7494,8 +7525,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "hint": (
                             "player_teleport of a client-owned seated occupant "
                             "desyncs client and server. One car per run: there is "
-                            "no get-out after vehicle_get_in_client; tear down "
-                            "with object_delete of the in-session fixture "
+                            "no get-out tool after vehicle_get_in_client. Confirm "
+                            "the client exit before object_delete of the in-session "
+                            "fixture; otherwise it refuses with vehicle_client_seated "
                             "(object_id does not survive the run)."
                         ),
                     }
@@ -10163,14 +10195,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ActionSwitchLights reads this client seat and the vehicle's power; "
             "the lights toggle in the action's server step, which reads "
             "vehicle_enter's server seat, so a lights test takes both seats. "
-            "One car per run: there is no get-out after this seat; "
+            "One car per run: there is no get-out tool after this seat; "
             "player_teleport of the occupant returns occupant_client_seated. "
             "vehicle_enter runs no client get-in: after a get-out with "
             "action_use ActionGetOutTransport, vehicle_enter in a second car "
-            "seats only the server's player there. Tear down with object_delete of the "
-            "in-session world_spawn object_id — that id does not survive the "
-            "run. Deleting a seated transport needs care (it ejects; a stale "
-            "or guessed object_id is not that fixture)."
+            "seats only the server's player there. Confirm the client exit before "
+            "object_delete of the in-session world_spawn object_id — that id "
+            "does not survive the run. Deleting a seated transport needs care: "
+            "vehicle_client_seated refuses deletion while the client owns the "
+            "seat; the server eject only sees server crew. Use vehicle_enter "
+            "for server-authoritative seating."
         )
     )
     async def vehicle_get_in_client(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
@@ -10338,7 +10372,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Abort, so the stop result is what you read. This only clears "
             "trace/control: it does not eject the driver or passengers and "
             "does not delete the vehicle. Use object_delete of the registered "
-            "fixture id for teardown; it checks every occupant before deletion."
+            "fixture id for teardown after confirming the client exit; "
+            "vehicle_client_seated refuses deletion of a client-owned seat. "
+            "Server-visible occupants are ejected before deletion."
         )
     )
     async def vehicle_release(timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
