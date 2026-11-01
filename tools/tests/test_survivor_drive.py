@@ -24,6 +24,7 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
 )
 from tests._addon_paths import addon_root
+from tests.test_298_integration import EjectGuardFake
 from tests.bridge_client_capabilities_helpers import _method_body
 from tests.enforce_subset_helpers import (
     EnforceString,
@@ -849,14 +850,14 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
         )
         # scene_clear drops the drive of each entry it removes, the same way.
         clear = _method_body(
-            self.bridge, "protected bool DispatchSceneClear(MCPCommand command, MCPResult result)"
+            self.bridge, "protected void DeleteSceneObjects(MCPJob job)"
         )
         _in_order(
             self,
             clear,
             "MCPSurvivorDrive.OnObjectGone(this, entry.object_id);",
             "m_RuntimeObjects.Remove(entry.object_id);",
-            "GetGame().ObjectDelete(deleteNow.Get(index));",
+            "GetGame().ObjectDelete(job.delete_targets.Get(index));",
         )
         shutdown = _method_body(self.bridge, "void Shutdown()")
         self.assertIn("MCPSurvivorDrive.ShutdownAll(this);", shutdown)
@@ -1249,6 +1250,7 @@ class _HandlerModel(_DriveModel):
         self.deleted: list[object] = []
         game = SimpleNamespace(ObjectDelete=self.deleted.append)
         self.handlers: dict[str, object] = {
+            "MCPVehicleEject": EjectGuardFake,
             "float": SimpleNamespace(MAX=_FLT_MAX),
             "SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG": float(bound.group(1)),
             "PENDING_POLL_THRESHOLD": int(threshold.group(1)),
@@ -1285,7 +1287,7 @@ class _HandlerModel(_DriveModel):
                 signature + "\n{" + body + "}\n",
                 signature,
                 self.handlers,
-                class_types=("Object", "PlayerBase", "vector", "MCPResultCallback"),
+                class_types=("Object", "PlayerBase", "vector", "MCPResultCallback", "MCPVehicleEject", "MCPJob"),
             )
         self.bridge = SimpleNamespace(
             RuntimeObjectById=self.handlers["RuntimeObjectById"],

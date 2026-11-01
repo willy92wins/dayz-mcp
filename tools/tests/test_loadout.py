@@ -47,6 +47,7 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
 )
 from tests._addon_paths import addon_root
+from tests.test_298_integration import EjectGuardFake
 from tests._tiers import slow_test
 from tests.enforce_subset_helpers import EnforceString, method_body, translate
 from tests.fence_helpers import (
@@ -215,7 +216,7 @@ _MEMBER_RE = re.compile(
 )
 _LOCAL_DECLARATION = re.compile(
     r"^\s*(?:string|int|bool|Object|EntityAI|PlayerBase|PlayerIdentity|GameInventory|"
-    r"CargoBase|InventoryLocation|MCPJob|MCPResult|MCPLoadout|MCPLoadoutItem|"
+    r"CargoBase|InventoryLocation|MCPJob|MCPResult|MCPVehicleEject|MCPLoadout|MCPLoadoutItem|"
     r"MCPLoadoutApplied|array<EntityAI>|array<int>)\s+(\w+)\s*(?:=[^;]*)?;\s*$"
 )
 _SERVER_CAPS = re.compile(
@@ -226,7 +227,8 @@ APPLY_FN = "protected bool DispatchLoadoutApply(MCPCommand command, MCPResult re
 CLEAR_FN = "protected bool DispatchLoadoutClear(MCPCommand command, MCPResult result)"
 RESOLVE_FN = "protected PlayerBase ResolveLoadoutTarget(MCPArgs args, out string error)"
 ROWS_FN = "protected string LoadoutRowsError(array<ref MCPLoadoutItem> rows)"
-CLEAR_LOADOUT_FN = "protected void ClearLoadout(PlayerBase target, array<EntityAI> cleared)"
+CLEAR_LOADOUT_FN = "protected bool ClearLoadout(PlayerBase target, array<EntityAI> cleared)"
+ROLLBACK_FN = "protected bool DeleteLoadoutRollback(EntityAI item)"
 APPLY_LOADOUT_FN = "protected void ApplyLoadout(PlayerBase target, MCPArgs args, MCPResult result)"
 CREATE_FN = (
     "protected EntityAI CreateLoadoutItem(PlayerBase target, EntityAI owner, "
@@ -248,6 +250,7 @@ _ENFORCE_FUNCTIONS = (
     RESOLVE_FN,
     ROWS_FN,
     CLEAR_LOADOUT_FN,
+    ROLLBACK_FN,
     APPLY_LOADOUT_FN,
     CREATE_FN,
     READ_FN,
@@ -1806,7 +1809,7 @@ class LoadoutEnforceTest(unittest.TestCase):
         order = [
             "target = ResolveLoadoutTarget(command.args, targetError);",
             "if (HasActiveJobFor(null, target))",
-            "ClearLoadout(target, cleared);",
+            "if (!ClearLoadout(target, cleared))",
             "if (cleared.Count() == 0)",
             'job.kind = "loadout_clear";',
             "m_Jobs.Insert(job.id, job);",
@@ -1848,7 +1851,7 @@ class LoadoutEnforceTest(unittest.TestCase):
         apply = self._code(APPLY_LOADOUT_FN)
         self.assertEqual(
             _errors(create),
-            {"unknown_type", "slot_not_found", "slot_occupied", "cannot_attach", "no_room"},
+            {"unknown_type", "slot_not_found", "slot_occupied", "cannot_attach", "no_room", "vehicle_eject_failed"},
         )
         self.assertEqual(_errors(apply), {"parent_failed"})
         self.assertEqual(_errors(create) | _errors(apply), set(loadout.ITEM_ERRORS))
@@ -1875,7 +1878,12 @@ class LoadoutEnforceTest(unittest.TestCase):
             "!inventory.HasEntityInCargo(item)",
         ):
             with self.subTest(postcondition=postcondition):
-                self.assertIn("GetGame().ObjectDelete(item);", _if_body(create, postcondition))
+                rollback = _if_body(create, postcondition)
+                self.assertIn("if (!DeleteLoadoutRollback(item))", rollback)
+                self.assertIn('error = "vehicle_eject_failed";', rollback)
+        guarded_delete = self._code(ROLLBACK_FN)
+        self.assertLess(guarded_delete.index("eject.Begin(m_Tick)"), guarded_delete.index("GetGame().ObjectDelete(item)"))
+        self.assertIn("eject.HasOccupants()", guarded_delete)
 
     def test_every_row_gets_one_outcome_and_a_failed_parent_stops_its_children(self) -> None:
         apply = self._code(APPLY_LOADOUT_FN)
@@ -2391,6 +2399,7 @@ _BRIDGE_TYPES = (
     "CargoBase",
     "InventoryLocation",
     "MCPJob",
+    "MCPVehicleEject",
     "MCPResult",
     "MCPLoadout",
     "MCPLoadoutItem",
@@ -2486,9 +2495,11 @@ class _Bridge:
         game = _Game(self.world)
         self.game = game
         self.namespace: dict[str, Any] = {
+            "MCPVehicleEject": EjectGuardFake,
             "_S": _Str,
             "m_Jobs": self.jobs,
             "m_ElapsedS": 0.0,
+            "m_Tick": 0,
             "JOB_TIMEOUT_S": self.job_timeout_s,
             "LOADOUT_MAX_ITEMS": int(_bridge_constant(source, "int LOADOUT_MAX_ITEMS")),
             "LOADOUT_MAX_DEPTH": int(_bridge_constant(source, "int LOADOUT_MAX_DEPTH")),

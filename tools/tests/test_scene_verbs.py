@@ -39,6 +39,7 @@ from dayz_mcp.core import ECE_INITAI, EXPECTED_BRIDGE_VERSION
 from dayz_mcp.result_prune import prune_unfilled_fields
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
 from tests._addon_paths import addon_root
+from tests.test_298_integration import EjectGuardFake
 from tests.enforce_subset_helpers import (
     EnforceArray,
     EnforceMap,
@@ -336,8 +337,8 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("never touches the server's storage", clear)
         self.assertIn("scene_shared", clear)
         self.assertIn("deleted out of it", clear)
-        self.assertIn("deleting a vehicle ejects its crew", clear)
-        self.assertIn("one seated in it is ejected", clear)
+        self.assertIn("all crew positions", clear)
+        self.assertIn("one seated in it must leave before deletion", clear)
         self.assertNotIn("Nothing else is touched", clear)
         # The cap: entries are never dropped, so a deleted one still counts.
         for name in ("world_spawn", "world_spawn_batch"):
@@ -835,18 +836,21 @@ class SceneBridgeSourceTest(unittest.TestCase):
 
     def test_scene_clear_deletes_its_own_entries_the_way_object_delete_does(self) -> None:
         clear = self._body("protected bool DispatchSceneClear(MCPCommand command, MCPResult result)")
+        delete = self._body("protected void DeleteSceneObjects(MCPJob job)")
         self.assertIn('if (!command.args || !IsValidSceneId(command.args.scene_id)) { result.ok = false; result.error = "bad_args"; return true; }', clear)
         self.assertIn("entries = m_Scenes.Get(command.args.scene_id);", clear)
         self.assertIn(
-            "if (m_RuntimeObjects.Get(entry.object_id) == entry.obj) "
+            "if (entry.obj && m_RuntimeObjects.Get(entry.object_id) == entry.obj) "
             "{ MCPBotControl.OnObjectGone(this, entry.object_id); MCPSurvivorDrive.OnObjectGone(this, entry.object_id); "
             "m_RuntimeObjects.Remove(entry.object_id); }",
-            clear,
+            delete,
         )
-        self.assertIn("GetGame().ObjectDelete(deleteNow.Get(index));", clear)
-        self.assertEqual(clear.count("ObjectDelete("), 1)
-        # Every refusal is decided before the first delete.
-        self.assertLess(clear.rindex("return RefuseSceneShared("), clear.index("ObjectDelete("))
+        self.assertIn("GetGame().ObjectDelete(job.delete_targets.Get(index));", delete)
+        self.assertEqual(delete.count("ObjectDelete("), 1)
+        self.assertNotIn("ObjectDelete(", clear)
+        # Scene sharing and the ejection preflight precede any delete.
+        self.assertLess(clear.rindex("return RefuseSceneShared("), clear.index("job.delete_eject.Begin(m_Tick)"))
+        self.assertLess(clear.index("job.delete_eject.Begin(m_Tick)"), clear.index("DeleteSceneObjects(job)"))
         for absent in ("GetObjectsAtPosition", "CreateObjectEx", "GetType()", "IsKindOf", "m_Scenes.Get(entry"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, clear)
@@ -859,7 +863,7 @@ class SceneBridgeSourceTest(unittest.TestCase):
             post,
         )
         timeout = self._body("protected void PostJobTimeout(MCPJob job)")
-        self.assertTrue(timeout.startswith('if (job.kind == "scene_clear") { PostSceneClear(job); return; }'))
+        self.assertIn('if (job.kind == "scene_clear") { PostSceneClear(job); return; }', timeout)
         ready = self._body("protected bool IsJobReady(MCPJob job)")
         self.assertIn('else if (job.kind == "scene_clear") { return IsSceneClearDone(job); }', ready)
         # One level up: the inventory parent of an EntityAI, else the entity-tree
@@ -936,9 +940,10 @@ _BRIDGE_CLASS_TYPES = frozenset(
         "MCPResult",
         "MCPSceneEntity",
         "EntityAI",
+        "MCPVehicleEject",
     }
 )
-_BRIDGE_MEMBERS = frozenset({"m_Scenes", "m_RuntimeObjects", "m_NextBatchObjectId", "m_Jobs", "m_ElapsedS"})
+_BRIDGE_MEMBERS = frozenset({"m_Scenes", "m_RuntimeObjects", "m_NextBatchObjectId", "m_Jobs", "m_ElapsedS", "m_Tick"})
 # The batch and scene methods. Every message member they use is checked against
 # MCPMessages.c (SceneMessageContractTest), and each one runs below.
 _SCENE_METHODS = (
@@ -949,6 +954,8 @@ _SCENE_METHODS = (
     "protected void AddSceneEntry(string sceneId, int objectId, Object obj)",
     "protected bool DispatchSceneEntities(MCPCommand command, MCPResult result)",
     "protected bool DispatchSceneClear(MCPCommand command, MCPResult result)",
+    "protected void DeleteSceneObjects(MCPJob job)",
+    "protected bool RefreshSceneDeleteTargets(MCPJob job)",
     "protected Object SceneCarrier(Object obj)",
     "protected int SceneCarrierIndex(Object obj, array<Object> carriers)",
     "protected int SceneHolderIndex(Object obj, array<Object> holders)",
@@ -1040,6 +1047,15 @@ class _Entity:
         self.parent = parent
         self.entity = entity
         self.orientation: list[float] | None = None
+        self.children: list[Any] = []
+        self.is_transport = type_name == "CivilianSedan"
+        self.occupants: list[Any] = []
+        if holder is not None:
+            holder.children.append(self)
+        if parent is not None:
+            parent.children.append(self)
+            if parent.is_transport and type_name.startswith("Survivor"):
+                parent.occupants.append(self)
 
     def GetType(self) -> EnforceString:
         return EnforceString.of(self.type_name)
@@ -1143,6 +1159,7 @@ class SceneBridgeExecutionTest(unittest.TestCase):
                     Cast=lambda obj: obj if isinstance(obj, _Entity) and obj.entity else None
                 ),
                 "Object": SimpleNamespace(Cast=lambda obj: obj if isinstance(obj, _Entity) else None),
+                "MCPVehicleEject": EjectGuardFake,
                 "float": SimpleNamespace(MAX=_FLOAT_MAX),
                 "IsSpawnReady": unexpected,
                 "IsSeatReady": unexpected,
@@ -1160,6 +1177,7 @@ class SceneBridgeExecutionTest(unittest.TestCase):
                 "m_Jobs": EnforceMap(),
                 "m_NextBatchObjectId": _bridge_const(self.bridge, "BATCH_OBJECT_ID_BASE"),
                 "m_ElapsedS": 0.0,
+                "m_Tick": 0,
             }
         )
         for name in (
@@ -1242,6 +1260,7 @@ class SceneBridgeExecutionTest(unittest.TestCase):
 
     def _run_jobs_at(self, elapsed_s: float) -> None:
         self.ns["m_ElapsedS"] = elapsed_s
+        self.ns["m_Tick"] += 1
         self.ns["ProcessJobs"]()
 
     # world_spawn_batch
@@ -1446,6 +1465,10 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         self._register("a", 1000000003, can)
         post_now, _result = self._clear("a", command_id=51)
         self.assertIs(post_now, False)
+        self.assertEqual(self.game.deleted, [])
+        self._run_jobs_at(0.01)
+        self.assertEqual(self.game.deleted, [])
+        self._run_jobs_at(0.02)
         # What the car holds goes with it: the call deletes the car and the sign.
         self.assertEqual(self.game.deleted, [car, sign])
         self.assertEqual(self.gone, [1000000000, 1000000001, 1000000002, 1000000003])
@@ -1463,8 +1486,8 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         self.assertEqual([entry.obj for entry in self._entries("a")], [None, None, None, None])
 
     def test_a_seated_object_is_deleted_through_its_own_entry(self) -> None:
-        # Deleting a vehicle ejects its crew (docs/VEHICLE_TESTING.md), so a
-        # seat is not a hold: what sits in the car gets its own delete.
+        # The bridge first requests every occupant's exit. A seat is not an
+        # inventory hold: the registered survivor still gets its own delete.
         car = _Entity("CivilianSedan")
         seated = _Entity("SurvivorM_Mirek", parent=car)
         # An unregistered player seated in the car, with a scene object in its
@@ -1479,6 +1502,15 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         self._register("a", 1000000003, bag)
         post_now, _result = self._clear("a", command_id=53)
         self.assertIs(post_now, False)
+        self.assertTrue(car.exit_requested)
+        self.assertEqual(self.game.deleted, [])
+        self._run_jobs_at(0.01)
+        self.assertEqual(self.game.deleted, [])
+        # The fake engine independently completes both exits.
+        car.occupants.clear()
+        seated.parent = None
+        player.parent = None
+        self._run_jobs_at(0.02)
         self.assertEqual(self.game.deleted, [car, seated, held])
         self.assertNotIn(player, self.game.deleted)
         self.assertEqual(self.logs[-1], "job queued id=53 kind=scene_clear pending=4 delete=3")
@@ -1497,6 +1529,9 @@ class SceneBridgeExecutionTest(unittest.TestCase):
         self._register("a", 1000000001, car)
         self._register("a", 1000000002, static)
         _post_now, _result = self._clear("a")
+        self.assertEqual(self.game.deleted, [])
+        self._run_jobs_at(0.01)
+        self._run_jobs_at(0.02)
         # The held object is deleted out of the hands; the wheel is left to go
         # with the car, as object_delete leaves it.
         self.assertEqual(self.game.deleted, [held, car, static])
@@ -1570,6 +1605,10 @@ _SCENE_MEMBER_TYPES: dict[tuple[str, str], str] = {
     ("MCPCommand", "id"): "int",
     ("MCPJob", "args"): "ref MCPArgs",
     ("MCPJob", "deadline_s"): "float",
+    ("MCPJob", "delete_eject"): "ref MCPVehicleEject",
+    ("MCPJob", "delete_targets"): "ref array<Object>",
+    ("MCPJob", "error"): "string",
+    ("MCPJob", "phase"): "int",
     ("MCPJob", "id"): "int",
     ("MCPJob", "kind"): "string",
     ("MCPJob", "scene_clear"): "ref MCPSceneClear",

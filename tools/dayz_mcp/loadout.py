@@ -53,6 +53,7 @@ ITEM_ERRORS = (
     "cannot_attach",
     "no_room",
     "parent_failed",
+    "vehicle_eject_failed",
 )
 # Warning of an ok answer whose loadout cannot be read: ok is then 0.
 INCOMPLETE = "loadout_incomplete"
