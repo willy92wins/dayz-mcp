@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import unittest
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -23,7 +24,7 @@ from tests.bridge_client_capabilities_helpers import (
     announced_literals,
     dispatch_census,
 )
-from tests.enforce_subset_helpers import EnforceArray, EnforceString, clean, method_body, translate
+from tests.enforce_subset_helpers import EnforceArray, EnforceMap, EnforceString, clean, method_body, translate
 
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
@@ -37,14 +38,6 @@ CACHE_DECL = "protected string m_PollCapabilities;"
 CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);"
 ANNOUNCE_LINE = 'request = request + "&caps=" + m_PollCapabilities;'
 _STRING_LITERAL_RE = re.compile(r'"(?:\\.|[^"\\\n])*"')
-_CACHE_ASSIGN_RE = re.compile(r"\bm_PollCapabilities\s*=(?!=)")
-_CACHE_COMPOUND_ASSIGN_RE = re.compile(r"\bm_PollCapabilities\s*(?:[+\-*/%|&^]|<<|>>)=(?!=)")
-_CACHE_INC_DEC_RE = re.compile(
-    r"(?:\+\+|--)\s*m_PollCapabilities\b|\bm_PollCapabilities\s*(?:\+\+|--)"
-)
-_CACHE_METHOD_OR_INDEX_RE = re.compile(r"\bm_PollCapabilities\s*[.\[]")
-_CACHE_OUT_KW_RE = re.compile(r"\b(?:out|inout)\s+m_PollCapabilities\b")
-_CACHE_TOKEN_RE = re.compile(r"\bm_PollCapabilities\b")
 _CONST_STRING_DECL_RE = re.compile(r"\bconst\s+string\s+([A-Za-z_]\w*)\s*=\s*([^;]+);")
 _CONST_INT_DECL_RE = re.compile(r"\bconst\s+int\s+([A-Za-z_]\w*)\s*=\s*(-?\d+)\s*;")
 _CONST_FLOAT_DECL_RE = re.compile(r"\bconst\s+float\s+([A-Za-z_]\w*)\s*=\s*(-?\d+(?:\.\d+)?)\s*;")
@@ -52,10 +45,315 @@ _DECLARED_MEMBER_RE = re.compile(
     r"\b(?:protected|private)\s+(?:static\s+)?(?P<ref>ref\s+)?"
     r"(?P<type>[A-Za-z_]\w*(?:\s*<[^;{}()=]*>)?)\s+(?P<name>m_\w+)\s*;"
 )
+_FUNC_DECL_HEAD_RE = re.compile(
+    r"\b(?P<ret>[A-Za-z_]\w*(?:\s*<[\w\s,<>]*>)?)\s+(?P<name>[A-Za-z_]\w*)\s*\("
+)
+
+_READONLY_STRING_METHODS = frozenset({
+    "Contains",
+    "EndsWith",
+    "Get",
+    "Hash",
+    "IndexOf",
+    "IndexOfFrom",
+    "LastIndexOf",
+    "Length",
+    "LengthUtf8",
+    "NthUTF8Char",
+    "Split",
+    "StartsWith",
+    "Substring",
+    "SubstringInverted",
+    "SubstringUtf8",
+    "ToAscii",
+    "ToFloat",
+    "ToInt",
+    "ToType",
+    "ToVector",
+    "Trim",
+})
+
+_NON_CALLEE_KEYWORDS = frozenset({
+    "case",
+    "catch",
+    "delete",
+    "else",
+    "for",
+    "if",
+    "in",
+    "inout",
+    "new",
+    "out",
+    "return",
+    "sizeof",
+    "switch",
+    "throw",
+    "typename",
+    "while",
+})
+
+_ENGINE_OUT_PARAMS: dict[str, frozenset[int]] = {
+    "CastTo": frozenset({0}),
+    "CommandlineGetParam": frozenset({1}),
+    "ConfigGetChildName": frozenset({2}),
+    "ConfigGetFullPath": frozenset({1}),
+    "ConfigGetObjectName": frozenset({1}),
+    "ConfigGetText": frozenset({1}),
+    "ConfigGetTextRaw": frozenset({1}),
+    "CopyFromClipboard": frozenset({0}),
+    "FGets": frozenset({1}),
+    "FindFile": frozenset({1, 2}),
+    "FindNextFile": frozenset({1, 2}),
+    "GetActionComponentName": frozenset({1}),
+    "GetCLIParam": frozenset({1}),
+    "GetCharacterName": frozenset({1}),
+    "GetClassVar": frozenset({3}),
+    "GetCurrentDir": frozenset({0}),
+    "GetHostAddress": frozenset({0}),
+    "GetHourMinuteSecond": frozenset({0, 1, 2}),
+    "GetHourMinuteSecondUTC": frozenset({0, 1, 2}),
+    "GetItemText": frozenset({2}),
+    "GetLine": frozenset({1}),
+    "GetLocale": frozenset({0}),
+    "GetModelName": frozenset({1}),
+    "GetPlayerName": frozenset({0}),
+    "GetPlayerNameShort": frozenset({1}),
+    "GetProfileString": frozenset({1}),
+    "GetSurfaceName": frozenset({3}),
+    "GetText": frozenset({0}),
+    "GetVersion": frozenset({0}),
+    "GetWorldName": frozenset({0}),
+    "GetYearMonthDay": frozenset({0, 1, 2}),
+    "GetYearMonthDayUTC": frozenset({0, 1, 2}),
+    "JsonLoadData": frozenset({1}),
+    "JsonLoadFile": frozenset({1}),
+    "LoadData": frozenset({1, 2}),
+    "LoadFile": frozenset({1, 2}),
+    "MakeData": frozenset({1, 2}),
+    "ParseCommandLine": frozenset({0, 1}),
+    "ParseString": frozenset({0}),
+    "ParseStringEx": frozenset({0}),
+    "Read": frozenset({0}),
+    "ReadFromString": frozenset({0, 2}),
+    "SaveFile": frozenset({2}),
+    "Split": frozenset({1}),
+    "SurfaceGetType": frozenset({2}),
+    "SurfaceGetType3D": frozenset({3}),
+    "SurfaceUnderObject": frozenset({1}),
+    "SurfaceUnderObjectByBone": frozenset({2}),
+    "SurfaceUnderObjectEx": frozenset({1}),
+    "WriteToString": frozenset({2}),
+}
+
+_ADDON_OUT_PARAMS_CACHE: dict[str, set[int]] | None = None
 
 
 def _blank_strings(cleaned: str) -> str:
     return _STRING_LITERAL_RE.sub(lambda m: '"' + (" " * (len(m.group(0)) - 2)) + '"', cleaned)
+
+
+def _find_matching_delim(text: str, open_pos: int, open_ch: str = "(", close_ch: str = ")") -> int:
+    depth = 0
+    for idx in range(open_pos, len(text)):
+        ch = text[idx]
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+
+def _split_top_level_commas(text: str, *, track_angles: bool) -> list[tuple[int, int, str]]:
+    parts: list[tuple[int, int, str]] = []
+    paren = brack = brace = angle = 0
+    start = 0
+    for idx, ch in enumerate(text):
+        if ch == "(":
+            paren += 1
+        elif ch == ")" and paren > 0:
+            paren -= 1
+        elif ch == "[":
+            brack += 1
+        elif ch == "]" and brack > 0:
+            brack -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}" and brace > 0:
+            brace -= 1
+        elif track_angles and ch == "<":
+            angle += 1
+        elif track_angles and ch == ">" and angle > 0:
+            angle -= 1
+        elif ch == "," and paren == 0 and brack == 0 and brace == 0 and (not track_angles or angle == 0):
+            parts.append((start, idx, text[start:idx]))
+            start = idx + 1
+    parts.append((start, len(text), text[start:]))
+    return parts
+
+
+def _collect_out_params(masked: str) -> dict[str, set[int]]:
+    found: dict[str, set[int]] = {}
+    for match in _FUNC_DECL_HEAD_RE.finditer(masked):
+        ret_base = match.group("ret").split("<", 1)[0].strip()
+        name = match.group("name")
+        if ret_base in _NON_CALLEE_KEYWORDS or name in _NON_CALLEE_KEYWORDS:
+            continue
+        open_paren = match.end() - 1
+        close_paren = _find_matching_delim(masked, open_paren, "(", ")")
+        if close_paren == -1:
+            continue
+        tail = masked[close_paren + 1 :].lstrip()
+        if not tail.startswith(("{", ";")):
+            continue
+        params_text = masked[open_paren + 1 : close_paren]
+        if "out" not in params_text:
+            continue
+        for idx, (_s, _e, param_decl) in enumerate(
+            _split_top_level_commas(params_text, track_angles=True)
+        ):
+            if re.search(r"\b(?:out|inout)\b", param_decl) is not None:
+                found.setdefault(name, set()).add(idx)
+    return found
+
+
+def _addon_out_params() -> dict[str, set[int]]:
+    global _ADDON_OUT_PARAMS_CACHE
+    if _ADDON_OUT_PARAMS_CACHE is None:
+        merged: dict[str, set[int]] = {}
+        for path in sorted(addon_root().rglob("*.c")):
+            file_masked = _blank_strings(clean(path.read_text(encoding="utf-8")))
+            for name, indices in _collect_out_params(file_masked).items():
+                merged.setdefault(name, set()).update(indices)
+        _ADDON_OUT_PARAMS_CACHE = merged
+    return _ADDON_OUT_PARAMS_CACHE
+
+
+def _assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
+    esc = re.escape(member)
+    decl_re = re.compile(
+        rf"\b(?!(?:{'|'.join(sorted(_NON_CALLEE_KEYWORDS))})\b)"
+        rf"[A-Za-z_]\w*(?:\s*<[\w\s,<>]*>)?\s+{esc}\b"
+    )
+    if len(decl_re.findall(masked)) != 1:
+        raise AssertionError(f"{member} must be declared once and never shadowed")
+    if re.search(rf"\b(?:out|inout)\s+\(*\s*(?:this\s*\.\s*)?{esc}\b", masked) is not None:
+        raise AssertionError(f"{member} must not be passed as out/inout")
+
+    out_params: dict[str, set[int]] = {k: set(v) for k, v in _ENGINE_OUT_PARAMS.items()}
+    for name, indices in _addon_out_params().items():
+        out_params.setdefault(name, set()).update(indices)
+    for name, indices in _collect_out_params(masked).items():
+        out_params.setdefault(name, set()).update(indices)
+
+    token_re = re.compile(rf"\b{esc}\b")
+    assign_count = 0
+    for match in token_re.finditer(masked):
+        pos = match.start()
+        stack: list[int] = []
+        for idx, ch in enumerate(masked[:pos]):
+            if ch == "(":
+                stack.append(idx)
+            elif ch == ")" and stack:
+                stack.pop()
+
+        if not stack and masked[:pos].rstrip().endswith(","):
+            raise AssertionError(f"{member} must not be redeclared in a multi-variable declaration")
+
+        m_start = pos
+        expr_end = match.end()
+        qual = re.search(r"(?:\b[A-Za-z_]\w*(?:\s*\(\s*\))?\s*\.\s*)+$", masked[:m_start])
+        if qual is not None:
+            m_start = qual.start()
+
+        for open_paren in reversed(stack):
+            close_paren = _find_matching_delim(masked, open_paren, "(", ")")
+            if close_paren == -1:
+                break
+            if masked[open_paren + 1 : m_start].strip() != "" or masked[expr_end:close_paren].strip() != "":
+                break
+            before_paren = masked[:open_paren].rstrip()
+            word_match = re.search(r"([A-Za-z_]\w*)$", before_paren)
+            if before_paren.endswith(">") or (
+                word_match is not None and word_match.group(1) not in {"return", "case", "else"}
+            ):
+                break
+            m_start = open_paren
+            expr_end = close_paren + 1
+
+        after = masked[expr_end:].lstrip()
+        if after.startswith("."):
+            dot_match = re.match(r"\.\s*([A-Za-z_]\w*)\s*\(", after)
+            if dot_match is None:
+                raise AssertionError(f"disallowed member access on {member}")
+            method_name = dot_match.group(1)
+            if method_name not in _READONLY_STRING_METHODS:
+                raise AssertionError(f"mutating method {method_name}() called on {member}")
+
+        after_target = after
+        while after_target.startswith("["):
+            close_brack = _find_matching_delim(after_target, 0, "[", "]")
+            if close_brack == -1:
+                raise AssertionError(f"unbalanced bracket after {member}")
+            after_target = after_target[close_brack + 1 :].lstrip()
+
+        if re.match(r"=(?!=)", after_target) is not None:
+            assign_count += 1
+        if re.match(r"(?:[+\-*/%|&^]|<<|>>)=(?!=)", after_target) is not None:
+            raise AssertionError(f"{member} must not be modified by compound assignment")
+        if after_target.startswith(("++", "--")) or masked[:m_start].rstrip().endswith(("++", "--")):
+            raise AssertionError(f"{member} must not be incremented or decremented")
+
+        for open_paren in reversed(stack):
+            before_paren = masked[:open_paren].rstrip()
+            if before_paren.endswith(">"):
+                lt_depth = 0
+                scan = len(before_paren) - 1
+                while scan >= 0:
+                    if before_paren[scan] == ">":
+                        lt_depth += 1
+                    elif before_paren[scan] == "<":
+                        lt_depth -= 1
+                        if lt_depth == 0:
+                            before_paren = before_paren[:scan].rstrip()
+                            break
+                    scan -= 1
+            callee_match = re.search(r"([A-Za-z_]\w*)$", before_paren)
+            if callee_match is None:
+                continue
+            callee = callee_match.group(1)
+            if callee in _NON_CALLEE_KEYWORDS:
+                break
+            close_paren = _find_matching_delim(masked, open_paren, "(", ")")
+            if close_paren == -1:
+                break
+            args_text = masked[open_paren + 1 : close_paren]
+            rel_pos = pos - (open_paren + 1)
+            for arg_idx, (a_start, a_end, raw_arg) in enumerate(
+                _split_top_level_commas(args_text, track_angles=False)
+            ):
+                if a_start <= rel_pos < a_end:
+                    expr = raw_arg.strip()
+                    while (
+                        expr.startswith("(")
+                        and expr.endswith(")")
+                        and _find_matching_delim(expr, 0, "(", ")") == len(expr) - 1
+                    ):
+                        expr = expr[1:-1].strip()
+                    if re.fullmatch(
+                        rf"(?:(?:out|inout)\s+)?(?:[A-Za-z_]\w*(?:\s*\(\s*\))?\s*\.\s*)*{esc}(?:\s*\[[^\]]*\])?",
+                        expr,
+                    ):
+                        if arg_idx in out_params.get(callee, ()):
+                            raise AssertionError(
+                                f"{member} must not be passed to out/inout parameter {arg_idx} of {callee}()"
+                            )
+                    break
+            break
+
+    if assign_count != 1:
+        raise AssertionError(f"{member} must not be reassigned after construction")
 
 
 def chunk_at_commas(names: list[str], limit: int = MAX_LITERAL_CHARS) -> list[str]:
@@ -98,11 +396,69 @@ def verify_announcement_matches_dispatcher(source: str) -> None:
 def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
     class WireString(EnforceString):
         def __add__(self, other):
-            if isinstance(other, int):
+            if isinstance(other, bool):
+                return WireString(self.data + (b"true" if other else b"false"))
+            if isinstance(other, (int, float)):
                 return WireString(self.data + str(other).encode("ascii"))
             if isinstance(other, EnforceString):
                 return WireString(self.data + other.data)
             return NotImplemented
+
+        def __radd__(self, other):
+            if isinstance(other, bool):
+                return WireString((b"true" if other else b"false") + self.data)
+            if isinstance(other, (int, float)):
+                return WireString(str(other).encode("ascii") + self.data)
+            return NotImplemented
+
+        def __getitem__(self, index: int) -> "WireString":
+            return self.Get(index)
+
+        def Get(self, index: int) -> "WireString":
+            return self.Substring(index, 1)
+
+        def Trim(self) -> "WireString":
+            return WireString(self.data.strip(b" \t\r\n"))
+
+        def IndexOf(self, sample: EnforceString) -> int:
+            return self.data.find(sample.data)
+
+        def IndexOfFrom(self, start: int, sample: EnforceString) -> int:
+            return self.data.find(sample.data, max(start, 0))
+
+        def LastIndexOf(self, sample: EnforceString) -> int:
+            return self.data.rfind(sample.data)
+
+        def Contains(self, sample: EnforceString) -> bool:
+            return sample.data in self.data
+
+        def StartsWith(self, sample: EnforceString) -> bool:
+            return self.data.startswith(sample.data)
+
+        def EndsWith(self, sample: EnforceString) -> bool:
+            return self.data.endswith(sample.data)
+
+        def LengthUtf8(self) -> int:
+            return len(self.text)
+
+        def SubstringUtf8(self, start: int, length: int) -> "WireString":
+            return WireString.of(self.text[start : start + length])
+
+        def Hash(self) -> int:
+            return zlib.crc32(self.data)
+
+        def ToInt(self) -> int:
+            m = re.match(rb"\s*[+-]?\d+", self.data)
+            return int(m.group(0)) if m else 0
+
+        def ToFloat(self) -> float:
+            m = re.match(rb"\s*[+-]?\d+(?:\.\d+)?", self.data)
+            return float(m.group(0)) if m else 0.0
+
+        def Split(self, sample: EnforceString, output: EnforceArray) -> None:
+            output.Clear()
+            for part in (self.data.split(sample.data) if sample.data else [self.data]):
+                output.Insert(WireString(part))
 
         def ToUpper(self) -> int:
             self.data = self.data.upper()
@@ -138,7 +494,14 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
     ns: dict = {
         "_S": WireString,
         "array": EnforceArray,
+        "map": EnforceMap,
         "IntDivide": lambda v, d: v // d if v >= 0 else -(-v // d),
+        "g_Game": None,
+        "Log": lambda *_args: None,
+        "Print": lambda *_args: None,
+        "PrintString": lambda *_args: None,
+        "PrintToRPT": lambda *_args: None,
+        "DPrint": lambda *_args: None,
         "MCP_BRIDGE_VERSION": WireString.of(ver_match.group(1)),
         "MCPCameraPath": object,
         "MCPJobRunner": lambda: SimpleNamespace(Count=lambda: 0),
@@ -194,14 +557,15 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
     ns["EncodeQueryValue"] = translate(
         encode_sig + "\n{" + encode_body + "}\n", encode_sig, dict(ns)
     )
-    for sig in (
+    base_sigs = (
         CONSTRUCTOR_SIGNATURE,
         "protected int NextLoadCounter(int value)",
         "protected int OutstandingWork()",
         "protected void EnsurePollCallback()",
         "protected void HoldPollCallback()",
         START_POLL_SIGNATURE,
-    ):
+    )
+    for sig in base_sigs:
         body = method_body(source, sig)
         translate(
             sig + "\n{" + body + "}\n",
@@ -210,6 +574,36 @@ def _execute_translated_client_poll(source: str, cleaned: str) -> list[str]:
             members=set(re.findall(r"\bm_\w+", body)),
             class_types=("MCPClientPollCallback",),
         )
+    call_re = re.compile(r"(?<!\.)\b([A-Za-z_]\w*)\s*\(")
+    helper_queue = [method_body(source, sig) for sig in (CONSTRUCTOR_SIGNATURE, START_POLL_SIGNATURE)]
+    seen_helpers: set[str] = set()
+    while helper_queue:
+        body_text = helper_queue.pop(0)
+        body_masked = _blank_strings(body_text)
+        for call_match in call_re.finditer(body_masked):
+            callee = call_match.group(1)
+            if callee in ns or callee in seen_helpers or callee in _NON_CALLEE_KEYWORDS:
+                continue
+            if re.search(r"\bnew\s+$", body_masked[: call_match.start()]) is not None:
+                continue
+            seen_helpers.add(callee)
+            sig_match = re.search(
+                rf"((?:(?:protected|private|static|override)\s+)*[A-Za-z_]\w*\s+{re.escape(callee)}\s*\([^()]*\))\s*\{{",
+                cleaned,
+            )
+            if sig_match is None:
+                continue
+            helper_sig = sig_match.group(1).strip()
+            helper_body = method_body(source, helper_sig)
+            translate(
+                helper_sig + "\n{" + helper_body + "}\n",
+                helper_sig,
+                ns,
+                members=set(re.findall(r"\bm_\w+", helper_body)),
+                class_types=("MCPClientPollCallback",),
+            )
+            helper_queue.append(helper_body)
+
     ns["MCPClientBridge"]()
     ns["m_Key"] = WireString.of("k")
     ns["m_PollCtx"] = transport
@@ -251,19 +645,7 @@ def verify_poll_wire(source: str) -> None:
     if re.search(r"\breturn\b", constructor_masked[:init_at]) is not None:
         raise AssertionError("no early return may precede m_PollCapabilities init")
 
-    if _CACHE_METHOD_OR_INDEX_RE.search(masked) is not None:
-        raise AssertionError("m_PollCapabilities must not have methods called on it or be indexed")
-    if _CACHE_COMPOUND_ASSIGN_RE.search(masked) is not None:
-        raise AssertionError("m_PollCapabilities must not be modified by compound assignment")
-    if _CACHE_INC_DEC_RE.search(masked) is not None:
-        raise AssertionError("m_PollCapabilities must not be incremented or decremented")
-    if len(_CACHE_ASSIGN_RE.findall(masked)) != 1:
-        raise AssertionError("m_PollCapabilities must not be reassigned after construction")
-    if _CACHE_OUT_KW_RE.search(masked) is not None:
-        raise AssertionError("m_PollCapabilities must not be passed as out/inout")
-    for match in _CACHE_TOKEN_RE.finditer(masked):
-        if masked[: match.start()].count("(") != masked[: match.start()].count(")"):
-            raise AssertionError("m_PollCapabilities must not appear inside parentheses or call args")
+    _assert_no_cache_writes_or_mutations(masked, "m_PollCapabilities")
 
     start_poll = method_body(source, START_POLL_SIGNATURE)
     start_poll_masked = _blank_strings(start_poll)
@@ -284,8 +666,6 @@ def verify_poll_wire(source: str) -> None:
         raise AssertionError("caps must be appended before the GET is issued")
     if start_poll.index('"&ver="') > announce_at:
         raise AssertionError("caps travel alongside ver (after it)")
-    if len(_CACHE_TOKEN_RE.findall(masked)) != 3:
-        raise AssertionError("m_PollCapabilities must appear only in declaration, constructor, and StartPoll")
 
     wire_caps = _execute_translated_client_poll(source, cleaned)
     if wire_caps != announced_caps(source):
@@ -377,6 +757,70 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
         for token in forbidden:
             self.assertNotIn(token, own)
 
+    def test_innocuous_reads_of_cached_capabilities_are_allowed(self) -> None:
+        source = self.source
+        ctor_head = "\tvoid MCPClientBridge()\n"
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        init_line = "\t\t" + CACHE_INIT + "\n"
+        wire_line = "\t\t" + ANNOUNCE_LINE + "\n"
+        for needle in (ctor_head, try_init_head, init_line, wire_line):
+            self.assertEqual(source.count(needle), 1, needle)
+
+        observer_decl = (
+            "\tprotected int ObservePollCaps(string value)\n"
+            "\t{\n"
+            "\t\treturn value.Length();\n"
+            "\t}\n\n"
+            "\tstring GetCachedPollCapabilities()\n"
+            "\t{\n"
+            "\t\treturn m_PollCapabilities;\n"
+            "\t}\n\n"
+        )
+        controls = {
+            "copy_to_local_in_constructor": source.replace(
+                init_line, init_line + "\t\tstring capsCopy = m_PollCapabilities;\n", 1
+            ),
+            "copy_to_local_in_start_poll": source.replace(
+                wire_line, "\t\tstring capsCopy = m_PollCapabilities;\n" + wire_line, 1
+            ),
+            "copy_and_length_in_try_init": source.replace(
+                try_init_head,
+                try_init_head
+                + "\t\tstring capsCopy = m_PollCapabilities;\n"
+                + "\t\tint capsLen = m_PollCapabilities.Length();\n",
+                1,
+            ),
+            "length_in_constructor_and_poll": source.replace(
+                init_line, init_line + "\t\tint ctorCapsLen = m_PollCapabilities.Length();\n", 1
+            ).replace(
+                wire_line, "\t\tint pollCapsLen = m_PollCapabilities.Length();\n" + wire_line, 1
+            ),
+            "non_mutating_string_methods": source.replace(
+                wire_line,
+                "\t\tstring head = m_PollCapabilities.Substring(0, 4);\n"
+                "\t\tstring trimmed = m_PollCapabilities.Trim();\n"
+                '\t\tint commaPos = m_PollCapabilities.IndexOf("%2C");\n'
+                '\t\tbool hasDialog = m_PollCapabilities.Contains("ui_dialog");\n'
+                "\t\tstring firstChar = m_PollCapabilities.Get(0);\n"
+                + wire_line,
+                1,
+            ),
+            "pass_by_value_and_getter": source.replace(
+                ctor_head, observer_decl + ctor_head, 1
+            ).replace(
+                wire_line,
+                "\t\tLog(m_PollCapabilities);\n"
+                "\t\tint seen = ObservePollCaps(m_PollCapabilities);\n"
+                + wire_line,
+                1,
+            ),
+        }
+        for label, variant in controls.items():
+            with self.subTest(control=label):
+                self.assertNotEqual(variant, source)
+                verify_announcement_matches_dispatcher(variant)
+                verify_poll_wire(variant)
+
     def test_mutants_are_red(self) -> None:
         source = self.source
         decl = CAPS_DECL_RE.search(source)
@@ -404,8 +848,22 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
         )
         self.assertEqual(source.count(terminal_else), 1)
 
+        ctor_head = "\tvoid MCPClientBridge()\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
+        self.assertEqual(source.count(ctor_head), 1)
         self.assertEqual(source.count(try_init_head), 1)
+        corrupt_out_decl = (
+            "\tprotected void CorruptCaps(out string value)\n"
+            "\t{\n"
+            '\t\tvalue = "";\n'
+            "\t}\n\n"
+        )
+        corrupt_inout_decl = (
+            "\tprotected void CorruptCapsInOut(inout string value)\n"
+            "\t{\n"
+            '\t\tvalue = "";\n'
+            "\t}\n\n"
+        )
 
         mutants = {
             "dispatcher_range_truncated_before_last_branch": source.replace(last_branch, "", 1),
@@ -425,6 +883,9 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "cache_to_upper_after_init": source.replace(
                 CACHE_INIT, CACHE_INIT + "\n\t\tm_PollCapabilities.ToUpper();", 1
             ),
+            "cache_parenthesized_to_upper": source.replace(
+                CACHE_INIT, CACHE_INIT + "\n\t\t(m_PollCapabilities).ToUpper();", 1
+            ),
             "cache_to_lower_in_poll": source.replace(
                 "\t\t" + ANNOUNCE_LINE, "\t\tm_PollCapabilities.ToLower();\n\t\t" + ANNOUNCE_LINE, 1
             ),
@@ -434,6 +895,12 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "cache_trim_in_place_after_init": source.replace(
                 CACHE_INIT, CACHE_INIT + "\n\t\tm_PollCapabilities.TrimInPlace();", 1
             ),
+            "cache_set_after_init": source.replace(
+                CACHE_INIT, CACHE_INIT + '\n\t\tm_PollCapabilities.Set(0, "x");', 1
+            ),
+            "cache_insert_after_init": source.replace(
+                CACHE_INIT, CACHE_INIT + '\n\t\tm_PollCapabilities.Insert(0, "x");', 1
+            ),
             "cache_method_in_poll_expr": source.replace(
                 ANNOUNCE_LINE, 'request = request + "&caps=" + m_PollCapabilities.Substring(0, 4);', 1
             ),
@@ -442,6 +909,19 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             ),
             "cache_passed_to_out_param": source.replace(
                 CACHE_INIT, CACHE_INIT + "\n\t\tg_Game.GetVersion(m_PollCapabilities);", 1
+            ),
+            "cache_passed_to_script_out_param": source.replace(
+                ctor_head, corrupt_out_decl + ctor_head, 1
+            ).replace(
+                CACHE_INIT, CACHE_INIT + "\n\t\tCorruptCaps(m_PollCapabilities);", 1
+            ),
+            "cache_passed_to_script_inout_param": source.replace(
+                ctor_head, corrupt_inout_decl + ctor_head, 1
+            ).replace(
+                CACHE_INIT, CACHE_INIT + "\n\t\tCorruptCapsInOut(m_PollCapabilities);", 1
+            ),
+            "cache_shadowed_by_local_in_poll": source.replace(
+                "\t\t" + ANNOUNCE_LINE, "\t\tstring m_PollCapabilities;\n\t\t" + ANNOUNCE_LINE, 1
             ),
             "cache_init_from_other_const": source.replace(
                 CACHE_INIT, "m_PollCapabilities = EncodeQueryValue(MCP_BRIDGE_VERSION);", 1
