@@ -1,8 +1,10 @@
-"""Issue 298 bridge integration against a controlled ejection boundary.
+"""Issue 298 bridge integration against controlled and real ejection boundaries.
 
 The ejection helper has its own source-execution tests. This fake makes its
 responses independently controllable so the bridge's real dispatch/job code
 must preserve objects on refusal and wait before deleting.
+Inventory retries run the translated helper with shared pending state so their
+cooldown cannot be bypassed by a fresh guard in the same tick.
 """
 
 from __future__ import annotations
@@ -200,36 +202,57 @@ class DeleteBridgeIntegrationTest(unittest.TestCase):
 class InventoryDeleteIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_loadout as loadout
+        from tests import test_298_vehicle_eject as eject
 
         self.loadout = loadout
+        self.eject = eject
         self.bridge = loadout._Bridge()
+        shared = {}
+        self.bridge.namespace["MCPVehicleEject"] = lambda: eject.helper(shared=shared)
 
     def test_clear_keeps_all_items_while_vehicle_exit_is_pending(self) -> None:
         player = self.bridge.survivor(3)
-        shirt = self.bridge.put(player, "attachment", "TShirt_White", "Body")
-        vehicle = self.bridge.put(player, "hands", "M4A1")
-        vehicle.is_transport = True
-        vehicle.occupants = [object(), object()]
+        shirt = self.eject.Entity()
+        player.inventory.attach(shirt, self.loadout._SLOT_IDS["Body"])
+        vehicle = self.eject.Vehicle()
+        player.hands = vehicle
+        occupants = [self.eject.Human(vehicle, seat) for seat in (0, 3)]
+        exit_commands = [occupant.command for occupant in occupants]
         result = self.loadout._Result()
         command = self.loadout._Command(self.loadout.CLEAR, self.loadout._Args(object_id=3), 21)
         self.assertTrue(self.bridge.call("DispatchLoadoutClear", command, result))
         self.assertEqual((result.ok, result.error.text, result.deleted, result.cleanup_complete),
                          (False, "vehicle_eject_failed", 0, False))
-        self.assertTrue(vehicle.exit_requested)
+        self.assertEqual([command.requests for command in exit_commands], [1, 1])
         self.assertEqual(self.bridge.world.deleted, [])
         self.assertEqual(self.bridge.jobs.Count(), 0)
-        vehicle.occupants.clear()
+        for occupant in occupants:
+            occupant.leave(vehicle)
+        self.assertEqual(self.bridge.namespace["m_Tick"], 0)
+        for _ in range(2):
+            retry = self.loadout._Result()
+            self.assertTrue(self.bridge.call("DispatchLoadoutClear", command, retry))
+            self.assertEqual((retry.ok, retry.error.text, retry.deleted, retry.cleanup_complete),
+                             (False, "vehicle_eject_failed", 0, False))
+            self.assertEqual(self.bridge.world.deleted, [])
+            self.assertEqual(self.bridge.jobs.Count(), 0)
+        self.bridge.namespace["m_Tick"] = 1
         self.assertFalse(self.bridge.call("DispatchLoadoutClear", command, self.loadout._Result()))
         self.assertEqual(self.bridge.world.deleted, [shirt, vehicle])
 
     def test_inventory_rollback_never_deletes_an_occupied_vehicle(self) -> None:
-        vehicle = self.loadout._Entity(self.bridge.world, "M4A1")
-        vehicle.is_transport = True
-        vehicle.occupants = [object()]
+        vehicle = self.eject.Vehicle()
+        occupant = self.eject.Human(vehicle, 0)
+        exit_command = occupant.command
         self.assertFalse(self.bridge.call("DeleteLoadoutRollback", vehicle))
-        self.assertTrue(vehicle.exit_requested)
+        self.assertEqual(exit_command.requests, 1)
         self.assertEqual(self.bridge.world.deleted, [])
-        vehicle.occupants.clear()
+        occupant.leave(vehicle)
+        self.assertEqual(self.bridge.namespace["m_Tick"], 0)
+        for _ in range(2):
+            self.assertFalse(self.bridge.call("DeleteLoadoutRollback", vehicle))
+            self.assertEqual(self.bridge.world.deleted, [])
+        self.bridge.namespace["m_Tick"] = 1
         self.assertTrue(self.bridge.call("DeleteLoadoutRollback", vehicle))
         self.assertEqual(self.bridge.world.deleted, [vehicle])
 

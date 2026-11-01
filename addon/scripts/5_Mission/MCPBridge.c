@@ -7276,8 +7276,8 @@ class MCPBridge : Managed
 	// then SetLifetime (entityai.c:3377-3387), make lifetime_s both the entity's
 	// own maximum and what remains of it. Those setters are EntityAI protos: an
 	// object that is not an EntityAI has no economy lifetime to set, so it is
-	// deleted and the command refused with lifetime_unsupported, rather than
-	// answered ok for a lifetime that was never set. Returns true when that
+	// deleted when safe and the command refused with lifetime_unsupported,
+	// rather than answered ok for a lifetime that was never set. Returns true when that
 	// refusal is to be posted now; false leaves the reply to the spawn job.
 	protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)
 	{
@@ -7309,6 +7309,18 @@ class MCPBridge : Managed
 		}
 
 		m_Jobs.Remove(command.id);
+		// A non-EntityAI root can still own a Transport through AddChild.
+		// Like inventory rollback, preserve it if an exit needs another frame;
+		// return its id so a later object_delete can complete the cleanup.
+		MCPVehicleEject eject = new MCPVehicleEject();
+		eject.Add(spawned);
+		if (!eject.Begin(m_Tick) || eject.HasOccupants())
+		{
+			result.ok = false;
+			result.error = "vehicle_eject_failed";
+			result.object_id = command.id;
+			return true;
+		}
 		m_RuntimeObjects.Remove(command.id);
 		if (spawned)
 		{

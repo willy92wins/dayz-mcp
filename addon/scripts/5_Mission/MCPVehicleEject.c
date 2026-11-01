@@ -15,6 +15,8 @@ class MCPVehicleEject
 	protected ref array<Object> m_Roots;
 	protected ref array<Transport> m_Vehicles;
 	protected ref array<Human> m_Occupants;
+	protected ref array<Human> m_Humans;
+	protected ref array<Man> m_Players;
 	protected ref array<IEntity> m_Nodes;
 	protected ref array<EntityAI> m_Inventory;
 	protected ref array<EntityAI> m_InventoryVisited;
@@ -30,6 +32,8 @@ class MCPVehicleEject
 		m_Roots = new array<Object>();
 		m_Vehicles = new array<Transport>();
 		m_Occupants = new array<Human>();
+		m_Humans = new array<Human>();
+		m_Players = new array<Man>();
 		m_Nodes = new array<IEntity>();
 		m_Inventory = new array<EntityAI>();
 		m_InventoryVisited = new array<EntityAI>();
@@ -144,6 +148,7 @@ class MCPVehicleEject
 	{
 		m_Nodes.Clear();
 		m_InventoryVisited.Clear();
+		m_Humans.Clear();
 		int index = 0;
 		while (index < m_Roots.Count())
 		{
@@ -155,6 +160,8 @@ class MCPVehicleEject
 		while (index < m_Nodes.Count())
 		{
 			IEntity node = m_Nodes.Get(index);
+			Human human = Human.Cast(node);
+			if (human) { m_Humans.Insert(human); }
 			Transport vehicle = Transport.Cast(node);
 			if (vehicle && m_Vehicles.Find(vehicle) < 0)
 			{
@@ -193,6 +200,53 @@ class MCPVehicleEject
 			}
 			index = index + 1;
 		}
+		// A seat may already be empty before the first guard. Hierarchy finds
+		// parented humans; the world list also finds command-only associations.
+		// World.GetPlayerList: scripts/3_game/global/world.c:8; used server-side
+		// by scripts/5_mission/mission/missionserver.c:768 (TickScheduler).
+		if (HasVehicles())
+		{
+			World world = GetGame().GetWorld(); // scripts/3_game/global/game.c:931
+			if (!world) { return false; }
+			m_Players.Clear();
+			world.GetPlayerList(m_Players);
+			index = 0;
+			while (index < m_Players.Count())
+			{
+				Human player = Human.Cast(m_Players.Get(index));
+				if (player && m_Humans.Find(player) < 0) { m_Humans.Insert(player); }
+				index = index + 1;
+			}
+		}
+		return true;
+	}
+
+	protected bool CollectAssociations(bool validate)
+	{
+		int humanIndex = 0;
+		while (humanIndex < m_Humans.Count())
+		{
+			Human occupant = m_Humans.Get(humanIndex);
+			int vehicleIndex = 0;
+			while (vehicleIndex < m_Vehicles.Count())
+			{
+				Transport vehicle = m_Vehicles.Get(vehicleIndex);
+				if (!IsClear(vehicle, occupant))
+				{
+					if (m_Occupants.Find(occupant) < 0) { m_Occupants.Insert(occupant); }
+					Remember(vehicle, occupant);
+					if (validate)
+					{
+						if (!occupant.IsAlive() || occupant.IsUnconscious()) { return false; }
+						HumanCommandVehicle command = occupant.GetCommand_Vehicle();
+						if (!command || command.GetTransport() != vehicle) { return false; }
+						if (command.IsGettingIn() || command.IsSwitchSeat()) { return false; }
+					}
+				}
+				vehicleIndex = vehicleIndex + 1;
+			}
+			humanIndex = humanIndex + 1;
+		}
 		return true;
 	}
 
@@ -229,6 +283,7 @@ class MCPVehicleEject
 			}
 			vehicleIndex = vehicleIndex + 1;
 		}
+		if (!CollectAssociations(true)) { return false; }
 		// Validate EVERY occupant before initiating any exit. A corpse/unconscious
 		// occupant without a vehicle command refuses the whole delete, never a raw detach.
 		int exitCount = m_Occupants.Count();
@@ -251,6 +306,7 @@ class MCPVehicleEject
 		if (!Collect()) { m_ClearTick = -1; return false; }
 		CollectPending(tick);
 		if (!HasVehicles()) { return true; }
+		CollectAssociations(false);
 		bool occupied = false;
 		int vehicleIndex = 0;
 		while (vehicleIndex < m_Vehicles.Count())

@@ -135,7 +135,7 @@ class Human(Node):
 
 MEMBERS = (
     "s_PendingVehicles", "s_PendingOccupants", "s_ClearTicks",
-    "m_Roots", "m_Vehicles", "m_Occupants", "m_Nodes", "m_Inventory",
+    "m_Roots", "m_Vehicles", "m_Occupants", "m_Humans", "m_Players", "m_Nodes", "m_Inventory",
     "m_InventoryVisited", "m_Siblings", "m_ClearTick", "m_Begun",
 )
 SIGNATURES = (
@@ -148,17 +148,21 @@ SIGNATURES = (
     "protected void CollectPending(int tick)",
     "protected bool QueueNode(IEntity node)",
     "protected bool Collect()",
+    "protected bool CollectAssociations(bool validate)",
     "bool Begin(int tick)",
     "bool Ready(int tick)",
 )
 
 
-def helper(source=None, shared=None):
+def helper(source=None, shared=None, players=()):
     text = SOURCE.read_text(encoding="utf-8") if source is None else source
     namespace = {
         "array": Array,
         "EntityAI": SimpleNamespace(Cast=lambda item: item if isinstance(item, Entity) else None),
         "Transport": SimpleNamespace(Cast=lambda item: item if isinstance(item, Vehicle) else None),
+        "Human": SimpleNamespace(Cast=lambda item: item if isinstance(item, Human) else None),
+        "GetGame": lambda: SimpleNamespace(GetWorld=lambda: SimpleNamespace(
+            GetPlayerList=lambda output: output.extend(players))),
         "InventoryTraversalType": SimpleNamespace(PREORDER=0),
     }
     for member in MEMBERS:
@@ -168,7 +172,7 @@ def helper(source=None, shared=None):
     for signature in SIGNATURES:
         translate(text, signature, namespace, members=MEMBERS,
                   class_types=("Object", "IEntity", "EntityAI", "GameInventory",
-                               "Transport", "Human", "HumanCommandVehicle", "array"))
+                               "Transport", "Human", "HumanCommandVehicle", "World", "array"))
     namespace["MCPVehicleEject"]()
     if shared is not None:
         shared.update({name: namespace[name] for name in ("s_PendingVehicles", "s_PendingOccupants", "s_ClearTicks")})
@@ -177,6 +181,102 @@ def helper(source=None, shared=None):
 
 
 class EjectExecutionTest(unittest.TestCase):
+    def test_first_guard_discovers_parented_human_without_seat_or_history(self):
+        car = Vehicle()
+        person = Human(car, 2)
+        car.crew[2] = None
+        car.attach(person)
+        command = person.command
+        gate = helper()
+        gate.Add(car)
+        self.assertTrue(gate.Begin(0))
+        self.assertTrue(gate.HasOccupants())
+        self.assertEqual(command.requests, 1)
+        self.assertFalse(gate.Ready(0))
+        self.assertFalse(gate.Ready(1))
+        person.leave(car)
+        self.assertFalse(gate.Ready(2))
+        self.assertTrue(gate.Ready(3))
+
+    def test_first_guard_discovers_command_only_human_from_world_without_history(self):
+        car = Vehicle()
+        person = Human(car, 2)
+        car.crew[2] = None
+        person.parent = None
+        command = person.command
+        gate = helper(players=[person])
+        gate.Add(car)
+        self.assertTrue(gate.Begin(0))
+        self.assertTrue(gate.HasOccupants())
+        self.assertEqual(command.requests, 1)
+        self.assertFalse(gate.Ready(1))
+        person.leave(car)
+        self.assertFalse(gate.Ready(2))
+        self.assertTrue(gate.Ready(3))
+
+    def test_first_guard_refuses_parent_only_association_without_exit_command(self):
+        car = Vehicle()
+        person = Human(car, 2)
+        car.crew[2] = None
+        car.attach(person)
+        person.command = None
+        gate = helper()
+        gate.Add(car)
+        self.assertFalse(gate.Begin(0))
+        self.assertTrue(gate.HasOccupants())
+        self.assertFalse(gate.Ready(1))
+
+    def test_world_human_in_another_vehicle_does_not_block_first_guard(self):
+        car_a, car_b = Vehicle(), Vehicle()
+        person = Human(car_b, 2)
+        gate = helper(players=[person])
+        gate.Add(car_a)
+        self.assertTrue(gate.Begin(0))
+        self.assertFalse(gate.HasOccupants())
+        self.assertFalse(gate.Ready(0))
+        self.assertTrue(gate.Ready(1))
+        self.assertEqual(person.command.requests, 0)
+
+    def test_rescan_discovers_late_command_only_association(self):
+        car = Vehicle()
+        people = []
+        gate = helper(players=people)
+        gate.Add(car)
+        self.assertTrue(gate.Begin(0))
+        self.assertFalse(gate.Ready(1))
+        person = Human(car, 2)
+        car.crew[2] = None
+        person.parent = None
+        people.append(person)
+        self.assertFalse(gate.Ready(2))
+        self.assertEqual(person.command.requests, 0)
+        person.leave(car)
+        self.assertFalse(gate.Ready(3))
+        self.assertTrue(gate.Ready(4))
+
+    def test_discovered_occupant_transfers_without_blocking_old_vehicle(self):
+        car_a, car_b = Vehicle(), Vehicle()
+        person = Human(car_a, 2)
+        car_a.crew[2] = None
+        car_a.attach(person)
+        shared = {}
+        gate = helper(shared=shared, players=[person])
+        gate.Add(car_a)
+        self.assertTrue(gate.Begin(0))
+        person.leave(car_a)
+        car_a.attach()
+        car_b.attach(person)
+        person.command = Command(car_b)
+        car_b.crew[2] = person
+        self.assertFalse(gate.Ready(1))
+        retry = helper(shared=shared, players=[person])
+        retry.Add(car_a)
+        self.assertTrue(retry.Begin(1))
+        self.assertFalse(retry.Ready(1))
+        self.assertTrue(retry.Ready(2))
+        self.assertTrue(gate.Ready(2))
+        self.assertEqual(person.command.requests, 0)
+
     def test_plain_object_is_ready_without_a_delay(self):
         gate = helper()
         gate.Add(Node())
@@ -596,12 +696,16 @@ class EjectMutationTest(unittest.TestCase):
             ("same_frame_prune", "else if (tick > clearTick) { completed = true; }",
              "else if (tick >= clearTick) { completed = true; }",
              "test_three_guards_in_the_exit_tick_cannot_bypass_shared_cooldown"),
+            ("skip_initial_associations", "if (!CollectAssociations(true)) { return false; }", "",
+             "test_first_guard_discovers_parented_human_without_seat_or_history"),
+            ("skip_association_rescan", "CollectAssociations(false);", "",
+             "test_rescan_discovers_late_command_only_association"),
         )
         factory = helper
         for name, old, new, test_name in mutants:
             with self.subTest(mutant=name):
                 self.assertIn(old, source)
-                mutant = source.replace(old, new, 1)
+                mutant = source.replace(old, new)
                 with patch(__name__ + ".helper", side_effect=lambda **kw: factory(mutant, **kw)):
                     result = unittest.TestResult()
                     EjectExecutionTest(test_name).run(result)

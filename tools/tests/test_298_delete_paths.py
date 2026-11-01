@@ -4,13 +4,50 @@ These guards deliberately read production method bodies. They catch moving a
 delete above its safety check, including inventory rollback paths.
 """
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
-from tests.enforce_subset_helpers import clean, method_body
+from tests.enforce_subset_helpers import EnforceMap, EnforceString, clean, method_body, translate
+from tests.test_298_vehicle_eject import Entity, Human, Node, Vehicle, helper
 
 
 ROOT = Path(__file__).resolve().parents[2]
 BRIDGE = (ROOT / "addon/scripts/5_Mission/MCPBridge.c").read_text(encoding="utf-8")
+
+
+class LogString(EnforceString):
+    def __add__(self, other):
+        if isinstance(other, EnforceString):
+            return LogString(self.data + other.data)
+        if isinstance(other, (int, float)) and not isinstance(other, bool):
+            return LogString(self.data + str(other).encode("ascii"))
+        raise AssertionError(f"unsupported log value: {other!r}")
+
+
+def spawn_lifetime_rollback(spawned):
+    """Run the production rollback and eject helper; only the engine is fake."""
+    jobs, objects, deleted = EnforceMap(), EnforceMap(), []
+    command = SimpleNamespace(id=37, args=SimpleNamespace(lifetime_s_set=True, lifetime_s=60.0))
+    result = SimpleNamespace(ok=True, error=EnforceString.of(""), object_id=0)
+    jobs.Insert(command.id, SimpleNamespace(subject=spawned))
+    objects.Insert(command.id, spawned)
+    namespace = {
+        "_S": LogString,
+        "m_Jobs": jobs,
+        "m_RuntimeObjects": objects,
+        "m_Tick": 8,
+        "EntityAI": SimpleNamespace(Cast=lambda item: item if isinstance(item, Entity) else None),
+        "MCPVehicleEject": helper,
+        "GetGame": lambda: SimpleNamespace(ObjectDelete=deleted.append),
+        "Log": lambda line: None,
+    }
+    apply = translate(
+        BRIDGE, "protected bool ApplySpawnLifetime(MCPCommand command, MCPResult result)",
+        namespace, class_types=("MCPJob", "Object", "EntityAI", "MCPVehicleEject"),
+        members=("m_Jobs", "m_RuntimeObjects", "m_Tick"),
+    )
+    post_now = apply(command, result)
+    return SimpleNamespace(post_now=post_now, result=result, jobs=jobs, objects=objects, deleted=deleted)
 
 
 class VehicleDeletePathsTest(unittest.TestCase):
@@ -27,13 +64,38 @@ class VehicleDeletePathsTest(unittest.TestCase):
         for signature in routes:
             with self.subTest(signature=signature):
                 self.assertEqual(method_body(BRIDGE, signature).count(".ObjectDelete("), 1)
-        # The lifetime failure deletes only a non-EntityAI. Transport inherits
-        # EntityAI, so it must take this return before reaching that delete.
-        lifetime = method_body(BRIDGE, routes[-1])
-        self.assertIn("entity = EntityAI.Cast(spawned);", lifetime)
-        self.assertIn("if (entity)", lifetime)
-        self.assertLess(lifetime.index("return false;", lifetime.index("if (entity)")),
-                        lifetime.index(".ObjectDelete("))
+
+    def test_lifetime_rollback_preserves_non_entityai_parent_of_occupied_vehicle(self):
+        for alive in (True, False):
+            with self.subTest(alive=alive):
+                root, intermediate, car = Node(), Node(), Vehicle()
+                root.attach(intermediate)
+                intermediate.attach(car)
+                occupant = Human(car, 3)
+                occupant.alive = alive
+                state = spawn_lifetime_rollback(root)
+                self.assertEqual(state.deleted, [])
+                self.assertIs(state.objects.Get(37), root)
+                self.assertFalse(state.jobs.Contains(37))
+                self.assertTrue(state.post_now)
+                self.assertFalse(state.result.ok)
+                self.assertEqual(state.result.error.text, "vehicle_eject_failed")
+                self.assertEqual(state.result.object_id, 37)
+                self.assertEqual(occupant.command.requests, 1 if alive else 0)
+
+    def test_lifetime_rollback_still_deletes_a_safe_non_entityai_parent(self):
+        for child in (Node(), Vehicle()):
+            with self.subTest(child=type(child).__name__):
+                root = Node()
+                root.attach(child)
+                state = spawn_lifetime_rollback(root)
+                self.assertEqual(state.deleted, [root])
+                self.assertFalse(state.objects.Contains(37))
+                self.assertFalse(state.jobs.Contains(37))
+                self.assertTrue(state.post_now)
+                self.assertFalse(state.result.ok)
+                self.assertEqual(state.result.error.text, "lifetime_unsupported")
+                self.assertEqual(state.result.object_id, 0)
 
     def test_object_delete_ejects_before_removing_registry_or_deleting(self):
         body = method_body(BRIDGE, "protected bool DispatchObjectDelete(MCPCommand command, MCPResult result)")
