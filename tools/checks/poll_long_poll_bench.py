@@ -151,17 +151,30 @@ def _sample_without_wait(loop: _Loopback, delay_s: float) -> tuple[float, int]:
 
 
 def _arm_hold(state: loopback.ServerState) -> threading.Event:
+    """Signal once this client's poll is inside Condition.wait.
+
+    One hook is installed on the condition and reused. Each sample only
+    points that hook at a new event. Wrapping the previous hook every sample
+    builds a chain that raises RecursionError.
+    """
+
     cv = state._command_cv["client"]
     entered = threading.Event()
-    real_release = cv._release_save
+    hook = getattr(cv, "_poll_bench_hold", None)
+    if hook is None or cv._release_save is not hook:
+        original = cv._release_save
 
-    def release_save():
-        saved = real_release()
-        if not entered.is_set():
-            entered.set()
-        return saved
+        def release_save():
+            saved = original()
+            current = getattr(cv, "_poll_bench_entered", None)
+            if current is not None and not current.is_set():
+                current.set()
+            return saved
 
-    cv._release_save = release_save
+        cv._release_save = release_save
+        hook = release_save
+        cv._poll_bench_hold = hook
+    cv._poll_bench_entered = entered
     return entered
 
 

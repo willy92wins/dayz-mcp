@@ -6895,7 +6895,7 @@ class ServerState:
 
     def _wait_for_peer_command(
         self, peer: str, instance: str | None, wait_s: float
-    ) -> None:
+    ) -> tuple[float, frozenset[int]] | None:
         """Block until peer has a queued command, the daemon stops, or wait_s ends.
 
         The lock is not held across the wait. Nothing here counts as a poll:
@@ -6905,6 +6905,12 @@ class ServerState:
         a retained wait does not take another: the slot is non-blocking, and
         this call returns so record_poll answers immediately. The slot is
         released when the wait ends, raises, or shutdown wakes it.
+
+        Returns (arrival_at, identities of legacy commands already queued) only
+        when this call blocks. arrival_at is the state clock just before the
+        wait, so the wait itself is not part of the reconnect gap. None when
+        it does not block, including every wait_s <= 0: record_poll then
+        measures as it did with no wait.
         """
 
         if (
@@ -6913,41 +6919,52 @@ class ServerState:
             or not math.isfinite(wait_s)
             or wait_s <= 0.0
         ):
-            return
+            return None
         if wait_s > POLL_LONG_POLL_MAX_S:
             wait_s = POLL_LONG_POLL_MAX_S
         if peer not in self._command_cv:
-            return
+            return None
         slot = self._poll_long_poll_slots.get(peer)
         if slot is None:
-            return
+            return None
         with self._lock:
             if self._stopping:
-                return
+                return None
             ready = self._poll_command_ready_locked(peer, instance)
             if ready is None or ready:
-                return
+                return None
             if not slot.acquire(blocking=False):
-                return
+                return None
+        # Set only once we are committed to Condition.wait. Commands queued
+        # after this snapshot arrived during the hold.
+        arrival: tuple[float, frozenset[int]] | None = None
         try:
             deadline = time.monotonic() + wait_s
             with self._lock:
                 if self._stopping:
-                    return
+                    return None
                 ready = self._poll_command_ready_locked(peer, instance)
                 if ready is None or ready:
-                    return
+                    return None
                 cv = self._command_cv[peer]
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
-                        return
+                        return arrival
+                    if arrival is None:
+                        arrival = (
+                            self._now(),
+                            frozenset(
+                                id(command)
+                                for command in self._legacy_queues[peer]
+                            ),
+                        )
                     cv.wait(timeout=remaining)
                     if self._stopping:
-                        return
+                        return arrival
                     ready = self._poll_command_ready_locked(peer, instance)
                     if ready is None or ready:
-                        return
+                        return arrival
         finally:
             slot.release()
 
@@ -6968,8 +6985,15 @@ class ServerState:
 
         # One GET, one record of this poll. The wait does not touch liveness,
         # attribution, caps, the reaper or the load counters; the body below
-        # does, exactly once, on wake, on timeout and when wait_s is 0.
-        self._wait_for_peer_command(peer, instance, wait_s)
+        # does, exactly once. held is None when this GET did not block
+        # (wait_s <= 0, a command already queued, no slot, shutdown): every
+        # measurement below then uses `now`, the same reads as a poll with no
+        # wait. When it blocked, held is the state clock and the identities of
+        # legacy commands already queued just before the wait. Gap, TTL, reap
+        # and the pid window use that arrival, so the hold is not silence and
+        # is not age. Reconnect flush may drop only those already-queued
+        # commands. The stamps this poll leaves are still taken when it answers.
+        held = self._wait_for_peer_command(peer, instance, wait_s)
 
         discarded_exec: list[tuple[str, str, int]] = []
         finished_operations: list[
@@ -6981,7 +7005,7 @@ class ServerState:
             if self.version_validator is not None
             else None
         )
-        self.reap_expired_commands(self._now())
+        self.reap_expired_commands(self._now() if held is None else held[0])
         token, token_class = classify_instance_token(instance)
         if source_pid is not None and source_creation_time is None:
             source_creation_time = self._lookup_creation_time(source_pid)
@@ -6989,6 +7013,8 @@ class ServerState:
 
         with self._lock:
             now = self._now()
+            # Arrival when this GET waited; otherwise the same `now` as before.
+            decision_at = now if held is None else held[0]
             if coordination is not None:
                 self._publish_due_deferred_closes_locked(deferred_quarantine)
             prev_poll = self._last_poll_at.get(peer)
@@ -7001,7 +7027,7 @@ class ServerState:
                 self._bound_queues.values()
             ):
                 self._expire_stale_commands(
-                    stale_queue, now, discarded_exec, finished_operations
+                    stale_queue, decision_at, discarded_exec, finished_operations
                 )
 
             if token_class == "instance_malformed":
@@ -7035,7 +7061,11 @@ class ServerState:
                     self._peer_last_class[peer] = bind_label
                 else:
                     bind_label = self._note_poll_pid_locked(
-                        binding, source_pid, now, source_creation_time
+                        binding,
+                        source_pid,
+                        now,
+                        source_creation_time,
+                        gap_at=None if held is None else held[0],
                     )
                     self._peer_last_class[peer] = bind_label
                     if bind_label == BINDING_BOUND:
@@ -7051,26 +7081,35 @@ class ServerState:
                                 )
                         queue = self._bound_queues.setdefault(token, [])
                         self._expire_stale_commands(
-                            queue, now, discarded_exec, finished_operations
+                            queue, decision_at, discarded_exec, finished_operations
                         )
             else:
                 self._peer_last_class[peer] = BINDING_LEGACY
                 queue = self._legacy_queues[peer]
-                if prev_poll is not None and (now - prev_poll) > PEER_RECONNECT_GAP_S:
-                    self._discard_queue(
-                        queue,
-                        "peer_reconnect_flush",
-                        discarded_exec,
-                        finished_operations,
-                    )
+                if prev_poll is not None and (decision_at - prev_poll) > PEER_RECONNECT_GAP_S:
+                    if held is None:
+                        self._discard_queue(
+                            queue,
+                            "peer_reconnect_flush",
+                            discarded_exec,
+                            finished_operations,
+                        )
+                    else:
+                        self._discard_present_locked(
+                            queue,
+                            held[1],
+                            "peer_reconnect_flush",
+                            discarded_exec,
+                            finished_operations,
+                        )
                 self._expire_stale_commands(
-                    queue, now, discarded_exec, finished_operations
+                    queue, decision_at, discarded_exec, finished_operations
                 )
 
             # After the whole binding chain: the census belongs to THIS poll,
             # so it needs this poll's accreditation, not the previous one's.
             self._record_poll_caps_locked(
-                peer, caps, accredited, ach=ach, instance=token, now=now
+                peer, caps, accredited, ach=ach, instance=token, now=decision_at
             )
             if load is not None and self._load_reading_applies_locked(
                 peer, token, accredited
@@ -7333,11 +7372,13 @@ class ServerState:
         source_pid: int,
         now: float,
         source_creation_time: str | None = None,
+        gap_at: float | None = None,
     ) -> str:
         if binding.pid is None:
             return BINDING_STARTING
         binding.last_present_at[source_pid] = now
         binding.presented_pids.add(source_pid)
+        window_at = now if gap_at is None else gap_at
         identity_mismatch = source_pid != binding.pid
         source_norm = normalize_creation_time_utc(source_creation_time)
         bound_norm = normalize_creation_time_utc(binding.creation_time_utc)
@@ -7369,7 +7410,7 @@ class ServerState:
             live = {
                 pid
                 for pid, seen_at in binding.last_present_at.items()
-                if (now - seen_at) <= PEER_RECONNECT_GAP_S
+                if (window_at - seen_at) <= PEER_RECONNECT_GAP_S
             }
             if live == {binding.pid} and source_pid == binding.pid:
                 binding.state = BINDING_BOUND
@@ -7396,6 +7437,27 @@ class ServerState:
                 command, reason, discarded_exec, finished_operations, hint=hint
             )
         queue.clear()
+
+    def _discard_present_locked(
+        self,
+        queue: list[dict],
+        present: frozenset[int],
+        reason: str,
+        discarded_exec: list[tuple[str, str, int]],
+        finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
+    ) -> None:
+        # Caller holds self._lock. Drops only commands that were already
+        # queued when the waiting GET arrived. Anything enqueued during the
+        # hold stays for delivery.
+        kept: list[dict] = []
+        for command in queue:
+            if id(command) in present:
+                self._mark_discarded(
+                    command, reason, discarded_exec, finished_operations
+                )
+            else:
+                kept.append(command)
+        queue[:] = kept
 
     def _expire_stale_commands(
         self,

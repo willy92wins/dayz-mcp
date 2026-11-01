@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ast
 import http.client
+import importlib.util
 import inspect
 import json
+import sys
 import threading
 import time
 import unittest
@@ -803,19 +805,12 @@ class PollQuotaTest(unittest.TestCase):
             assert isinstance(ticket, str)
             tickets.append((client.to_payload(), ticket))
 
-        entered = threading.Event()
-        entered_count = {"n": 0}
-        entered_lock = threading.Lock()
-        original_wait = coordinator.wait
-
-        def counting_wait(client, ticket_id, timeout_s):
-            with entered_lock:
-                entered_count["n"] += 1
-                if entered_count["n"] >= session_waits:
-                    entered.set()
-            return original_wait(client, ticket_id, timeout_s)
-
-        coordinator.wait = counting_wait  # type: ignore[method-assign]
+        # Count threads inside the real Condition.wait, not calls to the
+        # wrapper. An immediate stand-in for wait/await never enters it.
+        session_held = self._arm_held_count(coordinator._condition)
+        await_held_count = self._arm_held_count(self.daemon.state._result_cv)
+        outcomes: list[tuple] = []
+        outcome_lock = threading.Lock()
         wait_timeout_s = 4.0
         wait_threads: list[threading.Thread] = []
 
@@ -838,39 +833,37 @@ class PollQuotaTest(unittest.TestCase):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=wait_timeout_s + 3.0):
-                    return
-            except Exception:
-                return
+                with urllib.request.urlopen(
+                    request, timeout=wait_timeout_s + 3.0
+                ) as response:
+                    row = ("session", int(response.status), response.read(), None)
+            except BaseException as exc:
+                row = ("session", 0, b"", exc)
+            with outcome_lock:
+                outcomes.append(row)
 
         for identity, ticket in tickets:
             thread = threading.Thread(target=session_wait, args=(identity, ticket))
             wait_threads.append(thread)
             thread.start()
-        self.assertTrue(entered.wait(5.0), "session waits did not enter")
+        self._wait_until_held(
+            session_held, session_waits, outcomes, outcome_lock, 5.0, "session"
+        )
 
         await_held = loopback.AWAIT_LONG_POLL_MAX_IN_FLIGHT
-        await_entered = threading.Event()
-        await_count = {"n": 0}
-        original_await = self.daemon.state.await_stored_result
-
-        def counting_await(command_id_arg, remove=False, wait_s=0.0, cancel=None):
-            with entered_lock:
-                await_count["n"] += 1
-                if await_count["n"] >= await_held:
-                    await_entered.set()
-            return original_await(command_id_arg, remove, wait_s, cancel)
-
-        self.daemon.state.await_stored_result = counting_await  # type: ignore[method-assign]
         await_threads = [
             threading.Thread(
-                target=self._await_held, name=f"await-{index}"
+                target=self._await_held,
+                args=(outcomes, outcome_lock),
+                name=f"await-{index}",
             )
             for index in range(await_held)
         ]
         for thread in await_threads:
             thread.start()
-        self.assertTrue(await_entered.wait(2.0), "await waits did not enter")
+        self._wait_until_held(
+            await_held_count, await_held, outcomes, outcome_lock, 2.0, "await"
+        )
 
         # One retained /poll per peer, then a few more of the same peer.
         # Those must answer at once. 64 + 8 + 2 stay held, inside the 96
@@ -916,6 +909,13 @@ class PollQuotaTest(unittest.TestCase):
         self.assertEqual(server_waits["n"], 1)
         self.assertTrue(client_holder.is_alive())
         self.assertTrue(server_holder.is_alive())
+        # Both pools are still inside their waits at the probes, together.
+        self._assert_still_held(
+            session_held, session_waits, outcomes, outcome_lock, "before the probes"
+        )
+        self._assert_still_held(
+            await_held_count, await_held, outcomes, outcome_lock, "before the probes"
+        )
 
         result_status, result_raw = self.daemon.post_json(
             "/result", {"id": command_id, "ok": 1}, timeout=2.0
@@ -938,6 +938,14 @@ class PollQuotaTest(unittest.TestCase):
         self.assertEqual(enqueue_status, 200, enqueue_raw)
         enqueue_body = json.loads(enqueue_raw)
         self.assertIsInstance(enqueue_body.get("id"), int)
+        self._assert_still_held(
+            session_held, session_waits, outcomes, outcome_lock, "during the probes"
+        )
+        self._assert_still_held(
+            await_held_count, await_held, outcomes, outcome_lock, "during the probes"
+        )
+        self.assertTrue(all(thread.is_alive() for thread in wait_threads))
+        self.assertTrue(all(thread.is_alive() for thread in await_threads))
         self.daemon.state.cancel_pending()
         self._join(poll_threads)
         for thread in await_threads:
@@ -948,7 +956,7 @@ class PollQuotaTest(unittest.TestCase):
         self.assertFalse(any(thread.is_alive() for thread in await_threads))
         self.assertFalse(any(thread.is_alive() for thread in wait_threads))
 
-    def _await_held(self) -> None:
+    def _await_held(self, outcomes: list[tuple], outcome_lock: threading.Lock) -> None:
         url = (
             self.daemon.base
             + "/await?"
@@ -958,15 +966,224 @@ class PollQuotaTest(unittest.TestCase):
         )
         request = urllib.request.Request(url, method="GET")
         try:
-            with urllib.request.urlopen(request, timeout=5.0):
-                return
-        except Exception:
-            return
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                row = ("await", int(response.status), response.read(), None)
+        except BaseException as exc:
+            row = ("await", 0, b"", exc)
+        with outcome_lock:
+            outcomes.append(row)
+
+    @staticmethod
+    def _arm_held_count(cv: threading.Condition) -> dict[str, int]:
+        """How many threads are inside this condition's wait right now."""
+
+        held = {"n": 0}
+        real_release = cv._release_save
+        real_acquire = cv._acquire_restore
+
+        def release_save():
+            saved = real_release()
+            held["n"] += 1
+            return saved
+
+        def acquire_restore(state):
+            try:
+                return real_acquire(state)
+            finally:
+                held["n"] -= 1
+
+        cv._release_save = release_save
+        cv._acquire_restore = acquire_restore
+        return held
+
+    def _wait_until_held(
+        self,
+        held: dict[str, int],
+        expected: int,
+        outcomes: list[tuple],
+        outcome_lock: threading.Lock,
+        timeout_s: float,
+        label: str,
+    ) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and held["n"] < expected:
+            with outcome_lock:
+                if outcomes:
+                    break
+            time.sleep(0.01)
+        self._assert_still_held(held, expected, outcomes, outcome_lock, label)
+
+    def _assert_still_held(
+        self,
+        held: dict[str, int],
+        expected: int,
+        outcomes: list[tuple],
+        outcome_lock: threading.Lock,
+        when: str,
+    ) -> None:
+        with outcome_lock:
+            finished = list(outcomes)
+        for row in finished:
+            self.assertIsNone(row[3], f"client error {when}: {row!r}")
+            self.assertLess(row[1], 400, f"client error {when}: {row!r}")
+        self.assertEqual(finished, [], f"a client finished {when}: {finished!r}")
+        self.assertEqual(held["n"], expected, f"{when}: retained waits")
 
     @staticmethod
     def _join(threads: list[threading.Thread]) -> None:
         for thread in threads:
             thread.join(timeout=2.0)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+class PollArrivalHygieneTest(unittest.TestCase):
+    """F4. Gap and flush are decided when the GET arrives, not when it wakes."""
+
+    def _state(self, clock: _Clock) -> loopback.ServerState:
+        return loopback.ServerState("poll-arrival-key", time_fn=clock)
+
+    def _poll_waiting(
+        self, state: loopback.ServerState, box: dict
+    ) -> threading.Thread:
+        def run() -> None:
+            try:
+                box["result"] = state.record_poll(
+                    "client", wait_s=loopback.POLL_LONG_POLL_MAX_S
+                )
+            except BaseException as exc:
+                box["error"] = exc
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        return thread
+
+    def _enqueue_when_waiting(
+        self, state: loopback.ServerState, clock: _Clock, advance: float
+    ) -> tuple[threading.Event, dict]:
+        cv = state._command_cv["client"]
+        real_release = cv._release_save
+        entered = threading.Event()
+        spawned: dict = {}
+
+        def release_save():
+            saved = real_release()
+            if not entered.is_set():
+                entered.set()
+                if advance:
+                    clock.advance(advance)
+                status, payload = state.enqueue_command(
+                    "camera_get", {}, peer="client", operation_timeout_s=30
+                )
+                spawned["status"] = status
+                spawned["payload"] = payload
+            return saved
+
+        cv._release_save = release_save
+        return entered, spawned
+
+    def test_wait_does_not_flush_a_command_enqueued_during_the_wait(self) -> None:
+        # Last poll 9.5s ago. The 0.8s hold must not turn that into a reconnect.
+        clock = _Clock()
+        state = self._state(clock)
+        state.record_poll("client")
+        clock.advance(loopback.PEER_RECONNECT_GAP_S - 0.5)
+        box: dict = {}
+        entered, spawned = self._enqueue_when_waiting(state, clock, 0.8)
+        thread = self._poll_waiting(state, box)
+        self.addCleanup(lambda: thread.join(timeout=2.0))
+        self.assertTrue(entered.wait(2.0), "poll did not wait")
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", box)
+        status, poll = box["result"]
+        self.assertEqual(status, 200, poll)
+        self.assertEqual(spawned.get("status"), 200, spawned)
+        command_id = spawned["payload"]["id"]
+        self.assertEqual([command["id"] for command in poll["commands"]], [command_id])
+        self.assertIsNone(state.take_result(command_id))
+
+    def test_gap_already_open_at_arrival_flushes_only_earlier_commands(self) -> None:
+        # A command already queued when the GET arrives is still flushed.
+        # wait_ms does not block in that case: there is already something to
+        # deliver, and the no-wait path must keep today's flush.
+        clock = _Clock()
+        state = self._state(clock)
+        state.record_poll("client")
+        _status, old = state.enqueue_command(
+            "camera_get", {}, peer="client", operation_timeout_s=30
+        )
+        old_id = old["id"]
+        clock.advance(loopback.PEER_RECONNECT_GAP_S + 0.5)
+        status, poll = state.record_poll("client", wait_s=loopback.POLL_LONG_POLL_MAX_S)
+        self.assertEqual(status, 200, poll)
+        self.assertEqual(poll["commands"], [])
+        flushed = state.take_result(old_id)
+        self.assertIsNotNone(flushed)
+        assert flushed is not None
+        self.assertEqual(flushed.get("error"), "peer_reconnect_flush")
+
+        # The gap is already open at arrival and the queue is empty, so this
+        # GET does wait. A command enqueued while it is held arrived after the
+        # GET and must be delivered, not flushed with the previous session.
+        clock = _Clock()
+        state = self._state(clock)
+        state.record_poll("client")
+        clock.advance(loopback.PEER_RECONNECT_GAP_S + 0.5)
+        box: dict = {}
+        entered, spawned = self._enqueue_when_waiting(state, clock, 0.6)
+        thread = self._poll_waiting(state, box)
+        self.addCleanup(lambda: thread.join(timeout=2.0))
+        self.assertTrue(entered.wait(2.0), "poll did not wait")
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", box)
+        status, poll = box["result"]
+        self.assertEqual(status, 200, poll)
+        self.assertEqual(spawned.get("status"), 200, spawned)
+        new_id = spawned["payload"]["id"]
+        self.assertEqual([command["id"] for command in poll["commands"]], [new_id])
+        self.assertIsNone(state.take_result(new_id))
+
+
+def _load_poll_bench():
+    path = Path(__file__).resolve().parents[1] / "checks" / "poll_long_poll_bench.py"
+    spec = importlib.util.spec_from_file_location("poll_long_poll_bench_under_test", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class PollBenchHookTest(unittest.TestCase):
+    """F6. Arming a hold per sample must not chain Condition hooks."""
+
+    def test_many_samples_do_not_recurse_on_the_wait_hook(self) -> None:
+        bench = _load_poll_bench()
+        state = loopback.ServerState("poll-bench-hook-key")
+        cv = state._command_cv["client"]
+        entered = None
+        for _index in range(sys.getrecursionlimit() + 50):
+            entered = bench._arm_hold(state)
+        self.assertIsNotNone(entered)
+        assert entered is not None
+        with state._lock:
+            try:
+                saved = cv._release_save()
+            except RecursionError:
+                self.fail("stacked wait hooks recursed")
+            cv._acquire_restore(saved)
+        self.assertTrue(entered.is_set())
 
 
 if __name__ == "__main__":
