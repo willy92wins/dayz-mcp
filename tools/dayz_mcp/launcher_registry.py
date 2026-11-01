@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import stat
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
@@ -336,6 +341,76 @@ def open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
         raise
 
 
+@asynccontextmanager
+async def open_approved_launcher_async(
+    launcher_id: str,
+    *,
+    deadline_s: float = 5.0,
+    initial_backoff_s: float = 0.05,
+    max_backoff_s: float = 0.5,
+    sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+) -> AsyncIterator[_OpenedLauncher]:
+    """Async variant of `open_approved_launcher` (A3 FIX 9).
+
+    Same contract (shared lock, canonical read, cache fill, lock held
+    by the opened launcher), but the busy retry waits with
+    `await sleep_fn(...)` instead of `time.sleep`, so a contended
+    registry never freezes the caller's event loop. Only
+    `launcher_registry_busy` is retried, with exponential backoff
+    capped at `max_backoff_s` until `deadline_s` from the first
+    attempt; still busy then raises `launcher_registry_busy_timeout`.
+    Every other error propagates at once, without a retry.
+    """
+    from dayz_mcp.registry_lock import acquire_registry_lock
+
+    for value in (deadline_s, initial_backoff_s, max_backoff_s):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("invalid_registry_lock_retry")
+    if initial_backoff_s <= 0 or max_backoff_s < initial_backoff_s:
+        raise ValueError("invalid_registry_lock_retry")
+    _validate_id(launcher_id)
+    deadline = monotonic_fn() + deadline_s
+    backoff = initial_backoff_s
+    last_busy: RuntimeError | None = None
+    lock = None
+    while lock is None:
+        if last_busy is not None and monotonic_fn() >= deadline:
+            raise RuntimeError(
+                f"launcher_registry_busy_timeout: lock still busy after {deadline_s:g}s"
+            ) from last_busy
+        try:
+            lock = acquire_registry_lock(exclusive=False)
+        except RuntimeError as error:
+            if str(error) != "launcher_registry_busy":
+                raise
+            last_busy = error
+            remaining = deadline - monotonic_fn()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"launcher_registry_busy_timeout: lock still busy after {deadline_s:g}s"
+                ) from error
+            await sleep_fn(min(backoff, remaining))
+            backoff = min(backoff * 2, max_backoff_s)
+    try:
+        approved = _read_canonical_registry()
+        _cache_approved_registry(approved)
+        opened = _open_from_approved(approved, launcher_id)
+        opened._registry_lock = lock
+    except BaseException:
+        lock.close()
+        raise
+    try:
+        yield opened
+    finally:
+        opened.close()
+
+
 def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
     """Open without waiting for the registry lock (A3 FIX 5).
 
@@ -343,10 +418,15 @@ def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
     wrapper): a free lock reads and caches the canonical registry as
     `open_approved_launcher` does. A busy lock
     (`launcher_registry_busy`) falls back to the last registry read
-    with success in this process, opened from the cached entries
-    without holding the lock; with no cache the busy error propagates.
-    Every other error propagates too. An acquired lock is always
-    released when opening fails, whatever the exception.
+    with success in this process, verified against the current
+    canonical registry (P3d): registry updates replace that file
+    atomically, so it is re-read without the lock and only what it
+    still approves is opened, without holding the lock; a launcher
+    revoked since the cache was taken is not opened. With no cache,
+    or when the current registry cannot be read to verify the cache,
+    the busy error propagates (fail-closed). Every other error
+    propagates too. An acquired lock is always released when opening
+    fails, whatever the exception.
     """
     from dayz_mcp.registry_lock import acquire_registry_lock
 
@@ -359,7 +439,12 @@ def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
         cached = _cached_approved_registry()
         if cached is None:
             raise
-        return _open_from_approved(cached, launcher_id)
+        try:
+            current = _read_canonical_registry()
+        except ValueError:
+            raise RuntimeError("launcher_registry_busy") from error
+        _cache_approved_registry(current)
+        return _open_from_approved(current, launcher_id)
     try:
         approved = _read_canonical_registry()
         _cache_approved_registry(approved)

@@ -25,7 +25,7 @@ from dayz_mcp import (
     request_path_authority,
     secure_launcher,
 )
-from dayz_mcp.launcher_registry import open_approved_launcher
+from dayz_mcp.launcher_registry import open_approved_launcher_async
 from dayz_mcp.native_launcher_transaction import preflight_vpp_request
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.client_steam_bootstrap import (
@@ -2358,7 +2358,7 @@ async def _execute_preflight(
             stamped, defaulted, project_mod_replaced=project_mod_override
         )
 
-    with open_approved_launcher("dayz-test-v1") as opened:
+    async with open_approved_launcher_async("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             raw_request, policy = build_run_request(
@@ -2706,7 +2706,7 @@ async def execute_dayz_test_run(
         )
     preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
-    with open_approved_launcher("dayz-test-v1") as opened:
+    async with open_approved_launcher_async("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             request_arguments: dict[str, object] = {
@@ -3228,7 +3228,7 @@ async def execute_dayz_test_stop(
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")
-    with open_approved_launcher("dayz-test-v1") as opened:
+    async with open_approved_launcher_async("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
@@ -4640,8 +4640,12 @@ async def execute_dayz_test_close(
         # is graceful, or when there was no sealed policy (the busy-
         # registry fallback, where graceful is forced False although
         # the budget was consumed). An ungraceful close with a policy
-        # (e.g. run_retired_elsewhere) must not warn.
-        if logout_report["timed_out"] is True and (graceful or policy_missing):
+        # (e.g. run_retired_elsewhere) must not warn. FIX 9 (P3c): a
+        # role_without_rpt close with a policy also warns on timeout:
+        # the missing RPT is why no logout could be verified.
+        if logout_report["timed_out"] is True and (
+            graceful or policy_missing or reason == "role_without_rpt"
+        ):
             payload["warnings"] = [_PLAYER_STATE_NOT_SAVED]
     elif graceful:
         server_watch = watches.get("server")
