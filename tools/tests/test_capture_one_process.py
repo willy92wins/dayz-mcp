@@ -64,7 +64,14 @@ class _BatchGrab:
                 lines.append(json.dumps(payload))
                 break
             level = levels[index] if index < len(levels) else 100
-            path = pattern.replace("{0}", str(index)) if pattern else capture
+            if pattern:
+                # Mirror the fixed script: "{0}" is substituted only in the
+                # file name, never in the directory part of the pattern.
+                pattern_dir = os.path.dirname(pattern)
+                pattern_name = os.path.basename(pattern).replace("{0}", str(index))
+                path = os.path.join(pattern_dir, pattern_name) if pattern_dir else pattern_name
+            else:
+                path = capture
             Image.new("RGB", (16, 16), (level, level, level)).save(path, format="PNG")
             payload = {
                 "ok": True, "error": "", "method": "printwindow",
@@ -238,6 +245,46 @@ class CaptureOneProcessTest(unittest.TestCase):
         self.assertEqual({"isError": True, "error": "printwindow_failed"}, result)
         self.assertEqual(1, popen2.call_count)
 
+    def test_rename_failure_with_preexisting_destination_is_an_error(self) -> None:
+        popen = mock.Mock(side_effect=lambda cmd, **kw: _BatchGrab(cmd, (100, 120)))
+        probe, popen_patch = self._patched(popen)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [os.path.join(tmp, "dest_a.png"), os.path.join(tmp, "dest_b.png")]
+            for path in paths:
+                with open(path, "wb") as handle:
+                    handle.write(b"OLD-CAPTURE")
+            with probe, popen_patch, mock.patch.object(
+                os, "replace", side_effect=OSError("rename denied")
+            ):
+                results = mcp_capture._run_window_captures(
+                    paths, process_name="DayZDiag_x64", timeout_s=8.0
+                )
+        self.assertEqual(1, len(results))
+        self.assertIsNot(results[0].get("ok"), True)
+        self.assertEqual("capture_backend_failed: rename_failed", results[0].get("error"))
+        self.assertNotIn(tmp, str(results[0].get("error")))
+
+    def test_brace_directory_keeps_frames_inside_it(self) -> None:
+        popen = mock.Mock(side_effect=lambda cmd, **kw: _BatchGrab(cmd, (100, 120)))
+        probe, popen_patch = self._patched(popen)
+        with tempfile.TemporaryDirectory() as tmp:
+            brace_dir = os.path.join(tmp, "literal{0}")
+            os.makedirs(brace_dir)
+            paths = [os.path.join(brace_dir, f"frame_{i}.png") for i in range(2)]
+            pattern, targets = mcp_capture._frame_pattern_for(paths)
+            self.assertEqual(paths, targets)
+            self.assertEqual(brace_dir, os.path.dirname(pattern))
+            self.assertEqual("frame_{0}.png", os.path.basename(pattern))
+            with probe, popen_patch:
+                results = mcp_capture._run_window_captures(
+                    paths, process_name="DayZDiag_x64", timeout_s=8.0
+                )
+            self.assertEqual([True, True], [r.get("ok") for r in results])
+            for path in paths:
+                self.assertTrue(os.path.exists(path), path)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "literal0")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "literal1")))
+
     def test_grab_script_emits_started_once_in_source(self) -> None:
         with open(mcp_capture.GRAB_SCRIPT, encoding="utf-8") as handle:
             text = handle.read()
@@ -287,6 +334,34 @@ class RealGrabScriptTest(unittest.TestCase):
         paths += [f"{stem}_{i}{ext}" for i in range(1, frame_count)]
         detail = f"stdout={completed.stdout!r} stderr={completed.stderr!r} rc={completed.returncode}"
         return parsed, paths, detail
+
+    @slow_test
+    def test_selftest_emits_pure_ascii_json_bytes_with_original_text(self) -> None:
+        """P1 regression with real bytes: the reader decodes stdout as cp1252
+        (the host locale), where raw UTF-8 for "Á" raises and loses the
+        capture. -SelfTest now emits its non-ASCII sample through the same
+        ASCII-escaping emission path as Emit, so the raw stdout bytes must be
+        pure ASCII and json.loads must recover the original text."""
+        if shutil.which("powershell") is None:
+            self.skipTest("powershell not available on this host")
+        completed = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", mcp_capture.GRAB_SCRIPT, "-SelfTest",
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        detail = f"stdout={completed.stdout!r} stderr={completed.stderr!r} rc={completed.returncode}"
+        self.assertEqual(0, completed.returncode, detail)
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        self.assertEqual(1, len(lines), detail)
+        self.assertTrue(all(byte < 128 for byte in completed.stdout), detail)
+        payload = json.loads(lines[-1].decode("cp1252"))
+        self.assertIs(payload.get("ok"), True)
+        self.assertEqual("Á ñ", payload.get("sampleTitle"))
+        self.assertIs(payload.get("framePathBracesOk"), True)
+        self.assertEqual(r"C:\Temp\literal{0}\frame_3.png", payload.get("framePathBraces"))
 
     @slow_test
     def test_real_script_emits_result_line_per_frame(self) -> None:

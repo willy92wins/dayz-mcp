@@ -1499,15 +1499,28 @@ def _frame_pattern_for(output_paths: list[str]) -> tuple[str, list[str]]:
     directory = os.path.dirname(first)
     stem, ext = os.path.splitext(os.path.basename(first))
 
+    # Substitute the index only in the file name, never in the directory: a
+    # directory may literally contain "{0}" (e.g. under a TEMP such as
+    # C:\Temp\literal{0}\...) and must stay literal, exactly as the grab
+    # script's Get-FramePath treats the pattern it receives.
+    def _targets(pattern_name: str) -> list[str]:
+        return [
+            os.path.join(directory, pattern_name.replace("{0}", str(i)))
+            if directory
+            else pattern_name.replace("{0}", str(i))
+            for i in range(len(output_paths))
+        ]
+
     indexed_stem = re.sub(r"\d+$", "{0}", stem) if re.search(r"\d+$", stem) else None
     if indexed_stem is not None:
-        pattern = os.path.join(directory, indexed_stem + ext) if directory else indexed_stem + ext
-        targets = [pattern.replace("{0}", str(i)) for i in range(len(output_paths))]
+        pattern_name = indexed_stem + ext
+        pattern = os.path.join(directory, pattern_name) if directory else pattern_name
+        targets = _targets(pattern_name)
         if targets == list(output_paths):
             return pattern, targets
-    pattern_stem = f"{stem}_{{0}}"
-    pattern = os.path.join(directory, pattern_stem + ext) if directory else pattern_stem + ext
-    targets = [pattern.replace("{0}", str(i)) for i in range(len(output_paths))]
+    pattern_name = f"{stem}_{{0}}" + ext
+    pattern = os.path.join(directory, pattern_name) if directory else pattern_name
+    targets = _targets(pattern_name)
     return pattern, targets
 
 
@@ -1672,11 +1685,16 @@ def _run_window_captures(output_paths: list[str], process_name: str, timeout_s: 
             for index, result in enumerate(results):
                 if result.get("ok") is True:
                     source, destination = frame_targets[index], output_paths[index]
-                    if os.path.exists(source):
+                    if source != destination:
+                        # A failed rename is a failure: an older capture may
+                        # already sit at the destination, so its existence
+                        # proves nothing about this frame. The public error
+                        # carries no host path.
                         try:
                             os.replace(source, destination)
                         except OSError:
-                            pass
+                            moved.append({"ok": False, "error": "capture_backend_failed: rename_failed"})
+                            break
                     if not os.path.exists(destination):
                         moved.append({"ok": False, "error": "capture_backend_failed: missing_png"})
                         break

@@ -19,7 +19,9 @@
 #   { ok, error, method, window:{pid,class,title,left,top,width,height}, stats:{meanBrightness,nonBlackRatio}, sha256,
 #     client:{left,top,width,height}, clientStats:{meanBrightness,nonBlackRatio} }
 # Callers that read the last JSON line ignore the phase line. SelfTest stays
-# one JSON line and does not emit the phase line.
+# one JSON line and does not emit the phase line. Every JSON line is pure
+# ASCII (non-ASCII escaped as \uXXXX by ConvertTo-AsciiJson) so it decodes
+# identically under any reader code page.
 #
 # Multi-frame (perf/capture-one-process): with -FrameCount N (N > 1) Add-Type and
 # window resolution happen once, then N frames are captured in this same process,
@@ -182,15 +184,29 @@ public class MCPGrab {
 }
 "@
 
-function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats, $frameIndex = -1) {
-  $payload = [pscustomobject]@{
-    ok = $ok; error = $err; method = $method; window = $window; stats = $stats; sha256 = $sha
-    client = $client; clientStats = $clientStats
-  }
-  if ($FrameCount -gt 1) {
-    $payload | Add-Member -NotePropertyName frameIndex -NotePropertyValue ([int]$frameIndex)
-  }
+function ConvertTo-AsciiJson($payload) {
+  # ConvertTo-Json on Windows PowerShell 5.1 leaves non-ASCII characters raw.
+  # The Python reader decodes stdout with the host locale (cp1252 here), where
+  # raw UTF-8 bytes such as 0x81 are undefined and the decode raises, losing
+  # the whole capture. Escape every non-ASCII code unit as a \uXXXX sequence:
+  # the line is pure ASCII, decodes identically under any code page, and
+  # json.loads still returns the original text. Surrogate pairs become two
+  # \uXXXX escapes, which JSON parsers recombine.
   $json = $payload | ConvertTo-Json -Compress
+  $builder = [System.Text.StringBuilder]::new($json.Length)
+  foreach ($char in $json.ToCharArray()) {
+    $code = [int]$char
+    if ($code -gt 127) {
+      [void]$builder.AppendFormat('\u{0:x4}', $code)
+    } else {
+      [void]$builder.Append($char)
+    }
+  }
+  return $builder.ToString()
+}
+
+function Write-AsciiJsonLine($payload) {
+  $json = ConvertTo-AsciiJson $payload
   # Write the result line straight to the raw stdout handle, like the
   # {"phase":"started"} line below, and never to the success pipeline: inside
   # Capture-OneFrame anything on that pipeline becomes part of the function's
@@ -200,7 +216,7 @@ function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats, 
   # protocol identical for top-level and in-function calls alike, and leaves
   # Capture-OneFrame returning exactly $true/$false.
   try {
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json + "`n")
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($json + "`n")
     $rawOut = [Console]::OpenStandardOutput()
     $rawOut.Write($bytes, 0, $bytes.Length)
     $rawOut.Flush()
@@ -209,9 +225,25 @@ function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats, 
   }
 }
 
+function Emit($ok, $err, $method, $window, $stats, $sha, $client, $clientStats, $frameIndex = -1) {
+  $payload = [pscustomobject]@{
+    ok = $ok; error = $err; method = $method; window = $window; stats = $stats; sha256 = $sha
+    client = $client; clientStats = $clientStats
+  }
+  if ($FrameCount -gt 1) {
+    $payload | Add-Member -NotePropertyName frameIndex -NotePropertyValue ([int]$frameIndex)
+  }
+  Write-AsciiJsonLine $payload
+}
+
 function Get-FramePath($index) {
   if ($FramePattern -ne '') {
-    return $FramePattern.Replace('{0}', [string]$index)
+    # Substitute the index only in the file name: a directory may literally
+    # contain "{0}" (e.g. a TEMP folder) and must never be reinterpreted.
+    $frameDir = [System.IO.Path]::GetDirectoryName($FramePattern)
+    $frameName = [System.IO.Path]::GetFileName($FramePattern).Replace('{0}', [string]$index)
+    if ($frameDir) { return [System.IO.Path]::Combine($frameDir, $frameName) }
+    return $frameName
   }
   if ($index -eq 0) { return $CapturePng }
   $dir = [System.IO.Path]::GetDirectoryName($CapturePng)
@@ -270,8 +302,25 @@ if ($SelfTest) {
       ratio_boundary_strict = [bool](-not (Test-LiveStats ([double[]]@(3.0, 0.02))))
       above_boundaries_live = [bool](Test-LiveStats ([double[]]@(2.0001, 0.0201)))
     }
-    $ok = -not ($cases.Values -contains $false)
-    [pscustomobject]@{ ok = $ok; error = $(if ($ok) { '' } else { 'self_test_failed' }); cases = $cases } | ConvertTo-Json -Compress
+    # ASCII-escape regression sample: built from code points so this file
+    # stays pure ASCII itself. Emitted through the same Write-AsciiJsonLine
+    # path as Emit, so a reader under any code page recovers it via JSON.
+    $sampleTitle = [string]::Concat([char]0x00C1, ' ', [char]0x00F1)
+    $savedFramePattern = $FramePattern
+    try {
+      $FramePattern = 'C:\Temp\literal{0}\frame_{0}.png'
+      $framePathBraces = Get-FramePath 3
+    }
+    finally {
+      $FramePattern = $savedFramePattern
+    }
+    $framePathBracesOk = ($framePathBraces -eq 'C:\Temp\literal{0}\frame_3.png')
+    $ok = (-not ($cases.Values -contains $false)) -and $framePathBracesOk
+    $selfPayload = [pscustomobject]@{
+      ok = $ok; error = $(if ($ok) { '' } else { 'self_test_failed' }); cases = $cases
+      sampleTitle = $sampleTitle; framePathBraces = $framePathBraces; framePathBracesOk = [bool]$framePathBracesOk
+    }
+    Write-AsciiJsonLine $selfPayload
     if (-not $ok) { exit 1 }
     exit 0
   }
