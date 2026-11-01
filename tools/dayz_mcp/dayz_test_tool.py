@@ -846,6 +846,44 @@ async def _require_idle_session(runtime: _Runtime, *, tool: str) -> None:
         _fail("session_busy")
 
 
+async def _open_approved_launcher_async():
+    """Open the approved launcher without blocking the event loop (A3).
+
+    ``open_approved_launcher`` retries a busy registry lock with a
+    synchronous sleep (``acquire_registry_lock_with_retry``). Calling it
+    directly from a coroutine stalls every other coroutine, timer and
+    cancellation for the whole retry deadline, so the call runs in a
+    worker thread. A worker thread cannot be killed on cancellation: if
+    this coroutine is cancelled while the worker is still acquiring, a
+    done-callback closes any launcher the worker eventually returns, so
+    its registry lock is released instead of leaked.
+    """
+    opening = asyncio.ensure_future(
+        asyncio.to_thread(open_approved_launcher, "dayz-test-v1")
+    )
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+
+        def _release_late_opened(done: asyncio.Future) -> None:
+            if done.cancelled():
+                return
+            if done.exception() is not None:
+                return
+            opened = done.result()
+            close = getattr(opened, "close", None)
+            try:
+                if callable(close):
+                    close()
+                else:
+                    opened.__exit__(None, None, None)
+            except Exception:
+                pass
+
+        opening.add_done_callback(_release_late_opened)
+        raise
+
+
 def _planned_profile_leaf() -> str:
     """Leaf of the bound instance. Unbound is the default ``profiles`` leaf."""
     from dayz_mcp.server_cli import (
@@ -2358,7 +2396,7 @@ async def _execute_preflight(
             stamped, defaulted, project_mod_replaced=project_mod_override
         )
 
-    with open_approved_launcher("dayz-test-v1") as opened:
+    with await _open_approved_launcher_async() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             raw_request, policy = build_run_request(
@@ -2706,7 +2744,7 @@ async def execute_dayz_test_run(
         )
     preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
-    with open_approved_launcher("dayz-test-v1") as opened:
+    with await _open_approved_launcher_async() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             request_arguments: dict[str, object] = {
@@ -3228,7 +3266,7 @@ async def execute_dayz_test_stop(
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")
-    with open_approved_launcher("dayz-test-v1") as opened:
+    with await _open_approved_launcher_async() as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
