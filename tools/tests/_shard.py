@@ -12,10 +12,13 @@ used, so load_tests and the rest of discovery stay in place.
 Each direct child of that suite is one discovered module (a test file, or
 the suite load_tests returned for it). A child is never split, and the shard
 runs that original suite object. Flattening is only for counting and
-grouping, so a load_tests suite keeps its own run(). If two children share a
-test module, they stay on the same shard too: splitting either one would
-split a module. A plain empty TestSuite is not a module. A custom suite with
-no leaf tests is still run.
+grouping, so a load_tests suite keeps its own run(). Counting descends every
+BaseTestSuite, not only TestSuite: a BaseTestSuite is not a TestSuite, and
+stopping there would name the cases inside it after the suite. If two
+children share a test module, they stay on the same shard too: splitting
+either one would split a module. A plain empty TestSuite is not a module.
+A shard with no tests exits 1 even when an empty suite was assigned to it.
+Original suites still run when the shard has tests.
 
 Warnings follow unittest's CLI (TestProgram): 'default' when the process has
 no -W and no PYTHONWARNINGS; those filters stay in place when it does.
@@ -70,8 +73,16 @@ def discover_suite() -> unittest.TestSuite:
     )
 
 
-def iter_tests(item: unittest.TestSuite | unittest.case.TestCase) -> Iterator[unittest.case.TestCase]:
-    if isinstance(item, unittest.TestSuite):
+def iter_tests(
+    item: unittest.BaseTestSuite | unittest.case.TestCase,
+) -> Iterator[unittest.case.TestCase]:
+    """Yield leaf tests, descending every BaseTestSuite.
+
+    TestSuite is a BaseTestSuite (unittest/__init__.py imports both from
+    suite.py). A nested BaseTestSuite is not a TestSuite. Treating it as a
+    leaf would attribute its cases to the suite's module.
+    """
+    if isinstance(item, unittest.BaseTestSuite):
         for child in item:
             yield from iter_tests(child)
         return
@@ -292,7 +303,10 @@ def run_assigned(
     groups: list[Group], *, index: int, count: int, list_only: bool
 ) -> int:
     chosen = assign_groups(groups, count)[index - 1]
-    if not chosen or not any(group.suites for group in chosen):
+    # An empty custom suite is still a suite object. The gate is the tests:
+    # a shard with none exits 1. Suites on a shard that has tests are the
+    # original objects, added below.
+    if not chosen or not any(group.tests for group in chosen):
         print(f"shard {index}/{count} has no tests", file=sys.stderr)
         return 1
     if list_only:

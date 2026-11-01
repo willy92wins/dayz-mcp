@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -34,6 +35,90 @@ code = module.run_assigned(
     module.groups_from_suite(suite), index=1, count=1, list_only=False
 )
 raise SystemExit(code)
+"""
+
+# Runs shard argv[2]/argv[3] of whatever tests/ discover finds in cwd.
+_SHARD_RUN = """\
+import importlib.util
+import sys
+import unittest
+
+spec = importlib.util.spec_from_file_location("shard_under_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+suite = unittest.TestLoader().discover("tests", pattern="test*.py", top_level_dir=".")
+code = module.run_assigned(
+    module.groups_from_suite(suite),
+    index=int(sys.argv[2]),
+    count=int(sys.argv[3]),
+    list_only=False,
+)
+raise SystemExit(code)
+"""
+
+# Independent of tests._shard.iter_tests: an iterative walk, and it grades the
+# runner by the original suite objects, not by the runner's own leaf list.
+_PARTITION_DRIVER = """\
+import importlib.util
+import sys
+import unittest
+
+spec = importlib.util.spec_from_file_location("shard_under_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+
+def leaves(item):
+    pending = [item]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, unittest.BaseTestSuite):
+            pending.extend(reversed(tuple(current)))
+            continue
+        yield current
+
+
+def module_name(test):
+    kind = type(test)
+    if kind.__module__ == "unittest.loader" and kind.__name__ in {"_FailedTest", "ModuleSkipped"}:
+        method = getattr(test, "_testMethodName", None)
+        if isinstance(method, str) and method:
+            return method
+    name = getattr(kind, "__module__", None)
+    if isinstance(name, str) and name:
+        return name
+    return test.id().rsplit(".", 1)[0]
+
+
+suite = unittest.TestLoader().discover("tests", pattern="test*.py", top_level_dir=".")
+assigned = module.assign_groups(module.groups_from_suite(suite), 4)
+owner = {}
+for shard_index, shard in enumerate(assigned):
+    for group in shard:
+        for original in group.suites:
+            for test in leaves(original):
+                owner[id(test)] = shard_index
+
+by_module = {}
+missing = False
+for test in leaves(suite):
+    shard_index = owner.get(id(test))
+    if shard_index is None:
+        missing = True
+        print("MISSING %s" % test.id())
+        continue
+    by_module.setdefault(module_name(test), set()).add(shard_index)
+
+split = False
+for name in sorted(by_module):
+    shards = sorted(by_module[name])
+    print(
+        "MODULE %s shards=%s count=%s"
+        % (name, ",".join(str(item) for item in shards), len(shards))
+    )
+    if len(shards) != 1:
+        split = True
+raise SystemExit(1 if missing or split else 0)
 """
 
 
@@ -72,7 +157,7 @@ class ShardPartitionTest(unittest.TestCase):
 
         discovered: list[str] = []
         seen: set[str] = set()
-        for test in _shard.iter_tests(suite):
+        for test in _suite_leaves(suite):
             name = _shard.module_of(test)
             if name not in seen:
                 seen.add(name)
@@ -83,20 +168,23 @@ class ShardPartitionTest(unittest.TestCase):
         for names in first_names:
             self.assertTrue(names, "a shard has no modules")
 
+        # Ownership comes from walking the original suites, not group.tests.
+        # group.tests is the runner's own flattening, so it cannot be the oracle.
         owner: dict[int, int] = {}
         for shard_index, shard in enumerate(first):
             for group in shard:
-                for test in group.tests:
-                    self.assertNotIn(id(test), owner)
-                    owner[id(test)] = shard_index
-        all_tests = list(_shard.iter_tests(suite))
+                for original in group.suites:
+                    for test in _suite_leaves(original):
+                        self.assertNotIn(id(test), owner, test.id())
+                        owner[id(test)] = shard_index
+        all_tests = list(_suite_leaves(suite))
         self.assertEqual(
             {id(test) for test in all_tests},
             set(owner),
             "a discovered test is missing from the shards or was added",
         )
         for child in suite:
-            tests = list(_shard.iter_tests(child))
+            tests = list(_suite_leaves(child))
             if not tests:
                 continue
             shards = {owner[id(test)] for test in tests}
@@ -105,6 +193,15 @@ class ShardPartitionTest(unittest.TestCase):
                 1,
                 f"a discovered module was split across shards: {tests[0].id()}",
             )
+        by_module: dict[str, set[int]] = {}
+        for test in all_tests:
+            by_module.setdefault(_shard.module_of(test), set()).add(owner[id(test)])
+        for name, shards in by_module.items():
+            self.assertEqual(
+                len(shards),
+                1,
+                f"module {name} was split across shards {sorted(shards)}",
+            )
 
         parts: list[str] = []
         for index, shard in enumerate(first, start=1):
@@ -112,6 +209,38 @@ class ShardPartitionTest(unittest.TestCase):
             test_count = sum(len(group.tests) for group in shard)
             parts.append(f"{index}: {len(names)} modules, {test_count} tests")
         print("SHARD_SIZES " + "; ".join(parts), flush=True)
+
+
+def _suite_leaves(item: unittest.TestSuite | unittest.case.TestCase):
+    """Leaf tests under item, including those nested in a BaseTestSuite.
+
+    Iterative on purpose. This is not tests._shard.iter_tests: the partition
+    checks grade the runner against this walk, so a runner that stops at
+    TestSuite cannot supply the expected set.
+    """
+    pending: list[unittest.TestSuite | unittest.case.TestCase] = [item]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, unittest.BaseTestSuite):
+            pending.extend(reversed(tuple(current)))
+            continue
+        yield current
+
+
+def _one_test_suite(module_name: str) -> unittest.TestSuite:
+    """A suite whose only case lives in a fresh module."""
+    module = types.ModuleType(module_name)
+    sys.modules[module_name] = module
+
+    class Case(unittest.TestCase):
+        def test_one(self) -> None:
+            pass
+
+    Case.__module__ = module_name
+    module.Case = Case
+    suite = unittest.TestSuite()
+    suite.addTest(Case("test_one"))
+    return suite
 
 
 def _fresh_env() -> dict[str, str]:
@@ -237,6 +366,175 @@ class ShardRunnerParityTest(unittest.TestCase):
         self.assertEqual(discover_code, 0)
         self.assertNotIn("DeprecationWarning was not emitted", shard_err)
         self.assertNotIn("DeprecationWarning was not emitted", discover_err)
+
+    def test_base_test_suite_keeps_a_module_on_one_shard(self) -> None:
+        """A case of module A hidden in a BaseTestSuite stays with A's other case.
+
+        One load_tests suite nests BaseTestSuite -> TestSuite -> case. The other
+        holds a second case of the same class directly. Discover runs the class
+        and module fixtures once; the four shards must too, and the independent
+        walk must see A on a single shard.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-base-suite-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            log_path = root / "fixtures.log"
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "cases.py",
+                """
+                import os
+                import unittest
+
+                def _mark(kind):
+                    with open(os.environ["SHARD_FIXTURE_LOG"], "a", encoding="utf-8") as handle:
+                        handle.write(kind + "\\n")
+
+                def setUpModule():
+                    _mark("module-setup")
+
+                def tearDownModule():
+                    _mark("module-teardown")
+
+                class Shared(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        _mark("class-setup")
+
+                    @classmethod
+                    def tearDownClass(cls):
+                        _mark("class-teardown")
+
+                    def test_one(self):
+                        _mark("ran-one")
+
+                    def test_two(self):
+                        _mark("ran-two")
+                """,
+            )
+            _write(
+                root / "tests" / "test_nested.py",
+                """
+                import unittest
+                from tests.cases import Shared
+
+                def load_tests(loader, tests, pattern):
+                    inner = unittest.TestSuite()
+                    inner.addTest(Shared("test_one"))
+                    hidden = unittest.BaseTestSuite()
+                    hidden.addTest(inner)
+                    outer = unittest.TestSuite()
+                    outer.addTest(hidden)
+                    return outer
+                """,
+            )
+            _write(
+                root / "tests" / "test_direct.py",
+                """
+                import unittest
+                from tests.cases import Shared
+
+                def load_tests(loader, tests, pattern):
+                    outer = unittest.TestSuite()
+                    outer.addTest(Shared("test_two"))
+                    return outer
+                """,
+            )
+            env = _fresh_env()
+            env["SHARD_FIXTURE_LOG"] = str(log_path)
+            partition = root / "_partition.py"
+            partition.write_text(_PARTITION_DRIVER, encoding="utf-8")
+            runner = root / "_run_shard.py"
+            runner.write_text(_SHARD_RUN, encoding="utf-8")
+            graded = subprocess.run(
+                [sys.executable, "-B", str(partition), str(_SHARD_FILE)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            log_path.write_text("", encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            control_log = log_path.read_text(encoding="utf-8")
+            log_path.write_text("", encoding="utf-8")
+            shard_codes: list[int] = []
+            for index in range(1, 5):
+                run = subprocess.run(
+                    [sys.executable, "-B", str(runner), str(_SHARD_FILE), str(index), "4"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                shard_codes.append(run.returncode)
+            shard_log = log_path.read_text(encoding="utf-8")
+        self.assertEqual(
+            graded.returncode,
+            0,
+            f"independent walk split a module\n{graded.stdout}\n{graded.stderr}",
+        )
+        self.assertIn("MODULE tests.cases ", graded.stdout)
+        self.assertIn("count=1", graded.stdout.split("MODULE tests.cases ", 1)[1].splitlines()[0])
+        self.assertEqual(discover.returncode, 0, discover.stderr)
+        for label in ("module-setup", "module-teardown", "class-setup", "class-teardown"):
+            self.assertEqual(control_log.count(label), 1, f"control {label}\n{control_log}")
+            self.assertEqual(
+                shard_log.count(label),
+                1,
+                f"shards {label} codes={shard_codes}\n{shard_log}",
+            )
+        self.assertEqual(shard_log.count("ran-one"), 1, shard_log)
+        self.assertEqual(shard_log.count("ran-two"), 1, shard_log)
+
+    def test_empty_custom_suite_does_not_pass_a_shard(self) -> None:
+        """Three one-test modules plus an empty TestSuite subclass.
+
+        The empty suite lands on its own shard. That shard has no tests, so
+        its exit code is non-zero. Shards that do have tests still pass.
+        """
+        names = ("shard_reg_a", "shard_reg_b", "shard_reg_c")
+
+        class EmptyCustomSuite(unittest.TestSuite):
+            pass
+
+        top = unittest.TestSuite()
+        try:
+            for name in names:
+                top.addTest(_one_test_suite(name))
+            top.addTest(EmptyCustomSuite())
+            groups = _shard.groups_from_suite(top)
+            assigned = _shard.assign_groups(groups, 4)
+            counts: list[int] = []
+            codes: list[int] = []
+            for index, shard in enumerate(assigned, start=1):
+                counts.append(
+                    sum(
+                        sum(1 for _ in _suite_leaves(original))
+                        for group in shard
+                        for original in group.suites
+                    )
+                )
+                with redirect_stderr(io.StringIO()):
+                    codes.append(
+                        _shard.run_assigned(groups, index=index, count=4, list_only=False)
+                    )
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        self.assertEqual(counts.count(0), 1, f"counts={counts} codes={codes}")
+        for count, code in zip(counts, codes, strict=True):
+            if count == 0:
+                self.assertNotEqual(code, 0, f"counts={counts} codes={codes}")
+            else:
+                self.assertEqual(code, 0, f"counts={counts} codes={codes}")
 
 
 if __name__ == "__main__":
