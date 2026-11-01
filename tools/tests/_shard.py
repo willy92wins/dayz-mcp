@@ -27,7 +27,9 @@ Shards are a deterministic longest-processing-time balance. A group's weight
 is its test count plus SLOW_TEST_WEIGHT times the @slow_test decorators in
 the source of its modules (tools/tests/_tiers.py). Heavier groups are placed
 first; equal weights break ties by module name; an equal load breaks the tie
-toward the lower shard index. Inside a shard, modules run in discovery order.
+toward the lower shard index. Grouping only chooses the shard. Inside a
+shard the original children run in discovery order, even when one module's
+suites were not contiguous.
 
 Exit 0 when every selected test passes. Exit 1 when a test fails or the shard
 has no tests. Exit 2 when the arguments are wrong.
@@ -57,13 +59,15 @@ class Group(NamedTuple):
     """One unsplittable piece of the suite, in discovery order.
 
     tests is the flattened leaves, used only to count and to name modules.
-    suites is the original discover or load_tests children, and those are
-    what a shard runs.
+    suites is the original discover or load_tests children. positions is each
+    suite's discovery index: a shard runs its suites in that order, not in
+    group order.
     """
 
     modules: tuple[str, ...]
     tests: tuple[unittest.case.TestCase, ...]
     suites: tuple[unittest.TestSuite | unittest.case.TestCase, ...]
+    positions: tuple[int, ...]
 
 
 def discover_suite() -> unittest.TestSuite:
@@ -171,6 +175,7 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
         seen_modules: set[str] = set()
         tests: list[unittest.case.TestCase] = []
         suites: list[unittest.TestSuite | unittest.case.TestCase] = []
+        positions: list[int] = []
         for index in members[root]:
             child_modules, child_tests, child_suite = children[index]
             for name in child_modules:
@@ -179,7 +184,8 @@ def groups_from_suite(suite: unittest.TestSuite) -> list[Group]:
                     modules.append(name)
             tests.extend(child_tests)
             suites.append(child_suite)
-        groups.append(Group(tuple(modules), tuple(tests), tuple(suites)))
+            positions.append(index)
+        groups.append(Group(tuple(modules), tuple(tests), tuple(suites), tuple(positions)))
     return groups
 
 
@@ -314,11 +320,21 @@ def run_assigned(
             print(name)
         return 0
     suite = unittest.TestSuite()
-    for group in chosen:
-        for original in group.suites:
-            # addTest keeps the suite. addTests iterates it and would drop a
-            # load_tests suite's own run() (suite.py).
-            suite.addTest(original)
+    # positions are discovery indexes. A group holds every child of its
+    # modules, so walking group.suites would run A2 before B when discovery
+    # was A1, B, A2. The shard runs the selected children in discovery order.
+    selected = sorted(
+        (
+            (position, original)
+            for group in chosen
+            for position, original in zip(group.positions, group.suites, strict=True)
+        ),
+        key=lambda item: item[0],
+    )
+    for _, original in selected:
+        # addTest keeps the suite. addTests iterates it and would drop a
+        # load_tests suite's own run() (suite.py).
+        suite.addTest(original)
     result = unittest.TextTestRunner(verbosity=1, warnings=_runner_warnings()).run(suite)
     return 0 if result.wasSuccessful() else 1
 

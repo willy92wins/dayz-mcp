@@ -536,6 +536,150 @@ class ShardRunnerParityTest(unittest.TestCase):
             else:
                 self.assertEqual(code, 0, f"counts={counts} codes={codes}")
 
+    def test_interleaved_module_keeps_discovery_order(self) -> None:
+        """Hooks A1, B, A2, with A1 and A2 cases of one module.
+
+        B fails unless it runs after A1 and before A2. Discover keeps that
+        order. Grouping may put A1 and A2 in one group, but a shard that
+        runs both must still execute the children in discovery order. 1/1
+        covers every child; three heavier modules put A and B on one shard
+        of four.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-order-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "")
+            _write(
+                root / "tests" / "mod_a.py",
+                """
+                import unittest
+
+                LOG = []
+
+                class Shared(unittest.TestCase):
+                    def test_first(self):
+                        LOG.append("A1")
+
+                    def test_later(self):
+                        LOG.append("A2")
+                """,
+            )
+            _write(
+                root / "tests" / "test_a1.py",
+                """
+                import unittest
+                from tests.mod_a import Shared
+
+                def load_tests(loader, tests, pattern):
+                    suite = unittest.TestSuite()
+                    suite.addTest(Shared("test_first"))
+                    return suite
+                """,
+            )
+            _write(
+                root / "tests" / "test_b.py",
+                """
+                import unittest
+                from tests.mod_a import LOG
+
+                class Middle(unittest.TestCase):
+                    def test_runs_between_a1_and_a2(self):
+                        self.assertEqual(
+                            LOG,
+                            ["A1"],
+                            "B ran out of discovery order: %r" % (LOG,),
+                        )
+                        LOG.append("B")
+                """,
+            )
+            _write(
+                root / "tests" / "test_c.py",
+                """
+                import unittest
+                from tests.mod_a import Shared
+
+                def load_tests(loader, tests, pattern):
+                    suite = unittest.TestSuite()
+                    suite.addTest(Shared("test_later"))
+                    return suite
+                """,
+            )
+            for name in ("test_d", "test_e", "test_f"):
+                body = ["import unittest", "", "class Pad(unittest.TestCase):"]
+                for index in range(5):
+                    body.append(f"    def test_{index}(self):")
+                    body.append("        pass")
+                _write(root / "tests" / f"{name}.py", "\n".join(body) + "\n")
+            env = _fresh_env()
+            (root / "_drive.py").write_text(_DRIVER, encoding="utf-8")
+            (root / "_run.py").write_text(_SHARD_RUN, encoding="utf-8")
+            (root / "_part.py").write_text(_PARTITION_DRIVER, encoding="utf-8")
+            discover = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            whole = subprocess.run(
+                [sys.executable, "-B", str(root / "_drive.py"), str(_SHARD_FILE)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            graded = subprocess.run(
+                [sys.executable, "-B", str(root / "_part.py"), str(_SHARD_FILE)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            def shard_of(module_name: str) -> int:
+                prefix = f"MODULE {module_name} "
+                for line in graded.stdout.splitlines():
+                    if line.startswith(prefix):
+                        shards = line.split("shards=", 1)[1].split(" ", 1)[0]
+                        parts = [int(item) for item in shards.split(",") if item]
+                        self.assertEqual(parts, [parts[0]], line)
+                        return parts[0]
+                self.fail(f"{module_name} missing from\n{graded.stdout}\n{graded.stderr}")
+
+            shared = shard_of("tests.mod_a")
+            self.assertEqual(shard_of("tests.test_b"), shared, graded.stdout)
+            placed = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(root / "_run.py"),
+                    str(_SHARD_FILE),
+                    str(shared + 1),
+                    "4",
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        detail = (
+            f"discover={discover.returncode} 1/1={whole.returncode} "
+            f"shared_shard={shared + 1}/4 code={placed.returncode}\n"
+            f"--- partition ---\n{graded.stdout}\n"
+            f"--- discover stderr ---\n{discover.stderr}\n"
+            f"--- 1/1 stderr ---\n{whole.stderr}\n"
+            f"--- shared stderr ---\n{placed.stderr}"
+        )
+        self.assertEqual(graded.returncode, 0, detail)
+        self.assertEqual(
+            (discover.returncode, whole.returncode, placed.returncode),
+            (0, 0, 0),
+            detail,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
