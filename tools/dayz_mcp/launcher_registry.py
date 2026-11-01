@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import hashlib
 import json
@@ -291,17 +292,78 @@ def _read_canonical_registry() -> list[dict[str, object]]:
     return _parse_launcher_registry(text)
 
 
+_cached_approved: list[dict[str, object]] | None = None
+
+
+def _cache_approved_registry(approved: list[dict[str, object]]) -> None:
+    global _cached_approved
+    _cached_approved = copy.deepcopy(approved)
+
+
+def _cached_approved_registry() -> list[dict[str, object]] | None:
+    if _cached_approved is None:
+        return None
+    return copy.deepcopy(_cached_approved)
+
+
+def _clear_approved_registry_cache_for_test() -> None:
+    global _cached_approved
+    _cached_approved = None
+
+
+def _open_from_approved(
+    approved: list[dict[str, object]], launcher_id: str
+) -> _OpenedLauncher:
+    validated_id = _validate_id(launcher_id)
+    matches = [item for item in approved if item["id"] == validated_id]
+    if len(matches) != 1:
+        raise ValueError("launcher_not_approved")
+    return _open_validated_entry(matches[0])
+
+
 def open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
     from dayz_mcp.registry_lock import acquire_registry_lock_with_retry
 
     registry_lock = acquire_registry_lock_with_retry(exclusive=False)
     try:
         approved = _read_canonical_registry()
-        validated_id = _validate_id(launcher_id)
-        matches = [item for item in approved if item["id"] == validated_id]
-        if len(matches) != 1:
-            raise ValueError("launcher_not_approved")
-        opened = _open_validated_entry(matches[0])
+        _cache_approved_registry(approved)
+        opened = _open_from_approved(approved, launcher_id)
+        opened._registry_lock = registry_lock
+        return opened
+    except BaseException:
+        registry_lock.close()
+        raise
+
+
+def try_open_approved_launcher(launcher_id: str) -> _OpenedLauncher:
+    """Open without waiting for the registry lock (A3 FIX 5).
+
+    One fail-fast attempt (`acquire_registry_lock`, never the retry
+    wrapper): a free lock reads and caches the canonical registry as
+    `open_approved_launcher` does. A busy lock
+    (`launcher_registry_busy`) falls back to the last registry read
+    with success in this process, opened from the cached entries
+    without holding the lock; with no cache the busy error propagates.
+    Every other error propagates too. An acquired lock is always
+    released when opening fails, whatever the exception.
+    """
+    from dayz_mcp.registry_lock import acquire_registry_lock
+
+    _validate_id(launcher_id)
+    try:
+        registry_lock = acquire_registry_lock(exclusive=False)
+    except RuntimeError as error:
+        if str(error) != "launcher_registry_busy":
+            raise
+        cached = _cached_approved_registry()
+        if cached is None:
+            raise
+        return _open_from_approved(cached, launcher_id)
+    try:
+        approved = _read_canonical_registry()
+        _cache_approved_registry(approved)
+        opened = _open_from_approved(approved, launcher_id)
         opened._registry_lock = registry_lock
         return opened
     except BaseException:

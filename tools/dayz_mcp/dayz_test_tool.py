@@ -846,44 +846,6 @@ async def _require_idle_session(runtime: _Runtime, *, tool: str) -> None:
         _fail("session_busy")
 
 
-async def _open_approved_launcher_async():
-    """Open the approved launcher without blocking the event loop (A3).
-
-    ``open_approved_launcher`` retries a busy registry lock with a
-    synchronous sleep (``acquire_registry_lock_with_retry``). Calling it
-    directly from a coroutine stalls every other coroutine, timer and
-    cancellation for the whole retry deadline, so the call runs in a
-    worker thread. A worker thread cannot be killed on cancellation: if
-    this coroutine is cancelled while the worker is still acquiring, a
-    done-callback closes any launcher the worker eventually returns, so
-    its registry lock is released instead of leaked.
-    """
-    opening = asyncio.ensure_future(
-        asyncio.to_thread(open_approved_launcher, "dayz-test-v1")
-    )
-    try:
-        return await asyncio.shield(opening)
-    except asyncio.CancelledError:
-
-        def _release_late_opened(done: asyncio.Future) -> None:
-            if done.cancelled():
-                return
-            if done.exception() is not None:
-                return
-            opened = done.result()
-            close = getattr(opened, "close", None)
-            try:
-                if callable(close):
-                    close()
-                else:
-                    opened.__exit__(None, None, None)
-            except Exception:
-                pass
-
-        opening.add_done_callback(_release_late_opened)
-        raise
-
-
 def _planned_profile_leaf() -> str:
     """Leaf of the bound instance. Unbound is the default ``profiles`` leaf."""
     from dayz_mcp.server_cli import (
@@ -2396,7 +2358,7 @@ async def _execute_preflight(
             stamped, defaulted, project_mod_replaced=project_mod_override
         )
 
-    with await _open_approved_launcher_async() as opened:
+    with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             raw_request, policy = build_run_request(
@@ -2744,7 +2706,7 @@ async def execute_dayz_test_run(
         )
     preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
-    with await _open_approved_launcher_async() as opened:
+    with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             request_arguments: dict[str, object] = {
@@ -3266,7 +3228,7 @@ async def execute_dayz_test_stop(
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")
-    with await _open_approved_launcher_async() as opened:
+    with open_approved_launcher("dayz-test-v1") as opened:
         opened.validate_native_pe()
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
@@ -3502,9 +3464,18 @@ def _start_role_roots() -> dict[str, str] | None:
 def _close_project_policy(
     run: dict[str, object],
 ) -> dayz_test_request.RequestProjectPolicy | None:
-    """The sealed project policy, loaded the way stop does before artifacts."""
+    """The sealed project policy, loaded the way stop does before artifacts.
+
+    Non-blocking (A3 FIX 5): `try_open_approved_launcher` makes one
+    fail-fast lock attempt, so a busy registry never stalls the event
+    loop here; it opens from the last good cached registry instead,
+    and with no cache this returns None and the close falls back to
+    the conservative logout wait (see `_wait_for_connected_logouts`).
+    """
+    from dayz_mcp.launcher_registry import try_open_approved_launcher
+
     try:
-        with open_approved_launcher("dayz-test-v1") as opened:
+        with try_open_approved_launcher("dayz-test-v1") as opened:
             opened.validate_native_pe()
             with secure_launcher.load_verified_bundle(opened) as bundle:
                 policies = _semantic_policies(bundle.sealed_policies)
@@ -4127,11 +4098,22 @@ async def _wait_for_connected_logouts(
     only by their linked uid's logout after the pre-close boundary. Without
     that link the wait runs to the cap and the caller warns.
     """
-    if server_rpt is None:
-        return [], 0.0, False
     budget = min(_LOGOUT_WAIT_S, timeout_s)
     started = time.monotonic()
     deadline = started + budget
+    if server_rpt is None:
+        if not wait:
+            return [], 0.0, False
+        # Conservative default (A3 FIX 5): no server RPT to verify
+        # logouts against (e.g. the policy load hit a busy registry
+        # with no cached policy), so wait the whole budget before the
+        # server close instead of skipping the logout wait, and report
+        # a timeout so the caller warns player state may not be saved.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return [], max(0.0, time.monotonic() - started), True
+            await asyncio.sleep(min(_CLOSE_POLL_S, remaining))
     watch = _LogoutWatch(boundary)
 
     def _elapsed() -> float:

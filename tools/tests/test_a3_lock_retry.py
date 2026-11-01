@@ -7,11 +7,14 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from dayz_mcp import dayz_test_tool, launcher_registry, registry_lock
+from dayz_mcp import dayz_test_request, dayz_test_tool, launcher_registry, registry_lock
 from dayz_mcp import launcher_registry_update as updater
+from dayz_mcp.server_cli import reset_instance_context_for_tests
 
 
 class _FakeClock:
@@ -124,12 +127,21 @@ class RegistryLockRetryTest(unittest.TestCase):
         holder = registry_lock.acquire_registry_lock(
             exclusive=True, path=self.lock_path
         )
-        started = threading.Event()
+        rejected_busy = threading.Event()
         acquired = threading.Event()
         result: dict[str, object] = {}
+        calls: list = []
+
+        def observed_acquire(**kwargs):
+            calls.append(kwargs)
+            try:
+                return _REAL_ACQUIRE(**kwargs)
+            except RuntimeError as error:
+                if str(error) == "launcher_registry_busy":
+                    rejected_busy.set()
+                raise
 
         def _retry() -> None:
-            started.set()
             try:
                 with registry_lock.acquire_registry_lock_with_retry(
                     exclusive=True,
@@ -144,19 +156,25 @@ class RegistryLockRetryTest(unittest.TestCase):
                 result["error"] = error
 
         worker = threading.Thread(target=_retry)
-        try:
-            worker.start()
-            self.assertTrue(started.wait(5.0))
-            # While holder holds the lock, acquisition cannot succeed,
-            # whatever the scheduling of the worker thread.
-            self.assertFalse(acquired.wait(0.3))
-        finally:
-            holder.close()
-        worker.join(5.0)
+        with mock.patch.object(
+            registry_lock, "acquire_registry_lock", side_effect=observed_acquire
+        ):
+            worker_started = False
+            try:
+                worker.start()
+                worker_started = True
+                self.assertTrue(rejected_busy.wait(5.0), result)
+                self.assertFalse(acquired.is_set())
+            finally:
+                holder.close()
+                if worker_started:
+                    worker.join(5.0)
         self.assertFalse(worker.is_alive())
         self.assertTrue(acquired.is_set(), result)
         self.assertEqual(result.get("ok"), True)
         self.assertNotIn("error", result)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertTrue(all(call["exclusive"] is True for call in calls))
 
     def test_busy_past_deadline_fails_clearly_without_hanging(self) -> None:
         with registry_lock.acquire_registry_lock(
@@ -535,30 +553,263 @@ class CallerRetryTest(unittest.TestCase):
             self.assertEqual(registry.read_bytes(), installed)
 
 
-class _FakeOpened:
+class _FakeOpenedLauncher:
     def __init__(self) -> None:
         self.closed = False
+
+    def validate_native_pe(self) -> None:
+        return None
 
     def close(self) -> None:
         self.closed = True
 
-    def __enter__(self) -> "_FakeOpened":
+    def __enter__(self) -> "_FakeOpenedLauncher":
         return self
 
     def __exit__(self, *_args: object) -> None:
         self.close()
 
 
-class AsyncLauncherOpenTest(unittest.IsolatedAsyncioTestCase):
-    async def test_concurrent_progress_while_launcher_open_waits(self) -> None:
-        # The synchronous open (with its busy-lock retry sleep) would stall
-        # a 10 ms timer for its whole wait if it ran on the event loop.
-        opened = _FakeOpened()
+def _busy_acquire(calls: list):
+    def _acquire(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("launcher_registry_busy")
 
-        def slow_open(_launcher_id: str) -> _FakeOpened:
-            time.sleep(0.4)
-            return opened
+    return _acquire
 
+
+class NonBlockingRegistryOpenTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved_cache = launcher_registry._cached_approved_registry()
+        launcher_registry._clear_approved_registry_cache_for_test()
+        self.addCleanup(self._restore_cache)
+
+    def _restore_cache(self) -> None:
+        launcher_registry._clear_approved_registry_cache_for_test()
+        if self._saved_cache is not None:
+            launcher_registry._cache_approved_registry(self._saved_cache)
+
+    def test_busy_without_cache_raises_busy_after_one_fail_fast_attempt(self) -> None:
+        calls: list = []
+        started = time.monotonic()
+        with mock.patch.object(
+            registry_lock, "acquire_registry_lock", _busy_acquire(calls)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "^launcher_registry_busy$"):
+                launcher_registry.try_open_approved_launcher("dayz-test-v1")
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(call["exclusive"] is False for call in calls))
+
+    def test_busy_with_cache_opens_from_cache_without_lock(self) -> None:
+        launcher_registry._cache_approved_registry([_entry()])
+        opened = _FakeOpenedLauncher()
+        calls: list = []
+        with (
+            mock.patch.object(
+                registry_lock, "acquire_registry_lock", _busy_acquire(calls)
+            ),
+            mock.patch.object(
+                launcher_registry, "_open_validated_entry", return_value=opened
+            ) as open_entry,
+        ):
+            result = launcher_registry.try_open_approved_launcher("dayz-test-v1")
+        self.assertIs(result, opened)
+        self.assertFalse(hasattr(opened, "_registry_lock"))
+        self.assertEqual(open_entry.call_count, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(call["exclusive"] is False for call in calls))
+
+    def test_free_lock_reads_caches_and_releases_lock_on_error(self) -> None:
+        fake_lock = _FakeLock()
+        calls: list = []
+
+        def free_acquire(**kwargs):
+            calls.append(kwargs)
+            return fake_lock
+
+        with (
+            mock.patch.object(
+                registry_lock, "acquire_registry_lock", side_effect=free_acquire
+            ),
+            mock.patch.object(
+                launcher_registry,
+                "_read_canonical_registry",
+                return_value=[_entry()],
+            ),
+            mock.patch.object(
+                launcher_registry,
+                "_open_validated_entry",
+                side_effect=ValueError("launcher_not_approved"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "launcher_not_approved"):
+                launcher_registry.try_open_approved_launcher("dayz-test-v1")
+        self.assertTrue(fake_lock.closed)
+        self.assertTrue(all(call["exclusive"] is False for call in calls))
+        self.assertEqual(launcher_registry._cached_approved_registry(), [_entry()])
+
+    def test_pending_open_completes_after_lock_is_released(self) -> None:
+        # Busy with a cache: the close-path open is served from the cache.
+        launcher_registry._cache_approved_registry([_entry()])
+        cached_opened = _FakeOpenedLauncher()
+        with (
+            mock.patch.object(
+                registry_lock, "acquire_registry_lock", _busy_acquire([])
+            ),
+            mock.patch.object(
+                launcher_registry, "_open_validated_entry", return_value=cached_opened
+            ),
+        ):
+            self.assertIs(
+                launcher_registry.try_open_approved_launcher("dayz-test-v1"),
+                cached_opened,
+            )
+        # Once the holder releases, the next call takes the real lock and
+        # re-reads the canonical registry instead of serving the cache.
+        fake_lock = _FakeLock()
+        fresh_opened = _FakeOpenedLauncher()
+        with (
+            mock.patch.object(
+                registry_lock,
+                "acquire_registry_lock",
+                return_value=fake_lock,
+            ),
+            mock.patch.object(
+                launcher_registry,
+                "_read_canonical_registry",
+                return_value=[_entry()],
+            ) as read_registry,
+            mock.patch.object(
+                launcher_registry, "_open_validated_entry", return_value=fresh_opened
+            ),
+        ):
+            result = launcher_registry.try_open_approved_launcher("dayz-test-v1")
+        self.assertIs(result, fresh_opened)
+        self.assertIs(fresh_opened._registry_lock, fake_lock)  # type: ignore[attr-defined]
+        self.assertEqual(read_registry.call_count, 1)
+
+
+_CLOSE_RUN_ID = "run-a3-fix5"
+_CLOSE_TERMINATION = "--- Termination successfully completed ---\n"
+_CLOSE_CONNECT = 'Player "Ada" (id=1) is connected\n'
+_CLOSE_LINK = "[StateMachine]: Player Ada (uid 76561198000000001)\n"
+
+
+class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        reset_instance_context_for_tests()
+        self.addCleanup(reset_instance_context_for_tests)
+        self._saved_cache = launcher_registry._cached_approved_registry()
+        launcher_registry._clear_approved_registry_cache_for_test()
+        self.addCleanup(self._restore_cache)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "_server").mkdir()
+        (self.root / "_client").mkdir()
+        self.server_rpt = self.root / "_server" / "profiles" / "server.rpt"
+        self.client_rpt = self.root / "_client" / "profiles" / "client.rpt"
+        self.policy = dayz_test_request.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=str(self.root),
+            default_source=str(self.root),
+            default_base_mods=(),
+            mission_roots=(str(self.root / "_server" / "mpmissions"),),
+            mod_roots=(str(self.root),),
+        )
+        self.acquire_calls: list = []
+        self._busy_patcher = mock.patch.object(
+            registry_lock, "acquire_registry_lock", _busy_acquire(self.acquire_calls)
+        )
+        self._busy_patcher.start()
+        self.addCleanup(self._busy_patcher.stop)
+
+    def _restore_cache(self) -> None:
+        launcher_registry._clear_approved_registry_cache_for_test()
+        if self._saved_cache is not None:
+            launcher_registry._cache_approved_registry(self._saved_cache)
+
+    def _write(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _runtime(self, *, append_logout: bool) -> SimpleNamespace:
+        runtime = SimpleNamespace(
+            active_lease_token="held",
+            active_ticket=None,
+            active_operation_id=None,
+            retire_event=None,
+            close_at=[],
+        )
+
+        async def lifecycle_status():
+            if runtime.retire_event is not None:
+                return {
+                    "runs": [],
+                    "retired_run_diagnostics": [
+                        {
+                            "run_id": _CLOSE_RUN_ID,
+                            "daemon_generation_at_launch": "",
+                            "daemon_generation_current": "",
+                            "generation_changed": False,
+                            "event": runtime.retire_event,
+                            "reason": "all_processes_gone_or_foreign",
+                            "decision": "reaped",
+                            "state": "EXITED",
+                        }
+                    ],
+                }
+            return {
+                "runs": [
+                    {
+                        "run_id": _CLOSE_RUN_ID,
+                        "state": "RUNNING",
+                        "mod": "@ExampleMod",
+                        "profiles": str(self.server_rpt.parent),
+                        "processes": [
+                            {"role": "client", "pid": 2},
+                            {"role": "server", "pid": 1},
+                        ],
+                    }
+                ],
+                "retired_run_diagnostics": [],
+            }
+
+        async def lifecycle_close_roles(run_id: str, roles: list[str]):
+            runtime.close_at.append((tuple(roles), time.monotonic()))
+            for role in roles:
+                path = self.client_rpt if role == "client" else self.server_rpt
+                if append_logout and role == "client" and self.server_rpt.is_file():
+                    self.server_rpt.write_text(
+                        self.server_rpt.read_text(encoding="utf-8")
+                        + "[Logout]: Player 76561198000000001 finished\n",
+                        encoding="utf-8",
+                    )
+                if path.is_file():
+                    path.write_text(
+                        path.read_text(encoding="utf-8") + _CLOSE_TERMINATION,
+                        encoding="utf-8",
+                    )
+            result: dict[str, object] = {"run_id": run_id}
+            for role in roles:
+                result[role] = {"pid": 1, "windows_found": 1, "windows_posted": 1}
+            return result
+
+        async def lifecycle_close(run_id: str):
+            return await lifecycle_close_roles(run_id, ["client", "server"])
+
+        async def lifecycle_reap(run_id: str):
+            runtime.retire_event = "run_reaped"
+            return {"ok": True, "run_id": run_id, "state": "EXITED"}
+
+        runtime.lifecycle_status = lifecycle_status
+        runtime.lifecycle_close_roles = lifecycle_close_roles
+        runtime.lifecycle_close = lifecycle_close
+        runtime.lifecycle_reap = lifecycle_reap
+        return runtime
+
+    async def _close_with_ticker(self, runtime) -> tuple[dict[str, object], list, bool, float]:
         ticks: list[float] = []
 
         async def ticker() -> None:
@@ -566,45 +817,78 @@ class AsyncLauncherOpenTest(unittest.IsolatedAsyncioTestCase):
                 ticks.append(time.monotonic())
                 await asyncio.sleep(0.01)
 
-        with mock.patch.object(
-            dayz_test_tool, "open_approved_launcher", side_effect=slow_open
-        ):
-            tick_task = asyncio.create_task(ticker())
-            try:
-                result = await dayz_test_tool._open_approved_launcher_async()
-            finally:
-                tick_task.cancel()
-        self.assertIs(result, opened)
-        self.assertGreaterEqual(len(ticks), 5)
-
-    async def test_cancelled_open_releases_launcher_when_worker_finishes(
-        self,
-    ) -> None:
-        opened = _FakeOpened()
-
-        def slow_open(_launcher_id: str) -> _FakeOpened:
-            time.sleep(0.3)
-            return opened
-
-        with mock.patch.object(
-            dayz_test_tool, "open_approved_launcher", side_effect=slow_open
-        ):
-            task = asyncio.create_task(
-                dayz_test_tool._open_approved_launcher_async()
+        loop = asyncio.get_running_loop()
+        timer_fired: list[bool] = []
+        loop.call_later(0.01, lambda: timer_fired.append(True))
+        task = asyncio.create_task(ticker())
+        started = time.monotonic()
+        try:
+            result = await dayz_test_tool.execute_dayz_test_close(
+                runtime, _CLOSE_RUN_ID, graceful_timeout_s=0.6
             )
-            await asyncio.sleep(0.05)
-            started = time.monotonic()
+        finally:
             task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            # Cancellation is prompt, not held until the worker finishes.
-            self.assertLess(time.monotonic() - started, 0.25)
-            self.assertFalse(opened.closed)
-            # Once the worker returns the launcher, it is closed (lock freed).
-            deadline = time.monotonic() + 2.0
-            while not opened.closed and time.monotonic() < deadline:
-                await asyncio.sleep(0.01)
-        self.assertTrue(opened.closed)
+        return result, ticks, bool(timer_fired), time.monotonic() - started
+
+    async def test_close_busy_no_cache_returns_promptly_and_waits_logout(self) -> None:
+        self._write(self.server_rpt, "boot\n")
+        self._write(self.client_rpt, "boot client\n")
+        runtime = self._runtime(append_logout=False)
+        result, ticks, timer_fired, elapsed = await self._close_with_ticker(runtime)
+        # The busy lock never stalls the loop: the 10 ms timer fires and
+        # the 10 ms ticker keeps ticking while close waits.
+        self.assertTrue(timer_fired)
+        self.assertGreater(len(ticks), 0)
+        self.assertLess(elapsed, 3.0)
+        self.assertTrue(all(c["exclusive"] is False for c in self.acquire_calls))
+        # Conservative default: with no policy the server close still
+        # waits the logout budget after the client close.
+        self.assertEqual(
+            [roles for roles, _at in runtime.close_at], [("client",), ("server",)]
+        )
+        delta = runtime.close_at[1][1] - runtime.close_at[0][1]
+        self.assertGreaterEqual(delta, 0.4)
+        self.assertGreaterEqual(float(result["logout_wait_s"]), 0.4)
+
+    async def test_close_busy_with_cache_waits_for_connected_logout(self) -> None:
+        self._write(self.server_rpt, "boot\n" + _CLOSE_CONNECT + _CLOSE_LINK)
+        self._write(self.client_rpt, "boot client\n")
+        launcher_registry._cache_approved_registry([_entry()])
+        opened = _FakeOpenedLauncher()
+
+        @contextmanager
+        def fake_bundle(_opened):
+            yield SimpleNamespace(sealed_policies=object())
+
+        runtime = self._runtime(append_logout=False)
+        with (
+            mock.patch.object(
+                launcher_registry, "_open_validated_entry", return_value=opened
+            ),
+            mock.patch.object(
+                dayz_test_tool.secure_launcher,
+                "load_verified_bundle",
+                side_effect=fake_bundle,
+            ),
+            mock.patch.object(
+                dayz_test_tool, "_semantic_policies", return_value=[self.policy]
+            ),
+        ):
+            result, ticks, timer_fired, elapsed = await self._close_with_ticker(runtime)
+        self.assertTrue(timer_fired)
+        self.assertGreater(len(ticks), 0)
+        self.assertLess(elapsed, 3.0)
+        self.assertTrue(all(c["exclusive"] is False for c in self.acquire_calls))
+        self.assertEqual(
+            [roles for roles, _at in runtime.close_at], [("client",), ("server",)]
+        )
+        delta = runtime.close_at[1][1] - runtime.close_at[0][1]
+        self.assertGreaterEqual(delta, 0.4)
+        self.assertEqual(
+            result["logout_players"],
+            [{"player": "Ada", "logout_finished": False}],
+        )
+        self.assertIn("player_state_not_saved", str(result.get("warnings")))
 
 
 if __name__ == "__main__":
