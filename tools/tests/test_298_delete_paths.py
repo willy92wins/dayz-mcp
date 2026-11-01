@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from tests.enforce_subset_helpers import EnforceMap, EnforceString, clean, method_body, translate
-from tests.test_298_vehicle_eject import Entity, Human, Node, Vehicle, helper
+from tests.vehicle_eject_helpers import Entity, Human, Node, Vehicle, helper
 
 
 ROOT = Path(__file__).resolve().parents[2]

@@ -95,10 +95,10 @@ class VehicleDeleteContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"id": 17, "ok": 1, "object_id": 7, "deleted": 0})
 
     async def test_public_spawn_rollback_error_keeps_id_and_scene_registration(self) -> None:
-        from tests import test_scene_verbs as scenes
+        from tests import scene_helpers as scenes
         from tests.enforce_subset_helpers import EnforceArray, EnforceString
 
-        bridge = scenes.SceneBridgeExecutionTest(methodName="runTest")
+        bridge = scenes.SceneBridgeFixture()
         bridge.setUpClass()
         bridge.setUp()
         root = scenes._Entity("Barrel_Green", entity=False)

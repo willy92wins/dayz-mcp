@@ -24,7 +24,7 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
 )
 from tests._addon_paths import addon_root
-from tests.test_298_integration import EjectGuardFake
+from tests.vehicle_eject_helpers import EjectGuardFake
 from tests.bridge_client_capabilities_helpers import _method_body
 from tests.enforce_subset_helpers import (
     EnforceString,

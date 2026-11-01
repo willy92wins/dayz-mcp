@@ -12,48 +12,13 @@ from __future__ import annotations
 import unittest
 
 
-class EjectGuardFake:
-    def __init__(self) -> None:
-        self.targets = []
-        self.vehicles = []
-        self.ready_calls = []
-
-    def Add(self, target) -> None:
-        if target is None or target in self.targets:
-            return
-        self.targets.append(target)
-        if getattr(target, "is_transport", False):
-            self.vehicles.append(target)
-        for child in getattr(target, "children", ()):
-            self.Add(child)
-
-    def Begin(self, tick: int) -> bool:
-        if any(not getattr(vehicle, "eject_allowed", True) for vehicle in self.vehicles):
-            return False
-        for vehicle in self.vehicles:
-            vehicle.exit_requested = True
-        return True
-
-    def HasVehicles(self) -> bool:
-        return bool(self.vehicles)
-
-    def HasOccupants(self) -> bool:
-        return any(getattr(vehicle, "occupants", ()) for vehicle in self.vehicles)
-
-    def Ready(self, tick: int) -> bool:
-        self.ready_calls.append(tick)
-        return not self.HasOccupants() and all(
-            tick >= getattr(vehicle, "ready_at_tick", 2) for vehicle in self.vehicles
-        )
-
-
 class DeleteBridgeIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
-        from tests import test_scene_verbs as scenes
+        from tests import scene_helpers as scenes
         from tests.enforce_subset_helpers import translate
 
         self.scenes = scenes
-        self.bridge = scenes.SceneBridgeExecutionTest(methodName="runTest")
+        self.bridge = scenes.SceneBridgeFixture()
         self.bridge.setUpClass()
         self.bridge.setUp()
         for signature in (
@@ -130,7 +95,7 @@ class DeleteBridgeIntegrationTest(unittest.TestCase):
         self.assertTrue(self.bridge.posted[-1].ok)
 
     def test_object_deletes_empty_root_after_vehicle_detaches_and_is_occupied(self) -> None:
-        from tests import test_298_vehicle_eject as eject
+        from tests import vehicle_eject_helpers as eject
 
         root = eject.Entity()
         car = eject.Vehicle()
@@ -227,8 +192,8 @@ class DeleteBridgeIntegrationTest(unittest.TestCase):
 
 class InventoryDeleteIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
-        from tests import test_loadout as loadout
-        from tests import test_298_vehicle_eject as eject
+        from tests import loadout_helpers as loadout
+        from tests import vehicle_eject_helpers as eject
 
         self.loadout = loadout
         self.eject = eject
