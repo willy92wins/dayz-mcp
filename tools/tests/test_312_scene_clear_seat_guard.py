@@ -132,16 +132,21 @@ class SceneClearSeatGuardTest(unittest.IsolatedAsyncioTestCase):
                          telemetry if cmd == "vehicle_telemetry" else _CLEARED)
         with patch.object(self.runtime, "call_bridge", new=call):
             await self.runtime.tool_lock.acquire()
+            task = asyncio.create_task(self._clear())
             try:
-                task = asyncio.create_task(self._clear())
                 for _ in range(20):
                     await asyncio.sleep(0)
-                self.assertFalse(task.done())
-                self.runtime.bridge_status_payload.assert_not_awaited()
-                call.assert_not_awaited()
+                # Record while the lock is held; assert after the task is
+                # collected, so a failure never leaves it running (Sol r2 R2).
+                while_held = (
+                    task.done(),
+                    self.runtime.bridge_status_payload.await_count,
+                    call.await_count,
+                )
             finally:
                 self.runtime.tool_lock.release()
             result = await task
+        self.assertEqual(while_held, (False, 0, 0))
         self.assertEqual(result, _CLEARED)
         self.runtime.bridge_status_payload.assert_awaited_once()
         self.assertEqual([item.args[0] for item in call.await_args_list], ["vehicle_telemetry", "scene_clear"])
