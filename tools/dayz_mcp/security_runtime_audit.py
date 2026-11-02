@@ -47,6 +47,18 @@ RUNTIME_HTTP_ALLOWLIST = {
         reason="Canonical sink forms the authenticated query only after accreditation.",
     ),
     (
+        "dayz_mcp/accredited_keepalive.py",
+        "_transmit",
+        "http_request",
+    ): RuntimeHttpAllowance(
+        owner="client accredited keepalive",
+        reason=(
+            "Sends on a socket the sealed transport already accredited, or on "
+            "the first use of that socket after the sealed identity check. "
+            "The query key is the same client credential."
+        ),
+    ),
+    (
         "dayz_mcp/orphan_guard.py",
         "probe_listener_responsive",
         "urlopen",
