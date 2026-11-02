@@ -3,7 +3,7 @@
 The wire has no engine FOV getter (Camera.GetCurrentFOV froze the client
 render after camera_set, MCPClientBridge.c:5737-5740), so a successful
 apply echoes the value the setter path received, in radians, and fov=0
-reaches no SetFOV at all (MCPClientBridge.c:6383/:6429), reported as an
+reaches no SetFOV at all (MCPClientBridge.c:6383/:6432), reported as an
 explicit null. The ~68.5 degrees vertical at 1920x1080 default is an
 owner-provided contextual measurement (run 8834df0e, 2026-10-04),
 documented in the tool description and never read back from the engine.

@@ -203,8 +203,8 @@ class RestoreGameplayPostconditionContractTest(unittest.IsolatedAsyncioTestCase)
     The Enforce dispatch closes the verdict blind: RestoreGameplay() and
     ReleaseCamera() return nothing and result.ok = true is unconditional
     (MCPClientBridge.c:1284-1286), while both have exits that do nothing at all
-    (if (!mission) return; at :8291-8294; the m_ControlsSuppressed guard at
-    :8296). Ficha fb-20260903-125244-4f83. The separate gameplay_state reader
+    (if (!mission) return; at :8294-8297; the m_ControlsSuppressed guard at
+    :8299). Ficha fb-20260903-125244-4f83. The separate gameplay_state reader
     exposes controls, HUD and the bridge simulation flag; restore_gameplay's
     automatic verification still re-reads only camera_get, so that is the one postcondition this
     layer may claim -- and the only ground on which it may answer ok.
