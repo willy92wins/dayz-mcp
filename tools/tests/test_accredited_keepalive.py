@@ -1518,3 +1518,86 @@ class DaemonKeepaliveTests(unittest.TestCase):
                 except OSError:
                     pass
             daemon.stop()
+
+    def test_stop_during_follow_up_parse_does_not_dispatch(self) -> None:
+        """F13: stop() begins after the follow-up request line was read and
+        while its headers are still being parsed. The post-parse guard must
+        refuse it: 503, no lease."""
+        coordinator = SessionCoordinator(audit=lambda _event: True)
+        daemon = loopback.LoopbackServer(
+            0,
+            "stop-key",
+            log_sink=lambda _message: None,
+            poll_interval=0.01,
+            reclaim_orphans=False,
+        )
+        daemon.state.coordination = coordinator
+        entered = threading.Event()
+        release = threading.Event()
+        original_parse = loopback.Handler.parse_request
+
+        def gated_parse(handler: loopback.Handler) -> bool:
+            if getattr(handler, "command", None) is not None:
+                # Second parse on this socket: the follow-up. Hold it after
+                # its request line was read and before its headers are.
+                entered.set()
+                self.assertTrue(release.wait(2.0))
+            return original_parse(handler)
+
+        daemon.start()
+        sock: socket.socket | None = None
+        try:
+            assert daemon.httpd is not None
+            host, port = daemon.httpd.server_address
+            self.assertNotEqual(int(port), _FORBIDDEN_PORT)
+            with patch.object(loopback.Handler, "parse_request", gated_parse):
+                sock = socket.create_connection((host, int(port)), timeout=2.0)
+                sock.settimeout(2.0)
+                target = "/status?" + urllib.parse.urlencode({"key": "stop-key"})
+                sock.sendall(
+                    (
+                        f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        "Connection: keep-alive\r\n\r\n"
+                    ).encode("ascii")
+                )
+                status, headers, _body, rest = _read_http(sock)
+                self.assertTrue(status.startswith(b"HTTP/1.0 200"), status)
+                self.assertIn("keep-alive", headers.get("connection", "").lower())
+                client = ClientIdentity(
+                    "codex", 7, 1, "2026-07-14T20:00:00Z", "session-during-parse", "stop"
+                )
+                acquire_body = json.dumps(
+                    {"identity": client.to_payload(), "purpose": "during parse"}
+                ).encode("utf-8")
+                sock.sendall(
+                    (
+                        "POST /session/acquire?"
+                        + urllib.parse.urlencode({"key": "stop-key"})
+                        + " HTTP/1.1\r\n"
+                    ).encode("ascii")
+                )
+                self.assertTrue(entered.wait(2.0))
+                # Stop has begun (what LoopbackServer.stop() does first);
+                # the socket is not idle, so nothing wakes it.
+                daemon.state.cancel_pending()
+                sock.sendall(
+                    (
+                        "Host: 127.0.0.1\r\nConnection: keep-alive\r\n"
+                        f"Content-Length: {len(acquire_body)}\r\n\r\n"
+                    ).encode("ascii")
+                    + acquire_body
+                )
+                release.set()
+                followed, _hdrs, body, _rest = _read_http(sock, rest)
+            self.assertEqual(followed.split()[1], b"503", followed)
+            self.assertEqual(json.loads(body.decode("utf-8")).get("error"), "server_stopping")
+            self.assertNotIn(b"lease_token", body)
+            self.assertIsNone(coordinator._active)
+        finally:
+            release.set()
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            daemon.stop()
