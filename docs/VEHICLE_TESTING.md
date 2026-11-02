@@ -13,7 +13,9 @@ about the site, not about the tools.
 
 **Issue #302:** `object_delete` refuses with `ok=false`,
 `error=vehicle_client_seated`, `deleted=0` and the requested `object_id`
-when client telemetry shows a client-owned seated occupant. No delete is
+when client telemetry shows a client-owned seated occupant. Since #312
+`scene_clear` runs the same check and refuses the same way, with the
+requested `scene_id` instead of an `object_id`. No delete is
 sent to the server. The current telemetry has no server registry `object_id`
 (`addon/scripts/5_Mission/MCPClientBridge.c:2946-2994`), so the guard
 conservatively refuses **every target**, including an apparently unrelated

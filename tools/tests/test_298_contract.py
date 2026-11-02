@@ -178,12 +178,24 @@ class VehicleDeleteContractTest(unittest.IsolatedAsyncioTestCase):
             "ok": 1,
             "scene_clear": {"deleted": 2, "already_deleted": 1, "errors": 0, "error_ids": []},
         }
-        call = AsyncMock(return_value=copy.deepcopy(reply))
-        with patch.object(self.runtime, "call_bridge", new=call):
+        # #312: scene_clear reads client telemetry first, like object_delete.
+        call = AsyncMock(side_effect=[
+            {"ok": 1, "seated": False},
+            copy.deepcopy(reply),
+        ])
+        with (
+            patch.object(self.runtime, "bridge_status_payload", new=AsyncMock(
+                return_value={"client_peer": {"last_poll_age_s": 0.1}}
+            )),
+            patch.object(self.runtime, "call_bridge", new=call),
+        ):
             actual = _content_json(
                 await self.app.call_tool("scene_clear", {"scene_id": "vehicles", "timeout_s": 8.0})
             )
-        call.assert_awaited_once_with("scene_clear", {"scene_id": "vehicles"}, "server", 8.0)
+        self.assertEqual([(item.args, item.kwargs) for item in call.await_args_list], [
+            (("vehicle_telemetry", {}, "client", 8.0), {}),
+            (("scene_clear", {"scene_id": "vehicles"}, "server", 8.0), {}),
+        ])
         self.assertEqual(actual, reply)
 
     def test_loadout_names_vehicle_cleanup_refusal_in_both_error_surfaces(self) -> None:

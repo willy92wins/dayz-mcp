@@ -7221,6 +7221,90 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         return _scene_entities_reply(result)
 
+    async def _client_seat_refusal(
+        target: dict[str, Any], timeout_s: float
+    ) -> dict[str, Any] | None:
+        """#302: the refusal a delete gets while a client-owned seat may exist.
+
+        None means client telemetry shows no client-owned seat and the delete
+        may go to the server. Shared by object_delete and scene_clear (#312);
+        the caller holds runtime.tool_lock. target is the id the tool was
+        given ({"object_id": ...} or {"scene_id": ...}).
+        """
+        try:
+            # ClientRuntime also learns the serving profile from this read.
+            status = await runtime.bridge_status_payload()
+        except Exception:
+            status = None
+            if _is_client_authority(config, runtime):
+                _forget_serving_live_profile(runtime)
+        if _serving_live_enabled(config, runtime):
+            # Server-only player reads do not establish the client seat
+            # (see the query_player_state caveat). No poll is not no seat.
+            return {
+                "ok": False,
+                "error": "vehicle_seat_unverified",
+                **target,
+                "deleted": 0,
+                "hint": (
+                    "The live profile, or an unknown serving profile, has "
+                    "no permitted read that verifies the client-owned seat. "
+                    "Server in_vehicle=false and absent/stale client polls "
+                    "do not prove an empty seat. All object_ids are refused "
+                    "without client telemetry or deletion; a permitted "
+                    "seat verification is required before live deletion "
+                    "can be supported."
+                ),
+            }
+        if not _client_peer_probeable(status):
+            # Poll failures only retry/back off; they do not vacate the seat
+            # (addon/scripts/5_Mission/MCPClientBridge.c:1038-1067).
+            return {
+                "ok": False,
+                "error": "vehicle_seat_unverified",
+                **target,
+                "deleted": 0,
+                "hint": (
+                    "Unreadable bridge status or an absent/stale client does "
+                    "not prove an empty seat. Restore a probeable client and "
+                    "verify its seat before retrying deletion."
+                ),
+            }
+        telemetry = await runtime.call_bridge(
+            "vehicle_telemetry", {}, "client", _timeout(timeout_s)
+        )
+        client_seated = occupant_client_seated_strict(telemetry)
+        if client_seated is None:
+            return {
+                "ok": False,
+                "error": "vehicle_seat_unverified",
+                **target,
+                "deleted": 0,
+                "hint": (
+                    "Client telemetry must contain a readable boolean seated "
+                    "flag (true/false or integer 0/1) before deletion can be "
+                    "retried. Unreadable telemetry does not prove an empty seat."
+                ),
+            }
+        # Client telemetry has no server registry id. Refuse every
+        # target rather than guess whether its hierarchy holds this seat.
+        if client_seated:
+            return {
+                "ok": False,
+                "error": "vehicle_client_seated",
+                **target,
+                "deleted": 0,
+                "hint": (
+                    "Deleting while the client owns a seated vehicle can "
+                    "crash the client. Use the client exit flow and confirm "
+                    "seated=false before retrying, or use vehicle_enter "
+                    "for server-authoritative seating. Telemetry cannot "
+                    "safely match the seat to object_id, so all deletes "
+                    "are refused while this client-owned seat is occupied."
+                ),
+            }
+        return None
+
     @app.tool(
         description=(
             f"{LEASE_TOOL_LINE} Delete every object registered under scene_id "
@@ -7237,6 +7321,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "their registry ids. The raw bridge result records survivors in "
             "scene_clear.errors/error_ids; the MCP tool reports the error token. "
             "Some occupants may already have left when a failure is reported. "
+            "It first runs the client seat check of object_delete: in the live "
+            "profile or an unverifiable one, with an absent/stale client or "
+            "telemetry without a readable seated flag it returns "
+            "vehicle_seat_unverified, and while client vehicle_telemetry shows a "
+            "client-owned seat it returns vehicle_client_seated; both with "
+            "deleted=0, nothing sent to the server. "
             "Before requesting any dismount or "
             "deleting anything the call checks that no live object of this scene "
             "and live object of another scene are in one hierarchy, one carrying "
@@ -7272,6 +7362,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if not is_scene_id(scene_id):
             raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
         async with runtime.tool_lock:
+            refusal = await _client_seat_refusal({"scene_id": scene_id}, timeout_s)
+            if refusal is not None:
+                return refusal
             result = await runtime.call_bridge(
                 "scene_clear", {"scene_id": scene_id}, "server", _timeout(timeout_s)
             )
@@ -7331,78 +7424,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
         args = {"object_id": parsed_id}
         async with runtime.tool_lock:
-            try:
-                # ClientRuntime also learns the serving profile from this read.
-                status = await runtime.bridge_status_payload()
-            except Exception:
-                status = None
-                if _is_client_authority(config, runtime):
-                    _forget_serving_live_profile(runtime)
-            if _serving_live_enabled(config, runtime):
-                # Server-only player reads do not establish the client seat
-                # (see the query_player_state caveat). No poll is not no seat.
-                return {
-                    "ok": False,
-                    "error": "vehicle_seat_unverified",
-                    "object_id": parsed_id,
-                    "deleted": 0,
-                    "hint": (
-                        "The live profile, or an unknown serving profile, has "
-                        "no permitted read that verifies the client-owned seat. "
-                        "Server in_vehicle=false and absent/stale client polls "
-                        "do not prove an empty seat. All object_ids are refused "
-                        "without client telemetry or deletion; a permitted "
-                        "seat verification is required before live deletion "
-                        "can be supported."
-                    ),
-                }
-            if not _client_peer_probeable(status):
-                # Poll failures only retry/back off; they do not vacate the seat
-                # (addon/scripts/5_Mission/MCPClientBridge.c:1038-1067).
-                return {
-                    "ok": False,
-                    "error": "vehicle_seat_unverified",
-                    "object_id": parsed_id,
-                    "deleted": 0,
-                    "hint": (
-                        "Unreadable bridge status or an absent/stale client does "
-                        "not prove an empty seat. Restore a probeable client and "
-                        "verify its seat before retrying deletion."
-                    ),
-                }
-            telemetry = await runtime.call_bridge(
-                "vehicle_telemetry", {}, "client", _timeout(timeout_s)
-            )
-            client_seated = occupant_client_seated_strict(telemetry)
-            if client_seated is None:
-                return {
-                    "ok": False,
-                    "error": "vehicle_seat_unverified",
-                    "object_id": parsed_id,
-                    "deleted": 0,
-                    "hint": (
-                        "Client telemetry must contain a readable boolean seated "
-                        "flag (true/false or integer 0/1) before deletion can be "
-                        "retried. Unreadable telemetry does not prove an empty seat."
-                    ),
-                }
-            # Client telemetry has no server registry id. Refuse every
-            # target rather than guess whether its hierarchy holds this seat.
-            if client_seated:
-                return {
-                    "ok": False,
-                    "error": "vehicle_client_seated",
-                    "object_id": parsed_id,
-                    "deleted": 0,
-                    "hint": (
-                        "Deleting while the client owns a seated vehicle can "
-                        "crash the client. Use the client exit flow and confirm "
-                        "seated=false before retrying, or use vehicle_enter "
-                        "for server-authoritative seating. Telemetry cannot "
-                        "safely match the seat to object_id, so all deletes "
-                        "are refused while this client-owned seat is occupied."
-                    ),
-                }
+            refusal = await _client_seat_refusal({"object_id": parsed_id}, timeout_s)
+            if refusal is not None:
+                return refusal
             return await runtime.call_bridge("object_delete", args, "server", _timeout(timeout_s))
 
     @app.tool(

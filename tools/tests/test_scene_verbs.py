@@ -259,6 +259,18 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
         call.assert_awaited_once()
         return call.await_args.args, _content_json(result)
 
+    async def _forwarded_after_seat_check(self, tool: str, arguments: dict, answer: dict | None = None):
+        # #312: scene_clear runs the #302 client seat check of object_delete first.
+        reply = {"ok": 1} if answer is None else answer
+        call = AsyncMock(side_effect=lambda cmd, *_args:
+                         {"ok": 1, "seated": 0} if cmd == "vehicle_telemetry" else reply)
+        status = AsyncMock(return_value={"client_peer": {"last_poll_age_s": 0.1}})
+        with patch.object(self.runtime, "bridge_status_payload", new=status), \
+                patch.object(self.runtime, "call_bridge", new=call):
+            result = await self.app.call_tool(tool, arguments)
+        self.assertEqual([item.args[0] for item in call.await_args_list], ["vehicle_telemetry", tool])
+        return call.await_args.args, _content_json(result)
+
     async def _refused(self, tool: str, arguments: dict) -> str:
         call = AsyncMock(return_value={"ok": 1})
         with patch.object(self.runtime, "call_bridge", new=call):
@@ -375,7 +387,8 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
     async def test_scene_entities_and_scene_clear_send_the_scene_alone(self) -> None:
         for tool in ("scene_entities", "scene_clear"):
             with self.subTest(tool=tool):
-                args, _result = await self._forwarded(tool, {"scene_id": "Take-01_b", "timeout_s": 4})
+                forward = self._forwarded_after_seat_check if tool == "scene_clear" else self._forwarded
+                args, _result = await forward(tool, {"scene_id": "Take-01_b", "timeout_s": 4})
                 self.assertEqual(args, (tool, {"scene_id": "Take-01_b"}, "server", 4.0))
 
     async def test_batch_wire_items(self) -> None:
@@ -664,7 +677,7 @@ class SceneToolTest(unittest.IsolatedAsyncioTestCase):
                 "carried_scene_id": "",
             },
         }
-        _args, result = await self._forwarded("scene_clear", {"scene_id": "a"}, answer)
+        _args, result = await self._forwarded_after_seat_check("scene_clear", {"scene_id": "a"}, answer)
         self.assertEqual(
             result["scene_clear"], {"deleted": 2, "already_deleted": 1, "errors": 0, "error_ids": []}
         )

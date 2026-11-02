@@ -186,7 +186,12 @@ class Fb1004TeardownCopyTest(unittest.TestCase):
         self.assertNotIn("pos:", body)
         # #302 supersedes the historical no-seat-precheck contract. The
         # behavioral refusal and normal forwarding are covered by its tests.
-        self.assertIn("vehicle_client_seated", body)
+        # #312 moved the guard into a helper that scene_clear also calls.
+        self.assertIn("_client_seat_refusal(", body)
+        guard = _python_def(
+            source, "async def _client_seat_refusal(", "async def scene_clear("
+        )
+        self.assertIn("vehicle_client_seated", guard)
         self.assertNotIn("async def object_resolve(", body)
 
 
