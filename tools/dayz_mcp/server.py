@@ -116,6 +116,9 @@ from dayz_mcp.loopback import (
     ACTOR_EMOTE_WAIT_MIN_S,
     ACTOR_EMOTE_WAIT_SLACK_S,
     ACTOR_EMOTES,
+    AWAIT_LONG_POLL_FIELD,
+    AWAIT_LONG_POLL_MAX_IN_FLIGHT,
+    AWAIT_LONG_POLL_MAX_S,
     BOT_START_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
@@ -701,6 +704,29 @@ _CARRIER_REFRESH_S = 5.0
 # reviews F1 and F6 of #255).
 MIN_IDLE_RETIREMENT_S = SESSION_TTL_S + 5.0
 POLL_INTERVAL_S = 0.05
+# Do not long-poll in the last stretch of the caller's budget. wait_ms is
+# chosen on the worker thread from that deadline at the instant the request
+# is about to be sent, so time already queued on the default executor is
+# spent. The sealed transport then recomputes only the socket timeout
+# (accredited_daemon_transport.verified_daemon_http_request). Choosing
+# wait_ms before asyncio.to_thread let a saturated executor send a wait
+# longer than the budget left after accreditation: the socket died first,
+# the call surfaced daemon_response_ambiguous, and the cleanup that runs for
+# "timeout waiting…" did not run. A fixed 150ms margin failed the same way
+# on a slower accreditation. Long-poll only when
+# wait_s = min(remaining - AWAIT_LONG_POLL_BUDGET_MARGIN_S, AWAIT_LONG_POLL_MAX_S)
+# is still long enough to send a positive wait_ms. Inside the last
+# AWAIT_LONG_POLL_BUDGET_MARGIN_S the client omits wait_ms and sleeps
+# POLL_INTERVAL_S, so the budget ends as "timeout waiting…".
+AWAIT_LONG_POLL_BUDGET_MARGIN_S = 1.0
+# Long-polls do not take threads from the loop's default executor. That pool
+# is min(32, cpu+4) and every other client call shares it, so eight waits
+# would leave the next call queued until a wait ended. These waits run on a
+# private pool of this many threads (the daemon's in-flight cap, not a CPU
+# count). A non-blocking slot is taken before submit and released when the
+# hop returns, raises, or the task is cancelled. No free slot: this hop omits
+# wait_ms and uses the default executor for the immediate poll.
+AWAIT_CLIENT_LONG_POLL_SLOTS = AWAIT_LONG_POLL_MAX_IN_FLIGHT
 _BROKER_CLEANUP_BUDGET_S = 2.0
 _BROKER_ADMISSION_ERRORS = frozenset(
     {
@@ -1521,6 +1547,10 @@ class Runtime:
         return await self.wait_for_result("exec_enforce", command_id, "server", timeout_s)
 
     async def wait_for_result(self, cmd: str, command_id: int, peer: str, timeout_s: float) -> dict[str, Any]:
+        # In-process 50ms poll. Embedded mode pays neither HTTP nor accreditation,
+        # and this wait must not hold a thread of the shared default executor:
+        # with that pool full, a result published while the wait was queued was
+        # observed only after the deadline, and the call timed out.
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             result = self.state.take_result(command_id, remove=True)
@@ -1726,6 +1756,145 @@ def _client_keepalive_request(**kwargs):
     if bound is not _ORIGINAL_VERIFIED_DAEMON_HTTP_REQUEST:
         return bound(**kwargs)
     return accredited_keepalive.keepalive_daemon_http_request(**kwargs)
+
+
+def _await_replay_query(
+    path: str, query: dict[str, str] | None
+) -> dict[str, str]:
+    """Query for every resend of this call.
+
+    wait_ms is valid only for the first transmission of /await. Daemon
+    recovery, a 401 retry and a reaccreditation replay all drop it and poll
+    at once; the caller's loop chooses a fresh wait_ms from the deadline it
+    still has. This is the only place that knows the field. Other paths are
+    copied unchanged.
+    """
+    copied = dict(query or {})
+    if path == "/await":
+        copied.pop("wait_ms", None)
+    return copied
+
+
+_client_long_poll_guard = threading.Lock()
+_client_long_poll_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_client_long_poll_slots: threading.BoundedSemaphore | None = None
+
+
+def _client_long_poll_resources() -> tuple[
+    concurrent.futures.ThreadPoolExecutor, threading.BoundedSemaphore
+]:
+    global _client_long_poll_executor, _client_long_poll_slots
+    executor = _client_long_poll_executor
+    slots = _client_long_poll_slots
+    if executor is not None and slots is not None:
+        return executor, slots
+    with _client_long_poll_guard:
+        if _client_long_poll_executor is None or _client_long_poll_slots is None:
+            _client_long_poll_slots = threading.BoundedSemaphore(
+                AWAIT_CLIENT_LONG_POLL_SLOTS
+            )
+            _client_long_poll_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=AWAIT_CLIENT_LONG_POLL_SLOTS,
+                # Not the dayz-mcp- prefix: fixture teardown joins every
+                # thread with that prefix, and these workers stay up for the
+                # process.
+                thread_name_prefix="await-long-poll",
+            )
+        assert _client_long_poll_executor is not None
+        assert _client_long_poll_slots is not None
+        return _client_long_poll_executor, _client_long_poll_slots
+
+
+def _try_acquire_client_long_poll_slot() -> bool:
+    _executor, slots = _client_long_poll_resources()
+    return bool(slots.acquire(blocking=False))
+
+
+def _release_client_long_poll_slot() -> None:
+    _executor, slots = _client_long_poll_resources()
+    slots.release()
+
+
+class _AwaitHop:
+    """One private-pool ``/await`` submission.
+
+    The wait loop rebinds its locals every iteration. This object is created
+    for that submission and passed into the worker, so a hop queued by a
+    failed ``submit`` cannot observe the next iteration's flag or event.
+    """
+
+    __slots__ = ("abandoned", "released", "lock", "ready")
+
+    def __init__(self) -> None:
+        self.abandoned = False
+        self.released = False
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+
+    def abandon(self) -> None:
+        with self.lock:
+            self.abandoned = True
+        # Signalled on every abandon, including when the next iteration is
+        # already inside the last second and never arms a hop of its own.
+        self.ready.set()
+
+    def release_slot(self, _done: object = None) -> None:
+        with self.lock:
+            if self.released:
+                return
+            self.released = True
+        _release_client_long_poll_slot()
+
+
+def _issue_await_hop(
+    runtime: Any,
+    deadline: float,
+    command_id: int,
+    holder: dict[str, Any] | None,
+    long_poll: bool,
+    hop: _AwaitHop | None,
+) -> tuple[int, dict[str, Any]]:
+    """Send one ``/await``. ``holder`` and ``hop`` are this submission's.
+
+    ``holder`` is the value at submit time: the loop later rebinds it to
+    ``None`` on a 404, and an in-flight hop must keep the body it was given.
+    """
+
+    if long_poll:
+        if hop is None:
+            raise RuntimeError("long-poll hop missing")
+        hop.ready.wait()
+        with hop.lock:
+            abandoned = hop.abandoned
+        if abandoned:
+            hop.release_slot()
+            return (0, {"status": "abandoned"})
+    remaining_now = deadline - runtime._time_fn()
+    if remaining_now <= 0.0:
+        raise _CallBudgetExpired()
+    query: dict[str, str] = {"id": str(command_id), "remove": "1"}
+    if long_poll:
+        wait_s = min(
+            remaining_now - AWAIT_LONG_POLL_BUDGET_MARGIN_S,
+            AWAIT_LONG_POLL_MAX_S,
+        )
+        if wait_s > 0.0:
+            wait_ms = int(wait_s * 1000)
+            if wait_ms > 0:
+                query["wait_ms"] = str(wait_ms)
+    return runtime._call(
+        "GET" if holder is None else "POST",
+        "/await",
+        holder,
+        query,
+        remaining_now,
+        deadline,
+    )
+
+
+def _client_long_poll_executor_handle() -> concurrent.futures.ThreadPoolExecutor:
+    executor, _slots = _client_long_poll_resources()
+    return executor
 
 
 class ClientRuntime:
@@ -2736,13 +2905,19 @@ class ClientRuntime:
             data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
         deadline = self._time_fn() + float(timeout)
+        sent = dict(query or {})
         refresh_kwargs: dict[str, object] = {}
         if self._allow_stale_policy:
             refresh_kwargs["allow_stale_policy"] = True
+        # The provider replays this snapshot on a 401 or a reaccreditation.
+        # It does not know which paths carry a one-shot field.
+        replay = _await_replay_query(path, sent)
+        if replay != sent:
+            refresh_kwargs["replay_query"] = replay
         status, response_body = self._credential_provider.request_with_refresh(
             method=method,
             path=path,
-            query=dict(query or {}),
+            query=sent,
             body=data,
             headers=headers,
             deadline=deadline,
@@ -2777,6 +2952,16 @@ class ClientRuntime:
                 raise ToolError("daemon_unavailable")
             return remaining
 
+        def raise_ambiguous() -> None:
+            # The sealed transport turns a socket that dies after the request
+            # into an ambiguous failure. Once this /await's own deadline is
+            # already spent, that failure is the caller's timeout and the
+            # tool_timeout cleanup must run. A real transport error while
+            # budget remains stays ambiguous.
+            if path == "/await" and call_deadline - self._time_fn() <= 0.0:
+                raise _CallBudgetExpired()
+            raise ToolError("daemon_response_ambiguous")
+
         try:
             return self._request_once(
                 method, path, payload, query, remaining_timeout()
@@ -2791,7 +2976,7 @@ class ClientRuntime:
                 and error.http_bytes_sent == 0
             )
             if not retryable:
-                raise ToolError("daemon_response_ambiguous") from None
+                raise_ambiguous()
             try:
                 daemon_ready = self._ensure_daemon(call_deadline)
             except (ConnectionError, OSError):
@@ -2803,8 +2988,14 @@ class ClientRuntime:
                     raise _CallBudgetExpired() from None
                 raise ToolError(self._daemon_missing_error()) from None
             try:
+                # This hop is a resend. _await_replay_query drops wait_ms so
+                # the first transmission of the recovery is the immediate poll.
                 return self._request_once(
-                    method, path, payload, query, remaining_timeout()
+                    method,
+                    path,
+                    payload,
+                    _await_replay_query(path, query),
+                    remaining_timeout(),
                 )
             except daemon_credential.CredentialRefreshError as retry_error:
                 raise ToolError(
@@ -2818,7 +3009,7 @@ class ClientRuntime:
                     and retry_error.http_bytes_sent == 0
                 )
                 if not retry_safe:
-                    raise ToolError("daemon_response_ambiguous") from None
+                    raise_ambiguous()
                 if path == "/await":
                     raise _CallBudgetExpired() from None
                 raise ToolError("daemon_unavailable") from None
@@ -2964,19 +3155,71 @@ class ClientRuntime:
         if isinstance(lease_token, str):
             holder = {"identity": self.identity.to_payload(), "lease_token": lease_token}
         while True:
-            remaining = deadline - self._time_fn()
-            if remaining <= 0.0:
+            if deadline - self._time_fn() <= 0.0:
                 break
+
+            # Take the slot before submit. The private pool is the same size,
+            # so a taken slot has a free thread and the worker starts at once.
+            # The slot stays with that work until the future finishes: it
+            # returns, it raises, or it is cancelled before it starts.
+            # Cancelling this coroutine does not free it while the thread is
+            # still in HTTP. If submit queues the hop and then raises, the
+            # slot is returned once, that hop sends nothing, and this call
+            # continues without wait_ms. No slot, or no room for the margin:
+            # immediate poll on the shared executor, which stays free of
+            # long-polls.
+            use_long_poll = False
+            if (
+                deadline - self._time_fn()
+                > AWAIT_LONG_POLL_BUDGET_MARGIN_S
+            ):
+                use_long_poll = _try_acquire_client_long_poll_slot()
+
+            # submit() puts the work item on the queue before it starts a
+            # thread. A start failure leaves that item queued and raises.
+            # The hop object below belongs to that submission alone.
             try:
-                status, payload = await asyncio.to_thread(
-                    self._call,
-                    "GET" if holder is None else "POST",
-                    "/await",
-                    holder,
-                    {"id": str(command_id), "remove": "1"},
-                    remaining,
-                    deadline,
-                )
+                if use_long_poll:
+                    hop = _AwaitHop()
+                    try:
+                        future = _client_long_poll_executor_handle().submit(
+                            _issue_await_hop,
+                            self,
+                            deadline,
+                            command_id,
+                            holder,
+                            True,
+                            hop,
+                        )
+                    except Exception:
+                        hop.abandon()
+                        hop.release_slot()
+                        status, payload = await asyncio.to_thread(
+                            _issue_await_hop,
+                            self,
+                            deadline,
+                            command_id,
+                            holder,
+                            False,
+                            None,
+                        )
+                    else:
+                        # Done when the call finishes, and when the future is
+                        # cancelled before it starts. release_slot is
+                        # idempotent: abandon also calls it.
+                        future.add_done_callback(hop.release_slot)
+                        hop.ready.set()
+                        status, payload = await asyncio.wrap_future(future)
+                else:
+                    status, payload = await asyncio.to_thread(
+                        _issue_await_hop,
+                        self,
+                        deadline,
+                        command_id,
+                        holder,
+                        False,
+                        None,
+                    )
             except _CallBudgetExpired:
                 break
             if status == 404 and holder is not None:
@@ -2992,6 +3235,11 @@ class ClientRuntime:
                 if "human_input" in payload:
                     pruned["human_input"] = payload["human_input"]
                 return pruned
+            # The field means this daemon already waited out wait_ms. An old
+            # daemon omits it and still needs the poll sleep. Without the
+            # field an immediate pending must not hot-loop.
+            if status == 200 and payload.get(AWAIT_LONG_POLL_FIELD) is True:
+                continue
             remaining = deadline - self._time_fn()
             if remaining <= 0.0:
                 break
