@@ -24,6 +24,7 @@ from pathlib import Path
 from dayz_mcp import loopback
 from tests._addon_paths import addon_root
 from tests._tiers import slow_test
+from tests.enforce_subset_helpers import EnforceArray, method_body, translate
 
 
 _EMPTY = b'{"commands":[]}'
@@ -1417,6 +1418,84 @@ class PollBenchHookTest(unittest.TestCase):
                 self.fail("stacked wait hooks recursed")
             cv._acquire_restore(saved)
         self.assertTrue(entered.is_set())
+
+
+
+class RepollBehaviourTest(unittest.TestCase):
+    """Runs the real repoll statements of both bridges (Sol #308 r6 F11).
+
+    The source checks above pin the guards and their order; these run the
+    statements through the Enforce harness, so flipping what they assign or
+    dropping the tick branch fails here.
+    """
+
+    _SUCCESS_GUARD = "if (count == 0 && m_SincePollS >= 0.4)"
+    _TICK_FROM = "if (m_Pending && m_Pending.Count() > PENDING_POLL_THRESHOLD)"
+    _TICK_TO = "m_Accum = m_Accum + timeslice;"
+
+    def _sources(self):
+        for name in ("MCPBridge.c", "MCPClientBridge.c"):
+            yield name, (_MISSION / name).read_text(encoding="utf-8")
+
+    def _after_poll(self, source: str):
+        body = method_body(source, "void OnPollSuccess(string data, int dataSize)")
+        self.assertEqual(body.count(self._SUCCESS_GUARD), 1)
+        guard = self._SUCCESS_GUARD + "\n{" + _brace_body(body, self._SUCCESS_GUARD) + "}\n"
+        ns: dict[str, object] = {}
+        translate(
+            "void AfterPoll()\n{\n" + guard + "}\n",
+            "void AfterPoll()",
+            ns,
+            members=("count", "m_RepollNow", "m_SincePollS"),
+        )
+
+        def run(count: int, since_poll_s: float) -> bool:
+            ns.update(count=count, m_SincePollS=since_poll_s, m_RepollNow=False)
+            ns["AfterPoll"]()
+            return ns["m_RepollNow"]
+
+        return run
+
+    def _tick(self, source: str):
+        body = method_body(source, "void OnTick(float timeslice)")
+        start = body.index(self._TICK_FROM)
+        end = body.index(self._TICK_TO, start)
+        calls: list[str] = []
+        ns: dict[str, object] = {
+            "StartPoll": lambda: calls.append("StartPoll"),
+            "IntervalPath": lambda: calls.append("interval"),
+            "PENDING_POLL_THRESHOLD": 8,
+        }
+        translate(
+            "void TickTail()\n{\n" + body[start:end] + "IntervalPath();\n}\n",
+            "void TickTail()",
+            ns,
+            members=("m_Pending", "m_RepollNow", "PENDING_POLL_THRESHOLD"),
+        )
+
+        def run(repoll: bool) -> tuple[list[str], bool]:
+            calls.clear()
+            ns.update(m_Pending=EnforceArray(), m_RepollNow=repoll)
+            ns["TickTail"]()
+            return list(calls), ns["m_RepollNow"]
+
+        return run
+
+    def test_only_a_held_empty_poll_asks_for_an_immediate_repoll(self) -> None:
+        for name, source in self._sources():
+            with self.subTest(bridge=name):
+                after_poll = self._after_poll(source)
+                self.assertTrue(after_poll(0, 0.8))
+                self.assertTrue(after_poll(0, 0.4))
+                self.assertFalse(after_poll(0, 0.1))
+                self.assertFalse(after_poll(2, 0.8))
+
+    def test_next_tick_repolls_at_once_and_clears_the_flag(self) -> None:
+        for name, source in self._sources():
+            with self.subTest(bridge=name):
+                tick = self._tick(source)
+                self.assertEqual(tick(True), (["StartPoll"], False))
+                self.assertEqual(tick(False), (["interval"], False))
 
 
 if __name__ == "__main__":
