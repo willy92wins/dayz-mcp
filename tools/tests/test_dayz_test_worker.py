@@ -349,6 +349,32 @@ class DayzTestWorkerTests(unittest.TestCase):
             ["start", "ack", "start", "stop"],
         )
 
+    def test_clean_without_build_does_not_invoke_addon_builder(self) -> None:
+        broker = _Broker()
+        with tempfile.TemporaryDirectory() as temporary:
+            policy = dataclasses.replace(POLICY, default_source=temporary)
+            parsed = dayz_test_request.parse_dayz_test_request(
+                _raw(mode="offline", build=False, clean=True), policies=(policy,)
+            )
+            result = asyncio.run(
+                dayz_test_worker.execute_dayz_test_worker(
+                    parsed.canonical_bytes,
+                    request_sha256=parsed.sha256,
+                    request_policies=(policy,),
+                    runtime_policy=RUNTIME,
+                    broker=broker,
+                    has_binarizable_assets=lambda _source: False,
+                )
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(
+            [(item.kind, item.payload.get("command")) for item in broker.requests],
+            [
+                (native_broker_protocol.BrokerKind.LIFECYCLE_CLI, "start"),
+                (native_broker_protocol.BrokerKind.LIFECYCLE_CLI, "ack"),
+            ],
+        )
+
     def test_build_auto_packonly_then_all_starts_server_waits_and_extends_client(self) -> None:
         broker = _Broker()
         with tempfile.TemporaryDirectory() as temporary:

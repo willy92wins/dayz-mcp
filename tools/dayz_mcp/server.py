@@ -6199,6 +6199,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the launch, so a client whose own tool-call timeout is shorter "
             "(Antigravity CLI cuts MCP calls at 180 s) must pass a smaller "
             "wait_for_box_s and repeat the call. "
+            "build=false never builds, even with clean=true. clean=true only "
+            "passes -clear to AddonBuilder when build=true; pack_only=true "
+            "also requires build=true. "
             "build=true binarizes only when pack_only is false and the source "
             "has binarizable assets. Binarize requires the source folder name "
             "to match the PBO namespace, ignoring ASCII case, and otherwise "
@@ -6374,8 +6377,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 raise ToolError("dayz_test_failed:RuntimeError")
             return annotated(preflight_result)
 
-        # inbox 3997: the sealed request builds when build or clean is set.
-        built = bool(build or clean)
+        # Match the sealed request: clean only modifies an explicit build.
+        built = bool(build)
         box_wait_deadline: float | None = None
 
         def box_was_taken(admitted: object, box_now: object) -> bool:
