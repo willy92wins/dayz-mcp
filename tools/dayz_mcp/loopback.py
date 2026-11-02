@@ -8712,7 +8712,10 @@ class Handler(BaseHTTPRequestHandler):
         defect, and omits the rest. That partial set must not decide
         framing or keep-alive. A mapping with no defects attribute was
         not parsed (tests call do_POST with a dict). Any failure to read
-        the defect list is incomplete too.
+        the defect list is incomplete too. A bare CR pair
+        (``X: a\\r\\rContent-Length: 2``) ends the header block for the email
+        parser without any defect and leaves the later fields in the
+        payload (F11): a non-empty payload is incomplete as well.
         """
         try:
             headers = self.headers
@@ -8727,7 +8730,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return True
         try:
-            return len(defects) != 0
+            if len(defects) != 0:
+                return True
+            return bool(headers.get_payload())
         except Exception:
             return True
 
@@ -8880,6 +8885,12 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_json(self) -> dict | None:
+        if self._header_parse_incomplete():
+            # handle_one_request already forced the close. A defective
+            # header block keeps the 626aad2 reading and its answers
+            # (first Content-Length, 413 before 400), never the keep-alive
+            # framing rules (F12).
+            return self._read_json_legacy()
         length = self._unambiguous_body_length()
         if length is None:
             # Do not read a default of 0. That marked chunked and
@@ -8902,6 +8913,45 @@ class Handler(BaseHTTPRequestHandler):
         # Invalid JSON still closes via _force_close.
         if self._unambiguous_body_length() == length:
             self._body_fully_consumed = True
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            self._reject_unread_body(400, "bad_json")
+            return None
+
+        try:
+            body = json.loads(text or "{}")
+        except json.JSONDecodeError:
+            self._reject_unread_body(400, "bad_json")
+            return None
+
+        if not isinstance(body, dict):
+            self._reject_unread_body(400, "bad_json_type")
+            return None
+
+        return body
+
+    def _read_json_legacy(self) -> dict | None:
+        """The 626aad2 body read, answer for answer; every reply closes."""
+        self._force_close = True
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            self._reject_unread_body(400, "bad_content_length")
+            return None
+        if length < 0:
+            self._reject_unread_body(400, "bad_content_length")
+            return None
+        if length > MAX_BODY_BYTES:
+            self._reject_unread_body(413, "body_too_large")
+            return None
+
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._reject_unread_body(400, "bad_body_length")
+            return None
 
         try:
             text = raw.decode("utf-8")

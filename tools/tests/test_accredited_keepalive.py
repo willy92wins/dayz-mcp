@@ -726,6 +726,30 @@ class KeepaliveTransportTests(unittest.TestCase):
                     response.headers.defects,
                 )
 
+    def test_bare_cr_pair_hides_later_fields_without_a_defect(self) -> None:
+        """F11: ``\\r\\r`` ends the header block with no defect. Do not reuse."""
+        hidden = (
+            ("connection_close", b"Connection: close\r\n"),
+            ("empty_transfer_encoding", b"Transfer-Encoding:\r\n"),
+            ("second_content_length", b"Content-Length: 2\r\n"),
+        )
+        for name, tail in hidden:
+            with self.subTest(hidden=name):
+                raw = (
+                    b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n"
+                    b"Connection: keep-alive\r\nX: a\r\r" + tail + b"\r\n{}"
+                )
+                response = _parsed_response(raw)
+                # The trap: no defect, and the hidden field is in the payload.
+                self.assertEqual(response.headers.defects, [])
+                self.assertTrue(response.headers.get_payload())
+                self.assertIs(response.will_close, False)
+                self.assertFalse(accredited_keepalive._response_is_reusable(response))
+        control = _parsed_response(
+            b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n{}"
+        )
+        self.assertTrue(accredited_keepalive._response_is_reusable(control))
+
 
 def _read_http(sock: socket.socket, buffered: bytes = b"") -> tuple[bytes, dict[str, str], bytes, bytes]:
     data = buffered
@@ -1330,6 +1354,55 @@ class DaemonKeepaliveTests(unittest.TestCase):
                     self.assertEqual(extra_byte, b"")
                 finally:
                     sock.close()
+
+    def _answer_and_close(self, extra: list[str], body: bytes) -> tuple[int, str, str]:
+        """Status, error and Connection of a request that must end the socket."""
+        sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        try:
+            sock.settimeout(2.0)
+            sock.sendall(self._request_with_headers("POST", "/enqueue", extra, body))
+            status, headers, raw, _rest = _read_http(sock)
+            try:
+                # Whatever the client sent after the answer must not be
+                # parsed as another request: the server closes instead.
+                sock.sendall(self._raw("GET", "/status", protocol="HTTP/1.1", connection="keep-alive"))
+            except OSError:
+                pass
+            try:
+                tail = sock.recv(1)
+            except TimeoutError:
+                self.fail("server left the connection open")
+            except OSError:
+                tail = b""
+            self.assertEqual(tail, b"")
+            error = json.loads(raw.decode("utf-8")).get("error", "")
+            return int(status.split()[1]), error, headers.get("connection", "").lower()
+        finally:
+            sock.close()
+
+    def test_bare_cr_pair_in_request_headers_closes(self) -> None:
+        """F11: ``X: a\\r\\rContent-Length: 2`` hides the length with no defect.
+
+        626aad2 read Content-Length 0, answered /enqueue with the empty body
+        and closed. Keep-alive must not then read the ``{}`` as a new request.
+        """
+        status, error, connection = self._answer_and_close(["X: a\r\rContent-Length: 2"], b"{}")
+        self.assertEqual((status, error), (400, "not_whitelisted"))
+        self.assertNotIn("keep-alive", connection)
+
+    def test_defective_header_block_keeps_the_legacy_answer(self) -> None:
+        """F12: with a broken line the 626aad2 reading answers, then closes."""
+        cases = (
+            # 626aad2 read the first length: over the limit wins (413).
+            ("oversized_first_length", ["Content-Length: 1048577", "Content-Length: 0", "X-broken"], b"", 413, "body_too_large"),
+            # Repeated equal lengths before the broken line: read once, dispatched.
+            ("repeated_valid_lengths", ["Content-Length: 2", "Content-Length: 2", "X-broken"], b"{}", 400, "not_whitelisted"),
+        )
+        for name, extra, body, want_status, want_error in cases:
+            with self.subTest(framing=name):
+                status, error, connection = self._answer_and_close(extra, body)
+                self.assertEqual((status, error), (want_status, want_error))
+                self.assertNotIn("keep-alive", connection)
 
     def _request_with_headers(
         self,

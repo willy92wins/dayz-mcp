@@ -257,11 +257,15 @@ def _response_framing_allows_reuse(headers: object) -> bool:
 
 
 def _response_headers_complete(headers: object) -> bool:
-    """False when parsing recorded a defect or the defect list cannot be read.
+    """False when parsing recorded a defect, left fields in the payload, or
+    either cannot be read.
 
     A broken line makes the parser omit every later field after recording
-    the defect. That partial view is not reusable. Objects without a
-    defects attribute are test doubles, not parsed responses.
+    the defect. A bare CR pair (``X: a\\r\\rConnection: close``) ends the
+    header block for the email parser without any defect, and the fields
+    after it land in the payload (F11). Either partial view is not
+    reusable. Objects without a defects attribute are test doubles, not
+    parsed responses.
     """
     try:
         if not hasattr(headers, "defects"):
@@ -270,7 +274,9 @@ def _response_headers_complete(headers: object) -> bool:
     except Exception:
         return False
     try:
-        return len(defects) == 0
+        if len(defects) != 0:
+            return False
+        return not headers.get_payload()  # type: ignore[attr-defined]
     except Exception:
         return False
 
