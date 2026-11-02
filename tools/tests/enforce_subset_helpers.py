@@ -371,6 +371,10 @@ VERIFIED_CALLEE_PARAMS: dict[str, tuple[tuple[str, ...], str]] = {
     "Format": (("value",) * 10, "scripts/1_core/proto/enstring.c:526"),
     "GetVersion": (("out",), "scripts/3_game/global/game.c:942"),
 }
+# The catalogued natives that are called on a receiver: CGame.GetVersion and
+# the static string methods (string.ToString, string.Join, string.Format). The
+# rest are free functions; on a receiver their name proves nothing.
+VERIFIED_RECEIVER_METHODS = frozenset({"GetVersion", "ToString", "Join", "Format"})
 
 # name -> verified parameter modes of every array/set/map method of that name
 # (scripts/1_core/proto/enscript.c; class array<T> :374, set<T> :720, map :830).
@@ -496,18 +500,27 @@ def _callee_param_modes(
     every one of them takes it by value. A by-value homonym in another class
     cannot hide the out parameter of the native it shadows; the cost is that an
     out homonym in another class also rejects a by-value native call
-    (fail-closed). On an external receiver (``x.Name(``, anything but
-    ``this.``) a source declaration vouches for nothing: the receiver may be an
-    engine container, so only catalogued signatures count, and a name with
-    none is unverified."""
-    signatures = [] if external_receiver else list(declared.get(callee, ()))
+    (fail-closed). On an external receiver (``x.Name(``, ``Class.Name(``,
+    ``a().Name(``, ``a[0].Name(``: anything but ``this.``) the receiver may be
+    an engine object, so a source declaration cannot vouch for the call: it
+    must carry a catalogued method signature (container, string, or one of
+    the catalogued natives called on a receiver), and a catalogued free
+    function such as the global Print does not count. Source declarations of
+    that name still veto: they stay in the returned set, so a static
+    ``Writer.Print(out string)`` rejects the argument (F08)."""
+    declared_signatures = list(declared.get(callee, ()))
+    catalogued: list[tuple[str, ...]] = []
     for modes, _citation in CONTAINER_METHODS.get(callee, ()):
-        signatures.append(modes)
+        catalogued.append(modes)
     if callee in STRING_METHODS:
-        signatures.append(STRING_METHODS[callee][2])
-    if callee in VERIFIED_CALLEE_PARAMS:
-        signatures.append(VERIFIED_CALLEE_PARAMS[callee][0])
-    return signatures or None
+        catalogued.append(STRING_METHODS[callee][2])
+    if callee in VERIFIED_CALLEE_PARAMS and (
+        not external_receiver or callee in VERIFIED_RECEIVER_METHODS
+    ):
+        catalogued.append(VERIFIED_CALLEE_PARAMS[callee][0])
+    if external_receiver and not catalogued:
+        return None
+    return (declared_signatures + catalogued) or None
 
 
 def _member_argument_is_unresolved(expr: str, esc: str) -> bool:
@@ -698,9 +711,14 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
                             )
                         # An overload with fewer parameters than this call has
                         # arguments cannot be the callee. If none is left the
-                        # call is unverified and fails on the first one.
+                        # call matches no verified signature (F09).
                         n_args = len(_split_top_level_commas(args_text, track_angles=False))
-                        applicable = [m for m in signatures if len(m) >= n_args] or signatures
+                        applicable = [m for m in signatures if len(m) >= n_args]
+                        if not applicable:
+                            raise AssertionError(
+                                f"{member} passed to {callee}() with {n_args} arguments; "
+                                "no verified signature takes that many"
+                            )
                         for modes in applicable:
                             if arg_idx >= len(modes) or modes[arg_idx] != "value":
                                 raise AssertionError(

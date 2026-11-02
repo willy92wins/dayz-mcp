@@ -722,6 +722,35 @@ _FOREIGN_BY_VALUE_PROFILE = (
 _UNVERIFIED_PROFILE = "passed to unverified callee GetProfileString"
 
 
+# F08 (#305, Sol d2-r7): a source declaration with an out parameter vetoes the
+# argument on any receiver; the global by-value Print (endebug.c:96) must not
+# vouch for a static, chained or indexed Writer.Print(out string).
+_FOREIGN_OUT_PRINT = (
+    "\nclass ReviewCacheWriter\n"
+    "{\n"
+    "\tstatic void Print(out string value)\n"
+    "\t{\n"
+    '\t\tvalue = "broken";\n'
+    "\t}\n\n"
+    "\tstatic bool Contains(out string value)\n"
+    "\t{\n"
+    '\t\tvalue = "broken";\n'
+    "\t\treturn true;\n"
+    "\t}\n\n"
+    "\tstatic ReviewCacheWriter GetWriter()\n"
+    "\t{\n"
+    "\t\treturn null;\n"
+    "\t}\n"
+    "}\n"
+)
+# Print on a receiver has no catalogued method signature (unverified);
+# Contains has one by value, and the out declaration vetoes it.
+_RECEIVER_OUT_PRINT = "unverified callee Print"
+_RECEIVER_OUT_CONTAINS = "must not be passed to out/inout parameter 0 of Contains"
+# F09: more arguments than any verified signature takes.
+_TOO_MANY_ARGUMENTS = "no verified signature takes that many"
+
+
 class BridgeServerCapabilitiesTest(unittest.TestCase):
     def test_expected_census_is_canonical_and_names_the_mandatory_entry(self) -> None:
         expected = list(EXPECTED_SERVER_CAPABILITIES)
@@ -1042,6 +1071,40 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         for target, (mutant, expected) in cases.items():
             with self.subTest(target=target):
                 with self.assertRaisesRegex(AssertionError, _UNVERIFIED_PROFILE):
+                    _assert_contract(self, mutant, expected)
+
+    def test_receiver_out_declaration_and_arity_are_rejected(self) -> None:
+        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        ctor_head = "\tvoid MCPBridge()\n"
+        fixture = _known_good_source()
+        live = BRIDGE_PATH.read_text(encoding="utf-8")
+        print_calls = {
+            "static": "\t\tReviewCacheWriter.Print(m_PollCapabilities);\n",
+            "chained": "\t\tReviewCacheWriter.GetWriter().Print(m_PollCapabilities);\n",
+            "indexed": (
+                "\t\tarray<ReviewCacheWriter> reviewWriters = new array<ReviewCacheWriter>();\n"
+                "\t\treviewWriters[0].Print(m_PollCapabilities);\n"
+            ),
+        }
+        for target, src, anchor, expected in (
+            ("fixture", fixture, caps_cache_init, FIXTURE_EXPECTED),
+            ("live", live, try_init_head, EXPECTED_SERVER_CAPABILITIES),
+        ):
+            for (shape, call), (method, reason) in (
+                (item, pair)
+                for item in print_calls.items()
+                for pair in (("Print", _RECEIVER_OUT_PRINT), ("Contains", _RECEIVER_OUT_CONTAINS))
+            ):
+                with self.subTest(target=target, receiver=shape, method=method):
+                    mutant = src.replace(anchor, anchor + call.replace(".Print(", "." + method + "("), 1) + _FOREIGN_OUT_PRINT
+                    with self.assertRaisesRegex(AssertionError, reason):
+                        _assert_contract(self, mutant, expected)
+            with self.subTest(target=target, case="too_many_arguments"):
+                mutant = src.replace(ctor_head, "\tvoid Review(string value)\n\t{\n\t}\n\n" + ctor_head, 1).replace(
+                    anchor, anchor + "\t\tReview(m_PollCapabilities, 1);\n", 1
+                )
+                with self.assertRaisesRegex(AssertionError, _TOO_MANY_ARGUMENTS):
                     _assert_contract(self, mutant, expected)
 
     def test_mutants_are_rejected(self) -> None:
