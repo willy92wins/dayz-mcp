@@ -2532,6 +2532,17 @@ async def _execute_preflight(
                 effective_directories = dayz_test_worker._effective_directories(
                     parsed.payload, runtime_policy
                 )
+                # The launch accredits server_only_mods in every mode
+                # (request_path_authority.accredit_request_paths), so a client
+                # preflight checks them too instead of reporting success.
+                if parsed.payload.get("mode") == "client":
+                    effective_directories = (
+                        *effective_directories,
+                        *(
+                            dayz_test_worker._mod_path(value, runtime_policy)
+                            for value in parsed.payload.get("server_only_mods", [])
+                        ),
+                    )
             except dayz_test_worker.DayzTestWorkerError as error:
                 failed = _compact_result(
                     terminal=WorkerTerminal(
