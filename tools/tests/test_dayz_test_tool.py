@@ -94,6 +94,42 @@ def _list_projects_path(payload: bytes | BaseException) -> type:
 
 
 class DayzTestToolRequestTest(unittest.TestCase):
+    def test_server_only_bridge_suppresses_shared_default(self) -> None:
+        for project in ("ExampleMod", "DayZ_MCP"):
+            policy = _policy(mod=project)
+            raw, _ = dayz_test_tool.build_run_request(
+                _sealed(policy), project=project, mode="all",
+                server_only_mods=["@DayZ_MCP", "@Audit"],
+            )
+            payload = json.loads(raw)
+            self.assertEqual(payload["version"], 3)
+            self.assertEqual(payload["extra_mods"], [])
+            self.assertEqual(payload["server_only_mods"], ["@DayZ_MCP", "@Audit"])
+            self.assertEqual(dayz_test_tool._bridge_default_report(None, raw), [])
+
+    def test_empty_server_only_mods_keeps_default_payload(self) -> None:
+        policy = _policy()
+        default, _ = dayz_test_tool.build_run_request(_sealed(policy), project=policy.mod, mode="all")
+        empty, _ = dayz_test_tool.build_run_request(
+            _sealed(policy), project=policy.mod, mode="all", server_only_mods=[],
+        )
+        self.assertEqual(empty, default)
+
+    def test_server_only_duplicate_and_explicit_conflicts_are_named(self) -> None:
+        policy = _policy()
+        cases = (
+            ({"server_only_mods": ["@Audit", "@audit"]}, "mod_list_invalid"),
+            ({"server_only_mods": ["@Audit"], "extra_mods": ["@audit"]}, "server_only_mods_conflict"),
+            ({"server_only_mods": ["@CF"]}, "server_only_mods_conflict"),
+            ({"server_only_mods": ["@Audit"], "server_mods": ["@Audit"]}, "server_only_mods_conflict"),
+            ({"server_only_mods": ["@DayZ_MCP"], "extra_mods": ["@DayZ_MCP"]}, "server_only_mods_conflict"),
+        )
+        for options, reason in cases:
+            with self.subTest(options=options), self.assertRaisesRegex(
+                dayz_test_tool.DayzTestToolError, "bad_dayz_test_request:" + reason
+            ):
+                dayz_test_tool.build_run_request(_sealed(policy), project=policy.mod, mode="all", **options)
+
     def test_build_run_request_uses_sealed_project_and_policy_defaults(self) -> None:
         policy = _policy()
 
@@ -1074,6 +1110,12 @@ class DayzTestExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed.payload["base_mods"], list(policy.default_base_mods))
         self.assertEqual(parsed.payload["server_mods"], [])
         self.assertEqual(result["extra_mods_defaulted"], ["@DayZ_MCP"])
+
+    async def test_run_forwards_server_only_mods_without_bridge_default_report(self) -> None:
+        result, parsed = await self._launch_and_capture(server_only_mods=["@DayZ_MCP", "@Audit"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(parsed.payload["server_only_mods"], ["@DayZ_MCP", "@Audit"])
+        self.assertNotIn("extra_mods_defaulted", result)
 
     async def test_run_does_not_duplicate_an_explicit_bridge_mod(self) -> None:
         result, parsed = await self._launch_and_capture(

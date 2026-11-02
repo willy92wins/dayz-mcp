@@ -7,9 +7,11 @@ import os
 import stat
 import subprocess
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from tests._source_snapshot import source_of
 
@@ -105,6 +107,27 @@ class RequestPathAuthorityTests(unittest.TestCase):
             json.dumps(document).encode("utf-8"), policies=(policy,)
         )
 
+    @contextmanager
+    def _server_only_workspace(self, authority):
+        workspace = Path(__file__).resolve().parents[2]
+        original_prefixes = authority._prefixes
+
+        def workspace_prefixes(path):
+            # The sandbox cannot pin the user-profile ancestor. These fixtures
+            # pin only the permitted workspace; all directory, identity and
+            # reparse checks beneath that boundary remain real.
+            prefixes = tuple(
+                prefix
+                for prefix in original_prefixes(path)
+                if Path(prefix).is_relative_to(workspace)
+            )
+            self.assertTrue(prefixes, "fixture path must stay inside the worktree")
+            return prefixes
+
+        with TemporaryDirectory(dir=workspace) as temporary:
+            with patch.object(authority, "_prefixes", side_effect=workspace_prefixes):
+                yield Path(temporary)
+
     def test_regular_tree_is_pinned_until_context_exit(self) -> None:
         authority = importlib.import_module("dayz_mcp.request_path_authority")
         with TemporaryDirectory() as temporary:
@@ -136,6 +159,164 @@ class RequestPathAuthorityTests(unittest.TestCase):
                     },
                 )
             self.assertTrue(accredited.closed)
+
+    def test_server_only_mods_v3_accredits_directory_identity(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            sealed = authority._seal_project_policy_for_test(policy)
+            directory = str(Path(policy.mod_roots[0]) / "@Server")
+            expected = authority._capture_root_for_test(
+                directory, allow_root_junction=False
+            ).resolved_identity
+            for entry in ("@Server", directory):
+                with self.subTest(entry=entry):
+                    parsed = self._parse(policy, version=3, server_only_mods=[entry])
+                    with authority.accredit_request_paths(
+                        parsed, policies=(sealed,)
+                    ) as accredited:
+                        self.assertEqual(
+                            accredited.identities.get("server_only_mods"), (expected,)
+                        )
+                        self.assertGreater(accredited.handle_count, 0)
+                    self.assertTrue(accredited.closed)
+
+    def test_server_only_mods_missing_directory_is_rejected(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            sealed = authority._seal_project_policy_for_test(policy)
+            parsed = self._parse(policy, version=3, server_only_mods=["@Missing"])
+            with self.assertRaisesRegex(ValueError, "invalid_dayz_test_path_authority"):
+                with authority.accredit_request_paths(parsed, policies=(sealed,)):
+                    pass
+
+    def test_server_only_mods_directory_symlink_is_rejected(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            target = root / "linked-server-only-target"
+            target.mkdir()
+            linked = Path(policy.mod_roots[0]) / "@ServerOnlyLink"
+            try:
+                _make_directory_symlink(linked, target)
+            except OSError as error:
+                self.skipTest(f"directory symlink unavailable: {error}")
+            sealed = authority._seal_project_policy_for_test(policy)
+            parsed = self._parse(
+                policy, version=3, server_only_mods=["@ServerOnlyLink"]
+            )
+            with self.assertRaisesRegex(ValueError, "invalid_dayz_test_path_authority"):
+                with authority.accredit_request_paths(parsed, policies=(sealed,)):
+                    pass
+
+    def test_server_only_mods_physical_alias_conflicts_with_other_roles(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            mods = Path(policy.mod_roots[0])
+            real_mods = root / "real-mods"
+            destination = root / "shared-mod-target"
+            server_only_alias = mods / "@ServerOnlyAlias"
+            other_alias = mods / "@OtherAlias"
+            mods.rename(real_mods)
+            try:
+                _make_junction(mods, real_mods)
+                destination.mkdir()
+                _make_junction(server_only_alias, destination)
+                _make_junction(other_alias, destination)
+                sealed = authority._seal_project_policy_for_test(
+                    policy, allow_mod_root_junctions=(policy.mod_roots[0],)
+                )
+                for field in ("base_mods", "extra_mods", "server_mods"):
+                    with self.subTest(field=field):
+                        parsed = self._parse(
+                            policy,
+                            version=3,
+                            server_only_mods=["@ServerOnlyAlias"],
+                            **{field: ["@OtherAlias"]},
+                        )
+                        with self.assertRaisesRegex(
+                            ValueError, "invalid_dayz_test_path_authority"
+                        ):
+                            with authority.accredit_request_paths(
+                                parsed, policies=(sealed,)
+                            ):
+                                pass
+            finally:
+                _remove_junction(server_only_alias)
+                _remove_junction(other_alias)
+                _remove_junction(mods)
+
+    def test_server_only_mods_omitted_or_empty_preserves_legacy_identities(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            sealed = authority._seal_project_policy_for_test(policy)
+            legacy = self._parse(policy)
+            with authority.accredit_request_paths(
+                legacy, policies=(sealed,)
+            ) as accredited:
+                expected = dict(accredited.identities)
+            self.assertNotIn("server_only_mods", expected)
+            for overrides in ({"version": 3}, {"version": 3, "server_only_mods": []}):
+                with self.subTest(overrides=overrides):
+                    parsed = self._parse(policy, **overrides)
+                    with authority.accredit_request_paths(
+                        parsed, policies=(sealed,)
+                    ) as accredited:
+                        self.assertEqual(accredited.identities, expected)
+
+    def test_server_only_mods_physical_alias_to_implicit_project_is_rejected(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            mods = Path(policy.mod_roots[0])
+            real_mods = root / "real-mods"
+            alias = mods / "@Alias"
+            mods.rename(real_mods)
+            try:
+                _make_junction(mods, real_mods)
+                _make_junction(alias, real_mods / "@ExampleMod")
+                sealed = authority._seal_project_policy_for_test(
+                    policy, allow_mod_root_junctions=(policy.mod_roots[0],)
+                )
+                parsed = self._parse(policy, version=3, server_only_mods=["@Alias"])
+                with self.assertRaisesRegex(ValueError, "invalid_dayz_test_path_authority"):
+                    with authority.accredit_request_paths(parsed, policies=(sealed,)):
+                        pass
+            finally:
+                _remove_junction(alias)
+                _remove_junction(mods)
+
+    def test_server_only_mods_exact_implicit_project_is_accepted(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            sealed = authority._seal_project_policy_for_test(policy)
+            expected = authority._capture_root_for_test(
+                str(Path(policy.mod_roots[0]) / "@ExampleMod"),
+                allow_root_junction=False,
+            ).resolved_identity
+            parsed = self._parse(
+                policy, version=3, server_only_mods=["@ExampleMod"]
+            )
+            with authority.accredit_request_paths(parsed, policies=(sealed,)) as accredited:
+                self.assertEqual(accredited.identities["server_only_mods"], (expected,))
+
+    def test_server_only_mods_sidecar_allows_unbuilt_implicit_project(self) -> None:
+        authority = importlib.import_module("dayz_mcp.request_path_authority")
+        with self._server_only_workspace(authority) as root:
+            policy, _mission = self._fixture(root)
+            project = Path(policy.mod_roots[0]) / "@ExampleMod"
+            project.rmdir()
+            self.assertFalse(project.exists())
+            sealed = authority._seal_project_policy_for_test(policy)
+            parsed = self._parse(
+                policy, version=3, build=True, server_only_mods=["@Server"]
+            )
+            with authority.accredit_request_paths(parsed, policies=(sealed,)) as accredited:
+                self.assertEqual(len(accredited.identities["server_only_mods"]), 1)
 
     def test_replaced_root_identity_fails_closed(self) -> None:
         authority = importlib.import_module("dayz_mcp.request_path_authority")
