@@ -157,7 +157,9 @@ class EnforceArray(list):
         return True
 
     def Insert(self, value: object) -> int:
-        self.append(value)
+        # array.Insert takes its element by value (scripts/1_core/proto/enscript.c:407):
+        # the array holds its own copy, so transforming the element cannot reach the source.
+        self.append(_string_copy(value))
         return len(self) - 1
 
     def Get(self, index: int) -> Any:
@@ -464,14 +466,21 @@ def _declared_callee_params(masked: str) -> dict[str, list[tuple[str, ...]]]:
 def _callee_param_modes(
     callee: str, declared: dict[str, list[tuple[str, ...]]]
 ) -> list[tuple[str, ...]] | None:
-    """Verified parameter-mode signatures for `callee`, or None if unverified."""
-    if callee in declared:
-        return declared[callee]
+    """Every verified parameter-mode signature `callee` can name, or None if unverified.
+
+    The gate does not resolve a call to its scope or receiver, so a name is not
+    narrowed to one declaration: a declaration in the source under test (of any
+    class), the string method and the catalogued native signature are all
+    returned, and the caller accepts the argument only when every one of them
+    takes it by value. A by-value homonym in another class cannot hide the out
+    parameter of the native it shadows; the cost is that an out homonym in
+    another class also rejects a by-value native call (fail-closed)."""
+    signatures = list(declared.get(callee, ()))
     if callee in STRING_METHODS:
-        return [STRING_METHODS[callee][2]]
+        signatures.append(STRING_METHODS[callee][2])
     if callee in VERIFIED_CALLEE_PARAMS:
-        return [VERIFIED_CALLEE_PARAMS[callee][0]]
-    return None
+        signatures.append(VERIFIED_CALLEE_PARAMS[callee][0])
+    return signatures or None
 
 
 def _member_argument_is_unresolved(expr: str, esc: str) -> bool:

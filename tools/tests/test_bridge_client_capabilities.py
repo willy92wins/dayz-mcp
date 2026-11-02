@@ -396,6 +396,19 @@ def verify_poll_wire(source: str) -> None:
         raise AssertionError("translated MCPClientBridge() + StartPoll() caps differ from CLIENT_POLL_CAPS")
 
 
+# F04 (#305, Sol d2-r5): a by-value ErrorExString declared in another class must not
+# hide the native out parameter (scripts/1_core/proto/endebug.c:84).
+_FOREIGN_BY_VALUE_ERROR_EX_STRING = (
+    "\nclass ReviewForeignErrors\n"
+    "{\n"
+    "\tvoid ErrorExString(string err, string str, int severity)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_SHADOWED_NATIVE_OUT = "must not be passed to out/inout parameter 1 of ErrorExString"
+
+
 class BridgeClientCapabilitiesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -513,6 +526,16 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "\t\treviewBox[0] = m_PollCapabilities;\n"
             "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
         )
+        caps_insert_index_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            "\t\treviewBox.Insert(m_PollCapabilities);\n"
+            "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
+        )
+        caps_insert_get_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            "\t\treviewBox.Insert(m_PollCapabilities);\n"
+            "\t\tint reviewElemLen = reviewBox.Get(0).ToUpper();\n"
+        )
         controls = {
             "copy_to_local_in_constructor": source.replace(
                 init_line, init_line + "\t\tstring capsCopy = m_PollCapabilities;\n", 1
@@ -571,12 +594,28 @@ class BridgeClientCapabilitiesTest(unittest.TestCase):
             "indexed_assign_then_transform_element_in_poll": source.replace(
                 wire_line, indexed_caps_block + wire_line, 1
             ),
+            "insert_then_transform_indexed_element_in_poll": source.replace(
+                wire_line, caps_insert_index_block + wire_line, 1
+            ),
+            "insert_then_transform_get_element_in_poll": source.replace(
+                wire_line, caps_insert_get_block + wire_line, 1
+            ),
         }
         for label, variant in controls.items():
             with self.subTest(control=label):
                 self.assertNotEqual(variant, source)
                 verify_announcement_matches_dispatcher(variant)
                 verify_poll_wire(variant)
+
+    def test_foreign_by_value_homonym_does_not_hide_native_out(self) -> None:
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        self.assertEqual(self.source.count(try_init_head), 1)
+        mutant = self.source.replace(
+            try_init_head, try_init_head + '\t\tErrorExString("review", m_PollCapabilities);\n', 1
+        ) + _FOREIGN_BY_VALUE_ERROR_EX_STRING
+        with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
+            verify_announcement_matches_dispatcher(mutant)
+            verify_poll_wire(mutant)
 
     def test_mutants_are_red(self) -> None:
         source = self.source

@@ -364,6 +364,19 @@ def verify_enforce_arg_contract_hash(source: str) -> None:
         )
 
 
+# F04 (#305, Sol d2-r5): a by-value ErrorExString declared in another class must not
+# hide the native out parameter (scripts/1_core/proto/endebug.c:84).
+_FOREIGN_BY_VALUE_ERROR_EX_STRING = (
+    "\nclass ReviewForeignErrors\n"
+    "{\n"
+    "\tvoid ErrorExString(string err, string str, int severity)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_SHADOWED_NATIVE_OUT = "must not be passed to out/inout parameter 1 of ErrorExString"
+
+
 class ArgContractHashTest(unittest.TestCase):
     def test_python_hash_matches_canonical_fixture(self) -> None:
         self.assertEqual(
@@ -432,6 +445,16 @@ class ArgContractHashTest(unittest.TestCase):
             "\t\treviewBox[0] = m_PollArgContractHash;\n"
             "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
         )
+        hash_insert_index_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            "\t\treviewBox.Insert(m_PollArgContractHash);\n"
+            "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
+        )
+        hash_insert_get_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            "\t\treviewBox.Insert(m_PollArgContractHash);\n"
+            "\t\tint reviewElemLen = reviewBox.Get(0).ToUpper();\n"
+        )
         controls = {
             "copy_to_local_in_constructor": source.replace(
                 cache_init, cache_init + "\t\tstring achCopy = m_PollArgContractHash;\n", 1
@@ -490,11 +513,27 @@ class ArgContractHashTest(unittest.TestCase):
             "indexed_assign_then_transform_element_in_poll": source.replace(
                 ach_wire, indexed_hash_block + ach_wire, 1
             ),
+            "insert_then_transform_indexed_element_in_poll": source.replace(
+                ach_wire, hash_insert_index_block + ach_wire, 1
+            ),
+            "insert_then_transform_get_element_in_poll": source.replace(
+                ach_wire, hash_insert_get_block + ach_wire, 1
+            ),
         }
         for label, variant in controls.items():
             with self.subTest(control=label):
                 self.assertNotEqual(variant, source)
                 verify_enforce_arg_contract_hash(variant)
+
+    def test_foreign_by_value_homonym_does_not_hide_native_out(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        self.assertEqual(source.count(try_init_head), 1)
+        mutant = source.replace(
+            try_init_head, try_init_head + '\t\tErrorExString("review", m_PollArgContractHash);\n', 1
+        ) + _FOREIGN_BY_VALUE_ERROR_EX_STRING
+        with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
+            verify_enforce_arg_contract_hash(mutant)
 
     def test_enforce_hash_cache_mutants_are_rejected(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")

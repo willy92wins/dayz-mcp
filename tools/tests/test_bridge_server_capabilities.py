@@ -682,6 +682,19 @@ def _with_initializer(source: str, initializer: str) -> str:
     return source.replace(FIXTURE_INITIALIZER, initializer)
 
 
+# F04 (#305, Sol d2-r5): a by-value ErrorExString declared in another class must not
+# hide the native out parameter (scripts/1_core/proto/endebug.c:84).
+_FOREIGN_BY_VALUE_ERROR_EX_STRING = (
+    "\nclass ReviewForeignErrors\n"
+    "{\n"
+    "\tvoid ErrorExString(string err, string str, int severity)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_SHADOWED_NATIVE_OUT = "must not be passed to out/inout parameter 1 of ErrorExString"
+
+
 class BridgeServerCapabilitiesTest(unittest.TestCase):
     def test_expected_census_is_canonical_and_names_the_mandatory_entry(self) -> None:
         expected = list(EXPECTED_SERVER_CAPABILITIES)
@@ -772,6 +785,16 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "\t\treviewBox[0] = m_PollCapabilities;\n"
             "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
         )
+        caps_insert_index_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            "\t\treviewBox.Insert(m_PollCapabilities);\n"
+            "\t\tint reviewElemLen = reviewBox[0].ToUpper();\n"
+        )
+        caps_insert_get_block = (
+            "\t\tarray<string> reviewBox = new array<string>();\n"
+            "\t\treviewBox.Insert(m_PollCapabilities);\n"
+            "\t\tint reviewElemLen = reviewBox.Get(0).ToUpper();\n"
+        )
         fixture_controls = {
             "copy_to_local_in_constructor": fixture.replace(
                 fixture_init, fixture_init + "\t\tstring capsCopy = m_PollCapabilities;\n", 1
@@ -824,6 +847,12 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             ),
             "indexed_assign_then_transform_element_in_poll": fixture.replace(
                 fixture_wire, indexed_caps_block + fixture_wire, 1
+            ),
+            "insert_then_transform_indexed_element_in_poll": fixture.replace(
+                fixture_wire, caps_insert_index_block + fixture_wire, 1
+            ),
+            "insert_then_transform_get_element_in_poll": fixture.replace(
+                fixture_wire, caps_insert_get_block + fixture_wire, 1
             ),
         }
         for label, variant in fixture_controls.items():
@@ -882,11 +911,40 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "live_indexed_assign_then_transform_element_in_poll": live.replace(
                 fixture_wire, indexed_caps_block + fixture_wire, 1
             ),
+            "live_insert_then_transform_indexed_element_in_poll": live.replace(
+                fixture_wire, caps_insert_index_block + fixture_wire, 1
+            ),
+            "live_insert_then_transform_get_element_in_poll": live.replace(
+                fixture_wire, caps_insert_get_block + fixture_wire, 1
+            ),
         }
         for label, variant in live_controls.items():
             with self.subTest(target="live", control=label):
                 self.assertNotEqual(variant, live)
                 _assert_contract(self, variant, EXPECTED_SERVER_CAPABILITIES)
+
+    def test_foreign_by_value_homonym_does_not_hide_native_out(self) -> None:
+        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        call = '\t\tErrorExString("review", m_PollCapabilities);\n'
+        fixture = _known_good_source()
+        live = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(fixture.count(caps_cache_init), 1)
+        self.assertEqual(live.count(try_init_head), 1)
+        cases = {
+            "fixture": (
+                fixture.replace(caps_cache_init, caps_cache_init + call, 1) + _FOREIGN_BY_VALUE_ERROR_EX_STRING,
+                FIXTURE_EXPECTED,
+            ),
+            "live": (
+                live.replace(try_init_head, try_init_head + call, 1) + _FOREIGN_BY_VALUE_ERROR_EX_STRING,
+                EXPECTED_SERVER_CAPABILITIES,
+            ),
+        }
+        for target, (mutant, expected) in cases.items():
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
+                    _assert_contract(self, mutant, expected)
 
     def test_mutants_are_rejected(self) -> None:
         source = _known_good_source()
