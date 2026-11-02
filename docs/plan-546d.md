@@ -50,11 +50,11 @@ Incidente de la ficha: 2884 muestras en RAM del cliente, 0 leídas, mueren al ma
 - `TRACE_MODES = {start, status, stop, read, clear}` — `tools/dayz_mcp/vehicle_trace.py:18`
 - `normalize_request`: `mode not in TRACE_MODES` → `bad_mode` — `:174-175`
 - Ingress: `_one_of("start", "status", "stop", "read", "clear")` — `loopback.py:514`
-- Dispatch: la misma lista; otro modo → `bad_mode` — `MCPClientBridge.c:1300-1304`
+- Dispatch: la misma lista; otro modo → `bad_mode` — `MCPClientBridge.c:1303-1307`
 - `View` solo copia muestras si `mode == "read"` y `limit` 1..64 — `MCP_CarScript.c:400-413`
 - `$profile:` + `OpenFile` WRITE + `FPrintln` — `MCPClientBridge.c:355`; vanilla `ensystem.c:406-414`
-- JSONL compacto: `JsonSerializer.WriteToString(result, false, body)` — `MCPClientBridge.c:4401-4403`
-- Lector JSONL ya existe (telemetría) — `MCPBridge.c:2500-2516`
+- JSONL compacto: `JsonSerializer.WriteToString(result, false, body)` — `MCPClientBridge.c:4404-4406`
+- Lector JSONL ya existe (telemetría) — `MCPBridge.c:2505-2521`
 - `JsonFileLoader.JsonSaveFile` pretty-print (`nice=true`) — `jsonfileloader.c:140` — **no** sirve para JSONL
 - G3 spec histórica: exactamente esos 5 modos y “no persistencia del trace” — `plans/2026-07-25-vehicle-trace-feature-spec.md:52,76`
 - Tests del contrato leen `DayZ_MCP_dev/addon/`, no el sibling `DayZ_MCP` — `tools/tests/_addon_paths.py:5-10`
