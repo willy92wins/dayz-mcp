@@ -1179,6 +1179,12 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             dayz_test_tool, "preflight_vpp_request",
             return_value=type("V", (), {"error_code": None, "missing": (), "warnings": (), "hint": ""})(),
+        ), patch.object(
+            dayz_test_tool, "evaluate_steam_session",
+            return_value=SteamSessionResult(None, 41, (41,), ""),
+        ), patch.object(
+            dayz_test_tool, "evaluate_prerun_desktop",
+            return_value=type("D", (), {"error_code": None, "remediation": ""})(),
         ):
             results = {}
             for name in ("@Present", "@Absent"):
