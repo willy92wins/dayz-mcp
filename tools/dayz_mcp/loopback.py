@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import re
+import socket
 import stat
 import sys
 import threading
@@ -20,6 +21,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Mapping
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -348,8 +350,10 @@ MAX_RESULTS = MAX_QUEUE * 4
 # each queued session may hold one POST /wait. Add 2 game-bridge /poll
 # sockets, the active session's /enqueue+/await, /status probes, and
 # headroom for a short legitimate burst while waits are held. Exceeding the
-# ceiling closes the accepted socket without a worker (reject, do not queue):
-# Handler.timeout already bounds each worker's duration, not concurrency.
+# ceiling closes the accepted socket without a worker (reject, do not queue).
+# A request that has started is still bounded by Handler.timeout. An idle
+# keep-alive holds one of these workers only until the next request line or
+# KEEPALIVE_IDLE_S, and only while it owns one MAX_IDLE_KEEPALIVES slot.
 MAX_HTTP_WORKERS = MAX_SESSION_QUEUE + 32
 # Ceiling for one GET/POST /await?wait_ms= hold. Each wait occupies one of the
 # workers above. The pool is one POST /wait (up to 30s) per queued session plus
@@ -378,6 +382,34 @@ AWAIT_LONG_POLL_FIELD = "await_long_poll"
 # flight. A request that does not get a slot does not wait and omits
 # await_long_poll, and the client returns to its 50ms poll.
 AWAIT_LONG_POLL_MAX_IN_FLIGHT = 8
+# The game bridge polls /poll and posts /result. /set_poll_delay is the same
+# socket family. None of them may keep the connection.
+GAME_BRIDGE_HTTP_PATHS = frozenset({"/poll", "/result", "/set_poll_delay"})
+# Longer than the client's 5s idle discard (accredited_keepalive
+# IDLE_REUSE_LIMIT_S; this module does not import it) and far below
+# Handler.timeout. The client closes when it discards, which frees the
+# worker before this cap.
+KEEPALIVE_IDLE_S = 8.0
+# How many answered connections may sit idle at once. Each one keeps a
+# worker until the next request line or KEEPALIVE_IDLE_S. The +32 margin
+# above MAX_SESSION_QUEUE is the whole remainder of MAX_HTTP_WORKERS (96).
+# PR #306 parks AWAIT_LONG_POLL_MAX_IN_FLIGHT /await waits on this same pool. Two /poll sockets,
+# one /result and one /enqueue still need a worker when those waits and
+# every idle slot are taken:
+#   96 - 64 - 8 - 2 - 1 - 1 = 20.
+# The claim is non-blocking. No free slot means the response closes.
+_AWAIT_WAIT_RESERVE = AWAIT_LONG_POLL_MAX_IN_FLIGHT
+_POLL_WORKER_RESERVE = 2
+_RESULT_WORKER_RESERVE = 1
+_ENQUEUE_WORKER_RESERVE = 1
+MAX_IDLE_KEEPALIVES = (
+    MAX_HTTP_WORKERS
+    - MAX_SESSION_QUEUE
+    - _AWAIT_WAIT_RESERVE
+    - _POLL_WORKER_RESERVE
+    - _RESULT_WORKER_RESERVE
+    - _ENQUEUE_WORKER_RESERVE
+)
 # Stale-command hygiene: a client that crashed/relaunched must not
 # inherit commands queued for the previous session. record_poll drops commands
 # older than COMMAND_TTL_S, and flushes the peer's whole queue when the gap since
@@ -8464,11 +8496,296 @@ class Handler(BaseHTTPRequestHandler):
     # bounded — including the request-line read that otherwise holds a worker
     # thread forever when a local client connects and sends nothing. 35s sits
     # strictly above the POST /wait long-poll ceiling so a max-length wait still
-    # has headroom on the same socket.
+    # has headroom on the same socket. Between keep-alive requests the wait
+    # is KEEPALIVE_IDLE_S; this 35s bound is restored once a request line
+    # has been read, before the body and before POST /await.
     timeout = 35.0
+    _keepalive_ok = False
+    _force_close = False
+    # False until this request's one unambiguous length is fully read.
+    # A response before that, or any ambiguous framing, closes.
+    _body_fully_consumed = False
+    _idle_slot_held = False
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def handle(self) -> None:
+        self.close_connection = True
+        try:
+            self.handle_one_request()
+            while not self.close_connection:
+                # A follow-up on a kept-alive socket is a new request.
+                # Once stop has begun, do not dispatch it.
+                if self._server_stopping():
+                    self.close_connection = True
+                    return
+                self._arm_keepalive_idle_read()
+                if self.close_connection or self._server_stopping():
+                    self.close_connection = True
+                    return
+                if not self._read_idle_request_line():
+                    self.close_connection = True
+                    return
+                if self._server_stopping():
+                    self._refuse_during_stop()
+                    return
+                self.handle_one_request(line_ready=True)
+        finally:
+            self._release_idle_keepalive_slot()
+
+    def _arm_keepalive_idle_read(self) -> None:
+        try:
+            self.connection.settimeout(KEEPALIVE_IDLE_S)
+        except OSError:
+            self.close_connection = True
+
+    def handle_one_request(self, line_ready: bool = False) -> None:
+        # Same request dispatch as http.server.BaseHTTPRequestHandler in
+        # CPython 3.14, plus the idle-timeout restore below.
+        self._keepalive_ok = False
+        self._force_close = False
+        self._body_fully_consumed = False
+        try:
+            if not line_ready and not self._consume_request_line():
+                return
+            # The next request has arrived: this socket is not idle any more.
+            self._release_idle_keepalive_slot()
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                self.close_connection = True
+                return
+            if not self.parse_request():
+                return
+            # A defect means the parser dropped every later field. That
+            # partial view is not a keep-alive decision, and it is made
+            # before body consumption or Connection tokens are considered.
+            if self._header_parse_incomplete():
+                self._force_close = True
+            self._note_body_if_absent()
+            # Only a follow-up on a kept-alive socket is refused once stop has
+            # begun (F7). The first request of a connection is dispatched as
+            # before keep-alive existed: its handler sees _stopping itself, and
+            # an /await for a discarded id still gets its stored result.
+            if line_ready and self._server_stopping():
+                self._refuse_during_stop()
+                return
+            mname = "do_" + self.command
+            if not hasattr(self, mname):
+                self.send_error(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    "Unsupported method (%r)" % self.command,
+                )
+                return
+            method = getattr(self, mname)
+            method()
+            self.wfile.flush()
+        except TimeoutError as exc:
+            self.log_error("Request timed out: %r", exc)
+            self.close_connection = True
+            return
+
+    def _consider_keepalive(self, path: str) -> None:
+        """Arm keep-alive only for an authenticated client that asked for it.
+
+        protocol_version stays HTTP/1.0, so a response that does not take
+        this path is the same bytes as before. The game bridge never takes it.
+        """
+        self._keepalive_ok = False
+        if self._header_parse_incomplete():
+            self._force_close = True
+            return
+        try:
+            bridged = path in GAME_BRIDGE_HTTP_PATHS
+        except Exception:
+            return
+        if bridged:
+            return
+        # parse_request is what sets request_version. A handler built without
+        # it (tests call do_POST directly) has nothing to decide from.
+        if getattr(self, "request_version", "") != "HTTP/1.1":
+            return
+        # Every Connection instance. close on any of them wins, and a
+        # blank value is not a request to stay open. Unreadable headers
+        # do not arm keep-alive.
+        try:
+            tokens = self._connection_tokens(self.headers)
+        except Exception:
+            return
+        if (
+            tokens is not None
+            and "keep-alive" in tokens
+            and "close" not in tokens
+        ):
+            self._keepalive_ok = True
+
+    def _server_stopping(self) -> bool:
+        try:
+            return bool(self.state._stopping)
+        except Exception:
+            return True
+
+    def _refuse_during_stop(self) -> None:
+        """Reject a not-yet-dispatched request and close. No lease, no keep-alive."""
+        self._force_close = True
+        self._body_fully_consumed = False
+        self.close_connection = True
+        try:
+            self._json(503, {"error": "server_stopping"})
+        except Exception:
+            self.close_connection = True
+
+    def _mark_idle_keepalive(self, idle: bool) -> None:
+        try:
+            if idle:
+                self.server.register_idle_keepalive(self.connection)
+            else:
+                self.server.unregister_idle_keepalive(self.connection)
+        except Exception:
+            self.close_connection = True
+
+    def _read_idle_request_line(self) -> bool:
+        """Block for the next request line while stop() can wake this socket."""
+        self._mark_idle_keepalive(True)
+        try:
+            if self.close_connection or self._server_stopping():
+                self.close_connection = True
+                return False
+            return self._consume_request_line()
+        finally:
+            self._mark_idle_keepalive(False)
+
+    def _consume_request_line(self) -> bool:
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            return False
+        if len(self.raw_requestline) > 65536:
+            self.requestline = ""
+            self.request_version = ""
+            self.command = ""
+            self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+            self.close_connection = True
+            return False
+        if not self.raw_requestline:
+            self.close_connection = True
+            return False
+        return True
+
+    def _unambiguous_body_length(self) -> int | None:
+        """One declared body length, or None when the framing cannot be kept.
+
+        None covers a present Transfer-Encoding (this server does not read
+        chunked bodies; an empty or whitespace-only value is still the
+        field), more than one Content-Length, and a length that is not a
+        single non-negative integer. Two Content-Length fields close the
+        connection even when the numbers match: RFC 9112 requires rejecting
+        conflicting values, and identical repeats are still not one length
+        (recipients disagree on which field wins). A stored Content-Length
+        whose value is empty is present, not absent. 0 is an empty body.
+        """
+        try:
+            headers = self.headers
+            if self._transfer_encoding_present(headers):
+                return None
+            lengths = self._content_length_values(headers)
+        except Exception:
+            return None
+        if lengths is None or len(lengths) > 1:
+            return None
+        if len(lengths) == 0:
+            return 0
+        try:
+            length = int(str(lengths[0]).strip())
+        except (TypeError, ValueError):
+            return None
+        if length < 0:
+            return None
+        return length
+
+    def _header_parse_incomplete(self) -> bool:
+        """True when header parsing recorded a defect or cannot be trusted.
+
+        The email parser keeps fields before a broken line, records a
+        defect, and omits the rest. That partial set must not decide
+        framing or keep-alive. A mapping with no defects attribute was
+        not parsed (tests call do_POST with a dict). Any failure to read
+        the defect list is incomplete too. A bare CR pair
+        (``X: a\\r\\rContent-Length: 2``) ends the header block for the email
+        parser without any defect and leaves the later fields in the
+        payload (F11): a non-empty payload is incomplete as well.
+        """
+        try:
+            headers = self.headers
+        except Exception:
+            return True
+        if headers is None:
+            return True
+        try:
+            if not hasattr(headers, "defects"):
+                return False
+            defects = headers.defects
+        except Exception:
+            return True
+        try:
+            if len(defects) != 0:
+                return True
+            return bool(headers.get_payload())
+        except Exception:
+            return True
+
+    def _connection_tokens(self, headers: object) -> set[str] | None:
+        """Union of every Connection token. None if a value cannot be read.
+
+        Tokens are comma-separated and compared without regard to case.
+        A non-string value fails closed so the socket is not kept.
+        """
+        try:
+            values = self._header_instances(headers, "Connection")
+        except Exception:
+            return None
+        tokens: set[str] = set()
+        for value in values:
+            if not isinstance(value, str):
+                return None
+            for part in value.split(","):
+                token = part.strip().lower()
+                if token:
+                    tokens.add(token)
+        return tokens
+
+    def _header_instances(self, headers: object, name: str) -> list[object]:
+        """Every stored value of one field. Empty when the field is absent.
+
+        A blank value is still an instance. Presence is the length of this
+        list, not whether any value has text, and not the first value.
+        """
+        if hasattr(headers, "get_all"):
+            values = headers.get_all(name)
+            if values is None:
+                return []
+            return list(values)
+        if name not in headers:
+            return []
+        return [headers.get(name)]
+
+    def _transfer_encoding_present(self, headers: object) -> bool:
+        return len(self._header_instances(headers, "Transfer-Encoding")) > 0
+
+    def _content_length_values(self, headers: object) -> list[object] | None:
+        return self._header_instances(headers, "Content-Length")
+
+    def _note_body_if_absent(self) -> None:
+        """An unambiguous length of 0 is already fully consumed.
+
+        Any other length stays unconsumed until _read_json has read exactly
+        that many bytes. Ambiguous framing stays unconsumed.
+        """
+        self._body_fully_consumed = False
+        if self._unambiguous_body_length() == 0:
+            self._body_fully_consumed = True
 
     @property
     def state(self) -> ServerState:
@@ -8479,6 +8796,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query, keep_blank_values=True)
         if not self._authorized(qs):
             return
+        self._consider_keepalive(parsed.path)
 
         if parsed.path == "/poll":
             self._handle_poll(qs)
@@ -8501,6 +8819,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query, keep_blank_values=True)
         if not self._authorized(qs):
             return
+        self._consider_keepalive(parsed.path)
 
         if parsed.path == "/enqueue":
             self.state.touch_client()
@@ -8554,6 +8873,8 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self, qs: dict[str, list[str]]) -> bool:
         supplied = qs.get("key", [""])[0]
         if not hmac.compare_digest(supplied, self.state.key):
+            # POST has not read the body. Keep-alive would desynchronise it.
+            self._force_close = True
             self._json(401, {"error": "unauthorized"})
             return False
         if (
@@ -8564,51 +8885,149 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_json(self) -> dict | None:
-        raw_length = self.headers.get("Content-Length", "0")
-        try:
-            length = int(raw_length)
-        except (TypeError, ValueError):
-            self._json(400, {"error": "bad_content_length"})
-            return None
-        if length < 0:
-            self._json(400, {"error": "bad_content_length"})
+        if self._header_parse_incomplete():
+            # handle_one_request already forced the close. A defective
+            # header block keeps the 626aad2 reading and its answers
+            # (first Content-Length, 413 before 400), never the keep-alive
+            # framing rules (F12).
+            return self._read_json_legacy()
+        length = self._unambiguous_body_length()
+        if length is None:
+            # Do not read a default of 0. That marked chunked and
+            # contradictory Content-Length bodies as consumed.
+            self._reject_unread_body(400, "bad_content_length")
             return None
         if length > MAX_BODY_BYTES:
-            # HTTP/1.0, no keep-alive: 413 without reading the body is safe.
-            # A client still sending >1 MiB may see RST instead of the 413 body.
-            self._json(413, {"error": "body_too_large"})
+            # The body is not read. That is safe only because this response
+            # closes the connection, including when the client sent HTTP/1.1
+            # and Connection: keep-alive. A client still sending >1 MiB may
+            # see RST instead of the 413 body.
+            self._reject_unread_body(413, "body_too_large")
             return None
 
         raw = self.rfile.read(length)
         if len(raw) != length:
-            self._json(400, {"error": "bad_body_length"})
+            self._reject_unread_body(400, "bad_body_length")
             return None
+        # Consumed only after the one declared length was read in full.
+        # Invalid JSON still closes via _force_close.
+        if self._unambiguous_body_length() == length:
+            self._body_fully_consumed = True
 
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            self._json(400, {"error": "bad_json"})
+            self._reject_unread_body(400, "bad_json")
             return None
 
         try:
             body = json.loads(text or "{}")
         except json.JSONDecodeError:
-            self._json(400, {"error": "bad_json"})
+            self._reject_unread_body(400, "bad_json")
             return None
 
         if not isinstance(body, dict):
-            self._json(400, {"error": "bad_json_type"})
+            self._reject_unread_body(400, "bad_json_type")
             return None
 
         return body
 
+    def _read_json_legacy(self) -> dict | None:
+        """The 626aad2 body read, answer for answer; every reply closes."""
+        self._force_close = True
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            self._reject_unread_body(400, "bad_content_length")
+            return None
+        if length < 0:
+            self._reject_unread_body(400, "bad_content_length")
+            return None
+        if length > MAX_BODY_BYTES:
+            self._reject_unread_body(413, "body_too_large")
+            return None
+
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._reject_unread_body(400, "bad_body_length")
+            return None
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            self._reject_unread_body(400, "bad_json")
+            return None
+
+        try:
+            body = json.loads(text or "{}")
+        except json.JSONDecodeError:
+            self._reject_unread_body(400, "bad_json")
+            return None
+
+        if not isinstance(body, dict):
+            self._reject_unread_body(400, "bad_json_type")
+            return None
+
+        return body
+
+    def _reject_unread_body(self, code: int, error: str) -> None:
+        """Close. The body is missing, short, or not the JSON object we asked for."""
+        self._force_close = True
+        self._json(code, {"error": error})
+
     def _json(self, code: int, body: dict) -> None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        # One decision for every JSON reply. A header-parse defect closes
+        # before any other persistence check. Keep-alive then needs the
+        # flag, no forced close, and a single unambiguous length. Early
+        # 403/404, a present Transfer-Encoding (even blank) and a repeated
+        # Content-Length close.
+        if self._header_parse_incomplete():
+            self._force_close = True
+        try:
+            framing_ok = self._unambiguous_body_length() is not None
+        except Exception:
+            framing_ok = False
+        persist = (
+            getattr(self, "_keepalive_ok", False)
+            and not getattr(self, "_force_close", True)
+            and getattr(self, "_body_fully_consumed", False)
+            and framing_ok
+        )
+        if persist and not self._claim_idle_keepalive_slot():
+            persist = False
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        if persist:
+            self.send_header("Connection", "keep-alive")
+        else:
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(data)
+
+    def _claim_idle_keepalive_slot(self) -> bool:
+        """Non-blocking. No slot, or no quota on this server, means close."""
+        if self._idle_slot_held:
+            return True
+        try:
+            acquired = self.server._idle_keepalive_slots.acquire(blocking=False)
+        except Exception:
+            return False
+        if not acquired:
+            return False
+        self._idle_slot_held = True
+        return True
+
+    def _release_idle_keepalive_slot(self) -> None:
+        if not self._idle_slot_held:
+            return
+        self._idle_slot_held = False
+        try:
+            self.server._idle_keepalive_slots.release()
+        except Exception:
+            return
 
     def _log(self, message: str) -> None:
         sink = getattr(self.server, "log_sink", _default_log_sink)  # type: ignore[attr-defined]
@@ -9769,8 +10188,29 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._http_workers = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+        self._idle_keepalive_slots = threading.BoundedSemaphore(MAX_IDLE_KEEPALIVES)
         self._human_input_diagnostic = threading.BoundedSemaphore(1)
+        self._idle_keepalive_lock = threading.Lock()
+        self._idle_keepalive_sockets: set[object] = set()
         super().__init__(*args, **kwargs)
+
+    def register_idle_keepalive(self, connection: object) -> None:
+        with self._idle_keepalive_lock:
+            self._idle_keepalive_sockets.add(connection)
+
+    def unregister_idle_keepalive(self, connection: object) -> None:
+        with self._idle_keepalive_lock:
+            self._idle_keepalive_sockets.discard(connection)
+
+    def wake_idle_keepalives(self) -> None:
+        """Unblock idle keep-alive reads so stop() does not leave them dispatched."""
+        with self._idle_keepalive_lock:
+            sockets = list(self._idle_keepalive_sockets)
+        for connection in sockets:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def process_request(self, request, client_address):
         # Auth runs in the handler, after a worker exists. An idle TCP has
@@ -9900,6 +10340,10 @@ class LoopbackServer:
         if self.httpd is None:
             return
         self.state.cancel_pending()
+        try:
+            self.httpd.wake_idle_keepalives()
+        except Exception:
+            pass
         self.httpd.shutdown()
         self.httpd.server_close()
         if self.thread is not None:

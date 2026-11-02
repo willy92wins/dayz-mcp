@@ -91,7 +91,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 138 KB, touched 2026-11-01 (UTC)
+- `CHANGELOG.md` - 141 KB, touched 2026-11-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-01 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 20 KB, touched 2026-11-01 (UTC)
