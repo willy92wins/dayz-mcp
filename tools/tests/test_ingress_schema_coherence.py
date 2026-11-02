@@ -419,6 +419,12 @@ _BRIDGE_ANSWERS: dict[str, dict[str, Any]] = {
     "surface_query": {"ok": 1, "y": 5.0},
     "scene_raycast": {"ok": 1, "hit": 1, "pos": [10.0, 5.0, 20.0]},
     "loadout_clear": {"ok": 1, "deleted": 2, "cleanup_complete": 1, "uid": "76561198000000000"},
+    "vehicle_telemetry": {"ok": 1, "seated": 0},
+}
+# Tools that read bridge status before their call: a probeable client lets
+# scene_clear pass the #302/#312 client seat check and reach its bridge call.
+_STATUS_FOR: dict[str, dict[str, Any]] = {
+    "scene_clear": {"client_peer": {"last_poll_age_s": 0.1}},
 }
 
 
@@ -435,6 +441,8 @@ async def _captured_calls(
         return dict(_BRIDGE_ANSWERS.get(command, {"ok": 1}))
 
     async def no_status(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        if tool in _STATUS_FOR:
+            return copy.deepcopy(_STATUS_FOR[tool])
         raise RuntimeError("no bridge in this test")
 
     runtime.call_bridge = call_bridge  # type: ignore[method-assign]
