@@ -743,10 +743,24 @@ _FOREIGN_OUT_PRINT = (
     "\t}\n"
     "}\n"
 )
-# Print on a receiver has no catalogued method signature (unverified);
-# Contains has one by value, and the out declaration vetoes it.
-_RECEIVER_OUT_PRINT = "unverified callee Print"
-_RECEIVER_OUT_CONTAINS = "must not be passed to out/inout parameter 0 of Contains"
+# A class name, a chained call or an indexed element is a receiver the gate
+# does not resolve (Sol d2-r8): the call is rejected whatever its name.
+_RECEIVER_OUT_PRINT = r"unverified callee Print\(\); a receiver the gate cannot resolve"
+_RECEIVER_OUT_CONTAINS = r"unverified callee Contains\(\); a receiver the gate cannot resolve"
+# F10/F11 (Sol d2-r8) and the scope rule that replaces F04's union.
+_FIXED_ARRAY_OUT = "must not be passed to out/inout parameter 0 of ReviewPad"
+_UNPARSED_DECLARATION = r"ReviewOdd\(\); a declaration of ReviewOdd\(\) the gate cannot parse"
+_CLASS_TYPED_RECEIVER = r"unverified callee Get\(\); a receiver the gate cannot resolve"
+_FOREIGN_OUT_PRINT_ONLY = (
+    "\nclass ReviewForeignPrinter\n"
+    "{\n"
+    "\tvoid Print(out string value)\n"
+    "\t{\n"
+    '\t\tvalue = "broken";\n'
+    "\t}\n"
+    "}\n"
+)
+_INHERITED_CONTAINER = "\nclass ReviewInherited : BaseContainer\n{\n}\n"
 # F09: more arguments than any verified signature takes.
 _TOO_MANY_ARGUMENTS = "no verified signature takes that many"
 
@@ -1106,6 +1120,42 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(AssertionError, _TOO_MANY_ARGUMENTS):
                     _assert_contract(self, mutant, expected)
+
+    def test_gate_resolves_only_its_subset(self) -> None:
+        """Sol d2-r8: F10 fixed-size out, an unparsed declaration and a
+        class-typed receiver are rejected; a foreign Print(out) is out of
+        scope for the bridge's bare Print (the F04 false rejection)."""
+        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        ctor_head = "\tvoid MCPBridge()\n"
+        fixture = _known_good_source()
+        live = BRIDGE_PATH.read_text(encoding="utf-8")
+        cases = {
+            "fixed_array_out": ("\t\tint reviewPadding[1];\n\t\tReviewPad(m_PollCapabilities, reviewPadding);\n", _FIXED_ARRAY_OUT),
+            "unparsed_declaration": ("\t\tReviewOdd(m_PollCapabilities);\n", _UNPARSED_DECLARATION),
+            "class_typed_receiver": ("\t\tReviewInherited reviewReceiver;\n\t\treviewReceiver.Get(0, m_PollCapabilities);\n", _CLASS_TYPED_RECEIVER),
+        }
+        for target, src, anchor, expected in (
+            ("fixture", fixture, caps_cache_init, FIXTURE_EXPECTED),
+            ("live", live, try_init_head, EXPECTED_SERVER_CAPABILITIES),
+        ):
+            with_decls = src.replace(
+                ctor_head,
+                "\tprotected void ReviewPad(out string value, int padding[1])\n\t{\n\t}\n\n"
+                    "\tprotected void ReviewOdd(string value[2][2])\n\t{\n\t}\n\n"
+                    "\tprotected void ReviewNativeRead(ReviewInherited receiver)\n\t{\n\t}\n\n"
+                + ctor_head,
+                1,
+            ) + _INHERITED_CONTAINER
+            for case, (call, reason) in cases.items():
+                with self.subTest(target=target, case=case):
+                    mutant = with_decls.replace(anchor, anchor + call, 1)
+                    with self.assertRaisesRegex(AssertionError, reason):
+                        _assert_contract(self, mutant, expected)
+        control = live.replace(
+            try_init_head, try_init_head + "\t\tPrint(m_PollCapabilities);\n", 1
+        ) + _FOREIGN_OUT_PRINT_ONLY
+        _assert_contract(self, control, EXPECTED_SERVER_CAPABILITIES)
 
     def test_mutants_are_rejected(self) -> None:
         source = _known_good_source()

@@ -425,10 +425,24 @@ _FOREIGN_OUT_PRINT = (
     "\t}\n"
     "}\n"
 )
-# Print on a receiver has no catalogued method signature (unverified);
-# Contains has one by value, and the out declaration vetoes it.
-_RECEIVER_OUT_PRINT = "unverified callee Print"
-_RECEIVER_OUT_CONTAINS = "must not be passed to out/inout parameter 0 of Contains"
+# A class name, a chained call or an indexed element is a receiver the gate
+# does not resolve (Sol d2-r8): the call is rejected whatever its name.
+_RECEIVER_OUT_PRINT = r"unverified callee Print\(\); a receiver the gate cannot resolve"
+_RECEIVER_OUT_CONTAINS = r"unverified callee Contains\(\); a receiver the gate cannot resolve"
+# F10/F11 (Sol d2-r8) and the scope rule that replaces F04's union.
+_FIXED_ARRAY_OUT = "must not be passed to out/inout parameter 0 of ReviewPad"
+_UNPARSED_DECLARATION = r"ReviewOdd\(\); a declaration of ReviewOdd\(\) the gate cannot parse"
+_CLASS_TYPED_RECEIVER = r"unverified callee Get\(\); a receiver the gate cannot resolve"
+_FOREIGN_OUT_PRINT_ONLY = (
+    "\nclass ReviewForeignPrinter\n"
+    "{\n"
+    "\tvoid Print(out string value)\n"
+    "\t{\n"
+    '\t\tvalue = "broken";\n'
+    "\t}\n"
+    "}\n"
+)
+_INHERITED_CONTAINER = "\nclass ReviewInherited : BaseContainer\n{\n}\n"
 # F09: more arguments than any verified signature takes.
 _TOO_MANY_ARGUMENTS = "no verified signature takes that many"
 
@@ -655,6 +669,34 @@ class ArgContractHashTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(AssertionError, _TOO_MANY_ARGUMENTS):
                 verify_enforce_arg_contract_hash(mutant)
+
+    def test_gate_resolves_only_its_subset(self) -> None:
+        """Sol d2-r8: see the server-capabilities test of the same name."""
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        ctor_head = "\tvoid MCPBridge()\n"
+        cases = {
+            "fixed_array_out": ("\t\tint reviewPadding[1];\n\t\tReviewPad(m_PollArgContractHash, reviewPadding);\n", _FIXED_ARRAY_OUT),
+            "unparsed_declaration": ("\t\tReviewOdd(m_PollArgContractHash);\n", _UNPARSED_DECLARATION),
+            "class_typed_receiver": ("\t\tReviewInherited reviewReceiver;\n\t\treviewReceiver.Get(0, m_PollArgContractHash);\n", _CLASS_TYPED_RECEIVER),
+        }
+        with_decls = source.replace(
+            ctor_head,
+            "\tprotected void ReviewPad(out string value, int padding[1])\n\t{\n\t}\n\n"
+                    "\tprotected void ReviewOdd(string value[2][2])\n\t{\n\t}\n\n"
+                    "\tprotected void ReviewNativeRead(ReviewInherited receiver)\n\t{\n\t}\n\n"
+            + ctor_head,
+            1,
+        ) + _INHERITED_CONTAINER
+        for case, (call, reason) in cases.items():
+            with self.subTest(case=case):
+                mutant = with_decls.replace(try_init_head, try_init_head + call, 1)
+                with self.assertRaisesRegex(AssertionError, reason):
+                    verify_enforce_arg_contract_hash(mutant)
+        control = source.replace(
+            try_init_head, try_init_head + "\t\tPrint(m_PollArgContractHash);\n", 1
+        ) + _FOREIGN_OUT_PRINT_ONLY
+        verify_enforce_arg_contract_hash(control)
 
     def test_enforce_hash_cache_mutants_are_rejected(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")

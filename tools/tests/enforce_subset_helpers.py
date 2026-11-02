@@ -371,27 +371,39 @@ VERIFIED_CALLEE_PARAMS: dict[str, tuple[tuple[str, ...], str]] = {
     "Format": (("value",) * 10, "scripts/1_core/proto/enstring.c:526"),
     "GetVersion": (("out",), "scripts/3_game/global/game.c:942"),
 }
-# The catalogued natives that are called on a receiver: CGame.GetVersion and
-# the static string methods (string.ToString, string.Join, string.Format). The
-# rest are free functions; on a receiver their name proves nothing.
-VERIFIED_RECEIVER_METHODS = frozenset({"GetVersion", "ToString", "Join", "Format"})
+# The catalogued natives that are static methods of string, reachable as
+# string.Name( (enstring.c:98, :424, :526).
+STRING_STATIC_METHODS = frozenset({"ToString", "Join", "Format"})
 
-# name -> verified parameter modes of every array/set/map method of that name
-# (scripts/1_core/proto/enscript.c; class array<T> :374, set<T> :720, map :830).
-CONTAINER_METHODS: dict[str, tuple[tuple[tuple[str, ...], str], ...]] = {
-    "Set": ((("value", "value"), "enscript.c:389"), (("value", "value"), "enscript.c:883")),
-    "Find": (
-        (("value",), "enscript.c:394"),
-        (("value",), "enscript.c:730"),
-        (("value", "out"), "enscript.c:858"),
-    ),
-    "Get": ((("value",), "enscript.c:399"), (("value",), "enscript.c:731"), (("value",), "enscript.c:847")),
-    "Insert": ((("value",), "enscript.c:407"), (("value",), "enscript.c:739"), (("value", "value"), "enscript.c:907")),
-    "InsertAt": ((("value", "value"), "enscript.c:418"), (("value", "value"), "enscript.c:750")),
-    "Remove": ((("value",), "enscript.c:463"), (("value",), "enscript.c:756"), (("value",), "enscript.c:887")),
-    "Contains": ((("value",), "enscript.c:898"),),
-    "GetKey": ((("value",), "enscript.c:878"),),
-    "GetElement": ((("value",), "enscript.c:868"),),
+# kind -> method -> (parameter modes, citation), from scripts/1_core/proto/enscript.c
+# (class array<T> :374, set<T> :720, map<TKey,TValue> :830). Used only when the
+# receiver is a variable whose declared type is that container.
+CONTAINER_METHODS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
+    "array": {
+        "Set": (("value", "value"), "enscript.c:389"),
+        "Find": (("value",), "enscript.c:394"),
+        "Get": (("value",), "enscript.c:399"),
+        "Insert": (("value",), "enscript.c:407"),
+        "InsertAt": (("value", "value"), "enscript.c:418"),
+        "Remove": (("value",), "enscript.c:463"),
+    },
+    "set": {
+        "Find": (("value",), "enscript.c:730"),
+        "Get": (("value",), "enscript.c:731"),
+        "Insert": (("value",), "enscript.c:739"),
+        "InsertAt": (("value", "value"), "enscript.c:750"),
+        "Remove": (("value",), "enscript.c:756"),
+    },
+    "map": {
+        "Get": (("value",), "enscript.c:847"),
+        "Find": (("value", "out"), "enscript.c:858"),
+        "GetElement": (("value",), "enscript.c:868"),
+        "GetKey": (("value",), "enscript.c:878"),
+        "Set": (("value", "value"), "enscript.c:883"),
+        "Remove": (("value",), "enscript.c:887"),
+        "Contains": (("value",), "enscript.c:898"),
+        "Insert": (("value", "value"), "enscript.c:907"),
+    },
 }
 
 _NON_CALLEE_KEYWORDS = frozenset({
@@ -403,8 +415,8 @@ _CACHE_FUNC_DECL_HEAD = re.compile(
 )
 _CACHE_PARAM_DECL = re.compile(
     r"^(?:(out|inout)\s+)?(?:notnull\s+)?(?:ref\s+)?"
-    r"[A-Za-z_]\w*(?:\s*<.*>)?(?:\s*\[\s*\])?\s+"
-    r"(?:\[\s*\]\s*)?[A-Za-z_]\w*(?:\s*\[\s*\])?$"
+    r"[A-Za-z_]\w*(?:\s*<.*>)?(?:\s*\[\s*\d*\s*\])?\s+"
+    r"(?:\[\s*\d*\s*\]\s*)?[A-Za-z_]\w*(?:\s*\[\s*\d*\s*\])?$"
 )
 
 
@@ -449,14 +461,46 @@ def _split_top_level_commas(text: str, *, track_angles: bool) -> list[tuple[int,
     return parts
 
 
-def _declared_callee_params(masked: str) -> dict[str, list[tuple[str, ...]]]:
-    """Parameter modes of every function declared in `masked`, by name.
+_CLASS_HEAD = re.compile(
+    r"\b(?:modded\s+)?class\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?:\s*(?::|extends)\s*(?P<parent>[A-Za-z_]\w*))?[^{;]*\{"
+)
 
-    A candidate only counts when it looks like a declaration (its parameter
-    list parses as declarations and a body or semicolon follows); a call
-    site, whose arguments are expressions, never registers its callee.
+
+def _class_spans(masked: str) -> list[tuple[str, str | None, int, int]]:
+    """(name, parent, open brace, close brace) of every class in `masked`."""
+    spans = []
+    for match in _CLASS_HEAD.finditer(masked):
+        open_brace = match.end() - 1
+        close_brace = _find_matching_delim(masked, open_brace, "{", "}")
+        if close_brace != -1:
+            spans.append((match.group("name"), match.group("parent"), open_brace, close_brace))
+    return spans
+
+
+def _owner_class(spans: list[tuple[str, str | None, int, int]], pos: int) -> str | None:
+    """Innermost class whose body contains `pos`, or None at file scope."""
+    owner = None
+    width = None
+    for name, _parent, start, end in spans:
+        if start < pos < end and (width is None or end - start < width):
+            owner, width = name, end - start
+    return owner
+
+
+def _declared_callee_params(
+    masked: str,
+) -> dict[str, list[tuple[str | None, tuple[str, ...] | None]]]:
+    """Every function declared in `masked`, by name: (owner class, parameter modes).
+
+    A candidate only counts when it looks like a declaration (a body or a
+    semicolon follows its parameter list); a call site never registers its
+    callee because its arguments are expressions inside a statement. A
+    declaration whose parameter list does not parse keeps None as its modes:
+    the gate rejects a call that could reach it instead of forgetting it (F10).
     """
-    found: dict[str, list[tuple[str, ...]]] = {}
+    spans = _class_spans(masked)
+    found: dict[str, list[tuple[str | None, tuple[str, ...] | None]]] = {}
     for match in _CACHE_FUNC_DECL_HEAD.finditer(masked):
         ret_base = match.group("ret").split("<", 1)[0].strip()
         name = match.group("name")
@@ -470,57 +514,118 @@ def _declared_callee_params(masked: str) -> dict[str, list[tuple[str, ...]]]:
             continue
         if not masked[close_paren + 1 :].lstrip().startswith(("{", ";")):
             continue
+        owner = _owner_class(spans, match.start())
         params_text = masked[open_paren + 1 : close_paren].strip()
         if params_text in ("", "void"):
-            found.setdefault(name, []).append(())
+            found.setdefault(name, []).append((owner, ()))
             continue
         modes: list[str] = []
+        parsed = True
         for _s, _e, param_decl in _split_top_level_commas(params_text, track_angles=True):
             decl = param_decl.split("=", 1)[0].strip()
             param_match = _CACHE_PARAM_DECL.match(decl)
             if param_match is None:
+                parsed = False
                 break
             modes.append(param_match.group(1) or "value")
-        else:
-            found.setdefault(name, []).append(tuple(modes))
+        found.setdefault(name, []).append((owner, tuple(modes) if parsed else None))
     return found
 
 
-def _callee_param_modes(
-    callee: str,
-    declared: dict[str, list[tuple[str, ...]]],
-    external_receiver: bool = False,
-) -> list[tuple[str, ...]] | None:
-    """Every verified parameter-mode signature `callee` can name, or None if unverified.
+def _member_scope(masked: str, member_pos: int) -> set[str]:
+    """The member's class and its ancestors declared in `masked` (modded
+    classes of those names share their declarations)."""
+    spans = _class_spans(masked)
+    parents = {name: parent for name, parent, _s, _e in spans}
+    scope: set[str] = set()
+    current = _owner_class(spans, member_pos)
+    while current is not None and current not in scope:
+        scope.add(current)
+        current = parents.get(current)
+    return scope
 
-    The gate does not resolve a call to its scope or receiver, so a name is not
-    narrowed to one declaration: a declaration in the source under test (of any
-    class), the string method, the container methods and the catalogued native
-    signature are all returned, and the caller accepts the argument only when
-    every one of them takes it by value. A by-value homonym in another class
-    cannot hide the out parameter of the native it shadows; the cost is that an
-    out homonym in another class also rejects a by-value native call
-    (fail-closed). On an external receiver (``x.Name(``, ``Class.Name(``,
-    ``a().Name(``, ``a[0].Name(``: anything but ``this.``) the receiver may be
-    an engine object, so a source declaration cannot vouch for the call: it
-    must carry a catalogued method signature (container, string, or one of
-    the catalogued natives called on a receiver), and a catalogued free
-    function such as the global Print does not count. Source declarations of
-    that name still veto: they stay in the returned set, so a static
-    ``Writer.Print(out string)`` rejects the argument (F08)."""
-    declared_signatures = list(declared.get(callee, ()))
-    catalogued: list[tuple[str, ...]] = []
-    for modes, _citation in CONTAINER_METHODS.get(callee, ()):
-        catalogued.append(modes)
-    if callee in STRING_METHODS:
-        catalogued.append(STRING_METHODS[callee][2])
-    if callee in VERIFIED_CALLEE_PARAMS and (
-        not external_receiver or callee in VERIFIED_RECEIVER_METHODS
+
+def _receiver_kind(masked: str, name: str) -> str | None:
+    """array | set | map | string for a variable declared with exactly one such
+    type in `masked`; None for anything else (a class name, an engine global,
+    a parameter of a class type, two declarations that disagree)."""
+    kinds = set()
+    for match in re.finditer(
+        rf"(?<![\w.])(?:ref\s+)?(?P<type>[A-Za-z_]\w*)(?:\s*<[^;{{}}()=]*?>)?\s+{re.escape(name)}\s*(?=[;=,)])",
+        masked,
     ):
-        catalogued.append(VERIFIED_CALLEE_PARAMS[callee][0])
-    if external_receiver and not catalogued:
-        return None
-    return (declared_signatures + catalogued) or None
+        base = match.group("type")
+        if base in _NON_CALLEE_KEYWORDS or base in ("ref", "out", "inout", "notnull", "const", "static"):
+            continue
+        if base == "array" or re.fullmatch(r"T\w*Array", base):
+            kinds.add("array")
+        elif base == "set":
+            kinds.add("set")
+        elif base == "map" or re.fullmatch(r"T\w*Map", base):
+            kinds.add("map")
+        elif base == "string":
+            kinds.add("string")
+        else:
+            kinds.add(None)
+    return next(iter(kinds)) if len(kinds) == 1 else None
+
+
+def _resolve_callee_signatures(
+    callee: str,
+    receiver_text: str,
+    declared: dict[str, list[tuple[str | None, tuple[str, ...] | None]]],
+    member_scope: set[str],
+    masked: str,
+) -> tuple[list[tuple[str, ...]] | None, str]:
+    """The signatures this call can reach, or (None, reason) when the gate
+    cannot resolve it. Only this subset is resolved; everything else fails:
+
+    * a bare (or ``this.``) call reaches the methods of that name declared in
+      the member's class, its modded classes and ancestors in the source;
+      failing those, functions of that name declared at file scope; failing
+      those, the catalogued native. Methods of other classes are out of scope
+      (F04: they cannot hide the native, and an out homonym there no longer
+      rejects a by-value native call);
+    * ``string.Name(`` reaches the catalogued static string methods;
+    * ``v.Name(`` reaches the catalogued method of v's declared container or
+      string type (F06/F07);
+    * any other receiver (a class name, a chained or indexed receiver, an
+      engine global, a variable of another type) is not resolved (F08, F11);
+    * a reachable declaration whose parameters do not parse is not resolved
+      (F10).
+    """
+    receiver = receiver_text.rstrip()
+    bare = not receiver.endswith(".") or re.search(r"(?<![\w.\]\)])this\s*\.$", receiver) is not None
+    if bare:
+        entries = declared.get(callee, [])
+        for owners in ([o for o in member_scope], [None]):
+            reachable = [modes for owner, modes in entries if owner in owners]
+            if any(modes is None for modes in reachable):
+                return None, f"a declaration of {callee}() the gate cannot parse"
+            if reachable:
+                return list(reachable), ""  # type: ignore[arg-type]
+        if callee in VERIFIED_CALLEE_PARAMS:
+            return [VERIFIED_CALLEE_PARAMS[callee][0]], ""
+        return None, "no verified signature is catalogued for it"
+    named = re.search(r"(?<![\w.\]\)])([A-Za-z_]\w*)\s*\.$", receiver)
+    if named is None:
+        return None, "a receiver the gate cannot resolve"
+    receiver_name = named.group(1)
+    if receiver_name == "string":
+        if callee in STRING_STATIC_METHODS:
+            return [VERIFIED_CALLEE_PARAMS[callee][0]], ""
+        return None, "a receiver the gate cannot resolve"
+    kind = _receiver_kind(masked, receiver_name)
+    if kind == "string":
+        if callee in STRING_METHODS:
+            return [STRING_METHODS[callee][2]], ""
+        return None, "no verified signature is catalogued for it"
+    if kind is None:
+        return None, "a receiver the gate cannot resolve"
+    method = CONTAINER_METHODS[kind].get(callee)
+    if method is None:
+        return None, "no verified signature is catalogued for it"
+    return [method[0]], ""
 
 
 def _member_argument_is_unresolved(expr: str, esc: str) -> bool:
@@ -578,6 +683,7 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
         raise AssertionError(f"{member} must not be passed as out/inout")
 
     declared = _declared_callee_params(masked)
+    scope = _member_scope(masked, decl_re.search(masked).start())  # type: ignore[union-attr]
     token_re = re.compile(rf"\b{esc}\b")
     assign_count = 0
     for match in token_re.finditer(masked):
@@ -699,15 +805,13 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
                         expr,
                         re.DOTALL,
                     ):
-                        receiver_text = before_paren[: callee_match.start()].rstrip()
-                        external_receiver = receiver_text.endswith(".") and (
-                            re.search(r"(?<![\w.\]\)])this\s*\.$", receiver_text) is None
+                        receiver_text = before_paren[: callee_match.start()]
+                        signatures, reason = _resolve_callee_signatures(
+                            callee, receiver_text, declared, scope, masked
                         )
-                        signatures = _callee_param_modes(callee, declared, external_receiver)
                         if signatures is None:
                             raise AssertionError(
-                                f"{member} passed to unverified callee {callee}(); "
-                                "no verified signature is catalogued for it"
+                                f"{member} passed to unverified callee {callee}(); {reason}"
                             )
                         # An overload with fewer parameters than this call has
                         # arguments cannot be the callee. If none is left the
