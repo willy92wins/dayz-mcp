@@ -166,7 +166,7 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **Visual capture is not engine-native.** `MakeScreenshot` exists as a proto (`proto.c:142`) and is a no-op on DayZDiag as well as retail ([T165276](https://feedback.bistudio.com/T165276)). Probe 2026-06-06: `MakeScreenshot("$profile:mcpshot.dds")` twice, zero `.dds` anywhere, `ScreenShots` folder never created (`dayz-mcp-architecture.md:17-24`). `RenderTargetWidget` is display-only — no readback to file or bytes (`dayz-mcp-architecture.md:28-32`). Frames come from an external window-grab of the rendered client (`Graphics.CopyFromScreen`; first probe meanB 65, nbRatio 0.999 — `dayz-mcp-architecture.md:41-42`). That grab is the only non-native piece in the stack. A headless server returns data, not pixels (`dayz-mcp-architecture.md:62-64`; `product-spec.md:162-163`).
 
-**The API key cannot go in an HTTP header.** `RestContext.SetHeader(string)` sets Content-Type only (`restapi.c:135-141`; `tools/README-mcp.md:7`). The key travels as `?key=` (`addon/scripts/5_Mission/MCPBridge.c:226`). The listener binds `127.0.0.1`; there is no `0.0.0.0` mode and no remote mode (`product-spec.md:168`).
+**The API key cannot go in an HTTP header.** `RestContext.SetHeader(string)` sets Content-Type only (`restapi.c:135-141`; `tools/README-mcp.md:7`). The key travels as `?key=` (`addon/scripts/5_Mission/MCPBridge.c:231`). The listener binds `127.0.0.1`; there is no `0.0.0.0` mode and no remote mode (`product-spec.md:168`).
 
 **`SetTimeMultiplier(0)` freezes the entire simulation**, animations included (`world.c:14`; `dayz-mcp-architecture.md:185-187`). Condition lighting and weather after seating and animations have finished, not before a pending get-in.
 

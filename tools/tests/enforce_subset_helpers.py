@@ -25,6 +25,9 @@ Enforce behaviour kept on purpose:
   classes (EnforceArray, EnforceMap, fake_class);
 - a `vector` is copied on every assignment, as Enforce copies the value type, and
   `v[i]` reads or writes one component;
+- a `string` is likewise copied on every assignment, on every indexed
+  assignment and whenever it is passed by value (Enforce strings are a
+  value type), so mutating a copy never mutates the source string;
 - the class members a body uses bare are named in `members`, become globals of
   the namespace, and may be assigned.
 """
@@ -101,6 +104,14 @@ class EnforceString:
             raise AssertionError("ToAscii on an empty string")
         return self.data[0]
 
+    def HexToInt(self) -> int:
+        # scripts/1_core/proto/enstring.c:33 ("0xFF" -> 255)
+        text = self.data.strip().decode("ascii", "replace")
+        sign = -1 if text.startswith("-") else 1
+        text = text.lstrip("+-").removeprefix("0x").removeprefix("0X")
+        digits = re.match(r"[0-9a-fA-F]+", text)
+        return sign * int(digits.group(0), 16) if digits else 0
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, EnforceString):
             raise TypeError(f"string compared with {type(other).__name__}")
@@ -146,7 +157,9 @@ class EnforceArray(list):
         return True
 
     def Insert(self, value: object) -> int:
-        self.append(value)
+        # array.Insert takes its element by value (scripts/1_core/proto/enscript.c:407):
+        # the array holds its own copy, so transforming the element cannot reach the source.
+        self.append(_string_copy(value))
         return len(self) - 1
 
     def Get(self, index: int) -> Any:
@@ -192,7 +205,8 @@ class EnforceMap:
     def Insert(self, key: object, value: object) -> bool:
         if self._find(key) >= 0:
             raise AssertionError(f"map key {key!r} inserted twice")
-        self._pairs.append((key, value))
+        # map.Insert takes key and value by value (scripts/1_core/proto/enscript.c:907).
+        self._pairs.append((_string_copy(key), _string_copy(value)))
         return True
 
     def Remove(self, key: object) -> None:
@@ -241,6 +255,13 @@ class EnforceVector(list):
         list.__setitem__(self, self._check(index), float(value))  # type: ignore[arg-type]
 
 
+def _string_copy(value: Any) -> Any:
+    """Copy an EnforceString (value semantics); pass anything else through."""
+    if isinstance(value, EnforceString):
+        return type(value)(value.data)
+    return value
+
+
 def clean(source: str) -> str:
     """Blank comments (keeping line breaks) and keep string literals intact."""
 
@@ -272,6 +293,603 @@ def method_body(source: str, signature: str) -> str:
             if depth == 0:
                 return text[brace + 1 : match.start()]
     raise AssertionError(f"unterminated body: {signature}")
+
+
+# --- Poll-query cache gate (shared by the three bridge capability tests) ---
+#
+# The classification below is fail-closed and rests on verified signatures,
+# never on a list of what is forbidden:
+#
+# * STRING_METHODS catalogues every method declared in `class string` of the
+#   vanilla scripts/1_core/proto/enstring.c, proto and script alike. A method
+#   is "mutating" when its documentation says it changes the string itself
+#   (Replace, ToLower, ToUpper, TrimInPlace, Set, OldSet, Insert and
+#   ParseStringEx, which left-truncates its input) or when its signature has
+#   an out parameter (ParseStringEx, ParseString, Split); everything else is
+#   a "read". A method absent from the table is rejected, not assumed safe.
+# * VERIFIED_CALLEE_PARAMS catalogues the free/static callees whose verified
+#   signature is not declared in the source under test. Alongside it, a callee
+#   declared in that source (an addon or fixture method) is trusted from its
+#   own declaration there. Any other callee, and any catalogued parameter
+#   that is out/inout at the member's position, is rejected.
+#
+# Citations name the vanilla file and line of each signature. They are
+# written here by hand: CI has no vanilla scripts and no test reads them.
+
+# name -> (kind, citation, parameter modes in declaration order)
+STRING_METHODS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "ToInt": ("read", "scripts/1_core/proto/enstring.c:20", ()),
+    "HexToInt": ("read", "scripts/1_core/proto/enstring.c:33", ()),
+    "ToFloat": ("read", "scripts/1_core/proto/enstring.c:46", ()),
+    "ToVector": ("read", "scripts/1_core/proto/enstring.c:59", ()),
+    "BeautifiedToVector": ("read", "scripts/1_core/proto/enstring.c:67", ()),
+    "ToAscii": ("read", "scripts/1_core/proto/enstring.c:86", ()),
+    "ToType": ("read", "scripts/1_core/proto/enstring.c:95", ()),
+    "ToString": ("read", "scripts/1_core/proto/enstring.c:98", ("value", "value", "value", "value")),
+    "Substring": ("read", "scripts/1_core/proto/enstring.c:113", ("value", "value")),
+    "SubstringInverted": ("read", "scripts/1_core/proto/enstring.c:116", ("value", "value", "value")),
+    "SubstringUtf8": ("read", "scripts/1_core/proto/enstring.c:137", ("value", "value")),
+    "Replace": ("mutating", "scripts/1_core/proto/enstring.c:156", ("value", "value")),
+    "ToLower": ("mutating", "scripts/1_core/proto/enstring.c:171", ()),
+    "ToUpper": ("mutating", "scripts/1_core/proto/enstring.c:186", ()),
+    "Length": ("read", "scripts/1_core/proto/enstring.c:199", ()),
+    "LengthUtf8": ("read", "scripts/1_core/proto/enstring.c:212", ()),
+    "Hash": ("read", "scripts/1_core/proto/enstring.c:223", ()),
+    "IndexOf": ("read", "scripts/1_core/proto/enstring.c:240", ("value",)),
+    "LastIndexOf": ("read", "scripts/1_core/proto/enstring.c:253", ("value",)),
+    "IndexOfFrom": ("read", "scripts/1_core/proto/enstring.c:271", ("value", "value")),
+    "Contains": ("read", "scripts/1_core/proto/enstring.c:286", ("value",)),
+    "Trim": ("read", "scripts/1_core/proto/enstring.c:304", ()),
+    "TrimInPlace": ("mutating", "scripts/1_core/proto/enstring.c:319", ()),
+    "ParseStringEx": ("mutating", "scripts/1_core/proto/enstring.c:349", ("out",)),
+    "ParseString": ("mutating", "scripts/1_core/proto/enstring.c:369", ("out",)),
+    "Split": ("mutating", "scripts/1_core/proto/enstring.c:396", ("value", "out")),
+    "Join": ("read", "scripts/1_core/proto/enstring.c:424", ("value", "value")),
+    "Get": ("read", "scripts/1_core/proto/enstring.c:448", ("value",)),
+    "Set": ("mutating", "scripts/1_core/proto/enstring.c:473", ("value", "value")),
+    "OldSet": ("mutating", "scripts/1_core/proto/enstring.c:487", ("value", "value")),
+    "Insert": ("mutating", "scripts/1_core/proto/enstring.c:511", ("value", "value")),
+    "Format": ("read", "scripts/1_core/proto/enstring.c:526", ("value",) * 10),
+}
+
+# name -> (parameter modes in declaration order, citation)
+VERIFIED_CALLEE_PARAMS: dict[str, tuple[tuple[str, ...], str]] = {
+    "DumpStack": ((), "scripts/1_core/proto/endebug.c:27"),
+    "DumpStackString": (("out",), "scripts/1_core/proto/endebug.c:50"),
+    "DebugBreak": (("value",) * 10, "scripts/1_core/proto/endebug.c:53"),
+    "CompileBreak": ((), "scripts/1_core/proto/endebug.c:56"),
+    "DPrint": (("value",), "scripts/1_core/proto/endebug.c:59"),
+    "ErrorEx": (("value", "value"), "scripts/1_core/proto/endebug.c:83"),
+    "ErrorExString": (("value", "out", "value"), "scripts/1_core/proto/endebug.c:84"),
+    "Error2": (("value", "value"), "scripts/1_core/proto/endebug.c:87"),
+    "Error": (("value",), "scripts/1_core/proto/endebug.c:90"),
+    "Print": (("value",), "scripts/1_core/proto/endebug.c:96"),
+    "PrintToRPT": (("value",), "scripts/1_core/proto/endebug.c:99"),
+    "PrintFormat": (("value",) * 10, "scripts/1_core/proto/endebug.c:108"),
+    "ToString": (("value", "value", "value", "value"), "scripts/1_core/proto/enstring.c:98"),
+    "Join": (("value", "value"), "scripts/1_core/proto/enstring.c:424"),
+    "Format": (("value",) * 10, "scripts/1_core/proto/enstring.c:526"),
+    "GetVersion": (("out",), "scripts/3_game/global/game.c:942"),
+}
+# The catalogued natives that are static methods of string, reachable as
+# string.Name( (enstring.c:98, :424, :526).
+STRING_STATIC_METHODS = frozenset({"ToString", "Join", "Format"})
+
+# kind -> method -> (parameter modes, citation), from scripts/1_core/proto/enscript.c
+# (class array<T> :374, set<T> :720, map<TKey,TValue> :830). Used only when the
+# receiver is a variable whose declared type is that container.
+CONTAINER_METHODS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
+    "array": {
+        "Set": (("value", "value"), "enscript.c:389"),
+        "Find": (("value",), "enscript.c:394"),
+        "Get": (("value",), "enscript.c:399"),
+        "Insert": (("value",), "enscript.c:407"),
+        "InsertAt": (("value", "value"), "enscript.c:418"),
+        "Remove": (("value",), "enscript.c:463"),
+    },
+    "set": {
+        "Find": (("value",), "enscript.c:730"),
+        "Get": (("value",), "enscript.c:731"),
+        "Insert": (("value",), "enscript.c:739"),
+        "InsertAt": (("value", "value"), "enscript.c:750"),
+        "Remove": (("value",), "enscript.c:756"),
+    },
+    "map": {
+        "Get": (("value",), "enscript.c:847"),
+        "Find": (("value", "out"), "enscript.c:858"),
+        "GetElement": (("value",), "enscript.c:868"),
+        "GetKey": (("value",), "enscript.c:878"),
+        "Set": (("value", "value"), "enscript.c:883"),
+        "Remove": (("value",), "enscript.c:887"),
+        "Contains": (("value",), "enscript.c:898"),
+        "Insert": (("value", "value"), "enscript.c:907"),
+    },
+}
+
+# The vanilla container typedefs, by kind (scripts/1_core/proto/enscript.c:712-720,
+# :802-808, :974-1026). A type name counts as a container only when it is one of
+# these (or array/set/map itself) and no class of that name is declared in the
+# source under test (F13).
+ARRAY_TYPEDEFS = frozenset({
+    "TStringArray", "TFloatArray", "TIntArray", "TBoolArray", "TClassArray", "TManagedArray",
+    "TManagedRefArray", "TVectorArray", "TTypenameArray",
+})
+SET_TYPEDEFS = frozenset({
+    "TStringSet", "TFloatSet", "TIntSet", "TClassSet", "TManagedSet", "TManagedRefSet",
+    "TTypenameSet",
+})
+MAP_TYPEDEFS = frozenset({
+    "TIntFloatMap", "TIntIntMap", "TIntStringMap", "TIntClassMap", "TIntManagedMap",
+    "TIntManagedRefMap", "TIntTypenameMap", "TIntVectorMap", "TStringFloatMap",
+    "TStringIntMap", "TStringStringMap", "TStringClassMap", "TStringManagedMap",
+    "TStringManagedRefMap", "TStringTypenameMap", "TStringVectorMap", "TClassFloatMap",
+    "TClassIntMap", "TClassStringMap", "TClassClassMap", "TClassManagedMap",
+    "TClassManagedRefMap", "TClassTypenameMap", "TClassVectorMap", "TTypeNameFloatMap",
+    "TTypeNameIntMap", "TTypeNameStringMap", "TTypeNameClassMap", "TTypeNameManagedMap",
+    "TTypeNameManagedRefMap", "TTypeNameTypenameMap", "TTypeNameVectorMap", "TManagedFloatMap",
+    "TManagedIntMap", "TManagedStringMap", "TManagedClassMap", "TManagedManagedMap",
+    "TManagedManagedRefMap", "TManagedTypenameMap", "TManagedVectorMap", "TManagedRefFloatMap",
+    "TManagedRefIntMap", "TManagedRefStringMap", "TManagedRefClassMap",
+    "TManagedRefManagedMap", "TManagedRefManagedRefMap", "TManagedRefTypenameMap",
+    "TManagedRefVectorMap",
+})
+
+_NON_CALLEE_KEYWORDS = frozenset({
+    "case", "catch", "delete", "else", "for", "if", "in", "inout", "new",
+    "out", "return", "sizeof", "switch", "throw", "typename", "while",
+})
+_CACHE_FUNC_DECL_HEAD = re.compile(
+    r"\b(?P<ret>[A-Za-z_]\w*(?:\s*<[\w\s,<>]*>)?)\s+(?P<name>[A-Za-z_]\w*)\s*\("
+)
+_CACHE_PARAM_DECL = re.compile(
+    r"^(?:(out|inout)\s+)?(?:notnull\s+)?(?:ref\s+)?"
+    r"[A-Za-z_]\w*(?:\s*<.*>)?(?:\s*\[\s*\d*\s*\])?\s+"
+    r"(?:\[\s*\d*\s*\]\s*)?[A-Za-z_]\w*(?:\s*\[\s*\d*\s*\])?$"
+)
+
+
+def _find_matching_delim(text: str, open_pos: int, open_ch: str = "(", close_ch: str = ")") -> int:
+    depth = 0
+    for idx in range(open_pos, len(text)):
+        ch = text[idx]
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+
+def _split_top_level_commas(text: str, *, track_angles: bool) -> list[tuple[int, int, str]]:
+    parts: list[tuple[int, int, str]] = []
+    paren = brack = brace = angle = 0
+    start = 0
+    for idx, ch in enumerate(text):
+        if ch == "(":
+            paren += 1
+        elif ch == ")" and paren > 0:
+            paren -= 1
+        elif ch == "[":
+            brack += 1
+        elif ch == "]" and brack > 0:
+            brack -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}" and brace > 0:
+            brace -= 1
+        elif track_angles and ch == "<":
+            angle += 1
+        elif track_angles and ch == ">" and angle > 0:
+            angle -= 1
+        elif ch == "," and paren == 0 and brack == 0 and brace == 0 and (not track_angles or angle == 0):
+            parts.append((start, idx, text[start:idx]))
+            start = idx + 1
+    parts.append((start, len(text), text[start:]))
+    return parts
+
+
+_CLASS_HEAD = re.compile(
+    r"\b(?:modded\s+)?class\s+(?P<name>[A-Za-z_]\w*)"
+    r"(?:\s*(?::|extends)\s*(?P<parent>[A-Za-z_]\w*))?[^{;]*\{"
+)
+
+
+def _class_spans(masked: str) -> list[tuple[str, str | None, int, int]]:
+    """(name, parent, open brace, close brace) of every class in `masked`.
+
+    A class nested in another one is named ``Outer.Inner``: it is never the
+    top-level class of the same simple name, so neither its parent nor its
+    methods enter that class's scope (F14)."""
+    spans: list[tuple[str, str | None, int, int]] = []
+    for match in _CLASS_HEAD.finditer(masked):
+        open_brace = match.end() - 1
+        close_brace = _find_matching_delim(masked, open_brace, "{", "}")
+        if close_brace == -1:
+            continue
+        name = match.group("name")
+        enclosing = [s for s in spans if s[2] < match.start() < s[3]]
+        if enclosing:
+            name = max(enclosing, key=lambda s: s[2])[0] + "." + name
+        spans.append((name, match.group("parent"), open_brace, close_brace))
+    return spans
+
+
+def _owner_class(spans: list[tuple[str, str | None, int, int]], pos: int) -> str | None:
+    """Innermost class whose body contains `pos`, or None at file scope."""
+    owner = None
+    width = None
+    for name, _parent, start, end in spans:
+        if start < pos < end and (width is None or end - start < width):
+            owner, width = name, end - start
+    return owner
+
+
+def _declared_callee_params(
+    masked: str,
+) -> dict[str, list[tuple[str | None, tuple[str, ...] | None]]]:
+    """Every function declared in `masked`, by name: (owner class, parameter modes).
+
+    A candidate only counts when it looks like a declaration (a body or a
+    semicolon follows its parameter list); a call site never registers its
+    callee because its arguments are expressions inside a statement. A
+    declaration whose parameter list does not parse keeps None as its modes:
+    the gate rejects a call that could reach it instead of forgetting it (F10).
+    """
+    spans = _class_spans(masked)
+    found: dict[str, list[tuple[str | None, tuple[str, ...] | None]]] = {}
+    for match in _CACHE_FUNC_DECL_HEAD.finditer(masked):
+        ret_base = match.group("ret").split("<", 1)[0].strip()
+        name = match.group("name")
+        if ret_base in _NON_CALLEE_KEYWORDS or name in _NON_CALLEE_KEYWORDS:
+            continue
+        if match.start() > 0 and masked[match.start() - 1] == ".":
+            continue
+        open_paren = match.end() - 1
+        close_paren = _find_matching_delim(masked, open_paren, "(", ")")
+        if close_paren == -1:
+            continue
+        if not masked[close_paren + 1 :].lstrip().startswith(("{", ";")):
+            continue
+        owner = _owner_class(spans, match.start())
+        params_text = masked[open_paren + 1 : close_paren].strip()
+        if params_text in ("", "void"):
+            found.setdefault(name, []).append((owner, ()))
+            continue
+        modes: list[str] = []
+        parsed = True
+        for _s, _e, param_decl in _split_top_level_commas(params_text, track_angles=True):
+            decl = param_decl.split("=", 1)[0].strip()
+            param_match = _CACHE_PARAM_DECL.match(decl)
+            if param_match is None:
+                parsed = False
+                break
+            modes.append(param_match.group(1) or "value")
+        found.setdefault(name, []).append((owner, tuple(modes) if parsed else None))
+    return found
+
+
+def _member_scope(masked: str, member_pos: int) -> set[str]:
+    """The member's class and its ancestors declared in `masked` (modded
+    classes of those names share their declarations)."""
+    spans = _class_spans(masked)
+    # Every head of a name contributes its parent: a modded class keeps the
+    # inheritance of the class it modifies, so a later `modded class X {}`
+    # with no base must not erase X's parent (F12).
+    parents: dict[str, set[str]] = {}
+    for name, parent, _s, _e in spans:
+        if parent is not None:
+            parents.setdefault(name, set()).add(parent)
+    scope: set[str] = set()
+    pending = [_owner_class(spans, member_pos)]
+    while pending:
+        current = pending.pop()
+        if current is None or current in scope:
+            continue
+        scope.add(current)
+        pending.extend(parents.get(current, ()))
+    return scope
+
+
+def _receiver_kind(masked: str, name: str) -> str | None:
+    """array | set | map | string for a variable declared with exactly one such
+    type in `masked`; None for anything else (a class name, an engine global,
+    a parameter of a class type, two declarations that disagree)."""
+    # Any class of that simple name hides the typedef, nested ones included:
+    # the gate does not resolve which one a type name means (F15).
+    source_classes = {name.rsplit(".", 1)[-1] for name, _parent, _s, _e in _class_spans(masked)}
+    kinds = set()
+    for match in re.finditer(
+        rf"(?<![\w.])(?:ref\s+)?(?P<type>[A-Za-z_]\w*)(?:\s*<[^;{{}}()=]*?>)?\s+{re.escape(name)}\s*(?=[;=,)])",
+        masked,
+    ):
+        base = match.group("type")
+        if base in _NON_CALLEE_KEYWORDS or base in ("ref", "out", "inout", "notnull", "const", "static"):
+            continue
+        if base in source_classes:
+            kinds.add(None)
+        elif base == "array" or base in ARRAY_TYPEDEFS:
+            kinds.add("array")
+        elif base == "set" or base in SET_TYPEDEFS:
+            kinds.add("set")
+        elif base == "map" or base in MAP_TYPEDEFS:
+            kinds.add("map")
+        elif base == "string":
+            kinds.add("string")
+        else:
+            kinds.add(None)
+    return next(iter(kinds)) if len(kinds) == 1 else None
+
+
+def _resolve_callee_signatures(
+    callee: str,
+    receiver_text: str,
+    declared: dict[str, list[tuple[str | None, tuple[str, ...] | None]]],
+    member_scope: set[str],
+    masked: str,
+) -> tuple[list[tuple[str, ...]] | None, str]:
+    """The signatures this call can reach, or (None, reason) when the gate
+    cannot resolve it. Only this subset is resolved; everything else fails:
+
+    * a bare (or ``this.``) call reaches the methods of that name declared in
+      the member's class, its modded classes and ancestors in the source;
+      failing those, functions of that name declared at file scope; failing
+      those, the catalogued native. Methods of other classes are out of scope
+      (F04: they cannot hide the native, and an out homonym there no longer
+      rejects a by-value native call);
+    * ``string.Name(`` reaches the catalogued static string methods;
+    * ``v.Name(`` reaches the catalogued method of v's declared container or
+      string type (F06/F07);
+    * any other receiver (a class name, a chained or indexed receiver, an
+      engine global, a variable of another type) is not resolved (F08, F11);
+    * a reachable declaration whose parameters do not parse is not resolved
+      (F10).
+    """
+    receiver = receiver_text.rstrip()
+    bare = not receiver.endswith(".") or re.search(r"(?<![\w.\]\)])this\s*\.$", receiver) is not None
+    if bare:
+        entries = declared.get(callee, [])
+        for owners in ([o for o in member_scope], [None]):
+            reachable = [modes for owner, modes in entries if owner in owners]
+            if any(modes is None for modes in reachable):
+                return None, f"a declaration of {callee}() the gate cannot parse"
+            if reachable:
+                return list(reachable), ""  # type: ignore[arg-type]
+        if callee in VERIFIED_CALLEE_PARAMS:
+            return [VERIFIED_CALLEE_PARAMS[callee][0]], ""
+        return None, "no verified signature is catalogued for it"
+    named = re.search(r"(?<![\w.\]\)])([A-Za-z_]\w*)\s*\.$", receiver)
+    if named is None:
+        return None, "a receiver the gate cannot resolve"
+    receiver_name = named.group(1)
+    if receiver_name == "string":
+        if callee in STRING_STATIC_METHODS:
+            return [VERIFIED_CALLEE_PARAMS[callee][0]], ""
+        return None, "a receiver the gate cannot resolve"
+    kind = _receiver_kind(masked, receiver_name)
+    if kind == "string":
+        if callee in STRING_METHODS:
+            return [STRING_METHODS[callee][2]], ""
+        return None, "no verified signature is catalogued for it"
+    if kind is None:
+        return None, "a receiver the gate cannot resolve"
+    method = CONTAINER_METHODS[kind].get(callee)
+    if method is None:
+        return None, "no verified signature is catalogued for it"
+    return [method[0]], ""
+
+
+def _member_argument_is_unresolved(expr: str, esc: str) -> bool:
+    """True when `expr` hands the cached member itself to a callee in a form
+    the gate cannot resolve as a by-value read: neither the bare member (or
+    ``this.<member>``, with one optional index) nor a classified read on it.
+    A larger expression that only reads the member into a temporary (an
+    operator at the top level, or a read method on the member) is a by-value
+    read and returns False."""
+    if re.search(rf"\b{esc}\b", expr) is None:
+        return False
+    if re.match(
+        rf"(?:(?:out|inout)\s+)?(?:this\s*\.\s*)?{esc}"
+        rf"(?:\s*\[.*\])?\s*\.\s*[A-Za-z_]\w*\s*\(",
+        expr,
+        re.DOTALL,
+    ):
+        return False
+    depth = 0
+    for char in expr:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0 and char in "+-*/%<>=!&|?:":
+            return False
+    return True
+
+
+def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
+    """Fail unless `member` (in string-blanked, comment-free source) is only
+    ever assigned once, never mutated, and only read through verified calls.
+
+    Rejected: a second or compound assignment, `++`/`--`, an indexed
+    assignment, a mutating or unclassified string method on the member, the
+    member passed with an explicit out/inout keyword, and the member passed
+    as exactly one argument to a callee that is unverified, or whose
+    parameter at that position is out/inout, or that takes fewer parameters.
+    The member reached through any receiver other than the bare member or
+    ``this.<member>`` (an indexed receiver, a ``.Get(i)`` receiver, another
+    object or a bridge alias), and an argument that hands the member itself
+    to a callee in any other unresolved form, are likewise rejected: the
+    gate only ever resolves the whole access as a by-value read, or fails.
+    A read through a catalogued string method, a copy to a local and a
+    by-value argument to a verified callee are allowed.
+    """
+    esc = re.escape(member)
+    decl_re = re.compile(
+        rf"\b(?!(?:{'|'.join(sorted(_NON_CALLEE_KEYWORDS))})\b)"
+        rf"[A-Za-z_]\w*(?:\s*<[\w\s,<>]*>)?\s+{esc}\b"
+    )
+    if len(decl_re.findall(masked)) != 1:
+        raise AssertionError(f"{member} must be declared once and never shadowed")
+    if re.search(rf"\b(?:out|inout)\s+\(*\s*(?:this\s*\.\s*)?{esc}\b", masked) is not None:
+        raise AssertionError(f"{member} must not be passed as out/inout")
+
+    declared = _declared_callee_params(masked)
+    scope = _member_scope(masked, decl_re.search(masked).start())  # type: ignore[union-attr]
+    token_re = re.compile(rf"\b{esc}\b")
+    assign_count = 0
+    for match in token_re.finditer(masked):
+        pos = match.start()
+        if masked[:pos].rstrip().endswith(".") and (
+            re.search(r"(?<![\w.\]\)])this\s*\.\s*$", masked[:pos]) is None
+        ):
+            raise AssertionError(
+                f"{member} must not be reached through another object, an "
+                "indexed receiver or a bridge alias; only the bare member "
+                f"or this.{member} resolves as a read"
+            )
+        stack: list[int] = []
+        for idx, ch in enumerate(masked[:pos]):
+            if ch == "(":
+                stack.append(idx)
+            elif ch == ")" and stack:
+                stack.pop()
+
+        if not stack and masked[:pos].rstrip().endswith(","):
+            raise AssertionError(f"{member} must not be redeclared in a multi-variable declaration")
+
+        m_start = pos
+        expr_end = match.end()
+        qual = re.search(r"(?:\b[A-Za-z_]\w*(?:\s*\(\s*\))?\s*\.\s*)+$", masked[:m_start])
+        if qual is not None:
+            m_start = qual.start()
+
+        for open_paren in reversed(stack):
+            close_paren = _find_matching_delim(masked, open_paren, "(", ")")
+            if close_paren == -1:
+                break
+            if masked[open_paren + 1 : m_start].strip() != "" or masked[expr_end:close_paren].strip() != "":
+                break
+            before_paren = masked[:open_paren].rstrip()
+            word_match = re.search(r"([A-Za-z_]\w*)$", before_paren)
+            if before_paren.endswith(">") or (
+                word_match is not None and word_match.group(1) not in {"return", "case", "else"}
+            ):
+                break
+            m_start = open_paren
+            expr_end = close_paren + 1
+
+        after = masked[expr_end:].lstrip()
+        # A string method on the member, possibly after an index (Get form).
+        method_suffix = after
+        while method_suffix.startswith("["):
+            close_brack = _find_matching_delim(method_suffix, 0, "[", "]")
+            if close_brack == -1:
+                raise AssertionError(f"unbalanced bracket after {member}")
+            method_suffix = method_suffix[close_brack + 1 :].lstrip()
+        if method_suffix.startswith("."):
+            dot_match = re.match(r"\.\s*([A-Za-z_]\w*)\s*\(", method_suffix)
+            if dot_match is None:
+                raise AssertionError(f"disallowed member access on {member}")
+            method_name = dot_match.group(1)
+            if method_name not in STRING_METHODS:
+                raise AssertionError(
+                    f"unclassified string method {method_name}() called on {member}"
+                )
+            kind, citation, _modes = STRING_METHODS[method_name]
+            if kind != "read":
+                raise AssertionError(
+                    f"mutating string method {method_name}() called on {member} ({citation})"
+                )
+
+        after_target = after
+        while after_target.startswith("["):
+            close_brack = _find_matching_delim(after_target, 0, "[", "]")
+            if close_brack == -1:
+                raise AssertionError(f"unbalanced bracket after {member}")
+            after_target = after_target[close_brack + 1 :].lstrip()
+
+        if re.match(r"=(?!=)", after_target) is not None:
+            assign_count += 1
+        if re.match(r"(?:[+\-*/%|&^]|<<|>>)=(?!=)", after_target) is not None:
+            raise AssertionError(f"{member} must not be modified by compound assignment")
+        if after_target.startswith(("++", "--")) or masked[:m_start].rstrip().endswith(("++", "--")):
+            raise AssertionError(f"{member} must not be incremented or decremented")
+
+        for open_paren in reversed(stack):
+            before_paren = masked[:open_paren].rstrip()
+            if before_paren.endswith(">"):
+                lt_depth = 0
+                scan = len(before_paren) - 1
+                while scan >= 0:
+                    if before_paren[scan] == ">":
+                        lt_depth += 1
+                    elif before_paren[scan] == "<":
+                        lt_depth -= 1
+                        if lt_depth == 0:
+                            before_paren = before_paren[:scan].rstrip()
+                            break
+                    scan -= 1
+            callee_match = re.search(r"([A-Za-z_]\w*)$", before_paren)
+            if callee_match is None:
+                continue
+            callee = callee_match.group(1)
+            if callee in _NON_CALLEE_KEYWORDS:
+                break
+            close_paren = _find_matching_delim(masked, open_paren, "(", ")")
+            if close_paren == -1:
+                break
+            args_text = masked[open_paren + 1 : close_paren]
+            rel_pos = pos - (open_paren + 1)
+            for arg_idx, (a_start, a_end, raw_arg) in enumerate(
+                _split_top_level_commas(args_text, track_angles=False)
+            ):
+                if a_start <= rel_pos < a_end:
+                    expr = raw_arg.strip()
+                    while (
+                        expr.startswith("(")
+                        and expr.endswith(")")
+                        and _find_matching_delim(expr, 0, "(", ")") == len(expr) - 1
+                    ):
+                        expr = expr[1:-1].strip()
+                    if re.fullmatch(
+                        rf"(?:(?:out|inout)\s+)?(?:this\s*\.\s*)?{esc}(?:\s*\[.*\])?",
+                        expr,
+                        re.DOTALL,
+                    ):
+                        receiver_text = before_paren[: callee_match.start()]
+                        signatures, reason = _resolve_callee_signatures(
+                            callee, receiver_text, declared, scope, masked
+                        )
+                        if signatures is None:
+                            raise AssertionError(
+                                f"{member} passed to unverified callee {callee}(); {reason}"
+                            )
+                        # An overload with fewer parameters than this call has
+                        # arguments cannot be the callee. If none is left the
+                        # call matches no verified signature (F09).
+                        n_args = len(_split_top_level_commas(args_text, track_angles=False))
+                        applicable = [m for m in signatures if len(m) >= n_args]
+                        if not applicable:
+                            raise AssertionError(
+                                f"{member} passed to {callee}() with {n_args} arguments; "
+                                "no verified signature takes that many"
+                            )
+                        for modes in applicable:
+                            if arg_idx >= len(modes) or modes[arg_idx] != "value":
+                                raise AssertionError(
+                                    f"{member} must not be passed to out/inout parameter "
+                                    f"{arg_idx} of {callee}()"
+                                )
+                    elif _member_argument_is_unresolved(expr, esc):
+                        raise AssertionError(
+                            f"{member} passed to {callee}() in a form that "
+                            f"cannot be resolved as a by-value read: {expr!r}"
+                        )
+                    break
+            break
+
+    if assign_count != 1:
+        raise AssertionError(f"{member} must not be reassigned after construction")
 
 
 _FIELD = re.compile(
@@ -574,6 +1192,7 @@ def translate(
     namespace.setdefault("_S", EnforceString)
     namespace.setdefault("_bounded", _bounded)
     namespace.setdefault("_vector", EnforceVector)
+    namespace.setdefault("_string_copy", _string_copy)
     exec(compile(code, f"<enforce:{name}>", "exec"), namespace)
     return namespace[name]
 
@@ -599,12 +1218,19 @@ def python_source(
     if members:
         lines.append(f"    global {', '.join(sorted(members))}")
     lines.append("    _loops = [0]")
+    # Enforce passes strings by value: the callee works on its own copy, so
+    # a mutating method on a parameter cannot reach the caller's string.
+    for param in params:
+        if local_types.get(param) == "string":
+            lines.append(f"    {param} = _string_copy({param})")
     for out, out_type in outs:
         lines.append(f"    {out} = {_default(out_type, class_types)}")
     returns = ", ".join(out for out, _type in outs)
 
     def render_return(value: str | None) -> str:
-        rendered = "None" if value is None else _expression(value, out_functions)
+        # A returned string is a copy: a getter that returns a member hands
+        # the caller its own string, so ToUpper on it cannot reach the member.
+        rendered = "None" if value is None else f"_string_copy({_expression(value, out_functions)})"
         if outs:
             return f"return ({rendered}, {returns})"
         return f"return {rendered}" if value is not None else "return"
@@ -626,7 +1252,11 @@ def python_source(
         # A vector is a value type: the local gets its own copy.
         if local_types.get(target) == "vector":
             return f"_vector({rendered})"
-        return rendered
+        # A string is a value type too: the target gets its own copy, so a
+        # mutating method on it (ToUpper and friends) cannot reach the source.
+        # _string_copy passes non-strings through, so this also covers members
+        # and fields, whose types local_types does not know.
+        return f"_string_copy({rendered})"
 
     def render(chunk: str) -> str:
         if chunk == "else":
@@ -668,9 +1298,11 @@ def python_source(
             if "." not in target and base not in declared and base not in members:
                 raise AssertionError(f"assignment to undeclared {target} in {name}")
             if "[" in target:
+                # An indexed element holds a string by value too: copy it,
+                # or transforming the element would transform the source.
                 return (
                     f"{_expression(target, out_functions)} = "
-                    f"{_expression(assignment.group('value'), out_functions)}"
+                    f"_string_copy({_expression(assignment.group('value'), out_functions)})"
                 )
             out_call = render_out_call([target], assignment.group("value"))
             return out_call or f"{target} = {render_value(target, assignment.group('value'))}"
