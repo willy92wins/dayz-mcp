@@ -8564,7 +8564,11 @@ class Handler(BaseHTTPRequestHandler):
             if self._header_parse_incomplete():
                 self._force_close = True
             self._note_body_if_absent()
-            if self._server_stopping():
+            # Only a follow-up on a kept-alive socket is refused once stop has
+            # begun (F7). The first request of a connection is dispatched as
+            # before keep-alive existed: its handler sees _stopping itself, and
+            # an /await for a discarded id still gets its stored result.
+            if line_ready and self._server_stopping():
                 self._refuse_during_stop()
                 return
             mname = "do_" + self.command
