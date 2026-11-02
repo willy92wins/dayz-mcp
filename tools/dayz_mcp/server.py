@@ -3623,7 +3623,17 @@ EXTRA_MODS_DESCRIPTION = (
     "the policy defaults when the caller omits it) is not copied into "
     "extra_mods. base_mods and server_mods do not satisfy that gate, so "
     "that call stays bridge_mod_missing. bridge_mod_missing also remains "
-    "when the sealed request would reject the appended entry."
+    "when the sealed request would reject the appended entry. Declaring the "
+    "bridge in server_only_mods suppresses that default and satisfies the gate."
+)
+SERVER_ONLY_MODS_DESCRIPTION = (
+    "Mods loaded only by the server through -serverMod=, never through the "
+    "client's -mod=. Accepts the same folder names or absolute paths as "
+    "extra_mods. May include '@DayZ_MCP'; that suppresses the shared bridge "
+    "default. If the implicit project mod is listed, it is loaded only on "
+    "the server too. Duplicates and overlaps with base_mods (including policy "
+    "defaults), extra_mods or server_mods are rejected. Omit or pass [] to "
+    "keep the existing behavior. Repeat the list on mode=client reattachments."
 )
 CLIENT_START_BUDGET_MAX_S = 3600.0
 CLIENT_START_BUDGET_DESCRIPTION = (
@@ -3664,6 +3674,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
         ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
         ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
+        ("server_only_mods", SERVER_ONLY_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
         ("navmesh_data_server", NAVMESH_DATA_SERVER_DESCRIPTION),
         ("server_adminlog", SERVER_ADMINLOG_DESCRIPTION),
@@ -6178,6 +6189,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "that gate, so that call stays bridge_mod_missing. "
             "bridge_mod_missing also remains when the sealed request would "
             "reject the appended entry. "
+            "server_only_mods loads the listed mods exclusively through the "
+            "server's -serverMod=, including '@DayZ_MCP' when requested; "
+            "that declaration suppresses its shared default. Explicit "
+            "overlaps with other mod lists are rejected. "
             "wait_for_box_s>0 waits "
             "until session_status.box is free (FIFO, no tool_lock while "
             "sleeping). on_busy=\"queue\" waits in that FIFO (wait_for_box_s "
@@ -6227,6 +6242,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the launch, so a client whose own tool-call timeout is shorter "
             "(Antigravity CLI cuts MCP calls at 180 s) must pass a smaller "
             "wait_for_box_s and repeat the call. "
+            "build=false never builds, even with clean=true. clean=true only "
+            "passes -clear to AddonBuilder when build=true; pack_only=true "
+            "also requires build=true. "
             "build=true binarizes only when pack_only is false and the source "
             "has binarizable assets. Binarize requires the source folder name "
             "to match the PBO namespace, ignoring ASCII case, and otherwise "
@@ -6259,6 +6277,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         extra_mods: list[str] | None = None,
         base_mods: list[str] | None = None,
         server_mods: list[str] | None = None,
+        server_only_mods: list[str] | None = None,
         no_base_mods: bool = False,
         no_file_patching: bool = False,
         port: StrictInt = 2302,
@@ -6362,6 +6381,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         extra_mods=extra_mods,
                         base_mods=base_mods,
                         server_mods=server_mods,
+                        server_only_mods=server_only_mods,
                         no_base_mods=no_base_mods,
                         no_file_patching=no_file_patching,
                         navmesh_data_server=navmesh_data_server,
@@ -6402,8 +6422,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 raise ToolError("dayz_test_failed:RuntimeError")
             return annotated(preflight_result)
 
-        # inbox 3997: the sealed request builds when build or clean is set.
-        built = bool(build or clean)
+        # Match the sealed request: clean only modifies an explicit build.
+        built = bool(build)
         box_wait_deadline: float | None = None
 
         def box_was_taken(admitted: object, box_now: object) -> bool:

@@ -1,7 +1,7 @@
 """fb-20260829-221423-b2c4: a bridge ok:0 keeps the diagnostics it filled before the error.
 
 The bridge sets user_id, handler and clicked before it decides not_handled
-(MCPClientBridge.c:1465-1480) and echoes the request in ui_request; the Python
+(MCPClientBridge.c:3766-3781) and echoes the request in ui_request; the Python
 layer used to raise ToolError("not_handled") and drop all of it. The message is
 the only thing that crosses the MCP wire, so the fields now ride in it after the
 code -- for the core UI verbs only. MCPResult is one flat class, so every wire
