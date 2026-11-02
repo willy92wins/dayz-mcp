@@ -771,6 +771,25 @@ class ArgContractHashTest(unittest.TestCase):
         with self.subTest(case="nested_homonym_does_not_join_scope"):
             with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
                 verify_enforce_arg_contract_hash(nested)
+        # F15 (Sol d2-r11): a class nested in the bridge that is named like a
+        # vanilla typedef still hides it.
+        ctor_line = "\tvoid MCPBridge()\n"
+        self.assertEqual(source.count(ctor_line), 1)
+        nested_typedef = source.replace(
+            ctor_line,
+            "\tclass TStringArray\n\t{\n\t\tvoid Insert(out string value)\n\t\t{\n"
+            '\t\t\tvalue = "broken";\n\t\t}\n\t}\n\n' + ctor_line,
+            1,
+        ).replace(
+            try_init_head,
+            try_init_head
+            + "\t\tTStringArray reviewShadow = new TStringArray();\n"
+            + "\t\treviewShadow.Insert(m_PollArgContractHash);\n",
+            1,
+        )
+        with self.subTest(case="nested_class_hides_a_vanilla_typedef"):
+            with self.assertRaisesRegex(AssertionError, _FAKE_CONTAINER_REASON):
+                verify_enforce_arg_contract_hash(nested_typedef)
         vanilla = source.replace(
             try_init_head,
             try_init_head

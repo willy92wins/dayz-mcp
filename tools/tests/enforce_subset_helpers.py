@@ -595,7 +595,9 @@ def _receiver_kind(masked: str, name: str) -> str | None:
     """array | set | map | string for a variable declared with exactly one such
     type in `masked`; None for anything else (a class name, an engine global,
     a parameter of a class type, two declarations that disagree)."""
-    source_classes = {name for name, _parent, _s, _e in _class_spans(masked)}
+    # Any class of that simple name hides the typedef, nested ones included:
+    # the gate does not resolve which one a type name means (F15).
+    source_classes = {name.rsplit(".", 1)[-1] for name, _parent, _s, _e in _class_spans(masked)}
     kinds = set()
     for match in re.finditer(
         rf"(?<![\w.])(?:ref\s+)?(?P<type>[A-Za-z_]\w*)(?:\s*<[^;{{}}()=]*?>)?\s+{re.escape(name)}\s*(?=[;=,)])",
