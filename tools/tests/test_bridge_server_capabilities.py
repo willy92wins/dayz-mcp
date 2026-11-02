@@ -695,6 +695,33 @@ _FOREIGN_BY_VALUE_ERROR_EX_STRING = (
 _SHADOWED_NATIVE_OUT = "must not be passed to out/inout parameter 1 of ErrorExString"
 
 
+# F06 (#305, Sol d2-r6): a by-value Find declared in another class must not
+# vouch for map.Find(key, out val) on an engine container (enscript.c:858).
+_FOREIGN_BY_VALUE_FIND = (
+    "\nclass ReviewForeignLookup\n"
+    "{\n"
+    "\tvoid Find(int key, string value)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_MAP_FIND_OUT = "must not be passed to out/inout parameter 1 of Find"
+
+
+# F06 (#305, Sol d2-r6): on an engine receiver a source declaration vouches for
+# nothing; GetProfileString(string name, out string value) is not catalogued
+# (scripts/3_game/global/game.c:286), so a by-value homonym must not let it pass.
+_FOREIGN_BY_VALUE_PROFILE = (
+    "\nclass ReviewForeignProfile\n"
+    "{\n"
+    "\tvoid GetProfileString(string name, string value)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_UNVERIFIED_PROFILE = "passed to unverified callee GetProfileString"
+
+
 class BridgeServerCapabilitiesTest(unittest.TestCase):
     def test_expected_census_is_canonical_and_names_the_mandatory_entry(self) -> None:
         expected = list(EXPECTED_SERVER_CAPABILITIES)
@@ -795,6 +822,11 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "\t\treviewBox.Insert(m_PollCapabilities);\n"
             "\t\tint reviewElemLen = reviewBox.Get(0).ToUpper();\n"
         )
+        caps_map_member_block = (
+            "\t\tm_ReviewValues = new map<int, string>();\n"
+            "\t\tm_ReviewValues.Insert(0, m_PollCapabilities);\n"
+            "\t\tint reviewMapLen = m_ReviewValues.Get(0).ToUpper();\n"
+        )
         fixture_controls = {
             "copy_to_local_in_constructor": fixture.replace(
                 fixture_init, fixture_init + "\t\tstring capsCopy = m_PollCapabilities;\n", 1
@@ -853,6 +885,16 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             ),
             "insert_then_transform_get_element_in_poll": fixture.replace(
                 fixture_wire, caps_insert_get_block + fixture_wire, 1
+            ),
+            "map_member_insert_then_transform_element_in_constructor": fixture.replace(
+                fixture_ctor, "\tprotected ref map<int, string> m_ReviewValues;\n\n" + fixture_ctor, 1
+            ).replace(
+                fixture_init, fixture_init + caps_map_member_block, 1
+            ),
+            "getter_return_then_transform_in_poll": fixture.replace(
+                fixture_ctor, observer_decl + fixture_ctor, 1
+            ).replace(
+                fixture_wire, "\t\tint reviewGetLen = GetCachedPollCapabilities().ToUpper();\n" + fixture_wire, 1
             ),
         }
         for label, variant in fixture_controls.items():
@@ -917,6 +959,16 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "live_insert_then_transform_get_element_in_poll": live.replace(
                 fixture_wire, caps_insert_get_block + fixture_wire, 1
             ),
+            "live_map_member_insert_then_transform_element_in_constructor": live.replace(
+                "\tvoid MCPBridge()\n", "\tprotected ref map<int, string> m_ReviewValues;\n\n" + "\tvoid MCPBridge()\n", 1
+            ).replace(
+                fixture_init, fixture_init + caps_map_member_block, 1
+            ),
+            "live_getter_return_then_transform_in_poll": live.replace(
+                "\tvoid MCPBridge()\n", observer_decl + "\tvoid MCPBridge()\n", 1
+            ).replace(
+                fixture_wire, "\t\tint reviewGetLen = GetCachedPollCapabilities().ToUpper();\n" + fixture_wire, 1
+            ),
         }
         for label, variant in live_controls.items():
             with self.subTest(target="live", control=label):
@@ -944,6 +996,52 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         for target, (mutant, expected) in cases.items():
             with self.subTest(target=target):
                 with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
+                    _assert_contract(self, mutant, expected)
+
+    def test_foreign_by_value_find_does_not_vouch_for_map_find(self) -> None:
+        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        call = (
+            "\t\tmap<int, string> reviewValues = new map<int, string>();\n"
+            '\t\treviewValues.Insert(0, "broken");\n'
+            "\t\treviewValues.Find(0, m_PollCapabilities);\n"
+        )
+        fixture = _known_good_source()
+        live = BRIDGE_PATH.read_text(encoding="utf-8")
+        cases = {
+            "fixture": (
+                fixture.replace(caps_cache_init, caps_cache_init + call, 1) + _FOREIGN_BY_VALUE_FIND,
+                FIXTURE_EXPECTED,
+            ),
+            "live": (
+                live.replace(try_init_head, try_init_head + call, 1) + _FOREIGN_BY_VALUE_FIND,
+                EXPECTED_SERVER_CAPABILITIES,
+            ),
+        }
+        for target, (mutant, expected) in cases.items():
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(AssertionError, _MAP_FIND_OUT):
+                    _assert_contract(self, mutant, expected)
+
+    def test_source_declaration_does_not_vouch_for_an_engine_receiver(self) -> None:
+        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        call = '\t\tg_Game.GetProfileString("review", m_PollCapabilities);\n'
+        fixture = _known_good_source()
+        live = BRIDGE_PATH.read_text(encoding="utf-8")
+        cases = {
+            "fixture": (
+                fixture.replace(caps_cache_init, caps_cache_init + call, 1) + _FOREIGN_BY_VALUE_PROFILE,
+                FIXTURE_EXPECTED,
+            ),
+            "live": (
+                live.replace(try_init_head, try_init_head + call, 1) + _FOREIGN_BY_VALUE_PROFILE,
+                EXPECTED_SERVER_CAPABILITIES,
+            ),
+        }
+        for target, (mutant, expected) in cases.items():
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(AssertionError, _UNVERIFIED_PROFILE):
                     _assert_contract(self, mutant, expected)
 
     def test_mutants_are_rejected(self) -> None:

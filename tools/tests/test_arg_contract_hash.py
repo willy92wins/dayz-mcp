@@ -377,6 +377,33 @@ _FOREIGN_BY_VALUE_ERROR_EX_STRING = (
 _SHADOWED_NATIVE_OUT = "must not be passed to out/inout parameter 1 of ErrorExString"
 
 
+# F06 (#305, Sol d2-r6): a by-value Find declared in another class must not
+# vouch for map.Find(key, out val) on an engine container (enscript.c:858).
+_FOREIGN_BY_VALUE_FIND = (
+    "\nclass ReviewForeignLookup\n"
+    "{\n"
+    "\tvoid Find(int key, string value)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_MAP_FIND_OUT = "must not be passed to out/inout parameter 1 of Find"
+
+
+# F06 (#305, Sol d2-r6): on an engine receiver a source declaration vouches for
+# nothing; GetProfileString(string name, out string value) is not catalogued
+# (scripts/3_game/global/game.c:286), so a by-value homonym must not let it pass.
+_FOREIGN_BY_VALUE_PROFILE = (
+    "\nclass ReviewForeignProfile\n"
+    "{\n"
+    "\tvoid GetProfileString(string name, string value)\n"
+    "\t{\n"
+    "\t}\n"
+    "}\n"
+)
+_UNVERIFIED_PROFILE = "passed to unverified callee GetProfileString"
+
+
 class ArgContractHashTest(unittest.TestCase):
     def test_python_hash_matches_canonical_fixture(self) -> None:
         self.assertEqual(
@@ -455,6 +482,11 @@ class ArgContractHashTest(unittest.TestCase):
             "\t\treviewBox.Insert(m_PollArgContractHash);\n"
             "\t\tint reviewElemLen = reviewBox.Get(0).ToUpper();\n"
         )
+        hash_map_member_block = (
+            "\t\tm_ReviewValues = new map<int, string>();\n"
+            "\t\tm_ReviewValues.Insert(0, m_PollArgContractHash);\n"
+            "\t\tint reviewMapLen = m_ReviewValues.Get(0).ToUpper();\n"
+        )
         controls = {
             "copy_to_local_in_constructor": source.replace(
                 cache_init, cache_init + "\t\tstring achCopy = m_PollArgContractHash;\n", 1
@@ -519,6 +551,16 @@ class ArgContractHashTest(unittest.TestCase):
             "insert_then_transform_get_element_in_poll": source.replace(
                 ach_wire, hash_insert_get_block + ach_wire, 1
             ),
+            "map_member_insert_then_transform_element_in_constructor": source.replace(
+                ctor_head, "\tprotected ref map<int, string> m_ReviewValues;\n\n" + ctor_head, 1
+            ).replace(
+                cache_init, cache_init + hash_map_member_block, 1
+            ),
+            "getter_return_then_transform_in_poll": source.replace(
+                ctor_head, observer_decl + ctor_head, 1
+            ).replace(
+                ach_wire, "\t\tint reviewGetLen = GetCachedArgContractHash().ToUpper();\n" + ach_wire, 1
+            ),
         }
         for label, variant in controls.items():
             with self.subTest(control=label):
@@ -533,6 +575,26 @@ class ArgContractHashTest(unittest.TestCase):
             try_init_head, try_init_head + '\t\tErrorExString("review", m_PollArgContractHash);\n', 1
         ) + _FOREIGN_BY_VALUE_ERROR_EX_STRING
         with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
+            verify_enforce_arg_contract_hash(mutant)
+
+    def test_foreign_by_value_find_does_not_vouch_for_map_find(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        call = (
+            "\t\tmap<int, string> reviewValues = new map<int, string>();\n"
+            '\t\treviewValues.Insert(0, "broken");\n'
+            "\t\treviewValues.Find(0, m_PollArgContractHash);\n"
+        )
+        mutant = source.replace(try_init_head, try_init_head + call, 1) + _FOREIGN_BY_VALUE_FIND
+        with self.assertRaisesRegex(AssertionError, _MAP_FIND_OUT):
+            verify_enforce_arg_contract_hash(mutant)
+
+    def test_source_declaration_does_not_vouch_for_an_engine_receiver(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        mutant = source.replace(try_init_head, try_init_head + '\t\tg_Game.GetProfileString("review", m_PollArgContractHash);\n', 1)
+        mutant += _FOREIGN_BY_VALUE_PROFILE
+        with self.assertRaisesRegex(AssertionError, _UNVERIFIED_PROFILE):
             verify_enforce_arg_contract_hash(mutant)
 
     def test_enforce_hash_cache_mutants_are_rejected(self) -> None:

@@ -205,7 +205,8 @@ class EnforceMap:
     def Insert(self, key: object, value: object) -> bool:
         if self._find(key) >= 0:
             raise AssertionError(f"map key {key!r} inserted twice")
-        self._pairs.append((key, value))
+        # map.Insert takes key and value by value (scripts/1_core/proto/enscript.c:907).
+        self._pairs.append((_string_copy(key), _string_copy(value)))
         return True
 
     def Remove(self, key: object) -> None:
@@ -371,6 +372,24 @@ VERIFIED_CALLEE_PARAMS: dict[str, tuple[tuple[str, ...], str]] = {
     "GetVersion": (("out",), "scripts/3_game/global/game.c:942"),
 }
 
+# name -> verified parameter modes of every array/set/map method of that name
+# (scripts/1_core/proto/enscript.c; class array<T> :374, set<T> :720, map :830).
+CONTAINER_METHODS: dict[str, tuple[tuple[tuple[str, ...], str], ...]] = {
+    "Set": ((("value", "value"), "enscript.c:389"), (("value", "value"), "enscript.c:883")),
+    "Find": (
+        (("value",), "enscript.c:394"),
+        (("value",), "enscript.c:730"),
+        (("value", "out"), "enscript.c:858"),
+    ),
+    "Get": ((("value",), "enscript.c:399"), (("value",), "enscript.c:731"), (("value",), "enscript.c:847")),
+    "Insert": ((("value",), "enscript.c:407"), (("value",), "enscript.c:739"), (("value", "value"), "enscript.c:907")),
+    "InsertAt": ((("value", "value"), "enscript.c:418"), (("value", "value"), "enscript.c:750")),
+    "Remove": ((("value",), "enscript.c:463"), (("value",), "enscript.c:756"), (("value",), "enscript.c:887")),
+    "Contains": ((("value",), "enscript.c:898"),),
+    "GetKey": ((("value",), "enscript.c:878"),),
+    "GetElement": ((("value",), "enscript.c:868"),),
+}
+
 _NON_CALLEE_KEYWORDS = frozenset({
     "case", "catch", "delete", "else", "for", "if", "in", "inout", "new",
     "out", "return", "sizeof", "switch", "throw", "typename", "while",
@@ -464,18 +483,26 @@ def _declared_callee_params(masked: str) -> dict[str, list[tuple[str, ...]]]:
 
 
 def _callee_param_modes(
-    callee: str, declared: dict[str, list[tuple[str, ...]]]
+    callee: str,
+    declared: dict[str, list[tuple[str, ...]]],
+    external_receiver: bool = False,
 ) -> list[tuple[str, ...]] | None:
     """Every verified parameter-mode signature `callee` can name, or None if unverified.
 
     The gate does not resolve a call to its scope or receiver, so a name is not
     narrowed to one declaration: a declaration in the source under test (of any
-    class), the string method and the catalogued native signature are all
-    returned, and the caller accepts the argument only when every one of them
-    takes it by value. A by-value homonym in another class cannot hide the out
-    parameter of the native it shadows; the cost is that an out homonym in
-    another class also rejects a by-value native call (fail-closed)."""
-    signatures = list(declared.get(callee, ()))
+    class), the string method, the container methods and the catalogued native
+    signature are all returned, and the caller accepts the argument only when
+    every one of them takes it by value. A by-value homonym in another class
+    cannot hide the out parameter of the native it shadows; the cost is that an
+    out homonym in another class also rejects a by-value native call
+    (fail-closed). On an external receiver (``x.Name(``, anything but
+    ``this.``) a source declaration vouches for nothing: the receiver may be an
+    engine container, so only catalogued signatures count, and a name with
+    none is unverified."""
+    signatures = [] if external_receiver else list(declared.get(callee, ()))
+    for modes, _citation in CONTAINER_METHODS.get(callee, ()):
+        signatures.append(modes)
     if callee in STRING_METHODS:
         signatures.append(STRING_METHODS[callee][2])
     if callee in VERIFIED_CALLEE_PARAMS:
@@ -659,13 +686,22 @@ def assert_no_cache_writes_or_mutations(masked: str, member: str) -> None:
                         expr,
                         re.DOTALL,
                     ):
-                        signatures = _callee_param_modes(callee, declared)
+                        receiver_text = before_paren[: callee_match.start()].rstrip()
+                        external_receiver = receiver_text.endswith(".") and (
+                            re.search(r"(?<![\w.\]\)])this\s*\.$", receiver_text) is None
+                        )
+                        signatures = _callee_param_modes(callee, declared, external_receiver)
                         if signatures is None:
                             raise AssertionError(
                                 f"{member} passed to unverified callee {callee}(); "
                                 "no verified signature is catalogued for it"
                             )
-                        for modes in signatures:
+                        # An overload with fewer parameters than this call has
+                        # arguments cannot be the callee. If none is left the
+                        # call is unverified and fails on the first one.
+                        n_args = len(_split_top_level_commas(args_text, track_angles=False))
+                        applicable = [m for m in signatures if len(m) >= n_args] or signatures
+                        for modes in applicable:
                             if arg_idx >= len(modes) or modes[arg_idx] != "value":
                                 raise AssertionError(
                                     f"{member} must not be passed to out/inout parameter "
@@ -1019,7 +1055,9 @@ def python_source(
     returns = ", ".join(out for out, _type in outs)
 
     def render_return(value: str | None) -> str:
-        rendered = "None" if value is None else _expression(value, out_functions)
+        # A returned string is a copy: a getter that returns a member hands
+        # the caller its own string, so ToUpper on it cannot reach the member.
+        rendered = "None" if value is None else f"_string_copy({_expression(value, out_functions)})"
         if outs:
             return f"return ({rendered}, {returns})"
         return f"return {rendered}" if value is not None else "return"
