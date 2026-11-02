@@ -406,6 +406,34 @@ CONTAINER_METHODS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
     },
 }
 
+# The vanilla container typedefs, by kind (scripts/1_core/proto/enscript.c:712-720,
+# :802-808, :974-1026). A type name counts as a container only when it is one of
+# these (or array/set/map itself) and no class of that name is declared in the
+# source under test (F13).
+ARRAY_TYPEDEFS = frozenset({
+    "TStringArray", "TFloatArray", "TIntArray", "TBoolArray", "TClassArray", "TManagedArray",
+    "TManagedRefArray", "TVectorArray", "TTypenameArray",
+})
+SET_TYPEDEFS = frozenset({
+    "TStringSet", "TFloatSet", "TIntSet", "TClassSet", "TManagedSet", "TManagedRefSet",
+    "TTypenameSet",
+})
+MAP_TYPEDEFS = frozenset({
+    "TIntFloatMap", "TIntIntMap", "TIntStringMap", "TIntClassMap", "TIntManagedMap",
+    "TIntManagedRefMap", "TIntTypenameMap", "TIntVectorMap", "TStringFloatMap",
+    "TStringIntMap", "TStringStringMap", "TStringClassMap", "TStringManagedMap",
+    "TStringManagedRefMap", "TStringTypenameMap", "TStringVectorMap", "TClassFloatMap",
+    "TClassIntMap", "TClassStringMap", "TClassClassMap", "TClassManagedMap",
+    "TClassManagedRefMap", "TClassTypenameMap", "TClassVectorMap", "TTypeNameFloatMap",
+    "TTypeNameIntMap", "TTypeNameStringMap", "TTypeNameClassMap", "TTypeNameManagedMap",
+    "TTypeNameManagedRefMap", "TTypeNameTypenameMap", "TTypeNameVectorMap", "TManagedFloatMap",
+    "TManagedIntMap", "TManagedStringMap", "TManagedClassMap", "TManagedManagedMap",
+    "TManagedManagedRefMap", "TManagedTypenameMap", "TManagedVectorMap", "TManagedRefFloatMap",
+    "TManagedRefIntMap", "TManagedRefStringMap", "TManagedRefClassMap",
+    "TManagedRefManagedMap", "TManagedRefManagedRefMap", "TManagedRefTypenameMap",
+    "TManagedRefVectorMap",
+})
+
 _NON_CALLEE_KEYWORDS = frozenset({
     "case", "catch", "delete", "else", "for", "if", "in", "inout", "new",
     "out", "return", "sizeof", "switch", "throw", "typename", "while",
@@ -536,12 +564,21 @@ def _member_scope(masked: str, member_pos: int) -> set[str]:
     """The member's class and its ancestors declared in `masked` (modded
     classes of those names share their declarations)."""
     spans = _class_spans(masked)
-    parents = {name: parent for name, parent, _s, _e in spans}
+    # Every head of a name contributes its parent: a modded class keeps the
+    # inheritance of the class it modifies, so a later `modded class X {}`
+    # with no base must not erase X's parent (F12).
+    parents: dict[str, set[str]] = {}
+    for name, parent, _s, _e in spans:
+        if parent is not None:
+            parents.setdefault(name, set()).add(parent)
     scope: set[str] = set()
-    current = _owner_class(spans, member_pos)
-    while current is not None and current not in scope:
+    pending = [_owner_class(spans, member_pos)]
+    while pending:
+        current = pending.pop()
+        if current is None or current in scope:
+            continue
         scope.add(current)
-        current = parents.get(current)
+        pending.extend(parents.get(current, ()))
     return scope
 
 
@@ -549,6 +586,7 @@ def _receiver_kind(masked: str, name: str) -> str | None:
     """array | set | map | string for a variable declared with exactly one such
     type in `masked`; None for anything else (a class name, an engine global,
     a parameter of a class type, two declarations that disagree)."""
+    source_classes = {name for name, _parent, _s, _e in _class_spans(masked)}
     kinds = set()
     for match in re.finditer(
         rf"(?<![\w.])(?:ref\s+)?(?P<type>[A-Za-z_]\w*)(?:\s*<[^;{{}}()=]*?>)?\s+{re.escape(name)}\s*(?=[;=,)])",
@@ -557,11 +595,13 @@ def _receiver_kind(masked: str, name: str) -> str | None:
         base = match.group("type")
         if base in _NON_CALLEE_KEYWORDS or base in ("ref", "out", "inout", "notnull", "const", "static"):
             continue
-        if base == "array" or re.fullmatch(r"T\w*Array", base):
+        if base in source_classes:
+            kinds.add(None)
+        elif base == "array" or base in ARRAY_TYPEDEFS:
             kinds.add("array")
-        elif base == "set":
+        elif base == "set" or base in SET_TYPEDEFS:
             kinds.add("set")
-        elif base == "map" or re.fullmatch(r"T\w*Map", base):
+        elif base == "map" or base in MAP_TYPEDEFS:
             kinds.add("map")
         elif base == "string":
             kinds.add("string")

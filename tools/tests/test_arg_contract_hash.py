@@ -443,6 +443,29 @@ _FOREIGN_OUT_PRINT_ONLY = (
     "}\n"
 )
 _INHERITED_CONTAINER = "\nclass ReviewInherited : BaseContainer\n{\n}\n"
+# F12 (Sol d2-r9): a later `modded class X {}` keeps X's base declared in the source.
+_WRITER_BASE = (
+    "class ReviewWriterBase : Managed\n"
+    "{\n"
+    "\tprotected void Print(out string value)\n"
+    "\t{\n"
+    '\t\tvalue = "broken";\n'
+    "\t}\n"
+    "}\n"
+)
+_INHERITED_OUT_PRINT = "must not be passed to out/inout parameter 0 of Print"
+# F13: only the vanilla container typedefs count, and a source class of that
+# name hides the typedef.
+_FAKE_CONTAINER = (
+    "\nclass TStringArray\n"
+    "{\n"
+    "\tvoid Insert(out string value)\n"
+    "\t{\n"
+    '\t\tvalue = "broken";\n'
+    "\t}\n"
+    "}\n"
+)
+_FAKE_CONTAINER_REASON = r"unverified callee Insert\(\); a receiver the gate cannot resolve"
 # F09: more arguments than any verified signature takes.
 _TOO_MANY_ARGUMENTS = "no verified signature takes that many"
 
@@ -697,6 +720,51 @@ class ArgContractHashTest(unittest.TestCase):
             try_init_head, try_init_head + "\t\tPrint(m_PollArgContractHash);\n", 1
         ) + _FOREIGN_OUT_PRINT_ONLY
         verify_enforce_arg_contract_hash(control)
+
+    def test_inheritance_and_container_aliases(self) -> None:
+        try_init_head = "\tprotected void TryInit()\n\t{\n"
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        head = "class MCPBridge : Managed"
+        self.assertEqual(source.count(head), 1)
+        self.assertEqual(source.count(try_init_head), 1)
+        class_name = head.split()[1]
+        inherited = _WRITER_BASE + source.replace(
+            head, "class " + class_name + " : ReviewWriterBase", 1
+        ).replace(
+            try_init_head, try_init_head + "\t\tPrint(m_PollArgContractHash);\n", 1
+        ) + "\nmodded class " + class_name + "\n{\n}\n"
+        with self.subTest(case="modded_class_keeps_source_base"):
+            with self.assertRaisesRegex(AssertionError, _INHERITED_OUT_PRINT):
+                verify_enforce_arg_contract_hash(inherited)
+        fake = source.replace(
+            try_init_head,
+            try_init_head
+            + "\t\tTReviewArray reviewReceiver = new TReviewArray();\n"
+            + "\t\treviewReceiver.Insert(m_PollArgContractHash);\n",
+            1,
+        )
+        with self.subTest(case="unknown_type_named_like_a_typedef"):
+            with self.assertRaisesRegex(AssertionError, _FAKE_CONTAINER_REASON):
+                verify_enforce_arg_contract_hash(fake)
+        shadow = source.replace(
+            try_init_head,
+            try_init_head
+            + "\t\tTStringArray reviewShadow = new TStringArray();\n"
+            + "\t\treviewShadow.Insert(m_PollArgContractHash);\n",
+            1,
+        ) + _FAKE_CONTAINER
+        with self.subTest(case="source_class_hides_a_vanilla_typedef"):
+            with self.assertRaisesRegex(AssertionError, _FAKE_CONTAINER_REASON):
+                verify_enforce_arg_contract_hash(shadow)
+        vanilla = source.replace(
+            try_init_head,
+            try_init_head
+            + "\t\tTStringArray reviewList = new TStringArray();\n"
+            + "\t\treviewList.Insert(m_PollArgContractHash);\n",
+            1,
+        )
+        with self.subTest(case="vanilla_typedef_is_a_container"):
+            verify_enforce_arg_contract_hash(vanilla)
 
     def test_enforce_hash_cache_mutants_are_rejected(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
