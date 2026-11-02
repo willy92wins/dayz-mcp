@@ -7,6 +7,7 @@ exercised with the game transport mocked; no live game is involved.
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -122,6 +123,28 @@ class SceneClearSeatGuardTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ToolError):
                 await self._clear()
         call.assert_awaited_once_with("vehicle_telemetry", {}, "client", 2.0)
+
+    async def test_seat_check_waits_for_the_tool_lock(self) -> None:
+        # Sol #316 r1 R1: the status read and the telemetry run under the same
+        # tool_lock as the clear, so nothing starts while another tool holds it.
+        telemetry = {"ok": 1, "seated": 0}
+        call = AsyncMock(side_effect=lambda cmd, *_args:
+                         telemetry if cmd == "vehicle_telemetry" else _CLEARED)
+        with patch.object(self.runtime, "call_bridge", new=call):
+            await self.runtime.tool_lock.acquire()
+            try:
+                task = asyncio.create_task(self._clear())
+                for _ in range(20):
+                    await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.runtime.bridge_status_payload.assert_not_awaited()
+                call.assert_not_awaited()
+            finally:
+                self.runtime.tool_lock.release()
+            result = await task
+        self.assertEqual(result, _CLEARED)
+        self.runtime.bridge_status_payload.assert_awaited_once()
+        self.assertEqual([item.args[0] for item in call.await_args_list], ["vehicle_telemetry", "scene_clear"])
 
     async def test_invalid_scene_id_never_reads_status(self) -> None:
         call = AsyncMock(return_value=_CLEARED)
