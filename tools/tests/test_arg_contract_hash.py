@@ -756,6 +756,21 @@ class ArgContractHashTest(unittest.TestCase):
         with self.subTest(case="source_class_hides_a_vanilla_typedef"):
             with self.assertRaisesRegex(AssertionError, _FAKE_CONTAINER_REASON):
                 verify_enforce_arg_contract_hash(shadow)
+        # F14 (Sol d2-r10): a nested class with the bridge's simple name does not
+        # join the bridge's ancestry; ErrorExString keeps the native out.
+        nested = source.replace(
+            try_init_head,
+            try_init_head + '\t\tErrorExString("review", m_PollArgContractHash);\n',
+            1,
+        ) + (
+            "\nclass ReviewByValueBase : Managed\n{\n"
+            "\tvoid ErrorExString(string a, string b, int severity = 0)\n\t{\n\t}\n}\n"
+            "class ReviewOuter\n{\n\tclass " + class_name + " : ReviewByValueBase\n\t{\n\t}\n}\n"
+            "modded class " + class_name + "\n{\n}\n"
+        )
+        with self.subTest(case="nested_homonym_does_not_join_scope"):
+            with self.assertRaisesRegex(AssertionError, _SHADOWED_NATIVE_OUT):
+                verify_enforce_arg_contract_hash(nested)
         vanilla = source.replace(
             try_init_head,
             try_init_head

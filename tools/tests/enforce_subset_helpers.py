@@ -496,13 +496,22 @@ _CLASS_HEAD = re.compile(
 
 
 def _class_spans(masked: str) -> list[tuple[str, str | None, int, int]]:
-    """(name, parent, open brace, close brace) of every class in `masked`."""
-    spans = []
+    """(name, parent, open brace, close brace) of every class in `masked`.
+
+    A class nested in another one is named ``Outer.Inner``: it is never the
+    top-level class of the same simple name, so neither its parent nor its
+    methods enter that class's scope (F14)."""
+    spans: list[tuple[str, str | None, int, int]] = []
     for match in _CLASS_HEAD.finditer(masked):
         open_brace = match.end() - 1
         close_brace = _find_matching_delim(masked, open_brace, "{", "}")
-        if close_brace != -1:
-            spans.append((match.group("name"), match.group("parent"), open_brace, close_brace))
+        if close_brace == -1:
+            continue
+        name = match.group("name")
+        enclosing = [s for s in spans if s[2] < match.start() < s[3]]
+        if enclosing:
+            name = max(enclosing, key=lambda s: s[2])[0] + "." + name
+        spans.append((name, match.group("parent"), open_brace, close_brace))
     return spans
 
 
