@@ -11,6 +11,55 @@ from tests._source_snapshot import source_of
 
 
 class DayzTestRequestTests(unittest.TestCase):
+    def test_server_only_mods_v3_roundtrip_and_legacy_default(self) -> None:
+        from dayz_mcp import dayz_test_request as request
+        from tests.dayz_test_tool_helpers import _policy
+
+        policy = _policy()
+        base = {"version": 1, "dev_root": policy.dev_root, "mod": policy.mod}
+        legacy = request.parse_dayz_test_request(json.dumps(base).encode(), policies=(policy,))
+        for override in (False, True):
+            document = {
+                **base, "version": 3, "server_only_mods": ["@DayZ_MCP", "@Audit"],
+                "project_mod_override": override, "extra_mods": ["@Candidate"],
+            }
+            parsed = request.parse_dayz_test_request(json.dumps(document).encode(), policies=(policy,))
+            self.assertEqual(parsed.payload["version"], 3)
+            self.assertEqual(parsed.payload["server_only_mods"], ["@DayZ_MCP", "@Audit"])
+            self.assertEqual(request.parse_dayz_test_request(parsed.canonical_bytes, policies=(policy,)), parsed)
+        empty = request.parse_dayz_test_request(
+            json.dumps({**base, "version": 3, "server_only_mods": []}).encode(), policies=(policy,)
+        )
+        self.assertEqual(empty, legacy)
+        for version in (1, 2):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, ":unknown_key$"):
+                request.parse_dayz_test_request(
+                    json.dumps({**base, "version": version, "server_only_mods": ["@Audit"]}).encode(),
+                    policies=(policy,),
+                )
+
+    def test_server_only_mods_rejects_invalid_lists_and_role_conflicts(self) -> None:
+        from dayz_mcp import dayz_test_request as request
+        from tests.dayz_test_tool_helpers import _policy
+
+        policy = _policy()
+        base = {"version": 3, "dev_root": policy.dev_root, "mod": policy.mod}
+        for mods in (None, "@Audit", [1], ["@Audit", "@audit"], ["@A;@B"], ["../@A"], ["@A"] * 65):
+            with self.subTest(mods=mods), self.assertRaisesRegex(ValueError, ":mod_list_invalid$"):
+                request.parse_dayz_test_request(
+                    json.dumps({**base, "server_only_mods": mods}).encode(), policies=(policy,)
+                )
+        for field in ("base_mods", "extra_mods", "server_mods"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, ":server_only_mods_conflict$"):
+                request.parse_dayz_test_request(
+                    json.dumps({**base, "server_only_mods": ["@Audit"], field: ["@audit"]}).encode(),
+                    policies=(policy,),
+                )
+        with self.assertRaisesRegex(ValueError, ":server_only_mods_conflict$"):
+            request.parse_dayz_test_request(
+                json.dumps({**base, "server_only_mods": ["@CF"]}).encode(), policies=(policy,)
+            )
+
     def test_request_uses_current_mode_authority_for_each_parse(self) -> None:
         request_module = importlib.import_module("dayz_mcp.dayz_test_request")
         modes_module = importlib.import_module("dayz_mcp.dayz_test_modes")
@@ -303,6 +352,74 @@ class DayzTestRequestTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid_dayz_test_request"):
                     request_module.parse_dayz_test_request(raw, policies=(policy,))
 
+    def test_clean_does_not_enable_build_and_survives_canonical_roundtrip(self) -> None:
+        request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        policy = request_module.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=r"P:\ExampleMod",
+            default_base_mods=("@CF",),
+            mission_roots=(r"P:\ExampleMod_Suite\_server\mpmissions",),
+            mod_roots=(r"P:\Mods",),
+        )
+        base = {"version": 1, "dev_root": policy.dev_root, "mod": policy.mod}
+        for build_flags, expected_build in (({}, False), ({"build": False}, False), ({"build": True}, True)):
+            with self.subTest(build_flags=build_flags):
+                parsed = request_module.parse_dayz_test_request(
+                    json.dumps({**base, **build_flags, "clean": True}).encode("utf-8"),
+                    policies=(policy,),
+                )
+                self.assertIs(parsed.payload["build"], expected_build)
+                self.assertIs(parsed.payload["clean"], True)
+                self.assertIs(json.loads(parsed.canonical_bytes)["build"], expected_build)
+                self.assertEqual(
+                    request_module.parse_dayz_test_request(parsed.canonical_bytes, policies=(policy,)),
+                    parsed,
+                )
+
+    def test_clean_only_validation_depends_on_explicit_build(self) -> None:
+        request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        policy = request_module.RequestProjectPolicy(
+            mod="ExampleMod",
+            dev_root=r"P:\ExampleMod_Suite",
+            default_source=r"P:\ExampleMod",
+            default_base_mods=("@CF",),
+            mission_roots=(r"P:\ExampleMod_Suite\_server\mpmissions",),
+            mod_roots=(r"P:\Mods",),
+        )
+        base = {
+            "version": 1, "dev_root": policy.dev_root, "mod": policy.mod,
+            "build": False, "clean": True,
+        }
+        stop = {"kill": True, "mode": "offline", "run_id": "12345678-1234-4234-8234-1234567890ab"}
+        override = {"version": 2, "project_mod_override": True, "extra_mods": ["@Replacement"]}
+        cases = (
+            ({"pack_only": True}, "pack_only_requires_build"),
+            ({"source": policy.default_source}, "source_requires_build"),
+            ({"source": policy.default_source + r"\Source"}, "source_requires_build"),
+            ({**stop, "build": True}, "kill_conflicts_with_other_work"),
+            ({**stop, "preflight": True}, "kill_conflicts_with_other_work"),
+            ({"kill": True, "mode": "offline"}, "kill_conflicts_with_other_work"),
+            ({**override, "build": True}, "project_mod_override_conflicts_with_build"),
+        )
+        for flags, reason in cases:
+            with self.subTest(flags=flags):
+                with self.assertRaisesRegex(ValueError, f"^invalid_dayz_test_request:{reason}$"):
+                    request_module.parse_dayz_test_request(
+                        json.dumps({**base, **flags}).encode("utf-8"), policies=(policy,),
+                    )
+        for flags in (stop, override):
+            with self.subTest(accepted=flags):
+                parsed = request_module.parse_dayz_test_request(
+                    json.dumps({**base, **flags}).encode("utf-8"), policies=(policy,),
+                )
+                self.assertIs(parsed.payload["build"], False)
+                self.assertIs(parsed.payload["clean"], True)
+                self.assertEqual(
+                    request_module.parse_dayz_test_request(parsed.canonical_bytes, policies=(policy,)),
+                    parsed,
+                )
+
     def test_explicit_typed_overrides_are_preserved_and_canonicalized(self) -> None:
         request_module = importlib.import_module("dayz_mcp.dayz_test_request")
         policy = request_module.RequestProjectPolicy(
@@ -327,6 +444,7 @@ class DayzTestRequestTests(unittest.TestCase):
                 "height": 1440,
                 "player_name": "Utopia Dev",
                 "server_wait_s": 90,
+                "build": True,
                 "clean": True,
                 "pack_only": True,
                 "no_file_patching": True,

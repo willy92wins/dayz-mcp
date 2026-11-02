@@ -56,6 +56,33 @@ does not certify a generator connection or a usable navmesh. Stop this run with
 
 ## The server, as tools
 
+`dayz_test_run(project="ExampleMod", mode="all", server_only_mods=["@DayZ_MCP", "@Audit"])`
+loads those mods only through the server's `-serverMod=`. Neither appears in the
+client's `-mod=` or the server's shared `-mod=`. This is a permanent, generic list:
+folder names and absolute paths inside the project's allowed mod roots follow the
+same rules as `extra_mods`. Listed directories must already exist, including when
+`build=True`. Declaring `@DayZ_MCP` here suppresses its automatic
+addition to `extra_mods`. Listing the selected project's own mod also moves its
+implicit load to the server. The client bridge is then unavailable when DayZ_MCP
+is server-only; see [the server-only addon guide](docs/SERVERMOD.md).
+
+Duplicates and overlaps with `base_mods`, `extra_mods` or `server_mods` are rejected,
+including effective policy defaults. Supply an explicit `base_mods` without the
+exclusive mod when it is in those defaults. Existing `server_mods` retain their
+behavior and precede the new list in `-serverMod=`. Repeat `server_only_mods` when
+reattaching with `mode="client"`; that call does not change the existing server.
+Project attestation requirements still apply: a policy requiring client artifacts
+or initialization can reject a run that deliberately excludes them from the client.
+Omitting the parameter or passing `[]` preserves the previous defaults and hashes.
+
+Nonempty lists use request payload v3. Legacy v1/v2 requests remain readable;
+older launchers reject v3 instead of silently loading an exclusive mod on clients.
+The storage marker format is unchanged: a nonempty list adds its own provenance
+role to the seal. Returning to an older launcher or changing roles can therefore
+trigger the existing storage backup/rotation when the seal differs. No migration
+or PBO change is required. Automated tests cover routing; an in-game run is still
+needed to verify the loaded mods in each process.
+
 | Need | Tool(s) |
 |---|---|
 | Who is online, where, in what state | `query_all_players`, `query_player_state`, `object_inspect` |

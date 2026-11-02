@@ -683,7 +683,7 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         # is command.cmd == a distinct string literal, chained with else, and
         # each condition and the final else open their block at once) and
         # calls PostResult in that tick. PostResult serializes and leaves the
-        # send asynchronous (MCPBridge.c:7611).
+        # send asynchronous (MCPBridge.c:8229).
         dispatch = _dispatch_body(self.source)
         head = _DISPATCH_CMD_IF.search(dispatch)
         self.assertIsNotNone(head, "Dispatch has no command.cmd chain")

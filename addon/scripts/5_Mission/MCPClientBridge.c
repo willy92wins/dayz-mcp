@@ -504,6 +504,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected int m_TickPollCallback;
 	protected bool m_PollInFlight;
 	protected float m_PollInFlightS;
+	// Empty poll that stayed in flight long enough for the daemon to have held it.
+	protected bool m_RepollNow;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
 	// Same load counters as MCPBridge (A1). ia counts real TryInit attempts,
@@ -573,6 +575,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_PeerInstance = "";
 		m_PollInFlight = false;
 		m_PollInFlightS = 0.0;
+		m_RepollNow = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
 		m_InitAttempts = 0;
@@ -717,6 +720,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (m_Pending && m_Pending.Count() > PENDING_POLL_THRESHOLD)
 		{
+			return;
+		}
+
+		if (m_RepollNow)
+		{
+			m_RepollNow = false;
+			StartPoll();
 			return;
 		}
 
@@ -901,6 +911,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		request = request + "&caps=" + m_PollCapabilities;
 		request = request + LoadCounterQuery();
+		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
+		request = request + "&wait_ms=800";
 		m_PollCtx.GET(m_PollCallback, request);
 	}
 
@@ -967,6 +979,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			m_LastCmdsPerPoll = AddLoadCounter(0, count);
 			Log("client poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
+		}
+
+		// A fast empty keeps 1/pollHz. Only a held empty skips that gap.
+		if (count == 0 && m_SincePollS >= 0.4)
+		{
+			m_RepollNow = true;
 		}
 
 		// Defer the new batch when work is already waiting, so it cannot overtake.

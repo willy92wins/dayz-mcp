@@ -109,6 +109,8 @@ class MCPBridge : Managed
 	protected int m_TickPollSent;
 	protected int m_TickPollCallback;
 	protected bool m_PollInFlight;
+	// Empty poll that stayed in flight long enough for the daemon to have held it.
+	protected bool m_RepollNow;
 	protected bool m_Configured;
 	protected bool m_InitFailureLogged;
 	// A1 (fb-20261028-131233-a07f): real TryInit attempts (not frames; A2
@@ -162,6 +164,7 @@ class MCPBridge : Managed
 		m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
 		m_PeerInstance = "";
 		m_PollInFlight = false;
+		m_RepollNow = false;
 		m_Configured = false;
 		m_InitFailureLogged = false;
 		m_InitAttempts = 0;
@@ -243,6 +246,13 @@ class MCPBridge : Managed
 
 		if (m_Pending && m_Pending.Count() > PENDING_POLL_THRESHOLD)
 		{
+			return;
+		}
+
+		if (m_RepollNow)
+		{
+			m_RepollNow = false;
+			StartPoll();
 			return;
 		}
 
@@ -407,6 +417,8 @@ class MCPBridge : Managed
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
+		request = request + "&wait_ms=800";
 		m_Ctx.GET(cb, request);
 	}
 
@@ -445,6 +457,12 @@ class MCPBridge : Managed
 		{
 			m_LastCmdsPerPoll = AddLoadCounter(0, count);
 			Log("poll commands=" + count + " sent_tick=" + m_TickPollSent + " callback_tick=" + m_TickPollCallback);
+		}
+
+		// A fast empty keeps 1/pollHz. Only a held empty skips that gap.
+		if (count == 0 && m_SincePollS >= 0.4)
+		{
+			m_RepollNow = true;
 		}
 
 		// Defer the new batch when work is already waiting, so it cannot overtake.
