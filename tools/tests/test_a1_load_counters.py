@@ -26,6 +26,8 @@ from tests.enforce_subset_helpers import (
 
 
 _MISSION = addon_root() / "scripts" / "5_Mission"
+# #308: both bridges append the /poll long-poll cap last (StartPoll).
+_WAIT_MS = b"&wait_ms=800"
 _QUERY = '&ia=" + m_InitAttempts + "&pc=" + m_Polls + "&lpims=" + ms'
 _CAP = 2000000000
 _INST_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -606,6 +608,7 @@ class LoadCountersTest(unittest.TestCase):
                 + ach_enc
                 + load_enc
                 + inst_enc
+                + _WAIT_MS
             )
         return (
             b"poll?peer=client&key="
@@ -616,6 +619,7 @@ class LoadCountersTest(unittest.TestCase):
             + b"&caps="
             + caps_enc
             + load_enc
+            + _WAIT_MS
         )
 
     def _run_translated_constructor_and_polls(
