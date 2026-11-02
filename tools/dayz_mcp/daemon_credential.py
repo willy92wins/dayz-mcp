@@ -366,12 +366,20 @@ class RefreshingDaemonCredential:
         headers: dict[str, str],
         deadline: float,
         allow_stale_policy: bool = False,
+        replay_query: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         self._assert_authority_unchanged(
             request_stage="pre_request",
             http_bytes_sent=0,
         )
         request_query = dict(query)
+        # First transmission uses request_query. An internal resend (the 401
+        # retry and the reaccreditation replay) uses the caller's replay_query
+        # when one was given, snapshotted here so a later mutation cannot
+        # change it. None resends request_query.
+        resend_query = (
+            request_query if replay_query is None else dict(replay_query)
+        )
         request_headers = dict(headers)
         request_body = None if body is None else bytes(body)
         observed = self._snapshot
@@ -400,7 +408,7 @@ class RefreshingDaemonCredential:
                 observed_reaccredit_epoch=observed_reaccredit_epoch,
                 method=method,
                 path=path,
-                query=request_query,
+                query=resend_query,
                 body=request_body,
                 headers=request_headers,
                 deadline=deadline,
@@ -450,7 +458,7 @@ class RefreshingDaemonCredential:
                 secret=current.secret,
                 method=method,
                 path=path,
-                query=request_query,
+                query=resend_query,
                 body=request_body,
                 headers=retry_headers,
                 deadline=deadline,
