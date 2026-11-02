@@ -1297,6 +1297,7 @@ class _HandlerModel(_DriveModel):
             m_SincePollS=0.0,
             m_Configured=True,
             m_PollInFlight=False,
+            m_RepollNow=False,
             m_Accum=0.0,
             m_PollHz=5.0,
             m_Backoff=0.0,
