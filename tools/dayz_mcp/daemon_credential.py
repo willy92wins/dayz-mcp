@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from dayz_mcp import accredited_daemon_transport, pinned_keyfile
+from dayz_mcp import accredited_daemon_transport, accredited_keepalive, pinned_keyfile
 from dayz_mcp.daemon_policy_contract import AccreditedDaemonPolicy
 
 
@@ -267,7 +267,7 @@ class RefreshingDaemonCredential:
     ) -> tuple[int, bytes]:
         request = (
             self._request_fn
-            or accredited_daemon_transport.verified_daemon_http_request
+            or accredited_keepalive.keepalive_daemon_http_request
         )
         (
             _kind,
