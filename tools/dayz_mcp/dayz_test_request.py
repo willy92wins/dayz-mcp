@@ -535,7 +535,8 @@ def parse_dayz_test_request(
     if no_base_mods and "base_mods" in value and bool(base_mods):
         _invalid("no_base_mods_conflict")
 
-    effective_build = build or clean
+    # clean only modifies an explicitly requested build; it never starts one.
+    effective_build = build
     if navmesh_data_server and (mode != "server" or kill or pack_only):
         _invalid("navmesh_data_server_requires_server_launch")
     # -adminlog is a server process flag. mode=all starts that process;
