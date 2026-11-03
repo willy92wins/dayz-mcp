@@ -1,50 +1,32 @@
 # HANDOFF — DayZ-MCP
 
 <!-- LIVE-STATE:START -->
-# DayZ-MCP - Estado vivo - 2026-10-18 (Madrid; árboles vivos, PBO y buzón medidos a la 01:37; launcher, procesos e instancias, a las 17:55 del 17/10; main tras el merge de #247)
+# DayZ-MCP - Estado vivo - 2026-11-03 (Madrid; árbol LIVE, launcher, PBO, daemon y partida de prueba medidos entre las 12:49 y las 12:59, tras promover LIVE a `e18e481`)
 
-- **main** = `e995499` (#247).
-  - Desde el LIVE-STATE anterior (main `659191e`, 17/10) entraron:
-    - #245 (el LIVE-STATE anterior);
-    - #246 (`storage_recovery_joint_gate` siempre borra el journal que planta, y nombra el que ya estaba);
-    - #247 (`dayz-harness-apis.md` reanclado en la 1.30.164078).
-  - Los árboles vivos no siguen a main. LIVE (`DayZ_MCP_dev`) está detached en `b8c8d10` (v1.4) y T130 (`C:\temp\DayZ_MCP_130`, un worktree del repo de LIVE) detached en `d825aa2`, sin cambios en ficheros versionados. Sin seguimiento: `tools/native-launchers/dayz-test-v1/addonbuilder-include.lst` en los dos y `reviews/2026-10-13-9608/` en LIVE. Su rama local `main` sigue en `3c27f33`.
-  - Se mueven solo dentro de una promoción, con resellado; nunca `reset --hard`. Los extras de #244 tocan el worker sellado y el lock: no cambian nada en un árbol hasta que se reselle en ese commit.
-- **Release v1.4** (2026-10-17): la primera verificada en DayZ 1.30. La partida `334956a8-55cc-4398-81ab-367bfa83636c` corrió en 1.30.164.078 antes del tag. Evidencia: `C:\Users\guill\DayZ_MCP_backups\release-v1.4\EVIDENCE.md`.
-  - Known issue: `action_use` y `action_hold` no comprueban `CanBeStarted()`. El arreglo cambia el PBO y lo revisa el dueño.
-- **Launcher `dayz-test-v1`:** LIVE se reselló el 16/10 en la 1.30 y T130 el 17/10.
-  - LIVE: PE `3E7FF1A7…`, `approved-launchers.json` `913AAABE…`. T130: PE `D432700C…`, `approved-launchers.json` `682113CD…`. `app.pyz` `E258B0BF…` en los dos.
-  - En los dos, `check_native_launcher_registry.py` da ok con la procedencia anclada (23 transiciones en LIVE, 8 en T130), y `write_packaged_modules_lock.py --check` también.
-  - Cada actualización de Steam de DayZ o de DayZ Tools cambia hashes que el launcher fija y obliga a resellar (11b4).
-- **PBO vivo:** `7078C2E4…` (542 178 B, el de la v1.4) en `P:\Mods\@DayZ_MCP\Addons\`. `P:\Mods`, el `mods_root` de las dos policies, es un junction a `!Workshop`, así que default y 130 cargan el mismo PBO. El anterior sigue al lado como `DayZ_MCP.pbo.swapped_out_20261017T150136Z_D35364034BAE6392`. `pbo_provenance.py` contra `b8c8d10` da OK en sus 24 ficheros y el marcador (01:38 del 18/10).
-- **Instancias:**
-  - default: `C:\Program Files (x86)\Steam\steamapps\common\DayZ`, DayZDiag 1.30.164.078 (estable desde el 15/10), `:8765`, `dayz-mcp`.
-  - `130`: `E:\SteamLibrary\steamapps\common\DayZ Exp`, DayZDiag 1.30.164.200, `:8775`, `dayz-mcp-130`.
-  - `P:\scripts` es la 1.30; la 1.29 quedó en `P:\scripts_1.29_backup_20261016`. `P:` es un subst que se pierde al reiniciar, y sin él no se resella ni se construye el PBO.
-  - Censo de las 17:55: ningún proceso DayZ del MCP (había una partida normal del dueño, con BattlEye). El daemon de 8765 (pid 50984) corría desde las 17:00:38; 8775 no tenía daemon. Clientes: 20 procesos en 6 cadenas en 8765, y 16 en 4 en 8775.
-- **Buzón** (`C:\Users\guill\AppData\Local\DayZ_MCP\inbox\feedback.jsonl`), contado a la 01:37 del 18/10: 917 entradas y 869 resoluciones, que cierran 816. Hay 101 abiertas, 15 de ellas nuestras: 9 del MCP y 6 del Pack.
-  - Cerradas el 17/10 con su evidencia: bedf (T130 resellado), c9aa (#240), 11b4 (#238; las rutas desviadas siguen solo en doctor, porque el error del bundle no las lleva al wire), 2986 y 0093 (#234), ace5, 9d9b y 1d4d (#235, #237), d9c8 (#241), y del Pack ca47, c852, 25af, 5c98 y 35c1 (Pack #113) y 818e (Pack #117).
-  - Abiertas el 17 y el 18/10:
-    - del MCP, 127f (W2 a W4 de la revisión de Codex del #241: tres tests que una edición normal se salta, no fallos del código que guardan);
-    - del Pack:
-      - e6d6 (O1: el validador tarda un tiempo cuadrático en una sentencia larga de argumentos de plantilla; solo con entrada adversarial);
-      - dada (`ES-EMPTY-IFDEF` falla dos bloques vacíos que trae la 1.30; en la partida de la v1.4, World cargó con `DIAG_DEVELOPER` y `ENABLE_LOGGING` definidas en el servidor y en el cliente, y los dos terminaron con normalidad; falta la prueba controlada en un mod de prueba);
-      - 6b76 (con la vanilla 1.30, `ES-SYNCVAR-CONTRACT` acepta un override sin parámetros de `RegisterConstructionSyncVariables` en una clase que no deriva de `EntityAI`; es el límite que documenta el Pack #117).
-    - 818e se abrió y se cerró el mismo día, con el Pack #117.
-  - Siguen abiertas, nuestras: 127f, 204e, 5880, 8b1c, e92d, a97e, 75e7, fade y fb98; del Pack, a59b, 7ce1, 7b9e, e6d6, dada y 6b76.
-- **Riesgos abiertos:**
-  - «unable to locate running instance of steam» al lanzar desde la app: la copia congelada del registro de Steam (#239, Pack #113). Falta que el dueño pase el script de limpieza de Steam con Claude cerrado.
-  - `action_use(ActionTogglePlaceObject)` no activa la colocación (`204e`).
-  - El cliente se queda en el menú de pausa hasta `ui_click continuebtn` (`5880`).
-  - Virtualización MSIX de `%LOCALAPPDATA%` (`e92d`).
-  - Ningún verbo lee la cantidad de un ítem sin cambiarla (`fb98`).
-  - El Pack sigue declarando la 1.29 como build de anclaje (`sources/source-map.json`: 1.29.0.163451), como se decidió en el Pack #117; su control vanilla ya pasa en la 1.30.164078.
-- **Siguiente:**
-  1. `CanBeStarted()` en `action_use` y `action_hold`: el arreglo está pendiente de PR. Cambia el PBO, así que lo revisa y lo mergea el dueño, y la prueba en el juego espera a su OK.
-  2. Pack: medir en un mod de prueba la regla del bloque vacío (dada); siguen abiertas O1 (e6d6) y 6b76.
-  3. Los extras de #244 llegan a LIVE y T130 solo con un resellado, que decide el dueño.
-  4. Las fichas de diseño (8b1c, el foco; fb98; 9ab8) se hablan con el dueño antes de tocarlas.
-- **Detalle:** la evidencia de la v1.4 está en `C:\Users\guill\DayZ_MCP_backups\release-v1.4\`, y las revisiones de Codex de esta ventana y la medición de los árboles de la 01:37 (`trees-20261018.md`) en `C:\Users\guill\dzmcp_gauntlet\reviews\`.
+- **main** = `9d1df76` (#319, solo documentación). LIVE no sigue a main: está en `e18e481`, y de `e18e481` a `9d1df76` solo cambia documentación.
+- **LIVE** (`DayZ_MCP_dev`) detached en `e18e4814f` desde el 3/11; antes, `83b569b9`. El checkout no tocó ficheros versionados ni sin seguimiento.
+  - Entraron 27 commits (`83b569b..e18e481`): #263, #266-#268, #285, #286, #289-#297, #299-#309, #311-#314 y #316. Entre ellos, las PR de rendimiento (#303, #305-#308) y el B1 del godmode (#289, #293, #299).
+  - Plan y registro de la promoción en el vault: `AI/30_Sessions/2026-11-03-DayZ_MCP-promocion-live-plan.md` y `AI/30_Sessions/2026-11-03-DayZ_MCP-promocion-live.md`.
+- **Launcher `dayz-test-v1` de LIVE**, resellado el 3/11 a las 12:49-12:50 fuera de la app (por WMI):
+  - PE `7DFF6CE9…`, `app.pyz` `6C5F5108…`, `approved-launchers.json` `1A11C996…` (antes `2F569AA5…`), recibo `c09d02a4…`;
+  - `reproducibility.json` con `reproducible=true` (clean-1, clean-2, offline);
+  - el doctor da `NATIVE_BUNDLE_SOURCE_PINS_OK` y `NATIVE_BUNDLE_EXTERNALS_OK` (23).
+  - `replace-dayz-test-v1 --expected-sha256` solo acepta hexadecimal en mayúsculas (`_HEX`, `tools/dayz_mcp/launcher_registry_update.py:39`). Con el hash en minúsculas que da `sha256sum` falla con el genérico `invalid_launcher_registry_update`, no con `launcher_registry_cas_mismatch`.
+- **PBO vivo:** `B28CEC03…` (739 867 B), construido desde `e18e481` (`pbo_provenance.py`: PROVENANCE OK, 30 entradas), en `P:\Mods\@DayZ_MCP\addons\`.
+  - `P:\Mods` es un junction a `!Workshop`: es un solo fichero, y T130 también lo carga.
+  - El anterior queda al lado como `DayZ_MCP.pbo.swapped_out_20261103T115430Z_E4EBBA78DB16C225`.
+- **Daemon de 8765:** generación `4333fb6d…`, con `daemon_modules.stale=[]`. Lo arrancó por WMI, a las 12:25:53, la primera llamada de un cliente después de pararlo.
+  - Parar el daemon con clientes abiertos no lo deja parado: la siguiente llamada de cualquier sesión lo vuelve a arrancar desde el árbol vivo.
+  - El doctor (`--daemon-policy normal`) da `DAEMON_STATUS_OK` y un FAIL que ya venía de antes, `RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED`: los 10 huecos de `runs.json.bak-preprune` están llenos desde el 27/10, así que los runs retirados no se podan. Liberarlos lo decide el dueño.
+- **Partida de prueba** `d56ffd3f-17be-4782-84a3-da72f6c3ab89` (DayZ_MCP, mode all, 3/11 12:55):
+  - los dos bridges `ready`, capacidades `match`, versión `12~1.30.164200.56`;
+  - 0 `SCRIPT (E)` en los RPT y los script logs de servidor y cliente;
+  - `capture_screenshot` y `wait_for(players_at_least, 1)` correctos;
+  - godmode encendido al conectar (`profile=test`).
+  - El servidor dejó de hacer poll unos 46 s mientras entraba el primer jugador tras el reset del storage. La partida se paró con `dayz_test_stop`.
+- **D1, aceptado por el dueño el 3/11:** el godmode y el relleno de agua y energía están apagados por defecto, salvo en los runs del arnés (`profile=test`), que los encienden (`CHANGELOG.md`, entrada de B1).
+- **T130** (`C:\temp\DayZ_MCP_130`, 8775) sigue detached en `d825aa2` y sin tocar, pero carga el PBO nuevo por el junction. No se ha probado con él.
+- **Sin medir hoy:** buzón, censo de instancias y de clientes, y riesgos abiertos. El último censo completo es el LIVE-STATE del 18/10 (`git show 19dce57d:HANDOFF.md`).
 <!-- LIVE-STATE:END -->
 
 ---
