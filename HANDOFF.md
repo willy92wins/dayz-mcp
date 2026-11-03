@@ -4,7 +4,7 @@
 # DayZ-MCP - Estado vivo - 2026-11-03 (Madrid; árbol LIVE, launcher, PBO, daemon y partida de prueba medidos entre las 12:49 y las 12:59, tras promover LIVE a `e18e481`)
 
 - **main** = `9d1df76` (#319, solo documentación). LIVE no sigue a main: está en `e18e481`, y de `e18e481` a `9d1df76` solo cambia documentación.
-- **LIVE** (`DayZ_MCP_dev`) detached en `e18e4814f` desde el 3/11; antes, `83b569b9`. Antes del checkout no había cambios locales en ficheros versionados. El registro y el bundle del lanzador, que no están versionados, salieron del checkout con los mismos hashes.
+- **LIVE** (`DayZ_MCP_dev`) detached en `e18e4814f` desde el 3/11; antes, `83b569b9`. Antes del checkout no había cambios locales en ficheros versionados. El registro y los artefactos generados del lanzador salieron del checkout con los mismos hashes.
   - Entraron 27 commits (`83b569b..e18e481`): #263, #266-#268, #285, #286, #289-#297, #299-#309, #311-#314 y #316. Entre ellos, las PR de rendimiento (#303, #305-#308) y el B1 del godmode (#289, #293, #299).
   - Plan y registro de la promoción en el vault: `AI/30_Sessions/2026-11-03-DayZ_MCP-promocion-live-plan.md` y `AI/30_Sessions/2026-11-03-DayZ_MCP-promocion-live.md`.
 - **Launcher `dayz-test-v1` de LIVE**, resellado el 3/11 a las 12:49-12:50 fuera de la app (por WMI):
@@ -23,7 +23,7 @@
   - 0 `SCRIPT (E)` en los RPT y los script logs de servidor y cliente;
   - `capture_screenshot` correcto, y `wait_for(players_at_least, 1)` cumplido al segundo intento;
   - godmode encendido al conectar (`profile=test`).
-  - El primer `wait_for` abortó con `probe_timeout`: mientras entraba el primer jugador tras el reset del storage, el servidor estuvo al menos 20 s sin hacer poll (`server_poll_stale` en `bridge_status`).
+  - El primer `wait_for` abortó con `probe_timeout`: mientras entraba el primer jugador tras el reset del storage, el servidor dejó de hacer poll (`server_poll_stale`; un `bridge_status` midió 20,5 s desde su último poll).
   - La partida se paró con `dayz_test_stop` (`forced_kill`).
 - **D1, aceptado por el dueño el 3/11:** el godmode y el relleno de agua y energía están apagados por defecto, salvo en los runs del arnés (`profile=test`), que los encienden (`CHANGELOG.md`, entrada de B1).
 - **T130** (`C:\temp\DayZ_MCP_130`, 8775) sigue detached en `d825aa2` y sin tocar, pero carga el PBO nuevo por el junction. No se ha probado con él.
