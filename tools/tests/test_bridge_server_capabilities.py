@@ -1,9 +1,12 @@
 """Server half of the capability announcement (ficha 8f8c BONUS, module M03).
 
 ``MCPBridge.StartPoll`` announces ``caps=`` on every poll: the census of the
-commands its ``Dispatch`` chain handles, sorted ascending, comma separated and
-percent-encoded the same way ``inst=`` is. This test owns the expected census
-as a literal and checks it against the live source:
+commands its ``Dispatch`` chain handles, sorted ascending and comma separated.
+It goes on the wire as is: the names are ``[a-z0-9_]`` and a query may carry
+a literal comma (RFC 3986 3.4). ``%2C`` on every separator pushed the server
+poll past the URL length the engine sends (test_poll_url_engine_limit). This
+test owns the expected census as a literal and checks it against the live
+source:
 
 * the ``Dispatch`` chain is walked branch by branch, by balanced braces, until
   the terminal ``else`` that answers ``unknown_command``. A walk that stops at
@@ -19,11 +22,11 @@ as a literal and checks it against the live source:
   one would only be rejected by the Enforce compiler, which this text parser
   cannot observe. Chunk boundaries fall on commas so every piece is itself a
   readable sub-list;
-* ``MCPBridge()`` must encode ``SERVER_CAPABILITIES`` once through
-  ``EncodeQueryValue`` into ``m_PollCapabilities`` (never reassigned elsewhere),
+* ``MCPBridge()`` must copy ``SERVER_CAPABILITIES`` once into
+  ``m_PollCapabilities`` (never reassigned elsewhere, never percent-encoded),
   and ``StartPoll`` must append ``&caps=`` from that cached member after
   ``ver`` and before the optional ``inst`` block, so a peer that has no
-  instance still announces without re-encoding on every poll.
+  instance still announces without rebuilding the census on every poll.
 
 The expected census is never derived from ``loopback.SERVER_COMMANDS``, from
 the app, or from the announcement itself. ``exec_enforce`` is a dispatcher
@@ -56,7 +59,7 @@ DISPATCH_SIGNATURE = "protected void Dispatch(MCPCommand command)"
 CONSTRUCTOR_SIGNATURE = "void MCPBridge()"
 START_POLL_SIGNATURE = "protected void StartPoll()"
 CAPS_CACHE_DECL = "protected string m_PollCapabilities;"
-CAPS_CACHE_INIT = "m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);"
+CAPS_CACHE_INIT = "m_PollCapabilities = SERVER_CAPABILITIES;"
 CAPS_WIRE = 'request = request + "&caps=" + m_PollCapabilities;'
 VER_WIRE = '"&ver=" + GetPollVersion()'
 INSTANCE_GUARD = 'if (m_PeerInstance != "")'
@@ -293,7 +296,7 @@ def _assert_announced_on_every_poll(test: unittest.TestCase, clean: str) -> None
     test.assertEqual(
         constructor.count(CAPS_CACHE_INIT),
         1,
-        "MCPBridge() must encode SERVER_CAPABILITIES into m_PollCapabilities once",
+        "MCPBridge() must copy SERVER_CAPABILITIES into m_PollCapabilities once",
     )
     init_at = constructor.index(CAPS_CACHE_INIT)
     init_depth = constructor_masked[:init_at].count("{") - constructor_masked[:init_at].count("}")
@@ -618,7 +621,7 @@ def _known_good_source() -> str:
 
 	void MCPBridge()
 	{
-		m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);
+		m_PollCapabilities = SERVER_CAPABILITIES;
 	}
 
 	protected void StartPoll()
@@ -823,17 +826,16 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         )
         _assert_contract(self, source, FIXTURE_EXPECTED)
 
-    def test_announcement_survives_the_query_encoding_round_trip(self) -> None:
+    def test_announcement_needs_no_query_encoding(self) -> None:
         clean = _without_comments(BRIDGE_PATH.read_text(encoding="utf-8"))
         announced = _capabilities_literal(clean)
         joined = ",".join(announced)
-        encoded = _encode_query_value(joined)
-        self.assertEqual(encoded, "%2C".join(announced))
-        self.assertNotIn(",", encoded)
-        query = "key=k&ver=" + _encode_query_value("10~1.29.163709") + "&caps=" + encoded + "&inst=abc"
+        # Only unreserved characters and the comma separator: nothing to encode.
+        self.assertEqual(_encode_query_value(joined).replace("%2C", ","), joined)
+        query = "key=k&ver=" + _encode_query_value("10~1.29.163709") + "&caps=" + joined + "&inst=abc"
         parsed = parse_qs(query, strict_parsing=True, keep_blank_values=True)
         self.assertEqual(parsed["caps"], [joined])
-        self.assertEqual(unquote(encoded).split(","), announced)
+        self.assertEqual(unquote(joined).split(","), announced)
         self.assertEqual(announced, list(EXPECTED_SERVER_CAPABILITIES))
 
     def test_single_literal_longer_than_the_chunk_limit_is_rejected(self) -> None:
@@ -849,7 +851,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
 
     def test_innocuous_reads_of_cached_capabilities_are_allowed(self) -> None:
         fixture = _known_good_source()
-        fixture_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        fixture_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         fixture_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
         fixture_ctor = "\tvoid MCPBridge()\n"
         for needle in (fixture_init, fixture_wire, fixture_ctor):
@@ -920,7 +922,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 fixture_wire,
                 "\t\tstring head = m_PollCapabilities.Substring(0, 5);\n"
                 "\t\tstring trimmed = m_PollCapabilities.Trim();\n"
-                '\t\tint commaPos = m_PollCapabilities.IndexOf("%2C");\n'
+                '\t\tint commaPos = m_PollCapabilities.IndexOf(",");\n'
                 '\t\tbool hasAlpha = m_PollCapabilities.Contains("alpha");\n'
                 "\t\tstring firstChar = m_PollCapabilities.Get(0);\n"
                 + fixture_wire,
@@ -1042,7 +1044,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 _assert_contract(self, variant, EXPECTED_SERVER_CAPABILITIES)
 
     def test_foreign_by_value_homonym_does_not_hide_native_out(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         call = '\t\tErrorExString("review", m_PollCapabilities);\n'
         fixture = _known_good_source()
@@ -1065,7 +1067,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                     _assert_contract(self, mutant, expected)
 
     def test_foreign_by_value_find_does_not_vouch_for_map_find(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         call = (
             "\t\tmap<int, string> reviewValues = new map<int, string>();\n"
@@ -1090,7 +1092,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                     _assert_contract(self, mutant, expected)
 
     def test_source_declaration_does_not_vouch_for_an_engine_receiver(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         call = '\t\tg_Game.GetProfileString("review", m_PollCapabilities);\n'
         fixture = _known_good_source()
@@ -1111,7 +1113,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                     _assert_contract(self, mutant, expected)
 
     def test_receiver_out_declaration_and_arity_are_rejected(self) -> None:
-        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         ctor_head = "\tvoid MCPBridge()\n"
         fixture = _known_good_source()
@@ -1148,7 +1150,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         """Sol d2-r8: F10 fixed-size out, an unparsed declaration and a
         class-typed receiver are rejected; a foreign Print(out) is out of
         scope for the bridge's bare Print (the F04 false rejection)."""
-        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         try_init_head = "\tprotected void TryInit()\n\t{\n"
         ctor_head = "\tvoid MCPBridge()\n"
         fixture = _known_good_source()
@@ -1263,7 +1265,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         source = _known_good_source()
         caps_line = '\tprotected const string SERVER_CAPABILITIES = "alpha," + "entities_query," + "zulu";\n'
         caps_cache_decl = "\tprotected string m_PollCapabilities;\n"
-        caps_cache_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
         ctor_head = "\tvoid MCPBridge()\n"
         mutate_out_decl = (
@@ -1328,7 +1330,9 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             "caps_initializer_calls_a_function": _with_initializer(source, 'Join("alpha,", "entities_query,zulu")'),
             "cache_caps_decl_absent": source.replace(caps_cache_decl, ""),
             "cache_caps_init_absent": source.replace(caps_cache_init, ""),
-            "cache_caps_not_encoded": source.replace(caps_cache_init, "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"),
+            "cache_caps_percent_encoded": source.replace(
+                caps_cache_init, "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+            ),
             "cache_caps_to_upper_after_init": source.replace(
                 caps_cache_init, caps_cache_init + "\t\tm_PollCapabilities.ToUpper();\n"
             ),
@@ -1357,7 +1361,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 caps_wire, '\t\trequest = request + "&caps=" + m_PollCapabilities.Substring(0, 5);\n'
             ),
             "cache_caps_plus_equals_after_init": source.replace(
-                caps_cache_init, caps_cache_init + '\t\tm_PollCapabilities += "%2Cghost";\n'
+                caps_cache_init, caps_cache_init + '\t\tm_PollCapabilities += ",ghost";\n'
             ),
             "cache_caps_indexed_assign": source.replace(
                 caps_cache_init, caps_cache_init + '\t\tm_PollCapabilities[0] = "X";\n'
@@ -1392,8 +1396,11 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
             ),
             "cache_caps_init_from_other_const": source.replace(
                 caps_line, caps_line + '\tprotected const string OTHER_CAPS = "alpha,entities_query,zulu";\n'
-            ).replace(caps_cache_init, "\t\tm_PollCapabilities = EncodeQueryValue(OTHER_CAPS);\n"),
+            ).replace(caps_cache_init, "\t\tm_PollCapabilities = OTHER_CAPS;\n"),
             "cache_caps_init_from_literal": source.replace(
+                caps_cache_init, '\t\tm_PollCapabilities = "alpha,entities_query,zulu";\n'
+            ),
+            "cache_caps_init_from_encoded_literal": source.replace(
                 caps_cache_init, '\t\tm_PollCapabilities = EncodeQueryValue("alpha,entities_query,zulu");\n'
             ),
             "cache_caps_init_from_preencoded_literal": source.replace(
@@ -1417,7 +1424,9 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
                 caps_wire, '\t\trequest = request + "&caps=" + EncodeQueryValue(SERVER_CAPABILITIES);\n'
             ),
             "poll_without_caps": source.replace(caps_wire, ""),
-            "poll_caps_not_encoded": source.replace(caps_wire, '\t\trequest = request + "&caps=" + SERVER_CAPABILITIES;\n'),
+            "poll_caps_from_constant_not_cache": source.replace(
+                caps_wire, '\t\trequest = request + "&caps=" + SERVER_CAPABILITIES;\n'
+            ),
             "poll_caps_inside_instance_guard": source.replace(caps_wire, "").replace(
                 '\t\t\trequest = request + "&inst=" + EncodeQueryValue(m_PeerInstance);\n',
                 '\t\t\trequest = request + "&inst=" + EncodeQueryValue(m_PeerInstance);\n' + "\t" + caps_wire,

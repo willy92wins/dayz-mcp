@@ -91,7 +91,7 @@ class MCPBridge : Managed
 	protected string m_Key;
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
-	// Pre-encoded once from SERVER_CAPABILITIES and SERVER_ARG_CONTRACT_HASH; key and inst are not cached.
+	// Built once from SERVER_CAPABILITIES (as is) and SERVER_ARG_CONTRACT_HASH (encoded); key and inst are not cached.
 	protected string m_PollCapabilities;
 	protected string m_PollArgContractHash;
 	protected float m_PollHz;
@@ -160,7 +160,11 @@ class MCPBridge : Managed
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
-		m_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);
+		// Sent as is. The names are [a-z0-9_], and a query may carry a literal
+		// comma (RFC 3986 3.4). %2C on every separator pushed this poll past 1024
+		// characters, the longest URL the engine was seen to send
+		// (fb-20261103-133622-3e7a).
+		m_PollCapabilities = SERVER_CAPABILITIES;
 		m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
 		m_PeerInstance = "";
 		m_PollInFlight = false;

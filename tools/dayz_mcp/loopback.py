@@ -442,8 +442,9 @@ MAX_IDLE_KEEPALIVES = (
 COMMAND_TTL_S = 30.0
 PEER_RECONNECT_GAP_S = 10.0
 # Capability census announced on every poll as `caps=` by both Enforce
-# dispatchers (MCPBridge.c:235, MCPClientBridge.c:423): lowercase command
-# names, comma separated, URL encoded. The daemon STORES it and never
+# dispatchers (MCPBridge.StartPoll, MCPClientBridge.StartPoll): lowercase
+# command names, comma separated. The server sends the commas as is to keep
+# its poll URL short, the client as %2C; parse_qs reads both. The daemon STORES it and never
 # derives it -- a census that disagrees with the registered tools is the
 # signal, so repairing it here would delete the finding.
 POLL_CAPS_MAX_NAMES = 64
