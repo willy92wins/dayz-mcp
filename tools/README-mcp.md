@@ -100,6 +100,19 @@ launcher (`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) are 
   daemon's interpreter is `tools/.venv-mcp/bin/python` compared unresolved (the venv link resolves to the
   system interpreter), `msvcrt` is imported only on Windows.
 
+- `dayz_mcp/podman_server.py`: runs a DayZ dedicated server in rootless podman, the way dzo
+  (dayz-server-operator) starts it: a minimal `debian:trixie-slim` runtime image
+  (`localhost/dayz-mcp-runtime:1`), a private tree per run (symlinks into the Steam install, real `keys/`,
+  `profiles/`, a mission copy, a `serverDZ.cfg` with random passwords and the query port), `--network host`,
+  the install and every mod mounted read-only as overlays (`:O`) at their own paths, `ulimit -c 0` and the
+  experimental builds' assertion prompt answered from `stdin`. The container (name, ID, image ID, labels) is
+  the run's identity; stop is SIGTERM, 15 s, SIGKILL, `rm -f`. It writes `$profile:dayz_mcp.json` for the
+  bridge. CLI: `python -m dayz_mcp.podman_server image|start|status|stop` (JSON out). Measured 2026-11-04:
+  1.30.164289 with `@DayZ_MCP` loaded the mission in about 10 s and the bridge polled the host loopback of a
+  `--embedded` dayz-mcp at about 5 Hz (`LEGACY_UNBOUND`: binding needs the managed lifecycle, which needs the
+  daemon); the stop ended the server cleanly in 13 s and left nothing in the Steam install. Not yet wired
+  into `dayz_test_run`.
+
 Measured 2026-11-03 (Debian testing, Python 3.14): every module imports after `install()` except
 `native_launcher_backend` (Windows native launcher); `--embedded` answers MCP `initialize` and `tools/list`
 (107 tools) and serves the loopback the bridge polls; with `install()` applied 5939 unit tests pass, and the
