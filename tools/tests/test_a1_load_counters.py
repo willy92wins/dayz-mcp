@@ -588,7 +588,8 @@ class LoadCountersTest(unittest.TestCase):
     ) -> bytes:
         ver_raw = (core.EXPECTED_BRIDGE_VERSION + "~" + (game_version or "unknown")).encode("utf-8")
         ver_enc = _rfc3986_encode(ver_raw)
-        caps_enc = _rfc3986_encode(caps_raw)
+        # The server sends its census as is (test_poll_url_engine_limit).
+        caps_enc = caps_raw if name == "MCPBridge.c" else _rfc3986_encode(caps_raw)
         load_enc = (
             f"&ia={ia}&pc={pc}&lpims={lpims}&cc={cc}&cb={cb}&bms={bms}&lcp={lcp}"
         ).encode("ascii")
@@ -627,6 +628,12 @@ class LoadCountersTest(unittest.TestCase):
     ) -> None:
         ns = _bridge_harness(name, source=source)
         wire_str = ns["_S"]
+        # Built by the constructor, before any poll. The server's census needs
+        # no encoding, so only this read sees an init moved into StartPoll.
+        expected_caps_wire = (
+            expected_caps_raw if name == "MCPBridge.c" else _rfc3986_encode(expected_caps_raw)
+        )
+        self.assertEqual(ns["m_PollCapabilities"].data, expected_caps_wire)
         ns["game"].version = "1.30.164200"
         ns["m_Key"] = wire_str.of("k1")
         ns["m_PeerInstance"] = wire_str.of("inst/1")
@@ -670,7 +677,7 @@ class LoadCountersTest(unittest.TestCase):
         self.assertEqual(ns["polls"][-1], expected_second)
         self.assertEqual(ns["encode_calls"], [])
         expected_ctor_calls = (
-            [expected_caps_raw, server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH.encode("ascii")]
+            [server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH.encode("ascii")]
             if name == "MCPBridge.c"
             else [expected_caps_raw]
         )
@@ -682,10 +689,7 @@ class LoadCountersTest(unittest.TestCase):
             source = (_MISSION / name).read_text(encoding="utf-8")
             expected_caps_raw = ",".join(_dispatch_branches(source)).encode("ascii")
             expected_ctor_calls = (
-                [
-                    expected_caps_raw,
-                    server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH.encode("ascii"),
-                ]
+                [server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH.encode("ascii")]
                 if name == "MCPBridge.c"
                 else [expected_caps_raw]
             )
@@ -754,7 +758,7 @@ class LoadCountersTest(unittest.TestCase):
         server_caps_raw = ",".join(_dispatch_branches(server_source)).encode("ascii")
         client_caps_raw = ",".join(_dispatch_branches(client_source)).encode("ascii")
 
-        server_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         server_ach_init = "\t\tm_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n"
         client_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);\n"
         server_caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
@@ -800,7 +804,7 @@ class LoadCountersTest(unittest.TestCase):
                 server_caps_raw,
                 "server_caps_plus_equals_after_init",
                 server_source.replace(
-                    server_caps_init, server_caps_init + '\t\tm_PollCapabilities += "%2Cextra";\n', 1
+                    server_caps_init, server_caps_init + '\t\tm_PollCapabilities += ",extra";\n', 1
                 ),
             ),
             (
@@ -824,7 +828,7 @@ class LoadCountersTest(unittest.TestCase):
                 server_caps_raw,
                 "server_caps_init_from_other_const",
                 server_source.replace(
-                    server_caps_init, "\t\tm_PollCapabilities = EncodeQueryValue(VISIBILITY_HEAD_BONE);\n", 1
+                    server_caps_init, "\t\tm_PollCapabilities = VISIBILITY_HEAD_BONE;\n", 1
                 ),
             ),
             (
@@ -848,7 +852,15 @@ class LoadCountersTest(unittest.TestCase):
                 server_caps_raw,
                 "server_caps_init_from_literal",
                 server_source.replace(
-                    server_caps_init, '\t\tm_PollCapabilities = EncodeQueryValue("entities_query");\n', 1
+                    server_caps_init, '\t\tm_PollCapabilities = "entities_query";\n', 1
+                ),
+            ),
+            (
+                "MCPBridge.c",
+                server_caps_raw,
+                "server_caps_init_percent_encoded",
+                server_source.replace(
+                    server_caps_init, "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n", 1
                 ),
             ),
             (
@@ -988,7 +1000,7 @@ class LoadCountersTest(unittest.TestCase):
         client_source = (_MISSION / "MCPClientBridge.c").read_text(encoding="utf-8")
         server_caps_raw = ",".join(_dispatch_branches(server_source)).encode("ascii")
         client_caps_raw = ",".join(_dispatch_branches(client_source)).encode("ascii")
-        server_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(SERVER_CAPABILITIES);\n"
+        server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         server_ach_init = "\t\tm_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n"
         client_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);\n"
         positives = (
