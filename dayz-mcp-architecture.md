@@ -332,8 +332,14 @@ El primer gate real es el **POC (fase 0)**; la incógnita `MakeScreenshot` se re
     `0x000400F0 (Game restart required)`, incluso contra un servidor local con `BattlEye = 0`.
   - **Coste:** el frame de la captura dura 13-17 ms a 1920×1080, con el juego sin limitar (mediana de
     4 ms), y 86-179 ms a 3840×2160 en retail. Una ventana sin foco limitada a ~19 fps lo esconde.
-- **No verificado:** retail con BattlEye y `-autotest`; sesión bloqueada o pantalla apagada; un run
-  gestionado con `@DayZ_MCP`.
+- **Tercera ronda (BattlEye):** retail lanzado con `DayZ_BE.exe 0 1 1 -exe DayZ_x64.exe` (la línea del
+  launcher oficial) y `-autotest`, contra un servidor con `BattlEye = 1`, **captura y no lo expulsan**
+  (~5,5 min conectado).
+  - Sin `-noPause`, con la ventana sin foco, el cliente deja de renderizar: `MakeScreenshot` espera al
+    siguiente frame renderizado y de las peticiones acumuladas solo escribe la última. Con `-noPause`
+    captura también en segundo plano.
+- **No verificado:** que BattlEye del servidor estuviera activo (estaba configurado, pero no deja rastro
+  en sus logs); sesión bloqueada o pantalla apagada; un run gestionado con `@DayZ_MCP`.
 - **Estado.** `capture_screenshot` sigue con window-grab. Usar esta vía exige añadir `-autotest` a la
   política sellada del cliente (`tools/dayz_mcp/dayz_test_worker.py:669`) y un comando de cliente en el
   puente (PBO). Informe con comandos, extractos del RPT y esbozo: vault
