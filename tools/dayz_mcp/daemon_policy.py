@@ -5,7 +5,6 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
-import msvcrt
 import ntpath
 import os
 import re
@@ -15,7 +14,12 @@ from dataclasses import dataclass
 from ctypes import wintypes
 from typing import BinaryIO, MutableMapping
 
-from dayz_mcp import bootstrap_parent, host_config
+from dayz_mcp import bootstrap_parent, host_config, linux_compat
+
+# Windows only. Not even a stub elsewhere: a module named msvcrt makes CPython's
+# subprocess believe it runs on Windows.
+if os.name == "nt":
+    import msvcrt
 from dayz_mcp.daemon_contract import classify_dayz_argv
 from dayz_mcp.daemon_policy_contract import (
     AccreditedDaemonPolicy as _ContractAccreditedDaemonPolicy,
@@ -52,7 +56,7 @@ _BOOTSTRAP_ENV_NAMES = (
 def _kernel32_function(
     name: str, argtypes: list[object], restype: object
 ) -> object:
-    function = getattr(ctypes.WinDLL("kernel32", use_last_error=True), name)
+    function = getattr(linux_compat.win_dll("kernel32"), name)
     function.argtypes = argtypes
     function.restype = restype
     return function

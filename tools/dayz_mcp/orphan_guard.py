@@ -47,6 +47,7 @@ from dayz_mcp.accredited_daemon_transport import (
     argv_matches_redirected,
     verified_daemon_http_request,
 )
+from dayz_mcp.linux_compat import is_python_image
 from dayz_mcp.native_process_snapshot import (
     command_argv_of,
     full_image_path_of,
@@ -788,8 +789,7 @@ def try_reclaim_port(
         return False  # Never reclaim the current process.
 
     image = get_image(pid_a) or ""
-    image_name = ntpath.basename(image).casefold()
-    if not (image_name.startswith("python") and image_name.endswith(".exe")):
+    if not is_python_image(image):
         return False
     observed_argv = get_argv(pid_a)
     if observed_argv is None:
@@ -1130,8 +1130,7 @@ def try_reclaim_unresponsive_listener(
         return False
 
     image = get_image(pid_a) or ""
-    image_name = ntpath.basename(image).casefold()
-    if not (image_name.startswith("python") and image_name.endswith(".exe")):
+    if not is_python_image(image):
         log(f"RECLAIM(daemon): pid={pid_a} image={image} not python; preserving the exclusive bind")
         return False
     observed_argv = get_argv(pid_a)

@@ -221,19 +221,25 @@ def _python_not_approved_line(error: DaemonPythonNotApproved) -> str:
 
 
 def _ensure_identity_migration(config: Any) -> None:
-    approved_python = (
-        Path(__file__).resolve().parents[1]
-        / ".venv-mcp"
-        / "Scripts"
-        / "python.exe"
-    )
-    try:
-        approved = approved_python.resolve(strict=True)
-        current = Path(sys.executable).resolve(strict=True)
-    except OSError as error:
-        raise DaemonPythonNotApproved(approved_python, sys.executable) from error
-    if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
-        raise DaemonPythonNotApproved(approved_python, sys.executable)
+    venv = Path(__file__).resolve().parents[1] / ".venv-mcp"
+    if os.name == "nt":
+        approved_python = venv / "Scripts" / "python.exe"
+        try:
+            approved = approved_python.resolve(strict=True)
+            current = Path(sys.executable).resolve(strict=True)
+        except OSError as error:
+            raise DaemonPythonNotApproved(approved_python, sys.executable) from error
+        if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
+            raise DaemonPythonNotApproved(approved_python, sys.executable)
+    else:
+        # A POSIX venv's bin/python is a symlink to the system interpreter, so
+        # resolving both sides would admit any interpreter of that version. The
+        # venv path itself is the identity: it must exist and be the path this
+        # process was started as.
+        approved_python = venv / "bin" / "python"
+        approved = approved_python
+        if not approved_python.exists() or os.path.abspath(sys.executable) != str(approved_python):
+            raise DaemonPythonNotApproved(approved_python, sys.executable)
     guard = NativeProcessGuard()
     identity = guard.snapshot(os.getpid())
     if (
