@@ -3,7 +3,7 @@
 > **Objetivo:** un servidor MCP que expone DayZ (DayZDiag) como **tools tipadas**, para que un
 > agente conduzca el juego y extraiga datos estructurados — server-authoritative, **sin teclas
 > SO ni OCR**. (La captura visual es engine-native SI `MakeScreenshot` funciona en el exe diag;
-> si no, cae a window-grab del cliente — ver §6 y el caveat T165276.)
+> si no, cae a window-grab del cliente — ver §6 y el caveat T165276. Con `-autotest` sí escribe: §11.)
 > **Base:** 2 workflows de investigación (≈2.5M tokens) + spot-check directo de Claude sobre
 > cada API load-bearing (leídas en el source vanilla bajo `<vanilla scripts root>`).
 > Generado 2026-06-06 como documento de diseño. **Implementado y en produccion desde
@@ -14,7 +14,7 @@
 
 ---
 
-## Resultado del probe in-game (2026-06-06) — `MakeScreenshot` descartado
+## Resultado del probe in-game (2026-06-06) — `MakeScreenshot` descartado (sin `-autotest`; ver §11, probe del 2026-11-03)
 
 > **Verificado end-to-end por Claude** (no solo T165276): mod client-side `@MCPTest`
 > (`modded MissionGameplay`) cargado en el **exe diag** vía filepatching, player in-game
@@ -88,7 +88,7 @@ Todas con cita `file:line`. Guard: `—` = unguarded (vanilla); `DIAG` = requier
 **Cámara + captura** (CAPTURE — client-only):
 - `SetCameraEx(int cam, const vector mat[4])` — enworld.c:56 `—` (pose por matriz)
 - `GetCamera(int cam, out vector mat[4])` — enworld.c:59 `—` (lee pose, conserva roll)
-- `MakeScreenshot(string name)` — proto.c:142 `—` ⚠️ **el proto existe pero el runtime se reporta ROTO** ([T165276](https://feedback.bistudio.com/T165276): crea solo carpeta vacía en cliente retail, reproducido hasta 1.19; quizá solo el exe **diag**). **NO asumir funcional** — fallback de captura en §6.
+- `MakeScreenshot(string name)` — proto.c:142 `—` ⚠️ **el proto existe pero el runtime se reporta ROTO** ([T165276](https://feedback.bistudio.com/T165276): crea solo carpeta vacía en cliente retail, reproducido hasta 1.19; quizá solo el exe **diag**). **NO asumir funcional** — fallback de captura en §6. Actualización 2026-11-03: en DayZDiag escribe un BMP si el cliente arranca con `-autotest` (§11).
 - `SetWidgetWorld(RenderTargetWidget, world, int camera)` — enwidgets.c:705 `—` (render off-screen multi-cam; salida a textura, extracción a archivo también a validar)
 
 **Transporte + serialización + escape**:
@@ -285,7 +285,75 @@ mirar la carpeta) para no diseñar la fase 3 sobre una API rota.
 
 - **Verificado por Claude** (leído en source esta sesión, el proto existe): TODAS las APIs de §2 — Connect, OnClientNewEvent/CreateCharacter/InvokeOnConnect, CreateObjectEx, SetTimeMultiplier, StartCommand_Vehicle, Car setters, IsGettingIn, SetCameraEx/GetCamera, SetWidgetWorld, RestApi GET/POST async y `*_now`, RestCallback, JsonFileLoader/JsonSerializer, ExecuteEnforceScript, TickScheduler. **`MakeScreenshot`: el proto existe (proto.c:142) pero su RUNTIME se reporta roto — ver abajo.**
 - **De W2 (subagentes) + prior-art web, NO re-verificado por mí:** los patrones MCP (Blender/Unreal/Unity/Godot), límites de ImageContent (<1 MB), y los comportamientos runtime (latencia por tick, frame-lag de captura, `WeatherPhenomenon.Set`).
-- **Reportado roto por fuente externa (verificado por el usuario):** `MakeScreenshot` — feedback tracker [T165276](https://feedback.bistudio.com/T165276) (carpeta vacía en retail hasta 1.19; posible solo en diag). El diseño lleva fallback window-grab.
+- **Reportado roto por fuente externa (verificado por el usuario):** `MakeScreenshot` — feedback tracker [T165276](https://feedback.bistudio.com/T165276) (carpeta vacía en retail hasta 1.19; posible solo en diag). El diseño lleva fallback window-grab. Resuelto en §11: escribe con `-autotest`, en diag y en retail (offline y con BattlEye).
 - **A confirmar in-game (no verificable offline):** latencia del round-trip async; que el cliente diag spawnee controlable vía `Connect` programático; que la captura refleje la pose sin lag; y **si `MakeScreenshot` funciona en el exe diag** (mini-test temprano).
 
 El primer gate real es el **POC (fase 0)**; la incógnita `MakeScreenshot` se resuelve con un mini-test aparte antes de la fase 3.
+
+---
+
+## 11. Probe in-game 2026-11-03 — `MakeScreenshot` sí escribe con `-autotest` (issue #315)
+
+> **Verificado end-to-end por Claude** en DayZDiag 1.30.164.200 con un mod de prueba fuera del repo
+> (`MCPShotProbe`: `MakeScreenshot` desde un `modded MissionGameplay`, comprobando `FileExist` frame a
+> frame). Cinco procesos lanzados a mano por WMI, porque `dayz_test_run` no admite argumentos de
+> cliente; todos salieron con `RequestExit`.
+
+| Variante | Línea de comandos del cliente | Capturas con fichero |
+|---|---|---|
+| (a) | `-connect` + `-autotest=$profile:autotest_empty.json` | 5 de 5 |
+| (b) | offline `-mission` + `-autotest` | 8 de 8 |
+| (c) | `-connect` sin `-autotest` | 0 de 5 |
+| (c2) | offline `-mission` sin `-autotest` | 0 de 6 |
+
+- **Lo activa el motor.** Con `-connect` los scripts no entran en `AutoTestLaunch` (`dayzgame.c:2124-2142`;
+  el probe lee `m_AutotestEnabled=0`), pero el motor añade `AUTOTEST,LOG_TO_FILE,LOG_TO_SCRIPT` a los
+  defines de todos los módulos y escribe en el RPT `ENGINE : Screenshot successfully saved into …` por
+  cada captura. Sin `-autotest`, ninguna línea así.
+- **Formato.** Siempre BMP de 24 bits del fotograma compuesto (mundo + HUD + menús), a la resolución de
+  `-x/-y` (1280×720 = 2 764 854 B), aunque el nombre acabe en `.png`, `.jpg` o `.dds`.
+  - Con un nombre `$…`, la ruta exacta que se pasa, sin añadir extensión.
+  - Sin `$`, `$profile:ScreenShots/DD.MM.YYYY H.MM.SS.mmm-<nombre>.bmp`. La doc de `proto.c:136-141`
+    (DDS, carpeta `ScreenShotes`) no coincide.
+  - Sin `-autotest`, ese nombre crea la carpeta `ScreenShots` vacía y nada más (el probe de junio no la vio).
+- **Tiempo y ventana.** El fichero ya existe en la primera actualización de script tras la llamada (el
+  probe la cuenta como su segundo frame, porque también comprueba nada más llamar), y el RPT anota
+  `saved` 8-18 ms después de la llamada. Pasa con la ventana en primer plano, detrás de otra y
+  minimizada.
+- **Dónde.** En el `-profiles=` del cliente. El servidor dedicado (`NO_GUI`) no renderiza ni captura.
+- **Efectos de `-autotest`.**
+  - Cada `Print` sale también en el RPT: puede duplicar coincidencias en `logs_since` y `wait_for`.
+  - Código vanilla bajo `AUTOTEST`: `debug.c:274`, `entityai.c:3942`, `dayzgame.c:2489-2495`.
+  - Sin `-connect` y con un JSON de autotest que se carga bien (`m_AutotestEnabled=1`,
+    `dayzgame.c:2366-2369`), el runner vanilla cierra el juego en cuanto termina (`missiongameplay.c:232-245`).
+    Con `-autotest` sin valor la carga falla, el runner no se activa y no cierra nada, pero la captura
+    funciona igual.
+- **Segunda ronda, mismo día:**
+  - **Basta `-autotest` sin valor.** Activa el modo y la captura igual, así que el launcher no necesita
+    un JSON.
+  - **Retail (build RELEASE) también captura con `-autotest`**, probado en offline (`-mission`), y no
+    captura sin él. En retail el flag solo añade el define `AUTOTEST`, sin `LOG_TO_*`.
+  - Observado una vez: un `DayZ_x64.exe` lanzado sin `DayZ_BE.exe` actualizó BattlEye al conectar y cayó
+    al spawn con `0x000400F0 (Game restart required)`, contra un servidor local con `BattlEye = 0`. Con
+    `DayZ_BE.exe` sí conectó (tercera ronda). No se aisló si es una exigencia general.
+  - **Coste del frame de la captura**, con el juego sin limitar:
+    - 1920×1080 (mediana de 4-6 ms por frame): 12-20 ms, en 11 muestras de una corrida de Diag.
+    - 3840×2160 en retail (mediana de 5-10 ms): 31-69 ms en 8 muestras, más 120 y 179 ms en las dos
+      primeras capturas de la corrida offline, justo después del spawn.
+    - Con la ventana sin foco y el juego a ~52 ms por frame, la captura apenas se nota.
+- **Tercera ronda (BattlEye):** retail lanzado con `DayZ_BE.exe 0 1 1 -exe DayZ_x64.exe` (la línea del
+  launcher oficial) y `-autotest`, contra un servidor con `BattlEye = 1`, **captura y no lo expulsan**
+  en dos sesiones de unos 2,5 y 3 minutos.
+  - Sin `-noPause`, con la ventana sin foco, el cliente deja de renderizar: `MakeScreenshot` espera al
+    siguiente frame renderizado y de las peticiones acumuladas solo escribe la última. Con `-noPause`
+    captura también en segundo plano.
+- **No verificado:**
+  - que BattlEye del servidor estuviera activo: el del cliente está confirmado, el del servidor solo
+    configurado, y no deja rastro en sus logs;
+  - un servidor con firmas (`verifySignatures = 2`): las pruebas usaron `0`;
+  - la sesión bloqueada o la pantalla apagada;
+  - un run gestionado con `@DayZ_MCP`.
+- **Estado.** `capture_screenshot` sigue con window-grab. Usar esta vía exige añadir `-autotest` a la
+  política sellada del cliente (`tools/dayz_mcp/dayz_test_worker.py:669`) y un comando de cliente en el
+  puente (PBO). El informe con comandos, extractos del RPT y el esbozo está fuera del repo, en el vault
+  del dueño: `AI/10_Projects/DayZ_MCP/research/2026-11-03-makescreenshot-autotest-claude.md`.

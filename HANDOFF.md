@@ -90,7 +90,7 @@ La cola antigua quedó vacía en la v1.3: 0ab2 (#31), 546d (#26), a429 (#29), 2e
 
 ## Gotchas que siguen vigentes
 
-- `MakeScreenshot` roto (T165276) → window-grab.
+- `MakeScreenshot` no escribe sin `-autotest` (T165276); con `-autotest` sí (probe 2026-11-03, `dayz-mcp-architecture.md` §11, sin integrar) → window-grab.
 - `SetHeader` solo Content-Type → API-key en query string.
 - `*_now` bloquea el tick.
 - `SetTimeMultiplier(0)` congela la sim.

@@ -176,12 +176,12 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   comandos serializados por el daemon. Sigue siendo un único JUEGO (no multi-instancia de DayZ).
 - **`exec_enforce` como tool universal**: es breakglass auditado con allowlist, no la vía normal.
 - **Exposición a red / multi-usuario**: solo `127.0.0.1`, local single-user. Nada de `0.0.0.0`.
-- **Arreglar `MakeScreenshot`**: está roto en el engine (T165276); no es nuestro trabajo — se
-  rodea con window-grab.
+- **Arreglar `MakeScreenshot`**: sin `-autotest` el engine no escribe nada (T165276); no es nuestro trabajo — se
+  rodea con window-grab. Con `-autotest` sí escribe (probe 2026-11-03, `dayz-mcp-architecture.md` §11); usarlo es una decisión aparte.
 - **Ejecución funcional de `exec_enforce` en el server headless** (2026-06-10):
   `ExecuteEnforceScript` es proto "Developer only" (`game.c:776`) y devuelve `false` en el
   server diag `NO_GUI` incluso con el wrapper vanilla EXACTO del script-console — limitación de
-  engine análoga a `MakeScreenshot`. Lo que la tool SÍ garantiza y está verificado in-game es la
+  engine análoga a `MakeScreenshot` sin `-autotest`. Lo que la tool SÍ garantiza y está verificado in-game es la
   **salvaguarda de seguridad** del breakglass (gating allowlist-exacto + audit JSONL + OFF-default);
   el efecto del script en el server headless es best-effort, no contractual. No es nuestro trabajo
   hacer funcionar una API Developer-only en contexto headless.
@@ -201,7 +201,7 @@ Aceptación detallada: `plans/2026-07-14-agent-session-coordination-design.md` �
   un patrón como obligatorio.
 - **Residuo genuinamente nuevo** (no hay referente DayZ): transporte async **dentro del tick**
   DayZ sin bloquear 60Hz, server-authoritative vía `MissionServer`, captura por **window-grab**
-  (porque `MakeScreenshot` está roto). Marcado `[verify in-game]`; es lo que el POC de-risca.
+  (porque `MakeScreenshot` no escribe sin `-autotest`). Marcado `[verify in-game]`; es lo que el POC de-risca.
 - **Estado de extracción**: patrones recogidos en `dayz-mcp-architecture.md`; APIs DayZ
   re-verificadas por Claude (`dayz-harness-apis.md` + spot-checks de esta sesión).
 
