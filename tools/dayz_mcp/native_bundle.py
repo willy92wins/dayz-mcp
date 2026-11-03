@@ -133,12 +133,13 @@ def _external_paths() -> frozenset[str]:
         ntpath.normcase(str(path)) for path in external_file_paths(resolved_layout())
     )
 
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.GetSystemDirectoryW.argtypes = (
-    wintypes.LPWSTR,
-    wintypes.UINT,
-)
-_kernel32.GetSystemDirectoryW.restype = wintypes.UINT
+if os.name == "nt":
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetSystemDirectoryW.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.UINT,
+    )
+    _kernel32.GetSystemDirectoryW.restype = wintypes.UINT
 
 
 def _system_directory() -> str:

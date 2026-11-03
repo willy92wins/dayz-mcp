@@ -15,11 +15,17 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import timedelta
+import os
 from pathlib import Path
 from typing import TypeVar
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_VENV_PYTHON = TOOLS_DIR / ".venv-mcp" / "Scripts" / "python.exe"
+# A venv keeps its interpreter in Scripts\python.exe on Windows and bin/python elsewhere.
+DEFAULT_VENV_PYTHON = (
+    TOOLS_DIR / ".venv-mcp" / "Scripts" / "python.exe"
+    if os.name == "nt"
+    else TOOLS_DIR / ".venv-mcp" / "bin" / "python"
+)
 DEFAULT_KEYFILE = TOOLS_DIR / ".dayz_mcp.key"
 DEFAULT_PORT = 8765
 DEFAULT_IDLE_TIMEOUT_S = 1800.0

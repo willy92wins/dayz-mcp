@@ -76,6 +76,42 @@ Operator error codes:
 - `listener_present` — an unsettled migration sees a listener on this instance's port. Close that listener and start again.
 - `dayz_mcp_process_present` — an unsettled migration, or a start after a settled receipt, sees a same-root writer (or, before the receipt, a writer that does not prove its root). Stop that writer and start again.
 
+## Linux (partial port)
+
+Windows is the supported host and nothing below changes it. The modules sealed into the dayz-test-v1 native
+launcher (`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) are byte-identical to Windows-only
+`main`, so Linux support never forces a launcher rebuild. The Linux code lives in unsealed modules:
+
+- `dayz_mcp/linux_compat.py`: `install()` runs first in `python -m dayz_mcp` and, outside Windows only, sets
+  `LOCALAPPDATA` to `$XDG_STATE_HOME` (else `~/.local/state`) when unset, defines the two Win32
+  `stat.IO_REPARSE_TAG_*` constants, and replaces in the sealed modules: `win32_fileinfo.bind_common_kernel32`
+  (an `UnavailableLibrary`: prototypes bind at import, calls raise `OSError(win32_unavailable:...)`),
+  `pinned_keyfile.read_pinned_keyfile` (POSIX reader with the Win32 reader's refusals: absolute normalized path,
+  no symlink in it, regular file, one link, owned by the user, not group/other writable, at most 4096 bytes),
+  `native_process_snapshot.full_image_path_of` (`/proc/<pid>/exe`), the absolute-path test of
+  `native_process_guard` (POSIX image paths), and `server_cli.open_lock_file`. It also provides `win_dll()` and
+  `is_python_image()` (`python`, `python3`, `python3.14` off Windows) to unsealed modules. On Windows `install()`
+  does nothing. Other entry points (`python -m dayz_mcp.lifecycle_cli`, ...) do not call it yet.
+- `dayz_mcp/byte_lock.py`: one-byte locks, `msvcrt.locking` on Windows, open-file-description locks
+  (`F_OFD_SETLK`) on Linux, which, unlike `lockf`, survive closing another descriptor of the file. Used by the
+  instance lease, box admission, the knowledge lock and the daemon startup election.
+- Unsealed modules carry small `os.name` branches: the loopback sets `SO_REUSEADDR` on Linux (a restarted
+  daemon could not bind while the game's polls sat in TIME_WAIT; a second listener is still refused), the
+  daemon's interpreter is `tools/.venv-mcp/bin/python` compared unresolved (the venv link resolves to the
+  system interpreter), `msvcrt` is imported only on Windows.
+
+Measured 2026-11-03 (Debian testing, Python 3.14): every module imports after `install()` except
+`native_launcher_backend` (Windows native launcher); `--embedded` answers MCP `initialize` and `tools/list`
+(107 tools) and serves the loopback the bridge polls; with `install()` applied 5939 unit tests pass, and the
+failures examined are Windows-environment tests. The Windows suite was not run for this change.
+
+Not ported: the shared build lock in sealed `server_cli` stays Windows-only (`build_lock_unavailable`; it guards
+managed AddonBuilder builds, which Linux does not have). `--daemon`/`--client` (and with them leases and
+`session_*`) stop at the runs.json identity migration (`runs_backup_transaction_publish_failed`): it relies on
+Windows handle semantics (no-clobber rename, delete through a pinned handle, file-ID identity) and needs a POSIX
+design. A game started by hand polls as `LEGACY_UNBOUND`; the intended Linux route is a launch path in which
+the daemon starts the native server and the Proton client itself and binds them by per-run token.
+
 ## Startup and health
 
 1. Start a managed instance with `dayz_test_run`, or use an existing phase harness/local DayZ workflow with the same key/config.
