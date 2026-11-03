@@ -63,7 +63,7 @@ DayZ_MCP_dev/        (este, NO va al PBO)        → CLAUDE.md, product-spec.md,
 > está en `AI/30_Sessions/`. Ver `workflow.md` §"Arranque de sesión (bootstrap)".
 
 ## Gotchas conocidos (verificados in-game / en source)
-- **`MakeScreenshot` solo escribe con `-autotest`** (T165276; probe 2026-11-03, `dayz-mcp-architecture.md` §11): sin ese flag no escribe nada ni en el exe diag; con él, un BMP de 24 bits a los 2 frames (aunque el nombre diga `.dds`), también minimizado. dayz-mcp aún no lanza el cliente con `-autotest`: la vía
+- **`MakeScreenshot` solo escribe con `-autotest`** (T165276; probe 2026-11-03, `dayz-mcp-architecture.md` §11): sin ese flag no escribe nada ni en el exe diag; con él, un BMP de 24 bits que ya existe en la siguiente actualización de script (aunque el nombre diga `.dds`), también minimizado. dayz-mcp aún no lanza el cliente con `-autotest`: la vía
   visual sigue siendo window-grab externo (`Graphics.CopyFromScreen`, validado: meanB 65, nbRatio 0.999).
   RenderTargetWidget es display-only (sin readback); RestApi no materializa el framebuffer.
 - **`SetHeader` ≠ headers arbitrarios**: solo Content-Type → key en query string (ver arriba).
