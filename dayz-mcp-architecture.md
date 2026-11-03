@@ -323,7 +323,16 @@ El primer gate real es el **POC (fase 0)**; la incógnita `MakeScreenshot` se re
   - Cada `Print` sale también en el RPT: puede duplicar coincidencias en `logs_since` y `wait_for`.
   - Código vanilla bajo `AUTOTEST`: `debug.c:274`, `entityai.c:3942`, `dayzgame.c:2489-2495`.
   - Sin `-connect`, el runner vanilla cierra el juego en cuanto termina (`missiongameplay.c:243`).
-- **No verificado:** retail; `-autotest` sin valor; sesión bloqueada o pantalla apagada; un run
+- **Segunda ronda, mismo día:**
+  - **Basta `-autotest` sin valor.** Activa el modo y la captura igual, así que el launcher no necesita
+    un JSON.
+  - **Retail (build RELEASE) también captura con `-autotest`**, probado en offline (`-mission`), y no
+    captura sin él. En retail el flag solo añade el define `AUTOTEST`, sin `LOG_TO_*`.
+  - En multijugador retail exige BattlEye: un `DayZ_x64.exe` lanzado sin `DayZ_BE.exe` cae al spawn con
+    `0x000400F0 (Game restart required)`, incluso contra un servidor local con `BattlEye = 0`.
+  - **Coste:** el frame de la captura dura 13-17 ms a 1920×1080, con el juego sin limitar (mediana de
+    4 ms), y 86-179 ms a 3840×2160 en retail. Una ventana sin foco limitada a ~19 fps lo esconde.
+- **No verificado:** retail con BattlEye y `-autotest`; sesión bloqueada o pantalla apagada; un run
   gestionado con `@DayZ_MCP`.
 - **Estado.** `capture_screenshot` sigue con window-grab. Usar esta vía exige añadir `-autotest` a la
   política sellada del cliente (`tools/dayz_mcp/dayz_test_worker.py:669`) y un comando de cliente en el

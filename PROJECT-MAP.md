@@ -98,7 +98,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `CHANGELOG.md` - 147 KB, touched 2026-11-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-01 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
-- `dayz-mcp-architecture.md` - 23 KB, touched 2026-11-03 (UTC)
+- `dayz-mcp-architecture.md` - 24 KB, touched 2026-11-03 (UTC)
 - `GATES.md` - 4 KB, touched 2026-11-01 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-11-01 (UTC)
 - `QUICKSTART.md` - 4 KB, touched 2026-11-01 (UTC)
