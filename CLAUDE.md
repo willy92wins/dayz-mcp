@@ -9,7 +9,7 @@ Servidor MCP que expone **DayZ (DayZDiag)** como **tools tipadas** para que un a
 conduzca el juego y extraiga datos estructurados — **server-authoritative, sin teclas SO
 ni OCR**. Control + datos son **engine-native** (CreateObjectEx, StartCommand_Vehicle,
 Car setters, RestApi async, RaycastRVProxy, SetTimeMultiplier). La captura visual es la
-única pieza no-native: `MakeScreenshot` está roto (T165276) → se hace por **window-grab**
+única pieza no-native: `MakeScreenshot` no escribe sin `-autotest` (T165276) y dayz-mcp aún no arranca el cliente así → se hace por **window-grab**
 externo del cliente renderizado (pasivo, solo lee píxeles). Arquitectura cerrada y **en
 producción**: 101 tools registradas (lista en `README.md:80`, contada el 2026-10-28) y puente en `MCP_BRIDGE_VERSION = "12"`
 (`addon/scripts/5_Mission/MCPMessages.c:1`). Las 5 fases del plan original están cerradas.
@@ -63,8 +63,8 @@ DayZ_MCP_dev/        (este, NO va al PBO)        → CLAUDE.md, product-spec.md,
 > está en `AI/30_Sessions/`. Ver `workflow.md` §"Arranque de sesión (bootstrap)".
 
 ## Gotchas conocidos (verificados in-game / en source)
-- **`MakeScreenshot` roto en diag** (T165276): no escribe `.dds` ni en el exe diag. La vía
-  visual es window-grab externo (`Graphics.CopyFromScreen`, validado: meanB 65, nbRatio 0.999).
+- **`MakeScreenshot` solo escribe con `-autotest`** (T165276; probe 2026-11-03, `dayz-mcp-architecture.md` §11): sin ese flag no escribe nada ni en el exe diag; con él, un BMP de 24 bits a los 2 frames (aunque el nombre diga `.dds`), también minimizado. dayz-mcp aún no lanza el cliente con `-autotest`: la vía
+  visual sigue siendo window-grab externo (`Graphics.CopyFromScreen`, validado: meanB 65, nbRatio 0.999).
   RenderTargetWidget es display-only (sin readback); RestApi no materializa el framebuffer.
 - **`SetHeader` ≠ headers arbitrarios**: solo Content-Type → key en query string (ver arriba).
 - **`*_now` bloquea el tick**: usar siempre callbacks async.
