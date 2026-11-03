@@ -42,7 +42,7 @@ import unittest
 from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import loopback
-from tests.test_a1_load_counters import _bridge_harness, _dispatch_branches, _MISSION
+from tests.poll_harness_helpers import _MISSION, _bridge_harness, _dispatch_branches
 
 
 ENGINE_URL_MAX = 1024
