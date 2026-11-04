@@ -147,6 +147,14 @@ managed AddonBuilder builds, which Linux does not have). `dayz_test_run` runs th
 launcher (`native_launcher_backend`: a debugger-attached child in a job object), so it cannot start a Linux
 run; the podman runner is not wired into it, and a game started by hand polls as `LEGACY_UNBOUND`.
 
+Measured 2026-11-04, podman server bridged to that daemon: the bridge's established poll connection is owned
+in the host TCP table by the containerised `DayZServer`'s host PID (`podman inspect .State.Pid`; `/proc/<pid>/exe`
+is the Steam `DayZServer`, `/proc/<pid>/cgroup` ends in `libpod-<container id>.scope/container`). The loopback's
+PID + creation-time binding therefore applies to container runs unchanged. The missing piece is a Linux launch
+backend at the `secure_launcher` seam: mint the instance, write it into `dayz_mcp.json` before `podman run`,
+record the run with host PID and creation time (container ID and image ID as cross-checks), stop through
+`podman_server.stop`.
+
 ## Startup and health
 
 1. Start a managed instance with `dayz_test_run`, or use an existing phase harness/local DayZ workflow with the same key/config.
