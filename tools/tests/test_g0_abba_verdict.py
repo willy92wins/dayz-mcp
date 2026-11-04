@@ -14,7 +14,12 @@ from unittest.mock import patch
 
 from dayz_mcp.loopback import validate_command_args
 from tests._tiers import slow_test
-from tests.session_wait_quota_cases import QUOTA_PAUSE_CASES
+from tests.session_wait_quota_cases import (
+    DEADLINE_CASES,
+    MAX_VIRTUAL_WAITS,
+    QUOTA_PAUSE_CASES,
+    queued,
+)
 
 try:
     import g0_abba_gate as gate
@@ -360,8 +365,9 @@ class _VirtualTime:
     """Stands in for the gate's time module.
 
     monotonic() only moves when the fake transport or the gate's sleep moves
-    it, and sleep() records each pause. Dyadic values (1024.0, 0.375, 0.25)
-    keep the arithmetic exact, so a pause compares with ==.
+    it, and sleep() records each pause. Like time.sleep, sleep() refuses a
+    negative length. Dyadic values keep the arithmetic exact, so a pause
+    compares with ==.
     """
 
     def __init__(self) -> None:
@@ -373,6 +379,8 @@ class _VirtualTime:
 
     def sleep(self, seconds: float) -> None:
         self.pauses.append(seconds)
+        if seconds < 0:
+            raise ValueError("sleep length must be non-negative")
         self.now += seconds
 
 
@@ -411,6 +419,12 @@ class G0AbbaSessionWaitQuotaTest(unittest.TestCase):
                 }
             if path == "/session/wait":
                 if clock is not None:
+                    # Without a pause and with a transport that takes no
+                    # time, nothing moves the clock: fail, do not spin.
+                    if calls["wait"] >= MAX_VIRTUAL_WAITS:
+                        raise AssertionError(
+                            f"{calls['wait']} /session/wait calls on a clock nothing moves"
+                        )
                     clock.now += transport_s
                 answer = dict(waits[min(calls["wait"], len(waits) - 1)])
                 calls["wait"] += 1
@@ -424,38 +438,32 @@ class G0AbbaSessionWaitQuotaTest(unittest.TestCase):
         daemon._session_call = session_call
         return daemon, calls
 
-    def test_the_deadline_cut_reads_the_clock_after_the_answer(self) -> None:
-        # The answer takes 0.25s of a 0.375s budget. The pause asks for the
-        # 1s cap and is cut to the 0.125s left after the answer: a cut to
-        # what was left before the request would sleep 0.375s and return
-        # 0.25s late.
-        clock = _VirtualTime()
-        daemon, calls = self.daemon(
-            {"status": "queued", "session_wait_quota": "duplicate", "retry_after_s": 30},
-            clock=clock,
-            transport_s=0.25,
-        )
-        with patch.object(gate, "time", clock):
-            with self.assertRaisesRegex(RuntimeError, "session_wait_timeout"):
-                daemon.session_acquire_wait("build", 0.375)
+    def test_the_deadline_cuts_the_pause(self) -> None:
+        # The cut reads the clock when the answer arrives: a cut to what was
+        # left before the request would sleep 0.375s and return 0.25s late.
+        # It applies to the fallback as well, and it never asks for a
+        # negative pause.
+        for label, max_wait_s, transport_s, quota, retry_after, pauses, end in DEADLINE_CASES:
+            with self.subTest(label):
+                clock = _VirtualTime()
+                daemon, calls = self.daemon(
+                    queued(quota, retry_after), clock=clock, transport_s=transport_s
+                )
+                with patch.object(gate, "time", clock):
+                    with self.assertRaisesRegex(RuntimeError, "session_wait_timeout"):
+                        daemon.session_acquire_wait("build", max_wait_s)
 
-        self.assertEqual(1, calls["wait"])
-        self.assertEqual(1, calls["cancel"])
-        self.assertEqual([0.125], clock.pauses)
-        self.assertEqual(1024.375, clock.now)
+                self.assertEqual(1, calls["wait"])
+                self.assertEqual(1, calls["cancel"])
+                self.assertEqual(pauses, clock.pauses)
+                self.assertEqual(end, clock.now)
 
     def test_the_quota_pause_follows_the_retry_rule(self) -> None:
         for label, quota, retry_after, pauses in QUOTA_PAUSE_CASES:
             with self.subTest(label):
                 clock = _VirtualTime()
                 daemon, calls = self.daemon(
-                    {
-                        "status": "queued",
-                        "session_wait_quota": quota,
-                        "retry_after_s": retry_after,
-                    },
-                    ACTIVE_WAIT,
-                    clock=clock,
+                    queued(quota, retry_after), ACTIVE_WAIT, clock=clock
                 )
                 with patch.object(gate, "time", clock):
                     result = daemon.session_acquire_wait("build", 64.0)
