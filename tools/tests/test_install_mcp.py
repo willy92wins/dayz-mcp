@@ -5,12 +5,14 @@ import ctypes
 import hashlib
 import importlib
 import io
+import itertools
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 import unittest
 from ctypes import wintypes
 from contextlib import redirect_stderr, redirect_stdout
@@ -1190,30 +1192,40 @@ def _completed(returncode: int, stdout: str, stderr: str) -> object:
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
+def _utf16(text: str) -> tuple[int, ...]:
+    """The UTF-16 code units of a JavaScript string: its length, index and sort."""
+    data = text.encode("utf-16-le", "surrogatepass")
+    return tuple(int.from_bytes(data[i : i + 2], "little") for i in range(0, len(data), 2))
+
+
 def _claude_distance(left: str, right: str) -> int:
-    """Edit distance with adjacent transpositions, as claude.exe's ``Rse``."""
-    rows = [[0] * (len(right) + 1) for _ in range(len(left) + 1)]
-    for i in range(len(left) + 1):
+    """claude.exe's ``Rse``: edits and adjacent transpositions of UTF-16 units."""
+    a, b = _utf16(left), _utf16(right)
+    rows = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a) + 1):
         rows[i][0] = i
-    for j in range(len(right) + 1):
+    for j in range(len(b) + 1):
         rows[0][j] = j
-    for i in range(1, len(left) + 1):
-        for j in range(1, len(right) + 1):
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
             rows[i][j] = min(
                 rows[i - 1][j] + 1,
                 rows[i][j - 1] + 1,
-                rows[i - 1][j - 1] + (left[i - 1] != right[j - 1]),
+                rows[i - 1][j - 1] + (a[i - 1] != b[j - 1]),
             )
-            if i > 1 and j > 1 and left[i - 1] == right[j - 2] and left[i - 2] == right[j - 1]:
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
                 rows[i][j] = min(rows[i][j], rows[i - 2][j - 2] + 1)
     return rows[-1][-1]
 
 
 def _claude_suggestion(name: str, names: list[str]) -> str | None:
-    """claude.exe's ``bfe`` with maxEditDistance 2: the first closest name."""
+    """claude.exe's ``bfe`` with maxEditDistance 2: the first closest name.
+
+    A name whose UTF-16 length differs by more than two is skipped.
+    """
     best, best_distance = None, 3
     for other in names:
-        if abs(len(other) - len(name)) > 2:
+        if abs(len(_utf16(other)) - len(_utf16(name))) > 2:
             continue
         distance = _claude_distance(name, other)
         if distance < best_distance:
@@ -1221,9 +1233,17 @@ def _claude_suggestion(name: str, names: list[str]) -> str | None:
     return best
 
 
+def _claude_hidden(char: str) -> bool:
+    return unicodedata.category(char) in ("Cc", "Cf") or char in "\u2028\u2029"
+
+
 def _claude_printable(name: str) -> str:
-    """claude.exe's ``Rn``: control characters and line separators become a space."""
-    return re.sub("[\x00-\x1f\x7f-\x9f\u2028\u2029]+", " ", name)
+    """claude.exe's ``Rn``: each run of control or format characters, or of
+    line separators, becomes one space."""
+    return "".join(
+        " " if hidden else "".join(run)
+        for hidden, run in itertools.groupby(name, _claude_hidden)
+    )
 
 
 # Copied from the pinned claude.exe (Claude Code 2.1.310), not from
@@ -1242,10 +1262,11 @@ class FakeMcpClis:
 
     A missing server gets what the pinned CLIs print: exit 1, empty stdout and
     one line on stderr. Codex: ``Error: No MCP server named '<name>' found.``
-    Claude Code 2.1.310 (``GJr`` and ``JCn`` in claude.exe) names the server,
-    then suggests one within two edits (``bfe``), or says to run ``claude mcp
-    add`` when it has none, or lists up to eight; ``pending`` adds its note
-    about a .mcp.json awaiting approval, or prints it alone when it has none.
+    Claude Code 2.1.310 (``GJr`` and ``JCn`` in claude.exe) filters the names
+    (``Rn``) and sorts them by UTF-16 unit, names the server, then suggests one
+    within two edits (``bfe``), or says to run ``claude mcp add`` when it has
+    none, or lists up to eight; ``pending`` adds its note about a .mcp.json
+    awaiting approval, or prints it alone when it has none.
     """
 
     def __init__(self, configured: tuple[str, ...]) -> None:
@@ -1287,7 +1308,9 @@ class FakeMcpClis:
         return _completed(1, "", self.claude_not_found(name) + "\n")
 
     def claude_not_found(self, name: str) -> str:
-        names = sorted(_claude_printable(other) for other in self.servers["CLAUDE"])
+        names = sorted(
+            (_claude_printable(other) for other in self.servers["CLAUDE"]), key=_utf16
+        )
         if self.pending and not names:
             return f'No MCP server named "{name}". {_CLAUDE_PENDING}'
         suggestion = _claude_suggestion(name, names)
@@ -1501,15 +1524,34 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
         self.assert_registered("dayz-mcp", self.register("dayz-mcp"))
 
     def test_registers_whatever_the_listed_names_hold(self) -> None:
-        # A claude.ai connector keeps its display name, commas included.
-        connector = "claude.ai QA, dayz-mcp-perf"
-        for listed in (_NON_ASCII_SERVER, connector):
+        # A claude.ai connector keeps its display name, commas and quotes included.
+        for listed in (
+            _NON_ASCII_SERVER,
+            "claude.ai QA, dayz-mcp-perf",
+            'claude.ai QA "Blue"',
+        ):
             self.clis.servers["CLAUDE"][listed] = None
             self.assertIn(listed, self.clis.claude_not_found("dayz-mcp-perf"))
 
         desired = self.register("dayz-mcp-perf")
 
         self.assert_registered("dayz-mcp-perf", desired)
+
+    def test_fake_reads_names_as_claude_exe_does(self) -> None:
+        # Rn: a run of format characters becomes one space.
+        self.assertEqual(_claude_printable("claude.ai Q\u200b\u200cA"), "claude.ai Q A")
+        # bfe and Rse count UTF-16 units: two emoji are four units, too far.
+        self.assertIsNone(
+            _claude_suggestion("dayz-mcp-perf", ["dayz-mcp-perf\U0001f600\U0001f600"])
+        )
+        self.assertEqual(
+            _claude_suggestion("dayz-mcp-perf", ["dayz-mcp-epfr"]), "dayz-mcp-epfr"
+        )
+        # sort() compares UTF-16 units: a surrogate pair comes before U+FF01.
+        clis = FakeMcpClis(("\uff01x", "\U0001f600y"))
+        self.assertIn(
+            "Configured servers: \U0001f600y, \uff01x", clis.claude_not_found("dayz-mcp-perf")
+        )
 
     def test_cli_output_is_read_as_utf8(self) -> None:
         # A real child process writes the bytes, so subprocess decodes them.
@@ -1547,6 +1589,11 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
                 "CLAUDE",
                 head + f"Configured servers: {name}-2, zeta\n",
             ),
+            "claude, a listed name with a double quote": (
+                "CLAUDE",
+                head + 'Configured servers: claude.ai QA "Blue"\n',
+            ),
+            "claude, a lone empty name listed": ("CLAUDE", head + "Configured servers: \n"),
             "claude, a listed name with a comma": (
                 "CLAUDE",
                 head + f"Configured servers: claude.ai QA, {name}\n",
@@ -1586,7 +1633,7 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
                 head + "Configured servers: dayz-mcp,\nzeta\n",
             ),
             "claude, sentence alone": ("CLAUDE", 1, "", head.rstrip() + "\n"),
-            "claude, empty list": ("CLAUDE", 1, "", head + "Configured servers: \n"),
+            "claude, list without its space": ("CLAUDE", 1, "", head + "Configured servers:\n"),
             "claude, no final newline": ("CLAUDE", 1, "", claude[:-1]),
             "claude, another exit code": ("CLAUDE", 2, "", claude),
             "claude, text on stdout": ("CLAUDE", 1, "Removed\n", claude),

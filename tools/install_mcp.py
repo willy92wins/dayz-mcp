@@ -711,12 +711,13 @@ def _not_found_line(role: str, name: str) -> re.Pattern[str]:
     note = re.escape(_CLAUDE_PENDING_NOTE)
     # Claude passes names through a filter that turns control and format
     # characters and line separators into spaces; refuse those that would
-    # break the line (C0, DEL, C1, U+2028, U+2029).
-    text = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]+"
+    # break the line (C0, DEL, C1, U+2028, U+2029). The list can be empty: a
+    # lone server with an empty name prints nothing after the colon.
+    char = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]"
     return re.compile(
         r'No MCP server named "' + named + r'"\. (?:(?:'
-        r'Did you mean "(?P<other>' + text + r')"\? Run `claude mcp list` to see all\.'
-        r"|Configured servers: " + text + r"?"
+        r'Did you mean "(?P<other>' + char + r'+)"\? Run `claude mcp list` to see all\.'
+        r"|Configured servers: " + char + r"*?"
         r")(?: \(" + note + r"\))?"
         r"|Run `claude mcp add` to add one\."
         r"|" + note + r")\n"
