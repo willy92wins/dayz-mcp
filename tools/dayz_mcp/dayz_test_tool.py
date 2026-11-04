@@ -2532,18 +2532,6 @@ async def _execute_preflight(
                 effective_directories = dayz_test_worker._effective_directories(
                     parsed.payload, runtime_policy
                 )
-                # The launch accredits server_mods and server_only_mods in every
-                # mode (request_path_authority.accredit_request_paths), so a
-                # client preflight checks them too instead of reporting success.
-                if parsed.payload.get("mode") == "client":
-                    effective_directories = (
-                        *effective_directories,
-                        *(
-                            dayz_test_worker._mod_path(value, runtime_policy)
-                            for field in ("server_mods", "server_only_mods")
-                            for value in parsed.payload.get(field, [])
-                        ),
-                    )
             except dayz_test_worker.DayzTestWorkerError as error:
                 failed = _compact_result(
                     terminal=WorkerTerminal(
@@ -2583,6 +2571,15 @@ async def _execute_preflight(
                 try:
                     if selected is None:
                         raise ValueError("invalid_dayz_test_path_authority")
+                    # The launch accredits every declared mod list, in every
+                    # mode and against all sealed roots, before it asks for the
+                    # lease (native_launcher_transaction, accredit_request_paths).
+                    # The preflight runs that same check on the same request; the
+                    # runtime check below covers what the roles actually load.
+                    with request_path_authority.accredit_request_paths(
+                        parsed, policies=sealed
+                    ):
+                        pass
                     with request_path_authority.accredit_runtime_resolved_paths(
                         selected,
                         directories=effective_directories,

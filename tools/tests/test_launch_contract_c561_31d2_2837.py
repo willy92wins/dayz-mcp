@@ -1201,11 +1201,13 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["@Absent"]["status"], "failed")
         self.assertEqual(results["@Absent"]["error_code"], "invalid_dayz_test_path_authority")
 
-    async def test_0afc_client_preflight_accredits_server_mods(self) -> None:
-        # fb-20261102-122105-0afc: the launch accredits server_mods in every
-        # mode as well, so a client preflight must refuse one that does not
-        # exist instead of reporting success. The fixture is the #313 test's;
-        # the oracle is the launch's own accreditation of the same request.
+    async def test_0afc_preflight_accredits_mod_lists_like_the_launch(self) -> None:
+        # fb-20261102-122105-0afc, then Sol #325 r1 (F1, F2). The launch
+        # accredits every declared mod list, in every mode and against all
+        # sealed roots (native_launcher_transaction, accredit_request_paths). A
+        # preflight of the same request must refuse what the launch refuses and
+        # accept what it accepts. Each case states the launch's verdict; the
+        # launch's own accreditation is checked against it, then the preflight.
         tree = tempfile.TemporaryDirectory()
         self.addCleanup(tree.cleanup)
         root = tree.name
@@ -1221,7 +1223,10 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
             os.path.join(mods, "@DayZ_MCP"),
             os.path.join(missions, "dayzOffline.chernarusplus"),
             os.path.join(mods, "@Present"),
-            other,
+            os.path.join(mods, "@Candidate"),
+            os.path.join(mods, "@Dup"),
+            os.path.join(other, "@Dup"),
+            os.path.join(other, "@SecondRoot"),
         ):
             os.makedirs(path)
         policy = dayz_test_request.RequestProjectPolicy(
@@ -1265,18 +1270,47 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
                     raise ValueError("runtime_policy_invalid")
                 return runtime_policy
 
-        run_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-        # What a real launch does with the request (native_launcher_transaction):
-        # parse it, then accredit_request_paths before the lease and the process.
-        launch: dict[str, str | None] = {}
-        for name in ("@Present", "@Absent"):
+        present = os.path.join(mods, "@Present")
+        absent = os.path.join(mods, "@Absent")
+        client = {"mode": "client", "run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
+        # (case, the launch accepts it, request); every request also lists the bridge.
+        cases = (
+            ("server_mods present", True, {**client, "server_mods": ["@Present"]}),
+            ("server_mods absent", False, {**client, "server_mods": ["@Absent"]}),
+            ("second entry absent", False, {**client, "server_mods": ["@Present", "@Absent"]}),
+            (
+                "absent in the other list",
+                False,
+                {**client, "server_mods": ["@Present"], "server_only_mods": ["@Absent"]},
+            ),
+            ("absolute present", True, {**client, "server_mods": [present]}),
+            ("absolute absent", False, {**client, "server_mods": [absent]}),
+            (
+                "override with a candidate, absent",
+                False,
+                {
+                    **client,
+                    "project_mod_override": True,
+                    "extra_mods": ["@DayZ_MCP", "@Candidate"],
+                    "server_mods": ["@Absent"],
+                },
+            ),
+            ("server_mods only in the second root", True, {**client, "server_mods": ["@SecondRoot"]}),
+            (
+                "server_only_mods only in the second root",
+                True,
+                {**client, "server_only_mods": ["@SecondRoot"]},
+            ),
+            ("server_mods in both roots", False, {**client, "server_mods": ["@Dup"]}),
+            ("server mode, server_mods present", True, {"mode": "server", "server_mods": ["@Present"]}),
+            ("server mode, base_mods in both roots", False, {"mode": "server", "base_mods": ["@Dup"]}),
+        )
+
+        def launch_accepts(request: dict[str, object]) -> bool:
+            # What a real launch does with the request (native_launcher_transaction):
+            # parse it, then accredit_request_paths before the lease and the process.
             raw_request, _selected = dayz_test_tool.build_run_request(
-                (sealed,),
-                project="ExampleMod",
-                mode="client",
-                run_id=run_id,
-                extra_mods=["@DayZ_MCP"],
-                server_mods=[name],
+                (sealed,), project="ExampleMod", **request
             )
             parsed = dayz_test_request.parse_dayz_test_request(
                 raw_request, policies=(sealed.policy,)
@@ -1285,12 +1319,10 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
                 with request_path_authority.accredit_request_paths(
                     parsed, policies=(sealed,)
                 ):
-                    launch[name] = None
+                    return True
             except ValueError as error:
-                launch[name] = str(error)
-        self.assertEqual(
-            launch, {"@Present": None, "@Absent": "invalid_dayz_test_path_authority"}
-        )
+                self.assertEqual(str(error), "invalid_dayz_test_path_authority")
+                return False
 
         with patch.object(dayz_test_tool, "open_approved_launcher", return_value=_Opened()), patch.object(
             dayz_test_tool.secure_launcher, "load_verified_bundle", return_value=Bundle()
@@ -1304,20 +1336,20 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
             dayz_test_tool, "evaluate_prerun_desktop",
             return_value=type("D", (), {"error_code": None, "remediation": ""})(),
         ):
-            results = {}
-            for name in ("@Present", "@Absent"):
-                results[name] = await dayz_test_tool.execute_dayz_test_run(
-                    _Runtime(),
-                    project="ExampleMod",
-                    mode="client",
-                    run_id=run_id,
-                    preflight=True,
-                    extra_mods=["@DayZ_MCP"],
-                    server_mods=[name],
-                )
-        self.assertEqual(results["@Present"]["status"], "succeeded", results["@Present"]["error_code"])
-        self.assertEqual(results["@Absent"]["status"], "failed")
-        self.assertEqual(results["@Absent"]["error_code"], "invalid_dayz_test_path_authority")
+            for name, accepted, case in cases:
+                request = {"extra_mods": ["@DayZ_MCP"], **case}
+                with self.subTest(case=name):
+                    self.assertIs(launch_accepts(request), accepted)
+                    result = await dayz_test_tool.execute_dayz_test_run(
+                        _Runtime(), project="ExampleMod", preflight=True, **request
+                    )
+                    if accepted:
+                        self.assertEqual(result["status"], "succeeded", result["error_code"])
+                    else:
+                        self.assertEqual(result["status"], "failed")
+                        self.assertEqual(
+                            result["error_code"], "invalid_dayz_test_path_authority"
+                        )
 
     async def test_f12_original_directory_keeps_the_request_reason(self) -> None:
         runtime = _Runtime()
