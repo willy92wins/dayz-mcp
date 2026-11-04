@@ -1037,6 +1037,9 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(occupant)
 
     async def test_f3_preflight_does_not_accredit_another_root(self) -> None:
+        # Sol #325 r2 F3: the mission exists, so the refusal can only come from
+        # the base mod, which is under the other sealed root and not under the
+        # runtime mods root the roles load from.
         tree = tempfile.TemporaryDirectory()
         self.addCleanup(tree.cleanup)
         root = tree.name
@@ -1048,6 +1051,7 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
         for path in (
             source,
             missions,
+            os.path.join(missions, "dayzOffline.chernarusplus"),
             os.path.join(mods, "@ExampleMod"),
             os.path.join(mods, "@DayZ_MCP"),
             os.path.join(other, "@Missing"),
@@ -1202,12 +1206,14 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["@Absent"]["error_code"], "invalid_dayz_test_path_authority")
 
     async def test_0afc_preflight_accredits_mod_lists_like_the_launch(self) -> None:
-        # fb-20261102-122105-0afc, then Sol #325 r1 (F1, F2). The launch
-        # accredits every declared mod list, in every mode and against all
-        # sealed roots (native_launcher_transaction, accredit_request_paths). A
-        # preflight of the same request must refuse what the launch refuses and
-        # accept what it accepts. Each case states the launch's verdict; the
-        # launch's own accreditation is checked against it, then the preflight.
+        # fb-20261102-122105-0afc, then Sol #325 r1 (F1, F2) and r2 (F4). The
+        # launch accredits every declared mod list, in every mode and against
+        # all sealed roots (native_launcher_transaction, accredit_request_paths).
+        # A preflight of the same request must refuse what that accreditation
+        # refuses, and in these cases accept what it accepts; its runtime check
+        # can still refuse a folder the roles load (test_f3 above). Each case
+        # states the launch's verdict; the launch's own accreditation is
+        # checked against it, then the preflight.
         tree = tempfile.TemporaryDirectory()
         self.addCleanup(tree.cleanup)
         root = tree.name
@@ -1304,6 +1310,8 @@ class Round3Tests(unittest.IsolatedAsyncioTestCase):
             ("server_mods in both roots", False, {**client, "server_mods": ["@Dup"]}),
             ("server mode, server_mods present", True, {"mode": "server", "server_mods": ["@Present"]}),
             ("server mode, base_mods in both roots", False, {"mode": "server", "base_mods": ["@Dup"]}),
+            ("all mode, base_mods in both roots", False, {"mode": "all", "base_mods": ["@Dup"]}),
+            ("build, server_mods absent", False, {**client, "build": True, "server_mods": ["@Absent"]}),
         )
 
         def launch_accepts(request: dict[str, object]) -> bool:
