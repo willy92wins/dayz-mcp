@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import os
 import subprocess
 import sys
@@ -860,6 +861,9 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         # direct thread.join, is not recorded. The bounds are checked as
         # passed rather than timed, so a slow runner cannot fail a join that
         # kept to its bound, and a missing, unbounded or longer join fails.
+        # A first join may pass its budget by the float rounding of its
+        # deadline and no more (check_first_join says why); (e) holds the
+        # server's clock on one tick so that this case runs every time.
         # The server asks for the first join only while budget remains, so
         # (a) and (c) also accept the grace join alone when it was asked for
         # after the reader's deadline, and (d) takes that path on purpose.
@@ -879,12 +883,25 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         def reader_joins(thread: threading.Thread) -> list:
             return [entry[1:] for entry in joins if entry[0] is thread]
 
+        def check_first_join(bound, budget: float, deadline) -> None:
+            # The server asks for deadline - now, and the deadline is start +
+            # budget rounded to a float. A join asked for on the start's own
+            # clock tick gets that rounded sum minus the start, which can pass
+            # the budget: on Windows, Python 3.11 reads the clock in whole
+            # milliseconds that advance every 15.6 ms, and with the clock
+            # between 452 and 512 s a 60 s budget can give 60.00000000000006.
+            # That excess is never more than one ulp of the deadline (1.1e-13 s
+            # there), so the check allows that ulp and nothing more: a join
+            # that asks for a microsecond more than its budget still fails.
+            self.assertIsNotNone(deadline)
+            self.assertLessEqual(bound, budget + math.ulp(deadline))
+
         def check_timeout_joins(found: list, deadline, grace: float, alive: bool) -> None:
             # A first join within the 2 s budget, or none when the grace join
             # was asked for after the deadline; then the grace join.
             self.assertIn(len(found), (1, 2))
             if len(found) == 2:
-                self.assertLessEqual(found[0][0][0], 2.0)
+                check_first_join(found[0][0][0], 2.0, deadline)
             else:
                 self.assertIsNotNone(deadline)
                 self.assertGreaterEqual(found[0][2], deadline)
@@ -951,6 +968,7 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         def blocked_on_stop2(*_args, stop=None, **_kwargs):
             state2["thread"] = threading.current_thread()
             state2["signal"] = stop
+            state2["deadline"] = getattr(stop, "_deadline", None)
             state2["started"].set()
             signal = stop if stop is not None else _StopDeaf()
             while not signal.stopped:
@@ -978,7 +996,7 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(signal is state2["signal"] for signal in stopped))
         b_joins = reader_joins(state2["thread"])
         self.assertEqual(len(b_joins), 2)
-        self.assertLessEqual(b_joins[0][0][0], 60.0)
+        check_first_join(b_joins[0][0][0], 60.0, state2["deadline"])
         self.assertEqual(b_joins[1][:2], ((2.0,), False))
         self.assertFalse(state2["thread"].is_alive())
 
@@ -1040,6 +1058,27 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [entry[1] for entry in joins[before:]], [(server._THREAD_STOP_GRACE_S,)]
         )
+
+        # (e) What failed (b) on CI, made certain: a first join asked for on
+        # the start's own clock tick. With the server's clock held at
+        # 510.007 s, (510.007 + budget) - 510.007 passes both budgets of this
+        # test by rounding alone (2.000000000000057 and 60.00000000000006),
+        # and check_first_join must accept both. The literal is one that
+        # rounds up; a round value such as 510.0 does not.
+        tick = 510.007
+        for budget in (2.0, 60.0):
+            deadline = tick + budget
+            self.assertGreater(deadline - tick, budget)
+            before = len(joins)
+            with (
+                patch.object(server, "time", SimpleNamespace(monotonic=lambda: tick)),
+                patch.object(asyncio, "to_thread", recording_to_thread),
+            ):
+                self.assertIsNone(await server._thread_bounded(lambda stop: None, deadline))
+            e_joins = [entry[1] for entry in joins[before:]]
+            self.assertEqual(len(e_joins), 1)
+            self.assertGreater(e_joins[0][0], budget)
+            check_first_join(e_joins[0][0], budget, deadline)
 
     async def test_f10_release_during_final_status_aborts(self) -> None:
         self.server_file.write_text("READY\n", encoding="utf-8")
