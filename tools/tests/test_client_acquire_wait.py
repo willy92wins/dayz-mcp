@@ -1,7 +1,8 @@
 """The client side of session_acquire_wait.
 
 Moved verbatim from test_session_acquire_wait.py
-(review 2026-09-25, W4d step 3).
+(review 2026-09-25, W4d step 3). The session_wait_quota tests came later
+(#317): a virtual clock checks each pause, and real-time tests are the smoke.
 """
 
 from __future__ import annotations
@@ -11,20 +12,67 @@ import json
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
+from typing import Callable
 from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import server
+from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import MAX_OPERATION_TOMBSTONES
 from tests._tiers import slow_test
 from tests.catalog_helpers import list_tools_after_lease
 from tests.client_helpers import _fixture_client_runtime
+from tests.session_wait_quota_cases import (
+    DEADLINE_CASES,
+    MAX_VIRTUAL_WAITS,
+    QUOTA_PAUSE_CASES,
+    SEQUENCE_CASES,
+    queued,
+)
+
+_REAL_SLEEP = asyncio.sleep
+_ACTIVE = {"status": "active", "lease_token": "token-a", "lease_id": "lease-a"}
+
+
+class _VirtualClock:
+    """A monotonic clock that only the fake transport and the pause move.
+
+    sleep() stands in for asyncio.sleep: it records the pause asked for and
+    moves the clock by it, and like asyncio.sleep a negative pause moves it
+    by nothing. blocking_sleep() stands in for time.sleep, which would block
+    the event loop: it only records the call. Dyadic values keep the
+    arithmetic exact, so a pause compares with ==.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1024.0
+        self.pauses: list[float] = []
+        self.blocking: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.pauses.append(seconds)
+        self.now += max(0.0, seconds)
+        await _REAL_SLEEP(0)
+
+    def blocking_sleep(self, seconds: float) -> None:
+        self.blocking.append(seconds)
+
+
+def _module_view(module: types.ModuleType, **replaced: object) -> types.ModuleType:
+    """A copy of ``module`` for control_client alone, with ``replaced`` swapped in."""
+    view = types.ModuleType(module.__name__)
+    view.__dict__.update(vars(module))
+    view.__dict__.update(replaced)
+    return view
 
 
 # --- from test_session_acquire_wait.py ---
@@ -140,41 +188,193 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(elapsed, 0.9)
         self.assertLess(elapsed, 2.5)
 
-    @slow_test
-    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
-        runtime = self.runtime()
-        seen: dict[str, str] = {}
+    @staticmethod
+    def _quota_requests(
+        waits: list[dict[str, object]],
+    ) -> tuple[Callable[[str, dict, float], dict], dict[str, int]]:
+        """A fake _request_once for ticket-a.
+
+        Each /session/wait answers the next item of ``waits``, and the last
+        one repeats. ``calls`` counts the waits.
+        """
+        calls = {"wait": 0}
+        operation: list[str] = []
 
         def request(path, payload, _timeout_s):
             if path == "/session/enqueue":
-                seen["enqueue"] = payload["operation_id"]
+                operation.append(payload["operation_id"])
                 return {
                     "status": "queued",
                     "ticket": "ticket-a",
                     "position": 1,
-                    "operation_id": seen["enqueue"],
+                    "operation_id": operation[0],
                 }
             if path == "/session/wait":
-                return {
-                    "status": "queued",
-                    "ticket": "ticket-a",
-                    "position": 1,
-                    "operation_id": seen["enqueue"],
-                    "session_wait_quota": ["duplicate"],
-                    "retry_after_s": 10**400,
-                }
+                answer = dict(waits[min(calls["wait"], len(waits) - 1)])
+                calls["wait"] += 1
+                answer.update(ticket="ticket-a", operation_id=operation[0])
+                return answer
             if path == "/session/cancel-operation":
                 return {"cancelled": True, "operation_id": payload["operation_id"]}
             raise AssertionError(path)
 
+        return request, calls
+
+    async def _virtual_acquire(
+        self,
+        waits: list[dict[str, object]],
+        max_wait_s: float | None,
+        transport_s: float = 0.0,
+    ) -> tuple[object, _VirtualClock, dict[str, int]]:
+        """session_acquire_wait on a virtual clock.
+
+        Each /session/wait takes transport_s of virtual time to answer.
+        Returns the result, or the exception raised, with the clock and
+        the call counts.
+        """
+        runtime = self.runtime()
+        request, calls = self._quota_requests(waits)
+        clock = _VirtualClock()
+
+        def timed_request(path, payload, timeout_s):
+            if path == "/session/wait":
+                # Without a pause and with a transport that takes no time,
+                # nothing moves the clock: fail instead of spinning forever.
+                if calls["wait"] >= MAX_VIRTUAL_WAITS:
+                    raise AssertionError(
+                        f"{calls['wait']} /session/wait calls on a clock nothing moves"
+                    )
+                clock.now += transport_s
+            return request(path, payload, timeout_s)
+
+        runtime._control._request_once = timed_request
+        with patch.object(control_client, "_monotonic", clock.monotonic), patch.object(
+            control_client, "asyncio", _module_view(asyncio, sleep=clock.sleep)
+        ), patch.object(
+            control_client, "time", _module_view(time, sleep=clock.blocking_sleep)
+        ):
+            try:
+                outcome: object = await runtime.session_acquire_wait("build", max_wait_s)
+            except Exception as error:
+                outcome = error
+        return outcome, clock, calls
+
+    async def test_the_deadline_cuts_the_pause(self) -> None:
+        # The cut reads the clock when the answer arrives: a cut to what was
+        # left before the request would sleep 0.375s and return 0.25s late.
+        # It applies to the fallback as well, and it never asks for a
+        # negative pause.
+        for label, max_wait_s, transport_s, quota, retry_after, pauses, end in DEADLINE_CASES:
+            with self.subTest(label):
+                outcome, clock, calls = await self._virtual_acquire(
+                    [queued(quota, retry_after)], max_wait_s, transport_s
+                )
+                self.assertIsInstance(outcome, Exception)
+                self.assertIn("session_wait_timeout", str(outcome))
+                self.assertEqual(calls["wait"], 1)
+                self.assertEqual(clock.pauses, pauses)
+                self.assertEqual(clock.now, end)
+                self.assertEqual(clock.blocking, [])
+
+    async def test_the_quota_pause_follows_the_retry_rule(self) -> None:
+        # max_wait_s=None has no deadline, so nothing cuts the pause either.
+        for max_wait_s in (64.0, None):
+            for label, quota, retry_after, pauses in QUOTA_PAUSE_CASES:
+                with self.subTest(label, max_wait_s=max_wait_s):
+                    outcome, clock, calls = await self._virtual_acquire(
+                        [queued(quota, retry_after), _ACTIVE], max_wait_s
+                    )
+                    self.assertIsInstance(outcome, dict)
+                    self.assertEqual(outcome["status"], "active")
+                    self.assertEqual(calls["wait"], 2)
+                    self.assertEqual(clock.pauses, pauses)
+                    self.assertEqual(clock.blocking, [])
+
+    async def test_quota_answer_sequences(self) -> None:
+        for label, answers, max_wait_s, pauses in SEQUENCE_CASES:
+            with self.subTest(label):
+                outcome, clock, calls = await self._virtual_acquire(
+                    [*answers, _ACTIVE], max_wait_s
+                )
+                self.assertIsInstance(outcome, dict)
+                self.assertEqual(outcome["status"], "active")
+                self.assertEqual(calls["wait"], len(answers) + 1)
+                self.assertEqual(clock.pauses, pauses)
+                self.assertEqual(clock.blocking, [])
+
+    @slow_test
+    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
+        runtime = self.runtime()
+        request, calls = self._quota_requests(
+            [
+                {
+                    "status": "queued",
+                    "position": 1,
+                    "session_wait_quota": "duplicate",
+                    "retry_after_s": 30,
+                }
+            ]
+        )
         runtime._control._request_once = request
         started = time.monotonic()
         with self.assertRaisesRegex(Exception, "session_wait_timeout"):
             await runtime.session_acquire_wait("build", 0.3)
         elapsed = time.monotonic() - started
-        # A pause that ignores the deadline sleeps the 1s cap (measured
-        # 1.002s). A list quota or a huge retry_after_s must not raise
-        # TypeError or OverflowError.
+        # retry_after_s=30 asks for the whole 1s cap. Cut to the 0.3s the
+        # caller has left, the wait times out near 0.3s. Without the cut it
+        # sleeps the 1s first (measured 1.002s).
+        self.assertGreaterEqual(calls["wait"], 1)
+        self.assertLess(elapsed, 0.8)
+
+    @slow_test
+    async def test_duplicate_with_a_huge_retry_after_does_not_overflow(
+        self,
+    ) -> None:
+        runtime = self.runtime()
+        request, calls = self._quota_requests(
+            [
+                {
+                    "status": "queued",
+                    "position": 1,
+                    "session_wait_quota": "duplicate",
+                    # json.loads keeps an integer too large for a float
+                    # (401 digits is under Python's 4300-digit limit), and
+                    # float() of it raises OverflowError.
+                    "retry_after_s": 10**400,
+                },
+                {
+                    "status": "active",
+                    "lease_token": "token-a",
+                    "lease_id": "lease-a",
+                },
+            ]
+        )
+        runtime._control._request_once = request
+        result = await runtime.session_acquire_wait("build", 5.0)
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(calls["wait"], 2)
+
+    @slow_test
+    async def test_a_list_quota_is_not_a_pause(self) -> None:
+        runtime = self.runtime()
+        request, _calls = self._quota_requests(
+            [
+                {
+                    "status": "queued",
+                    "position": 1,
+                    "session_wait_quota": ["duplicate"],
+                    "retry_after_s": 10**400,
+                }
+            ]
+        )
+        runtime._control._request_once = request
+        started = time.monotonic()
+        with self.assertRaisesRegex(Exception, "session_wait_timeout"):
+            await runtime.session_acquire_wait("build", 0.3)
+        elapsed = time.monotonic() - started
+        # Only a string is a quota: testing a list against the set would
+        # raise TypeError. With no quota there is no pause, so retry_after_s
+        # is never read and the wait times out at the caller's 0.3s.
         self.assertLess(elapsed, 0.8)
 
     async def test_timeout_tombstones_exact_operation_and_clears_state(self) -> None:
