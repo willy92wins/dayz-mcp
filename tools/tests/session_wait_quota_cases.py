@@ -16,7 +16,7 @@ import math
 # A field the answer leaves out, as the daemon's ordinary queued answer does.
 ABSENT = object()
 
-# Every case needs one or two /session/wait calls. On a virtual clock a loop
+# No case needs more than five /session/wait calls. On a virtual clock a loop
 # that neither pauses nor sees time pass would call it forever, so the fakes
 # fail past this many calls.
 MAX_VIRTUAL_WAITS = 8
@@ -55,10 +55,32 @@ QUOTA_PAUSE_CASES = (
     ("an unknown quota", "other", 30, []),
 )
 
-# Two quota answers in one acquisition, then active: each answer starts again
-# from the 0.05s fallback instead of keeping the previous pause. Budget 64s.
-SEQUENCE_ANSWERS = (queued("duplicate", 0.125), queued("duplicate", 0))
-SEQUENCE_PAUSES = [0.125, 0.05]
+# (label, quota answers before active, max_wait_s, pauses asked for). Each
+# answer starts again from the 0.05s fallback and from nothing it read
+# before, and a pause spends the budget once: the deadline stays where the
+# caller set it.
+SEQUENCE_CASES = (
+    (
+        "a 0 retry after a valid one",
+        (queued("duplicate", 0.125), queued("duplicate", 0)),
+        64.0, [0.125, 0.05],
+    ),
+    (
+        "a null retry after a valid one",
+        (queued("duplicate", 0.125), queued("duplicate", None)),
+        64.0, [0.125, 0.05],
+    ),
+    (
+        "an int too large for a float after a valid retry",
+        (queued("duplicate", 0.125), queued("duplicate", 10**400)),
+        64.0, [0.125, 0.05],
+    ),
+    (
+        "four full answers fit a 0.3125s budget",
+        tuple(queued("full", 0) for _ in range(4)),
+        0.3125, [0.05, 0.05, 0.05, 0.05],
+    ),
+)
 
 # (label, max_wait_s, transport_s, quota, retry_after_s, pauses asked for,
 # virtual time when the wait times out). The virtual clock starts at 1024.0

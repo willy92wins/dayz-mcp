@@ -32,8 +32,7 @@ from tests.session_wait_quota_cases import (
     DEADLINE_CASES,
     MAX_VIRTUAL_WAITS,
     QUOTA_PAUSE_CASES,
-    SEQUENCE_ANSWERS,
-    SEQUENCE_PAUSES,
+    SEQUENCE_CASES,
     queued,
 )
 
@@ -291,15 +290,17 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(clock.pauses, pauses)
                     self.assertEqual(clock.blocking, [])
 
-    async def test_each_quota_answer_starts_from_the_fallback(self) -> None:
-        outcome, clock, calls = await self._virtual_acquire(
-            [*SEQUENCE_ANSWERS, _ACTIVE], 64.0
-        )
-        self.assertIsInstance(outcome, dict)
-        self.assertEqual(outcome["status"], "active")
-        self.assertEqual(calls["wait"], 3)
-        self.assertEqual(clock.pauses, SEQUENCE_PAUSES)
-        self.assertEqual(clock.blocking, [])
+    async def test_quota_answer_sequences(self) -> None:
+        for label, answers, max_wait_s, pauses in SEQUENCE_CASES:
+            with self.subTest(label):
+                outcome, clock, calls = await self._virtual_acquire(
+                    [*answers, _ACTIVE], max_wait_s
+                )
+                self.assertIsInstance(outcome, dict)
+                self.assertEqual(outcome["status"], "active")
+                self.assertEqual(calls["wait"], len(answers) + 1)
+                self.assertEqual(clock.pauses, pauses)
+                self.assertEqual(clock.blocking, [])
 
     @slow_test
     async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
