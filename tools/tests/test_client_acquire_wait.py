@@ -32,6 +32,8 @@ from tests.session_wait_quota_cases import (
     DEADLINE_CASES,
     MAX_VIRTUAL_WAITS,
     QUOTA_PAUSE_CASES,
+    SEQUENCE_ANSWERS,
+    SEQUENCE_PAUSES,
     queued,
 )
 
@@ -288,6 +290,16 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(calls["wait"], 2)
                     self.assertEqual(clock.pauses, pauses)
                     self.assertEqual(clock.blocking, [])
+
+    async def test_each_quota_answer_starts_from_the_fallback(self) -> None:
+        outcome, clock, calls = await self._virtual_acquire(
+            [*SEQUENCE_ANSWERS, _ACTIVE], 64.0
+        )
+        self.assertIsInstance(outcome, dict)
+        self.assertEqual(outcome["status"], "active")
+        self.assertEqual(calls["wait"], 3)
+        self.assertEqual(clock.pauses, SEQUENCE_PAUSES)
+        self.assertEqual(clock.blocking, [])
 
     @slow_test
     async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:

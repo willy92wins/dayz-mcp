@@ -38,6 +38,7 @@ QUOTA_PAUSE_CASES = (
     ("duplicate, 30s: the 1s cap", "duplicate", 30, [1.0]),
     ("full, 30s: the 1s cap", "full", 30, [1.0]),
     ("a fraction under the cap", "duplicate", 0.125, [0.125]),
+    ("a fraction under the 0.05s fallback", "duplicate", 0.0078125, [0.0078125]),
     ("full with 0, as the daemon sends it", "full", 0.0, [0.05]),
     ("an int too large for a float", "duplicate", 10**400, [0.05]),
     ("inf", "duplicate", math.inf, [0.05]),
@@ -53,6 +54,11 @@ QUOTA_PAUSE_CASES = (
     ("a JSON object is not a quota", {"duplicate": True}, 30, []),
     ("an unknown quota", "other", 30, []),
 )
+
+# Two quota answers in one acquisition, then active: each answer starts again
+# from the 0.05s fallback instead of keeping the previous pause. Budget 64s.
+SEQUENCE_ANSWERS = (queued("duplicate", 0.125), queued("duplicate", 0))
+SEQUENCE_PAUSES = [0.125, 0.05]
 
 # (label, max_wait_s, transport_s, quota, retry_after_s, pauses asked for,
 # virtual time when the wait times out). The virtual clock starts at 1024.0

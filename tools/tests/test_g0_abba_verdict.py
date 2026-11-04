@@ -18,6 +18,8 @@ from tests.session_wait_quota_cases import (
     DEADLINE_CASES,
     MAX_VIRTUAL_WAITS,
     QUOTA_PAUSE_CASES,
+    SEQUENCE_ANSWERS,
+    SEQUENCE_PAUSES,
     queued,
 )
 
@@ -471,6 +473,16 @@ class G0AbbaSessionWaitQuotaTest(unittest.TestCase):
                 self.assertEqual("active", result["status"])
                 self.assertEqual(2, calls["wait"])
                 self.assertEqual(pauses, clock.pauses)
+
+    def test_each_quota_answer_starts_from_the_fallback(self) -> None:
+        clock = _VirtualTime()
+        daemon, calls = self.daemon(*SEQUENCE_ANSWERS, ACTIVE_WAIT, clock=clock)
+        with patch.object(gate, "time", clock):
+            result = daemon.session_acquire_wait("build", 64.0)
+
+        self.assertEqual("active", result["status"])
+        self.assertEqual(3, calls["wait"])
+        self.assertEqual(SEQUENCE_PAUSES, clock.pauses)
 
     @slow_test
     def test_full_quota_pauses_before_the_next_wait(self) -> None:
