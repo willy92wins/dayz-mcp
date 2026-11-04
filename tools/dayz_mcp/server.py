@@ -5918,7 +5918,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(
-        description="LOW-LEVEL: prefer session_acquire_wait. Wait up to 30s for this client's FIFO ticket."
+        description=(
+            "LOW-LEVEL: prefer session_acquire_wait. Wait up to 30s for this "
+            "client's FIFO ticket. A second wait on a ticket that already has "
+            "one returns at once, still status queued, with session_wait_quota "
+            "duplicate and retry_after_s (seconds left on that wait). "
+            "session_wait_quota full means other tickets hold the whole cap, "
+            "and retry_after_s is 0. Neither holds an HTTP worker. Wait up to "
+            "retry_after_s before calling again; about once a second is enough, "
+            "and do not retry immediately."
+        )
     )
     async def session_wait(ticket: str, timeout_s: StrictFloat = 30.0) -> dict[str, Any]:
         if not isinstance(ticket, str) or not ticket:

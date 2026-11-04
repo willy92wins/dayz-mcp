@@ -347,7 +347,11 @@ MAX_RESULTS = MAX_QUEUE * 4
 # Bind is 127.0.0.1: this is local availability, not remote exposure, so the
 # number tracks the broker rather than a large internet backlog.
 # The coordinator admits MAX_SESSION_QUEUE Cowork sessions against one game;
-# each queued session may hold one POST /wait. Add 2 game-bridge /poll
+# each queued session may hold one POST /session/wait. A second wait on
+# the same ticket does not hold another worker: session_coordination
+# admits at most one blocking wait per ticket and at most
+# SESSION_WAIT_MAX_IN_FLIGHT (MAX_SESSION_QUEUE) in total, and answers
+# the rest at once with session_wait_quota. Add 2 game-bridge /poll
 # sockets, the active session's /enqueue+/await, /status probes, and
 # headroom for a short legitimate burst while waits are held. Exceeding the
 # ceiling closes the accepted socket without a worker (reject, do not queue).
@@ -418,6 +422,11 @@ KEEPALIVE_IDLE_S = 8.0
 # How many answered connections may sit idle at once. Each one keeps a
 # worker until the next request line or KEEPALIVE_IDLE_S. The +32 margin
 # above MAX_SESSION_QUEUE is the whole remainder of MAX_HTTP_WORKERS (96).
+# Those 64 are one blocking POST /session/wait per ticket
+# (session_coordination.SESSION_WAIT_MAX_IN_FLIGHT), not one per
+# duplicate HTTP call. A wait that does not get a slot returns 202
+# immediately (session_wait_quota "duplicate" or "full", plus
+# retry_after_s). It does not hold a worker.
 # PR #306 parks AWAIT_LONG_POLL_MAX_IN_FLIGHT /await waits on this same pool. Two /poll sockets,
 # one /result and one /enqueue still need a worker when those waits and
 # every idle slot are taken:

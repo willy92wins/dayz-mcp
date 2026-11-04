@@ -1031,6 +1031,35 @@ class ControlClient:
                         return self._with_own_identity(response)
                     if response.get("status") != "queued":
                         self._bad_session_response()
+                    quota = response.get("session_wait_quota")
+                    if isinstance(quota, str) and quota in {"duplicate", "full"}:
+                        # The admitted wait still holds the ticket. Sleeping
+                        # the whole retry would hide a grant until that
+                        # deadline. Cap the pause at 1s, and never past the
+                        # caller's own deadline.
+                        retry_after = response.get("retry_after_s")
+                        pause_s = 0.05
+                        retry_value: float | None
+                        try:
+                            if isinstance(retry_after, bool) or not isinstance(
+                                retry_after, (int, float)
+                            ):
+                                retry_value = None
+                            else:
+                                retry_value = float(retry_after)
+                        except (TypeError, ValueError, OverflowError):
+                            retry_value = None
+                        if (
+                            retry_value is not None
+                            and math.isfinite(retry_value)
+                            and retry_value > 0.0
+                        ):
+                            pause_s = min(1.0, retry_value)
+                        if deadline is not None:
+                            pause_s = min(
+                                pause_s, max(0.0, deadline - _monotonic())
+                            )
+                        await asyncio.sleep(pause_s)
                     if progress_cb is not None:
                         elapsed = max(0.0, _monotonic() - started)
                         await progress_cb(

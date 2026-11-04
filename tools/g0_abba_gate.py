@@ -833,6 +833,16 @@ class Daemon:
                     raise RuntimeError(
                         f"session_acquire_wait bad wait response: {response}"
                     )
+                if response.get("session_wait_quota") in {"duplicate", "full"}:
+                    retry_after = response.get("retry_after_s")
+                    pause_s = 0.05
+                    if (
+                        isinstance(retry_after, (int, float))
+                        and not isinstance(retry_after, bool)
+                        and retry_after > 0.0
+                    ):
+                        pause_s = min(1.0, float(retry_after))
+                    time.sleep(pause_s)
         finally:
             if not active:
                 try:
