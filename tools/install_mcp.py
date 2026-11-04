@@ -42,6 +42,12 @@ _PE32_PLUS_MAGIC = 0x20B
 _PSUTIL_WHEEL_BYTES = 137_737
 _PSUTIL_WHEEL_SHA256 = "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
 _ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
+# Claude follows its not-found sentence with servers it has configured:
+#   No MCP server named "<name>". Configured servers: a, b (and 9 more ...)
+# That list changes whenever a server is added or removed, claude.ai
+# connectors included, so it is the one part of the pinned text that a later
+# probe may not repeat (fb-20261102-122105-e9c6).
+_CLAUDE_SERVER_LIST = " Configured servers: "
 _SECURITY_DIR_ENV = "DAYZ_MCP_SECURITY_DIR"
 _PIN_RECIPE = "run: python install_mcp.py --pin-clis"
 _CLI_MANIFEST_NAME = "installer-cli-manifest-v1.json"
@@ -684,6 +690,47 @@ def invoke_manifest_cli(
     )
 
 
+def _is_pinned_not_found(
+    role: str,
+    pinned: InstallerNotFoundEntry,
+    server_name: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> bool:
+    """True only for the pinned not-found output, with ``server_name`` in it.
+
+    --pin-clis records that output for ``_ABSENT_PROBE_NAME``, so the probe
+    name is what becomes the server name. Exit code and stdout must match.
+    Claude's stderr may end in another server list (``_CLAUDE_SERVER_LIST``),
+    still one line and ended as pinned; the rest must match, the sentence that
+    names the server included. Any other output is not an absence.
+    """
+    if (
+        returncode != pinned.returncode
+        or stdout != pinned.stdout.replace(_ABSENT_PROBE_NAME, server_name)
+    ):
+        return False
+    if stderr == pinned.stderr.replace(_ABSENT_PROBE_NAME, server_name):
+        return True
+    if role != "CLAUDE":
+        return False
+    sentence, marker, listed = pinned.stderr.partition(_CLAUDE_SERVER_LIST)
+    servers = listed.rstrip("\n")
+    if (
+        not marker
+        or _ABSENT_PROBE_NAME not in sentence
+        or not servers
+        or "\n" in servers
+        or "\r" in servers
+    ):
+        return False
+    stable = sentence.replace(_ABSENT_PROBE_NAME, server_name) + marker
+    ending = listed[len(servers) :]
+    pattern = re.escape(stable) + r"[^\r\n]+" + re.escape(ending)
+    return re.fullmatch(pattern, stderr) is not None
+
+
 class CliRegistrationProvider:
     def __init__(
         self,
@@ -733,16 +780,13 @@ class CliRegistrationProvider:
         completed = self._invoke(role, arguments)
         returncode, stdout, stderr = self._result_fields(completed)
         if returncode != 0:
-            expected = self.not_found.entries[role]
-            expected_stdout = expected.stdout
-            expected_stderr = expected.stderr
-            if self.server_name != "dayz-mcp":
-                expected_stdout = expected_stdout.replace("dayz-mcp", self.server_name)
-                expected_stderr = expected_stderr.replace("dayz-mcp", self.server_name)
-            if (
-                returncode == expected.returncode
-                and stdout == expected_stdout
-                and stderr == expected_stderr
+            if _is_pinned_not_found(
+                role,
+                self.not_found.entries[role],
+                self.server_name,
+                returncode,
+                stdout,
+                stderr,
             ):
                 return None
             raise InstallerExecutionError("registration_probe_failed")
