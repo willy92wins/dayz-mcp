@@ -1190,20 +1190,40 @@ def _completed(returncode: int, stdout: str, stderr: str) -> object:
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
-def _edit_distance(left: str, right: str) -> int:
-    previous = list(range(len(right) + 1))
-    for row, left_char in enumerate(left, 1):
-        current = [row]
-        for column, right_char in enumerate(right, 1):
-            current.append(
-                min(
-                    previous[column] + 1,
-                    current[column - 1] + 1,
-                    previous[column - 1] + (left_char != right_char),
-                )
+def _claude_distance(left: str, right: str) -> int:
+    """Edit distance with adjacent transpositions, as claude.exe's ``Rse``."""
+    rows = [[0] * (len(right) + 1) for _ in range(len(left) + 1)]
+    for i in range(len(left) + 1):
+        rows[i][0] = i
+    for j in range(len(right) + 1):
+        rows[0][j] = j
+    for i in range(1, len(left) + 1):
+        for j in range(1, len(right) + 1):
+            rows[i][j] = min(
+                rows[i - 1][j] + 1,
+                rows[i][j - 1] + 1,
+                rows[i - 1][j - 1] + (left[i - 1] != right[j - 1]),
             )
-        previous = current
-    return previous[-1]
+            if i > 1 and j > 1 and left[i - 1] == right[j - 2] and left[i - 2] == right[j - 1]:
+                rows[i][j] = min(rows[i][j], rows[i - 2][j - 2] + 1)
+    return rows[-1][-1]
+
+
+def _claude_suggestion(name: str, names: list[str]) -> str | None:
+    """claude.exe's ``bfe`` with maxEditDistance 2: the first closest name."""
+    best, best_distance = None, 3
+    for other in names:
+        if abs(len(other) - len(name)) > 2:
+            continue
+        distance = _claude_distance(name, other)
+        if distance < best_distance:
+            best, best_distance = other, distance
+    return best
+
+
+def _claude_printable(name: str) -> str:
+    """claude.exe's ``Rn``: control characters and line separators become a space."""
+    return re.sub("[\x00-\x1f\x7f-\x9f\u2028\u2029]+", " ", name)
 
 
 # Copied from the pinned claude.exe (Claude Code 2.1.310), not from
@@ -1223,9 +1243,9 @@ class FakeMcpClis:
     A missing server gets what the pinned CLIs print: exit 1, empty stdout and
     one line on stderr. Codex: ``Error: No MCP server named '<name>' found.``
     Claude Code 2.1.310 (``GJr`` and ``JCn`` in claude.exe) names the server,
-    then suggests one within two edits, or says to run ``claude mcp add`` when
-    it has none, or lists up to eight; ``pending`` adds its note about a
-    .mcp.json awaiting approval.
+    then suggests one within two edits (``bfe``), or says to run ``claude mcp
+    add`` when it has none, or lists up to eight; ``pending`` adds its note
+    about a .mcp.json awaiting approval, or prints it alone when it has none.
     """
 
     def __init__(self, configured: tuple[str, ...]) -> None:
@@ -1267,13 +1287,13 @@ class FakeMcpClis:
         return _completed(1, "", self.claude_not_found(name) + "\n")
 
     def claude_not_found(self, name: str) -> str:
-        names = sorted(self.servers["CLAUDE"])
+        names = sorted(_claude_printable(other) for other in self.servers["CLAUDE"])
         if self.pending and not names:
             return f'No MCP server named "{name}". {_CLAUDE_PENDING}'
-        close = min(((_edit_distance(name, other), other) for other in names), default=None)
-        if close is not None and close[0] <= 2:
+        suggestion = _claude_suggestion(name, names)
+        if suggestion is not None:
             line = (
-                f'No MCP server named "{name}". Did you mean "{close[1]}"? '
+                f'No MCP server named "{name}". Did you mean "{suggestion}"? '
                 "Run `claude mcp list` to see all."
             )
         elif not names:
@@ -1462,10 +1482,14 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
 
     def test_registers_while_a_mcp_json_awaits_approval(self) -> None:
         self.clis.pending = True
-        self.assertTrue(
-            self.clis.claude_not_found("dayz-mcp-perf").endswith(f" ({_CLAUDE_PENDING})")
-        )
-        self.assert_registered("dayz-mcp-perf", self.register("dayz-mcp-perf"))
+        for name, ending in (
+            ("dayz-mcp-131", 'Did you mean "dayz-mcp-130"?'),
+            ("dayz-mcp-perf", "Configured servers:"),
+        ):
+            line = self.clis.claude_not_found(name)
+            self.assertIn(ending, line)
+            self.assertTrue(line.endswith(f" ({_CLAUDE_PENDING})"))
+            self.assert_registered(name, self.register(name))
 
         # With no other server Claude prints the note alone.
         for role in ("CLAUDE", "CODEX"):
@@ -1476,9 +1500,12 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
         )
         self.assert_registered("dayz-mcp", self.register("dayz-mcp"))
 
-    def test_registers_with_a_non_ascii_server_listed(self) -> None:
-        self.clis.servers["CLAUDE"][_NON_ASCII_SERVER] = None
-        self.assertIn(_NON_ASCII_SERVER, self.clis.claude_not_found("dayz-mcp-perf"))
+    def test_registers_whatever_the_listed_names_hold(self) -> None:
+        # A claude.ai connector keeps its display name, commas included.
+        connector = "claude.ai QA, dayz-mcp-perf"
+        for listed in (_NON_ASCII_SERVER, connector):
+            self.clis.servers["CLAUDE"][listed] = None
+            self.assertIn(listed, self.clis.claude_not_found("dayz-mcp-perf"))
 
         desired = self.register("dayz-mcp-perf")
 
@@ -1520,6 +1547,16 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
                 "CLAUDE",
                 head + f"Configured servers: {name}-2, zeta\n",
             ),
+            "claude, a listed name with a comma": (
+                "CLAUDE",
+                head + f"Configured servers: claude.ai QA, {name}\n",
+            ),
+            "claude, suggestion and pending note": (
+                "CLAUDE",
+                head
+                + 'Did you mean "dayz-mcp-pe"? Run `claude mcp list` to see all.'
+                + f" ({_CLAUDE_PENDING})\n",
+            ),
             "claude, list and pending note": (
                 "CLAUDE",
                 head + f"Configured servers: zeta ({_CLAUDE_PENDING})\n",
@@ -1559,11 +1596,11 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
                 "",
                 head + f'Did you mean "{name}"? Run `claude mcp list` to see all.\n',
             ),
-            "claude, lists the server itself": (
+            "claude, no server and pending note": (
                 "CLAUDE",
                 1,
                 "",
-                head + f"Configured servers: dayz-mcp, {name}, zeta\n",
+                head + f"Run `claude mcp add` to add one. ({_CLAUDE_PENDING})\n",
             ),
             "claude, a control character listed": (
                 "CLAUDE",

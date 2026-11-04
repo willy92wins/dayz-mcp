@@ -46,12 +46,13 @@ _ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
 # line on stderr (fb-20261102-122105-e9c6). The pinned claude.exe (Claude Code
 # 2.1.310) has one sentence and four endings:
 #   No MCP server named "<name>". Did you mean "<other>"? Run `claude mcp list` to see all.
-#   No MCP server named "<name>". Run `claude mcp add` to add one.
 #   No MCP server named "<name>". Configured servers: <up to eight> (and N more ...)
+#   No MCP server named "<name>". Run `claude mcp add` to add one.
 #   No MCP server named "<name>". <_CLAUDE_PENDING_NOTE>
-# The first three gain " (<_CLAUDE_PENDING_NOTE>)" when a .mcp.json in the
-# working directory has servers awaiting approval. Which one appears depends
-# on the servers configured at that moment, so a pin records only one of them.
+# When a .mcp.json in the working directory has servers awaiting approval,
+# the first two end in " (<_CLAUDE_PENDING_NOTE>)" and the last one replaces
+# the third. Which line appears depends on the servers configured at that
+# moment, so a pin records only one of them.
 # The pinned codex.exe has one: Error: No MCP server named '<name>' found.
 _CLAUDE_PENDING_NOTE = (
     ".mcp.json servers are awaiting approval \u2014 run `claude` in this "
@@ -708,14 +709,17 @@ def _not_found_line(role: str, name: str) -> re.Pattern[str]:
     if role == "CODEX":
         return re.compile(r"Error: No MCP server named '" + named + r"' found\.\n")
     note = re.escape(_CLAUDE_PENDING_NOTE)
-    # Server names are one line of printable text.
+    # Claude passes names through a filter that turns control and format
+    # characters and line separators into spaces; refuse those that would
+    # break the line (C0, DEL, C1, U+2028, U+2029).
     text = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]+"
     return re.compile(
         r'No MCP server named "' + named + r'"\. (?:(?:'
         r'Did you mean "(?P<other>' + text + r')"\? Run `claude mcp list` to see all\.'
+        r"|Configured servers: " + text + r"?"
+        r")(?: \(" + note + r"\))?"
         r"|Run `claude mcp add` to add one\."
-        r"|Configured servers: (?P<listed>" + text + r"?)"
-        r")(?: \(" + note + r"\))?|" + note + r")\n"
+        r"|" + note + r")\n"
     )
 
 
@@ -740,13 +744,10 @@ def _is_pinned_not_found(
     if _not_found_line(role, _ABSENT_PROBE_NAME).fullmatch(pinned.stderr) is None:
         return False
     match = _not_found_line(role, server_name).fullmatch(stderr)
-    if match is None:
-        return False
-    found = match.groupdict()
-    # Claude suggests and lists only servers it has: naming this one there
-    # would contradict the sentence before it.
-    listed = (found.get("listed") or "").split(", ")
-    return found.get("other") != server_name and server_name not in listed
+    # Claude suggests only a server it has, so suggesting this one would
+    # contradict the sentence before it. The list is not read: a listed name
+    # may hold a comma (a claude.ai connector keeps its display name).
+    return match is not None and match.groupdict().get("other") != server_name
 
 
 class CliRegistrationProvider:
