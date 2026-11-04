@@ -1547,11 +1547,28 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
         self.assertEqual(
             _claude_suggestion("dayz-mcp-perf", ["dayz-mcp-epfr"]), "dayz-mcp-epfr"
         )
+        # The distance itself: an emoji for the "f" is three units away, not two.
+        self.assertEqual(_claude_distance("dayz-mcp-perf", "dayz-mcp-zer\U0001f600"), 3)
+        self.assertIsNone(
+            _claude_suggestion("dayz-mcp-perf", ["dayz-mcp-zer\U0001f600"])
+        )
         # sort() compares UTF-16 units: a surrogate pair comes before U+FF01.
         clis = FakeMcpClis(("\uff01x", "\U0001f600y"))
         self.assertIn(
             "Configured servers: \U0001f600y, \uff01x", clis.claude_not_found("dayz-mcp-perf")
         )
+
+    def test_registers_next_to_a_connector_outside_the_bmp(self) -> None:
+        # In claude.exe's UTF-16 strings an emoji is a surrogate pair.
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                self.pin(FakeMcpClis(("zeta",)))
+                self.clis.pending = pending
+                self.clis.servers["CLAUDE"] = {"claude.ai QA \U0001f9ea": None}
+
+                desired = self.register("dayz-mcp-perf")
+
+                self.assert_registered("dayz-mcp-perf", desired)
 
     def test_cli_output_is_read_as_utf8(self) -> None:
         # A real child process writes the bytes, so subprocess decodes them.
