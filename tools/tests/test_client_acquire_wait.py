@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Callable
 from unittest.mock import AsyncMock, patch
 
 _TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -140,41 +141,110 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(elapsed, 0.9)
         self.assertLess(elapsed, 2.5)
 
-    @slow_test
-    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
-        runtime = self.runtime()
-        seen: dict[str, str] = {}
+    @staticmethod
+    def _quota_requests(
+        waits: list[dict[str, object]],
+    ) -> tuple[Callable[[str, dict, float], dict], dict[str, int]]:
+        """A fake _request_once for ticket-a.
+
+        Each /session/wait answers the next item of ``waits``, and the last
+        one repeats. ``calls`` counts the waits.
+        """
+        calls = {"wait": 0}
+        operation: list[str] = []
 
         def request(path, payload, _timeout_s):
             if path == "/session/enqueue":
-                seen["enqueue"] = payload["operation_id"]
+                operation.append(payload["operation_id"])
                 return {
                     "status": "queued",
                     "ticket": "ticket-a",
                     "position": 1,
-                    "operation_id": seen["enqueue"],
+                    "operation_id": operation[0],
                 }
             if path == "/session/wait":
-                return {
-                    "status": "queued",
-                    "ticket": "ticket-a",
-                    "position": 1,
-                    "operation_id": seen["enqueue"],
-                    "session_wait_quota": ["duplicate"],
-                    "retry_after_s": 10**400,
-                }
+                answer = dict(waits[min(calls["wait"], len(waits) - 1)])
+                calls["wait"] += 1
+                answer.update(ticket="ticket-a", operation_id=operation[0])
+                return answer
             if path == "/session/cancel-operation":
                 return {"cancelled": True, "operation_id": payload["operation_id"]}
             raise AssertionError(path)
 
+        return request, calls
+
+    @slow_test
+    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
+        runtime = self.runtime()
+        request, calls = self._quota_requests(
+            [
+                {
+                    "status": "queued",
+                    "position": 1,
+                    "session_wait_quota": "duplicate",
+                    "retry_after_s": 30,
+                }
+            ]
+        )
         runtime._control._request_once = request
         started = time.monotonic()
         with self.assertRaisesRegex(Exception, "session_wait_timeout"):
             await runtime.session_acquire_wait("build", 0.3)
         elapsed = time.monotonic() - started
-        # A pause that ignores the deadline sleeps the 1s cap (measured
-        # 1.002s). A list quota or a huge retry_after_s must not raise
-        # TypeError or OverflowError.
+        # retry_after_s=30 asks for the whole 1s cap. Cut to the 0.3s the
+        # caller has left, the wait times out near 0.3s. Without the cut it
+        # sleeps the 1s first (measured 1.002s).
+        self.assertGreaterEqual(calls["wait"], 1)
+        self.assertLess(elapsed, 0.8)
+
+    @slow_test
+    async def test_duplicate_with_a_huge_retry_after_does_not_overflow(
+        self,
+    ) -> None:
+        runtime = self.runtime()
+        request, calls = self._quota_requests(
+            [
+                {
+                    "status": "queued",
+                    "position": 1,
+                    "session_wait_quota": "duplicate",
+                    # JSON carries integers of any size, and float() of this
+                    # one raises OverflowError. The pause falls back to 0.05s.
+                    "retry_after_s": 10**400,
+                },
+                {
+                    "status": "active",
+                    "lease_token": "token-a",
+                    "lease_id": "lease-a",
+                },
+            ]
+        )
+        runtime._control._request_once = request
+        result = await runtime.session_acquire_wait("build", 5.0)
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(calls["wait"], 2)
+
+    @slow_test
+    async def test_a_list_quota_is_not_a_pause(self) -> None:
+        runtime = self.runtime()
+        request, _calls = self._quota_requests(
+            [
+                {
+                    "status": "queued",
+                    "position": 1,
+                    "session_wait_quota": ["duplicate"],
+                    "retry_after_s": 10**400,
+                }
+            ]
+        )
+        runtime._control._request_once = request
+        started = time.monotonic()
+        with self.assertRaisesRegex(Exception, "session_wait_timeout"):
+            await runtime.session_acquire_wait("build", 0.3)
+        elapsed = time.monotonic() - started
+        # Only a string is a quota: testing a list against the set would
+        # raise TypeError. With no quota there is no pause, so retry_after_s
+        # is never read and the wait times out at the caller's 0.3s.
         self.assertLess(elapsed, 0.8)
 
     async def test_timeout_tombstones_exact_operation_and_clears_state(self) -> None:

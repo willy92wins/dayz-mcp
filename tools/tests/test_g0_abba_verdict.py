@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 import unittest
 from pathlib import Path
 
 from dayz_mcp.loopback import validate_command_args
+from tests._tiers import slow_test
 
 try:
     import g0_abba_gate as gate
@@ -344,6 +346,121 @@ class G0AbbaPureLogicTest(unittest.TestCase):
 
         self.assertEqual("SETUP_FAILED", result["status"])
         self.assertEqual("wheel_counts", result["field"])
+
+
+ACTIVE_WAIT = {"status": "active", "lease_token": "token-a", "lease_id": "lease-a"}
+
+
+class G0AbbaSessionWaitQuotaTest(unittest.TestCase):
+    """The gate's pause after a /session/wait 202 with session_wait_quota (#317).
+
+    The gate keeps its own copy of dayz_mcp.control_client's rule: only a
+    string quota pauses, for at most 1s and never past the caller's deadline,
+    and a retry_after_s that is not a finite positive number pauses 0.05s.
+    """
+
+    def setUp(self) -> None:
+        self.assertIsNotNone(gate, "g0_abba_gate.py does not exist yet")
+
+    def daemon(self, *waits: dict) -> tuple[object, dict[str, int]]:
+        """A gate.Daemon whose /session/wait answers ``waits`` in order.
+
+        The last answer repeats. Nothing goes on the network.
+        """
+        daemon = gate.Daemon(1, "test-key")
+        calls = {"wait": 0, "cancel": 0}
+        operation: list[str] = []
+
+        def session_call(path, payload=None, timeout_s=35.0):
+            if path == "/session/enqueue":
+                operation.append(payload["operation_id"])
+                return {
+                    "status": "queued",
+                    "ticket": "ticket-a",
+                    "position": 1,
+                    "operation_id": operation[0],
+                }
+            if path == "/session/wait":
+                answer = dict(waits[min(calls["wait"], len(waits) - 1)])
+                calls["wait"] += 1
+                answer.update(ticket="ticket-a", operation_id=operation[0])
+                return answer
+            if path == "/session/cancel-operation":
+                calls["cancel"] += 1
+                return {"cancelled": True, "operation_id": payload["operation_id"]}
+            raise AssertionError(path)
+
+        daemon._session_call = session_call
+        return daemon, calls
+
+    @slow_test
+    def test_full_quota_pauses_before_the_next_wait(self) -> None:
+        daemon, calls = self.daemon(
+            {"status": "queued", "session_wait_quota": "full", "retry_after_s": 30},
+            ACTIVE_WAIT,
+        )
+        started = time.monotonic()
+        result = daemon.session_acquire_wait("build", 5.0)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual("active", result["status"])
+        self.assertEqual(2, calls["wait"])
+        # The cap is 1s. 0.9s still fails if the pause is removed, and 2.5s
+        # leaves room when the machine is busy.
+        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertLess(elapsed, 2.5)
+
+    @slow_test
+    def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
+        daemon, calls = self.daemon(
+            {"status": "queued", "session_wait_quota": "duplicate", "retry_after_s": 30},
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "session_wait_timeout"):
+            daemon.session_acquire_wait("build", 0.3)
+        elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(calls["wait"], 1)
+        self.assertEqual(1, calls["cancel"])
+        # Cut to the 0.3s left. Without the cut the gate sleeps the whole 1s
+        # cap first (measured 1.000s).
+        self.assertLess(elapsed, 0.8)
+
+    @slow_test
+    def test_duplicate_with_a_huge_retry_after_does_not_overflow(self) -> None:
+        # JSON carries integers of any size, and float() of this one raises
+        # OverflowError. The pause falls back to 0.05s.
+        daemon, calls = self.daemon(
+            {
+                "status": "queued",
+                "session_wait_quota": "duplicate",
+                "retry_after_s": 10**400,
+            },
+            ACTIVE_WAIT,
+        )
+        result = daemon.session_acquire_wait("build", 5.0)
+
+        self.assertEqual("active", result["status"])
+        self.assertEqual(2, calls["wait"])
+
+    def test_a_list_quota_is_not_a_pause(self) -> None:
+        daemon, calls = self.daemon(
+            {
+                "status": "queued",
+                "session_wait_quota": ["duplicate"],
+                "retry_after_s": 30,
+            },
+            ACTIVE_WAIT,
+        )
+        started = time.monotonic()
+        result = daemon.session_acquire_wait("build", 5.0)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual("active", result["status"])
+        self.assertEqual(2, calls["wait"])
+        # Only a string is a quota: testing a list against the set would
+        # raise TypeError. Without a quota there is no pause.
+        self.assertLess(elapsed, 0.5)
 
 
 if __name__ == "__main__":
