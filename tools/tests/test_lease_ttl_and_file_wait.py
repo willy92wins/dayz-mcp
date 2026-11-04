@@ -862,7 +862,8 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         # passed rather than timed, so a slow runner cannot fail a join that
         # kept to its bound, and a missing, unbounded or longer join fails.
         # A first join may pass its budget by the float rounding of its
-        # deadline and no more (check_first_join says why).
+        # deadline and no more (check_first_join says why); (e) holds the
+        # server's clock on one tick so that this case runs every time.
         # The server asks for the first join only while budget remains, so
         # (a) and (c) also accept the grace join alone when it was asked for
         # after the reader's deadline, and (d) takes that path on purpose.
@@ -1057,6 +1058,27 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [entry[1] for entry in joins[before:]], [(server._THREAD_STOP_GRACE_S,)]
         )
+
+        # (e) What failed (b) on CI, made certain: a first join asked for on
+        # the start's own clock tick. With the server's clock held at
+        # 510.007 s, (510.007 + budget) - 510.007 passes both budgets of this
+        # test by rounding alone (2.000000000000057 and 60.00000000000006),
+        # and check_first_join must accept both. The literal is one that
+        # rounds up; a round value such as 510.0 does not.
+        tick = 510.007
+        for budget in (2.0, 60.0):
+            deadline = tick + budget
+            self.assertGreater(deadline - tick, budget)
+            before = len(joins)
+            with (
+                patch.object(server, "time", SimpleNamespace(monotonic=lambda: tick)),
+                patch.object(asyncio, "to_thread", recording_to_thread),
+            ):
+                self.assertIsNone(await server._thread_bounded(lambda stop: None, deadline))
+            e_joins = [entry[1] for entry in joins[before:]]
+            self.assertEqual(len(e_joins), 1)
+            self.assertGreater(e_joins[0][0], budget)
+            check_first_join(e_joins[0][0], budget, deadline)
 
     async def test_f10_release_during_final_status_aborts(self) -> None:
         self.server_file.write_text("READY\n", encoding="utf-8")
