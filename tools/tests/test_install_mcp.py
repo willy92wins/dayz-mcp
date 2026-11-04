@@ -110,18 +110,21 @@ def write_synthetic_not_found_fixture(fixture_path: Path, manifest_path: Path) -
             "bytes": len(manifest_bytes),
             "sha256": hashlib.sha256(manifest_bytes).hexdigest().upper(),
         },
+        # What both CLIs print for the probe (exit 1, nothing on stdout).
         "entries": {
             "CLAUDE": {
                 "cli_sha256": manifest.entries["CLAUDE"].sha256,
-                "returncode": 7,
-                "stdout": "CLAUDE-absent\n",
-                "stderr": "",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": 'No MCP server named "p0s-absent-fixture-do-not-create". '
+                "Configured servers: dayz-mcp-130\n",
             },
             "CODEX": {
                 "cli_sha256": manifest.entries["CODEX"].sha256,
-                "returncode": 8,
-                "stdout": "CODEX-absent\n",
-                "stderr": "",
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "Error: No MCP server named "
+                "'p0s-absent-fixture-do-not-create' found.\n",
             },
         },
     }
@@ -1092,20 +1095,26 @@ class InstallerCliRegistrationProviderTest(unittest.TestCase):
             self.fixture_path, self.manifest_path
         )
 
-    def test_exact_frozen_nonzero_maps_to_absent_and_drift_is_error(self) -> None:
+    def test_pinned_not_found_line_for_the_server_is_absent_and_drift_is_error(
+        self,
+    ) -> None:
         calls: list[list[str]] = []
+        names_the_probe = False
 
         def runner(argv: list[str], **_kwargs: object) -> object:
             calls.append(list(argv))
             role = "CLAUDE" if Path(argv[0]).name.casefold() == "claude.exe" else "CODEX"
             expected = self.fixture.entries[role]
+            stderr = expected.stderr
+            if not names_the_probe:
+                stderr = stderr.replace("p0s-absent-fixture-do-not-create", "dayz-mcp")
             return type(
                 "Completed",
                 (),
                 {
                     "returncode": expected.returncode,
                     "stdout": expected.stdout,
-                    "stderr": expected.stderr,
+                    "stderr": stderr,
                 },
             )()
 
@@ -1119,6 +1128,12 @@ class InstallerCliRegistrationProviderTest(unittest.TestCase):
         self.assertIsNone(provider.get("CODEX"))
         self.assertEqual(calls[0][1:], ["mcp", "get", "dayz-mcp"])
         self.assertEqual(calls[1][1:], ["mcp", "get", "dayz-mcp", "--json"])
+
+        # The pinned line verbatim says the probe is missing, not dayz-mcp.
+        names_the_probe = True
+        for role in ("CLAUDE", "CODEX"):
+            with self.assertRaises(InstallerExecutionError):
+                provider.get(role)
 
         def drift_runner(_argv: list[str], **_kwargs: object) -> object:
             return type(
@@ -1175,14 +1190,42 @@ def _completed(returncode: int, stdout: str, stderr: str) -> object:
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
+def _edit_distance(left: str, right: str) -> int:
+    previous = list(range(len(right) + 1))
+    for row, left_char in enumerate(left, 1):
+        current = [row]
+        for column, right_char in enumerate(right, 1):
+            current.append(
+                min(
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                    previous[column - 1] + (left_char != right_char),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+# Copied from the pinned claude.exe (Claude Code 2.1.310), not from
+# install_mcp, so a typo there fails these tests.
+_CLAUDE_PENDING = (
+    ".mcp.json servers are awaiting approval \u2014 run `claude` in this "
+    "directory to review them."
+)
+_CLAUDE_MORE = " (and {} more \u2014 run `claude mcp list` to see all)"
+# Its UTF-8 bytes include 0x90, which cp1252 does not decode.
+_NON_ASCII_SERVER = "claude.ai \u0410\u0440\u0445\u0438\u0432"
+
+
 class FakeMcpClis:
     """``claude mcp`` and ``codex mcp`` get/add/remove over an in-memory list.
 
-    A missing server gets the not-found output both CLIs printed for
-    ``--pin-clis`` on the box (2026-10-07 and 2026-11-02): exit 1, empty
-    stdout, and on stderr Claude's ``No MCP server named "<name>".`` followed by
-    up to eight of its configured servers, or Codex's
-    ``Error: No MCP server named '<name>' found.``
+    A missing server gets what the pinned CLIs print: exit 1, empty stdout and
+    one line on stderr. Codex: ``Error: No MCP server named '<name>' found.``
+    Claude Code 2.1.310 (``GJr`` and ``JCn`` in claude.exe) names the server,
+    then suggests one within two edits, or says to run ``claude mcp add`` when
+    it has none, or lists up to eight; ``pending`` adds its note about a
+    .mcp.json awaiting approval.
     """
 
     def __init__(self, configured: tuple[str, ...]) -> None:
@@ -1190,6 +1233,7 @@ class FakeMcpClis:
         self.servers: dict[str, dict[str, RegistrationSpec | None]] = {
             role: dict.fromkeys(configured) for role in ("CLAUDE", "CODEX")
         }
+        self.pending = False
         self.calls: list[tuple[str, list[str]]] = []
 
     def __call__(self, argv: list[str], **_kwargs: object) -> object:
@@ -1220,17 +1264,25 @@ class FakeMcpClis:
     def _absent(self, role: str, name: str) -> object:
         if role == "CODEX":
             return _completed(1, "", f"Error: No MCP server named '{name}' found.\n")
-        names = sorted(self.servers[role])
-        if not names:
-            raise AssertionError("Claude's text with no configured server was never recorded")
-        listed = ", ".join(names[:8])
-        if len(names) > 8:
-            listed += (
-                f" (and {len(names) - 8} more \u2014 run `claude mcp list` to see all)"
+        return _completed(1, "", self.claude_not_found(name) + "\n")
+
+    def claude_not_found(self, name: str) -> str:
+        names = sorted(self.servers["CLAUDE"])
+        if self.pending and not names:
+            return f'No MCP server named "{name}". {_CLAUDE_PENDING}'
+        close = min(((_edit_distance(name, other), other) for other in names), default=None)
+        if close is not None and close[0] <= 2:
+            line = (
+                f'No MCP server named "{name}". Did you mean "{close[1]}"? '
+                "Run `claude mcp list` to see all."
             )
-        return _completed(
-            1, "", f'No MCP server named "{name}". Configured servers: {listed}\n'
-        )
+        elif not names:
+            line = f'No MCP server named "{name}". Run `claude mcp add` to add one.'
+        else:
+            more = _CLAUDE_MORE.format(len(names) - 8) if len(names) > 8 else ""
+            listed = ", ".join(names[:8])
+            line = f'No MCP server named "{name}". Configured servers: {listed}{more}'
+        return line + (f" ({_CLAUDE_PENDING})" if self.pending else "")
 
     @staticmethod
     def _present(role: str, name: str, spec: RegistrationSpec | None) -> str:
@@ -1294,15 +1346,18 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         security = self.root / "security"
         security.mkdir()
-        claude = self.root / "claude.exe"
-        codex = self.root / "codex.exe"
-        write_fake_x64_pe(claude)
-        write_fake_x64_pe(codex)
+        self.claude = self.root / "claude.exe"
+        self.codex = self.root / "codex.exe"
+        write_fake_x64_pe(self.claude)
+        write_fake_x64_pe(self.codex)
         environment = patch.dict(os.environ, {"DAYZ_MCP_SECURITY_DIR": str(security)})
         environment.start()
         self.addCleanup(environment.stop)
-        self.clis = FakeMcpClis(self.CONFIGURED)
-        pin_installer_clis(claude_exe=claude, codex_exe=codex, runner=self.clis)
+        self.pin(FakeMcpClis(self.CONFIGURED))
+
+    def pin(self, clis: FakeMcpClis) -> None:
+        self.clis = clis
+        pin_installer_clis(claude_exe=self.claude, codex_exe=self.codex, runner=clis)
         self.manifest = load_installer_cli_manifest(installer_cli_manifest_path())
         self.not_found = load_installer_not_found_fixtures(
             installer_not_found_fixtures_path(), installer_cli_manifest_path()
@@ -1349,8 +1404,9 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
             self.not_found.entries["CLAUDE"].stderr,
             'No MCP server named "p0s-absent-fixture-do-not-create". Configured '
             "servers: Example, claude.ai Calendar, claude.ai Drive, claude.ai "
-            "Mail, dayz-mcp, dayz-mcp-130, docs-search, notes (and 2 more "
-            "\u2014 run `claude mcp list` to see all)\n",
+            "Mail, dayz-mcp, dayz-mcp-130, docs-search, notes"
+            + _CLAUDE_MORE.format(2)
+            + "\n",
         )
         self.assertEqual(
             self.not_found.entries["CODEX"].stderr,
@@ -1381,12 +1437,96 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
         self.assert_registered("dayz-mcp-perf", first)
         self.assert_registered("dayz-mcp-other", second)
 
+    def test_instance_one_edit_from_another_registers(self) -> None:
+        # Claude suggests dayz-mcp-130 instead of listing its servers.
+        self.assertIn(
+            'Did you mean "dayz-mcp-130"?', self.clis.claude_not_found("dayz-mcp-131")
+        )
+
+        desired = self.register("dayz-mcp-131")
+
+        self.assert_registered("dayz-mcp-131", desired)
+
+    def test_registers_with_no_server_and_after_a_pin_with_none(self) -> None:
+        # Pinned with a list, probed with no server at all.
+        for role in ("CLAUDE", "CODEX"):
+            self.clis.servers[role].clear()
+        self.assertIn("Run `claude mcp add`", self.clis.claude_not_found("dayz-mcp"))
+        self.assert_registered("dayz-mcp", self.register("dayz-mcp"))
+
+        # Pinned with no server, probed with a list.
+        self.pin(FakeMcpClis(()))
+        self.assertIn("Run `claude mcp add`", self.not_found.entries["CLAUDE"].stderr)
+        self.clis.servers["CLAUDE"]["Example"] = None
+        self.assert_registered("dayz-mcp-perf", self.register("dayz-mcp-perf"))
+
+    def test_registers_while_a_mcp_json_awaits_approval(self) -> None:
+        self.clis.pending = True
+        self.assertTrue(
+            self.clis.claude_not_found("dayz-mcp-perf").endswith(f" ({_CLAUDE_PENDING})")
+        )
+        self.assert_registered("dayz-mcp-perf", self.register("dayz-mcp-perf"))
+
+        # With no other server Claude prints the note alone.
+        for role in ("CLAUDE", "CODEX"):
+            self.clis.servers[role].clear()
+        self.assertEqual(
+            self.clis.claude_not_found("dayz-mcp"),
+            f'No MCP server named "dayz-mcp". {_CLAUDE_PENDING}',
+        )
+        self.assert_registered("dayz-mcp", self.register("dayz-mcp"))
+
+    def test_registers_with_a_non_ascii_server_listed(self) -> None:
+        self.clis.servers["CLAUDE"][_NON_ASCII_SERVER] = None
+        self.assertIn(_NON_ASCII_SERVER, self.clis.claude_not_found("dayz-mcp-perf"))
+
+        desired = self.register("dayz-mcp-perf")
+
+        self.assert_registered("dayz-mcp-perf", desired)
+
+    def test_cli_output_is_read_as_utf8(self) -> None:
+        # A real child process writes the bytes, so subprocess decodes them.
+        stderr = (
+            'No MCP server named "dayz-mcp-perf". Configured servers: '
+            f"{_NON_ASCII_SERVER}, dayz-mcp ({_CLAUDE_PENDING})\n"
+        )
+        script = (
+            "import sys; sys.stderr.buffer.write(bytes.fromhex(sys.argv[1])); "
+            "sys.exit(1)"
+        )
+
+        def child(_argv: list[str], **kwargs: object) -> object:
+            return subprocess.run(
+                [sys.executable, "-c", script, stderr.encode("utf-8").hex()],
+                **kwargs,
+            )
+
+        self.assertIsNone(self.provider("dayz-mcp-perf", child).get("CLAUDE"))
+
     def test_unrecognized_not_found_output_is_still_a_probe_failure(self) -> None:
         name = "dayz-mcp-perf"
-        claude = f'No MCP server named "{name}". Configured servers: dayz-mcp, zeta\n'
+        head = f'No MCP server named "{name}". '
+        claude = head + "Configured servers: dayz-mcp, zeta\n"
         codex = f"Error: No MCP server named '{name}' found.\n"
         probe = "p0s-absent-fixture-do-not-create"
-        accepted = {"CLAUDE": (1, "", claude), "CODEX": (1, "", codex)}
+        accepted = {
+            "claude, server list": ("CLAUDE", claude),
+            "claude, suggestion": (
+                "CLAUDE",
+                head + 'Did you mean "dayz-mcp-pe"? Run `claude mcp list` to see all.\n',
+            ),
+            "claude, no server": ("CLAUDE", head + "Run `claude mcp add` to add one.\n"),
+            "claude, a longer name listed": (
+                "CLAUDE",
+                head + f"Configured servers: {name}-2, zeta\n",
+            ),
+            "claude, list and pending note": (
+                "CLAUDE",
+                head + f"Configured servers: zeta ({_CLAUDE_PENDING})\n",
+            ),
+            "claude, pending note alone": ("CLAUDE", head + _CLAUDE_PENDING + "\n"),
+            "codex": ("CODEX", codex),
+        }
         refused = {
             "claude, another server": (
                 "CLAUDE",
@@ -1406,18 +1546,43 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
                 "CLAUDE",
                 1,
                 "",
-                f'No MCP server named "{name}". Configured servers: dayz-mcp,\nzeta\n',
+                head + "Configured servers: dayz-mcp,\nzeta\n",
             ),
-            "claude, no list": ("CLAUDE", 1, "", f'No MCP server named "{name}".\n'),
-            "claude, empty list": (
-                "CLAUDE",
-                1,
-                "",
-                f'No MCP server named "{name}". Configured servers: \n',
-            ),
+            "claude, sentence alone": ("CLAUDE", 1, "", head.rstrip() + "\n"),
+            "claude, empty list": ("CLAUDE", 1, "", head + "Configured servers: \n"),
             "claude, no final newline": ("CLAUDE", 1, "", claude[:-1]),
             "claude, another exit code": ("CLAUDE", 2, "", claude),
             "claude, text on stdout": ("CLAUDE", 1, "Removed\n", claude),
+            "claude, suggests the server itself": (
+                "CLAUDE",
+                1,
+                "",
+                head + f'Did you mean "{name}"? Run `claude mcp list` to see all.\n',
+            ),
+            "claude, lists the server itself": (
+                "CLAUDE",
+                1,
+                "",
+                head + f"Configured servers: dayz-mcp, {name}, zeta\n",
+            ),
+            "claude, a control character listed": (
+                "CLAUDE",
+                1,
+                "",
+                head + "Configured servers: ze\x00ta\n",
+            ),
+            "claude, a line separator listed": (
+                "CLAUDE",
+                1,
+                "",
+                head + "Configured servers: ze\u2028ta\n",
+            ),
+            "claude, suggestion cut short": (
+                "CLAUDE",
+                1,
+                "",
+                head + 'Did you mean "zeta"?\n',
+            ),
             "codex, a server list": (
                 "CODEX",
                 1,
@@ -1436,19 +1601,68 @@ class NewInstanceRegistrationProbeTest(unittest.TestCase):
                 "",
                 f"Error: No MCP server named '{probe}' found.\n",
             ),
+            "codex, not in configuration": (
+                "CODEX",
+                1,
+                "",
+                f"Error: No MCP server named '{name}' found in configuration.\n",
+            ),
             "codex, another exit code": ("CODEX", 2, "", codex),
         }
+        # A pin that recorded anything but a not-found line for the probe is
+        # no template: neither that output renamed nor a real not-found line
+        # counts as absent until --pin-clis records one.
+        error = "Error: EACCES: permission denied, open '.claude.json'\n"
+        no_server = head + "Run `claude mcp add` to add one.\n"
+        templates = {
+            "codex, a longer name": (
+                "CODEX",
+                "",
+                f"Error: No MCP server named 'prefix-{probe}' found.\n",
+                "",
+                f"Error: No MCP server named 'prefix-{name}' found.\n",
+            ),
+            "codex, a longer name, then a real line": (
+                "CODEX",
+                "",
+                f"Error: No MCP server named 'prefix-{probe}' found.\n",
+                "",
+                codex,
+            ),
+            "claude, an error": ("CLAUDE", "", error, "", error),
+            "claude, an error, then a real line": ("CLAUDE", "", error, "", no_server),
+            "claude, text on stdout": (
+                "CLAUDE",
+                "Configured servers: zeta\n",
+                f'No MCP server named "{probe}". Run `claude mcp add` to add one.\n',
+                "",
+                no_server,
+            ),
+        }
 
-        for role, (returncode, stdout, stderr) in accepted.items():
-            with self.subTest(accepted=role):
+        for label, (role, stderr) in accepted.items():
+            with self.subTest(accepted=label):
                 provider = self.provider(
-                    name, lambda *_a, **_k: _completed(returncode, stdout, stderr)
+                    name, lambda *_a, **_k: _completed(1, "", stderr)
                 )
                 self.assertIsNone(provider.get(role))
         for label, (role, returncode, stdout, stderr) in refused.items():
             with self.subTest(refused=label):
                 provider = self.provider(
                     name, lambda *_a, **_k: _completed(returncode, stdout, stderr)
+                )
+                with self.assertRaises(InstallerExecutionError) as raised:
+                    provider.get(role)
+                self.assertEqual(str(raised.exception), "registration_probe_failed")
+        for label, (role, pinned_out, pinned_err, stdout, stderr) in templates.items():
+            with self.subTest(template=label):
+                entries = dict(self.not_found.entries)
+                entries[role] = replace(entries[role], stdout=pinned_out, stderr=pinned_err)
+                provider = CliRegistrationProvider(
+                    self.manifest,
+                    replace(self.not_found, entries=entries),
+                    runner=lambda *_a, **_k: _completed(1, stdout, stderr),
+                    server_name=name,
                 )
                 with self.assertRaises(InstallerExecutionError) as raised:
                     provider.get(role)

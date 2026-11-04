@@ -42,12 +42,21 @@ _PE32_PLUS_MAGIC = 0x20B
 _PSUTIL_WHEEL_BYTES = 137_737
 _PSUTIL_WHEEL_SHA256 = "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
 _ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
-# Claude follows its not-found sentence with servers it has configured:
-#   No MCP server named "<name>". Configured servers: a, b (and 9 more ...)
-# That list changes whenever a server is added or removed, claude.ai
-# connectors included, so it is the one part of the pinned text that a later
-# probe may not repeat (fb-20261102-122105-e9c6).
-_CLAUDE_SERVER_LIST = " Configured servers: "
+# When the server does not exist, `mcp get` exits 1 with empty stdout and one
+# line on stderr (fb-20261102-122105-e9c6). The pinned claude.exe (Claude Code
+# 2.1.310) has one sentence and four endings:
+#   No MCP server named "<name>". Did you mean "<other>"? Run `claude mcp list` to see all.
+#   No MCP server named "<name>". Run `claude mcp add` to add one.
+#   No MCP server named "<name>". Configured servers: <up to eight> (and N more ...)
+#   No MCP server named "<name>". <_CLAUDE_PENDING_NOTE>
+# The first three gain " (<_CLAUDE_PENDING_NOTE>)" when a .mcp.json in the
+# working directory has servers awaiting approval. Which one appears depends
+# on the servers configured at that moment, so a pin records only one of them.
+# The pinned codex.exe has one: Error: No MCP server named '<name>' found.
+_CLAUDE_PENDING_NOTE = (
+    ".mcp.json servers are awaiting approval \u2014 run `claude` in this "
+    "directory to review them."
+)
 _SECURITY_DIR_ENV = "DAYZ_MCP_SECURITY_DIR"
 _PIN_RECIPE = "run: python install_mcp.py --pin-clis"
 _CLI_MANIFEST_NAME = "installer-cli-manifest-v1.json"
@@ -684,9 +693,29 @@ def invoke_manifest_cli(
         [str(entry.path), *arguments],
         shell=False,
         text=True,
+        # Both CLIs write UTF-8. The locale code page (cp1252) would turn
+        # non-ASCII into other characters, and some bytes into a decode error.
+        encoding="utf-8",
         capture_output=True,
         timeout=30.0,
         check=False,
+    )
+
+
+def _not_found_line(role: str, name: str) -> re.Pattern[str]:
+    """What ``mcp get`` prints on stderr when ``name`` does not exist."""
+    named = re.escape(name)
+    if role == "CODEX":
+        return re.compile(r"Error: No MCP server named '" + named + r"' found\.\n")
+    note = re.escape(_CLAUDE_PENDING_NOTE)
+    # Server names are one line of printable text.
+    text = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]+"
+    return re.compile(
+        r'No MCP server named "' + named + r'"\. (?:(?:'
+        r'Did you mean "(?P<other>' + text + r')"\? Run `claude mcp list` to see all\.'
+        r"|Run `claude mcp add` to add one\."
+        r"|Configured servers: (?P<listed>" + text + r"?)"
+        r")(?: \(" + note + r"\))?|" + note + r")\n"
     )
 
 
@@ -698,37 +727,26 @@ def _is_pinned_not_found(
     stdout: str,
     stderr: str,
 ) -> bool:
-    """True only for the pinned not-found output, with ``server_name`` in it.
+    """True only when ``mcp get`` says that ``server_name`` does not exist.
 
-    --pin-clis records that output for ``_ABSENT_PROBE_NAME``, so the probe
-    name is what becomes the server name. Exit code and stdout must match.
-    Claude's stderr may end in another server list (``_CLAUDE_SERVER_LIST``),
-    still one line and ended as pinned; the rest must match, the sentence that
-    names the server included. Any other output is not an absence.
+    stderr must be a not-found line for exactly ``server_name``, with the
+    pinned exit code and nothing on stdout. The pinned output must itself be a
+    not-found line for ``_ABSENT_PROBE_NAME``: --pin-clis records whatever the
+    CLI printed, and anything else is no template for an absence. Any other
+    output is not an absence.
     """
-    if (
-        returncode != pinned.returncode
-        or stdout != pinned.stdout.replace(_ABSENT_PROBE_NAME, server_name)
-    ):
+    if returncode != pinned.returncode or stdout or pinned.stdout:
         return False
-    if stderr == pinned.stderr.replace(_ABSENT_PROBE_NAME, server_name):
-        return True
-    if role != "CLAUDE":
+    if _not_found_line(role, _ABSENT_PROBE_NAME).fullmatch(pinned.stderr) is None:
         return False
-    sentence, marker, listed = pinned.stderr.partition(_CLAUDE_SERVER_LIST)
-    servers = listed.rstrip("\n")
-    if (
-        not marker
-        or _ABSENT_PROBE_NAME not in sentence
-        or not servers
-        or "\n" in servers
-        or "\r" in servers
-    ):
+    match = _not_found_line(role, server_name).fullmatch(stderr)
+    if match is None:
         return False
-    stable = sentence.replace(_ABSENT_PROBE_NAME, server_name) + marker
-    ending = listed[len(servers) :]
-    pattern = re.escape(stable) + r"[^\r\n]+" + re.escape(ending)
-    return re.fullmatch(pattern, stderr) is not None
+    found = match.groupdict()
+    # Claude suggests and lists only servers it has: naming this one there
+    # would contradict the sentence before it.
+    listed = (found.get("listed") or "").split(", ")
+    return found.get("other") != server_name and server_name not in listed
 
 
 class CliRegistrationProvider:
