@@ -863,7 +863,9 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         # kept to its bound, and a missing, unbounded or longer join fails.
         # A first join may pass its budget by the float rounding of its
         # deadline and no more (check_first_join says why); (e) holds the
-        # server's clock on one tick so that this case runs every time.
+        # server's clock on one tick so that this case runs every time, and
+        # (f) moves that clock on while the reader starts, so the first join
+        # must come from the clock read after the start.
         # The server asks for the first join only while budget remains, so
         # (a) and (c) also accept the grace join alone when it was asked for
         # after the reader's deadline, and (d) takes that path on purpose.
@@ -1064,7 +1066,9 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         # 510.007 s, (510.007 + budget) - 510.007 passes both budgets of this
         # test by rounding alone (2.000000000000057 and 60.00000000000006),
         # and check_first_join must accept both. The literal is one that
-        # rounds up; a round value such as 510.0 does not.
+        # rounds up; a round value such as 510.0 does not. On a held clock
+        # the bound is known exactly, so the join must be deadline - tick
+        # itself: check_first_join alone would also pass one float above it.
         tick = 510.007
         for budget in (2.0, 60.0):
             deadline = tick + budget
@@ -1078,7 +1082,39 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
             e_joins = [entry[1] for entry in joins[before:]]
             self.assertEqual(len(e_joins), 1)
             self.assertGreater(e_joins[0][0], budget)
+            self.assertEqual(e_joins[0][0], deadline - tick)
             check_first_join(e_joins[0][0], budget, deadline)
+
+        # (f) The first join is the budget left when it is asked for, read
+        # from the clock after the reader starts. Here the start takes one
+        # second of the server's clock, so the join must be
+        # deadline - (tick + 1.0). A server that read the clock before the
+        # start and reused that reading would ask for deadline - tick: a
+        # second more than remains, but still inside the budget, so no other
+        # part would see it.
+        clock = [tick]
+        real_start = threading.Thread.start
+
+        def start_takes_a_second(thread: threading.Thread) -> None:
+            # Only the reader thread of _thread_bounded; the executor threads
+            # behind asyncio.to_thread start as usual.
+            target = getattr(thread, "_target", None)
+            if getattr(target, "__qualname__", "").startswith("_thread_bounded."):
+                clock[0] += 1.0
+            real_start(thread)
+
+        deadline = tick + 60.0
+        before = len(joins)
+        with (
+            patch.object(server, "time", SimpleNamespace(monotonic=lambda: clock[0])),
+            patch.object(threading.Thread, "start", start_takes_a_second),
+            patch.object(asyncio, "to_thread", recording_to_thread),
+        ):
+            self.assertIsNone(await server._thread_bounded(lambda stop: None, deadline))
+        self.assertEqual(clock[0], tick + 1.0)
+        f_joins = [entry[1] for entry in joins[before:]]
+        self.assertEqual(len(f_joins), 1)
+        self.assertEqual(f_joins[0][0], deadline - (tick + 1.0))
 
     async def test_f10_release_during_final_status_aborts(self) -> None:
         self.server_file.write_text("READY\n", encoding="utf-8")
