@@ -10,6 +10,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -21,6 +22,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import server
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import MAX_OPERATION_TOMBSTONES
+from tests._tiers import slow_test
 from tests.catalog_helpers import list_tools_after_lease
 from tests.client_helpers import _fixture_client_runtime
 
@@ -90,6 +92,90 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
             "En cola (posición 2) para build",
             "En cola (posición 1) para build",
         ])
+
+    @slow_test
+    async def test_duplicate_quota_pauses_before_the_next_wait(self) -> None:
+        runtime = self.runtime()
+        calls = {"n": 0}
+        operation_ids: list[str] = []
+
+        def request(path, payload, _timeout_s):
+            if path == "/session/enqueue":
+                operation_ids.append(payload["operation_id"])
+                return {
+                    "status": "queued",
+                    "ticket": "ticket-a",
+                    "position": 1,
+                    "operation_id": payload["operation_id"],
+                }
+            if path == "/session/wait":
+                calls["n"] += 1
+                operation_id = operation_ids[0]
+                if calls["n"] == 1:
+                    return {
+                        "status": "queued",
+                        "ticket": "ticket-a",
+                        "position": 1,
+                        "operation_id": operation_id,
+                        "session_wait_quota": "duplicate",
+                        "retry_after_s": 30,
+                    }
+                return {
+                    "status": "active",
+                    "ticket": "ticket-a",
+                    "operation_id": operation_id,
+                    "lease_token": "token-a",
+                    "lease_id": "lease-a",
+                }
+            raise AssertionError(path)
+
+        runtime._control._request_once = request
+        started = time.monotonic()
+        result = await runtime.session_acquire_wait("build", 5.0)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(calls["n"], 2)
+        # The cap is 1s. 0.9s still fails if the pause is removed.
+        # 2.5s leaves room when the machine is busy.
+        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertLess(elapsed, 2.5)
+
+    @slow_test
+    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
+        runtime = self.runtime()
+        seen: dict[str, str] = {}
+
+        def request(path, payload, _timeout_s):
+            if path == "/session/enqueue":
+                seen["enqueue"] = payload["operation_id"]
+                return {
+                    "status": "queued",
+                    "ticket": "ticket-a",
+                    "position": 1,
+                    "operation_id": seen["enqueue"],
+                }
+            if path == "/session/wait":
+                return {
+                    "status": "queued",
+                    "ticket": "ticket-a",
+                    "position": 1,
+                    "operation_id": seen["enqueue"],
+                    "session_wait_quota": ["duplicate"],
+                    "retry_after_s": 10**400,
+                }
+            if path == "/session/cancel-operation":
+                return {"cancelled": True, "operation_id": payload["operation_id"]}
+            raise AssertionError(path)
+
+        runtime._control._request_once = request
+        started = time.monotonic()
+        with self.assertRaisesRegex(Exception, "session_wait_timeout"):
+            await runtime.session_acquire_wait("build", 0.3)
+        elapsed = time.monotonic() - started
+        # A pause that ignores the deadline sleeps the 1s cap (measured
+        # 1.002s). A list quota or a huge retry_after_s must not raise
+        # TypeError or OverflowError.
+        self.assertLess(elapsed, 0.8)
 
     async def test_timeout_tombstones_exact_operation_and_clears_state(self) -> None:
         runtime = self.runtime()

@@ -19,6 +19,12 @@ MAX_PREF_RENEWALS = 1
 BOX_CLAIM_TTL_S = 600.0
 WAIT_MAX_S = 30.0
 MAX_SESSION_QUEUE = 64
+# Blocking POST /session/wait calls that may sit in Condition.wait.
+# loopback.MAX_HTTP_WORKERS is MAX_SESSION_QUEUE + 32 and counts one of
+# these per queued session. A second wait on the same ticket, or any
+# wait past this cap, is answered at once and does not hold a worker
+# (it still runs the handler, then returns).
+SESSION_WAIT_MAX_IN_FLIGHT = MAX_SESSION_QUEUE
 READ_ONLY_COMMANDS = frozenset(
     {
         "query_player_state",
@@ -365,6 +371,9 @@ class SessionCoordinator:
             raise ValueError("invalid_lease_end_bound")
         self._lease_end_bound_s = float(lease_end_bound_s)
         self._condition = threading.Condition()
+        # Ticket id -> monotonic deadline of the one blocking POST
+        # /session/wait the HTTP pool budgets. See SESSION_WAIT_MAX_IN_FLIGHT.
+        self._blocking_session_waits: dict[str, float] = {}
         # The request thread that just renewed a lease. Handlers read it back
         # onto the wire; it is cleared at the start of every authorize and of
         # every command handler so a reused HTTP worker cannot leak it.
@@ -1155,7 +1164,15 @@ class SessionCoordinator:
                 self._grant_inflight is not None
                 and self._grant_inflight.ticket is ticket
             )
-            if not protected_by_grant and ticket.touched_at != touched_at:
+            # A duplicate of a wait that already holds this ticket must not
+            # refresh the TTL or bump the revision. That bump persists a
+            # snapshot, and a client that retries the 202 would do it on
+            # every spin. The admitted wait keeps the ticket alive.
+            if (
+                ticket_id not in self._blocking_session_waits
+                and not protected_by_grant
+                and ticket.touched_at != touched_at
+            ):
                 ticket.touched_at = touched_at
                 # A live wait may refresh its TTL while a release/grant WAL is
                 # completing. That liveness-only refresh is included in the WAL's
@@ -1163,169 +1180,241 @@ class SessionCoordinator:
                 if self._wal_marker is None:
                     self._bump_revision_locked()
 
-            while True:
-                degraded.extend(self._expire_due())
-                latched_stage = self._queued_grant_audit_stage_locked(degraded)
-                if latched_stage is not None:
-                    return 503, self._payload_with_degradation(
-                        self._audit_failed_payload(latched_stage), degraded
-                    )
-                active_payload = self._wait_active_payload_locked(client, ticket_id)
-                if active_payload is not None:
-                    active_lease = self._active
-                    if not self._write_wait_audit_locked(
-                        "session_wait",
-                        client=client,
-                        ticket=ticket_id,
-                        lease_id=(
-                            self._active.lease_id
-                            if self._active is not None
-                            else None
-                        ),
-                        decision="active",
-                        reason="granted",
-                        wait_started_at=wait_started_at,
-                    ):
+            admitted_ticket: str | None = None
+            try:
+                while True:
+                    degraded.extend(self._expire_due())
+                    latched_stage = self._queued_grant_audit_stage_locked(degraded)
+                    if latched_stage is not None:
                         return 503, self._payload_with_degradation(
-                            self._audit_failed_payload("write"), degraded
+                            self._audit_failed_payload(latched_stage), degraded
                         )
-                    if self._active is not active_lease:
-                        return 409, self._payload_with_degradation(
-                            {"error": "coordination_changed"}, degraded
-                        )
-                    if degraded:
-                        active_payload = self._merge_cleanup_degraded(
-                            active_payload, self._unique(degraded)
-                        )
-                    return 200, active_payload
-
-                ticket = self._find_ticket_locked(ticket_id)
-                if ticket is None or ticket.client != client:
-                    if not self._write_wait_audit_locked(
-                        "session_wait",
-                        client=client,
-                        ticket=ticket_id,
-                        decision="expired",
-                        reason="ticket_expired",
-                        wait_started_at=wait_started_at,
-                    ):
-                        return 503, self._payload_with_degradation(
-                            self._audit_failed_payload("write"), degraded
-                        )
-                    body: dict[str, object] = {"error": "ticket_expired"}
-                    if degraded:
-                        body = self._merge_cleanup_degraded(
-                            body, self._unique(degraded)
-                        )
-                    return 410, body
-
-                slot_idle = (
-                    self._active is None
-                    and self._releasing is None
-                    and self._grant_inflight is None
-                    and self._wal_marker is None
-                    and not self._handoff_pending
-                    and not self._lease_end_blocks_locked()
-                    and not self._grant_audit_failed
-                    and self._lifecycle_recovery_fault is None
-                )
-                at_head = bool(self._queue) and self._queue[0] is ticket
-                preferential = (
-                    ticket in self._queue
-                    and self._preferential_reacquire_locked(ticket.client)
-                )
-                can_claim = slot_idle and (
-                    (at_head and not self._grace_blocks_stranger_locked(ticket.client))
-                    or preferential
-                )
-                if can_claim:
-                    if self._queue[0] is not ticket:
-                        self._queue.remove(ticket)
-                        self._queue.insert(0, ticket)
-                        self._bump_revision_locked()
-                    claim_outcome, claim_payload = self._claim_head_from_wait_locked(
-                        ticket
-                    )
-                    if claim_outcome == "granted" and claim_payload is not None:
-                        if degraded:
-                            claim_payload = self._merge_cleanup_degraded(
-                                claim_payload, self._unique(degraded)
+                    active_payload = self._wait_active_payload_locked(client, ticket_id)
+                    if active_payload is not None:
+                        active_lease = self._active
+                        if not self._write_wait_audit_locked(
+                            "session_wait",
+                            client=client,
+                            ticket=ticket_id,
+                            lease_id=(
+                                self._active.lease_id
+                                if self._active is not None
+                                else None
+                            ),
+                            decision="active",
+                            reason="granted",
+                            wait_started_at=wait_started_at,
+                        ):
+                            return 503, self._payload_with_degradation(
+                                self._audit_failed_payload("write"), degraded
                             )
-                        return 200, claim_payload
-                    if claim_outcome == "audit_failed":
-                        # The claim returns the audit_failed body, audit_stage
-                        # included, in place of the grant payload (every such
-                        # return goes through its failed()); the fallback only
-                        # keeps the refusal a dict.
-                        return 503, self._payload_with_degradation(
-                            claim_payload or self._audit_failed_payload(None),
-                            degraded,
+                        if self._active is not active_lease:
+                            return 409, self._payload_with_degradation(
+                                {"error": "coordination_changed"}, degraded
+                            )
+                        if degraded:
+                            active_payload = self._merge_cleanup_degraded(
+                                active_payload, self._unique(degraded)
+                            )
+                        return 200, active_payload
+
+                    ticket = self._find_ticket_locked(ticket_id)
+                    if ticket is None or ticket.client != client:
+                        if not self._write_wait_audit_locked(
+                            "session_wait",
+                            client=client,
+                            ticket=ticket_id,
+                            decision="expired",
+                            reason="ticket_expired",
+                            wait_started_at=wait_started_at,
+                        ):
+                            return 503, self._payload_with_degradation(
+                                self._audit_failed_payload("write"), degraded
+                            )
+                        body: dict[str, object] = {"error": "ticket_expired"}
+                        if degraded:
+                            body = self._merge_cleanup_degraded(
+                                body, self._unique(degraded)
+                            )
+                        return 410, body
+
+                    slot_idle = (
+                        self._active is None
+                        and self._releasing is None
+                        and self._grant_inflight is None
+                        and self._wal_marker is None
+                        and not self._handoff_pending
+                        and not self._lease_end_blocks_locked()
+                        and not self._grant_audit_failed
+                        and self._lifecycle_recovery_fault is None
+                    )
+                    at_head = bool(self._queue) and self._queue[0] is ticket
+                    preferential = (
+                        ticket in self._queue
+                        and self._preferential_reacquire_locked(ticket.client)
+                    )
+                    can_claim = slot_idle and (
+                        (
+                            at_head
+                            and not self._grace_blocks_stranger_locked(ticket.client)
                         )
-                    if claim_outcome == "coordination_changed":
-                        return 409, self._payload_with_degradation(
-                            {"error": "coordination_changed"}, degraded
+                        or preferential
+                    )
+                    if can_claim:
+                        if self._queue[0] is not ticket:
+                            self._queue.remove(ticket)
+                            self._queue.insert(0, ticket)
+                            self._bump_revision_locked()
+                        claim_outcome, claim_payload = self._claim_head_from_wait_locked(
+                            ticket
                         )
-                    if claim_outcome == "operation_cancelled":
-                        return 409, self._payload_with_degradation(
-                            {"error": "operation_cancelled"}, degraded
+                        if claim_outcome == "granted" and claim_payload is not None:
+                            if degraded:
+                                claim_payload = self._merge_cleanup_degraded(
+                                    claim_payload, self._unique(degraded)
+                                )
+                            return 200, claim_payload
+                        if claim_outcome == "audit_failed":
+                            # The claim returns the audit_failed body, audit_stage
+                            # included, in place of the grant payload (every such
+                            # return goes through its failed()); the fallback only
+                            # keeps the refusal a dict.
+                            return 503, self._payload_with_degradation(
+                                claim_payload or self._audit_failed_payload(None),
+                                degraded,
+                            )
+                        if claim_outcome == "coordination_changed":
+                            return 409, self._payload_with_degradation(
+                                {"error": "coordination_changed"}, degraded
+                            )
+                        if claim_outcome == "operation_cancelled":
+                            return 409, self._payload_with_degradation(
+                                {"error": "operation_cancelled"}, degraded
+                            )
+                        if claim_outcome == "busy":
+                            payload = self._ticket_payload_locked(ticket, 1)
+                            if degraded:
+                                payload = self._merge_cleanup_degraded(
+                                    payload, self._unique(degraded)
+                                )
+                            return 202, payload
+
+                    real_remaining = real_deadline - time.monotonic()
+                    if real_remaining <= 0.0:
+                        audit_outcome = self._write_wait_audit_outcome_locked(
+                            "session_wait",
+                            client=client,
+                            ticket=ticket_id,
+                            decision="queued",
+                            reason="queued",
+                            wait_started_at=wait_started_at,
+                            blocking=False,
                         )
-                    if claim_outcome == "busy":
-                        payload = self._ticket_payload_locked(ticket, 1)
+                        if audit_outcome == "failed":
+                            return 503, self._payload_with_degradation(
+                                self._audit_failed_payload("write"), degraded
+                            )
+                        active_payload = self._wait_active_payload_locked(client, ticket_id)
+                        still_granting = (
+                            self._grant_inflight is not None
+                            and self._grant_inflight.ticket is ticket
+                        )
+                        if ticket in self._queue:
+                            position = self._queue.index(ticket) + 1
+                        elif still_granting or active_payload is not None:
+                            position = 1
+                        else:
+                            return 409, self._payload_with_degradation(
+                                {"error": "coordination_changed"}, degraded
+                            )
+                        payload = self._ticket_payload_locked(ticket, position)
                         if degraded:
                             payload = self._merge_cleanup_degraded(
                                 payload, self._unique(degraded)
                             )
                         return 202, payload
 
-                real_remaining = real_deadline - time.monotonic()
-                if real_remaining <= 0.0:
-                    audit_outcome = self._write_wait_audit_outcome_locked(
-                        "session_wait",
-                        client=client,
-                        ticket=ticket_id,
-                        decision="queued",
-                        reason="queued",
-                        wait_started_at=wait_started_at,
-                        blocking=False,
-                    )
-                    if audit_outcome == "failed":
-                        return 503, self._payload_with_degradation(
-                            self._audit_failed_payload("write"), degraded
-                        )
-                    active_payload = self._wait_active_payload_locked(client, ticket_id)
-                    still_granting = (
-                        self._grant_inflight is not None
-                        and self._grant_inflight.ticket is ticket
-                    )
-                    if ticket in self._queue:
-                        position = self._queue.index(ticket) + 1
-                    elif still_granting or active_payload is not None:
-                        position = 1
-                    else:
-                        return 409, self._payload_with_degradation(
-                            {"error": "coordination_changed"}, degraded
-                        )
-                    payload = self._ticket_payload_locked(ticket, position)
-                    if degraded:
-                        payload = self._merge_cleanup_degraded(
-                            payload, self._unique(degraded)
-                        )
-                    return 202, payload
+                    now = self._time_fn()
+                    ticket_remaining = max(0.0, ticket.touched_at + SESSION_TTL_S - now)
+                    owner_remaining = real_remaining
+                    if self._active is not None:
+                        owner_remaining = max(0.0, self._active.effective_expiry() - now)
+                    elif self._grace_blocks_stranger_locked(ticket.client):
+                        owner_remaining = self._grace_remaining_locked()
+                    wait_for = min(real_remaining, ticket_remaining, owner_remaining)
+                    lease_end_remaining = self._lease_end_wait_remaining_locked()
+                    if lease_end_remaining is not None:
+                        wait_for = min(wait_for, lease_end_remaining)
+                    if wait_for <= 0.0:
+                        continue
+                    # Precondition: one blocking HTTP wait per ticket, and at
+                    # most SESSION_WAIT_MAX_IN_FLIGHT of them. The loopback
+                    # pool is sized for that (MAX_HTTP_WORKERS = MAX_SESSION_QUEUE
+                    # + 32). A duplicate, or a wait past the cap, must answer
+                    # now. Condition.wait would hold this worker until timeout.
+                    if admitted_ticket is None:
+                        if not self._try_admit_session_wait_locked(
+                            ticket.ticket_id, real_deadline
+                        ):
+                            return self._session_wait_not_admitted_locked(
+                                ticket, degraded
+                            )
+                        admitted_ticket = ticket.ticket_id
+                    self._condition.wait(wait_for)
+            finally:
+                if admitted_ticket is not None:
+                    self._blocking_session_waits.pop(admitted_ticket, None)
 
-                now = self._time_fn()
-                ticket_remaining = max(0.0, ticket.touched_at + SESSION_TTL_S - now)
-                owner_remaining = real_remaining
-                if self._active is not None:
-                    owner_remaining = max(0.0, self._active.effective_expiry() - now)
-                elif self._grace_blocks_stranger_locked(ticket.client):
-                    owner_remaining = self._grace_remaining_locked()
-                wait_for = min(real_remaining, ticket_remaining, owner_remaining)
-                lease_end_remaining = self._lease_end_wait_remaining_locked()
-                if lease_end_remaining is not None:
-                    wait_for = min(wait_for, lease_end_remaining)
-                if wait_for <= 0.0:
-                    continue
-                self._condition.wait(wait_for)
+    def _try_admit_session_wait_locked(self, ticket_id: str, deadline: float) -> bool:
+        """Take the one blocking slot for this ticket, if the quota has room.
+
+        Caller holds the coordinator lock. False means this HTTP wait must
+        return now: another wait already holds the ticket, or
+        SESSION_WAIT_MAX_IN_FLIGHT slots are taken. The pool in
+        loopback.MAX_HTTP_WORKERS budgets that many session waits and no
+        duplicates. deadline is the admitted call's monotonic end, so a
+        refusal can report retry_after_s.
+        """
+        if (
+            ticket_id in self._blocking_session_waits
+            or len(self._blocking_session_waits) >= SESSION_WAIT_MAX_IN_FLIGHT
+        ):
+            return False
+        self._blocking_session_waits[ticket_id] = deadline
+        return True
+
+    def _session_wait_not_admitted_locked(
+        self, ticket: _Ticket, degraded: list
+    ) -> tuple[int, dict]:
+        """202 for a wait that does not hold a worker.
+
+        status stays queued, with the same ticket fields a timed-out wait
+        returns, plus session_wait_quota so the refusal is visible.
+        duplicate: this ticket already has its one blocking wait.
+        full: the session-wait quota is taken by other tickets.
+        retry_after_s is what remains of that blocking wait, or 0 when
+        the quota is full and this ticket has no holder.
+
+        This refusal does not write a session_wait audit row. The timeout
+        path does. An audit write here would bump the revision and persist
+        a snapshot on every duplicate, which is the spin this refusal
+        avoids. The HTTP log line SESSION event=wait status=202 is the record.
+        """
+        if ticket in self._queue:
+            position = self._queue.index(ticket) + 1
+        else:
+            position = 1
+        payload = self._ticket_payload_locked(ticket, position)
+        holder_deadline = self._blocking_session_waits.get(ticket.ticket_id)
+        if holder_deadline is not None:
+            payload["session_wait_quota"] = "duplicate"
+            payload["retry_after_s"] = max(0.0, holder_deadline - time.monotonic())
+        else:
+            payload["session_wait_quota"] = "full"
+            payload["retry_after_s"] = 0.0
+        if degraded:
+            payload = self._merge_cleanup_degraded(payload, self._unique(degraded))
+        return 202, payload
 
     def heartbeat(
         self, client: ClientIdentity, lease_token: str | None
