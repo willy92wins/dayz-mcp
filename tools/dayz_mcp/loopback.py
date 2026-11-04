@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import re
+import select
 import socket
 import stat
 import sys
@@ -8930,15 +8931,90 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _read_idle_request_line(self) -> bool:
-        """Block for the next request line while stop() can wake this socket."""
+        """Block for the next request line while stop() can wake this socket.
+
+        Bytes already in rfile are taken with a non-blocking peek. Otherwise
+        the wait is one select() on the connection and the wake socket.
+        readline() still blocks, for up to KEEPALIVE_IDLE_S, once a request
+        line has started to arrive. No poll loop.
+        """
         self._mark_idle_keepalive(True)
         try:
             if self.close_connection or self._server_stopping():
                 self.close_connection = True
                 return False
+            if not self._wait_until_idle_readable():
+                self.close_connection = True
+                return False
             return self._consume_request_line()
         finally:
             self._mark_idle_keepalive(False)
+
+    def _reader_holds_bytes(self) -> bool:
+        """True when rfile already has the next request byte.
+
+        makefile() returns _io.BufferedReader. Its buffer is not visible
+        from Python, and select() does not see bytes already read into it.
+        peek(1) with timeout 0 returns those bytes without waiting. An
+        empty buffer returns b'' at once instead of recv()ing for
+        KEEPALIVE_IDLE_S. The idle timeout is restored either way.
+        """
+        try:
+            self.connection.settimeout(0.0)
+        except OSError:
+            self.close_connection = True
+            return False
+        try:
+            return bool(self.rfile.peek(1))
+        except (OSError, ValueError):
+            return False
+        finally:
+            try:
+                self.connection.settimeout(KEEPALIVE_IDLE_S)
+            except OSError:
+                self.close_connection = True
+
+    def _wait_until_idle_readable(self) -> bool:
+        """True when the connection can yield a request line.
+
+        One select for the idle budget when the buffer is empty. The wake
+        byte is level-triggered, so a waiter that enters select after
+        stop()'s write still returns at once. A missing wake socket means
+        stop() already closed it. A readable wake socket or _stopping
+        skips readline.
+        """
+        if self._reader_holds_bytes():
+            return not self.close_connection
+        if self.close_connection or self._server_stopping():
+            return False
+        deadline = time.monotonic() + KEEPALIVE_IDLE_S
+        wake = getattr(self.server, "_keepalive_wake_reader", None)
+        # Closed by server_close: the attribute stays, the value is None.
+        # select() on the connection alone would sit for KEEPALIVE_IDLE_S.
+        if wake is None and hasattr(self.server, "_keepalive_wake_reader"):
+            return False
+        watches: list[socket.socket] = [self.connection]
+        if isinstance(wake, socket.socket):
+            watches.append(wake)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        try:
+            readable, _, _ = select.select(watches, [], [], remaining)
+        except (OSError, ValueError):
+            return False
+        if self._server_stopping() or (wake is not None and wake in readable):
+            return False
+        if self.connection not in readable:
+            return False
+        try:
+            # A full idle budget for the rest of the line, as before select().
+            # The idle wait does not eat into a request that arrives late
+            # and in more than one segment.
+            self.connection.settimeout(KEEPALIVE_IDLE_S)
+        except OSError:
+            return False
+        return True
 
     def _consume_request_line(self) -> bool:
         try:
@@ -10478,7 +10554,38 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
         self._human_input_diagnostic = threading.BoundedSemaphore(1)
         self._idle_keepalive_lock = threading.Lock()
         self._idle_keepalive_sockets: set[object] = set()
+        self._keepalive_wake_reader: socket.socket | None = None
+        self._keepalive_wake_writer: socket.socket | None = None
         super().__init__(*args, **kwargs)
+        self._open_keepalive_wake()
+
+    def _open_keepalive_wake(self) -> None:
+        try:
+            reader, writer = socket.socketpair()
+        except OSError:
+            # Bind already succeeded. Drop the listen socket before the
+            # constructor exception abandons this server.
+            super().server_close()
+            raise
+        self._keepalive_wake_reader = reader
+        self._keepalive_wake_writer = writer
+
+    def _close_keepalive_wake(self) -> None:
+        for name in ("_keepalive_wake_reader", "_keepalive_wake_writer"):
+            sock = getattr(self, name, None)
+            setattr(self, name, None)
+            if sock is None:
+                continue
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self._close_keepalive_wake()
 
     def register_idle_keepalive(self, connection: object) -> None:
         with self._idle_keepalive_lock:
@@ -10489,7 +10596,20 @@ class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
             self._idle_keepalive_sockets.discard(connection)
 
     def wake_idle_keepalives(self) -> None:
-        """Unblock idle keep-alive reads so stop() does not leave them dispatched."""
+        """Unblock idle keep-alive reads so stop() does not leave them dispatched.
+
+        The byte stays in the wake socket, so every idle select() returns,
+        including one that starts after this write. shutdown() does not
+        wake that select on its own; the byte does. shutdown() still runs
+        so a recv already inside readline is nudged where the platform
+        allows it.
+        """
+        writer = self._keepalive_wake_writer
+        if writer is not None:
+            try:
+                writer.send(b"\x00")
+            except OSError:
+                pass
         with self._idle_keepalive_lock:
             sockets = list(self._idle_keepalive_sockets)
         for connection in sockets:

@@ -1519,6 +1519,105 @@ class DaemonKeepaliveTests(unittest.TestCase):
                     pass
             daemon.stop()
 
+    def test_pipelined_keepalive_answers_the_buffered_request(self) -> None:
+        """Two keep-alive requests in one write both get a response at once.
+
+        The second request is already in rfile after the first response.
+        select() does not see those bytes. Missing them waits out
+        KEEPALIVE_IDLE_S (8s) and then closes. This bound is 1s.
+        """
+        target = "/status?" + urllib.parse.urlencode({"key": self.key})
+        one = (
+            f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Connection: keep-alive\r\n\r\n"
+        ).encode("ascii")
+        sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        try:
+            sock.settimeout(1.0)
+            started = time.monotonic()
+            sock.sendall(one + one)
+            status1, headers1, _body1, rest = _read_http(sock)
+            self.assertTrue(status1.startswith(b"HTTP/1.0 200"), status1)
+            self.assertIn("keep-alive", headers1.get("connection", "").lower())
+            try:
+                status2, _headers2, _body2, _rest = _read_http(sock, rest)
+            except (TimeoutError, OSError) as exc:
+                self.fail(f"pipelined second response did not arrive: {exc}")
+            self.assertTrue(status2.startswith(b"HTTP/1.0 200"), status2)
+            self.assertLess(time.monotonic() - started, 1.0)
+        finally:
+            sock.close()
+
+    def test_stop_releases_idle_keepalive_worker_while_client_open(self) -> None:
+        """#318: an idle keep-alive worker must leave shortly after stop().
+
+        The client socket stays open for the whole check. Closing it would
+        hide the Windows bug, where shutdown() does not unblock the idle
+        read and the worker sits until KEEPALIVE_IDLE_S (8s).
+        """
+        daemon = loopback.LoopbackServer(
+            0,
+            "stop-key",
+            log_sink=lambda _message: None,
+            poll_interval=0.01,
+            reclaim_orphans=False,
+        )
+        daemon.start()
+        sock: socket.socket | None = None
+        try:
+            assert daemon.httpd is not None
+            httpd = daemon.httpd
+            host, port = httpd.server_address
+            self.assertNotEqual(int(port), _FORBIDDEN_PORT)
+            sock = socket.create_connection((host, int(port)), timeout=2.0)
+            sock.settimeout(2.0)
+            target = "/status?" + urllib.parse.urlencode({"key": "stop-key"})
+            sock.sendall(
+                (
+                    f"GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    "Connection: keep-alive\r\n\r\n"
+                ).encode("ascii")
+            )
+            status, headers, _body, _rest = _read_http(sock)
+            self.assertTrue(status.startswith(b"HTTP/1.0 200"), status)
+            self.assertIn("keep-alive", headers.get("connection", "").lower())
+            idle_deadline = time.monotonic() + 2.0
+            idle = 0
+            while time.monotonic() < idle_deadline:
+                with httpd._idle_keepalive_lock:
+                    idle = len(httpd._idle_keepalive_sockets)
+                if (
+                    idle == 1
+                    and httpd._http_workers._value == loopback.MAX_HTTP_WORKERS - 1
+                ):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(idle, 1)
+            self.assertEqual(
+                httpd._http_workers._value, loopback.MAX_HTTP_WORKERS - 1
+            )
+            started = time.monotonic()
+            daemon.stop()
+            released = httpd._http_workers._value == loopback.MAX_HTTP_WORKERS
+            while not released and (time.monotonic() - started) < 1.0:
+                time.sleep(0.01)
+                released = httpd._http_workers._value == loopback.MAX_HTTP_WORKERS
+            elapsed = time.monotonic() - started
+            # The test has not closed the client. getpeername fails if it has.
+            self.assertIsNotNone(sock.getpeername())
+            self.assertTrue(
+                released,
+                f"idle keep-alive worker still held {elapsed:.3f}s after stop()",
+            )
+            self.assertLess(elapsed, 1.0)
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            daemon.stop()
+
     def test_stop_during_follow_up_parse_does_not_dispatch(self) -> None:
         """F13: stop() begins after the follow-up request line was read and
         while its headers are still being parsed. The post-parse guard must
