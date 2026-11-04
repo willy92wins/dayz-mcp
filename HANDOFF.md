@@ -8,13 +8,16 @@
   - Tras el checkout, los registros y los bundles de los dos lanzadores conservan sus hashes (58 ficheros cada uno).
 - **Entraron 5 commits** (`e18e481..3732333`):
   - #319 y #320, solo documentación;
-  - #321: la URL del poll del servidor ya no pasa de 1024 caracteres, el arreglo del `poll error=7` (PBO y daemon);
+  - #321: arreglo del `poll error=7` (PBO y daemon). Con la clave de 43 caracteres que genera la instalación, que es la de LIVE y T130, la URL del poll del servidor cabe en 1024 caracteres. Una clave 41 caracteres más larga llevaría el caso saturado a 1025 (`tools/tests/test_poll_url_engine_limit.py`, docstring del módulo);
   - #322 (#318): en Windows, `stop()` libera los workers keep-alive ociosos;
   - #323 (#317): una sola espera bloqueante de `/session/wait` por ticket, pausa de cliente y nueva descripción de `session_wait`.
 - **En el vault:** `AI/30_Sessions/2026-11-04-DayZ_MCP-promocion-0107c0c-plan.md` (plan, apunta a `3732333d`) y `AI/30_Sessions/2026-11-04-DayZ_MCP-flecos-317-318.md`; la promoción del 3/11 está en `AI/30_Sessions/2026-11-03-DayZ_MCP-promocion-live.md`.
-- **Lanzadores `dayz-test-v1`, sin resellar el 4/11.** `e18e481..3732333` no toca el lanzador ni los 21 ficheros que fija `tools/packaged-modules.lock.json`, y los doctores no dan `NATIVE_BUNDLE_EXTERNAL_DRIFT`. Siguen los resellados del 3/11 por la tarde, posteriores a la actualización de DayZ Tools (build `26405911`):
-  - LIVE: `approved-launchers.json` `FC65EDF4…`, PE `F24523EA…`, `app.pyz` `6C5F5108…`, recibo `d1c49575…`;
-  - T130: `approved-launchers.json` `A550CEAC…`, PE `B8D1CFCA…`, `app.pyz` `6C5F5108…`, recibo `84f5b804…`.
+- **Lanzadores `dayz-test-v1`, sin resellar el 4/11.** `e18e481..3732333` no toca el lanzador ni los 21 ficheros que fija `tools/packaged-modules.lock.json`, y los doctores no dan `NATIVE_BUNDLE_EXTERNAL_DRIFT`.
+  - Siguen los resellados del 3/11, hechos tras la actualización de DayZ Tools de las 13:56 (build `26323527`): LIVE a las 14:26 y T130 a las 14:37, al promoverlo.
+  - La actualización de las 18:54 (build `26405911`, el actual) no los ha desfasado.
+  - Registros vigentes:
+    - LIVE: `approved-launchers.json` `FC65EDF4…`, PE `F24523EA…`, `app.pyz` `6C5F5108…`, recibo `d1c49575…`;
+    - T130: `approved-launchers.json` `A550CEAC…`, PE `B8D1CFCA…`, `app.pyz` `6C5F5108…`, recibo `84f5b804…`.
   - La política de T130 solo existe en la copia privada de la app de Claude (`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\DayZ_MCP_130\launcher-policy.json`). Para construir T130 fuera de la app hay que pasar esa ruta con `--policy`.
   - `replace-dayz-test-v1 --expected-sha256` solo acepta hexadecimal en mayúsculas (`tools/dayz_mcp/launcher_registry_update.py:39`).
   - DayZ (221100) tiene una actualización pendiente en Steam (`StateFlags 6`). Al aplicarse cambiará `DayZDiag_x64.exe`, los dos lanzadores quedarán desfasados y habrá que resellarlos.
