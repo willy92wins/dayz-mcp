@@ -98,6 +98,10 @@ def _valid_text(value: object, *, maximum: int = 520) -> bool:
 
 
 def _valid_absolute_path(value: object) -> bool:
+    if os.name != "nt":
+        from dayz_mcp.linux_compat import valid_posix_absolute_path
+
+        return valid_posix_absolute_path(value)
     if not _valid_text(value) or ntpath.normpath(value) != value:
         return False
     drive, tail = ntpath.splitdrive(value)

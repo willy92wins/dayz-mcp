@@ -297,6 +297,8 @@ class BackupTransactionAdversarialTest(HangGuardedTestCase):
 
                 return race
 
+            # Off Windows the no-clobber rename is posix_fileops.rename_noreplace.
+            original_noreplace = identity_migration.posix_fileops.rename_noreplace
             with (
                 patch.object(
                     identity_migration.os,
@@ -307,6 +309,11 @@ class BackupTransactionAdversarialTest(HangGuardedTestCase):
                     identity_migration.os,
                     "rename",
                     side_effect=boundary(original_rename),
+                ),
+                patch.object(
+                    identity_migration.posix_fileops,
+                    "rename_noreplace",
+                    side_effect=boundary(original_noreplace),
                 ),
                 self.assertRaisesRegex(
                     RunsBackupGateError, "runs_backup_transaction_conflict"
@@ -597,8 +604,8 @@ class BackupTransactionAdversarialTest(HangGuardedTestCase):
                     )
                 else:
                     context = patch.object(
-                        identity_migration.os,
-                        "rename",
+                        identity_migration.os if os.name == "nt" else identity_migration.posix_fileops,
+                        "rename" if os.name == "nt" else "rename_noreplace",
                         side_effect=OSError("fixture-rename"),
                     )
                 with context, self.assertRaises(RunsBackupGateError):
@@ -654,6 +661,7 @@ class BackupTransactionAdversarialTest(HangGuardedTestCase):
             self.assertEqual(marker.read_bytes(), external)
             self.assertTrue(displaced.is_file())
 
+    @unittest.skipUnless(os.name == "nt", "a share-mode handle blocks renames only on Windows")
     def test_recovery_pins_marker_against_swap_until_delete_on_close(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
