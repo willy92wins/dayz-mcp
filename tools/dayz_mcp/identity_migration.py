@@ -97,7 +97,7 @@ try:
 except ImportError:  # pragma: no cover - covered by the fail-closed runtime path.
     psutil = None  # type: ignore[assignment]
 
-from dayz_mcp import byte_lock
+from dayz_mcp import byte_lock, posix_fileops
 from dayz_mcp.accredited_daemon_transport import argv_matches_redirected
 from dayz_mcp.native_process_guard import NativeProcessGuard, identity_hashes
 from dayz_mcp.orphan_guard import image_name_of
@@ -235,7 +235,7 @@ def _assert_no_name_surrogates(path: Path, error_code: str) -> None:
         except OSError as error:
             raise RunsBackupGateError(error_code) from error
         tag = int(getattr(value, "st_reparse_tag", 0) or 0)
-        if tag & _NAME_SURROGATE_BIT:
+        if tag & _NAME_SURROGATE_BIT or (os.name != "nt" and stat.S_ISLNK(value.st_mode)):
             raise RunsBackupGateError(error_code)
 
 
@@ -293,9 +293,22 @@ def _safe_unlink_owned(
         fault_injector(f"{phase_name}_before_unlink_open")
     if not os.path.lexists(path):
         return
-    if os.name != "nt":
-        raise RunsBackupGateError("runs_backup_recovery_conflict")
     candidates = expected if isinstance(expected, tuple) else (expected,)
+    if os.name != "nt":
+        try:
+            posix_fileops.unlink_owned(
+                path,
+                lambda actual: _matches_owned_bytes(actual, candidates, allow_prefix),
+                fault_injector=fault_injector,
+                phase_name=phase_name,
+            )
+        except posix_fileops.OwnedUnlinkConflict as error:
+            raise RunsBackupGateError("runs_backup_recovery_conflict") from error
+        except posix_fileops.OwnedUnlinkFailed as error:
+            raise RunsBackupGateError("runs_backup_recovery_failed") from error
+        if os.path.lexists(path):
+            raise RunsBackupGateError("runs_backup_recovery_failed")
+        return
     handle = _kernel32.CreateFileW(
         str(_absolute(path)),
         _GENERIC_READ | _DELETE_ACCESS,
@@ -1241,14 +1254,20 @@ def _validate_transaction_marker(
     return payload, encoded
 
 
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """os.rename with its Windows meaning: FileExistsError instead of replacing."""
+    if os.name == "nt":
+        os.rename(source, target)
+    else:
+        posix_fileops.rename_noreplace(source, target)
+
+
 def _publish_transaction_marker(
     marker_path: Path,
     next_path: Path,
     marker: Mapping[str, object],
     fault_injector: Callable[[str], None] | None,
 ) -> str:
-    if os.name != "nt":
-        raise RunsBackupGateError("runs_backup_transaction_publish_failed")
     if os.path.lexists(marker_path):
         raise RunsBackupGateError("runs_backup_transaction_conflict")
     if os.path.lexists(next_path):
@@ -1267,7 +1286,7 @@ def _publish_transaction_marker(
     if _read_file(next_path, "invalid_runs_backup_transaction") != encoded:
         raise RunsBackupGateError("runs_backup_transaction_conflict")
     try:
-        os.rename(next_path, marker_path)
+        _rename_noreplace(next_path, marker_path)
     except FileExistsError as error:
         raise RunsBackupGateError("runs_backup_transaction_conflict") from error
     except OSError as error:
@@ -1705,7 +1724,7 @@ def ensure_runs_v1_backup(
         if os.path.lexists(receipt_path):
             raise RunsBackupGateError("runs_backup_receipt_publish_conflict")
         try:
-            os.rename(pending_receipt_path, receipt_path)
+            _rename_noreplace(pending_receipt_path, receipt_path)
         except OSError as error:
             raise RunsBackupGateError("runs_backup_receipt_publish_failed") from error
         if fault_injector is not None:

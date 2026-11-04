@@ -13,8 +13,12 @@ Linux implementations in place before any other module binds them:
   Windows-only checks);
 - ``pinned_keyfile.read_pinned_keyfile``: a POSIX reader with the Win32 reader's refusals;
 - ``native_process_snapshot.full_image_path_of``: ``/proc/<pid>/exe``;
-- ``native_process_guard``: process images are absolute POSIX paths, not drive paths;
-- ``server_cli.open_lock_file``: ``byte_lock.open_lock_file``.
+- ``native_process_guard``, ``accredited_daemon_transport`` and
+  ``native_process_snapshot.working_directory_of``: process images and working
+  directories are absolute POSIX paths, not drive paths;
+- ``server_cli.open_lock_file``: ``byte_lock.open_lock_file``;
+- ``daemon_policy_contract.valid_absolute_path``: ``valid_posix_absolute_path``
+  (the Win32 rule demands a drive letter, so no Linux path was ever valid).
 
 On Windows ``install()`` does nothing and importing this module has no side effect.
 Unsealed modules import ``win_dll`` and ``is_python_image`` from here directly.
@@ -25,6 +29,7 @@ from __future__ import annotations
 import ctypes
 import ntpath
 import os
+import posixpath
 import stat as _stat
 from pathlib import Path
 
@@ -83,6 +88,23 @@ def is_python_image(value: object) -> bool:
     basename = os.path.basename(value)
     return basename.startswith("python") and all(
         character.isdigit() or character == "." for character in basename[6:]
+    )
+
+
+def valid_posix_absolute_path(value: object) -> bool:
+    """The drive-letter rule's POSIX counterpart: an absolute, normalized path.
+
+    Same text limits as ``daemon_policy_contract.valid_text`` (1..520 characters,
+    NFC, no NUL, no lone surrogates); ``//`` at the start is refused, like any other
+    path that normalization would change.
+    """
+    from dayz_mcp.daemon_policy_contract import valid_text
+
+    return (
+        valid_text(value)
+        and value.startswith("/")
+        and not value.startswith("//")
+        and posixpath.normpath(value) == value
     )
 
 
@@ -171,7 +193,7 @@ def full_image_path_of_posix(pid: int) -> str | None:
 
 
 class _NtpathWithPosixIsabs:
-    """ntpath for native_process_guard, except that a POSIX image path is absolute.
+    """ntpath for sealed modules, except that a POSIX path is absolute.
 
     The identity hash keeps ntpath.normpath, so its value is computed the same way
     on every host.
@@ -207,6 +229,7 @@ def install() -> None:
     from dayz_mcp import native_process_snapshot
 
     native_process_snapshot.full_image_path_of = full_image_path_of_posix
+    native_process_snapshot.ntpath = _NtpathWithPosixIsabs()
 
     from dayz_mcp import pinned_keyfile
 
@@ -216,6 +239,14 @@ def install() -> None:
 
     native_process_guard.ntpath = _NtpathWithPosixIsabs()
 
+    from dayz_mcp import accredited_daemon_transport
+
+    accredited_daemon_transport.ntpath = _NtpathWithPosixIsabs()
+
     from dayz_mcp import byte_lock, server_cli
 
     server_cli.open_lock_file = byte_lock.open_lock_file
+
+    from dayz_mcp import daemon_policy_contract
+
+    daemon_policy_contract.valid_absolute_path = valid_posix_absolute_path

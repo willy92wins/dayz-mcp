@@ -88,17 +88,36 @@ launcher (`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) are 
   (an `UnavailableLibrary`: prototypes bind at import, calls raise `OSError(win32_unavailable:...)`),
   `pinned_keyfile.read_pinned_keyfile` (POSIX reader with the Win32 reader's refusals: absolute normalized path,
   no symlink in it, regular file, one link, owned by the user, not group/other writable, at most 4096 bytes),
-  `native_process_snapshot.full_image_path_of` (`/proc/<pid>/exe`), the absolute-path test of
-  `native_process_guard` (POSIX image paths), and `server_cli.open_lock_file`. It also provides `win_dll()` and
+  `native_process_snapshot.full_image_path_of` (`/proc/<pid>/exe`), the absolute-path test (`ntpath.isabs`, which
+  refuses `/home/...` since Python 3.13) of `native_process_guard`, `accredited_daemon_transport` and
+  `native_process_snapshot.working_directory_of`, `daemon_policy_contract.valid_absolute_path` (the drive-letter
+  rule, replaced by "absolute and normalized"), and `server_cli.open_lock_file`. It also provides `win_dll()` and
   `is_python_image()` (`python`, `python3`, `python3.14` off Windows) to unsealed modules. On Windows `install()`
   does nothing. Other entry points (`python -m dayz_mcp.lifecycle_cli`, ...) do not call it yet.
+- `dayz_mcp/posix_fileops.py`: what the runs.json identity migration (`identity_migration.py`) needs from
+  Windows handles, rebuilt for POSIX. `rename_noreplace` is `renameat2(RENAME_NOREPLACE)` (fallback
+  `link`+`unlink`; both fail with `EEXIST`), used to publish the transaction marker and the receipt.
+  `unlink_owned` replaces "open with share-read only, verify bytes and file ID, delete on close": it opens the
+  leaf `O_NOFOLLOW` under a held directory descriptor, requires a regular single-link file with the owned bytes,
+  moves the name to a random quarantine name with `rename_noreplace`, and unlinks only if the quarantined inode
+  is the descriptor's (a foreign file caught there is moved back). POSIX cannot block a concurrent rename as the
+  Windows share mode does; it is detected instead and ends in `runs_backup_recovery_conflict` with nothing
+  foreign deleted (`tests/test_posix_fileops.py`; the Windows pinning test is skipped off Windows). The
+  migration also refuses a symbolic link anywhere in the migration path, as Windows refuses name surrogates.
 - `dayz_mcp/byte_lock.py`: one-byte locks, `msvcrt.locking` on Windows, open-file-description locks
   (`F_OFD_SETLK`) on Linux, which, unlike `lockf`, survive closing another descriptor of the file. Used by the
   instance lease, box admission, the knowledge lock and the daemon startup election.
 - Unsealed modules carry small `os.name` branches: the loopback sets `SO_REUSEADDR` on Linux (a restarted
   daemon could not bind while the game's polls sat in TIME_WAIT; a second listener is still refused), the
   daemon's interpreter is `tools/.venv-mcp/bin/python` compared unresolved (the venv link resolves to the
-  system interpreter), `msvcrt` is imported only on Windows.
+  system interpreter), `msvcrt` is imported only on Windows, `daemon_policy._valid_absolute_path` uses the POSIX
+  rule.
+- Daemon and client on Linux: create the venv with copied binaries, `python3 -m venv --copies tools/.venv-mcp`,
+  then `pip install -r requirements-mcp.txt` and `pip install -e tools`. Sealed `host_config` refuses a
+  registration whose `command` resolves elsewhere, and a default venv's `bin/python` is a symlink. The client
+  resolves the daemon policy from both registrations, `~/.claude.json` (`mcpServers.dayz-mcp`) and
+  `~/.codex/config.toml` (`[mcp_servers.dayz-mcp]`), which must agree, exactly as on Windows; on a host without
+  Codex that file has to exist anyway.
 
 - `dayz_mcp/podman_server.py`: runs a DayZ dedicated server in rootless podman, the way dzo
   (dayz-server-operator) starts it: a minimal `debian:trixie-slim` runtime image
@@ -118,12 +137,15 @@ Measured 2026-11-03 (Debian testing, Python 3.14): every module imports after `i
 (107 tools) and serves the loopback the bridge polls; with `install()` applied 5939 unit tests pass, and the
 failures examined are Windows-environment tests. The Windows suite was not run for this change.
 
+Measured 2026-11-04: with registrations in a scratch `HOME`, `--client` spawns `--daemon`, the runs.json
+migration completes (backup, receipt, no marker left), the client's connected-daemon identity check passes
+(`/proc` image, argv, cwd, psutil snapshot hashes) and `session_status` answers. The box reports
+`scan_known: false`: the DayZ process scan looks for the Windows images.
+
 Not ported: the shared build lock in sealed `server_cli` stays Windows-only (`build_lock_unavailable`; it guards
-managed AddonBuilder builds, which Linux does not have). `--daemon`/`--client` (and with them leases and
-`session_*`) stop at the runs.json identity migration (`runs_backup_transaction_publish_failed`): it relies on
-Windows handle semantics (no-clobber rename, delete through a pinned handle, file-ID identity) and needs a POSIX
-design. A game started by hand polls as `LEGACY_UNBOUND`; the intended Linux route is a launch path in which
-the daemon starts the native server and the Proton client itself and binds them by per-run token.
+managed AddonBuilder builds, which Linux does not have). `dayz_test_run` runs through the sealed native
+launcher (`native_launcher_backend`: a debugger-attached child in a job object), so it cannot start a Linux
+run; the podman runner is not wired into it, and a game started by hand polls as `LEGACY_UNBOUND`.
 
 ## Startup and health
 
