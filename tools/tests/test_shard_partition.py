@@ -1563,5 +1563,35 @@ class ShardRunnerParityTest(unittest.TestCase):
         self.assertEqual(admit(_shard.discover_suite()), [])
 
 
+class SlowCountGateTest(unittest.TestCase):
+    """The substring gate and the per-source cache keep the AST counts."""
+
+    def test_ascii_source_without_the_name_counts_zero(self) -> None:
+        source = "class A:\n    def test_x(self): pass\n"
+        self.assertEqual(_shard._slow_tests_in_source(source), 0)
+
+    def test_nonascii_source_is_parsed_not_shortcut(self) -> None:
+        # U+017F NFKC-folds to "s", so this decorator is slow_test to the
+        # parser while the ASCII substring never appears in the text.
+        source = "class A:\n    @ſlow_test\n    def test_x(self): pass\n"
+        self.assertEqual(_shard._slow_tests_in_source(source), 1)
+
+    def test_rewritten_module_recounts(self) -> None:
+        name = "test_slowcount_probe_tmp"
+        path = Path(f"{name}.py")
+        self.addCleanup(lambda: _shard._SLOW_COUNT_CACHE.pop(name, None))
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        path.write_text(
+            "class A:\n    def test_x(self): pass\n", encoding="utf-8"
+        )
+        self.assertEqual(_shard.slow_test_count(name), 0)
+        path.write_text(
+            "from tests._tiers import slow_test\n"
+            "class A:\n    @slow_test\n    def test_x(self): pass\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(_shard.slow_test_count(name), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
