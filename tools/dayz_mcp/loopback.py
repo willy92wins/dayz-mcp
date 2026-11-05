@@ -5464,10 +5464,9 @@ class ServerState:
             # or the coordination setter replay) no lease-end round opens
             # and no close is ever sent for it.
             coordination = self.coordination
-            registered = getattr(coordination, "peer_registered", None)
-            if not callable(registered) or not registered(
-                run_id, peer, bound[0].instance
-            ):
+            if not hasattr(coordination, "peer_registered"):
+                return False
+            if not coordination.peer_registered(run_id, peer, bound[0].instance):
                 return False
         return True
 
