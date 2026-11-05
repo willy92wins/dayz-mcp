@@ -8253,6 +8253,10 @@ class ServerState:
                         coordination.lease_end_round(session_id, lease_id)
                         is not None
                     )
+                if has_round:
+                    # §2.14 (H5): with a round the close settles the bots, so
+                    # enqueue_bot_stops_for_lease (the only pop) never runs.
+                    self._bot_by_lease.pop(lease_id, None)
         quarantined = self._retail_quarantined()
         if quarantined:
             fenced = self._fence_open_holds(session_id, lease_id)
@@ -10342,30 +10346,27 @@ class Handler(BaseHTTPRequestHandler):
 
 def _seed_restart_debt_from_lifecycle(
     coordinator: SessionCoordinator, lifecycle: object
-) -> None:
+) -> bool:
     """§2.12 (H4): seed daemon_restart debt for the live runs repair keeps.
 
     Called after the manifest is validated or restored and before the
     lifecycle fault is lifted. Nothing here reads process liveness.
+    Returns False when the seed could not be made, so the caller can
+    refuse to lift the fault (fail-closed) instead of granting clean.
     """
 
     manifest = getattr(lifecycle, "manifest", None)
     if manifest is None:
-        return
-    try:
-        runs = manifest.list_runs()
-    except Exception:
-        return
-    from dayz_mcp.process_lifecycle import _ACTIVE_STATES
+        return True
+    from dayz_mcp.process_lifecycle import restart_debt_pairs
 
-    pairs: list[tuple[str, str | None]] = [
-        (run.run_id, getattr(record, "role", None))
-        for run in runs
-        if getattr(run, "state", None) in _ACTIVE_STATES
-        for record in (getattr(run, "processes", None) or [])
-    ]
-    if pairs:
-        coordinator.seed_restart_debt(pairs)
+    try:
+        pairs = restart_debt_pairs(manifest.list_runs())
+        if pairs:
+            coordinator.seed_restart_debt(pairs)
+    except Exception:
+        return False
+    return True
 
 
 def _repair_lifecycle_recovery_fault(
@@ -10394,7 +10395,8 @@ def _repair_lifecycle_recovery_fault(
     ):
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
     if event.get("state") == "repaired":
-        _seed_restart_debt_from_lifecycle(coordinator, lifecycle)
+        if not _seed_restart_debt_from_lifecycle(coordinator, lifecycle):
+            return 409, {"error": "lifecycle_recovery_seed_failed"}
         coordinator.clear_lifecycle_recovery_fault(fault_id)
         return 200, {"repaired": True, "fault_id": fault_id}
     manifest_sha = fault.get("manifest_sha256")
@@ -10487,7 +10489,8 @@ def _repair_lifecycle_recovery_fault(
         )
     except (OSError, RuntimeError, ValueError):
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
-    _seed_restart_debt_from_lifecycle(coordinator, lifecycle)
+    if not _seed_restart_debt_from_lifecycle(coordinator, lifecycle):
+        return 409, {"error": "lifecycle_recovery_seed_failed"}
     if not coordinator.complete_lifecycle_recovery_fault(fault_id):
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
     return 200, {"repaired": True, "fault_id": fault_id}

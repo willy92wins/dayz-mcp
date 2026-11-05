@@ -59,9 +59,9 @@ from dayz_mcp.idle_warden import (
     install_idle_warden,
 )
 from dayz_mcp.process_lifecycle import (
-    _ACTIVE_STATES,
     ProcessLifecycle,
     RunManifestStore,
+    restart_debt_pairs,
 )
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.session_coordination import CleanupDisposition, SessionCoordinator
@@ -678,12 +678,7 @@ def _activate_server_coordination(
         # it is attached to the state below; the relaunch of each run clears
         # it through note_processes_gone. With a recovered lifecycle fault
         # the listing is deferred to the repair paths in loopback.py.
-        restart_pairs: list[tuple[str, str | None]] = [
-            (run.run_id, record.role)
-            for run in runs
-            if run.state in _ACTIVE_STATES
-            for record in run.processes
-        ]
+        restart_pairs = restart_debt_pairs(runs)
         if restart_pairs:
             bounded_io(coordinator.seed_restart_debt, restart_pairs)
     else:

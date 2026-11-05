@@ -414,6 +414,47 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(replaced[0].get("owned_pids"), [721])
         self.assertEqual(replaced[0].get("gone_pids"), [])
 
+    def test_replace_role_clears_only_the_replaced_role_after_its_write(self) -> None:
+        # §5.2.1 role replace (M6): the replaced role's debt is cleared by
+        # the lifecycle write, the kept role's debt is not.
+        server = self.owned(720, "server")
+        hung = self.owned(721, "client")
+        self.install_run([server, hung], state="RUNNING", owner="A")
+        self.coordinator.seed_restart_debt([(RUN_ID, "server"), (RUN_ID, "client")])
+        self.arm_launch()
+        result = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, self.request(with_witness=True)
+        )
+        self.assertIs(result.get("ok"), True, result)
+        rows = self.coordinator._lease_end_rows
+        self.assertNotIn((RUN_ID, "client"), rows)
+        self.assertIn((RUN_ID, "server"), rows)
+
+    def test_replace_role_keeps_debt_when_the_write_after_the_kill_fails(self) -> None:
+        # Negative: note_processes_gone only after the durable write lands.
+        server = self.owned(722, "server")
+        hung = self.owned(723, "client")
+        self.install_run([server, hung], state="RUNNING", owner="A")
+        self.coordinator.seed_restart_debt([(RUN_ID, "server"), (RUN_ID, "client")])
+        self.arm_launch()
+        real_replace = self.store.replace
+        calls: list[int] = []
+
+        def _flaky_replace(run):
+            calls.append(1)
+            if len(calls) >= 2:
+                raise OSError("disk")
+            return real_replace(run)
+
+        with patch.object(self.store, "replace", _flaky_replace):
+            result = self.lifecycle.start_run(
+                IDENTITY_A, self.token_a, self.request(with_witness=True)
+            )
+        self.assertIsNot(result.get("ok"), True, result)
+        rows = self.coordinator._lease_end_rows
+        self.assertIn((RUN_ID, "client"), rows)
+        self.assertIn((RUN_ID, "server"), rows)
+
     # -- fb-20260906-185909-df53 -------------------------------------------
     def test_a_client_over_a_run_with_no_client_needs_no_witness(self) -> None:
         """mode=all: the client stage extends the run its own server stage made.

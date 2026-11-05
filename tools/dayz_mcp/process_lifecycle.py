@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -70,6 +71,19 @@ RUN_STATES = frozenset(
     {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "EXITED", "UNRECONCILED"}
 )
 _ACTIVE_STATES = RUN_STATES - {"EXITED"}
+# §2.12: the game processes that are peers. A crash_reporter is a child the
+# lifecycle tracks for ports, never a bridge peer, so it owes no close.
+_RESTART_DEBT_ROLES = frozenset({"server", "client", "offline"})
+
+
+def restart_debt_pairs(runs: Iterable[RunRecord]) -> list[tuple[str, str]]:
+    return [
+        (run.run_id, record.role)
+        for run in runs
+        if run.state in _ACTIVE_STATES
+        for record in run.processes
+        if record.role in _RESTART_DEBT_ROLES
+    ]
 # States a dead-run reaper may retire: they hold ProcessRecords but no in-flight
 # lifecycle operation. STARTING/STOPPING (operation in progress under the lock) are
 # left to recover_after_restart; EXITED is terminal.
@@ -3664,6 +3678,11 @@ class ProcessLifecycle:
             self._invalidate_box_cache()
             if target.state == "EXITED":
                 self._seal_terminal(provisional.run_id, time.time())
+                # §2.12 (H6): a launch confirmed then failed leaves no live
+                # process; clear its registry/debt once EXITED is durable.
+                note_gone = getattr(self.coordinator, "note_processes_gone", None)
+                if callable(note_gone):
+                    note_gone(provisional.run_id, None)
         if attempt_started_at is not None:
             self._forget_attempt_activity(
                 provisional.run_id,

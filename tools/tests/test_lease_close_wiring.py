@@ -344,7 +344,14 @@ class LeaseCloseWiringTest(_WiringBase):
         self.coordinator.seed_restart_debt([("test-run", None)])
         lifecycle = object.__new__(process_lifecycle.ProcessLifecycle)
         lifecycle.coordinator = self.coordinator
-        lifecycle._retire_run_bindings = lambda *_args: None
+        # M5b: go through the real retire_run, so a note_processes_gone
+        # smuggled into it (clearing debt before the persist) is caught
+        # by the failing-write half below.
+        retire_state = loopback.ServerState("test-key", time_fn=self.broker_clock)
+        retire_state.coordination = self.coordinator
+        lifecycle._retire_run_bindings = (
+            lambda run_id, reason: retire_state.retire_run(run_id, reason)
+        )
         lifecycle._release_parent_anchors_locked = lambda: None
         lifecycle._best_effort_post_persist_retirement = (
             lambda *_args: None
@@ -389,10 +396,23 @@ class LeaseCloseWiringTest(_WiringBase):
                 live = SimpleNamespace(
                     run_id="kept-run",
                     state="RUNNING",
-                    processes=[SimpleNamespace(role="server")],
+                    processes=[
+                        SimpleNamespace(role="server"),
+                        SimpleNamespace(role="crash_reporter"),
+                    ],
                 )
+                seen: list[bool] = []
+
+                def _list_runs():
+                    # M7: seeding must happen while the fault is still
+                    # armed, i.e. before complete/clear lifts it.
+                    seen.append(
+                        coordinator._lifecycle_recovery_fault is not None
+                    )
+                    return [live]
+
                 lifecycle = SimpleNamespace(
-                    manifest=SimpleNamespace(list_runs=lambda: [live]),
+                    manifest=SimpleNamespace(list_runs=_list_runs),
                     repair_recovery_fault=lambda _fault: {
                         "terminal_safe": True,
                         "manifest_sha256": "sha-1",
@@ -412,6 +432,7 @@ class LeaseCloseWiringTest(_WiringBase):
                     state, "fault-1", "head-1"
                 )
                 self.assertEqual((status, body.get("repaired")), (200, True))
+                self.assertEqual(seen, [True])
                 photo = coordinator.status(self.a).get("lease_end", {})
                 self.assertEqual(
                     [
@@ -420,6 +441,52 @@ class LeaseCloseWiringTest(_WiringBase):
                     ],
                     [("server", ["daemon_restart"])],
                 )
+
+    def test_repair_seed_failure_returns_409_and_keeps_fault(self) -> None:
+        # H1 fail-closed: a seeding failure must not lift the fault.
+        for repaired_first in (True, False):
+            with self.subTest(repaired_first=repaired_first):
+                clock = FakeClock()
+                coordinator = SessionCoordinator(
+                    time_fn=clock,
+                    token_fn=SequentialIds("token"),
+                    id_fn=SequentialIds("lease"),
+                    audit=AuditSink(),
+                    cleanup=lambda *_args: {},
+                )
+                fault = {
+                    "fault": {"fault_id": "fault-1"},
+                    "event": {"state": "repaired" if repaired_first else "armed"},
+                    "pointer": {"head_event_sha256": "head-1"},
+                }
+                coordinator.arm_lifecycle_recovery_fault(fault)
+
+                def _boom():
+                    raise OSError("disk")
+
+                lifecycle = SimpleNamespace(
+                    manifest=SimpleNamespace(list_runs=_boom),
+                    repair_recovery_fault=lambda _fault: {
+                        "terminal_safe": True,
+                        "manifest_sha256": "sha-1",
+                    },
+                )
+                store = SimpleNamespace(
+                    load_active=lambda: fault,
+                    transition=lambda *a, **k: "head-2",
+                    create_receipt=lambda *a, **k: "receipt-1",
+                )
+                state = SimpleNamespace(
+                    coordination=coordinator,
+                    lifecycle_recovery_fault_store=store,
+                    lifecycle=lifecycle,
+                )
+                status, body = loopback._repair_lifecycle_recovery_fault(
+                    state, "fault-1", "head-1"
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(body.get("error"), "lifecycle_recovery_seed_failed")
+                self.assertIsNotNone(coordinator._lifecycle_recovery_fault)
 
 
 class LeaseCloseCleanupWiringTest(_WiringBase):
@@ -457,6 +524,8 @@ class LeaseCloseCleanupWiringTest(_WiringBase):
             [c["id"] for c in self._poll("server")], [int(bot["id"])]
         )
         self._release(self.a, lease)
+        # H5: with a round, _bot_by_lease must not leak the lease entry.
+        self.assertEqual(self.state._bot_by_lease, {})
         client_close = self._deliver_close("client")
         self._settle("client", client_close)
         server_close = self._deliver_close("server")
@@ -471,6 +540,28 @@ class LeaseCloseCleanupWiringTest(_WiringBase):
 
 class DaemonRestartWiringTest(unittest.TestCase):
     """K13 at the daemon seam: a live run survives in the manifest listing."""
+
+    def test_restart_debt_pairs_filters_non_peer_roles_and_exited(self) -> None:
+        # M8/M10 at the helper: EXITED seeds nothing, roles are kept as-is,
+        # and non-peer roles (crash_reporter) are dropped.
+        live = SimpleNamespace(
+            run_id="live",
+            state="RUNNING",
+            processes=[
+                SimpleNamespace(role="server"),
+                SimpleNamespace(role="crash_reporter"),
+                SimpleNamespace(role="offline"),
+            ],
+        )
+        done = SimpleNamespace(
+            run_id="done",
+            state="EXITED",
+            processes=[SimpleNamespace(role="server")],
+        )
+        self.assertEqual(
+            process_lifecycle.restart_debt_pairs([live, done]),
+            [("live", "server"), ("live", "offline")],
+        )
 
     def test_daemon_startup_seeds_restart_debt(self) -> None:
         import os
@@ -495,6 +586,18 @@ class DaemonRestartWiringTest(unittest.TestCase):
             assert first.lifecycle is not None
             from dayz_mcp.process_lifecycle import ProcessRecord, RunRecord
 
+            def _rec(pid, role):
+                return ProcessRecord(
+                    pid,
+                    "2026-08-18T00:00:00.000000Z",
+                    "a" * 64,
+                    "b" * 64,
+                    role,
+                    identity_scheme="psutil-argv-v2",
+                )
+
+            # H1: crash_reporter owes no close and must not break startup.
+            # M8/M10: EXITED runs seed nothing; offline seeds both peers.
             record = RunRecord(
                 "restart-run",
                 None,
@@ -504,18 +607,35 @@ class DaemonRestartWiringTest(unittest.TestCase):
                 "",
                 "",
                 "",
-                [
-                    ProcessRecord(
-                        PID_SERVER,
-                        "2026-08-18T00:00:00.000000Z",
-                        "a" * 64,
-                        "b" * 64,
-                        "server",
-                        identity_scheme="psutil-argv-v2",
-                    )
-                ],
+                [_rec(PID_SERVER, "server"), _rec(PID_CLIENT, "crash_reporter")],
             )
             first.lifecycle.manifest.add(record)
+            first.lifecycle.manifest.add(
+                RunRecord(
+                    "offline-run",
+                    None,
+                    None,
+                    "RUNNING_IDLE",
+                    "wiring-fixture",
+                    "",
+                    "",
+                    "",
+                    [_rec(333, "offline")],
+                )
+            )
+            first.lifecycle.manifest.add(
+                RunRecord(
+                    "old-run",
+                    None,
+                    None,
+                    "EXITED",
+                    "wiring-fixture",
+                    "",
+                    "",
+                    "",
+                    [],
+                )
+            )
             first.root_writer_lease.release()
 
             restarted = daemon.build_server_state(
@@ -526,11 +646,15 @@ class DaemonRestartWiringTest(unittest.TestCase):
                 identity = _identity("a")
                 photo = coordinator.status(identity).get("lease_end", {})
                 self.assertEqual(
-                    [
-                        (r["peer"], list(r["reasons"]))
+                    sorted(
+                        (r["run_id"], r["peer"], tuple(r["reasons"]))
                         for r in photo.get("unconfirmed", [])
+                    ),
+                    [
+                        ("offline-run", "client", ("daemon_restart",)),
+                        ("offline-run", "server", ("daemon_restart",)),
+                        ("restart-run", "server", ("daemon_restart",)),
                     ],
-                    [("server", ["daemon_restart"])],
                 )
                 status, grant = coordinator.acquire(identity, "trace")
                 self.assertEqual(status, 200, grant)
@@ -539,6 +663,7 @@ class DaemonRestartWiringTest(unittest.TestCase):
                 )
                 coordinator.release(identity, grant["lease_token"])
                 coordinator.note_processes_gone("restart-run", None)
+                coordinator.note_processes_gone("offline-run", None)
                 status, grant = coordinator.acquire(identity, "trace")
                 self.assertEqual(status, 200, grant)
                 self.assertNotIn(
