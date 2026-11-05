@@ -225,8 +225,32 @@ class AiGroupOrderBrokerTest(unittest.TestCase):
         return commands
 
     def _enqueue(self, state: loopback.ServerState):
+        # Enqueue under a real lease from the attached coordinator, as the
+        # tool layer does; bound_state attached it via the §2.12 replay.
+        coord = state.coordination
+        if coord is None:
+            return state.enqueue_command(
+                ORDER, {"group_id": GROUP_ID, "behaviour": "LOOP"}, peer="server"
+            )
+        lease = getattr(state, "_order_lease", None)
+        client = getattr(state, "_order_client", None)
+        if lease is None or client is None:
+            from tests.lease_helpers import _identity
+
+            client = _identity("order")
+            status, lease = coord.acquire(client, "trace")
+            assert status == 200, lease
+            state._order_client = client  # type: ignore[attr-defined]
+            state._order_lease = lease  # type: ignore[attr-defined]
+        payload = {
+            "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+            "started_at_utc": client.started_at_utc,
+            "session_id": client.session_id, "task_label": client.task_label,
+        }
         return state.enqueue_command(
-            ORDER, {"group_id": GROUP_ID, "behaviour": "LOOP"}, peer="server"
+            ORDER, {"group_id": GROUP_ID, "behaviour": "LOOP"}, peer="server",
+            identity_payload=payload, lease_token=lease["lease_token"],
+            operation_timeout_s=30.0,
         )
 
     def test_o1_missing_verb_is_adapter_not_loaded(self) -> None:

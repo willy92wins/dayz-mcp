@@ -74,6 +74,12 @@ def bound_state() -> loopback.ServerState:
     state.install_bound_peer(
         instance=INST_SERVER, role="server", pid=PID_SERVER, run_id="xai-run"
     )
+    # Real §2.12 path: attaching the coordinator replays the BOUND peer
+    # into its registry, so the §5.1 gate sees it registered (v13).
+    from dayz_mcp.session_coordination import SessionCoordinator
+
+    state.coordination = SessionCoordinator()
+    state.retail_probe = lambda: {"known": True, "processes": []}
     return state
 
 
@@ -113,6 +119,8 @@ def adapter_census() -> list[str]:
 
 def good_commands(*, lease_close: bool = True, adapter: bool = True) -> list[str]:
     commands = adapter_census() if adapter else _base_commands()
+    # v13: the base census already announces lease_close; never duplicate it.
+    commands = [name for name in commands if name not in ("lease_close", "lease_close_client")]
     if lease_close:
         commands += ["lease_close"]
     return commands
