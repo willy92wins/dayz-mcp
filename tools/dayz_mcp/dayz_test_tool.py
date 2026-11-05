@@ -136,8 +136,7 @@ _ARG_CONTRACT_MISMATCH_REMEDIATION = (
     "{announced}, and this MCP's tools send {expected}, so the server bridge "
     "would refuse the commands that need the contract with "
     "arg_contract_mismatch. Nothing was launched. Deploy a @DayZ_MCP built "
-    "from this MCP's commit (tools/pack-addon.ps1), or use the MCP whose "
-    "commit built that PBO"
+    "from this MCP's commit, or use the MCP whose commit built that PBO"
 )
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "

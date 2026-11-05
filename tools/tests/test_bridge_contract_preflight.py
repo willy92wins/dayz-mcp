@@ -25,7 +25,6 @@ import mcp_capture
 from tests import dayz_test_tool_helpers as fixtures
 from tests._addon_paths import addon_root
 from tests.pbo_helpers import build_pbo
-from tests.test_steam_preflight import _MutableSteamProvider
 
 
 # The contract the stable MCP expected in the ticket, while the PBO said 86e3c48a.
@@ -192,14 +191,18 @@ class HostBridgePboReaderTest(unittest.TestCase):
 class DayzTestRunContractGateTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.policy = fixtures._policy()
-        self.provider = _MutableSteamProvider()
         self.runtime = fixtures._Runtime({"runs": []})
         self.vpp = SimpleNamespace(error_code=None, missing=(), warnings=(), hint="")
         self.launch = AsyncMock(side_effect=self._launch)
         self.evaluate = self._patch(
             tool,
             "evaluate_steam_session",
-            side_effect=lambda: steam.evaluate_steam_session(self.provider),
+            return_value=steam.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=41,
+                steam_live_pids=(41,),
+                remediation=steam.REMEDIATION,
+            ),
         )
         self._patch(tool, "open_approved_launcher", return_value=fixtures._Opened())
         self._patch(
