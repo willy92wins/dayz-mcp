@@ -68,6 +68,8 @@ READ_ONLY_COMMANDS = frozenset(
         "players_visibility",
         # Server read of one scene's registry and its objects (165a).
         "scene_entities",
+        # Server read of one Expansion AI adapter group or scene (90f9).
+        "ai_group_state",
     }
 )
 MAX_OPERATION_PIN_S = 300.0

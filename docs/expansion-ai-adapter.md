@@ -28,6 +28,8 @@ server. It ships in `addon_expansion_ai/` and packs as
   `ai_group_spawn`, on the server. At least one of `behaviour`,
   `waypoints`, `formation` or `speed` must be given (none is `bad_args`
   and sends nothing).
+- `ai_group_state` (tool, no lease) reads one group by `group_id`, or
+  every group registered under a `scene_id`, exactly one of the two.
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
   when a delivered spawn is abandoned (timeout or cancel). It is not a
   public tool and never runs from lease-end cleanup.
@@ -72,6 +74,68 @@ Offline coverage: `tools/tests/test_xai_group_order.py` (criteria O3 and
 O4 for this verb, E5, and the mutants "not restoring the limit after a
 HOLD" and "a HOLD stomping the threat limit", run on a mutated copy of
 the adapter source).
+
+## Reading a group (`ai_group_state`, 90f9)
+
+Read-only tool `ai_group_state(group_id=None, scene_id=None, timeout_s)`.
+Exactly one of the two ids must be given; both or neither is `bad_args`
+(the tool refuses before sending, the loopback `_command_schema` admits
+only one-key variants, and the bridge dispatch refuses again). It takes
+no lease: `ai_group_state` is in `READ_ONLY_COMMANDS`, so the real
+`authorize` passes it without a token, including after
+`session_release`, while a mutating command in the same state answers
+`lease_required`.
+
+The broker admits the server verb by census, base `ach`, verb and `xai`
+only (`expansion_unavailable` with `adapter_not_loaded` or
+`adapter_contract_mismatch`); it is not a new mutation, so the
+lease-close gate never applies and residues stay readable on a v12
+census. The adapter announces the verb as bit3 of its `xai` bitmask
+(see "How the adapter announces itself"); it adds no name to `caps=`.
+
+The dispatch answers at once, with no job and no setter call. It never
+reads through `eAITarget.GetThreat` or `GetPosition(false)`, which would
+update state while reading.
+
+With `group_id` the reply is `ai_group`; with `scene_id` it is
+`ai_groups` with every group of that scene in registration order (a
+scene with none answers an empty list). Per group: `group_id`,
+`scene_id`, `faction`, `formation`, `formation_state`, `behaviour` (tool
+vocabulary) and `behaviour_expansion` (waypoint-behaviour name),
+`waypoint_index`, `waypoint_count`, `current_waypoint`, `in_combat`,
+`alive` (members alive now), `members_total` and `group_present`
+(whether `eAIGroup.GetGroupByID(id, false)` still returns the original
+group). A releasing group with anything left also carries
+`release: "pending"`, `confirmed: false` and the pending member ids in
+`remaining_ids`. Getters of a group Expansion no longer returns are
+never called: its group fields stay unavailable (empty strings,
+`waypoint_index: -1`, no current waypoint) while its registered members
+are still read.
+
+Per member: `object_id`, `alive`, `pos`, `health`, `fsm_state` and
+`fsm_substate` (from `GetFSM()`/`GetState()`/`GetName()` and
+`GetSubFSM()`; any null reference in that chain reads empty), `threat`
+(`GetThreatToSelf(true)`), `fighting`, `speed_limit` and
+`speed_limit_threat`, `emote_playing`, and `emote_pending` (a request in
+either the Expansion layer, `m_Expansion_EmoteID`, or the vanilla layer,
+`m_bEmoteIsRequestPending`). A live read refreshes the member's last
+observation; a member whose entity is gone answers `gone: true` with
+that last observation (`pos`, `health`, `alive`) and
+`last_observation: true`. A member seen dead stays `alive: false`.
+
+Errors: an unknown `group_id`, or the id of a releasing group that is
+already fully gone (no member entity left and the original group no
+longer returned), is `not_found`. A group with no living members
+answers ok with `alive: 0`.
+
+The state-only fields of the shared `MCPAIGroup` reply (`group_present`,
+`alive`, `members_total`, `current_waypoint`, `scene_id`) are only
+filled by `ai_group_state`; a spawn/order/release reply leaves them at
+their defaults.
+
+Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, and the
+O13 part that reads residues on a v12 census). In-game validation is
+pending; this section describes the offline contract only.
 
 ## How the adapter announces itself (deviation from plan 2.2)
 
