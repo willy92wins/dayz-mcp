@@ -5,6 +5,7 @@ array primitives are fakes; branching, allocation, pool operations, callback
 handlers and shutdown come from the selected .c source (also understands BEFORE).
 Independent oracle: distinct live requests, exact bodies/order, peak allocations,
 old failure identities cannot release new requests. Unknown syntax fails closed.
+A failed POST is sent once more, marked retry=1, and only once (inbox d67f).
 """
 from __future__ import annotations
 
@@ -171,10 +172,17 @@ def model(bridge=None, callbacks=None):
     bridge = source("MCPBridge.c") if bridge is None else clean(bridge)
     callbacks = source("MCPCallbacks.c") if callbacks is None else clean(callbacks)
     cls = body(callbacks, "class MCPResultCallback :")
+
+    def declared(name):
+        # d67f gave both handlers the failed callback; read what this source declares.
+        found = re.search(r"\bvoid " + name + r"\(([^)]*)\)", bridge)
+        return ", ".join(part.split()[-1] for part in found[1].split(",") if part.strip())
+
     bridge_specs = [
         ("PostResult", "result"), ("AcquireResultCallback", ""),
         ("RecycleResultCallback", "cb"), ("OnResultSuccess", "data, dataSize"),
-        ("OnResultError", "errorCode"), ("OnResultTimeout", ""),
+        ("OnResultError", declared("OnResultError")), ("OnResultTimeout", declared("OnResultTimeout")),
+        ("RetryResult", "failed"),
         ("ReleaseCallback", "cb"), ("Shutdown", ""),
         ("AddLoadCounter", "value, amount"),
     ]
@@ -193,6 +201,9 @@ def model(bridge=None, callbacks=None):
             result[name] = translate(body(text, signature), name, args, names)
         return result
     Callback = type("Callback", (), methods(cls, cb_specs))
+    # Enforce zero-initializes plain fields (d67f's result_id, request, body, retried).
+    for kind, field in re.findall(r"^\s*(int|string|bool) (\w+)\s*;", cls, re.M):
+        setattr(Callback, field, {"int": 0, "string": "", "bool": False}[kind])
     Bridge = type("Bridge", (), methods(bridge, bridge_specs))
     b = Bridge()
     declarations = re.findall(r"protected (?:static )?(?:ref )?[^;\n=]+?\b(m_\w+)\s*;", bridge[:bridge.index("void MCPBridge()")])
@@ -280,11 +291,14 @@ class ResultPoolBehaviorTest(unittest.TestCase):
                 survivor = post(b, 2)
                 complete(b, old, event)
                 self.assertIsNone(old.m_Bridge)
+                # d67f: the failed POST went once more, on a callback of its own.
+                retry = b.m_Ctx.requests[-1][0]
+                self.assertIsNot(retry, old)
                 current = post(b, 3)
                 self.assertIsNot(current, old)
                 for late_event in ("Error", "Error", "Success", "Timeout"):
                     complete(b, old, late_event)
-                    self.assertEqual(set(b.m_CallbackRefs.items), {survivor, current})
+                    self.assertEqual(set(b.m_CallbackRefs.items), {survivor, retry, current})
                 complete(b, current)
                 self.assertIs(post(b, 4), current)
                 complete(b, survivor)
@@ -349,6 +363,63 @@ class ResultPoolBehaviorTest(unittest.TestCase):
         b = model(callbacks=prefix + "class MCPResultCallback :" + result.replace("m_Bridge.ReleaseCallback(this);", ""))
         complete(b, post(b, 1))
         self.assertEqual(b.m_CallbackRefs.Count(), 1)
+
+
+class ResultRetryTest(unittest.TestCase):
+    """d67f: a result POST that fails is sent once more, marked retry=1."""
+
+    def test_a_failed_post_is_sent_once_more_with_the_same_body(self):
+        for event in ("Error", "Timeout"):
+            with self.subTest(event=event):
+                b = model()
+                failed = post(b, 7)
+                sent_once = b.m_CmdBytes
+                complete(b, failed, event)
+                self.assertEqual(len(b.m_Ctx.requests), 2)
+                (_first, request, payload), (retry, retry_request, retry_payload) = b.m_Ctx.requests
+                self.assertEqual(request, "result?key=test")
+                self.assertEqual(retry_request, "result?key=test&retry=1")
+                self.assertEqual(retry_payload, payload)
+                self.assertIsNot(retry, failed)
+                self.assertEqual(b.m_CallbackRefs.items, [retry])
+                self.assertEqual(b.m_CmdBytes, 2 * sent_once)
+
+    def test_the_retry_is_the_last_post(self):
+        for event in ("Error", "Timeout"):
+            with self.subTest(event=event):
+                b = model()
+                complete(b, post(b, 7), event)
+                complete(b, b.m_Ctx.requests[-1][0], event)
+                self.assertEqual(len(b.m_Ctx.requests), 2)
+                self.assertEqual(b.m_CallbackRefs.Count(), 0)
+
+    def test_a_success_or_an_unconfigured_bridge_sends_nothing_more(self):
+        b = model()
+        complete(b, post(b, 7))
+        self.assertEqual(len(b.m_Ctx.requests), 1)
+        b = model()
+        failed = post(b, 8)
+        b.m_Configured = False
+        complete(b, failed, "Error")
+        self.assertEqual(len(b.m_Ctx.requests), 1)
+
+    def test_the_pool_keeps_no_request_or_body_and_a_reused_callback_retries(self):
+        b = model()
+        complete(b, post(b, 7), "Error")
+        retry = b.m_Ctx.requests[-1][0]
+        complete(b, retry)
+        self.assertEqual((retry.request, retry.body), ("", ""))
+        self.assertIs(post(b, 8), retry)
+        complete(b, retry, "Timeout")
+        self.assertEqual(len(b.m_Ctx.requests), 4)
+        self.assertEqual(b.m_Ctx.requests[-1][1], "result?key=test&retry=1")
+        self.assertEqual(b.m_Ctx.requests[-1][2]["id"], 8)
+
+    def test_the_retry_log_never_names_the_request(self):
+        retry = body(source("MCPBridge.c"), "protected void RetryResult(")
+        logs = re.findall(r"\bLog\(([^;]*)\);", retry)
+        self.assertEqual(len(logs), 1)
+        self.assertNotIn("request", logs[0])
 
 
 class ResultPoolSourceTest(unittest.TestCase):
