@@ -137,6 +137,7 @@ class MCPBridge : Managed
 	protected ref array<ref MCPResultCallback> m_ResultCallbackPool;
 	protected ref array<Man> m_Players;
 	protected bool m_InfectedDebt;
+	protected ref array<DayZInfected> m_InfectedOverridden;
 	protected ref array<string> m_LeaseCloseRpcKinds;
 	protected ref array<int> m_LeaseCloseRpcIds;
 	protected ref array<Object> m_LeaseCloseDeletion;
@@ -193,6 +194,7 @@ class MCPBridge : Managed
 		m_LeaseCloseRpcKinds = new array<string>();
 		m_LeaseCloseRpcIds = new array<int>();
 		m_LeaseCloseDeletion = new array<Object>();
+		m_InfectedOverridden = new array<DayZInfected>();
 		m_RuntimeObjects = new map<int, Object>();
 		m_Scenes = new map<string, ref array<ref MCPSceneEntry>>();
 		m_NextBatchObjectId = BATCH_OBJECT_ID_BASE;
@@ -1953,6 +1955,10 @@ class MCPBridge : Managed
 			return;
 		}
 		reason = MCPInventoryMoveClientReason(reason);
+		// This refusal passed every check above (job, actor, sender) and the
+		// client sends it only before emitting (§2.7 step 5): it liquidates
+		// the RPC register row. It does not answer the job by itself.
+		LiquidateLeaseCloseRpc(jobId, "inventory_move");
 		// Publishing here would be a write the census can reach from every
 		// command, because Event_OnRPC is not a command. The job pass posts it.
 		// phase 1: the server read already matches, so confirmation wins.
@@ -2466,6 +2472,9 @@ class MCPBridge : Managed
 			DeleteSceneObjects(job);
 		}
 		m_Jobs.Insert(job.id, job);
+		// §2.7 step 6: deletion refs enter the bridge register at dispatch,
+		// so a later timeout or close still finds them.
+		RegisterDeletionRefs(job);
 
 		Log("job queued id=" + job.id + " kind=scene_clear pending=" + job.scene_pending.Count() + " delete=" + deleteNow.Count());
 		return false;
@@ -4304,12 +4313,23 @@ class MCPBridge : Managed
 			controller.OverrideMovementSpeed(false, 0.0);
 			controller.OverrideHeading(false, 0.0);
 			controller.OverrideTurnSpeed(false, 0.0);
+			// §2.7 step 2: a release forgets this infected; the close
+			// releases every one still recorded below.
+			if (m_InfectedOverridden && m_InfectedOverridden.Find(infected) >= 0)
+			{
+				m_InfectedOverridden.RemoveItem(infected);
+			}
 		}
 		else
 		{
 			controller.OverrideTurnSpeed(true, Math.PI2);
 			controller.OverrideMovementSpeed(true, command.args.speed);
 			controller.OverrideHeading(true, command.args.heading * Math.DEG2RAD);
+			// Record each infected this bridge overrides (§2.7 step 2).
+			if (m_InfectedOverridden && m_InfectedOverridden.Find(infected) < 0)
+			{
+				m_InfectedOverridden.Insert(infected);
+			}
 		}
 
 		vector current = infected.GetPosition();
@@ -4872,6 +4892,8 @@ class MCPBridge : Managed
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
 		m_Jobs.Insert(job.id, job);
+		// §2.7 step 6: deletion refs enter the bridge register at dispatch.
+		RegisterDeletionRefs(job);
 		Log("job queued id=" + job.id + " kind=loadout_clear deleted=" + cleared.Count() + " deadline_s=" + job.deadline_s);
 		return false;
 	}
@@ -7885,6 +7907,7 @@ class MCPBridge : Managed
 		}
 		if (job.kind == "loadout_clear")
 		{
+			RegisterDeletionRefs(job);
 			PostLoadoutClearJob(job, true);
 			return;
 		}
@@ -7907,6 +7930,7 @@ class MCPBridge : Managed
 
 		if (job.kind == "scene_clear")
 		{
+			RegisterDeletionRefs(job);
 			PostSceneClear(job);
 			return;
 		}
@@ -8100,6 +8124,8 @@ class MCPBridge : Managed
 		// there is one of its errors, not a timeout of the whole call.
 		if (job.kind == "scene_clear")
 		{
+			// Terminal path: remaining refs move to the register first.
+			RegisterDeletionRefs(job);
 			PostSceneClear(job);
 			return;
 		}
@@ -8118,6 +8144,7 @@ class MCPBridge : Managed
 		// A loadout_clear job at its deadline reports, with cleanup_complete false.
 		if (job.kind == "loadout_clear")
 		{
+			RegisterDeletionRefs(job);
 			PostLoadoutClearJob(job, false);
 			return;
 		}
@@ -8169,6 +8196,30 @@ class MCPBridge : Managed
 
 	protected void LeaseCloseExtensionCensus(MCPLeaseCloseCensus census)
 	{
+	}
+
+	// A validated refuse naming this request id, sent before the client
+	// emitted any vanilla manipulation, is the only in-process liquidation
+	// (§2.7 step 5). A job-ready readback never calls this.
+	protected void LiquidateLeaseCloseRpc(int requestId, string kind)
+	{
+		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds)
+		{
+			return;
+		}
+
+		int index = 0;
+		while (index < m_LeaseCloseRpcIds.Count())
+		{
+			if (m_LeaseCloseRpcIds.Get(index) == requestId && m_LeaseCloseRpcKinds.Get(index) == kind)
+			{
+				m_LeaseCloseRpcIds.Remove(index);
+				m_LeaseCloseRpcKinds.Remove(index);
+				return;
+			}
+
+			index = index + 1;
+		}
 	}
 
 	protected void RegisterLeaseCloseRpc(int requestId, string kind)
@@ -8295,7 +8346,7 @@ class MCPBridge : Managed
 			census.lease_id = closeArgs.close_lease_id;
 		}
 
-		AddCloseEntry(census, "bots", MCPBotControl.AnyRunning() || MCPBotControl.LeaseCloseUnverified(), "bot_state_unverified");
+		AddCloseEntry(census, "bots", MCPBotControl.LeaseCloseBusy(this), MCPBotControl.LeaseCloseResidueReason(this));
 		AddCloseEntry(census, "infected_drive", m_InfectedDebt, "infected_drive");
 		bool moveActive = false;
 		bool weaponActive = false;
@@ -8406,6 +8457,26 @@ class MCPBridge : Managed
 	protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)
 	{
 		MCPBotControl.ShutdownAll(this);
+		// §2.7 step 2: release every recorded infected with the same three
+		// calls. The registry and the debt stay: the native lifetime cannot
+		// be read back, so this is unverified until the process exits.
+		if (m_InfectedOverridden)
+		{
+			int infIndex = 0;
+			while (infIndex < m_InfectedOverridden.Count())
+			{
+				DayZInfected recorded = m_InfectedOverridden.Get(infIndex);
+				if (recorded && recorded.GetInputController())
+				{
+					DayZInfectedInputController infController = recorded.GetInputController();
+					infController.OverrideMovementSpeed(false, 0.0);
+					infController.OverrideHeading(false, 0.0);
+					infController.OverrideTurnSpeed(false, 0.0);
+				}
+
+				infIndex = infIndex + 1;
+			}
+		}
 		if (command.args && command.args.close_floors)
 		{
 			m_Players.Clear();

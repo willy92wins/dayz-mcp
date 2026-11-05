@@ -872,7 +872,8 @@ class SceneBridgeSourceTest(unittest.TestCase):
             post,
         )
         timeout = self._body("protected void PostJobTimeout(MCPJob job)")
-        self.assertIn('if (job.kind == "scene_clear") { PostSceneClear(job); return; }', timeout)
+        # §2.7 step 6: remaining refs transfer before the deadline post.
+        self.assertIn('if (job.kind == "scene_clear") { RegisterDeletionRefs(job); PostSceneClear(job); return; }', timeout)
         ready = self._body("protected bool IsJobReady(MCPJob job)")
         self.assertIn('else if (job.kind == "scene_clear") { return IsSceneClearDone(job); }', ready)
         # One level up: the inventory parent of an EntityAI, else the entity-tree

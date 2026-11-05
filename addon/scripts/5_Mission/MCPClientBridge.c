@@ -8714,6 +8714,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
+		// §2.9: interrupt/START debt of this client process, per §2.7 types.
+		AddCloseEntry(census, "action_input_in_flight", MCPHoldControl.InputInFlight(), "action_input_in_flight");
 		bool jobsActive = false;
 		if (m_JobRunner && m_JobRunner.CountExcluding("lease_close") > 0)
 		{

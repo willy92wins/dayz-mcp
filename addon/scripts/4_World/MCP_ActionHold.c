@@ -56,6 +56,19 @@ class MCPHoldControl
 		return s_Active;
 	}
 
+	// §2.7/§2.9: an interrupt (or a start still in flight) is causal debt
+	// until this client process exits; there is no later terminal in
+	// vanilla, so nothing in-process clears this.
+	static bool InputInFlight()
+	{
+		if (s_InterruptSent || s_InterruptPending)
+		{
+			return true;
+		}
+
+		return false;
+	}
+
 	protected static float NowS()
 	{
 		if (!GetGame())

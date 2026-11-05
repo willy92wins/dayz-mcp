@@ -633,7 +633,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 "ReleaseAll": staticmethod(lambda cause: None)}),
             "MCPWeaponControl": type("W", (), {"IsBusy": staticmethod(lambda: flags["weapon"]), "CloseRequestFloor": staticmethod(lambda: 4)}),
             "MCPLookAtControl": type("L", (), {"IsActive": staticmethod(lambda: flags["look_at"])}),
-            "MCPHoldControl": type("H", (), {"IsActive": staticmethod(lambda: flags["action_hold"]), "Shutdown": staticmethod(lambda cause: None)}),
+            "MCPHoldControl": type("H", (), {"IsActive": staticmethod(lambda: flags["action_hold"]), "Shutdown": staticmethod(lambda cause: None), "InputInFlight": staticmethod(lambda: False)}),
             "MCPVehicleTrace": type("V", (), {"IsActive": staticmethod(lambda: flags["samplers"]), "Abort": staticmethod(lambda cause: None)}),
             "MCPAnimTimeline": type("A", (), {"IsActive": staticmethod(lambda: False), "Abort": staticmethod(lambda cause: None)}),
             "MCPPlayerTrace": type("T", (), {"IsActive": staticmethod(lambda: False), "Abort": staticmethod(lambda cause: None)}),
@@ -734,6 +734,70 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertIn("MCP_PostJobTimeout(job)", abort)
         # Mutant: AbortAll that only clears would post nothing.
         self.assertNotIn("MCP_PostJobTimeout", abort.replace("MCP_PostJobTimeout(job)", "", 1))
+
+class LeaseCloseDeliverable5Tests(unittest.TestCase):
+    """Deliverable 5: RPC refuse, bot FSM, infected registry, deletion at
+    dispatch, and action-input debt (plan §2.7 steps 1-6, §2.9)."""
+
+    def test_inventory_refuse_liquidates_only_after_validation(self):
+        source = _read(SERVER_PATH)
+        body = method_body(source, "void MCPOnInventoryMoveRefused(PlayerIdentity sender, Object target, int rpc_type, ParamsReadContext ctx)")
+        # POS: liquidation sits after the sender/actor validation.
+        self.assertLess(body.find("sender.GetId() != job.actor.GetIdentity().GetId()"),
+                        body.find('LiquidateLeaseCloseRpc(jobId, "inventory_move")'))
+        # NEG: the job-ready readback never liquidates a register row.
+        ready = method_body(source, "protected bool MCPInventoryMoveReady(MCPJob job)")
+        self.assertNotIn("LiquidateLeaseCloseRpc", ready)
+        liquidate = method_body(source, "protected void LiquidateLeaseCloseRpc(int requestId, string kind)")
+        self.assertIn("m_LeaseCloseRpcIds.Remove(index);", liquidate)
+        # Mutant: liquidation before validation would accept foreign refuses.
+        mutant = body.replace('LiquidateLeaseCloseRpc(jobId, "inventory_move")', "", 1)
+        self.assertNotIn("LiquidateLeaseCloseRpc", mutant)
+        # Client side: a refusal after an emit stays silent (§2.7 step 5).
+        client = _read(SCRIPTS.parent / "4_World" / "MCP_InventoryMove.c")
+        self.assertIn('MCPDropInventoryMove("refuse_after_emit");', client)
+        self.assertIn("m_MCPInventoryMoveEmitted = false;", client)
+
+    def test_bots_fsm_state_and_infected_registry(self):
+        bots = _read(SCRIPTS / "MCP_BotControl.c")
+        self.assertIn("static string LeaseCloseBotState(MCPBridge bridge, int objectId)", bots)
+        self.assertIn('return "idle";', bots)
+        self.assertIn("static bool LeaseCloseBusy(MCPBridge bridge)", bots)
+        server = _read(SERVER_PATH)
+        census = method_body(server, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
+        self.assertIn("MCPBotControl.LeaseCloseBusy(this)", census)
+        # Mutant: an emptied registry as the bot proof fails this pin.
+        self.assertNotIn("AnyRunning() ||", census)
+        # Infected: recorded per specimen, released at close, never cleared.
+        self.assertIn("protected ref array<DayZInfected> m_InfectedOverridden;", server)
+        drive = method_body(server, "protected bool DispatchInfectedDrive(MCPCommand command, MCPResult result)")
+        self.assertIn("m_InfectedOverridden.Insert(infected);", drive)
+        self.assertIn("m_InfectedOverridden.RemoveItem(infected);", drive)
+        close = method_body(server, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)")
+        self.assertIn("infController.OverrideMovementSpeed(false, 0.0);", close)
+        self.assertIn("infController.OverrideTurnSpeed(false, 0.0);", close)
+        self.assertNotIn("m_InfectedOverridden.Clear()", close)
+        self.assertNotIn("m_InfectedDebt = false;", close)
+
+    def test_deletion_refs_at_dispatch_and_action_input_debt(self):
+        server = _read(SERVER_PATH)
+        scene = method_body(server, "protected bool DispatchSceneClear(MCPCommand command, MCPResult result)")
+        insert_at = scene.find("m_Jobs.Insert(job.id, job);")
+        self.assertLess(insert_at, scene.find("RegisterDeletionRefs(job);", insert_at))
+        loadout = method_body(server, "protected bool DispatchLoadoutClear(MCPCommand command, MCPResult result)")
+        insert_at = loadout.find("m_Jobs.Insert(job.id, job);")
+        self.assertLess(insert_at, loadout.find("RegisterDeletionRefs(job);", insert_at))
+        timeout = method_body(server, "protected void PostJobTimeout(MCPJob job)")
+        self.assertGreaterEqual(timeout.count("RegisterDeletionRefs(job);"), 2)
+        # Mutant: refs only at close (the pre-fix shape) fails the dispatch pin.
+        self.assertNotIn("RegisterDeletionRefs", scene.replace("RegisterDeletionRefs(job);", "", 1))
+        client = _read(CLIENT_PATH)
+        census = method_body(client, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
+        self.assertIn('"action_input_in_flight"', census)
+        hold = _read(SCRIPTS.parent / "4_World" / "MCP_ActionHold.c")
+        self.assertIn("static bool InputInFlight()", hold)
+        self.assertIn("s_InterruptSent", method_body(hold, "static bool InputInFlight()"))
+
 
 if __name__ == "__main__":
     unittest.main()

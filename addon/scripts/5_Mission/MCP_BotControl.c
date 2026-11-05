@@ -127,16 +127,94 @@ class MCPBotControl
 		Release(bridge, objectId, "deleted");
 	}
 
-	// Lease close: a bot was started in this process and its FSM state cannot
-	// be read back here, so the census keeps it unverified (plan S1).
-	static bool LeaseCloseUnverified()
+	// Lease close (plan S1, §2.7 step 1): read the real FSM state of a bot
+	// this process started. "idle" is the only state that clears a bot;
+	// a state that cannot be read is "unreadable", never clean.
+	static string LeaseCloseBotState(MCPBridge bridge, int objectId)
 	{
+		if (!bridge)
+		{
+			return "unreadable";
+		}
+
+		Object botTarget = bridge.RuntimeObjectById(objectId);
+		PlayerBase botPlayer = PlayerBase.Cast(botTarget);
+		if (!botPlayer)
+		{
+			return "unreadable";
+		}
+
+		string stateName = "";
+#ifdef DAYZ_1_30
+#ifdef ROBOCLIENT
+#ifdef INPUT_OVERRIDE
+		if (botPlayer.m_Bot && botPlayer.m_Bot.GetFSM())
+		{
+			stateName = botPlayer.m_Bot.GetFSM().GetCurrState().GetName();
+		}
+#endif
+#endif
+#endif
+		if (stateName == "")
+		{
+			return "unreadable";
+		}
+
+		if (stateName.IndexOf("Idle") >= 0)
+		{
+			return "idle";
+		}
+
+		return "busy";
+	}
+
+	// Busy while any started bot is running, busy after its stop, or in a
+	// state nobody could read. An emptied s_Running alone never clears.
+	static bool LeaseCloseBusy(MCPBridge bridge)
+	{
+		if (AnyRunning())
+		{
+			return true;
+		}
+
 		if (!s_Initialized)
 		{
 			return false;
 		}
 
-		return s_Initialized.Count() > 0;
+		int index = 0;
+		while (index < s_Initialized.Count())
+		{
+			if (LeaseCloseBotState(bridge, s_Initialized.Get(index)) != "idle")
+			{
+				return true;
+			}
+
+			index = index + 1;
+		}
+
+		return false;
+	}
+
+	static string LeaseCloseResidueReason(MCPBridge bridge)
+	{
+		if (!s_Initialized)
+		{
+			return "bot_state_unverified";
+		}
+
+		int index = 0;
+		while (index < s_Initialized.Count())
+		{
+			if (LeaseCloseBotState(bridge, s_Initialized.Get(index)) == "unreadable")
+			{
+				return "bot_state_unverified";
+			}
+
+			index = index + 1;
+		}
+
+		return "bot_stop_rejected";
 	}
 
 	static bool AnyRunning()

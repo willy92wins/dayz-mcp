@@ -1818,7 +1818,8 @@ class LoadoutEnforceTest(unittest.TestCase):
                 branch = _if_body(body, 'job.kind == "loadout_clear"')
                 self.assertEqual(
                     [line.strip() for line in branch.strip().splitlines()],
-                    [f"PostLoadoutClearJob(job, {complete});", "return;"],
+                    # §2.7 step 6: refs transfer to the register before the post.
+                    ["RegisterDeletionRefs(job);", f"PostLoadoutClearJob(job, {complete});", "return;"],
                 )
         # The first round's "loadout" job kind is gone.
         self.assertNotIn('job.kind == "loadout"', _without_comments(self.source))
