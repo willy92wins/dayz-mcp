@@ -4,6 +4,8 @@
 
 **Qué es esto.** Es la revisión 8 del diseño, sobre `ce3601e` (la base del código sigue siendo main `75b5d16`). Responde a la revisión r7 de Codex Sol, RED con los hallazgos H1 a H4 (P1 en H1 y H2, P3 en H3 y H4). El cuerpo, en inglés, cambia solo lo que esos H piden. Donde discrepen, manda esta cabecera.
 
+**Enmienda F1 (2026-11-05, tras la revisión de Codex Sol sobre main `9b4a941`, H1 a H3).** El F1 del #268 (`92ea1da7`) salda sin comando la fila de un destino cuyo censo no trae el nombre de cierre (`close_not_supported`). Es la exención temporal del bridge 12, que no tiene cierres: no confirma que el juego quede limpio. Este plan la recoge ahora en el §0, la tabla del §2.3, el §2.4 y la nota de la etapa 2b. Hoy el mismo motivo cubre también un censo ausente, no acreditado, ilegible o de otra instancia o generación, y el corte no mira la edad del censo: las dos cosas hay que arreglarlas antes de que un bridge anuncie el cierre (§2.16).
+
 **Decisión de Guillermo (2026-10-24 10:07Z):** «PR aparte». Lo revisa Codex Sol y lo mergea Guillermo, porque toca el PBO.
 
 **La decisión: el diseño D** (§2 del cuerpo).
@@ -85,8 +87,10 @@ Design D (revision 8) does four things:
    Its dispatch stops every controller its bridge owns (§3). Its answer is a census of the
    real state.
 2. **Debt that persists.** The coordinator keeps one row per (run, peer). Only a clean close or the
-   process exiting clears a row. Every grant while a row is owed says `lease_end_unconfirmed`.
-   Degradations merge; they never overwrite the marker.
+   process exiting clears a row, apart from the bridge 12 exemption of §2.4 (F1): a destination
+   whose census accredits that its bridge lacks the close is cleared with no command. Every grant
+   while a row is owed says `lease_end_unconfirmed`. Degradations merge; they never overwrite the
+   marker.
 3. **Order and identity.** Both bridges dispatch HTTP in delivery order. A delivered close
    names the `conn_gen` of the client census that produced F and W. It releases move
    copies with id ≤ F and weapon requests with id ≤ W **only when that `conn_gen` is
@@ -265,7 +269,9 @@ CLOSING and its deadline has not passed.
 | none | daemon start, live run (§2.12) | OWED (`daemon_restart`) |
 | PENDING | hook report: close published | CLOSING (id) |
 | PENDING | hook report: server close deferred (§2.4) | PENDING, published later |
+| PENDING (server close deferred) | that later publish finds `close_not_supported` (§2.4) | clear, with no command (`note_close_unreachable`) |
 | PENDING | hook report: destination unreachable (not BOUND, version-blocked, quarantine) | OWED (that reason) |
+| PENDING | hook report: `close_not_supported`, the bridge 12 exemption (§2.4) | clear, with no command; the round's settled list holds it with `close_id` None |
 | PENDING | hook finished without naming the row | OWED (`close_not_reported`) |
 | PENDING | hook refused for saturation, failed to start, or raised (2527-2530, 2549-2559) | OWED (`cleanup_worker_saturated` or `cleanup_failed`) at once |
 | PENDING | hook timed out (2555-2557) | stays PENDING; a late report before the deadline applies; when the hook later returns or raises, that round's PENDING rows (never another round's) become owed as in the two rows above |
@@ -309,6 +315,13 @@ Rules:
 - **Unreachable destinations become debt at once:** a binding that is not BOUND, a binding whose
   last poll the version block refused (4546-4547) [DESIGN: the broker keeps that verdict per
   instance], and retail quarantine. No close is published for them.
+- **The bridge 12 exemption (F1, `92ea1da7`).** A destination that passes the binding, identity
+  and version checks but whose census does not list the close name it needs is
+  `close_not_supported`. No close is published and the row is cleared, at the hook's report and
+  at a deferred server publish alike, including a row that an earlier lease left OWED. This skips
+  a mechanism bridge 12 does not have; it does not confirm that the game is clean, and the next
+  grant carries no `lease_end_unconfirmed` for it. It holds only while the census accredits the
+  absence: §2.16 says what must change before a bridge announces the close.
 - **Order per run.** The client close goes first. The server close is published when that run's
   client row resolves, or 10 s after the round opened, whichever comes first [DESIGN]. The broker
   checks this on every poll and result, with its own clock (`_now`, 2096-2097). A run with no
@@ -463,7 +476,13 @@ Rules:
     peer, its queue, a broker that is not stopping and a pin with a complete identity; anything
     else is `not_bound`. An instance whose last poll was version-blocked (the set the poll writes
     at 5193-5199, cleared by its next passing poll) is `version_blocked`. Quarantine is the
-    reading `cleanup_owner` already took (6039); it wins over the binding.
+    reading `cleanup_owner` already took (6039); it wins over the binding. Since F1
+    (`92ea1da7`) it also reads the peer's census (main `9b4a941`, loopback.py:6444-6451): a
+    census that is not of the bound instance and generation, or does not list `lease_close`
+    (server) or `lease_close_client` (client), is `close_not_supported`, and the coordinator
+    clears the row (session_coordination.py:1855-1856 in `note_close_round`, :1918-1919 in
+    `note_close_unreachable`). The deferred server publish runs the same check
+    (loopback.py:6573-6578).
   - Publish: `_publish_close_locked` (4631-4699) runs in the lock section that found the
     destination reachable. It pins, seals and records `_enqueued_at`, with no `MAX_QUEUE`
     check, no owner and no fire-and-forget. A queued close of the same instance and peer is
@@ -1216,6 +1235,36 @@ it runs.
     `fixtures/bridge_capabilities_v1.json` follows.
   - They are not in `SERVER_ARG_CONTRACT` (bridge_readiness.py:233-240), so the hash (252-260;
     MCPBridge.c:43) does not change.
+- **Before any bridge announces the close (F1 review, H2 and H3).** Today `close_not_supported`
+  (§2.4) also covers a census that is absent, unaccredited, unparsed or of another instance or
+  generation. `parse_poll_caps` returns None for a list that is too large, has too many names, is
+  malformed or repeats a name (main `9b4a941`, loopback.py:481-493), and an accredited poll then
+  stores `commands` None with the current instance and time (:8592-8608). The check never reads
+  the census's age (`announced_at`): a stale census of the bound instance and generation that
+  lists the name still gets its close published, and one that lacks it is cleared for the missing
+  name. One real path: a poll with the right instance and no attributable PID keeps the
+  binding (main `9b4a941`, loopback.py:7135-7139) and overwrites the census with `commands`,
+  `instance` and `announced_at` None (:7190-7194, :8597-8609). If the lease ends before the next
+  accredited poll, the row is cleared although the peer announced the close; between the client's
+  result and the deferred server publish (:7805-7808) the same loss clears the server row. With
+  bridge 12 that is harmless, because no bridge handles a close. The stage that lets a bridge
+  announce `lease_close` or `lease_close_client` must first:
+  - split the reason, at the hook's report and at the deferred server publish. Only a fresh
+    census of the bound instance and generation, from an accredited poll and parsed, can grant
+    the exemption: if it lacks the name, the row stays `close_not_supported` (cleared). A census
+    that is absent, unaccredited, unparsed or of another instance or generation says nothing
+    about support: it gets a reason of its own that leaves the row OWED, and so does a stale one
+    that lacks the name. Freshness is a requirement of its own, because today's check never reads
+    the age; adding only that check to today's condition is not enough, because it would still
+    clear the other unknown cases;
+  - add tests for attribution lost before the hook and during the server deferral, for a row an
+    earlier lease left OWED (for example a `deletion_pending` residue), for each invalid census
+    (absent; unaccredited; unparsed because too large, with too many names, malformed or with a
+    repeated name; of another instance; of another generation; stale), for peers with different
+    support, and for the bridge 12 case still clearing with no synthetic debt. The two F1 tests
+    (tools/tests/test_lease_close_broker.py:3503-3535) never reach the deferred clear in
+    `note_close_unreachable` nor a census of another instance or generation, so a mutant of
+    either survives them.
 
 ### 2.17 Files
 - **PBO:** MCPBridge.c, MCPClientBridge.c, MCPJobRunner.c, MCPDialogController.c, MCPMessages.c,
