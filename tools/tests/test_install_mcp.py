@@ -1923,7 +1923,33 @@ class InstallerOrchestrationTest(unittest.TestCase):
             }
         )
         stderr = io.StringIO()
+        # main() runs the real transaction, so the machine paths it would
+        # resolve or use go to the temp root: the tools root and keyfile its
+        # own parse resolves, the registration journal and its lock, the host
+        # configs and the host-config journal (c99e).
+        journal_root = self.root / "registration-transaction"
+        parse = installer.parse_args
         with (
+            patch.object(
+                installer,
+                "parse_args",
+                side_effect=lambda argv=None: parse(argv, tools_root=self.root),
+            ) as parsed,
+            patch.object(
+                installer,
+                "_default_registration_journal_root",
+                return_value=journal_root,
+            ),
+            patch.object(
+                installer,
+                "_acquire_registration_lock",
+                wraps=installer._acquire_registration_lock,
+            ) as lock,
+            patch.object(installer.Path, "home", return_value=self.root / "home"),
+            patch(
+                "dayz_mcp.host_config._default_journal_root",
+                return_value=self.root / "host-config-transaction",
+            ),
             patch.object(
                 installer,
                 "install_runtime",
@@ -1941,6 +1967,8 @@ class InstallerOrchestrationTest(unittest.TestCase):
         ):
             code = installer.main(["--register", "--no-supervised", "--skip-knowledge-pack"])
 
+        parsed.assert_called_once()
+        self.assertEqual([call.args[0] for call in lock.call_args_list], [journal_root])
         self.assertEqual(code, 2)
         payload = json.loads(stderr.getvalue())
         self.assertEqual(payload["error"], "registration_would_drop_options")
