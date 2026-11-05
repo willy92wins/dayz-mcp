@@ -177,7 +177,7 @@
     },
     {
       "name": "notify_players",
-      "description": "Send a notification to a player.",
+      "description": "Send a notification to the player with this uid, or to every player with uid all.",
       "inputSchema": {
         "type": "object",
         "properties": {
