@@ -740,6 +740,9 @@ WAIT_FOR_MAX_TIMEOUT_S = 600.0
 BOX_WAIT_MAX_S = 600.0
 BOX_WAIT_POLL_S = 1.0
 BOX_WAIT_MIN_POLL_S = 0.05
+# A box read whose answer did not come back. The wait keeps its ticket and
+# reads again within its budget instead of leaving the FIFO (788c).
+BOX_READ_LOST = frozenset({"daemon_response_ambiguous", "daemon_unavailable"})
 BOX_CLAIM_HEARTBEAT_S = 30.0
 WAIT_FOR_MIN_POLL_INTERVAL_S = 0.5
 WAIT_FOR_CONDITIONS = frozenset({
@@ -5482,6 +5485,18 @@ async def execute_wait_for_box(
     every status read; a truthy result ends the wait like a timeout
     (the caller still holds the ticket to leave the FIFO).
 
+    A read whose answer was lost (``BOX_READ_LOST``) keeps the ticket and
+    reads again within the budget, so the caller keeps its FIFO place
+    (788c). A first join that may have reached the daemon
+    (``daemon_response_ambiguous``) is swept once with leave-session before
+    the next join, and the cleanup sends leave-session only for such a join
+    whose answer it has not seen. A lost claim counts once a later touch says
+    ``box_claimed`` and that touch's box passes the same checks as any other
+    read.
+    Without ``until``, a wait whose budget runs out on a lost read names
+    it in ``error``; with ``until`` it ends as before. Any other error
+    still raises and leaves the FIFO.
+
     ``until`` is an absolute end in ``time_fn``'s clock that no reply can
     stretch (the dayz_test_run re-queue, inbox 3997): it is checked before
     each join, again with tool_lock held before each join and claim is
@@ -5499,6 +5514,12 @@ async def execute_wait_for_box(
     box = empty_box(occupied=True)
     session_id = str(getattr(getattr(client, "identity", None), "session_id", "") or "")
     join_task: asyncio.Task[Any] | None = None
+    lost: str | None = None
+    # A join sent without a ticket whose answer this wait has not seen may
+    # have queued one. Only then does leave-session have a ticket of this
+    # wait to sweep; otherwise it could only take the ticket of another wait
+    # in the same session.
+    unseen = False
     try:
         while True:
             if until is not None and clock() >= deadline:
@@ -5508,10 +5529,26 @@ async def execute_wait_for_box(
                 if until is not None and clock() >= deadline:
                     # The lock was held past the end: no join out of budget.
                     return {"ok": False, "ticket": ticket, "box": box}
+                unseen = ticket is None
                 join_task = asyncio.create_task(
                     client.session_box_status(wait=True, ticket=ticket)
                 )
-                status = await asyncio.shield(join_task)
+                try:
+                    status = await asyncio.shield(join_task)
+                    lost = None
+                except ToolError as error:
+                    if str(error) not in BOX_READ_LOST:
+                        raise
+                    status, lost = None, str(error)
+            # Seen, never sent (daemon_unavailable) or swept below: either
+            # way the cleanup has no unseen join of this wait left to sweep.
+            sweep = unseen and lost == "daemon_response_ambiguous"
+            unseen = False
+            if sweep:
+                # The join may have reached the daemon and its answer was
+                # lost, so it may have queued a ticket this wait never saw:
+                # leave-session sweeps it, once, before the next join.
+                await _release_box_wait_ticket(client, None)
             if isinstance(status, dict):
                 box = _box_from_status(status)
                 next_ticket = status.get("box_ticket")
@@ -5554,6 +5591,10 @@ async def execute_wait_for_box(
                 # The reply came back after the end: a free box seen now is
                 # not a grant.
                 return {"ok": False, "ticket": ticket, "box": box}
+            if isinstance(status, dict) and status.get("box_claimed") is True:
+                # A claim whose answer was lost landed: the touch says this
+                # ticket holds it, and the checks above passed on its box.
+                return {"ok": True, "ticket": ticket, "box": box}
             ready = (
                 isinstance(ticket, str)
                 and ticket
@@ -5571,9 +5612,15 @@ async def execute_wait_for_box(
                             wait=True, ticket=ticket, claim=True
                         )
                     )
-                    claimed = await asyncio.shield(join_task)
-                holds_claim = True
-                if isinstance(claimed, dict):
+                    try:
+                        claimed = await asyncio.shield(join_task)
+                    except ToolError as error:
+                        if str(error) not in BOX_READ_LOST:
+                            raise
+                        # It may have landed; the next join's touch says so.
+                        claimed, lost = None, str(error)
+                holds_claim = lost is None
+                if holds_claim and isinstance(claimed, dict):
                     box = _box_from_status(claimed)
                     holds_claim = claimed.get("box_claimed") is not False
                 if holds_claim and until is not None and clock() >= deadline:
@@ -5584,7 +5631,12 @@ async def execute_wait_for_box(
                     return {"ok": True, "ticket": ticket, "box": box}
             remaining = deadline - clock()
             if remaining <= 0.0:
-                return {"ok": False, "ticket": ticket, "box": box}
+                ended: dict[str, Any] = {"ok": False, "ticket": ticket, "box": box}
+                if lost is not None and until is None:
+                    # The last read was lost: the box state is not known.
+                    # A re-queue (until) answers with the refusal it proved.
+                    ended["error"] = lost
+                return ended
             await sleeper(min(poll, remaining))
     except BaseException:
         with anyio.CancelScope(shield=True):
@@ -5595,19 +5647,30 @@ async def execute_wait_for_box(
                 ):
                     try:
                         status = await join_task
+                    except ToolError as error:
+                        status = None
+                        if str(error) == "daemon_unavailable":
+                            # It never went out: it queued nothing.
+                            unseen = False
                     except (Exception, asyncio.CancelledError):
                         status = None
                     else:
+                        # Its answer is seen: a ticket it queued is read here.
+                        unseen = False
                         if isinstance(status, dict):
                             next_ticket = status.get("box_ticket")
                             if isinstance(next_ticket, str) and next_ticket:
                                 ticket = next_ticket
-            leftover = 5.0 - (time.monotonic() - started)
-            with anyio.move_on_after(leftover if leftover > 0.0 else 0.05):
-                try:
-                    await client.session_box_status(done=True, ticket=ticket)
-                except Exception:
-                    pass
+            # Without a ticket, leave-session only for a join whose answer
+            # this wait has not seen; otherwise there is nothing of its own
+            # to sweep.
+            if ticket is not None or unseen:
+                leftover = 5.0 - (time.monotonic() - started)
+                with anyio.move_on_after(leftover if leftover > 0.0 else 0.05):
+                    try:
+                        await client.session_box_status(done=True, ticket=ticket)
+                    except Exception:
+                        pass
             if join_task is not None and not join_task.done():
                 join_task.cancel()
         raise
@@ -6373,6 +6436,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 failed["hint"] = "retry with wait_for_box_s=<n>"
             if wait_error in {"own_run", "adopt"}:
                 failed["reason"] = wait_error
+            if wait_error in BOX_READ_LOST:
+                failed["error_code"] = wait_error
             return failed
 
         async def release_box() -> None:
