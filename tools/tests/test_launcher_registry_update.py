@@ -383,6 +383,38 @@ class ReplaceTransitionTest(unittest.TestCase):
                 "C" * 64,
             )
 
+    def test_main_takes_the_cas_hash_in_lowercase(self) -> None:
+        # A lowercase hash is the same hash; main() used to refuse it with the
+        # generic invalid_launcher_registry_update (fb-20261103-120327-1a8f).
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, lock, receipts = self._paths(root)
+            stdout = io.StringIO()
+            with (
+                patch.object(updater, "_CANONICAL_REGISTRY", registry),
+                patch.object(updater, "_CANONICAL_LOCK", lock),
+                patch.object(updater, "_CANONICAL_RECEIPTS", receipts),
+                patch.object(updater, "_CANONICAL_BUNDLE", root),
+                redirect_stdout(stdout),
+            ):
+                with patch.object(updater, "_validated_entry", return_value=_entry()):
+                    installed = updater.main([
+                        "install-dayz-test-v1",
+                        "--expected-sha256",
+                        updater._sha256(BASELINE).lower(),
+                    ])
+                with patch.object(
+                    updater, "_validated_entry", return_value=_entry_with_sha("B" * 64)
+                ):
+                    replaced = updater.main([
+                        "replace-dayz-test-v1",
+                        "--expected-sha256",
+                        updater._sha256(registry.read_bytes()).lower(),
+                    ])
+            self.assertEqual((installed, replaced), (0, 0), stdout.getvalue())
+            launchers = json.loads(registry.read_text(encoding="utf-8"))["launchers"]
+            self.assertEqual([item["sha256"] for item in launchers], ["B" * 64])
+
     def test_a_failure_after_the_swap_is_recovered(self) -> None:
         """Recover the after_apply half of a replace. The before_apply half is
         covered by fb-20260907-083722-1f0a, not by this test.

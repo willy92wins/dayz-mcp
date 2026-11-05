@@ -806,10 +806,16 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        # The CAS compares uppercase hex; a hash typed or pasted in lowercase
+        # is the same hash (fb-20261103-120327-1a8f).
         if args.command == "install-dayz-test-v1":
-            result = install_dayz_test_v1(expected_sha256=args.expected_sha256)
+            result = install_dayz_test_v1(
+                expected_sha256=args.expected_sha256.strip().upper()
+            )
         elif args.command == "replace-dayz-test-v1":
-            result = replace_dayz_test_v1(expected_sha256=args.expected_sha256)
+            result = replace_dayz_test_v1(
+                expected_sha256=args.expected_sha256.strip().upper()
+            )
         elif args.command == "bootstrap":
             result = bootstrap_registry()
             print(
