@@ -356,6 +356,218 @@ def wait_mission(profiles: Path, timeout_s: float = 180.0, name: str | None = No
     return False
 
 
+# ---------------------------------------------------------------- lifecycle launcher
+
+
+SERVER_BINARY = "DayZServer"
+EXEC_WAIT_S = 10.0
+
+
+@dataclass
+class LaunchedContainer:
+    """What ``ProcessLifecycle`` gets back from a launch: ``pid`` is DayZServer's host PID."""
+
+    pid: int
+    name: str
+    container_id: str
+    image_id: str
+    tree: str
+
+
+def _state_root() -> Path:
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local:
+        raise PodmanServerError("local_cache_unavailable")
+    return Path(local) / "DayZ_MCP" / "podman-runs"
+
+
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    prefix = flag.casefold() + "="
+    values = [item[len(prefix):] for item in argv if item.casefold().startswith(prefix)]
+    if len(values) > 1:
+        raise PodmanServerError(f"duplicate_flag:{flag}")
+    return values[0] if values else None
+
+
+def _absolute_path(value: str | None, what: str) -> Path:
+    if not value or not os.path.isabs(value) or os.path.normpath(value) != value:
+        raise PodmanServerError(f"invalid_{what}")
+    return Path(value)
+
+
+def _remove_stale_trees(root: Path, podman: str) -> None:
+    """Trees of containers that no longer exist (a stopped run leaves its tree)."""
+    if not root.is_dir():
+        return
+    for entry in root.iterdir():
+        if entry.name.startswith(CONTAINER_PREFIX) and not status(entry.name, podman).get("exists"):
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+def _wait_for_server_exec(pid: int, binary_name: str, deadline: float) -> None:
+    """PID 1 is ``sh`` until it execs DayZServer; the identity must be taken after."""
+    while time.monotonic() < deadline:
+        try:
+            if os.path.basename(os.readlink(f"/proc/{pid}/exe")) == binary_name:
+                return
+        except OSError:
+            pass
+        time.sleep(0.05)
+    raise PodmanServerError("server_exec_not_observed")
+
+
+def _cgroup_names_container(pid: int, container_id: str) -> bool:
+    try:
+        text = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return f"libpod-{container_id}.scope" in text
+
+
+def launch_lifecycle_process(argv: list[str], cwd: str, podman: str = "podman") -> LaunchedContainer:
+    """``ProcessLifecycle``'s launcher on Linux: the worker's server argv, in a container.
+
+    The sealed worker builds the argv it builds on Windows, with POSIX paths from
+    the Linux launcher policy: ``<diag_executable> -server -config=<cfg>
+    -profiles=<dir> -mission=<dir> -mod=<abs;...> [-filePatching] -port=<n>
+    [-serverMod=<abs;...>] <server_extra_args>``. Measured on DayZServer 1.30
+    (2026-11-04): absolute ``-config``/``-profiles``/``-mission`` work and are kept,
+    each mounted at its own path (the daemon wrote ``dayz_mcp.json`` into the
+    profiles before this call and reads the RPT there). Absolute mod paths are
+    ignored by the engine (dzo), so each mod becomes an ``@name`` link in a private
+    tree that is the working directory. ``-server`` is dropped (the binary is a
+    server); ``-dologs`` is added as dzo always passes it; ``-filePatching`` is
+    dropped (it hangs the Linux server, see below). ``cwd`` (the policy's
+    game directory) is not used: the tree is the working directory.
+
+    Returns once DayZServer, not the ``sh`` that starts it, is the container's
+    PID 1, after checking that this host PID's cgroup is the container's and that
+    the container runs the runtime image. The caller records that PID like any
+    other: ``NativeProcessGuard`` identity, terminated with SIGKILL, which ends the
+    container (``--rm`` removes it).
+    """
+    del cwd
+    if not argv or not os.path.isabs(argv[0]) or os.path.basename(argv[0]) != SERVER_BINARY:
+        raise PodmanServerError("not_a_linux_server_launch")
+    server_dir = Path(argv[0]).parent.resolve()
+    if not (server_dir / SERVER_BINARY).is_file():
+        raise PodmanServerError("no_dayzserver")
+    # -filePatching: measured 2026-11-04 on DayZServer 1.30 (Linux), twice, over
+    # 4 minutes: with it the main thread busy-polls /proc/self/statm and
+    # /proc/meminfo after the last building type loads and the landscape never
+    # finishes; without it the landscape loads in ~10 s. The sealed worker adds it
+    # unless no_file_patching, so it is dropped here and the container label
+    # records that it was.
+    dropped_file_patching = any(item.casefold() == "-filepatching" for item in argv[1:])
+    args = [item for item in argv[1:] if item.casefold() not in {"-server", "-filepatching"}]
+    config = _absolute_path(_flag_value(args, "-config"), "config")
+    profiles = _absolute_path(_flag_value(args, "-profiles"), "profiles")
+    mission = _absolute_path(_flag_value(args, "-mission"), "mission")
+    if not config.is_file() or not mission.is_dir():
+        raise PodmanServerError("config_or_mission_missing")
+    profiles.mkdir(parents=True, exist_ok=True)
+
+    image_id = ensure_image(podman)
+    root = _state_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _remove_stale_trees(root, podman)
+    name = CONTAINER_PREFIX + secrets.token_hex(6)
+    tree = root / name
+    tree.mkdir(mode=0o700)
+    try:
+        for entry in server_dir.iterdir():
+            entry_name = entry.name
+            if entry_name == "core" or entry_name.startswith(("core.", "@")) or entry_name in _SKIP_TOP:
+                continue
+            if entry_name == "battleye":
+                _link_contents(entry, tree / entry_name)
+            else:
+                _replace_link(entry, tree / entry_name)
+        (tree / "stdin").write_text(STDIN_ANSWER, encoding="utf-8")
+
+        mounts: list[str] = []
+        key_sources = [server_dir / "keys"]
+        rewritten: list[str] = []
+        for item in args:
+            lowered = item.casefold()
+            if lowered.startswith("-mod="):
+                flag_length = len("-mod=")
+            elif lowered.startswith("-servermod="):
+                flag_length = len("-servermod=")
+            else:
+                rewritten.append(item)
+                continue
+            names: list[str] = []
+            for value in filter(None, item[flag_length:].split(";")):
+                path = Path(value)
+                if not path.is_absolute():
+                    raise PodmanServerError(f"relative_mod_path:{value}")
+                real = path.resolve()
+                if not real.is_dir():
+                    raise PodmanServerError(f"no_mod_dir:{value}")
+                mod_name = path.name if path.name.startswith("@") else "@" + path.name
+                if not _MOD_NAME.match(mod_name):
+                    raise PodmanServerError(f"bad_mod_name:{mod_name}")
+                if (tree / mod_name).is_symlink() or (tree / mod_name).exists():
+                    raise PodmanServerError(f"duplicate_mod_name:{mod_name}")
+                (tree / mod_name).symlink_to(real)
+                # :O, not :ro. Measured 2026-11-04 (DayZServer 1.30): from a read-only
+                # bind mount the engine skips the mod without a word ("Adding
+                # package" never appears); from an overlay it loads, and whatever it
+                # writes stays in the container's upper layer, not in the build.
+                mounts += ["-v", f"{real}:{real}:O"]
+                key_sources.append(real / "keys")
+                names.append(mod_name)
+            rewritten.append(item[:flag_length] + ";".join(names))
+        if not any(item.casefold() == "-dologs" for item in rewritten):
+            rewritten.append("-dologs")
+
+        keys = tree / "keys"
+        keys.mkdir()
+        for source in key_sources:
+            if source.is_dir():
+                for key in source.glob("*.bikey"):
+                    shutil.copyfile(key, keys / key.name)
+    except BaseException:
+        shutil.rmtree(tree, ignore_errors=True)
+        raise
+
+    command = [
+        "run", "-d", "--rm", "--name", name, "--network", "host",
+        "--label", f"{LABEL}=1", "--label", f"{LABEL}.tree={tree}", "--label", f"{LABEL}.profiles={profiles}",
+        "--label", f"{LABEL}.dropped-filepatching={int(dropped_file_patching)}",
+        "-v", f"{tree}:{tree}", "-v", f"{server_dir}:{server_dir}:O",
+        "-v", f"{config}:{config}:ro", "-v", f"{profiles}:{profiles}", "-v", f"{mission}:{mission}",
+        *mounts, "-w", str(tree),
+        f"{IMAGE_NAME}:{IMAGE_TAG}", "/bin/sh", "-c",
+        'ulimit -c 0 && exec "$@" < ./stdin > ./server.out 2>&1', "sh", f"./{SERVER_BINARY}",
+        *rewritten,
+    ]
+    started = _podman(podman, *command, check=False)
+    if started.returncode != 0:
+        shutil.rmtree(tree, ignore_errors=True)
+        raise PodmanServerError("container_start_failed: " + started.stderr[-2000:])
+    try:
+        info = status(name, podman)
+        pid = info.get("host_pid")
+        container_id = str(info.get("container_id") or "")
+        if not isinstance(pid, int) or pid <= 0 or not container_id:
+            raise PodmanServerError("container_pid_unavailable")
+        if info.get("image_id") != image_id:
+            raise PodmanServerError("container_image_mismatch")
+        _wait_for_server_exec(pid, SERVER_BINARY, time.monotonic() + EXEC_WAIT_S)
+        if not _cgroup_names_container(pid, container_id):
+            raise PodmanServerError("container_pid_not_in_container")
+    except BaseException:
+        _podman(podman, "rm", "-f", "-t", "0", name, check=False)
+        raise
+    (tree / "container.json").write_text(
+        json.dumps({"name": name, "container_id": container_id, "image_id": image_id, "host_pid": pid}) + "\n",
+        encoding="utf-8",
+    )
+    return LaunchedContainer(pid=pid, name=name, container_id=container_id, image_id=image_id, tree=str(tree))
+
+
 # ---------------------------------------------------------------- CLI
 
 

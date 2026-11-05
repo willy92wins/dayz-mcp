@@ -27,6 +27,15 @@ from dayz_mcp import (
 )
 from dayz_mcp.launcher_registry import open_approved_launcher_async
 
+# Policy paths (dev_root, recorded profiles) are drive paths on Windows and
+# POSIX paths elsewhere (linux_launcher); DRIVE_PATH_AWARE keeps ntpath for a
+# drive path and uses posixpath for a POSIX one, as for the sealed request and
+# worker modules. Every ntpath call here is on such a path.
+if os.name != "nt":
+    from dayz_mcp.linux_compat import DRIVE_PATH_AWARE
+
+    ntpath = DRIVE_PATH_AWARE  # noqa: F811
+
 # Compat seam (A3 FIX 9): existing tests patch `open_approved_launcher`
 # in this module with a synchronous context manager. Production binds
 # the name to the async variant; `_open_launcher` accepts either

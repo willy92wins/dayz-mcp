@@ -589,6 +589,8 @@ class NonBlockingRegistryOpenTest(unittest.TestCase):
         if self._saved_cache is not None:
             launcher_registry._cache_approved_registry(self._saved_cache)
 
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
+
     def test_busy_without_cache_raises_busy_after_one_fail_fast_attempt(self) -> None:
         calls: list = []
         started = time.monotonic()
@@ -600,6 +602,8 @@ class NonBlockingRegistryOpenTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(len(calls), 1)
         self.assertTrue(all(call["exclusive"] is False for call in calls))
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     def test_busy_with_cache_opens_from_cache_without_lock(self) -> None:
         launcher_registry._cache_approved_registry([_entry()])
@@ -624,6 +628,8 @@ class NonBlockingRegistryOpenTest(unittest.TestCase):
         self.assertEqual(open_entry.call_count, 1)
         self.assertEqual(len(calls), 1)
         self.assertTrue(all(call["exclusive"] is False for call in calls))
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     def test_free_lock_reads_caches_and_releases_lock_on_error(self) -> None:
         fake_lock = _FakeLock()
@@ -653,6 +659,8 @@ class NonBlockingRegistryOpenTest(unittest.TestCase):
         self.assertTrue(fake_lock.closed)
         self.assertTrue(all(call["exclusive"] is False for call in calls))
         self.assertEqual(launcher_registry._cached_approved_registry(), [_entry()])
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     def test_pending_open_completes_after_lock_is_released(self) -> None:
         # Busy with a cache: the close-path open is served from the cache.
@@ -948,6 +956,7 @@ class CloseNonBlockingLogoutTest(unittest.IsolatedAsyncioTestCase):
             result.get("warnings"), [dayz_test_tool._PLAYER_STATE_NOT_SAVED]
         )
 
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
     async def test_close_with_policy_ungraceful_retired_elsewhere_no_warn(
         self,
     ) -> None:
@@ -1141,6 +1150,8 @@ class ApprovedRegistryCacheAuditTest(unittest.TestCase):
         if self._saved_cache is not None:
             launcher_registry._cache_approved_registry(self._saved_cache)
 
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
+
     def test_try_open_non_busy_error_propagates_with_cache_present(self) -> None:
         # :357: only launcher_registry_busy may fall back to the cache.
         launcher_registry._cache_approved_registry([_entry()])
@@ -1164,6 +1175,8 @@ class ApprovedRegistryCacheAuditTest(unittest.TestCase):
                 launcher_registry.try_open_approved_launcher("dayz-test-v1")
         self.assertEqual(len(calls), 1)
         open_entry.assert_not_called()
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     def test_blocking_open_fills_the_cache(self) -> None:
         # :330: open_approved_launcher caches the registry it read.
@@ -1262,6 +1275,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(result, opened)
         self.assertTrue(opened.closed)
 
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
+
     async def test_async_open_retries_busy_with_awaited_backoff(self) -> None:
         clock = _FakeAsyncClock()
         fake_lock = _FakeLock()
@@ -1298,6 +1313,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clock.sleeps, [0.02, 0.04])
         self.assertEqual(launcher_registry._cached_approved_registry(), [_entry()])
 
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
+
     async def test_async_open_busy_past_deadline_times_out(self) -> None:
         clock = _FakeAsyncClock()
         calls: list = []
@@ -1320,6 +1337,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(clock.sleeps), 3)
         for got, want in zip(clock.sleeps, [0.4, 0.5, 0.1]):
             self.assertAlmostEqual(got, want)
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     async def test_async_open_non_busy_error_is_not_retried(self) -> None:
         clock = _FakeAsyncClock()
@@ -1344,6 +1363,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(clock.sleeps, [])
 
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
+
     async def test_async_open_releases_lock_when_open_fails(self) -> None:
         fake_lock = _FakeLock()
         with (
@@ -1367,6 +1388,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     pass
         self.assertTrue(fake_lock.closed)
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     async def test_async_open_rejects_invalid_retry_parameters(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid_registry_lock_retry"):
@@ -1393,6 +1416,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
         points = [started, *ticks, ended]
         max_gap = max(b - a for a, b in zip(points, points[1:]))
         return max_gap, ended - started
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     async def test_async_open_keeps_loop_responsive_while_busy(self) -> None:
         # P2: with the real asyncio.sleep, a registry busy for ~0.35 s
@@ -1437,6 +1462,8 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(
             max_gap, 0.2, f"max tick gap {max_gap:.3f}s: event loop stalled"
         )
+
+    @unittest.skipIf(os.name != "nt", "Windows launcher registry: off Windows launcher_registry opens the installed Linux bundle")
 
     async def test_blocking_open_would_stall_the_loop(self) -> None:
         # P2 negative control: the old blocking retry (time.sleep)

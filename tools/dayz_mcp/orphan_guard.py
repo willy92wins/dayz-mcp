@@ -219,8 +219,15 @@ def is_pid_alive(pid: int | None) -> bool:
 
 def _toolhelp_lookup(pid: int) -> tuple[int, str] | None:
     """Return (parent_pid, image_name) for ``pid`` from a ToolHelp32 snapshot."""
-    if not _IS_WINDOWS:  # pragma: no cover
-        return None
+    if not _IS_WINDOWS:
+        try:
+            with open(f"/proc/{int(pid)}/stat", "rb") as stream:
+                raw = stream.read(1024)
+            ppid = int(raw[raw.rindex(b")") + 2 :].split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+        name = _proc_image_name(int(pid))
+        return (ppid, name) if name else None
     snapshot = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == wintypes.HANDLE(-1).value:
         return None
@@ -256,10 +263,63 @@ def _named_snapshot_from_entries(
     return {"known": True, "processes": processes}
 
 
+_WINE_LOADERS = frozenset({"wine", "wine64", "wine-preloader", "wine64-preloader", "wineserver"})
+
+
+def _proc_image_name(pid: int) -> str | None:
+    """ToolHelp's szExeFile for a /proc process: the image's basename.
+
+    A Wine/Proton process's image is the Wine loader, and its argv[0] is the
+    Windows path of the program it runs, so its name is that path's basename
+    (DayZ_x64.exe under Proton). Otherwise the basename of /proc/<pid>/exe, or
+    the kernel's comm when the link cannot be read (another user's process).
+    """
+    try:
+        image = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        image = None
+    if image is None or image in _WINE_LOADERS:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as stream:
+                first = stream.read(4096).split(b"\0", 1)[0].decode("utf-8", "replace")
+        except OSError:
+            first = ""
+        if first and (image in _WINE_LOADERS or first.casefold().endswith(".exe")):
+            return ntpath.basename(first)
+    if image is not None:
+        return image
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as stream:
+            raw = stream.read(1024)
+        return raw[raw.index(b"(") + 1 : raw.rindex(b")")].decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _proc_process_entries() -> list[tuple[int, int, str]] | None:
+    """The ToolHelp walk on Linux: (pid, ppid, image name) for every /proc process."""
+    try:
+        pids = [int(name) for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return None
+    entries: list[tuple[int, int, str]] = []
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as stream:
+                raw = stream.read(1024)
+            ppid = int(raw[raw.rindex(b")") + 2 :].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue  # gone between listdir and open
+        name = _proc_image_name(pid)
+        if name:
+            entries.append((pid, ppid, name))
+    return entries
+
+
 def _snapshot_all_process_entries_with_parent() -> list[tuple[int, int, str]] | None:
     """ToolHelp rows with th32ParentProcessID (inbox 7417)."""
-    if not _IS_WINDOWS:  # pragma: no cover - production target is Windows.
-        return None
+    if not _IS_WINDOWS:
+        return _proc_process_entries() if os.path.isdir("/proc/self") else None
     snapshot = _k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == wintypes.HANDLE(-1).value:
         return None
@@ -542,6 +602,57 @@ def _udp_holders_via_netstat() -> list[tuple[int, int | None]] | None:
     return _udp_holders_from_netstat_output(result.stdout or b"")
 
 
+def _udp_foreign_sockets_by_port() -> dict[int, list[int]] | None:
+    """Linux: per bound UDP port, the uids of sockets that belong to another user."""
+    foreign: dict[int, list[int]] = {}
+    read_any = False
+    me = os.geteuid()
+    for table in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            with open(table, encoding="ascii", errors="replace") as stream:
+                lines = stream.read().splitlines()[1:]
+        except OSError:
+            continue
+        read_any = True
+        for line in lines:
+            fields = line.split()
+            try:
+                port = int(fields[1].rsplit(":", 1)[1], 16)
+                uid = int(fields[7])
+            except (IndexError, ValueError):
+                continue
+            if uid != me:
+                foreign.setdefault(port, []).append(uid)
+    return foreign if read_any else None
+
+
+def _label_other_users_sockets(rows: list[dict[str, object]]) -> None:
+    """Name unattributable holders by uid when the kernel says they are another user's.
+
+    An unprivileged process on Linux cannot map another user's socket to a PID
+    (chrony, avahi, rpcbind...), so every Linux host would read as
+    ``port_attribution_unknown``. psutil and this read walk the same kernel
+    tables, one row per socket: when a port has at least as many sockets of
+    other uids as rows without a PID, those rows are the other users' sockets
+    and get ``uid:<n>``. That is not a DayZ image, so it blocks a launch only on
+    the port the launch asked for. Any row left over (a socket of this user
+    whose process cannot be named) stays unattributed.
+    """
+    foreign = _udp_foreign_sockets_by_port()
+    if foreign is None:
+        return
+    unnamed: dict[int, list[dict[str, object]]] = {}
+    for row in rows:
+        if row["pid"] is None and row["name"] is None:
+            unnamed.setdefault(int(row["port"]), []).append(row)
+    for port, port_rows in unnamed.items():
+        uids = foreign.get(port, [])
+        if uids and len(port_rows) <= len(uids):
+            label = "uid:" + ",".join(str(uid) for uid in sorted(set(uids)))
+            for row in port_rows:
+                row["name"] = label
+
+
 def snapshot_udp_port_holders() -> dict[str, object]:
     """Every bound UDP port with its holder PID and image name, from the OS table.
 
@@ -576,6 +687,8 @@ def snapshot_udp_port_holders() -> dict[str, object]:
         }
         for port, pid in holders
     ]
+    if not _IS_WINDOWS:
+        _label_other_users_sockets(rows)
     rows.sort(
         key=lambda row: (
             int(row["port"]),

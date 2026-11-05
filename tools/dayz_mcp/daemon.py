@@ -446,12 +446,12 @@ def _lifecycle_game_path(config: Any) -> Path:
     configured = getattr(config, "game_path", None)
     if isinstance(configured, str) and configured:
         return Path(configured)
-    return Path(
-        os.environ.get(
-            "DAYZ_GAME_PATH",
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
-        )
+    default = (
+        r"C:\Program Files (x86)\Steam\steamapps\common\DayZ"
+        if os.name == "nt"
+        else str(Path.home() / ".steam" / "steam" / "steamapps" / "common" / "DayZ")
     )
+    return Path(os.environ.get("DAYZ_GAME_PATH", default))
 
 
 def _activate_server_coordination(
@@ -641,7 +641,8 @@ def _activate_server_coordination(
         # fb-20260904-114520-6927: a dedicated server that has not bound its
         # port yet is only visible by name, so the name probe lists it too.
         diag_probe=lambda: orphan_guard.snapshot_processes_by_name(
-            ["DayZDiag_x64.exe", "DayZServer_x64.exe"]
+            # Off Windows the dedicated server is the native DayZServer binary.
+            ["DayZDiag_x64.exe", "DayZServer_x64.exe", *(() if os.name == "nt" else ("DayZServer",))]
         ),
         # fb-20260904-114520-6927: the socket table is the second witness of
         # the box; a DayZ image holding a UDP port occupies it without a run.

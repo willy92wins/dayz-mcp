@@ -121,39 +121,105 @@ launcher (`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) are 
 
 - `dayz_mcp/podman_server.py`: runs a DayZ dedicated server in rootless podman, the way dzo
   (dayz-server-operator) starts it: a minimal `debian:trixie-slim` runtime image
-  (`localhost/dayz-mcp-runtime:1`), a private tree per run (symlinks into the Steam install, real `keys/`,
-  `profiles/`, a mission copy, a `serverDZ.cfg` with random passwords and the query port), `--network host`,
-  the install and every mod mounted read-only as overlays (`:O`) at their own paths, `ulimit -c 0` and the
-  experimental builds' assertion prompt answered from `stdin`. The container (name, ID, image ID, labels) is
-  the run's identity; stop is SIGTERM, 15 s, SIGKILL, `rm -f`. It writes `$profile:dayz_mcp.json` for the
-  bridge. CLI: `python -m dayz_mcp.podman_server image|start|status|stop` (JSON out). Measured 2026-11-04:
-  1.30.164289 with `@DayZ_MCP` loaded the mission in about 10 s and the bridge polled the host loopback of a
-  `--embedded` dayz-mcp at about 5 Hz (`LEGACY_UNBOUND`: binding needs the managed lifecycle, which needs the
-  daemon); the stop ended the server cleanly in 13 s and left nothing in the Steam install. Not yet wired
-  into `dayz_test_run`.
+  (`localhost/dayz-mcp-runtime:1`), a private tree per run (symlinks into the Steam install, real `keys/`),
+  `--network host`, the install and every mod mounted as overlays (`:O`) at their own paths, `ulimit -c 0` and
+  the experimental builds' assertion prompt answered from `stdin`. Two entry points: the CLI
+  (`python -m dayz_mcp.podman_server image|start|status|stop`, its own tree, config and profiles) and
+  `launch_lifecycle_process`, the daemon's launcher on Linux (below).
 
 Measured 2026-11-03 (Debian testing, Python 3.14): every module imports after `install()` except
-`native_launcher_backend` (Windows native launcher); `--embedded` answers MCP `initialize` and `tools/list`
-(107 tools) and serves the loopback the bridge polls; with `install()` applied 5939 unit tests pass, and the
-failures examined are Windows-environment tests. The Windows suite was not run for this change.
+`native_launcher_backend` (Windows native launcher, replaced by `linux_launcher` off Windows); `--embedded`
+answers MCP `initialize` and `tools/list` (107 tools) and serves the loopback the bridge polls; with `install()`
+applied 5939 unit tests pass, and the failures examined are Windows-environment tests. The Windows suite was not
+run for this change.
 
 Measured 2026-11-04: with registrations in a scratch `HOME`, `--client` spawns `--daemon`, the runs.json
 migration completes (backup, receipt, no marker left), the client's connected-daemon identity check passes
-(`/proc` image, argv, cwd, psutil snapshot hashes) and `session_status` answers. The box reports
-`scan_known: false`: the DayZ process scan looks for the Windows images.
+(`/proc` image, argv, cwd, psutil snapshot hashes) and `session_status` answers, with the process scan known
+(`scan_known: true`) since `orphan_guard` walks `/proc`.
 
-Not ported: the shared build lock in sealed `server_cli` stays Windows-only (`build_lock_unavailable`; it guards
-managed AddonBuilder builds, which Linux does not have). `dayz_test_run` runs through the sealed native
-launcher (`native_launcher_backend`: a debugger-attached child in a job object), so it cannot start a Linux
-run; the podman runner is not wired into it, and a game started by hand polls as `LEGACY_UNBOUND`.
+### `dayz_test_run` on Linux (server role)
 
-Measured 2026-11-04, podman server bridged to that daemon: the bridge's established poll connection is owned
-in the host TCP table by the containerised `DayZServer`'s host PID (`podman inspect .State.Pid`; `/proc/<pid>/exe`
-is the Steam `DayZServer`, `/proc/<pid>/cgroup` ends in `libpod-<container id>.scope/container`). The loopback's
-PID + creation-time binding therefore applies to container runs unchanged. The missing piece is a Linux launch
-backend at the `secure_launcher` seam: mint the instance, write it into `dayz_mcp.json` before `podman run`,
-record the run with host PID and creation time (container ID and image ID as cross-checks), stop through
-`podman_server.stop`.
+The managed lifecycle runs on Linux for `mode=server`: the same request projection, box queue, lease, sealed
+worker, daemon start/ack/stop, instance minting and PID binding as on Windows. Only the two places that start
+a process differ.
+
+- **Launcher** (`dayz_mcp/linux_launcher.py`, `dayz_mcp/linux_worker_host.py`). There is no signed PE, so
+  `launcher_registry` opens an installed bundle instead, `native_bundle.load_verified_bundle` verifies it
+  with `linux_launcher`, and `linux_compat.install()` registers a stand-in `dayz_mcp.native_launcher_backend`
+  whose `launch_registered_native` is `launch_registered_linux`. `secure_launcher.py` and
+  `build_native_launcher.py` are not edited: `dependency-lock.json` pins the first and every Windows build
+  contract records the hash of the second, so touching either would cost a launcher rebuild. The relay's two
+  `subprocess.Popen` calls are the only process creation `security_runtime_audit` accepts in
+  `linux_launcher.py` (one per relay function, argv straight from `_host_argv`). `server.py` imports this closure at
+  startup, as it imports the native one on Windows, so the server-code freshness check covers it. `python -m dayz_mcp.linux_launcher install [--policy FILE]` builds it from the
+  launcher policy (default `$LOCALAPPDATA/DayZ_MCP/launcher-policy.json`, POSIX paths, same schema as the
+  Windows example) into `$LOCALAPPDATA/DayZ_MCP/linux-launchers/dayz-test-v1/`: the same `app.pyz`
+  (`build_native_launcher._build_app_pyz`, imported unchanged) and the same `request-policy.json` / `worker-runtime.json` the
+  Windows builder emits, pinned by `bundle-manifest.json`. Every open checks the directory is private to the
+  user, every file against the manifest, every archive member against `packaged-modules.lock.json` and the
+  lock against the sources; a policy root is sealed by `(st_dev, st_ino)` and must contain no symlink.
+  `launch_registered_linux` is the PE's relay loop: it starts the sealed worker
+  (`python -I -m dayz_mcp.linux_worker_host --bundle DIR --app-sha256 HEX`), writes the bootstrap frame, and
+  answers each lifecycle frame by starting a `--lifecycle-child` that alone receives the lease token, client
+  identity and daemon policy; the worker's `DZW1` terminal is the launcher's stdout. The worker host imports the
+  sealed modules from the verified archive bytes, gives `app_main` an `msvcrt` with an identity
+  `open_osfhandle` only while it is imported (the cancel handle is a pipe descriptor; a module named `msvcrt`
+  left in `sys.modules` turns `subprocess` into its Windows branch), and points its bundle root at `--bundle`.
+  Not rebuilt: the debugger gate on every image a child maps and the job object. Build mode
+  (AddonBuilder) is not available.
+- **Sealed path semantics** (`linux_compat.install_sealed_worker_paths`): `dayz_test_request`,
+  `dayz_test_worker`, `dayz_test_attestation` and `dayz_test_storage` get `linux_compat.DRIVE_PATH_AWARE`
+  as their `ntpath` (each call takes `ntpath` for a drive or UNC path, `posixpath` otherwise, so
+  Windows-shaped values behave as they always did) and their two drive-letter validators also accept a POSIX
+  path; unsealed `dayz_test_tool` and `native_launcher_transaction` use the same object.
+  `request_path_authority` pins each path component with an `O_PATH` descriptor (`/proc/self/fd` is the final
+  path, a symbolic link stands where Windows finds a junction).
+- **Process** (`podman_server.launch_lifecycle_process`, used by `ProcessLifecycle._launch` off Windows). The
+  daemon has minted the instance and written `<profiles>/dayz_mcp.json` before the call, as on Windows. The
+  worker's argv is kept except: `-mod=`/`-serverMod=` become `@name` links in a private tree under
+  `$LOCALAPPDATA/DayZ_MCP/podman-runs/` (the engine ignores absolute mod paths); `-server` is dropped;
+  `-dologs` is added; `-filePatching` is dropped (see the measurement below; the container carries
+  `dayz-mcp.podman-server.dropped-filepatching=1`). Config, profiles and mission are mounted at their own paths.
+  It returns once the container's PID 1 has exec'd DayZServer (an identity taken from the `sh` before the
+  exec would never match again), after checking that this host PID's cgroup is
+  `libpod-<container id>.scope` and the container's image is the runtime image. The run's record is that host
+  PID with its creation time, executable and argv hashes, as on Windows; stop is the guard's kill of that
+  PID, which ends the container (`--rm`).
+- **Daemon allow rule**: the only executables a start may name are `<game_path>/DayZDiag_x64.exe` and, off
+  Windows, the native server of the paired Steam app, derived from `game_path` and never from the request
+  (`steamapps/common/DayZ` → `DayZServer/DayZServer`, `DayZ Exp` → `DayZ Server Exp/DayZServer`). The
+  default `game_path` off Windows is `~/.steam/steam/steamapps/common/DayZ` (`DAYZ_GAME_PATH`, `--game-path`).
+- **Host probes**: the process scan (`orphan_guard`, ToolHelp on Windows) walks `/proc`; a Wine/Proton
+  process is named by the basename of its Windows `argv[0]` (`DayZ_x64.exe`), others by their image.
+  The UDP holder scan labels a socket the kernel says belongs to another uid as `uid:<n>`: an unprivileged
+  process cannot map it to a PID (chrony, avahi, rpcbind), so every Linux host read as
+  `port_attribution_unknown`; such a holder is not a DayZ image and still blocks the port it holds.
+  `runtime_state`'s coordination-fault lock uses `byte_lock.lock` (`LK_LOCK` semantics: ten tries a second
+  apart) instead of refusing without `msvcrt`.
+
+Setup: a dev root with `_server/serverDZ.cfg`, `_server/profiles/` and `_client/profiles/`, the missions under a
+mission root, the mods under a mod root, `diag_executable` = the Steam `DayZServer` binary; then
+`python -m dayz_mcp.linux_launcher install --policy <file>` and `status`.
+
+Measured 2026-11-04 (Debian testing, DayZServer 1.30, `@DayZ_MCP`, scratch `HOME` with throwaway
+registrations): `dayz_test_run mode=server` succeeded through the lease, the sealed worker, the lifecycle child
+and the daemon (`lifecycle_ack: launch_identity_match`); the bridge's server polls arrived bound
+(`server_bound_last_poll_age_s` equal to `server_last_poll_age_s`, about 0.3 s); `dayz_test_stop` matched the
+identity, terminated the container's DayZServer (`terminated: 1`, run `EXITED`) and `--rm` removed the
+container. A container killed outside the daemon was retired by the run reaper (`run_reaped`,
+`gone_pids` = its host PID). Two engine findings set the launcher's choices: with `-filePatching` DayZServer
+busy-polls `/proc/self/statm` and `/proc/meminfo` after the last building type loads and never finishes the
+landscape (4+ minutes, twice; ~10 s without); and a mod mounted read-only (`:ro`) is skipped without a log
+line, while from an overlay (`:O`) it loads. Absolute `-config`, `-profiles` and `-mission` work.
+
+Tests: `tests/test_linux_launcher.py` (bundle install and tamper refusal, the worker host running the sealed
+worker from the archive, the `msvcrt` shim scope, the POSIX path authority, the host probes, the allow rule)
+and two relay-boundary tests in `tests/test_security_runtime_audit.py`. Tests of the Windows approval registry
+and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")`, with the reason).
+
+Not ported: the client and offline roles (Proton; `ProcessLifecycle._launch` refuses any argv that is not the
+Linux `DayZServer`), build mode, and the shared build lock in sealed `server_cli` (`build_lock_unavailable`).
 
 ## Startup and health
 
