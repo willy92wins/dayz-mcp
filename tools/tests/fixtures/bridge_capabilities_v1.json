@@ -10,6 +10,7 @@
       "ai_group_order": "ai_group_order",
       "ai_group_release": null,
       "ai_group_spawn": "ai_group_spawn",
+      "ai_group_state": "ai_group_state",
       "bot_start": "bot_start",
       "bot_stop": "bot_stop",
       "entities_query": "entities_query",
