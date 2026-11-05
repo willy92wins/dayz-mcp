@@ -37,6 +37,7 @@ from dayz_mcp import (
     dayz_test_tool,
     host_config,
     inbox,
+    native_launcher_transaction,
     orphan_guard,
     playbook_tool as playbook_tool_mod,
     registry_lock,
@@ -5229,6 +5230,22 @@ def _client_extension_exempt(
     return not _client_extension_blocked(box, row)
 
 
+def _run_protected_stop(run_id: str, notice: dict[str, Any]) -> dict[str, Any]:
+    """dayz_test_stop's answer for a run this session may not adopt."""
+
+    failed: dict[str, Any] = {
+        "status": "failed",
+        "run_id": run_id,
+        "error_code": "run_protected",
+        "hint": notice.get("hint"),
+        "use_state": notice.get("use_state"),
+        "use_reason": notice.get("use_reason"),
+    }
+    if "retry_after_s" in notice:
+        failed["retry_after_s"] = notice["retry_after_s"]
+    return failed
+
+
 def _failed_active_run_result(
     *,
     project: str,
@@ -6816,18 +6833,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             if isinstance(snapshot, dict):
                 row = _box_run(_box_from_status(snapshot), run_id)
                 if _row_is_protected(row, caller_session):
-                    notice = protection_fields(row)
-                    failed: dict[str, Any] = {
-                        "status": "failed",
-                        "run_id": run_id,
-                        "error_code": "run_protected",
-                        "hint": notice["hint"],
-                        "use_state": notice["use_state"],
-                        "use_reason": notice["use_reason"],
-                    }
-                    if "retry_after_s" in notice:
-                        failed["retry_after_s"] = notice["retry_after_s"]
-                    return failed
+                    return _run_protected_stop(run_id, protection_fields(row))
             try:
                 with _typed_dayz_test_value_errors():
                     result = await dayz_test_tool.execute_dayz_test_stop(
@@ -6838,6 +6844,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             except ToolError:
                 raise
             except Exception as exc:
+                grant = (
+                    exc.protected_grant
+                    if isinstance(
+                        exc, native_launcher_transaction.NativeLauncherTransactionError
+                    )
+                    else None
+                )
+                adopted = grant.get("adopted_run") if isinstance(grant, dict) else None
+                if isinstance(adopted, dict) and adopted.get("run_id") == run_id:
+                    # fb-20261104-143314-32cf: the check above did not see the
+                    # run as protected (for one, a RUNNING row still held by a
+                    # dead client's lease), the daemon refused the adopt of the
+                    # worker's grant as run_protected, and the client released
+                    # that grant (_validate_grant attaches no answer otherwise).
+                    return _run_protected_stop(run_id, adopted)
                 # The ToolError carries the exception TYPE, plus the launcher
                 # backend's bare code when it has one (ficha ae65). The message
                 # can hold host paths, so it must not cross the MCP wire; FastMCP
