@@ -4,7 +4,7 @@
 modded class Bot
 {
 	// Lease close (plan S1): 1 idle, 0 busy, -1 unreadable.
-	// m_ActiveFSM bot.c:22, m_IdleState bot.c:26, GetCurrentState hfsmbase.c:43.
+	// m_ActiveFSM bot.c:22, m_IdleState bot.c:27, GetCurrentState hfsmbase.c:43.
 	int MCP_LeaseCloseState()
 	{
 		if (!m_ActiveFSM)

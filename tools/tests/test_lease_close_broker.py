@@ -22,6 +22,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import loopback, session_coordination
 from dayz_mcp.session_coordination import (
     LEASE_END_BOUND_S,
@@ -2945,7 +2946,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             self.assertEqual(self._poll(peer), [])
 
     def _poll(
-        self, peer: str, *, pid: int | None = None, version: str = "12~1.29"
+        self, peer: str, *, pid: int | None = None, version: str = f"{EXPECTED_BRIDGE_VERSION}~1.29"
     ) -> list[dict]:
         query = poll_census_query(peer)
         # v13: the census table already announces the close name. A
@@ -3485,7 +3486,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             answers.append(
                 self.state.record_poll(
                     "client",
-                    "12~1.29",
+                    f"{EXPECTED_BRIDGE_VERSION}~1.29",
                     instance=INST_CLIENT,
                     source_pid=PID_CLIENT,
                     caps=query["caps"],

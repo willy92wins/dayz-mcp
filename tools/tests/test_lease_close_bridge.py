@@ -699,6 +699,22 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(census3.state.text, "residue")
         self.assertTrue(self._last_client_ns["LeaseCloseCensusSettled"](census3))
 
+    def test_h3_settled_gates_dispatch_and_observer(self):
+        # H3 (D-r2-H3): unverified debt must not hold the answer; residue must.
+        # Kills N1-N3: reverting any of these three call sites to
+        # LeaseCloseCensusClean reintroduces the 25 s wait for process debt.
+        for path, sig in (
+            (SERVER_PATH, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)"),
+            (CLIENT_PATH, "protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)"),
+        ):
+            with self.subTest(path=path.name):
+                src = _read(path)
+                body = method_body(src, sig)
+                self.assertIn("if (LeaseCloseCensusSettled(census))", body)
+                self.assertNotIn("LeaseCloseCensusClean(", body)
+                self.assertEqual(src.count("return LeaseCloseCensusSettled(BuildLeaseCloseCensus(job.args));"), 1)
+                self.assertNotIn("return LeaseCloseCensusClean(BuildLeaseCloseCensus(job.args));", src)
+
     def test_h1_h2_symbol_pins(self):
         client = _read(CLIENT_PATH)
         census = method_body(client, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
@@ -895,6 +911,13 @@ class LeaseCloseCensusTests(unittest.TestCase):
         c_inf = self._server_census(source, infected=True)
         self.assertTrue(self._server_ns["LeaseCloseCensusSettled"](c_inf))
         self.assertFalse(self._server_ns["LeaseCloseCensusClean"](c_inf))
+        # D-r2-H5/N9: an unreadable bot FSM is unverified debt, not residue:
+        # it settles the observer instead of holding it for 25 s.
+        c_bots = self._server_census(source, flags={"bots": True, "bots_reason": "bot_state_unverified"})
+        bad_bots = [(e.name.text, e.state.text) for e in c_bots.entries if e.state.text != "clean"]
+        self.assertIn(("bots", "unverified"), bad_bots)
+        self.assertTrue(self._server_ns["LeaseCloseCensusSettled"](c_bots))
+        self.assertFalse(self._server_ns["LeaseCloseCensusClean"](c_bots))
         # RegisterDeletionRefs actually moves refs (kills M3).
         ns = self._server_ns
         job = type("J", (), {"loadout_cleared": EnforceArray([object()]), "scene_pending": EnforceArray()})()
@@ -932,6 +955,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 for helper in (
                     "protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)",
                     "protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)",
+                    "protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)",
                 ):
                     try:
                         hb = method_body(source, helper)
@@ -956,6 +980,28 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(ns["LeaseCloseBotState"](bridge, 99).text, "idle")
         self.assertNotIn("GetFSM", bots)
         self.assertIn("s_Initialized.Remove(goneIndex);", bots)
+
+    def test_bot_fsm_state_translated(self):
+        # D-r2-H5/N7: idle is identity with m_IdleState, not mere non-null.
+        src = _read(SCRIPTS.parent / "4_World" / "MCP_BotState.c")
+        sig = "int MCP_LeaseCloseState()"
+        idle = object()
+        busy = object()
+
+        class _FSM:
+            def __init__(self, current):
+                self._current = current
+
+            def GetCurrentState(self):
+                return self._current
+
+        for fsm, want in ((_FSM(idle), 1), (_FSM(busy), 0), (_FSM(None), -1), (None, -1)):
+            with self.subTest(want=want):
+                ns = {"m_ActiveFSM": fsm, "m_IdleState": idle}
+                translate(_wrap(sig, method_body(src, sig)), sig, ns,
+                          class_types=("BotStateBase",),
+                          members=("m_ActiveFSM", "m_IdleState"))
+                self.assertEqual(ns["MCP_LeaseCloseState"](), want)
 
 
 
@@ -1104,6 +1150,9 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
         hold = _read(SCRIPTS.parent / "4_World" / "MCP_ActionHold.c")
         self.assertIn("static bool InputInFlight()", hold)
         self.assertIn("s_InterruptSent", method_body(hold, "static bool InputInFlight()"))
+        # D-r2-H5/N11: both interrupt sends mark the process-lifetime debt.
+        self.assertEqual(hold.count("s_InterruptDebt = true;"), 2)
+        self.assertNotIn("s_InterruptDebt = false", hold)
 
 
 if __name__ == "__main__":

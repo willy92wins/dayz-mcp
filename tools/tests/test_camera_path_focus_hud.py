@@ -23,6 +23,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any, Callable
 from unittest.mock import AsyncMock, patch
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import bridge_readiness, camera_path, loopback, result_prune, server
 from dayz_mcp.bridge_errors import _public_enqueue_error
 from dayz_mcp.server import ServerConfig, ToolError, build_app
@@ -1316,7 +1317,7 @@ class OlderBridgeAdmissionTest(unittest.TestCase):
 
     def _announce(self, names: list[str]) -> tuple[int, dict]:
         return self.state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=",".join(names)
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=",".join(names)
         )
 
     def _enqueue(self, command: str) -> tuple[int, dict]:
@@ -2084,7 +2085,7 @@ class ExecutedDispatchTest(unittest.TestCase):
             census = sorted(server._BRIDGE_COMMAND_TOOLS["client"])
         status, body = state.record_poll(
             "client",
-            "12~1.29",
+            f"{EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=",".join(census),

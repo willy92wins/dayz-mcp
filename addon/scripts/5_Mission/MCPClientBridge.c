@@ -8790,7 +8790,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.id = job.id;
 		result.ok = true;
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(job.args);
-		if (timedOut && !LeaseCloseCensusClean(census))
+		if (timedOut && !LeaseCloseCensusSettled(census))
 		{
 			AddCloseEntry(census, "observer", true, "observer_timeout");
 			census.state = "residue";

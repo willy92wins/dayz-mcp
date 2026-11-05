@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import bridge_errors, loopback, result_prune, server
 from dayz_mcp.result_prune import PRUNABLE_FIELDS, prune_unfilled_fields
 from dayz_mcp.server import (
@@ -769,7 +770,7 @@ class PlayerViewSetAdmissionTest(unittest.TestCase):
     def _poll(self, caps: list[str]) -> dict:
         status, body = self.state.record_poll(
             "client",
-            "12~1.29",
+            f"{EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=",".join(caps),

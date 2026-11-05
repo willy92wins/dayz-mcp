@@ -382,7 +382,7 @@ def _announce_hold(state: loopback.ServerState) -> None:
     query = poll_census_query("client")
     state.record_poll(
         "client",
-        "12~1.29",
+        f"{EXPECTED_BRIDGE_VERSION}~1.29",
         instance=INST_CLIENT,
         source_pid=PID_CLIENT,
         caps=query["caps"],
@@ -394,7 +394,7 @@ def _poll_hold(state: loopback.ServerState):
     query = poll_census_query("client")
     return state.record_poll(
         "client",
-        "12~1.29",
+        f"{EXPECTED_BRIDGE_VERSION}~1.29",
         instance=INST_CLIENT,
         source_pid=PID_CLIENT,
         caps=query["caps"],

@@ -842,7 +842,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         query = poll_census_query("client")
         fixture.state.record_poll(
             "client",
-            "12~1.29",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=query["caps"],
@@ -859,7 +859,7 @@ class BrokerBindingAbandonTest(unittest.IsolatedAsyncioTestCase):
         )
         _status, polled = fixture.state.record_poll(
             "client",
-            "12~1.29",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=query["caps"],
