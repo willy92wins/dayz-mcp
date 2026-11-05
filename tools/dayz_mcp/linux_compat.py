@@ -17,8 +17,15 @@ Linux implementations in place before any other module binds them:
   ``native_process_snapshot.working_directory_of``: process images and working
   directories are absolute POSIX paths, not drive paths;
 - ``server_cli.open_lock_file``: ``byte_lock.open_lock_file``;
-- ``daemon_policy_contract.valid_absolute_path``: ``valid_posix_absolute_path``
-  (the Win32 rule demands a drive letter, so no Linux path was ever valid).
+- ``daemon_policy_contract.valid_absolute_path``: also ``valid_posix_absolute_path``
+  (the Win32 rule demands a drive letter, so no Linux path was ever valid);
+- ``dayz_test_request``, ``dayz_test_worker``, ``dayz_test_attestation`` and
+  ``dayz_test_storage`` (``install_sealed_worker_paths``): ``DRIVE_PATH_AWARE`` for
+  their ``ntpath`` (``posixpath`` on POSIX paths, ``ntpath`` on drive paths), and
+  drive-letter validators that also accept a POSIX path;
+- ``dayz_mcp.native_launcher_backend`` (``install_linux_launcher_backend``, called by
+  ``linux_launcher.load_verified_bundle``, not by ``install()``): a stand-in
+  whose ``launch_registered_native`` is ``linux_launcher.launch_registered_linux``.
 
 On Windows ``install()`` does nothing and importing this module has no side effect.
 Unsealed modules import ``win_dll`` and ``is_python_image`` from here directly.
@@ -31,6 +38,7 @@ import ntpath
 import os
 import posixpath
 import stat as _stat
+import sys
 from pathlib import Path
 
 _MAX_RAW_BYTES = 4096
@@ -249,4 +257,170 @@ def install() -> None:
 
     from dayz_mcp import daemon_policy_contract
 
-    daemon_policy_contract.valid_absolute_path = valid_posix_absolute_path
+    drive_rule = daemon_policy_contract.valid_absolute_path
+    if not getattr(drive_rule, "_accepts_posix", False):
+        # A POSIX path, or what the drive-letter rule accepted before: a drive
+        # path never matches a Linux process image, so it fails closed later.
+        def absolute_rule(value: object) -> bool:
+            return valid_posix_absolute_path(value) or drive_rule(value)
+
+        absolute_rule._accepts_posix = True
+        daemon_policy_contract.valid_absolute_path = absolute_rule
+
+    install_sealed_worker_paths()
+
+
+def install_linux_launcher_backend() -> None:
+    """``dayz_mcp.native_launcher_backend`` off Windows: the Linux relay.
+
+    The real module drives the signed PE through Win32 and cannot even be
+    imported here. ``secure_launcher`` is byte-pinned by ``dependency-lock.json``
+    (editing it costs a launcher rebuild), and it imports the backend by name
+    when a lease is granted, so a module of that name with
+    ``linux_launcher.launch_registered_linux`` as ``launch_registered_native``
+    is where the Linux run takes over. ``security_runtime_audit`` audits
+    ``linux_launcher`` explicitly for that reason. Installed by
+    ``linux_launcher.load_verified_bundle``, i.e. only in a process that is about
+    to launch, and with ``linux_launcher.py`` as its file, so the server-code
+    freshness check can read its source.
+    """
+    if os.name == "nt" or "dayz_mcp.native_launcher_backend" in sys.modules:
+        return
+    import types
+
+    from dayz_mcp import linux_launcher
+
+    backend = types.ModuleType(
+        "dayz_mcp.native_launcher_backend",
+        "Off Windows: linux_launcher's relay under the native backend's name.",
+    )
+    backend.__file__ = linux_launcher.__file__
+    backend.launch_registered_native = linux_launcher.launch_registered_linux
+    backend.NativeLauncherBackendError = linux_launcher.LinuxLauncherError
+    sys.modules[backend.__name__] = backend
+
+
+# install_sealed_worker_paths covers the sealed modules a dayz_test_run request
+# passes through: the tool's request projection, the worker that turns it into
+# lifecycle starts, the attestation of the mod it names and the mission storage
+# rotation the daemon does before a spawn.
+
+
+def _windows_shaped(value: object) -> bool:
+    """A drive path (``C:...``) or a UNC/device path (``\\\\...``): Windows semantics."""
+    if isinstance(value, (list, tuple)):
+        return any(_windows_shaped(item) for item in value)
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    return isinstance(value, str) and (
+        (len(value) >= 2 and value[1] == ":" and value[0].isascii() and value[0].isalpha())
+        or value.startswith("\\\\")
+    )
+
+
+class DrivePathAwarePath:
+    """``ntpath`` for Windows-shaped paths, ``posixpath`` for everything else.
+
+    Policy paths are drive paths on Windows and POSIX paths on Linux, and the
+    same code handles both. Each call is dispatched on its first argument: a
+    drive or UNC path keeps exactly the ``ntpath`` behaviour it always had, so a
+    Windows-shaped value is judged the same way on every host; anything else
+    (``/home/...``, a bare name) gets ``posixpath``. Only the functions those
+    modules call exist here; any other name is an AttributeError.
+    """
+
+    @staticmethod
+    def basename(path):
+        return ntpath.basename(path) if _windows_shaped(path) else posixpath.basename(path)
+
+    @staticmethod
+    def dirname(path):
+        return ntpath.dirname(path) if _windows_shaped(path) else posixpath.dirname(path)
+
+    @staticmethod
+    def isabs(path):
+        return ntpath.isabs(path) if _windows_shaped(path) else posixpath.isabs(path)
+
+    @staticmethod
+    def isjunction(path):
+        return ntpath.isjunction(path) if _windows_shaped(path) else posixpath.isjunction(path)
+
+    @staticmethod
+    def join(path, *paths):
+        return ntpath.join(path, *paths) if _windows_shaped(path) else posixpath.join(path, *paths)
+
+    @staticmethod
+    def normcase(path):
+        return ntpath.normcase(path) if _windows_shaped(path) else posixpath.normcase(path)
+
+    @staticmethod
+    def normpath(path):
+        return ntpath.normpath(path) if _windows_shaped(path) else posixpath.normpath(path)
+
+    @staticmethod
+    def splitdrive(path):
+        return ntpath.splitdrive(path) if _windows_shaped(path) else posixpath.splitdrive(path)
+
+    @staticmethod
+    def splitext(path):
+        return ntpath.splitext(path) if _windows_shaped(path) else posixpath.splitext(path)
+
+    @staticmethod
+    def relpath(path, start=None):
+        if _windows_shaped(path):
+            return ntpath.relpath(path, start)
+        return posixpath.relpath(path, start)
+
+    @staticmethod
+    def commonpath(paths):
+        return ntpath.commonpath(paths) if _windows_shaped(paths) else posixpath.commonpath(paths)
+
+
+DRIVE_PATH_AWARE = DrivePathAwarePath()
+
+
+def valid_posix_local_path(value: object) -> bool:
+    """The POSIX counterpart of the sealed drive-letter rule.
+
+    Same bounds as theirs (3..520 characters, valid NFC text) and an absolute,
+    normalized POSIX path.
+    """
+    return isinstance(value, str) and 3 <= len(value) <= 520 and valid_posix_absolute_path(value)
+
+
+def install_sealed_worker_paths() -> None:
+    """Give the sealed request/worker modules POSIX path semantics for POSIX paths.
+
+    They join, normalize and compare policy paths with ``ntpath`` and accept
+    only drive-letter paths. Outside Windows the policy paths are POSIX paths, so
+    their module-level ``ntpath`` becomes ``DRIVE_PATH_AWARE`` (``posixpath`` for a
+    POSIX path, unchanged ``ntpath`` for a drive path; ``isjunction`` is False for
+    POSIX paths) and the two drive-letter validators accept a valid POSIX path as
+    well as what they accepted before. Called by ``install()`` and by the Linux
+    worker host before the sealed worker runs.
+    """
+    if os.name == "nt":
+        return
+    from dayz_mcp import (
+        dayz_test_attestation,
+        dayz_test_request,
+        dayz_test_storage,
+        dayz_test_worker,
+    )
+
+    for module in (dayz_test_request, dayz_test_worker, dayz_test_attestation, dayz_test_storage):
+        module.ntpath = DRIVE_PATH_AWARE
+    drive_request = dayz_test_request._valid_local_absolute_path
+    drive_worker = dayz_test_worker._local_path
+    if not getattr(drive_request, "_accepts_posix", False):
+        def request_rule(value: object) -> bool:
+            return valid_posix_local_path(value) or drive_request(value)
+
+        request_rule._accepts_posix = True
+        dayz_test_request._valid_local_absolute_path = request_rule
+    if not getattr(drive_worker, "_accepts_posix", False):
+        def worker_rule(value: object) -> bool:
+            return valid_posix_local_path(value) or drive_worker(value)
+
+        worker_rule._accepts_posix = True
+        dayz_test_worker._local_path = worker_rule

@@ -1303,6 +1303,68 @@ def _create_registered_launcher(opened_launcher):
                 self._write(root, relative, source)
                 self.assertNotEqual(auditor.audit_process_creation(root), ())
 
+    _LINUX_RELAY = """import subprocess
+
+def _host_argv(bundle, *, lifecycle):
+    return ["python", "-I", "-m", "dayz_mcp.linux_worker_host"]
+
+def _run_lifecycle_child(bundle, frame, command, secrets_env):
+    child = subprocess.Popen(_host_argv(bundle, lifecycle=True), stdin=subprocess.PIPE)
+    return child
+
+def _supervise_worker(bundle):
+    {worker_call}
+    return worker
+"""
+
+    def _linux_relay_tree(self, root: Path, worker_call: str) -> None:
+        self._write(
+            root,
+            "dayz_mcp/secure_launcher.py",
+            "def consume():\n    from dayz_mcp import linux_launcher\n    return linux_launcher\n",
+        )
+        self._write(
+            root,
+            "dayz_mcp/linux_launcher.py",
+            self._LINUX_RELAY.replace("{worker_call}", worker_call),
+        )
+
+    def test_linux_relay_boundary_accepts_one_host_argv_popen_per_function(self) -> None:
+        auditor = self._auditor()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._linux_relay_tree(
+                root, "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), close_fds=True)"
+            )
+            self.assertEqual(auditor.audit_process_creation(root), ())
+
+    def test_linux_relay_boundary_rejects_any_other_process_call(self) -> None:
+        auditor = self._auditor()
+        fixtures = {
+            "free_argv": "worker = subprocess.Popen(['sh', '-c', 'anything'])",
+            "second_popen": (
+                "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False))\n"
+                "    worker = subprocess.Popen(_host_argv(bundle, lifecycle=False))"
+            ),
+            "shell": "worker = subprocess.Popen(_host_argv(bundle, lifecycle=False), shell=True)",
+            "run_instead": "worker = subprocess.run(_host_argv(bundle, lifecycle=False))",
+        }
+        for label, call in fixtures.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._linux_relay_tree(root, call)
+                self.assertNotEqual(auditor.audit_process_creation(root), ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._linux_relay_tree(root, "worker = None")
+            path = root / "dayz_mcp" / "linux_launcher.py"
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "\ndef elsewhere(bundle):\n    return subprocess.Popen(_host_argv(bundle, lifecycle=False))\n",
+                encoding="utf-8",
+            )
+            self.assertNotEqual(auditor.audit_process_creation(root), ())
+
     def test_process_auditor_rejects_alias_getattr_and_dynamic_lookup(self) -> None:
         auditor = self._auditor()
         bodies = {

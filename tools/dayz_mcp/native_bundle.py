@@ -1489,6 +1489,14 @@ def _verify_app(stream: BinaryIO, source_bytes: dict[str, bytes]) -> None:
 
 
 def load_verified_bundle(opened_launcher: object) -> VerifiedNativeBundle:
+    if os.name != "nt" and type(opened_launcher).__name__ == "LinuxOpenedLauncher":
+        # No signed PE outside Windows: launcher_registry opened the installed
+        # Linux bundle (same app.pyz and policy documents); linux_launcher
+        # verifies it. Any other object takes the Windows path, as before.
+        from dayz_mcp import linux_launcher
+
+        if type(opened_launcher) is linux_launcher.LinuxOpenedLauncher:
+            return linux_launcher.load_verified_bundle(opened_launcher)
     if type(opened_launcher) is not _OpenedLauncher:
         _invalid()
     opened_launcher.revalidate()

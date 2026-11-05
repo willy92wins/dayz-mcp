@@ -48,6 +48,28 @@ def try_lock(descriptor: int, offset: int = 0) -> None:
         _fcntl_lock(descriptor, offset, fcntl.F_WRLCK)
 
 
+def lock(descriptor: int, offset: int = 0) -> None:
+    """Lock byte ``offset``, waiting like ``msvcrt.locking(LK_LOCK)``.
+
+    LK_LOCK tries once a second, ten times, then raises OSError. Elsewhere the
+    same: ten non-blocking attempts a second apart, never an unbounded wait.
+    """
+    if os.name == "nt":
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        return
+    import time
+
+    for attempt in range(10):
+        try:
+            _fcntl_lock(descriptor, offset, fcntl.F_WRLCK)
+            return
+        except OSError:
+            if attempt == 9:
+                raise
+            time.sleep(1.0)
+
+
 def unlock(descriptor: int, offset: int = 0) -> None:
     """Release byte ``offset``. Raises OSError like ``msvcrt.locking`` does."""
     if os.name == "nt":
