@@ -17,6 +17,7 @@ import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 from tests import _shard
 from tests._tiers import slow_test
@@ -1566,9 +1567,35 @@ class ShardRunnerParityTest(unittest.TestCase):
 class SlowCountGateTest(unittest.TestCase):
     """The substring gate and the per-source cache keep the AST counts."""
 
+    def _temp_module(self, root: Path, source: str) -> tuple[str, Path]:
+        name = "test_slowcount_probe_tmp"
+        path = root / f"{name}.py"
+        path.write_text(source, encoding="utf-8")
+        module = types.ModuleType(name)
+        module.__file__ = str(path)
+        sys.modules[name] = module
+        _shard._SLOW_COUNT_CACHE.pop(name, None)
+        self.addCleanup(sys.modules.pop, name, None)
+        self.addCleanup(_shard._SLOW_COUNT_CACHE.pop, name, None)
+        return name, path
+
     def test_ascii_source_without_the_name_counts_zero(self) -> None:
         source = "class A:\n    def test_x(self): pass\n"
         self.assertEqual(_shard._slow_tests_in_source(source), 0)
+
+    def test_ascii_source_without_the_name_skips_parse(self) -> None:
+        source = "class A:\n    def test_x(self): pass\n"
+        with mock.patch.object(
+            _shard.ast, "parse", side_effect=AssertionError("ast.parse called")
+        ) as parse:
+            self.assertEqual(_shard._slow_tests_in_source(source), 0)
+        parse.assert_not_called()
+
+    def test_ascii_source_with_the_name_still_parses(self) -> None:
+        source = "class A:\n    @slow_test\n    def test_x(self): pass\n"
+        with mock.patch.object(_shard.ast, "parse", wraps=_shard.ast.parse) as parse:
+            self.assertEqual(_shard._slow_tests_in_source(source), 1)
+        parse.assert_called_once()
 
     def test_nonascii_source_is_parsed_not_shortcut(self) -> None:
         # U+017F NFKC-folds to "s", so this decorator is slow_test to the
@@ -1577,20 +1604,30 @@ class SlowCountGateTest(unittest.TestCase):
         self.assertEqual(_shard._slow_tests_in_source(source), 1)
 
     def test_rewritten_module_recounts(self) -> None:
-        name = "test_slowcount_probe_tmp"
-        path = Path(f"{name}.py")
-        self.addCleanup(lambda: _shard._SLOW_COUNT_CACHE.pop(name, None))
-        self.addCleanup(lambda: path.unlink(missing_ok=True))
-        path.write_text(
-            "class A:\n    def test_x(self): pass\n", encoding="utf-8"
-        )
-        self.assertEqual(_shard.slow_test_count(name), 0)
-        path.write_text(
-            "from tests._tiers import slow_test\n"
-            "class A:\n    @slow_test\n    def test_x(self): pass\n",
-            encoding="utf-8",
-        )
-        self.assertEqual(_shard.slow_test_count(name), 1)
+        with tempfile.TemporaryDirectory(prefix="shard-slowcount-") as tmp:
+            name, path = self._temp_module(
+                Path(tmp), "class A:\n    def test_x(self): pass\n"
+            )
+            self.assertEqual(_shard.slow_test_count(name), 0)
+            path.write_text(
+                "from tests._tiers import slow_test\n"
+                "class A:\n    @slow_test\n    def test_x(self): pass\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(_shard.slow_test_count(name), 1)
+
+    def test_repeated_same_source_reuses_cached_count(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shard-slowcount-") as tmp:
+            name, _path = self._temp_module(
+                Path(tmp),
+                "class A:\n    @slow_test\n    def test_x(self): pass\n",
+            )
+            with mock.patch.object(
+                _shard.ast, "parse", wraps=_shard.ast.parse
+            ) as parse:
+                self.assertEqual(_shard.slow_test_count(name), 1)
+                self.assertEqual(_shard.slow_test_count(name), 1)
+            parse.assert_called_once()
 
 
 if __name__ == "__main__":
