@@ -1042,6 +1042,23 @@ class HttpAdoptionMatrixTest(unittest.TestCase):
         self.assertEqual(queued.get("status"), "queued")
 
 
+def _isolated_client_runtime(config: ServerConfig) -> server_module.ClientRuntime:
+    """The fixture runtime, without the host's handoff or the Win32 key read."""
+    with (
+        patch.dict(os.environ),
+        # Its credential reads the fixture keyfile through the Windows file
+        # API; plain file I/O reads the same key.
+        patch.object(
+            server_module.daemon_credential.pinned_keyfile,
+            "read_pinned_keyfile",
+            new=lambda path: Path(path).read_text(encoding="utf-8").strip(),
+        ),
+    ):
+        # It reads, then deletes, a handoff carrier the environment names.
+        os.environ.pop(session_handoff.HANDOFF_ENV, None)
+        return _fixture_client_runtime(config)
+
+
 class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
     def _config(self) -> ServerConfig:
         return ServerConfig(
@@ -1238,7 +1255,7 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
     ):
         # fb-20261104-143314-32cf: the check sees a RUNNING row still held by
         # a dead client's lease and lets the stop reach the worker.
-        runtime = _fixture_client_runtime(self._config())
+        runtime = _isolated_client_runtime(self._config())
         box = {
             "occupied": True,
             "runs": [
