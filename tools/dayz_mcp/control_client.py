@@ -298,25 +298,28 @@ class ControlClient:
                 except Exception:
                     registered = ""
                 if policy_cause.startswith("HostConfigError:daemon_provenance_"):
-                    # A replacement validates this server's registration the same
-                    # way, so while it cannot be validated the replacement dies at
-                    # startup and server_reload cannot help
+                    # A server_reload replacement repeats this validation, so it
+                    # dies at startup too while the same problem affects it
                     # (fb-20261102-134653-e0ce). _conflict also covers a failed
                     # read, and a failed check of this process's own executable
-                    # with both registrations intact: hence "could not be
-                    # validated" and "while that holds".
+                    # with both registrations intact, which the replacement
+                    # repeats for its own process and may pass: hence "could not
+                    # be validated", and a reload only once both registrations
+                    # are known to be intact.
                     next_step = (
                         "This server's registration in the host configs could not be "
                         "validated (for example: missing, in one config only, not the "
                         "same in each, malformed or unreadable, or this process's own "
-                        "executable could not be checked). While that holds, "
-                        "server_reload cannot help: its replacement validates the same "
-                        "way and fails to start. "
+                        "executable could not be checked). A server_reload replacement "
+                        "repeats this validation and fails to start too while the same "
+                        "problem affects it. "
                         "Report this to the host/operator to check both registrations, "
                         "and restore them if needed, before any server_reload "
                         "(install_mcp.py --register, with --instance for a named "
                         "instance; it refuses an entry it cannot parse, which has to "
-                        "be fixed or removed by hand first). "
+                        "be fixed or removed by hand first). If both are intact, the "
+                        "failure may be local to this process, and a server_reload may "
+                        "then help. "
                     )
                 else:
                     next_step = (
