@@ -9,6 +9,7 @@ Criteria: K5, K13, K14 and the cleanup half of §2.14.
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -664,6 +665,18 @@ class DaemonRestartWiringTest(unittest.TestCase):
                 coordinator.release(identity, grant["lease_token"])
                 coordinator.note_processes_gone("restart-run", None)
                 coordinator.note_processes_gone("offline-run", None)
+                # D-r6-H2: the release's cleanup finishes off this thread;
+                # a queued (202) answer while the slot drains is production
+                # behavior, not this test's subject. Wait for the slot to
+                # free, then require an immediate clean grant.
+                deadline = time.monotonic() + 5.0
+                with coordinator._condition:
+                    while (
+                        coordinator._releasing is not None
+                        or coordinator._active is not None
+                        or coordinator._grant_inflight is not None
+                    ) and time.monotonic() < deadline:
+                        coordinator._condition.wait(0.05)
                 status, grant = coordinator.acquire(identity, "trace")
                 self.assertEqual(status, 200, grant)
                 self.assertNotIn(

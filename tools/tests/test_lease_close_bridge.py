@@ -612,7 +612,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
-            "camera", "dialog", "action_hold", "samplers", "action_input_in_flight")}
+            "camera", "camera_path", "dialog", "action_hold", "samplers", "action_input_in_flight")}
         class _Ctl:
             def __init__(self, fn):
                 self._fn = fn
@@ -651,6 +651,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "MCPLeaseCloseCensus": _CloseCensus,
             "MCPLeaseCloseEntry": _CloseEntry,
             "MCPLeaseCloseFloor": _CloseFloor,
+            "m_CameraPath": type("CP", (), {"IsPlaying": lambda self: flags["camera_path"]})(),
             "m_ActiveCam": object() if "camera" in active else None,
             "m_CameraHandoffPending": False,
             "m_PlayerSimulationDisabled": "player_simulation" in active,
@@ -670,7 +671,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             if mutant_clean and name == "LeaseCloseCensusClean":
                 body = body.replace('census.entries.Get(i).state != "clean"', "false", 1)
             translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient"),
-                      members=("m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
+                      members=("m_CameraPath", "m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
                                "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner"))
         args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
         self._last_client_ns = ns
@@ -688,6 +689,13 @@ class LeaseCloseCensusTests(unittest.TestCase):
         census2 = self._client_census(source, active=("weapon",))
         residue = [e.name.text for e in census2.entries if e.state.text != "clean"]
         self.assertEqual(residue, ["weapon"])
+        # §4 #263 NEG: a path still playing after the stop names only
+        # camera_path; the stop itself is pinned in the dispatch order.
+        census_path = self._client_census(source, active=("camera_path",))
+        residue_path = [e.name.text for e in census_path.entries if e.state.text != "clean"]
+        self.assertEqual(residue_path, ["camera_path"])
+        self.assertEqual(census_path.state.text, "residue")
+        self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census_path))
         self.assertEqual(census2.state.text, "residue")
         self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census2))
         # H3: process-lifetime input debt is unverified: census residue,
@@ -743,7 +751,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         body = method_body(source, "protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)")
         steps = ["FinishLeaseClosed()", "m_UiPreviewRoot.Unlink()", "MCPCarDrive.Clear()",
                  'MCPInputTriggerControl.ReleaseAll("shutdown")', 'MCPPlayerMoveControl.ReleaseAll("shutdown")',
-                 "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
+                 "StopCameraPath()", "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
                  'MCPVehicleTrace.Abort("shutdown")', "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
         pos = -1
         for step in steps:
@@ -756,7 +764,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
     def test_k27_k30_server_census_and_registers(self):
         source = _read(SERVER_PATH)
         body = method_body(source, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)")
-        for step in ("MCPBotControl.ShutdownAll(this)", "MCPMoveCloseServer(carried.move_id, carried.conn_gen)",
+        for step in ("MCPBotControl.ShutdownAll(this)", "MCPSurvivorDrive.ShutdownAll(this)", "MCPMoveCloseServer(carried.move_id, carried.conn_gen)",
                      "MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen)", "PostJobTimeout(job)",
                      "LeaseCloseExtensionStop()", "BuildLeaseCloseCensus(command.args)"):
             self.assertIn(step, body, step)
@@ -765,7 +773,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertIn('closeJob.kind = "lease_close";', body)
         self.assertIn("m_ElapsedS + 25.0", body)
         census = method_body(source, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
-        for name in ("bots", "infected_drive", "move_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
+        for name in ("bots", "survivor_drive", "infected_drive", "move_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
             self.assertIn(f'"{name}"', census, name)
         self.assertIn("LeaseCloseExtensionCensus(census);", census)
         # H7: registration sits at the real send, not in Dispatch.
@@ -850,6 +858,10 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 "LeaseCloseBusy": staticmethod(lambda b: state["bots"]),
                 "LeaseCloseResidueReason": staticmethod(lambda b: _LogString.of(state["bots_reason"])),
             }),
+            "MCPSurvivorDrive": type("SD", (), {
+                "LeaseCloseBusy": staticmethod(lambda: bool(flags.get("survivor_drive"))),
+                "ShutdownAll": staticmethod(lambda b: None),
+            }),
             "MCPJob": _Job,
             "EntityAI": object,
             "MCPSceneEntry": type("SE", (), {}),
@@ -899,6 +911,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             ({"flags": {"move": True}}, "move_copy", "residue"),
             ({"flags": {"weapon": True}}, "weapon", "residue"),
             ({"flags": {"bots": True}}, "bots", "residue"),
+            ({"flags": {"survivor_drive": True}}, "survivor_drive", "residue"),
             ({"deletion": (object(),)}, "deletion_pending", "residue"),
         ]
         for kwargs, name, want_state in cases:

@@ -2424,9 +2424,10 @@ class ProcessLifecycle:
             return False
         # §2.12: only the lifecycle proves processes gone, and only after
         # the manifest write succeeded. A failed write calls nothing.
-        note_gone = getattr(self.coordinator, "note_processes_gone", None)
-        if callable(note_gone):
-            note_gone(run.run_id, None)
+        if self.coordinator is not None and hasattr(
+            self.coordinator, "note_processes_gone"
+        ):
+            self.coordinator.note_processes_gone(run.run_id, None)
         self._release_parent_anchors_locked()
         self._best_effort_post_persist_retirement(run, event, reason, decision)
         return True
@@ -3680,9 +3681,10 @@ class ProcessLifecycle:
                 self._seal_terminal(provisional.run_id, time.time())
                 # §2.12 (H6): a launch confirmed then failed leaves no live
                 # process; clear its registry/debt once EXITED is durable.
-                note_gone = getattr(self.coordinator, "note_processes_gone", None)
-                if callable(note_gone):
-                    note_gone(provisional.run_id, None)
+                if self.coordinator is not None and hasattr(
+                    self.coordinator, "note_processes_gone"
+                ):
+                    self.coordinator.note_processes_gone(provisional.run_id, None)
         if attempt_started_at is not None:
             self._forget_attempt_activity(
                 provisional.run_id,
@@ -4261,11 +4263,12 @@ class ProcessLifecycle:
                             # §2.12: the replaced role's processes are gone
                             # once this write lands, before the new instance
                             # is minted below. A failed write calls nothing.
-                            note_gone = getattr(
-                                self.coordinator, "note_processes_gone", None
-                            )
-                            if callable(note_gone):
-                                note_gone(run_id, launch_role)
+                            if self.coordinator is not None and hasattr(
+                                self.coordinator, "note_processes_gone"
+                            ):
+                                self.coordinator.note_processes_gone(
+                                    run_id, launch_role
+                                )
                     if replace_error is not None:
                         settled = self._settle_failed_launch(
                             client=client,

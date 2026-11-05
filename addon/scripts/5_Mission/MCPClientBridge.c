@@ -8722,6 +8722,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "camera", cameraActive, "camera");
+		// §4 #263: the path itself, after the stop above. A path that is
+		// still playing is residue the observer re-reads.
+		bool cameraPathPlaying = false;
+		if (m_CameraPath && m_CameraPath.IsPlaying())
+		{
+			cameraPathPlaying = true;
+		}
+
+		AddCloseEntry(census, "camera_path", cameraPathPlaying, "camera_path");
 		AddCloseEntry(census, "player_simulation", m_PlayerSimulationDisabled, "player_simulation");
 		AddCloseEntry(census, "controls_hud", m_ControlsSuppressed, "controls_hud");
 		bool dialogOpen = false;
@@ -8820,6 +8829,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPCarDrive.Clear();
 		MCPInputTriggerControl.ReleaseAll("shutdown");
 		MCPPlayerMoveControl.ReleaseAll("shutdown");
+		// §4 #263: stop the playing camera path before gameplay and the
+		// camera are restored, as restore_gameplay does. The census below
+		// then reads the path itself, not a job.
+		StopCameraPath();
 		RestoreGameplay();
 		ReleaseCamera();
 		MCPHoldControl.Shutdown("shutdown");

@@ -8439,6 +8439,7 @@ class MCPBridge : Managed
 			i = i + 1;
 		}
 
+		AddCloseEntry(census, "survivor_drive", MCPSurvivorDrive.LeaseCloseBusy(), "survivor_drive");
 		AddCloseEntry(census, "move_copy", moveActive, "move_copy");
 		AddCloseEntry(census, "weapon", weaponActive, "weapon");
 		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
@@ -8533,6 +8534,10 @@ class MCPBridge : Managed
 	protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)
 	{
 		MCPBotControl.ShutdownAll(this);
+		// §4 #266: every driven survivor stops with the lease. The census
+		// below reads s_Driven itself, so a drive that survives this is
+		// residue, never a silent clean.
+		MCPSurvivorDrive.ShutdownAll(this);
 		// §2.7 step 2: release every recorded infected with the same three
 		// calls. The registry and the debt stay: the native lifetime cannot
 		// be read back, so this is unverified until the process exits.
