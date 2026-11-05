@@ -127,6 +127,28 @@ class MCPBotControl
 		Release(bridge, objectId, "deleted");
 	}
 
+	// Lease close: a bot was started in this process and its FSM state cannot
+	// be read back here, so the census keeps it unverified (plan S1).
+	static bool LeaseCloseUnverified()
+	{
+		if (!s_Initialized)
+		{
+			return false;
+		}
+
+		return s_Initialized.Count() > 0;
+	}
+
+	static bool AnyRunning()
+	{
+		if (!s_Running)
+		{
+			return false;
+		}
+
+		return s_Running.Count() > 0;
+	}
+
 	static bool IsRunning(int objectId)
 	{
 		return FindRunning(objectId) >= 0;
