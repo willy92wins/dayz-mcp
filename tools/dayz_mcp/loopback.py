@@ -7503,13 +7503,13 @@ class ServerState:
                             peer, command_name, token
                         )
                     if refusal is not None:
-                        refusal, _sep, refusal_detail = refusal.partition(":")
+                        payload = self._expansion_refusal_payload(refusal)
                         self._mark_discarded(
                             command,
-                            refusal,
+                            payload["error"],
                             discarded_exec,
                             finished_operations,
-                            detail=refusal_detail or None,
+                            detail=payload.get("detail"),
                         )
                         continue
                     if (

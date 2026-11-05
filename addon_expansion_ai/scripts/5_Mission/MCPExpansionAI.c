@@ -854,7 +854,8 @@ modded class MCPBridge
 			loadoutName = AINormalizeLoadout(factionInstance.GetDefaultLoadout());
 		}
 
-		loadoutPath = ExpansionPrefab.GetPath(loadoutName);
+		// Both args: ExpansionPrefab also has an instance GetPath() (ExpansionPrefab.c:48).
+		loadoutPath = ExpansionPrefab.GetPath(loadoutName, EXPANSION_LOADOUT_FOLDER);
 		if (!FileExist(loadoutPath))
 		{
 			AISpawnRefuse(result, report, "bad_args", "loadout");

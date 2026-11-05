@@ -45,6 +45,7 @@ import unittest
 from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import loopback
+from dayz_mcp.bridge_readiness import EXPANSION_AI_VERB_BITS
 from tests.poll_harness_helpers import _MISSION, _bridge_harness, _dispatch_branches
 
 
@@ -156,8 +157,10 @@ class PollUrlEngineLimitTest(unittest.TestCase):
         hash_ = re.search(r'EXPANSION_AI_ARG_CONTRACT_HASH = "([0-9a-f]{16})"', adapter)
         verbs = re.search(r'EXPANSION_AI_VERBS = "([0-9]+)"', adapter)
         self.assertIsNotNone(hash_)
+        widest = len(str((1 << len(EXPANSION_AI_VERB_BITS)) - 1))
+        announced = len(verbs.group(1)) if verbs else 0
         extra = (len(caps.group(1)) if caps else 0) + len("&xai=") + len(hash_.group(1)) \
-            + (len("." + verbs.group(1)) if verbs else 0)
+            + 1 + max(widest, announced)
         self.assertLessEqual(len(_saturated_url("MCPBridge.c")) + extra + len(",lease_close"),
                              ENGINE_URL_MAX)
 

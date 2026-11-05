@@ -23,6 +23,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback, server
 from dayz_mcp.bridge_readiness import (
     EXPANSION_AI_ARG_CONTRACT,
+    EXPANSION_AI_VERB_BITS,
     EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH,
     _compare_bridge_capabilities,
     parse_xai,
@@ -318,6 +319,127 @@ class ExpansionCloseGateAllPeersTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(len(bound_queue(state, "server")), 1)
 
+    def _gate_state(self, role: str) -> loopback.ServerState:
+        state = loopback.ServerState(key="k")
+        state.daemon_generation = "gen-xai"
+        state.install_bound_peer(
+            instance=INST_SERVER, role=role, pid=PID_SERVER, run_id="xai-run"
+        )
+        _announce(state, _good_commands(), server.EXPECTED_SERVER_ARG_CONTRACT_HASH, GOOD_XAI)
+        return state
+
+    def _client_census(self, state, instance, commands, generation=None) -> None:
+        state._peer_caps["client"] = {
+            "generation": state.daemon_generation if generation is None else generation,
+            "commands": list(commands),
+            "reason": "ok",
+            "arg_contract_hash": None,
+            "expansion_arg_contract_hash": None,
+            "announced_at": state._now(),
+            "instance": instance,
+        }
+
+    def test_h10_offline_binding_needs_both_closes(self) -> None:
+        # Mutant killed: an offline binding treated as server-only.
+        state = self._gate_state("offline")
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(
+            (status, body),
+            (409, {"error": "expansion_unavailable", "detail": "lease_close_not_supported"}),
+        )
+        self._client_census(state, INST_SERVER, ["lease_close_client"])
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(status, 200, body)
+
+    def test_h10_starting_or_stale_client_blocks_and_server_only_run_admits(self) -> None:
+        # Mutants killed: required peers read only from BOUND bindings, and
+        # a client census of another generation accepted.
+        state = self._gate_state("server")
+        state._bindings[INST_CLIENT] = loopback.Binding(
+            instance=INST_CLIENT, run_id="xai-run", role="client", epoch=99,
+            pid=None, creation_time_utc=None, state=loopback.BINDING_STARTING,
+        )
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(body.get("detail"), "lease_close_not_supported", body)
+        state = self._gate_state("server")
+        state.install_bound_peer(
+            instance=INST_CLIENT, role="client", pid=PID_CLIENT, run_id="xai-run"
+        )
+        self._client_census(state, INST_CLIENT, ["lease_close_client"], generation="old")
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(body.get("detail"), "lease_close_not_supported", body)
+        state = self._gate_state("server")
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(status, 200, body)
+
+
+class ExpansionXaiWireTest(unittest.TestCase):
+    """H3 mask on the wire: record_poll -> stored census -> admission (O2/O14)."""
+
+    def _after_poll(self, xai: str, caps: list[str] | None = None):
+        state = _bound_state()
+        names = _base_commands() + ["lease_close"] if caps is None else caps
+        status, polled = state.record_poll(
+            "server", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_SERVER,
+            source_pid=PID_SERVER, caps=",".join(names),
+            ach=server.EXPECTED_SERVER_ARG_CONTRACT_HASH, xai=xai,
+        )
+        self.assertEqual(status, 200, polled)
+        return state, state.enqueue_command(RELEASE, {"spawn_token": TOKEN}, peer="server")
+
+    def test_good_mask_expands_to_names_and_enqueues(self) -> None:
+        state, (status, body) = self._after_poll(f"{GOOD_XAI}.3")
+        self.assertEqual(status, 200, body)
+        stored = state._peer_caps["server"]["commands"]
+        self.assertEqual([c for c in stored if c.startswith("ai_")], [RELEASE, SPAWN])
+
+    def test_unknown_bit_is_contract_mismatch(self) -> None:
+        # Mutant killed: a bit this broker does not know accepted (or read
+        # as adapter_not_loaded, hiding the version skew of plan 2.2).
+        unknown = 1 << len(EXPANSION_AI_VERB_BITS)
+        _state, reply = self._after_poll(f"{GOOD_XAI}.{unknown | 1}")
+        self.assertEqual(
+            reply,
+            (409, {"error": "expansion_unavailable", "detail": "adapter_contract_mismatch"}),
+        )
+
+    def test_malformed_mask_announces_no_verb(self) -> None:
+        # Mutant killed: a bare hash or a non-canonical mask read as verbs.
+        for xai in (GOOD_XAI, f"{GOOD_XAI}.", f"{GOOD_XAI}.03", f"{GOOD_XAI}.x", f"{GOOD_XAI}.-1"):
+            with self.subTest(xai=xai):
+                _state, reply = self._after_poll(xai)
+                self.assertEqual(
+                    reply,
+                    (409, {"error": "expansion_unavailable", "detail": "adapter_not_loaded"}),
+                )
+
+    def test_name_in_caps_and_mask_is_duplicate(self) -> None:
+        # Mutant killed: the expansion skipping the duplicate check.
+        state, _reply = self._after_poll(
+            f"{GOOD_XAI}.3", _base_commands() + ["lease_close", RELEASE]
+        )
+        self.assertEqual(state._peer_caps["server"]["reason"], "duplicate")
+
+    def test_expanded_census_over_the_cap_is_too_many(self) -> None:
+        # Mutant killed: the 64-name cap checked before the expansion only.
+        caps = [f"x{i}" for i in range(loopback.POLL_CAPS_MAX_NAMES - 1)]
+        state, _reply = self._after_poll(f"{GOOD_XAI}.3", caps)
+        self.assertEqual(state._peer_caps["server"]["reason"], "too_many")
+
+    def test_bit_order_is_append_only_and_matches_the_dispatch(self) -> None:
+        # Mutants killed: a reordered bit table, and a mask announcing a
+        # verb DispatchExtension does not answer (it would read unknown_command).
+        self.assertEqual(
+            EXPANSION_AI_VERB_BITS[:4],
+            ("ai_group_release", "ai_group_spawn", "ai_group_order", "ai_group_state"),
+        )
+        source = ADAPTER.read_text(encoding="utf-8")
+        hook = method_body(
+            source, "protected override int DispatchExtension(MCPCommand command, MCPResult result)"
+        )
+        dispatched = set(re.findall(r'command\.cmd == "([a-z_]+)"', hook))
+        self.assertEqual(set(_adapter_census()) - set(_base_commands()), dispatched)
+
 
 class ExpansionComparatorTest(unittest.TestCase):
     """O7: the adapter verbs are optional in _compare_bridge_capabilities."""
@@ -438,8 +560,9 @@ class ExpansionO13InertTest(unittest.TestCase):
     """O13, the part that needs no close: v12 support stays inert."""
 
     def test_o13_internal_release_stays_available_on_a_v12_census(self) -> None:
-        # Mutant killed: the lease-close gate blocking an internal release
-        # (it is not a new mutation) or creating close debt on v12.
+        # Mutants killed: the lease-close gate blocking an internal release
+        # (it is not a new mutation), ai_group_release joining the
+        # new-mutation gate, or creating close debt on v12.
         state = _bound_state()
         _announce(
             state,
@@ -450,18 +573,6 @@ class ExpansionO13InertTest(unittest.TestCase):
         status, body = state.enqueue_command(RELEASE, {"spawn_token": TOKEN}, peer="server")
         self.assertEqual(status, 200, body)
         self.assertEqual(len(bound_queue(state, "server")), 1)
-
-    def test_o14_internal_release_is_not_gated_on_lease_close(self) -> None:
-        # Mutant killed: ai_group_release joining the new-mutation gate.
-        state = _bound_state()
-        _announce(
-            state,
-            _good_commands(lease_close=False),
-            server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
-            GOOD_XAI,
-        )
-        status, body = state.enqueue_command(RELEASE, {"spawn_token": TOKEN}, peer="server")
-        self.assertEqual(status, 200, body)
 
 
 # --- E6/E9: translated Enforce bodies -------------------------------------

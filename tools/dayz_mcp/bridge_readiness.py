@@ -349,21 +349,26 @@ EXPANSION_AI_VERB_BITS: tuple[str, ...] = (
     "ai_group_order",
     "ai_group_state",
 )
-_XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.([0-9]{1,2})\Z")
+_XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.(0|[1-9][0-9]{0,3})\Z")
 
 
 def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
-    """'<hash>.<bits>' -> (hash, verbs); anything else -> (None, ())."""
+    """'<hash>.<mask>' -> (hash, verbs); anything else -> (None, ()).
+
+    Known bits always expand, so the verb check of plan 2.2 passes and a
+    version skew reads adapter_contract_mismatch, not adapter_not_loaded.
+    A bit this broker does not know voids the hash (fail closed).
+    """
 
     match = _XAI_ANNOUNCE.match(raw or "")
     if match is None:
         return None, ()
     bits = int(match.group(2))
-    if bits >= 1 << len(EXPANSION_AI_VERB_BITS):
-        return None, ()
     verbs = tuple(
         name for index, name in enumerate(EXPANSION_AI_VERB_BITS) if bits & (1 << index)
     )
+    if bits >> len(EXPANSION_AI_VERB_BITS):
+        return None, verbs
     return match.group(1), verbs
 
 

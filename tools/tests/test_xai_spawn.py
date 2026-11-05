@@ -488,9 +488,10 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "eAISurvivor": SimpleNamespace(GetQuasiRandom=lambda: EnforceString.of("eAI_SurvivorM_Test")),
         "ExpansionAISpawnBase": SimpleNamespace(GetPlacementPosition=lambda pos: pos),
         # Real Load returns its prefab even for a file that does not parse.
+        "EXPANSION_LOADOUT_FOLDER": EnforceString.of("$profile:ExpansionMod/Loadouts/"),
         "ExpansionPrefab": SimpleNamespace(
             Load=lambda name, force: object(),
-            GetPath=lambda name: EnforceString.of("$profile:ExpansionMod/Loadouts/" + (name.text if isinstance(name, EnforceString) else str(name)) + ".json"),
+            GetPath=lambda name, folder=None: EnforceString.of((folder.text if isinstance(folder, EnforceString) else "$profile:ExpansionMod/Loadouts/") + (name.text if isinstance(name, EnforceString) else str(name)) + ".json"),
         ),
         "AILoadoutParses": lambda path: (state["load"].append((path.text, True)), path.text in {f"$profile:ExpansionMod/Loadouts/{name}.json" for name in parseable})[1],
         "ExpansionHumanLoadout": SimpleNamespace(Apply=lambda member, name, force: (state["apply"].append((name.text if isinstance(name, EnforceString) else str(name), force)), True)[1]),

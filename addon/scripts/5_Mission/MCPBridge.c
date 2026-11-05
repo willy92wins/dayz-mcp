@@ -121,6 +121,8 @@ class MCPBridge : Managed
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
 	// Built once from SERVER_CAPABILITIES (as is) and SERVER_ARG_CONTRACT_HASH (encoded); key and inst are not cached.
+	// The poll sends ServerCapabilities(), which returns the same constant; this cached copy is
+	// never reassigned after construction and is what the capability tests audit.
 	protected string m_PollCapabilities;
 	protected string m_PollArgContractHash;
 	protected float m_PollHz;

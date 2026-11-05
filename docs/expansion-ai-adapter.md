@@ -41,7 +41,8 @@ in the append-only order fixed in `bridge_readiness.py`
 (`EXPANSION_AI_VERB_BITS`: release, spawn, order, state). The broker
 expands the mask to names before storing the census, so admission and the
 capability comparator keep seeing names, and the saturated poll with the
-full adapter and v13 measures 1019. This deviates from plan 2.2 ("the
+full adapter (widest mask) and v13 measures 1020, four characters under
+the limit. This deviates from plan 2.2 ("the
 adapter adds its names to the census") and is provisional, pending
 Guillermo's confirmation.
 
