@@ -37,6 +37,7 @@ from dayz_mcp import (
     dayz_test_tool,
     host_config,
     inbox,
+    native_launcher_transaction,
     orphan_guard,
     playbook_tool as playbook_tool_mod,
     registry_lock,
@@ -5229,6 +5230,22 @@ def _client_extension_exempt(
     return not _client_extension_blocked(box, row)
 
 
+def _run_protected_stop(run_id: str, notice: dict[str, Any]) -> dict[str, Any]:
+    """dayz_test_stop's answer for a run this session may not adopt."""
+
+    failed: dict[str, Any] = {
+        "status": "failed",
+        "run_id": run_id,
+        "error_code": "run_protected",
+        "hint": notice.get("hint"),
+        "use_state": notice.get("use_state"),
+        "use_reason": notice.get("use_reason"),
+    }
+    if "retry_after_s" in notice:
+        failed["retry_after_s"] = notice["retry_after_s"]
+    return failed
+
+
 def _failed_active_run_result(
     *,
     project: str,
@@ -6816,18 +6833,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             if isinstance(snapshot, dict):
                 row = _box_run(_box_from_status(snapshot), run_id)
                 if _row_is_protected(row, caller_session):
-                    notice = protection_fields(row)
-                    failed: dict[str, Any] = {
-                        "status": "failed",
-                        "run_id": run_id,
-                        "error_code": "run_protected",
-                        "hint": notice["hint"],
-                        "use_state": notice["use_state"],
-                        "use_reason": notice["use_reason"],
-                    }
-                    if "retry_after_s" in notice:
-                        failed["retry_after_s"] = notice["retry_after_s"]
-                    return failed
+                    return _run_protected_stop(run_id, protection_fields(row))
             try:
                 with _typed_dayz_test_value_errors():
                     result = await dayz_test_tool.execute_dayz_test_stop(
@@ -6838,6 +6844,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             except ToolError:
                 raise
             except Exception as exc:
+                grant = (
+                    exc.protected_grant
+                    if isinstance(
+                        exc, native_launcher_transaction.NativeLauncherTransactionError
+                    )
+                    else None
+                )
+                adopted = grant.get("adopted_run") if isinstance(grant, dict) else None
+                if isinstance(adopted, dict) and adopted.get("run_id") == run_id:
+                    # fb-20261104-143314-32cf: the check above did not see the
+                    # run as protected (for one, a RUNNING row still held by a
+                    # dead client's lease), the daemon refused the adopt of the
+                    # worker's grant as run_protected, and the client released
+                    # that grant (_validate_grant attaches no answer otherwise).
+                    return _run_protected_stop(run_id, adopted)
                 # The ToolError carries the exception TYPE, plus the launcher
                 # backend's bare code when it has one (ficha ae65). The message
                 # can hold host paths, so it must not cross the MCP wire; FastMCP
@@ -7645,10 +7666,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            "Requires a lease (session_acquire_wait). Seat the first "
-            "player in the driver seat of a vehicle near pos. seated=1 "
-            "means the server read that player (or, if that one is gone, the "
-            "first player) in the driver seat of that vehicle once the get-in "
+            "Requires a lease (session_acquire_wait). Seat the player uid "
+            "names in the driver seat of a vehicle near pos. uid is required "
+            "and never falls back to the first human: no connected player "
+            "with it answers player_not_found. seated=1 means the server read "
+            "that player in the driver seat of that vehicle once the get-in "
             "ended. The bridge checks that each tick: seated=1 on the first "
             "tick that reads it, timeout on a tick that does not once 5 s have "
             "passed, whatever timeout_s is. A timeout can still end seated: "
@@ -7657,8 +7679,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "establish it with vehicle_get_in_client."
         )
     )
-    async def vehicle_enter(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_enter(
+        pos: list[StrictFloat],
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos")}
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_enter", args, "server", _timeout(timeout_s))
 
@@ -8620,10 +8649,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Only a failure to read the id ends as timeout. Refusals "
             "before the call move nothing: object_not_found, not_reachable, "
             "no_room, slot_not_found, slot_occupied. uid is required and "
-            "never falls back to the first human for client moves and for "
-            "to_hands, to_inventory, split_half and split_to_hands; a "
-            "server-authority world-to-world move names no player and "
-            "needs no uid. Client moves need that player in reach "
+            "never falls back to the first human for client moves, for "
+            "to_hands, to_inventory, split_half and split_to_hands, and for "
+            "a server-authority move whose item or target is in a player's "
+            "inventory (the bridge answers uid_required); a server-authority "
+            "world-to-world move names no player and needs no uid. Client "
+            "moves need that player in reach "
             "(UAMaxDistances.DEFAULT). No OS input and no client focus."
         )
     )
@@ -9986,7 +10017,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "report the commanded angle as success and does not require a "
             "weapon. First person, idle, standing or crouched, weapon "
             "lowered, no freelook, tracking, scripted camera or concurrent "
-            "action. Budget 3 s."
+            "action. third_person comes from the IsInThirdPerson flag or from "
+            "a third-person camera in use (DayZPlayerCamera3rdPerson). The pose "
+            "checks run before the turn, on each tick and when the job's time "
+            "runs out, so a refused pose answers its own code, not deadline. "
+            "Budget 3 s."
         )
     )
     async def player_look_at(
