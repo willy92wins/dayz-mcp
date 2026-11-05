@@ -24,7 +24,7 @@ jobs:
       matrix:
         python: ["3.11", "3.14"]
         shard: [1, 2, 3, 4]
-        av: [default, excluded]
+        av: [default]
     defaults:
       run:
         shell: pwsh

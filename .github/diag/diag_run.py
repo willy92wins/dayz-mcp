@@ -5,12 +5,18 @@ usage (cwd = tools): python -B ../.github/diag/diag_run.py <i>/<n> <out_dir>
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
 import threading
 import time
 import unittest
+
+# Bound before any test patches time.sleep / time.perf_counter.
+_sleep = time.sleep
+_perf = time.perf_counter
+_now = time.time
 
 sys.path[0] = os.getcwd()
 from tests import _shard  # noqa: E402
@@ -26,17 +32,38 @@ def probe() -> None:
     # includes GIL contention from threads the tests left running.
     with open(os.path.join(out_dir, "probe_inproc.jsonl"), "w") as fh:
         while not stop.is_set():
-            t0 = time.perf_counter()
-            time.sleep(0.002)
-            d = time.perf_counter() - t0
+            t0 = _perf()
+            _sleep(0.002)
+            d = _perf() - t0
             if d > 0.05:
-                fh.write(json.dumps({"t": time.time(), "d": round(d, 4)}) + "\n")
+                fh.write(json.dumps({"t": _now(), "d": round(d, 4)}) + "\n")
                 fh.flush()
+
+
+gc_fh = open(os.path.join(out_dir, "gc.jsonl"), "w")
+_gc_start = {}
+
+
+def gc_cb(phase, info):
+    # Every collection of generation 2, and any collection over 20 ms.
+    if phase == "start":
+        _gc_start["t"] = _perf()
+        _gc_start["w"] = _now()
+        return
+    d = _perf() - _gc_start.get("t", _perf())
+    if info.get("generation") == 2 or d > 0.02:
+        gc_fh.write(json.dumps({"t": _gc_start.get("w"), "d": round(d, 4),
+                                "gen": info.get("generation"),
+                                "collected": info.get("collected")}) + "\n")
+        gc_fh.flush()
+
+
+gc.callbacks.append(gc_cb)
 
 
 class Result(unittest.TextTestResult):
     def startTest(self, test):  # noqa: N802
-        self._diag = {"id": test.id(), "t0": time.time(), "threads0": threading.active_count(),
+        self._diag = {"id": test.id(), "t0": _now(), "threads0": threading.active_count(),
                       "outcome": "ok"}
         super().startTest(test)
 
@@ -67,7 +94,7 @@ class Result(unittest.TextTestResult):
     def stopTest(self, test):  # noqa: N802
         super().stopTest(test)
         d = self._diag
-        d["t1"] = time.time()
+        d["t1"] = _now()
         d["threads1"] = threading.active_count()
         tests_fh.write(json.dumps(d) + "\n")
         tests_fh.flush()
@@ -83,6 +110,10 @@ try:
     code = _shard.main([spec])
 finally:
     stop.set()
+    gc.callbacks.remove(gc_cb)
+    with open(os.path.join(out_dir, "gc_end.json"), "w") as fh:
+        json.dump({"objects": len(gc.get_objects()), "counts": gc.get_count(),
+                   "threshold": gc.get_threshold(), "stats": gc.get_stats()}, fh)
     names = sorted(t.name for t in threading.enumerate())
     with open(os.path.join(out_dir, "threads_at_end.json"), "w") as fh:
         json.dump(names, fh)
