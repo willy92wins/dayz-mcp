@@ -302,6 +302,12 @@ def _bridge_harness(name: str, *, source: str | None = None) -> dict:
             "protected void EnsurePollCallback()",
             "protected void HoldPollCallback()",
         ))
+    else:
+        # Extension hooks the poll now calls (expansion-ai-adapter plan 2.1).
+        signatures.extend((
+            "protected string ServerCapabilities()",
+            "protected string ExtensionPollParams()",
+        ))
     for signature in signatures:
         body = method_body(source, signature)
         body = re.sub(r"\bLog\([^;\n]*\);", "", body)

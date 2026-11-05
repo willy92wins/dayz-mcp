@@ -1717,6 +1717,12 @@ class SessionCoordinator:
             self._peer_registry[(run_id, peer)] = instance
             self._condition.notify_all()
 
+    def peer_registered(self, run_id: str, peer: str, instance: str) -> bool:
+        # Memory-only read: safe under the broker lock (§2.15), never
+        # reaches _expire_due or any expiry path.
+        with self._condition:
+            return self._peer_registry.get((run_id, peer)) == instance
+
     def note_processes_gone(self, run_id: str, role: str | None) -> None:
         run_id = self._require_lease_end_id(run_id, "run_id")
         peers = self._peers_for_role(role)

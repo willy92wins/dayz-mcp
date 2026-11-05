@@ -52,7 +52,7 @@ _DECLARED_MEMBER = re.compile(
 )
 _ACH_CACHE_DECL = "protected string m_PollArgContractHash;"
 _ACH_CACHE_INIT = "m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);"
-_CAPS_WIRE = 'request = request + "&caps=" + m_PollCapabilities;'
+_CAPS_WIRE = 'request = request + "&caps=" + ServerCapabilities();'
 _ACH_WIRE = 'request = request + "&ach=" + m_PollArgContractHash;'
 
 # The cache write/mutation detector and its verified signature catalogues
