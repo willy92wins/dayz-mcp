@@ -103,9 +103,9 @@ def _observation(**overrides: object) -> dict:
 
 class HoldSchemaTest(unittest.TestCase):
     def test_bridge_and_python_expect_version_12(self) -> None:
-        self.assertEqual(EXPECTED_BRIDGE_VERSION, "12")
+        self.assertEqual(EXPECTED_BRIDGE_VERSION, "13")
         text = MESSAGES.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', text)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', text)
 
     def test_budget_rejects_bool_nan_and_bad_margin(self) -> None:
         hold, timeout = validate_hold_budget(30, 45)

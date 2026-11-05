@@ -1679,8 +1679,8 @@ class LoadoutEnforceTest(unittest.TestCase):
             f'SERVER_ARG_CONTRACT_HASH = "{server.EXPECTED_SERVER_ARG_CONTRACT_HASH}"',
             self.source,
         )
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', self.messages)
-        self.assertEqual(EXPECTED_BRIDGE_VERSION, "12")
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', self.messages)
+        self.assertEqual(EXPECTED_BRIDGE_VERSION, "13")
 
     def test_the_caps_mirror_the_tool_s_caps(self) -> None:
         items = re.search(r"protected const int LOADOUT_MAX_ITEMS = (\d+);", self.source)

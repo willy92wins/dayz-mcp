@@ -8661,7 +8661,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "verdict in the script "
             "log as [DayZ_MCP] weapon_raise server accepted=0|1 raised=0|1 "
             "reason=...; a full input channel is error input_busy and changes "
-            "neither side. The result is the client's read-back after one "
+            "neither side, and before the connection generation is known it "
+            "is error conn_gen_unknown and changes neither side. The result "
+            "is the client's read-back after one "
             "simulation tick: raised is PlayerBase.IsRaised(), input_raised is "
             "HumanInputController.IsWeaponRaised(), plus expires_at and "
             "hold_ttl_s. Nothing stays ENABLED without an expiry."
@@ -8728,7 +8730,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "first), fires from its CommandHandler and prints its verdict in "
             "the script log as [DayZ_MCP] weapon_fire server accepted=0|1 "
             "reason=...; a full input channel is the completed refusal "
-            "input_busy, and then the client does not fire either. "
+            "input_busy, and then the client does not fire either; before "
+            "the connection generation is known it is the completed refusal "
+            "conn_gen_unknown and the client does not fire either. "
             "accepted=true means the client called Fire, not that the server "
             "counted a shot; confirm the shot with "
             "weapon_state. A completed refusal is ok=true, accepted=false, "
@@ -10366,7 +10370,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "bad_arrive_radius_m, bad_hold_s, bad_ttl_s, client_not_in_game, "
         "no_player, player_dead, player_unconscious, player_restrained, "
         "seated, no_input_controller, not_in_move_command, player_move_busy, "
-        "input_busy, not_held, aborted."
+        "input_busy, conn_gen_unknown, not_held, aborted."
     ))
     async def player_move(
         speed: StrictStr = "walk",

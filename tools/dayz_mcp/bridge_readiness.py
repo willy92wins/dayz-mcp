@@ -300,6 +300,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "bot_stop": "bot_stop",
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
+        "lease_close": None,  # internal: broker lease close, not a public tool
         "hands_attach": "hands_attach",
         "hands_take": "hands_take",
         "infected_drive": "infected_drive",
@@ -365,6 +366,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "input_describe": "input_describe",
         "input_trigger": "input_trigger",
         "key_press": "key_press",
+        "lease_close_client": None,  # internal: broker lease close, not a public tool
         "player_look_at": "player_look_at",
         "player_look_at_release": None,
         "player_move": "player_move",

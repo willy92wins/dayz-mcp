@@ -2948,8 +2948,17 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self, peer: str, *, pid: int | None = None, version: str = "12~1.29"
     ) -> list[dict]:
         query = poll_census_query(peer)
+        # v13: the census table already announces the close name. A
+        # close_supported=False poll simulates a v12 bridge, so it must drop
+        # the name; adding it twice would make parse_poll_caps reject the
+        # census as duplicate.
+        names = [name for name in query["caps"].split(",") if name]
         if self.close_supported:
-            query["caps"] += "," + _CLOSE_NAMES[peer]
+            if _CLOSE_NAMES[peer] not in names:
+                names.append(_CLOSE_NAMES[peer])
+        else:
+            names = [name for name in names if name != _CLOSE_NAMES[peer]]
+        query["caps"] = ",".join(names)
         status, body = self.state.record_poll(
             peer,
             version,
@@ -3468,7 +3477,7 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.clock.advance(SESSION_TTL_S + 1.0)
         query = poll_census_query("client")
-        query["caps"] += ",lease_close_client"
+        # v13: poll_census_query already announces lease_close_client.
         answers: list[tuple[int, dict]] = []
         answered = threading.Event()
 
@@ -3511,7 +3520,12 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
             declaration = re.search(r"\b" + constant + r"\s*=\s*([^;]+);", source)
             self.assertIsNotNone(declaration)
             caps = "".join(re.findall(r'"([^"\n]*)"', declaration.group(1)))
-            self.assertNotIn(_CLOSE_NAMES[peer], caps.split(","))
+            # v13 (§2.16): the bridge announces the close name. The v12
+            # census below strips it, which is what keeps the close inert.
+            self.assertIn(_CLOSE_NAMES[peer], caps.split(","))
+            caps = ",".join(
+                name for name in caps.split(",") if name != _CLOSE_NAMES[peer]
+            )
             query = poll_census_query(peer)
             status, body = self.state.record_poll(
                 peer, "12~1.29", instance=self.instances[peer],

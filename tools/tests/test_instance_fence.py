@@ -939,9 +939,9 @@ class StatusAndVersionFenceTest(unittest.TestCase):
         self.assertEqual(payload.get("error"), "legacy_unbound")
 
     def test_expected_bridge_version_stays_10(self) -> None:
-        self.assertEqual(EXPECTED_BRIDGE_VERSION, "12")
+        self.assertEqual(EXPECTED_BRIDGE_VERSION, "13")
         messages = (MOD_SCRIPTS / "MCPMessages.c").read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', messages)
         self.assertNotIn('const string MCP_BRIDGE_VERSION = "9";', messages)
         match = re.search(r"class MCPConfig\s*\{([^}]*)\}", messages)
         self.assertIsNotNone(match)

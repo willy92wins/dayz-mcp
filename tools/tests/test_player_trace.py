@@ -584,7 +584,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)

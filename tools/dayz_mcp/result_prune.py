@@ -137,6 +137,8 @@ PRUNABLE_FIELDS = (
     # hud_set and gameplay_state fill it with the HUD flags they read (f427).
     "hud",
     "gameplay",
+    # lease_close / lease_close_client fill it with the close census (§2.16).
+    "lease_close",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

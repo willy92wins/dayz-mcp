@@ -423,9 +423,9 @@ Alcance v1: el cliente local donde corre el puente. Sin `target_player`. Relaci�
 `notify_players`: no se duplica; el toast vanilla sigue unidireccional. `ui_dialog` existe
 cuando hay que **saber** que el jugador respondió.
 
-### Cinco estados terminales `[EXACT]`
+### Seis estados terminales `[EXACT]`
 
-`completed` · `cancelled` · `timed_out` · `disconnected` · `rejected`
+`completed` · `cancelled` · `timed_out` · `disconnected` · `rejected` · `lease_closed`
 (`ui_dialog.py:17-19`; contrato `plans/2026-08-18-ui-dialog-contrato-v1.md:157-159`).
 
 `cancelled` y `timed_out` son **respuestas válidas**: `ok` true y `state` lo dice. **Nunca** se

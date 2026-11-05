@@ -764,7 +764,7 @@ class SceneBridgeSourceTest(unittest.TestCase):
         return " ".join(method_body(self.bridge, signature).split())
 
     def test_bridge_version_and_constants_match_the_python_mirrors(self) -> None:
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', self.messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', self.messages)
         for name, value in (
             ("SCENE_ID_MAX_CHARS", loopback.SCENE_ID_MAX_CHARS),
             ("SCENE_ENTRIES_MAX", server.SCENE_ENTRIES_MAX),

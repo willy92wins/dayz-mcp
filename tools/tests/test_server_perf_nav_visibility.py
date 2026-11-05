@@ -420,7 +420,7 @@ class ReadsCensusTest(unittest.TestCase):
         self.assertNotEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, PREVIOUS_ARG_CONTRACT_HASH)
         self.assertIn('SERVER_ARG_CONTRACT_HASH = "86e3c48a43e86b91"', self.source)
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', messages)
 
     def test_a_stale_server_census_names_the_missing_tool(self) -> None:
         registered = frozenset(

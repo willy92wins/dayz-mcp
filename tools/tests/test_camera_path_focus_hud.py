@@ -1496,7 +1496,7 @@ class CensusTest(unittest.TestCase):
         for command in (*NEW_COMMANDS, "camera_path_release"):
             self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES))
 
 
 class ExecutedCameraPathTest(unittest.TestCase):
