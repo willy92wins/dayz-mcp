@@ -7685,7 +7685,7 @@ class ServerState:
             cv.notify_all()
 
     def store_result(
-        self, body: dict, instance: str | None = None
+        self, body: dict, instance: str | None = None, *, retry: bool = False
     ) -> tuple[int, dict]:
         try:
             command_id = int(body.get("id"))
@@ -7753,6 +7753,24 @@ class ServerState:
                             "origin_epoch": self._station_epoch,
                         },
                     )
+            if retry and (
+                command_id in self._results
+                or not (
+                    command_id in self._enqueued_at
+                    or command_id in self._fire_and_forget_ids
+                    or command_id in self._lease_closes
+                )
+            ):
+                # d67f: the bridge sends a failed result POST once more. A copy
+                # of a result already stored, or of a command no longer
+                # pending, changes nothing: no re-store, no second finish, no
+                # hold or camera-path note, no discard.
+                return 200, {
+                    "ok": True,
+                    "id": command_id,
+                    "ok_value": None,
+                    "duplicate": True,
+                }
             close_row = self._lease_closes.get(command_id)
             if close_row is not None:
                 close_handled = True
@@ -10243,18 +10261,29 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         inst_raw = ""
+        retry = False
         if qs is not None:
             inst_raw = qs.get("inst", [""])[0]
+            retry = qs.get("retry", [""])[0] == "1"
         instance = inst_raw if inst_raw else None
-        status, payload = self.state.store_result(body, instance=instance)
+        status, payload = self.state.store_result(
+            body, instance=instance, retry=retry
+        )
         if status != 200:
             self._json(status, payload)
             return
 
-        self._log(f"RESULT id={payload['id']} ok={payload.get('ok_value')}")
+        line = f"RESULT id={payload['id']} ok={payload.get('ok_value')}"
+        if retry:
+            line += " retry=1"
+        if payload.get("duplicate"):
+            line += " duplicate=1"
+        self._log(line)
         response: dict[str, object] = {"ok": True}
         if payload.get("discarded"):
             response["discarded"] = True
+        if payload.get("duplicate"):
+            response["duplicate"] = True
         self._json(200, response)
 
     def _handle_set_poll_delay(self) -> None:

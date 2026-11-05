@@ -8236,6 +8236,10 @@ class MCPBridge : Managed
 		{
 			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		cb.result_id = result.id;
+		cb.request = resultRequest;
+		cb.body = body;
+		cb.retried = false;
 		// Result JSON bytes submitted, not acknowledgements or HTTP overhead.
 		m_CmdBytes = AddLoadCounter(m_CmdBytes, body.Length());
 		m_Ctx.POST(cb, resultRequest, body);
@@ -8266,6 +8270,9 @@ class MCPBridge : Managed
 
 	void RecycleResultCallback(MCPResultCallback cb)
 	{
+		// The pool keeps no request (it carries the key) and no body.
+		cb.request = "";
+		cb.body = "";
 		if (m_ResultCallbackPool && m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS)
 		{
 			m_ResultCallbackPool.Insert(cb);
@@ -8277,14 +8284,39 @@ class MCPBridge : Managed
 		Log("result ack size=" + dataSize);
 	}
 
-	void OnResultError(int errorCode)
+	void OnResultError(MCPResultCallback cb, int errorCode)
 	{
 		Log("result post error=" + errorCode);
+		RetryResult(cb);
 	}
 
-	void OnResultTimeout()
+	void OnResultTimeout(MCPResultCallback cb)
 	{
 		Log("result post timeout");
+		RetryResult(cb);
+	}
+
+	// d67f: a failed result POST is sent once more, marked retry=1, so a
+	// result the daemon never got still reaches it. The daemon answers a copy
+	// of a result it already has without acting on it again. The failed
+	// callback left m_CallbackRefs just before, so admission debt is unchanged.
+	protected void RetryResult(MCPResultCallback failed)
+	{
+		if (!failed || failed.retried || !m_Configured || !m_Ctx)
+		{
+			return;
+		}
+
+		MCPResultCallback cb = AcquireResultCallback();
+		m_CallbackRefs.Insert(cb);
+		cb.result_id = failed.result_id;
+		cb.request = failed.request;
+		cb.body = failed.body;
+		cb.retried = true;
+		m_CmdBytes = AddLoadCounter(m_CmdBytes, cb.body.Length());
+		m_Ctx.POST(cb, cb.request + "&retry=1", cb.body);
+		// Never the request: it carries the key.
+		Log("result retry posted id=" + cb.result_id);
 	}
 
 	void ReleaseCallback(RestCallback cb)
