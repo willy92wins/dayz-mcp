@@ -805,10 +805,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def _cas_hash_argument(value: str) -> str:
     # The CAS compares uppercase hex; a hash typed or pasted in lowercase, or
-    # with spaces around it, is the same hash (fb-20261103-120327-1a8f). Only
+    # with spaces around it, is the same hash (fb-20261103-120327-1a8f).
+    # str.strip() also drops Unicode spaces. Only a stripped value that is all
     # ASCII is uppercased: "\ufb00".upper() is "FF", so a ligature would become
-    # hex digits nobody typed. Anything else reaches _valid_sha as typed and is
-    # refused there.
+    # hex digits nobody typed. A stripped value that still holds a non-ASCII
+    # character goes to _valid_sha as it is and is refused there.
     stripped = value.strip()
     return stripped.upper() if stripped.isascii() else stripped
 

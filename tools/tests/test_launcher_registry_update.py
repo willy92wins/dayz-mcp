@@ -513,9 +513,11 @@ class ReplaceTransitionTest(unittest.TestCase):
 class CasHashArgumentTest(unittest.TestCase):
     def test_main_refuses_a_non_ascii_hash_that_uppercases_to_hex(self) -> None:
         # "\ufb00".upper() is "FF": uppercased, this 63-character value would be
-        # 64 hex digits nobody typed, and a registry whose hash starts with FF
-        # would pass the CAS (Codex Sol on #334, H1). It is refused before the
-        # bundle is read, so no launcher API runs on any platform.
+        # "FF" + "A" * 62, hex digits nobody typed, and a registry whose sha256
+        # is exactly those 64 digits would pass the CAS (Codex Sol on #334, H1).
+        # It must be refused before _validated_entry, patched here to raise. The
+        # module imports Windows-only launcher code, so this runs on Windows (on
+        # Linux only with local shims).
         typed = "\ufb00" + "a" * 62
         for command in ("install-dayz-test-v1", "replace-dayz-test-v1"):
             stdout = io.StringIO()
