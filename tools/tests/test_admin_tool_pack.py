@@ -126,6 +126,25 @@ def _spy_bridge(runtime: object, calls: list[str]) -> None:
     )
 
 
+def _recording_bridge(runtime: object, calls: list[tuple[str, dict]]) -> None:
+    """Replace runtime.call_bridge with a stub that records (cmd, args)."""
+
+    async def fake_call_bridge(
+        cmd: str, args: dict, _peer: str, _timeout: object
+    ) -> dict[str, object]:
+        calls.append((cmd, args))
+        if cmd == "query_all_players":
+            return {"ok": True, "players": [{"uid": TEST_UID}]}
+        return {"ok": True}
+
+    runtime.call_bridge = fake_call_bridge  # type: ignore[attr-defined]
+    runtime.start_loopback = lambda: None  # type: ignore[attr-defined]
+    runtime.stop_loopback = lambda: None  # type: ignore[attr-defined]
+    runtime.bridge_status_payload = AsyncMock(  # type: ignore[attr-defined]
+        return_value={}
+    )
+
+
 def _result_text(result: object) -> str:
     content = getattr(result, "content", None) or []
     return " ".join(
@@ -308,6 +327,96 @@ class AdminToolPackTest(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertFalse(dispatched.isError, dispatched)
                     self.assertIn(name, calls)
+
+    async def test_admin_notify_all_is_broadcast_over_mcp_transport(
+        self,
+    ) -> None:
+        app, runtime = build_app(
+            ServerConfig(
+                tool_pack="admin",
+                keyfile="dummy.key",
+                log_sink=lambda _message: None
+            )
+        )
+        calls: list[tuple[str, dict]] = []
+        _recording_bridge(runtime, calls)
+        async with create_connected_server_and_client_session(
+            app._mcp_server
+        ) as session:
+            broadcast = await session.call_tool(
+                "notify_players",
+                {"show_time": 1.0, "title": "hi", "uid": "all"},
+            )
+            self.assertFalse(broadcast.isError, broadcast)
+            self.assertEqual(
+                [cmd for cmd, _args in calls],
+                ["query_all_players", "notify_players"],
+            )
+            notify_args = calls[1][1]
+            self.assertNotIn("uid", notify_args)
+            self.assertEqual(notify_args.get("show_time"), 1.0)
+            self.assertEqual(notify_args.get("title"), "hi")
+
+            calls.clear()
+            exact = await session.call_tool(
+                "notify_players",
+                {"show_time": 1.0, "title": "hi", "uid": "All"},
+            )
+            self.assertFalse(exact.isError, exact)
+            self.assertEqual(
+                [cmd for cmd, _args in calls],
+                ["query_all_players", "notify_players"],
+            )
+            self.assertEqual(calls[1][1].get("uid"), "All")
+
+    async def test_admin_notify_blank_uid_is_refused_over_mcp_transport(
+        self,
+    ) -> None:
+        app, runtime = build_app(
+            ServerConfig(
+                tool_pack="admin",
+                keyfile="dummy.key",
+                log_sink=lambda _message: None
+            )
+        )
+        calls: list[tuple[str, dict]] = []
+        _recording_bridge(runtime, calls)
+        async with create_connected_server_and_client_session(
+            app._mcp_server
+        ) as session:
+            result = await session.call_tool(
+                "notify_players",
+                {"show_time": 1.0, "title": "hi", "uid": "   "},
+            )
+            self.assertTrue(result.isError, result)
+            self.assertIn("uid_required", _result_text(result))
+            self.assertEqual(calls, [])
+
+    async def test_full_pack_sends_all_as_a_uid_over_mcp_transport(
+        self,
+    ) -> None:
+        app, runtime = build_app(
+            ServerConfig(
+                tool_pack="full",
+                keyfile="dummy.key",
+                log_sink=lambda _message: None
+            )
+        )
+        calls: list[tuple[str, dict]] = []
+        _recording_bridge(runtime, calls)
+        async with create_connected_server_and_client_session(
+            app._mcp_server
+        ) as session:
+            result = await session.call_tool(
+                "notify_players",
+                {"show_time": 1.0, "title": "hi", "uid": "all"},
+            )
+            self.assertFalse(result.isError, result)
+            self.assertEqual(
+                [cmd for cmd, _args in calls],
+                ["query_all_players", "notify_players"],
+            )
+            self.assertEqual(calls[1][1].get("uid"), "all")
 
     async def test_full_pack_refuses_empty_uid_over_mcp_transport(
         self,
