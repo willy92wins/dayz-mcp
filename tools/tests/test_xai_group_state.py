@@ -77,6 +77,8 @@ def _good_commands(*, lease_close: bool = True, state_verb: bool = True) -> list
     commands = adapter_census()
     if not state_verb:
         commands = [name for name in commands if name != STATE]
+    # v13: the base census already announces lease_close; never duplicate it.
+    commands = [name for name in commands if name not in ("lease_close", "lease_close_client")]
     if lease_close:
         commands += ["lease_close"]
     return commands
@@ -191,7 +193,51 @@ class AiGroupStateAdmissionTest(unittest.TestCase):
     """O13 residue part + O1/O2 for the state verb at the broker."""
 
     def _enqueue(self, state: loopback.ServerState, args=None):
-        return state.enqueue_command(STATE, args or {"group_id": 7}, peer="server")
+        # v13: bound_state attaches a real coordinator, so enqueue needs a
+        # parseable identity; the read itself takes no lease token.
+        coord = state.coordination
+        if coord is None:
+            return state.enqueue_command(STATE, args or {"group_id": 7}, peer="server")
+        client = getattr(state, "_state_client", None)
+        if client is None:
+            client = _identity("state")
+            state._state_client = client  # type: ignore[attr-defined]
+        payload = {
+            "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+            "started_at_utc": client.started_at_utc,
+            "session_id": client.session_id, "task_label": client.task_label,
+        }
+        return state.enqueue_command(
+            STATE, args or {"group_id": 7}, peer="server",
+            identity_payload=payload,
+        )
+
+    def _enqueue_order(self, state: loopback.ServerState):
+        # The mutation half of O13 reaches the lease-close gate only under
+        # a real lease, as the tool layer presents it (B's pattern).
+        coord = state.coordination
+        if coord is None:
+            return state.enqueue_command(
+                "ai_group_order", {"group_id": 7, "behaviour": "HOLD"}, peer="server"
+            )
+        lease = getattr(state, "_state_order_lease", None)
+        client = getattr(state, "_state_order_client", None)
+        if lease is None or client is None:
+            client = _identity("stateord")
+            status, lease = coord.acquire(client, "trace")
+            assert status == 200, lease
+            state._state_order_client = client  # type: ignore[attr-defined]
+            state._state_order_lease = lease  # type: ignore[attr-defined]
+        payload = {
+            "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+            "started_at_utc": client.started_at_utc,
+            "session_id": client.session_id, "task_label": client.task_label,
+        }
+        return state.enqueue_command(
+            "ai_group_order", {"group_id": 7, "behaviour": "HOLD"}, peer="server",
+            identity_payload=payload, lease_token=lease["lease_token"],
+            operation_timeout_s=30.0,
+        )
 
     def test_o13_state_reads_residues_on_a_v12_census_without_lease(self) -> None:
         # Mutant killed: ai_group_state joining the new-mutation lease-close
@@ -209,9 +255,7 @@ class AiGroupStateAdmissionTest(unittest.TestCase):
         self.assertEqual(len(bound_queue(state, "server")), 1)
         self.assertNotIn(STATE, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
         # Same v12 census: a new adapter mutation is refused, the read is not.
-        order_status, order_body = state.enqueue_command(
-            "ai_group_order", {"group_id": 7, "behaviour": "HOLD"}, peer="server"
-        )
+        order_status, order_body = self._enqueue_order(state)
         self.assertEqual(order_status, 409)
         self.assertEqual(
             order_body,
