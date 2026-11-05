@@ -59,10 +59,6 @@ def gc_cb(phase, info):
 
 
 gc.callbacks.append(gc_cb)
-if os.environ.get("DIAG_GC_FREEZE") == "1":
-    from tests._gc_pauses import install
-
-    install()
 
 
 class Result(unittest.TextTestResult):
@@ -116,6 +112,28 @@ finally:
     stop.set()
     gc.callbacks.remove(gc_cb)
     import collections
+    import ctypes
+    from ctypes import wintypes
+
+    class _PMC(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    pmc = _PMC()
+    pmc.cb = ctypes.sizeof(_PMC)
+    k32 = ctypes.WinDLL("kernel32")
+    psapi = ctypes.WinDLL("psapi")
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+    psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb)
+    with open(os.path.join(out_dir, "mem_end.json"), "w") as fh:
+        json.dump({"peak_working_set_mb": round(pmc.PeakWorkingSetSize / 2**20, 1),
+                   "peak_private_mb": round(pmc.PeakPagefileUsage / 2**20, 1),
+                   "private_mb": round(pmc.PagefileUsage / 2**20, 1)}, fh)
 
     before = len(gc.get_objects())
     top_before = collections.Counter(type(o).__name__ for o in gc.get_objects()).most_common(15)

@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   diag:
-    name: diag shard ${{ matrix.shard }}/4 py${{ matrix.python }} av=${{ matrix.av }}
+    name: diag shard ${{ matrix.shard }}/4 py${{ matrix.python }} shard_py=${{ matrix.shard_py }}
     runs-on: windows-latest
     timeout-minutes: 40
     strategy:
@@ -25,6 +25,7 @@ jobs:
         python: ["3.11", "3.14"]
         shard: [1, 2, 3, 4]
         av: [default]
+        shard_py: [main, branch]
     defaults:
       run:
         shell: pwsh
@@ -53,6 +54,10 @@ jobs:
           Add-MpPreference -ExclusionPath "${{ github.workspace }}","${{ runner.temp }}","${{ runner.tool_cache }}"
           Add-MpPreference -ExclusionProcess "python.exe"
           (Get-MpPreference).ExclusionPath
+
+      - name: Use the shard runner of origin/main
+        if: matrix.shard_py == 'main'
+        run: git checkout origin/main -- tests/_shard.py
 
       - name: Install
         run: |
@@ -89,5 +94,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: diag-${{ matrix.python }}-${{ matrix.shard }}-${{ matrix.av }}
+          name: diag-${{ matrix.python }}-${{ matrix.shard }}-${{ matrix.shard_py }}
           path: ${{ runner.temp }}/diag-out

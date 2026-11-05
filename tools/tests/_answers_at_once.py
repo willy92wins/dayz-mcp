@@ -1,11 +1,15 @@
-"""Shared check for "answers at once" gates on a loaded Windows runner.
+"""Shared check for "answers at once" gates in the test process.
 
 A gate such as ``assertLess(elapsed, 0.2)`` around an HTTP round trip, a
-thread hop or an asyncio step measures the runner as well as the code. On the
-4-vCPU windows-latest runners Windows can leave one thread unscheduled for
-0.2-0.8 s while the other threads of the same process keep running (measured
-in PR #349 and in the PR that added this module; see CHANGELOG.md). No check
-from inside the process can tell that gap from a gap the code made.
+thread hop or an asyncio step also times whatever else runs in the process.
+On the Windows CI runners that was the cyclic garbage collector: 98 % of the
+stalls of 0.1 s or more seen by a thread inside the test process fell inside
+a full (generation 2) collection, which holds the GIL and stops every thread,
+the test's HTTP server and event loop included. They reached 1.3 s while
+tests/_shard.py kept every finished case alive; with that fixed the largest
+measured was 0.25 s, still over a 0.2 s gate. A collection can start in any
+thread, so no check inside the process tells that gap from one the code made
+(CHANGELOG.md has the measurements).
 
 So a gate says what "at once" means in two parts:
 
@@ -16,8 +20,8 @@ So a gate says what "at once" means in two parts:
 2. **The wall clock, gate unchanged, as a backstop.** A sample over the gate
    is taken again, at most ``samples`` times, and the test fails if none is
    under it. A block the code makes (a ``time.sleep``, a slow path that is
-   not a condition wait) repeats in every sample and still fails; a stall
-   the scheduler made does not repeat three times in a row.
+   not a condition wait) repeats in every sample and still fails; a
+   collection pause does not land in three samples in a row.
 
 Elapsed time uses ``time.perf_counter``: on Windows, Python 3.11's
 ``time.monotonic`` is GetTickCount64 and moves in 15.625 ms steps.
@@ -33,7 +37,7 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-# Three samples: the stalls measured on CI were single events (one failing
+# Three samples: the pauses measured on CI were single events (one failing
 # test per job, never two in a row), and a real block repeats in all three.
 DEFAULT_SAMPLES = 3
 
