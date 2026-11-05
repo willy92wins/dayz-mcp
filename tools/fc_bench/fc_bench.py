@@ -783,6 +783,11 @@ def _pos_matches(pos, spec) -> bool:
                 return False
         elif not _in_range(pos[1], y["range"]):
             return False
+    elif "in" in y:
+        # Each accepted y lands where the simulator puts it: y=0 on the
+        # ground (11.8), any other y where it was asked.
+        if pos[1] not in [11.8 if v == 0 else v for v in y["in"]]:
+            return False
     return True
 
 

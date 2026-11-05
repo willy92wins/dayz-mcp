@@ -92,7 +92,7 @@
       "prompt": "Teletransporta a Survivor_Ana a X=6500, Z=2500.",
       "fail_without_uid": true,
       "answer_any": ["uid", "identific"],
-      "identified": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"range": [0, 0]}, "pos.2": {"range": [2490, 2510]}}}
+      "identified": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"in": [0, 11.8]}, "pos.2": {"range": [2490, 2510]}}}
     },
     {
       "id": "S12", "kind": "action", "title": "Cambiar la hora y soltar el control",

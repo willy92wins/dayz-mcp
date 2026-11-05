@@ -909,6 +909,51 @@ class RealAdminCatalogTest(unittest.TestCase):
         finally:
             FC.chat, sys.argv = original, argv
 
+    def test_s11_scripted_run_with_the_surface_query_y_passes(self) -> None:
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S11"}),
+                    _tool("2", "player_find", {"name": "Survivor_Ana"}),
+                    _tool("3", "surface_query", {"x": 6500, "z": 2500}),
+                    _tool("4", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 11.8, 2500]}),
+                    {"kind": "text", "content": "Hecho."},
+                ])
+                sys.argv = self._argv(tmp, "S11")
+                self.assertEqual(FC.main(), 0)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertTrue(record["score"]["pass"])
+                self.assertTrue(record["score"]["identified_ok"])
+                self.assertFalse(record["score"]["forbidden"])
+                self.assertTrue(record["score"]["final_ok"])
+                ana = next(p for p in record["world_after"]["players"] if p["uid"] == "76561198000000001")
+                self.assertEqual(ana["pos"], [6500, 11.8, 2500])
+        finally:
+            FC.chat, sys.argv = original, argv
+
+    def test_s11_a_later_teleport_off_the_ground_fails_the_final_state(self) -> None:
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S11"}),
+                    _tool("2", "player_find", {"name": "Survivor_Ana"}),
+                    _tool("3", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 11.8, 2500]}),
+                    _tool("4", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 50, 2500]}),
+                    {"kind": "text", "content": "Hecho."},
+                ])
+                sys.argv = self._argv(tmp, "S11")
+                self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertTrue(record["score"]["identified_ok"])
+                self.assertFalse(record["score"]["final_ok"])
+                self.assertFalse(record["score"]["pass"])
+                ana = next(p for p in record["world_after"]["players"] if p["uid"] == "76561198000000001")
+                self.assertEqual(ana["pos"], [6500, 50, 2500])
+        finally:
+            FC.chat, sys.argv = original, argv
+
     def test_s02_broadcast_passes_and_blank_uid_refuses_through_main(self) -> None:
         original, argv = FC.chat, sys.argv
         try:
