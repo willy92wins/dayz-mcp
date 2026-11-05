@@ -1,8 +1,8 @@
 """Expansion AI adapter foundation (expansion-ai-adapter plan 2.1-2.3, 3.6, 5.2).
 
-Offline criteria O1, O2, O7, O9, O14, E6 and E9, plus the part of O13 that
-does not need the v13 lease-close activation. O6, O10, O11, O12 and the
-close-publishing part of O13 are skipped with their blocker named.
+Offline criteria O1, O2, O6, O7, O9, O10-O14, E6 and E9 on bridge v13.
+The lease-close gate admits only when every bound peer announces the
+v13 close; O6/O10-O13 drive the real broker and coordinator.
 
 Each test names the mutant it kills in its docstring; the commit message
 carries the criterion -> test -> mutant table.
@@ -534,28 +534,279 @@ class ExpansionReleaseRegistryTest(unittest.TestCase):
         self.assertIs(loopback.validate_command_args(RELEASE, {"spawn_token": "x"})[0], False)
 
 
-class ExpansionBlockedOnV13Test(unittest.TestCase):
-    """Criteria that need the v13 lease-close activation (plan 5.1)."""
+class ExpansionLeaseCloseV13Test(unittest.TestCase):
+    """O6/O10-O13 on v13: real ServerState + SessionCoordinator, fake clocks.
 
-    @unittest.skip("blocked: needs the v13 lease-close activation (plan §5.1)")
+    Mutants (plan §6): cleaning by timeout, keeping residue after it
+    disappears, clearing server debt on client-only exit, creating OWED
+    for a v12 peer without close, and an unreachable adapter rejection.
+    """
+
+    def setUp(self) -> None:
+        from dayz_mcp.session_coordination import SessionCoordinator
+        from tests.lease_helpers import AuditSink, FakeClock, SequentialIds, _identity
+
+        self._coord_cls = SessionCoordinator
+        self.clock = FakeClock()
+        self.broker_clock = FakeClock()
+        self.audit = AuditSink()
+        self.a = _identity("a")
+        self.b = _identity("b")
+        self.close_supported = True
+        self.state = loopback.ServerState("test-key", time_fn=self.broker_clock)
+        from tests.fence_helpers import bind_both_peers
+
+        bind_both_peers(self.state, run_id="xai-close-run")
+        self.coordinator = SessionCoordinator(
+            time_fn=self.clock,
+            token_fn=SequentialIds("token"),
+            id_fn=SequentialIds("lease"),
+            audit=self.audit,
+            cleanup=lambda *args: self.state.cleanup_owner(*args),
+        )
+        self.state.coordination = self.coordinator
+        self.state.retail_probe = lambda: {"known": True, "processes": []}
+        for peer in ("server", "client"):
+            inst = INST_SERVER if peer == "server" else INST_CLIENT
+            self.coordinator.note_peer_bound("xai-close-run", peer, inst)
+            self.assertEqual(self._poll(peer), [])
+
+    # -- harness (mirrors test_lease_close_broker stage 2b) ----------------
+    def _poll(self, peer: str) -> list[dict]:
+        from tests.fence_helpers import poll_census_query
+
+        query = poll_census_query(peer)
+        # Adapter verbs travel in the xai mask, not in caps (H3).
+        names = [n for n in query["caps"].split(",") if n and n not in EXPANSION_AI_ARG_CONTRACT]
+        close_name = "lease_close" if peer == "server" else "lease_close_client"
+        if self.close_supported:
+            if close_name not in names:
+                names.append(close_name)
+        else:
+            names = [n for n in names if n != close_name]
+        status, body = self.state.record_poll(
+            peer,
+            f"{EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=INST_SERVER if peer == "server" else INST_CLIENT,
+            source_pid=PID_SERVER if peer == "server" else PID_CLIENT,
+            caps=",".join(names),
+            ach=query.get("ach"),
+            xai=f"{GOOD_XAI}.3" if peer == "server" else None,
+        )
+        self.assertEqual(status, 200, body)
+        return list(body.get("commands") or [])
+
+    def _queued(self, peer: str) -> list[str]:
+        inst = INST_SERVER if peer == "server" else INST_CLIENT
+        return [str(c.get("cmd")) for c in self.state._bound_queues.get(inst, [])]
+
+    def _payload(self, client) -> dict:
+        return {
+            "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+            "started_at_utc": client.started_at_utc,
+            "session_id": client.session_id, "task_label": client.task_label,
+        }
+
+    def _spawn_delivered(self):
+        status, lease = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200, lease)
+        status, body = self.state.enqueue_command(
+            SPAWN, dict(SPAWN_WIRE), peer="server",
+            identity_payload=self._payload(self.a),
+            lease_token=lease["lease_token"], operation_timeout_s=30.0,
+        )
+        self.assertEqual(status, 200, body)
+        delivered = self._poll("server")
+        self.assertEqual([c["cmd"] for c in delivered], [SPAWN], delivered)
+        return lease, int(body["id"])
+
+    def _release(self, client, lease) -> None:
+        status, body = self.coordinator.release(client, lease["lease_token"])
+        self.assertEqual(status, 200, body)
+        with self.coordinator._condition:
+            self.assertTrue(self.coordinator._condition.wait_for(
+                lambda: not self.coordinator._handoff_pending, timeout=30.0))
+
+    def _census(self, peer: str, close: dict, **fields) -> dict:
+        census = {
+            "generation": close["args"]["close_generation"],
+            "lease_id": close["args"]["close_lease_id"],
+            "peer": peer, "state": "clean",
+        }
+        if peer == "client":
+            census.update(entries=[{"name": "action", "state": "clean"}],
+                          move_floor=7, weapon_floor=4, net_low=10, net_high=20, conn_gen=1)
+        else:
+            census.update(entries=[{"name": "bots", "state": "clean"}],
+                          floors=[{"net_low": 10, "net_high": 20, "conn_gen": 1,
+                                   "move_id": 7, "weapon_id": 4}])
+        census.update(fields)
+        return census
+
+    def _settle(self, peer: str, close: dict, **fields):
+        return self.state.store_result(
+            {"id": close["id"], "ok": True, "lease_close": self._census(peer, close, **fields)},
+            instance=INST_SERVER if peer == "server" else INST_CLIENT,
+        )
+
+    def _deliver_close(self, peer: str) -> dict:
+        commands = self._poll(peer)
+        want = "lease_close" if peer == "server" else "lease_close_client"
+        self.assertEqual([c["cmd"] for c in commands], [want], commands)
+        return commands[0]
+
+    def _photo(self) -> dict:
+        return self.coordinator.status(self.a).get("lease_end", {})
+
+    # -- O6 -----------------------------------------------------------------
     def test_o6_lease_end_publishes_closes_and_stop_covers_all_groups(self) -> None:
-        raise AssertionError("unreachable")
+        # Mutant killed: cleanup_owner queueing ai_group_release at lease end.
+        lease, command_id = self._spawn_delivered()
+        self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self.assertEqual(self._queued("server"), [])
+        self.assertNotIn(RELEASE, self._queued("server") + self._queued("client"))
+        client_close = self._deliver_close("client")
+        status, body = self._settle("client", client_close)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self._queued("server"), ["lease_close"])
+        server_close = self._deliver_close("server")
+        # The server census carries the adapter residue by spawn_token name.
+        status, body = self._settle(
+            "server", server_close,
+            entries=[{"name": f"ai_group:{TOKEN}", "state": "residue",
+                      "reason": "ai_group_release_unconfirmed"}],
+            state="residue",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIn("server", {r["peer"] for r in self._photo().get("unconfirmed", [])})
 
-    @unittest.skip("blocked: needs the v13 lease-close activation (plan §5.1)")
+    # -- O10 ----------------------------------------------------------------
     def test_o10_close_census_at_25s_owed_and_timeout_at_40s(self) -> None:
-        raise AssertionError("unreachable")
+        # Mutants killed: cleaning by timeout, and waiting forever.
+        from dayz_mcp.session_coordination import LEASE_END_BOUND_S
 
-    @unittest.skip("blocked: needs the v13 lease-close activation (plan §5.1)")
+        lease, command_id = self._spawn_delivered()
+        self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
+        self._release(self.a, lease)
+        self.assertEqual(self._settle("client", self._deliver_close("client"))[0], 200)
+        server_close = self._deliver_close("server")
+        # Residue still present when the bridge observer gives up (25 s):
+        # the row is OWED, never silently cleaned.
+        self.assertEqual(self._settle(
+            "server", server_close,
+            entries=[{"name": f"ai_group:{TOKEN}", "state": "residue",
+                      "reason": "ai_group_release_unconfirmed"}], state="residue")[0], 200)
+        self.assertTrue(self._photo().get("unconfirmed"))
+        # A lost close answer times out at the 40 s bound: degraded grant.
+        self.clock.advance(LEASE_END_BOUND_S)
+        status, grant = self.coordinator.acquire(self.b, "trace")
+        self.assertIn(status, (200, 202), grant)
+        if status == 202:
+            status, grant = self.coordinator.wait(self.b, grant["ticket"], 30.0)
+        self.assertEqual(status, 200, grant)
+        self.assertIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
+
+    # -- O11 ----------------------------------------------------------------
     def test_o11_late_clean_close_clears_the_debt(self) -> None:
-        raise AssertionError("unreachable")
+        # Mutant killed: keeping the residue debt after the group disappears.
+        lease, command_id = self._spawn_delivered()
+        self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
+        self._release(self.a, lease)
+        self.assertEqual(self._settle("client", self._deliver_close("client"))[0], 200)
+        server_close = self._deliver_close("server")
+        self.assertEqual(self._settle(
+            "server", server_close,
+            entries=[{"name": f"ai_group:{TOKEN}", "state": "residue",
+                      "reason": "ai_group_release_unconfirmed"}], state="residue")[0], 200)
+        self.assertTrue(self._photo().get("unconfirmed"))
+        # A census of another lease does not settle this row.
+        status, body = self.state.store_result(
+            {"id": server_close["id"], "ok": True,
+             "lease_close": self._census("server", server_close, lease_id="another-lease")},
+            instance=INST_SERVER)
+        self.assertEqual(body.get("discarded"), True, body)
+        self.assertTrue(self._photo().get("unconfirmed"))
+        # The late clean census settles it: the owed debt opens B's round,
+        # which republishes the closes; a clean census there clears it.
+        status, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status, 200, grant_b)
+        self.assertIn("lease_end_unconfirmed", grant_b.get("cleanup_degraded", []))
+        self._release(self.b, grant_b)
+        self.assertEqual(self._settle("client", self._deliver_close("client"))[0], 200)
+        status, body = self._settle("server", self._deliver_close("server"))
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("discarded", body)
+        self.assertEqual(self._photo().get("unconfirmed", []), [])
 
-    @unittest.skip("blocked: needs the v13 lease-close activation (plan §5.1)")
+    # -- O12 ----------------------------------------------------------------
     def test_o12_processes_gone_clears_never_observed_deletes(self) -> None:
-        raise AssertionError("unreachable")
+        # Mutants killed: clearing server debt on client-only exit, and
+        # note_processes_gone of another run settling this run.
+        self.coordinator.seed_restart_debt([("xai-close-run", None)])
+        status, grant = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200, grant)
+        self.assertIn("lease_end_unconfirmed", grant.get("cleanup_degraded", []))
+        self.coordinator.note_processes_gone("other-run", None)
+        self.assertIn("lease_end_unconfirmed",
+                      self.coordinator.status(self.a).get("cleanup_degraded", [])
+                      or grant.get("cleanup_degraded", []))
+        self.coordinator.note_processes_gone("xai-close-run", "client")
+        still = self.coordinator.status(self.b).get("lease_end", {})
+        self.assertTrue(still.get("unconfirmed"), still)
+        self.coordinator.note_processes_gone("xai-close-run", "server")
+        self.coordinator.release(self.a, grant["lease_token"])
+        with self.coordinator._condition:
+            self.assertTrue(self.coordinator._condition.wait_for(
+                lambda: not self.coordinator._handoff_pending, timeout=30.0))
+        status_b, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status_b, 200, grant_b)
+        self.assertNotIn("lease_end", grant_b)
 
-    @unittest.skip("blocked: needs the v13 lease-close activation (plan §5.1)")
+    # -- O13 ----------------------------------------------------------------
     def test_o13_close_publishing_with_v12_and_close_capable_census(self) -> None:
-        raise AssertionError("unreachable")
+        # Mutant killed: creating OWED/close work for a v12 census.
+        self.close_supported = False
+        self._poll("server")
+        self._poll("client")
+        lease, command_id = self._spawn_delivered_v12()
+        self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._photo().get("unconfirmed", []), [])
+
+    def _spawn_delivered_v12(self):
+        # With a v12 census the spawn gate itself refuses (see H10 tests);
+        # deliver plain work instead so the lease has delivered work.
+        status, lease = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200, lease)
+        status, body = self.state.enqueue_command(
+            "object_delete", {"object_id": 1}, peer="server",
+            identity_payload=self._payload(self.a),
+            lease_token=lease["lease_token"], operation_timeout_s=30.0,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual([c["cmd"] for c in self._poll("server")], ["object_delete"])
+        return lease, int(body["id"])
+
+    def test_o13_adapter_without_close_support_rejected_before_spawn(self) -> None:
+        # Mutant killed: the lease_close_not_supported rejection unreachable.
+        self.close_supported = False
+        self._poll("server")
+        self._poll("client")
+        status, lease = self.coordinator.acquire(self.a, "trace")
+        self.assertEqual(status, 200, lease)
+        status, body = self.state.enqueue_command(
+            SPAWN, dict(SPAWN_WIRE), peer="server",
+            identity_payload=self._payload(self.a),
+            lease_token=lease["lease_token"], operation_timeout_s=30.0,
+        )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body, {"error": "expansion_unavailable",
+                                "detail": "lease_close_not_supported"})
+        self.assertEqual(bound_queue(self.state, "server"), [])
 
 
 class ExpansionO13InertTest(unittest.TestCase):

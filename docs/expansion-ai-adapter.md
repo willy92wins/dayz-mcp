@@ -11,11 +11,12 @@ server. It ships in `addon_expansion_ai/` and packs as
 - Load it alongside `@DayZ_MCP` and DayZ Expansion AI. Its `CfgPatches`
   requires `DayZ_MCP` and `DayZExpansion_AI_Scripts`, so without Expansion
   the game fails closed at load instead of starting half-wired.
-- The base PBO (`DayZ_MCP`, bridge v12) only carries the five extension
+- The base PBO (`DayZ_MCP`, bridge v13) carries the five extension
   hooks of the adapter plan (§2.1): `ServerCapabilities`,
   `ExtensionPollParams`, `DispatchExtension`, and the two lease-close hooks
-  nothing calls yet. It names no Expansion type and has no `#ifdef`, so a
-  run without the adapter polls and dispatches byte-identically.
+  the v13 close dispatch and observer call. It names no Expansion type and
+  has no `#ifdef`, so a run without the adapter polls and dispatches
+  byte-identically.
 
 ## What it does
 
@@ -46,19 +47,21 @@ the limit. This deviates from plan 2.2 ("the
 adapter adds its names to the census") and is provisional, pending
 Guillermo's confirmation.
 
-## The lease-close gate (mutations are inert today)
+## The lease-close gate (active on bridge v13)
 
 New adapter mutations are admitted only when every peer the run binds
 announces real lease-close support (plan 5.1: server and client, or both
 roles of an offline binding), with a current instance and generation, at
-enqueue and again at delivery. Bridge v12 does not announce
-`lease_close` / `lease_close_client`, so today `ai_group_spawn` is refused
-with `expansion_unavailable` / `lease_close_not_supported` before anything
-is created. That is the designed inert behaviour, not a fault: the v13
-lease-close activation (its census, observer and floors) is a separate
-change, and only then do spawns go through. Without the adapter at all,
-the refusal is `expansion_unavailable` / `adapter_not_loaded`; with a stale
-adapter contract hash, `adapter_contract_mismatch`.
+enqueue and again at delivery. On bridge v13 both peers announce
+`lease_close` / `lease_close_client`, so `ai_group_spawn` is admitted and
+the adapter takes part in the lease close: its groups are stopped by
+`LeaseCloseExtensionStop` and reported as `ai_group:<spawn_token>`
+`residue` entries by `LeaseCloseExtensionCensus` until they disappear.
+A peer still on v12 announces no close, so the spawn is refused with
+`expansion_unavailable` / `lease_close_not_supported` before anything is
+created. Without the adapter at all, the refusal is
+`expansion_unavailable` / `adapter_not_loaded`; with a stale adapter
+contract hash, `adapter_contract_mismatch`.
 
 ## Licence
 
