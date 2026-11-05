@@ -19,6 +19,9 @@
 // INPUT_UDT_* are 1..16 (_constants.c:2-19); this sits beside
 // MCP_INPUT_UDT_WEAPON_FIRE/RAISE (MCP_Weapon.c:6-7), far above them.
 const int MCP_INPUT_UDT_PLAYER_MOVE = 78541066;
+// Server-to-owner connection generation (§2.5): the server names each
+// connection of a body; move and weapon messages carry it back (§2.8).
+const int MCP_RPC_CONN_GEN = 78541073;
 
 //! One player_move request: what the owner applies and what the server's copy
 //! receives. move_id is the owner's id of the move. speed is the
@@ -110,6 +113,11 @@ class MCPPlayerMoveControl
 	static bool IsActive()
 	{
 		return s_Active;
+	}
+
+	static bool ServerReleasePending()
+	{
+		return s_ServerReleasePending;
 	}
 
 	static int Generation()
@@ -722,6 +730,24 @@ class MCPPlayerMoveControl
 	// The release of the previous move goes out first: the server keeps a move
 	// running when a later start is refused, so no start may stand in for a
 	// release. While that release cannot be sent the start is input_busy too.
+	// The connection generation this client last received on MCP_RPC_CONN_GEN
+	// for its own body; 0 while none has arrived (§2.5).
+	static int KnownConnGen()
+	{
+		if (!GetGame())
+		{
+			return 0;
+		}
+
+		PlayerBase localPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!localPlayer)
+		{
+			return 0;
+		}
+
+		return localPlayer.MCPConnGenValue();
+	}
+
 	static string SendStart(MCPPlayerMoveRequest request)
 	{
 		ScriptInputUserData message;
@@ -737,6 +763,10 @@ class MCPPlayerMoveControl
 		{
 			return "unavailable";
 		}
+		if (KnownConnGen() == 0)
+		{
+			return "conn_gen_unknown";
+		}
 		FlushServerRelease();
 		if (s_ServerReleasePending)
 		{
@@ -750,6 +780,7 @@ class MCPPlayerMoveControl
 		message.Write(MCP_INPUT_UDT_PLAYER_MOVE);
 		message.Write(true);
 		message.Write(request.move_id);
+		message.Write(KnownConnGen());
 		message.Write(request.phase);
 		message.Write(request.speed);
 		message.Write(request.direction);
@@ -787,6 +818,12 @@ class MCPPlayerMoveControl
 		{
 			return;
 		}
+		if (KnownConnGen() == 0)
+		{
+			// No generation known yet: the release stays pending and the
+			// per-tick retry sends it once one arrives (§2.5).
+			return;
+		}
 		if (!ScriptInputUserData.CanStoreInputUserData())
 		{
 			return;
@@ -795,6 +832,7 @@ class MCPPlayerMoveControl
 		message.Write(MCP_INPUT_UDT_PLAYER_MOVE);
 		message.Write(false);
 		message.Write(s_ServerReleaseId);
+		message.Write(KnownConnGen());
 		message.Send();
 		s_ServerReleasePending = false;
 	}
@@ -883,6 +921,9 @@ modded class PlayerBase
 	// into this same body resets it (OnReconnect), as that client may be a new
 	// process counting from 1 again.
 	protected int m_MCPMoveLastId;
+	// Connection generation of this body (plan §2.5). 0 until the conn-gen
+	// RPC names one; a close naming another generation must not touch the copy.
+	protected int m_MCPConnGen;
 
 	// playerbase.c:6250. Ours stops here, as the weapon requests do
 	// (MCP_Weapon.c OnInputUserDataProcess).
@@ -902,9 +943,11 @@ modded class PlayerBase
 	{
 		bool isStart;
 		int moveId;
+		int connGen;
 		MCPPlayerMoveRequest request;
 		isStart = false;
 		moveId = 0;
+		connGen = 0;
 		if (!ctx.Read(isStart))
 		{
 			MCPMoveVerdict(false, 0, "read_failed");
@@ -915,9 +958,20 @@ modded class PlayerBase
 			MCPMoveVerdict(false, 0, "read_failed");
 			return;
 		}
+		if (!ctx.Read(connGen))
+		{
+			MCPMoveVerdict(false, moveId, "read_failed");
+			return;
+		}
+		if (connGen == 0 || connGen != m_MCPConnGen)
+		{
+			// §2.5: no generation, or another connection's, changes nothing.
+			MCPMoveVerdict(false, moveId, "conn_gen_mismatch");
+			return;
+		}
 		if (!isStart)
 		{
-			MCPMoveReadRelease(moveId);
+			MCPMoveReadRelease(moveId, connGen);
 			return;
 		}
 		request = new MCPPlayerMoveRequest();
@@ -932,8 +986,15 @@ modded class PlayerBase
 
 	// The owner's release ends the move it names, never a newer one. Its id
 	// counts as seen, so a start of that move arriving after it is refused.
-	protected void MCPMoveReadRelease(int moveId)
+	protected void MCPMoveReadRelease(int moveId, int connGen)
 	{
+		if (connGen == 0 || connGen != m_MCPConnGen)
+		{
+			// Another generation's release frees nothing and raises no floor.
+			MCPMoveNote(moveId, "conn_gen_mismatch");
+			return;
+		}
+
 		if (moveId > m_MCPMoveLastId)
 		{
 			m_MCPMoveLastId = moveId;
@@ -1135,6 +1196,89 @@ modded class PlayerBase
 	protected void MCPMoveNote(int moveId, string reason)
 	{
 		Print("[DayZ_MCP] player_move server ignored move=" + moveId.ToString() + " reason=" + reason);
+	}
+
+	int MCPConnGenValue()
+	{
+		return m_MCPConnGen;
+	}
+
+	void MCPSetConnGen(int connGen)
+	{
+		m_MCPConnGen = connGen;
+	}
+
+	// §2.5: the server names this connection on the body and tells the owner.
+	// The identity is the mission event's, so the RPC targets that client.
+	void MCPSendConnGen(PlayerIdentity identity)
+	{
+		if (!identity)
+		{
+			return;
+		}
+
+		ScriptRPC rpc = new ScriptRPC();
+		if (!rpc.Write(m_MCPConnGen))
+		{
+			return;
+		}
+
+		rpc.Send(this, MCP_RPC_CONN_GEN, true, identity);
+	}
+
+	override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)
+	{
+		super.OnRPC(sender, rpc_type, ctx);
+		if (rpc_type != MCP_RPC_CONN_GEN)
+		{
+			return;
+		}
+
+		int receivedGen = 0;
+		if (!ctx.Read(receivedGen))
+		{
+			return;
+		}
+
+		m_MCPConnGen = receivedGen;
+	}
+
+	int MCPMoveServerFloor()
+	{
+		return m_MCPMoveLastId;
+	}
+
+	bool MCPMoveActiveNow()
+	{
+		if (m_MCPMoveActive)
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	// Lease close (§2.7): raises the floor to floorId and releases a copy at
+	// or below it, only when connGen is this body's generation. A mismatch
+	// changes nothing and the caller reports it as residue.
+	bool MCPMoveCloseServer(int floorId, int connGen)
+	{
+		if (connGen == 0 || connGen != m_MCPConnGen)
+		{
+			return false;
+		}
+
+		if (floorId > m_MCPMoveLastId)
+		{
+			m_MCPMoveLastId = floorId;
+		}
+
+		if (m_MCPMoveActive && m_MCPMoveActive.move_id <= floorId)
+		{
+			MCPMoveServerRelease("lease_close");
+		}
+
+		return true;
 	}
 
 	// A client reconnecting into this body (missionserver.c:620-626) may be a

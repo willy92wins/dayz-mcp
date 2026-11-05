@@ -316,6 +316,19 @@ class MCPDialogController : ScriptedWidgetEventHandler
 		TryFinish("disconnected", "", "", now);
 	}
 
+	void FinishLeaseClosed()
+	{
+		if (m_State != STATE_OPEN)
+		{
+			UnlockInput();
+			HideRoot();
+			return;
+		}
+
+		float now = ReadNow();
+		TryFinish("lease_closed", "", "", now);
+	}
+
 	void DestroyHost()
 	{
 		UnlockInput();

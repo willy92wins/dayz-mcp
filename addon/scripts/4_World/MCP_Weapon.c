@@ -63,6 +63,8 @@ class MCPWeaponControl
 	static const float AIM_CHANGE_ABS_MAX = 3.141593;
 
 	static int s_SimTick;
+	// Lease-close weapon floor: every raise/fire request id the client wrote.
+	static int s_CloseRequestId;
 	static bool s_AwaitTick;
 
 	static bool s_RaiseArmed;
@@ -134,6 +136,28 @@ class MCPWeaponControl
 	static string FireReason()
 	{
 		return s_FireReason;
+	}
+
+	static int CloseRequestFloor()
+	{
+		return s_CloseRequestId;
+	}
+
+	// The connection generation this client last received (§2.5); 0 = none.
+	static int KnownConnGen()
+	{
+		if (!GetGame())
+		{
+			return 0;
+		}
+
+		PlayerBase localPlayer = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!localPlayer)
+		{
+			return 0;
+		}
+
+		return localPlayer.MCPConnGenValue();
 	}
 
 	static int Generation(string verb)
@@ -646,12 +670,19 @@ class MCPWeaponControl
 		{
 			return "";
 		}
+		if (KnownConnGen() == 0)
+		{
+			return "conn_gen_unknown";
+		}
 		if (!ScriptInputUserData.CanStoreInputUserData())
 		{
 			return "input_busy";
 		}
+		s_CloseRequestId = s_CloseRequestId + 1;
 		request = new ScriptInputUserData();
 		request.Write(MCP_INPUT_UDT_WEAPON_FIRE);
+		request.Write(s_CloseRequestId);
+		request.Write(KnownConnGen());
 		request.Write(held);
 		request.Send();
 		return "";
@@ -674,12 +705,19 @@ class MCPWeaponControl
 		{
 			return "";
 		}
+		if (KnownConnGen() == 0)
+		{
+			return "conn_gen_unknown";
+		}
 		if (!ScriptInputUserData.CanStoreInputUserData())
 		{
 			return "input_busy";
 		}
+		s_CloseRequestId = s_CloseRequestId + 1;
 		request = new ScriptInputUserData();
 		request.Write(MCP_INPUT_UDT_WEAPON_RAISE);
+		request.Write(s_CloseRequestId);
+		request.Write(KnownConnGen());
 		request.Write(raised);
 		request.Write(ttlS);
 		request.Send();
@@ -701,6 +739,7 @@ modded class PlayerBase
 	protected bool m_MCPRaiseArmed;
 	protected float m_MCPRaiseDeadlineS;
 	protected Weapon_Base m_MCPRaiseWeapon;
+	protected int m_MCPWeaponLastId;
 
 	// playerbase.c:6250. Ours stop here: super's chain resets the melee
 	// target for every type (dayzplayerimplement.c:2998-3001) and offers the
@@ -720,14 +759,92 @@ modded class PlayerBase
 		return super.OnInputUserDataProcess(userDataType, ctx);
 	}
 
+	int MCPWeaponServerFloor()
+	{
+		return m_MCPWeaponLastId;
+	}
+
+	bool MCPWeaponPendingNow()
+	{
+		if (m_MCPFireRequested || m_MCPRaiseRequested || m_MCPRaiseArmed)
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	// Lease close (§2.7): same conn_gen rule as the move copy.
+	bool MCPWeaponCloseServer(int floorId, int connGen)
+	{
+		if (connGen == 0 || connGen != MCPConnGenValue())
+		{
+			return false;
+		}
+
+		// Only requests at or below W are cleared: the stored request is the
+		// last accepted one, so its id is m_MCPWeaponLastId before the raise.
+		bool clearPending = m_MCPWeaponLastId <= floorId;
+		if (floorId > m_MCPWeaponLastId)
+		{
+			m_MCPWeaponLastId = floorId;
+		}
+
+		if (clearPending && m_MCPFireRequested)
+		{
+			m_MCPFireRequested = false;
+			m_MCPFireWeapon = null;
+		}
+
+		if (clearPending && m_MCPRaiseRequested)
+		{
+			m_MCPRaiseRequested = false;
+		}
+
+		if (clearPending && m_MCPRaiseArmed)
+		{
+			m_MCPRaiseArmed = false;
+		}
+
+		return true;
+	}
+
 	protected void MCPReadFireRequest(ParamsReadContext ctx)
 	{
 		Weapon_Base requested = null;
+		int requestId = 0;
+		int connGen = 0;
+		if (!ctx.Read(requestId))
+		{
+			MCPFireVerdict(false, "read_failed");
+			return;
+		}
+
+		if (!ctx.Read(connGen))
+		{
+			MCPFireVerdict(false, "read_failed");
+			return;
+		}
+
+		if (connGen == 0 || connGen != MCPConnGenValue())
+		{
+			MCPFireVerdict(false, "conn_gen_mismatch");
+			return;
+		}
+
 		if (!ctx.Read(requested))
 		{
 			MCPFireVerdict(false, "read_failed");
 			return;
 		}
+
+		if (requestId <= m_MCPWeaponLastId)
+		{
+			MCPFireVerdict(false, "stale_weapon_id");
+			return;
+		}
+
+		m_MCPWeaponLastId = requestId;
 		if (m_MCPFireRequested)
 		{
 			MCPFireVerdict(false, "superseded");
@@ -740,6 +857,26 @@ modded class PlayerBase
 	{
 		bool raised = false;
 		float ttlS = 0.0;
+		int raiseId = 0;
+		int connGen = 0;
+		if (!ctx.Read(raiseId))
+		{
+			MCPRaiseVerdict(false, false, "read_failed");
+			return;
+		}
+
+		if (!ctx.Read(connGen))
+		{
+			MCPRaiseVerdict(false, false, "read_failed");
+			return;
+		}
+
+		if (connGen == 0 || connGen != MCPConnGenValue())
+		{
+			MCPRaiseVerdict(false, false, "conn_gen_mismatch");
+			return;
+		}
+
 		if (!ctx.Read(raised))
 		{
 			MCPRaiseVerdict(false, false, "read_failed");
@@ -750,6 +887,14 @@ modded class PlayerBase
 			MCPRaiseVerdict(false, raised, "read_failed");
 			return;
 		}
+
+		if (raiseId <= m_MCPWeaponLastId)
+		{
+			MCPRaiseVerdict(false, raised, "stale_weapon_id");
+			return;
+		}
+
+		m_MCPWeaponLastId = raiseId;
 		if (m_MCPRaiseRequested)
 		{
 			MCPRaiseVerdict(false, m_MCPRaiseRequestUp, "superseded");

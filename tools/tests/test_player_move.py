@@ -56,7 +56,7 @@ BRIDGE_CODES = {
     "bad_arrive_radius_m", "bad_hold_s", "bad_ttl_s", "client_not_in_game",
     "no_player", "player_dead", "player_unconscious", "player_restrained",
     "seated", "no_input_controller", "not_in_move_command", "player_move_busy",
-    "input_busy", "not_held", "aborted",
+    "input_busy", "conn_gen_unknown", "not_held", "aborted",
 }
 EXPECTED_REQUIRED = {
     frozenset({"mode"}),
@@ -141,7 +141,7 @@ COMPASS = "static float CompassFromHeading(float headingRad)"
 BEARING = "static float BearingDeg(vector from, vector target)"
 SERVER_INPUT = "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)"
 SERVER_READ = "protected void MCPMoveReadRequest(ParamsReadContext ctx)"
-SERVER_READ_RELEASE = "protected void MCPMoveReadRelease(int moveId)"
+SERVER_READ_RELEASE = "protected void MCPMoveReadRelease(int moveId, int connGen)"
 SERVER_ACCEPT = "protected void MCPMoveAccept(MCPPlayerMoveRequest request)"
 SERVER_FRESHNESS = "protected string MCPMoveFreshnessRefusal(int moveId)"
 SERVER_OWNER = "protected string MCPMoveOwnerRefusal()"
@@ -315,7 +315,11 @@ def _bridge_codes() -> set[str]:
     for signature in (REFUSAL, SECONDS, ACTOR, START_REFUSAL, DISTANCE):
         codes |= set(re.findall(r'return "(\w+)";', _method_body(move, signature)))
     codes |= set(re.findall(r'code = "(\w+)";', _method_body(move, SECONDS)))
+    # §2.5: SendStart can answer conn_gen_unknown; sent/unavailable are not errors.
+    codes |= set(re.findall(r'return "(\w+)";', _method_body(move, SEND_START)))
     codes.discard("")
+    codes.discard("sent")
+    codes.discard("unavailable")
     return codes
 
 
@@ -335,7 +339,7 @@ _TO_STRING = re.compile(r"\b([A-Za-z_][\w.]*)\.ToString\(\)")
 INSTANCE_TYPES = SimpleNamespace(INSTANCETYPE_SERVER=21, INSTANCETYPE_CLIENT=22)
 SERVER_MODEL_MEMBERS = (
     "m_MCPMoveActive|m_MCPMoveDeadlineS|m_MCPMoveApplied|m_MCPMoveConsumed|m_MCPMoveHandled|"
-    "m_MCPMoveLastId|MCPMoveVerdict|MCPMoveNote|MCPMoveServerRelease|MCPMoveFreshnessRefusal|"
+    "m_MCPMoveLastId|m_MCPConnGen|MCPMoveVerdict|MCPMoveNote|MCPMoveServerRelease|MCPMoveFreshnessRefusal|"
     "MCPMoveOwnerRefusal|GetInstanceType|GetIdentity|IsPlayerDisconnected|GetInputController"
 )
 SERVER_MODEL_METHODS = (
@@ -380,6 +384,8 @@ class _ServerPlayer:
         self.m_MCPMoveConsumed = 0
         self.m_MCPMoveHandled = 0
         self.m_MCPMoveLastId = 0
+        # The body's connection generation (§2.5); releases name it as G.
+        self.m_MCPConnGen = 7
         self.identity: object | None = object()
         self.disconnected = False
         self.alive = True
@@ -466,8 +472,11 @@ class _ServerMoveModel:
         request.direction = _LogString.of(request.direction)
         self.player.MCPMoveAccept(request)
 
-    def release(self, move_id: int) -> None:
-        self.player.MCPMoveReadRelease(move_id)
+    def release(self, move_id: int, conn_gen: int | None = None) -> None:
+        # Default: the release names this body's own generation G.
+        self.player.MCPMoveReadRelease(
+            move_id, self.player.m_MCPConnGen if conn_gen is None else conn_gen
+        )
 
     def tick(self, from_consume: bool = True) -> None:
         self.player.MCPMoveServerTick(from_consume)
@@ -487,6 +496,8 @@ class _OwnerReleaseModel:
         self.disabled = 0
         self.channel_free = True
         self.local_player = True
+        # The generation the owner's body last received (§2.5); 0 = unknown.
+        self.gen = 7
         model = self
 
         class InputUserData:
@@ -520,6 +531,8 @@ class _OwnerReleaseModel:
             "ScriptInputUserData": InputUserData,
             "MCP_INPUT_UDT_PLAYER_MOVE": int(re.search(r"const int MCP_INPUT_UDT_PLAYER_MOVE = (\d+);", source).group(1)),
             "Disable": self._disable,
+            # FlushServerRelease calls its own class's KnownConnGen() (§2.5).
+            "KnownConnGen": lambda: model.gen,
         }
         self.source = source
         for signature in (FLUSH, RELEASE_ALL):
@@ -648,7 +661,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)
@@ -1002,6 +1015,7 @@ class PlayerMoveServerContractTest(unittest.TestCase):
             send,
             "if (!GetGame().IsMultiplayer())",
             "if (!GetGame().IsClient())",
+            "if (KnownConnGen() == 0)",
             "FlushServerRelease();",
             "if (s_ServerReleasePending)",
             "if (!ScriptInputUserData.CanStoreInputUserData())",
@@ -1009,9 +1023,12 @@ class PlayerMoveServerContractTest(unittest.TestCase):
             "message.Write(MCP_INPUT_UDT_PLAYER_MOVE);",
             "message.Write(true);",
             "message.Write(request.move_id);",
+            "message.Write(KnownConnGen());",
             "message.Send();",
             'return "sent";',
         )
+        # §2.5: no known generation refuses before Begin writes anything.
+        self.assertEqual(_if_body(send, "KnownConnGen() == 0").strip(), 'return "conn_gen_unknown";')
         self.assertEqual(
             _if_body(send, "!ScriptInputUserData.CanStoreInputUserData()").strip(),
             'return "input_busy";',
@@ -1037,6 +1054,8 @@ class PlayerMoveServerContractTest(unittest.TestCase):
             server_read,
             "if (!ctx.Read(isStart))",
             "if (!ctx.Read(moveId))",
+            "if (!ctx.Read(connGen))",
+            "if (connGen == 0 || connGen != m_MCPConnGen)",
             "if (!isStart)",
             "request.move_id = moveId;",
             "if (!MCPPlayerMoveControl.ReadRequest(ctx, request))",
@@ -1067,10 +1086,12 @@ class PlayerMoveServerContractTest(unittest.TestCase):
             "if (!s_ServerReleasePending)",
             "if (!GetGame().IsMultiplayer() || !GetGame().IsClient())",
             "if (!GetGame().GetPlayer())",
+            "if (KnownConnGen() == 0)",
             "if (!ScriptInputUserData.CanStoreInputUserData())",
             "message.Write(MCP_INPUT_UDT_PLAYER_MOVE);",
             "message.Write(false);",
             "message.Write(s_ServerReleaseId);",
+            "message.Write(KnownConnGen());",
             "message.Send();",
         )
         self.assertTrue(flush.rstrip().endswith("message.Send();\n\t\ts_ServerReleasePending = false;"))
@@ -1158,7 +1179,8 @@ class PlayerMoveServerContractTest(unittest.TestCase):
         # The member is a plain int (0 on a new PlayerBase) and only these write it.
         self.assertIn("\tprotected int m_MCPMoveLastId;\n", self.source)
         writes = re.findall(r"m_MCPMoveLastId = ([^;]+);", self.code)
-        self.assertEqual(writes, ["moveId", "request.move_id", "0"])
+        # §2.7: the lease close also raises the floor (floorId).
+        self.assertEqual(writes, ["moveId", "request.move_id", "floorId", "0"])
         # A reconnect into this body may be a new client process counting from 1.
         self.assertEqual(
             _flat(_method_body(self.source, SERVER_RECONNECT)),
@@ -1381,6 +1403,21 @@ class PlayerMoveServerCopyModelTest(unittest.TestCase):
         self.assertEqual((model.active, model.log[-1]), (1, self._verdict(1, 1, "")))
 
 
+    def test_a_release_of_another_generation_frees_nothing(self) -> None:
+        # §2.5/§2.8 NEG: unknown (0) or mismatched generation releases do
+        # not end B's copy and do not raise the server floor.
+        model = self.model
+        model.start(7)
+        self.assertEqual(model.active, 7)
+        for bad_gen in (0, 99):
+            with self.subTest(conn_gen=bad_gen):
+                model.release(7, conn_gen=bad_gen)
+                self.assertEqual(model.active, 7)
+                self.assertEqual(model.player.m_MCPMoveLastId, 7)
+        model.release(7)
+        self.assertIsNone(model.active)
+
+
 class PlayerMoveShutdownReleaseModelTest(unittest.TestCase):
     """Review R1 F4(a), run on the owner's translated release methods."""
 
@@ -1391,9 +1428,22 @@ class PlayerMoveShutdownReleaseModelTest(unittest.TestCase):
     def test_a_move_ended_by_shutdown_sends_its_identified_release(self) -> None:
         model = _OwnerReleaseModel(self.source)
         model.release_all("shutdown")
-        self.assertEqual(model.sent, [[self.udt, False, 5]])
+        self.assertEqual(model.sent, [[self.udt, False, 5, 7]])
         self.assertFalse(model.state.s_ServerReleasePending)
         self.assertEqual((model.disabled, model.state.s_ReleasedBy.text), (1, "shutdown"))
+
+    def test_a_release_without_a_known_generation_stays_pending(self) -> None:
+        # §2.5 NEG: with no generation known the release is not sent, the
+        # overrides still go off, and the retry sends it once G is known.
+        model = _OwnerReleaseModel(self.source)
+        model.gen = 0
+        model.release_all("ttl")
+        self.assertEqual(model.sent, [])
+        self.assertTrue(model.state.s_ServerReleasePending)
+        self.assertEqual(model.disabled, 1)
+        model.gen = 7
+        model.shutdown_release()
+        self.assertEqual(model.sent, [[self.udt, False, 5, 7]])
 
     def test_shutdown_tries_once_then_drops_what_it_could_not_send(self) -> None:
         # The local player gone or the channel full: nothing is sent, the owner's
@@ -1412,7 +1462,7 @@ class PlayerMoveShutdownReleaseModelTest(unittest.TestCase):
         self.assertEqual((model.sent, model.state.s_ServerReleasePending), ([], True))
         model.channel_free = True
         model.shutdown_release()
-        self.assertEqual(model.sent, [[self.udt, False, 5]])
+        self.assertEqual(model.sent, [[self.udt, False, 5, 7]])
         self.assertFalse(model.state.s_ServerReleasePending)
         # A move that never reached the server sends nothing.
         model = _OwnerReleaseModel(self.source)
@@ -1537,6 +1587,7 @@ class PlayerMoveDispatchContractTest(unittest.TestCase):
             "refusal = MCPPlayerMoveControl.DistanceRefusal(player, request);",
             "request.move_id = MCPPlayerMoveControl.NextMoveId();",
             "serverRequest = MCPPlayerMoveControl.SendStart(request);",
+            'if (serverRequest == "conn_gen_unknown")',
             'if (serverRequest == "input_busy")',
             "nowS = GetGame().GetTickTime();",
             "generation = MCPPlayerMoveControl.Begin(player, request, nowS, serverRequest);",
@@ -1552,6 +1603,8 @@ class PlayerMoveDispatchContractTest(unittest.TestCase):
         )
         self.assertIn('result.error = "bad_to";', _if_body(self.dispatch, "!ArrayToVector(args.to, target)"))
         self.assertIn('result.error = "input_busy";', _if_body(self.dispatch, 'serverRequest == "input_busy"'))
+        # §2.5: the literal branch sits before Begin, so nothing starts.
+        self.assertIn('result.error = "conn_gen_unknown";', _if_body(self.dispatch, 'serverRequest == "conn_gen_unknown"'))
         self.assertEqual(_flat(_if_body(self.dispatch, 'args.mode == "press"')), "result.ok = true; return true;")
         self.assertIn(
             "job.deadline_s = m_JobRunner.GetElapsedS() + PLAYER_MOVE_JOB_SLACK_S + request.seconds;",

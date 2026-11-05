@@ -475,7 +475,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release," + "camera_set,camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move,player_respawn," + "player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry," + "vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1268,7 +1268,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		if (command.cmd == "camera_set")
+		if (command.cmd == "lease_close_client")
+		{
+			postNow = DispatchLeaseCloseClient(command, result);
+		}
+		else if (command.cmd == "camera_set")
 		{
 			postNow = DispatchCameraSet(command, result);
 		}
@@ -3383,6 +3387,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// (MCP_PlayerMove.c). Sent first: input_busy leaves both sides as they were.
 		request.move_id = MCPPlayerMoveControl.NextMoveId();
 		serverRequest = MCPPlayerMoveControl.SendStart(request);
+		if (serverRequest == "conn_gen_unknown")
+		{
+			result.ok = false;
+			result.error = "conn_gen_unknown";
+			return true;
+		}
 		if (serverRequest == "input_busy")
 		{
 			result.ok = false;
@@ -5439,6 +5449,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		if (job.kind == "lease_close")
+		{
+			return LeaseCloseCensusClean(BuildLeaseCloseCensus(job.args));
+		}
+
 		if (job.kind == "camera_set")
 		{
 			return ProcessCameraSetJob(job);
@@ -6450,6 +6465,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, false);
+		}
+
 		if (job.kind == "camera_set")
 		{
 			MCPResult result = new MCPResult();
@@ -6638,6 +6658,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		if (!job)
 		{
+			return;
+		}
+
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, true);
 			return;
 		}
 
@@ -6972,7 +6998,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	}
 
 	// Observe-only seated view. Parent+crew is already established by
-	// CameraReadError → camera_unavailable_vehicle. GetCommand_Vehicle is
+	// CameraReadError â†’ camera_unavailable_vehicle. GetCommand_Vehicle is
 	// never presence. A readable transform is view=vehicle, not scripted.
 	protected bool FillSeatedCameraView(MCPCamera camera, PlayerBase cameraPlayer)
 	{
@@ -8575,6 +8601,215 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 			i = i + 1;
 		}
+	}
+
+	// Lease close census (Â§2.6): state, not jobs. A controller still active
+	// after its stop step is residue naming that controller.
+	protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		if (active)
+		{
+			entry.state = "residue";
+			entry.reason = reason;
+		}
+		else
+		{
+			entry.state = "clean";
+			entry.reason = "";
+		}
+
+		census.entries.Insert(entry);
+	}
+
+	protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state != "clean")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)
+	{
+		MCPLeaseCloseCensus census = new MCPLeaseCloseCensus();
+		census.peer = "client";
+		if (closeArgs)
+		{
+			census.generation = closeArgs.close_generation;
+			census.lease_id = closeArgs.close_lease_id;
+		}
+
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			int closeNetLow = 0;
+			int closeNetHigh = 0;
+			player.GetNetworkID(closeNetLow, closeNetHigh);
+			census.net_low = closeNetLow;
+			census.net_high = closeNetHigh;
+			census.conn_gen = player.MCPConnGenValue();
+		}
+
+		census.move_floor = MCPPlayerMoveControl.Generation();
+		census.weapon_floor = MCPWeaponControl.CloseRequestFloor();
+		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.IsActive(), "vehicle_drive");
+		AddCloseEntry(census, "input_trigger", MCPInputTriggerControl.IsHeld(), "input_trigger");
+		bool moveActive = MCPPlayerMoveControl.IsActive();
+		if (MCPPlayerMoveControl.ServerReleasePending())
+		{
+			moveActive = true;
+		}
+
+		AddCloseEntry(census, "player_move", moveActive, "player_move");
+		AddCloseEntry(census, "weapon", MCPWeaponControl.IsBusy(), "weapon");
+		AddCloseEntry(census, "look_at", MCPLookAtControl.IsActive(), "look_at");
+		bool cameraActive = false;
+		if (m_ActiveCam || m_CameraHandoffPending)
+		{
+			cameraActive = true;
+		}
+
+		AddCloseEntry(census, "camera", cameraActive, "camera");
+		AddCloseEntry(census, "player_simulation", m_PlayerSimulationDisabled, "player_simulation");
+		AddCloseEntry(census, "controls_hud", m_ControlsSuppressed, "controls_hud");
+		bool dialogOpen = false;
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			dialogOpen = true;
+		}
+
+		AddCloseEntry(census, "dialog", dialogOpen, "dialog");
+		bool previewSet = false;
+		if (m_UiPreviewRoot)
+		{
+			previewSet = true;
+		}
+
+		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
+		// Â§2.9: the client half reads the action manager, not the job, so a
+		// Take that cleared the hold control cannot make this row clean.
+		bool holdActive = MCPHoldControl.IsActive();
+		if (player)
+		{
+			ActionManagerClient holdManager = ActionManagerClient.Cast(player.GetActionManager());
+			if (holdManager && holdManager.MCP_HoldBusy())
+			{
+				holdActive = true;
+			}
+		}
+
+		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
+		bool jobsActive = false;
+		if (m_JobRunner && m_JobRunner.CountExcluding("lease_close") > 0)
+		{
+			jobsActive = true;
+		}
+
+		AddCloseEntry(census, "jobs", jobsActive, "jobs");
+		bool samplerActive = false;
+		if (MCPVehicleTrace.IsActive() || MCPAnimTimeline.IsActive() || MCPPlayerTrace.IsActive())
+		{
+			samplerActive = true;
+		}
+
+		AddCloseEntry(census, "samplers", samplerActive, "samplers");
+		if (census.conn_gen == 0)
+		{
+			AddCloseEntry(census, "conn_gen", true, "conn_gen_unknown");
+		}
+
+		if (LeaseCloseCensusClean(census))
+		{
+			census.state = "clean";
+		}
+		else
+		{
+			census.state = "residue";
+		}
+
+		return census;
+	}
+
+	protected void PostLeaseCloseJob(MCPJob job, bool timedOut)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.ok = true;
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(job.args);
+		if (timedOut && !LeaseCloseCensusClean(census))
+		{
+			AddCloseEntry(census, "observer", true, "observer_timeout");
+			census.state = "residue";
+		}
+
+		result.lease_close = census;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		PostResult(result);
+	}
+
+	// Â§2.6 stop steps, in Shutdown's order, without the bridge teardown.
+	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
+	{
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			m_Dialog.FinishLeaseClosed();
+		}
+
+		if (m_UiPreviewRoot)
+		{
+			m_UiPreviewRoot.Unlink();
+			m_UiPreviewRoot = null;
+		}
+
+		MCPCarDrive.Clear();
+		MCPInputTriggerControl.ReleaseAll("shutdown");
+		MCPPlayerMoveControl.ReleaseAll("shutdown");
+		RestoreGameplay();
+		ReleaseCamera();
+		MCPHoldControl.Shutdown("shutdown");
+		MCPVehicleTrace.Abort("shutdown");
+		MCPAnimTimeline.Abort("shutdown");
+		MCPPlayerTrace.Abort("shutdown");
+		if (m_JobRunner)
+		{
+			m_JobRunner.AbortAll(this);
+		}
+
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
+		if (LeaseCloseCensusClean(census))
+		{
+			result.ok = true;
+			result.lease_close = census;
+			return true;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "lease_close";
+		job.args = command.args;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		job.deadline_s = m_JobRunner.GetElapsedS() + 25.0;
+		m_JobRunner.AddJob(job);
+		return false;
 	}
 
 	void Shutdown()

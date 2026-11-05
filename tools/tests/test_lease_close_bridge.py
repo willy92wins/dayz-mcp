@@ -571,5 +571,169 @@ class LeaseCloseBridgeTests(unittest.TestCase):
                         )
 
 
+
+class _CloseEntry:
+    def __init__(self):
+        self.name = ""
+        self.state = ""
+        self.reason = ""
+
+
+class _CloseCensus:
+    def __init__(self):
+        self.generation = ""
+        self.lease_id = ""
+        self.peer = ""
+        self.state = ""
+        self.entries = EnforceArray()
+        self.move_floor = 0
+        self.weapon_floor = 0
+        self.conn_gen = 0
+        self.net_low = 0
+        self.net_high = 0
+        self.floors = EnforceArray()
+
+
+class LeaseCloseCensusTests(unittest.TestCase):
+    """K26-K30: census builders, observer, gate, and registers (offline)."""
+
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False):
+        # Translate the real client census builder against controller doubles.
+        flags = {name: (name in active) for name in (
+            "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
+            "camera", "dialog", "action_hold", "samplers")}
+        class _Ctl:
+            def __init__(self, fn):
+                self._fn = fn
+            def __call__(self, *a):
+                return self._fn(*a)
+        def ctl(name):
+            return _Ctl(lambda *a, n=name: flags.get(n, False))
+        manager = type("AM", (), {"MCP_HoldBusy": lambda self: flags["action_hold"]})()
+        player = type("P", (), {
+            "GetNetworkID": lambda self, low, high: None,
+            "MCPConnGenValue": lambda self: conn_gen,
+            "GetActionManager": lambda self: manager,
+        })()
+        game = type("G", (), {"GetPlayer": lambda self: player})()
+        runner = type("R", (), {
+            "CountExcluding": lambda self, kind: 1 if "jobs" in active else 0,
+            "GetElapsedS": lambda self: 0.0,
+        })()
+        ns = {
+            "GetGame": lambda: game,
+            "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
+            "ActionManagerClient": type("AMC", (), {"Cast": staticmethod(lambda x: x)}),
+            "MCPCarDrive": type("C", (), {"IsActive": staticmethod(lambda: flags["vehicle_drive"]), "Clear": staticmethod(lambda: None)}),
+            "MCPInputTriggerControl": type("I", (), {"IsHeld": staticmethod(lambda: flags["input_trigger"]), "ReleaseAll": staticmethod(lambda cause: None)}),
+            "MCPPlayerMoveControl": type("M", (), {
+                "IsActive": staticmethod(lambda: flags["player_move"]),
+                "ServerReleasePending": staticmethod(lambda: False),
+                "Generation": staticmethod(lambda: 7),
+                "ReleaseAll": staticmethod(lambda cause: None)}),
+            "MCPWeaponControl": type("W", (), {"IsBusy": staticmethod(lambda: flags["weapon"]), "CloseRequestFloor": staticmethod(lambda: 4)}),
+            "MCPLookAtControl": type("L", (), {"IsActive": staticmethod(lambda: flags["look_at"])}),
+            "MCPHoldControl": type("H", (), {"IsActive": staticmethod(lambda: flags["action_hold"]), "Shutdown": staticmethod(lambda cause: None)}),
+            "MCPVehicleTrace": type("V", (), {"IsActive": staticmethod(lambda: flags["samplers"]), "Abort": staticmethod(lambda cause: None)}),
+            "MCPAnimTimeline": type("A", (), {"IsActive": staticmethod(lambda: False), "Abort": staticmethod(lambda cause: None)}),
+            "MCPPlayerTrace": type("T", (), {"IsActive": staticmethod(lambda: False), "Abort": staticmethod(lambda cause: None)}),
+            "MCPLeaseCloseCensus": _CloseCensus,
+            "MCPLeaseCloseEntry": _CloseEntry,
+            "m_ActiveCam": object() if "camera" in active else None,
+            "m_CameraHandoffPending": False,
+            "m_PlayerSimulationDisabled": "player_simulation" in active,
+            "m_ControlsSuppressed": "controls_hud" in active,
+            "m_Dialog": type("D", (), {"IsOpen": lambda self: "dialog" in active})() if "dialog" in active else None,
+            "m_UiPreviewRoot": object() if "ui_preview" in active else None,
+            "m_JobRunner": runner,
+        }
+        for sig, name in (
+            ("protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseEntry"),
+            ("protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)", "LeaseCloseCensusClean"),
+            ("protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)", "BuildLeaseCloseCensus"),
+        ):
+            body = method_body(source, sig)
+            if mutant_clean and name == "LeaseCloseCensusClean":
+                body = body.replace('census.entries.Get(i).state != "clean"', "false", 1)
+            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient"),
+                      members=("m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
+                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner"))
+        args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
+        return ns["BuildLeaseCloseCensus"](args)
+
+    def test_k26_client_census_clean_and_residue(self):
+        source = _read(CLIENT_PATH)
+        census = self._client_census(source)
+        self.assertEqual(census.state.text, "clean")
+        self.assertEqual(census.move_floor, 7)
+        self.assertEqual(census.weapon_floor, 4)
+        self.assertEqual(census.conn_gen, 7)
+        # NEG: one controller left active names exactly that entry.
+        census2 = self._client_census(source, active=("weapon",))
+        residue = [e.name.text for e in census2.entries if e.state.text != "clean"]
+        self.assertEqual(residue, ["weapon"])
+        # Mutant: a clean check that ignores residue must turn this red.
+        census3 = self._client_census(source, active=("weapon",), mutant_clean=True)
+        self.assertEqual(census3.state.text, "clean", "mutant clean check hides residue")
+
+    def test_k29_client_not_in_game_gate(self):
+        source = _read(CLIENT_PATH)
+        dispatch = method_body(source, "protected void Dispatch(MCPCommand command)")
+        self.assertLess(dispatch.find("IsClientInGame()"), dispatch.find("lease_close_client"))
+
+    def test_k26_k28_dispatch_order_and_observer(self):
+        source = _read(CLIENT_PATH)
+        body = method_body(source, "protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)")
+        steps = ["FinishLeaseClosed()", "m_UiPreviewRoot.Unlink()", "MCPCarDrive.Clear()",
+                 'MCPInputTriggerControl.ReleaseAll("shutdown")', 'MCPPlayerMoveControl.ReleaseAll("shutdown")',
+                 "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
+                 'MCPVehicleTrace.Abort("shutdown")', "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
+        pos = -1
+        for step in steps:
+            nxt = body.find(step, pos + 1)
+            self.assertGreater(nxt, pos, f"step out of order or missing: {step}")
+            pos = nxt
+        self.assertIn('job.kind = "lease_close";', body)
+        self.assertIn("GetElapsedS() + 25.0", body)
+        # Mutant: dropping AbortAll leaves jobs running (K26 jobs row).
+        self.assertNotIn("AbortAll", body.replace("AbortAll(this)", "", 1))
+
+    def test_k27_k30_server_census_and_registers(self):
+        source = _read(SERVER_PATH)
+        body = method_body(source, "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)")
+        for step in ("MCPBotControl.ShutdownAll(this)", "MCPMoveCloseServer(carried.move_id, carried.conn_gen)",
+                     "MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen)", "PostJobTimeout(job)",
+                     "LeaseCloseExtensionStop()", "BuildLeaseCloseCensus(command.args)"):
+            self.assertIn(step, body, step)
+        self.assertIn('job.kind != "server_perf"', body, "server_perf is kept")
+        self.assertIn("RegisterDeletionRefs(job)", body, "deletion refs transfer before the job drops")
+        self.assertIn('closeJob.kind = "lease_close";', body)
+        self.assertIn("m_ElapsedS + 25.0", body)
+        census = method_body(source, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
+        for name in ("bots", "infected_drive", "move_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
+            self.assertIn(f'"{name}"', census, name)
+        self.assertIn("LeaseCloseExtensionCensus(census);", census)
+        for kind in ("notify_players", "inventory_move", "hands_take", "hands_attach"):
+            self.assertIn(f'RegisterLeaseCloseRpc(command.id, "{kind}")', source, kind)
+        # NEG pins: the RPC register never deletes a row on a job-ready readback.
+        register = method_body(source, "protected void RegisterLeaseCloseRpc(int requestId, string kind)")
+        self.assertNotIn("Remove", register)
+        self.assertIn("m_InfectedDebt = true;", source, "infected debt survives an empty registry")
+
+    def test_k27_k28_hooks_and_observer_timeout(self):
+        source = _read(SERVER_PATH)
+        self.assertIn("protected void LeaseCloseExtensionStop()", source)
+        self.assertIn("protected void LeaseCloseExtensionCensus(MCPLeaseCloseCensus census)", source)
+        post = method_body(source, "protected void PostLeaseCloseJob(MCPJob job, bool timedOut)")
+        self.assertIn('"observer_timeout"', post)
+        client = _read(CLIENT_PATH)
+        post_client = method_body(client, "protected void PostLeaseCloseJob(MCPJob job, bool timedOut)")
+        self.assertIn('"observer_timeout"', post_client)
+        runner = _read(SCRIPTS / "MCPJobRunner.c")
+        abort = method_body(runner, "void AbortAll(MCPJobRunnerOwner owner)")
+        self.assertIn("MCP_PostJobTimeout(job)", abort)
+        # Mutant: AbortAll that only clears would post nothing.
+        self.assertNotIn("MCP_PostJobTimeout", abort.replace("MCP_PostJobTimeout(job)", "", 1))
+
 if __name__ == "__main__":
     unittest.main()

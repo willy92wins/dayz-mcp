@@ -842,6 +842,27 @@ modded class ActionManagerClient
 	}
 };
 
+modded class ActionManagerServer
+{
+	// Server-side hold snapshot for the lease-close census (§2.7 step 3):
+	// reads current/pending without mutating. Named apart from the client
+	// helper so source tools see one MCP_HoldBusy (the client's).
+	bool MCP_HoldServerBusy()
+	{
+		if (m_PendingAction)
+		{
+			return true;
+		}
+
+		if (m_CurrentActionData)
+		{
+			return true;
+		}
+
+		return false;
+	}
+};
+
 modded class CAContinuousBase
 {
 	override void OnCompletePogress(ActionData action_data)
