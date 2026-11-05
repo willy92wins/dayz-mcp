@@ -2267,6 +2267,25 @@ class ExecuteWaitForBoxLostReadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls[-1], {"done": True, "ticket": "t1"})
 
 
+def _isolated_client_runtime(config: ServerConfig) -> server_module.ClientRuntime:
+    """The fixture runtime, without the host's handoff or the Win32 key read."""
+    from tests.client_helpers import _fixture_client_runtime
+
+    with (
+        patch.dict(os.environ),
+        # Its credential reads the fixture keyfile through the Windows file
+        # API; plain file I/O reads the same key.
+        patch.object(
+            server_module.daemon_credential.pinned_keyfile,
+            "read_pinned_keyfile",
+            new=lambda path: Path(path).read_text(encoding="utf-8").strip(),
+        ),
+    ):
+        # It reads, then deletes, a handoff carrier the environment names.
+        os.environ.pop(server_module.session_handoff.HANDOFF_ENV, None)
+        return _fixture_client_runtime(config)
+
+
 class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
     async def test_wait_then_launch_when_box_already_free(self) -> None:
         # RED if wait_for_box_s>0 never reaches execute after a free box.
@@ -2448,8 +2467,6 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_wait_that_ends_on_a_lost_read_names_it(self) -> None:
         # fb-788c: the failure names the lost read and keeps the queue offer.
-        from tests.client_helpers import _fixture_client_runtime
-
         config = ServerConfig(
             mode="client",
             key="k",
@@ -2457,11 +2474,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
             client_platform="codex",
             log_sink=lambda _message: None,
         )
-        with patch.dict(os.environ):
-            # GA14 H2: the runtime reads, then deletes, a handoff carrier
-            # named in the environment it inherits.
-            os.environ.pop(server_module.session_handoff.HANDOFF_ENV, None)
-            runtime = _fixture_client_runtime(config)
+        runtime = _isolated_client_runtime(config)
         box = {
             "occupied": True,
             "runs": [{"run_id": "run-live", "mod": "@LFHeli", "age_s": 44.0}],
@@ -2511,8 +2524,6 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         # GA14 H5: the real wait under dayz_test_run, with no join answered.
-        from tests.client_helpers import _fixture_client_runtime
-
         config = ServerConfig(
             mode="client",
             key="k",
@@ -2520,9 +2531,7 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
             client_platform="codex",
             log_sink=lambda _message: None,
         )
-        with patch.dict(os.environ):
-            os.environ.pop(server_module.session_handoff.HANDOFF_ENV, None)
-            runtime = _fixture_client_runtime(config)
+        runtime = _isolated_client_runtime(config)
         calls: list[dict[str, object]] = []
 
         async def box_status(**kwargs: object) -> dict[str, object]:
