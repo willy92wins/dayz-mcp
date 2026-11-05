@@ -3594,7 +3594,7 @@ class MCPBridge : Managed
 
 		string surfaceType = "";
 		// SurfaceGetType is not proto native; returns hit Y and fills type by out-param.
-		// game.c:1166 â€” do not treat the return as "success bool".
+		// game.c:1166 — do not treat the return as "success bool".
 		float surfaceY = GetGame().SurfaceGetType(command.args.x, command.args.z, surfaceType);
 		vector normal = GetGame().SurfaceGetNormal(command.args.x, command.args.z);
 
@@ -5568,7 +5568,7 @@ class MCPBridge : Managed
 	}
 
 	// F3.6: memory points and bounding center. Missing memory points are product FAIL
-	// (exists:false) with ok:true â€” never a tool error.
+	// (exists:false) with ok:true — never a tool error.
 	protected bool DispatchObjectInspect(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || !command.args.want || command.args.want.Count() == 0)
@@ -7868,14 +7868,14 @@ class MCPBridge : Managed
 
 	protected void PostJobSuccess(MCPJob job)
 	{
-		if (job.kind == "lease_close")
-		{
-			PostLeaseCloseJob(job, false);
-			return;
-		}
 		if (job.kind == "seat")
 		{
 			PostSeatSuccess(job);
+			return;
+		}
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, false);
 			return;
 		}
 		if (job.kind == "object_delete")

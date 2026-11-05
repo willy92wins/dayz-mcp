@@ -6998,7 +6998,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	}
 
 	// Observe-only seated view. Parent+crew is already established by
-	// CameraReadError â†’ camera_unavailable_vehicle. GetCommand_Vehicle is
+	// CameraReadError → camera_unavailable_vehicle. GetCommand_Vehicle is
 	// never presence. A readable transform is view=vehicle, not scripted.
 	protected bool FillSeatedCameraView(MCPCamera camera, PlayerBase cameraPlayer)
 	{
