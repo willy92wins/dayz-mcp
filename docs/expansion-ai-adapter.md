@@ -24,6 +24,10 @@ server. It ships in `addon_expansion_ai/` and packs as
   `eAISurvivor` members under a caller-generated `spawn_token`, applies the
   faction loadout, formation and one of HOLD / ONCE / LOOP / ROAM, and
   answers with what the server reads back (faction, formation, members).
+- `ai_group_order` (tool, lease required) orders one group registered by
+  `ai_group_spawn`, on the server. At least one of `behaviour`,
+  `waypoints`, `formation` or `speed` must be given (none is `bad_args`
+  and sends nothing).
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
   when a delivered spawn is abandoned (timeout or cancel). It is not a
   public tool and never runs from lease-end cleanup.
@@ -31,6 +35,42 @@ server. It ships in `addon_expansion_ai/` and packs as
   deleted from it; a group is `active` or `releasing`). Members also enter
   the base `m_RuntimeObjects` and, with a `scene_id`, the scene registry,
   so `object_inspect`, `object_delete` and `scene_entities` work on them.
+
+## Ordering a group (`ai_group_order`, 3ca5)
+
+- An unknown `group_id`, or a group that is `releasing`, answers
+  `not_found` in the adapter and changes nothing.
+- The adapter validates every field before applying any: `behaviour`
+  (HOLD, ONCE, LOOP, ROAM), `formation` (a name registered in
+  `eAIFormation.s_FormationTypes` of the installed Expansion build, so a
+  formation a newer build adds is accepted and `RANDOM` is not),
+  `waypoints` (flat triples, 1 to 32 points; an empty list is refused)
+  and `speed` (1 to 3, only beside `speed_set`). A bad formation changes
+  nothing, not even the other fields of the call.
+- Only the fields present are applied. Waypoints replace the route
+  (`ClearWaypoints`, backtracking off, one `AddWaypoint` per point, the
+  current waypoint set to the first new point). `ROAM` roams to Expansion
+  locations, not only to waypoints.
+- Speed travels as the saved normal/threat preferences: the spawn seeds
+  them from the member getters, an order's `speed` (walk/jog/sprint as
+  1/2/3) replaces the normal preference, HOLD applies formation state
+  NONE plus waypoint behaviour HALT and writes (STATIC, threat) per
+  member; a repeated HOLD touches neither preference; a speed ordered
+  in a HOLD is only saved; and leaving a HOLD restores (normal, threat).
+- Changing only the formation keeps its scale and looseness.
+- The reply is read after the change, inside `ai_group`: `group_id`,
+  `behaviour` and `behaviour_expansion`, `formation`, `formation_state`,
+  `waypoint_count`, `waypoint_index`, `in_combat` and, when the group is
+  in combat, `combat_may_override: true` (the combat FSM may ignore the
+  order), plus `roams_expansion_locations: true` when the behaviour is
+  ROAM, and one member row per registered member with `object_id`,
+  `speed_limit` and `speed_limit_threat`. A `not_found`, and a
+  `bad_args` with no field, carry no `ai_group`.
+
+Offline coverage: `tools/tests/test_xai_group_order.py` (criteria O3 and
+O4 for this verb, E5, and the mutants "not restoring the limit after a
+HOLD" and "a HOLD stomping the threat limit", run on a mutated copy of
+the adapter source).
 
 ## How the adapter announces itself (deviation from plan 2.2)
 
@@ -53,13 +93,14 @@ New adapter mutations are admitted only when every peer the run binds
 announces real lease-close support (plan 5.1: server and client, or both
 roles of an offline binding), with a current instance and generation, at
 enqueue and again at delivery. On bridge v13 both peers announce
-`lease_close` / `lease_close_client`, so `ai_group_spawn` is admitted and
-the adapter takes part in the lease close: its groups are stopped by
-`LeaseCloseExtensionStop` and reported as `ai_group:<spawn_token>`
-`residue` entries by `LeaseCloseExtensionCensus` until they disappear.
-A peer still on v12 announces no close, so the spawn is refused with
+`lease_close` / `lease_close_client`, so `ai_group_spawn` and
+`ai_group_order` are admitted and the adapter takes part in the lease
+close: its groups are stopped by `LeaseCloseExtensionStop` and reported
+as `ai_group:<spawn_token>` `residue` entries by
+`LeaseCloseExtensionCensus` until they disappear. A peer still on v12
+announces no close, so the spawn and the order are refused with
 `expansion_unavailable` / `lease_close_not_supported` before anything is
-created. Without the adapter at all, the refusal is
+created or ordered. Without the adapter at all, the refusal is
 `expansion_unavailable` / `adapter_not_loaded`; with a stale adapter
 contract hash, `adapter_contract_mismatch`.
 
