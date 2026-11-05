@@ -21,6 +21,7 @@ MAX_TAIL_BYTES = 256 * 1024
 # .adm is the admin log. DayZDiag's file name is not pinned: any file
 # with that extension in the profile directory qualifies.
 LOG_SUFFIXES = (".rpt", ".log", ".adm")
+_LOG_SUFFIXES = frozenset(LOG_SUFFIXES)
 # Bytes hashed to identify the file. A rewrite in place keeps the path and can
 # keep or exceed the old size, so size alone cannot detect it.
 IDENTITY_PREFIX_BYTES = 512
@@ -107,6 +108,17 @@ def decode_marker(value: str | None) -> dict[str, TailMarker]:
     return markers
 
 
+def _crc_prefix(prefix: bytes) -> int:
+    """crc32 of an already-buffered prefix. 0 is reserved for "unknown"."""
+    return zlib.crc32(prefix) or 1
+
+
+def _prefix_length(size: int) -> int:
+    if size <= 0:
+        return 0
+    return min(IDENTITY_PREFIX_BYTES, size)
+
+
 def _file_identity(handle, length: int) -> int:
     """crc32 of the first `length` bytes; 0 means "unknown", never "mismatch".
 
@@ -124,7 +136,34 @@ def _file_identity(handle, length: int) -> int:
         handle.seek(position)
     if len(prefix) < length:
         return 0  # shorter than expected: the size checks own that case
-    return zlib.crc32(prefix) or 1  # never 0: 0 is reserved for "unknown"
+    return _crc_prefix(prefix)
+
+
+def _identity_for_window(
+    handle,
+    *,
+    size: int,
+    marker: TailMarker | None,
+    previous: int,
+    rotated: bool,
+    start: int,
+    payload: bytes,
+) -> int:
+    """Identity of the current prefix without a second disk read when possible.
+
+    An incremental append keeps the same prefix length, so the crc just taken
+    to detect rotation is the new identity. A window that already starts at
+    byte 0 carries that prefix in ``payload``.
+    """
+    now = _prefix_length(size)
+    if now == 0:
+        return 0
+    then = 0 if marker is None else _prefix_length(marker.size)
+    if marker is not None and not rotated and previous != 0 and now == then:
+        return previous
+    if start == 0 and len(payload) >= now:
+        return _crc_prefix(payload[:now])
+    return _file_identity(handle, now)
 
 
 def read_open_handle(
@@ -146,7 +185,7 @@ def read_open_handle(
     size = os.fstat(handle.fileno()).st_size
     previous = 0
     if marker is not None:
-        previous = _file_identity(handle, min(IDENTITY_PREFIX_BYTES, marker.size))
+        previous = _file_identity(handle, _prefix_length(marker.size))
     rotated = marker is not None and (
         size < marker.size
         or size < marker.offset
@@ -159,7 +198,15 @@ def read_open_handle(
         truncated = True
     handle.seek(start)
     payload = read_window(handle, max_bytes, stop)
-    new_identity = _file_identity(handle, min(IDENTITY_PREFIX_BYTES, size))
+    new_identity = _identity_for_window(
+        handle,
+        size=size,
+        marker=marker,
+        previous=previous,
+        rotated=rotated,
+        start=start,
+        payload=payload,
+    )
     last_newline = payload.rfind(b"\n")
     complete = b"" if last_newline == -1 else payload[: last_newline + 1]
     if max_lines is not None:
@@ -215,16 +262,31 @@ def is_allowed_profiles_dir(value: object) -> bool:
 
 
 def resolve_log_files(profiles_dir: str) -> list[str]:
-    """Newest-last list of RPT, script and admin logs in a profile directory."""
+    """Newest-last list of RPT, script and admin logs in a profile directory.
+
+    One ``scandir`` pass: ``Path.iterdir`` plus ``is_file`` plus ``stat``
+    issued a fresh status call per entry, and a profile directory holds
+    thousands of non-log files. ``DirEntry.stat`` reuses the directory
+    listing on Windows.
+    """
+    found: list[tuple[float, str]] = []
     try:
-        entries = [
-            item
-            for item in Path(profiles_dir).iterdir()
-            if item.is_file() and item.suffix.casefold() in LOG_SUFFIXES
-        ]
+        with os.scandir(profiles_dir) as scan:
+            for item in scan:
+                suffix = os.path.splitext(item.name)[1].casefold()
+                if suffix not in _LOG_SUFFIXES:
+                    continue
+                try:
+                    if not item.is_file():
+                        continue
+                    mtime = item.stat().st_mtime
+                except OSError:
+                    continue
+                found.append((mtime, item.path))
     except OSError:
         return []
-    return [str(item) for item in sorted(entries, key=lambda item: item.stat().st_mtime)]
+    found.sort(key=lambda row: row[0])
+    return [path for _, path in found]
 
 
 def read_since(
@@ -257,9 +319,7 @@ def read_since(
             # an append (which only adds bytes after it) cannot look like a change.
             previous = 0
             if marker is not None:
-                previous = _file_identity(
-                    handle, min(IDENTITY_PREFIX_BYTES, marker.size)
-                )
+                previous = _file_identity(handle, _prefix_length(marker.size))
             rotated = marker is not None and (
                 size < marker.size
                 or size < marker.offset
@@ -273,7 +333,15 @@ def read_since(
                 truncated = True
             handle.seek(start)
             payload = handle.read(max_bytes)
-            new_identity = _file_identity(handle, min(IDENTITY_PREFIX_BYTES, size))
+            new_identity = _identity_for_window(
+                handle,
+                size=size,
+                marker=marker,
+                previous=previous,
+                rotated=rotated,
+                start=start,
+                payload=payload,
+            )
     except OSError as error:
         raise LogTailError("log_unavailable") from error
 
