@@ -234,7 +234,7 @@ seat-verification channel is needed to support live deletion safely.
    `condition_failed` (see "The exit reality"). Confirm the client exit via
    `vehicle_telemetry` (`seated=false`) before `object_delete` of the fixture.
    `vehicle_release` only aborts the trace and clears drive-control state
-   (`MCPClientBridge.c:3172-3178`); it is not a get-out. Stop the ladder on a
+   (`MCPClientBridge.c:3202-3208`); it is not a get-out. Stop the ladder on a
    refused exit, `vehicle_seat_unverified`, `vehicle_client_seated` or
    `vehicle_eject_failed`, retaining the fixture id
    for retry. After a successful deletion verify continued client polling,
@@ -284,12 +284,13 @@ server replica is.
    teardown below deletes that id, and no fixture id survives the run.
 2. `player_teleport` the driver to the surface y behind the canopy gate, as
    in the client ladder (with the player's `uid`, which is required).
-3. `vehicle_enter` near the fixture pos: the server half of the seat. It
+3. `vehicle_enter` near the fixture pos, with the same `uid` (required: it
+   never falls back to the first player, and a `uid` no connected player has
+   answers `player_not_found`): the server half of the seat. It
    runs `StartCommand_Vehicle` (`MCPBridge.c:3211`, in `DispatchVehicleEnter` `:3176`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
    (product-spec B2). `seated=1` means the server read the player it seated
-   (or, if that one is gone, the first player) in the driver seat of that car
-   once the get-in ended (`IsSeatReady`). The bridge checks that each tick and
+   in the driver seat of that car once the get-in ended (`IsSeatReady`). The bridge checks that each tick and
    answers `timeout` on a tick that does not read it once 5 s
    (`JOB_TIMEOUT_S`) have passed, whatever `timeout_s` is, so a `timeout` can
    still end seated: read `query_all_players` (`in_vehicle`) before retrying.
@@ -318,7 +319,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: confirm the client exit before
    `object_delete` of the registered fixture id. `vehicle_release` only
-   clears trace/control (`MCPClientBridge.c:3172-3178`); server-visible
+   clears trace/control (`MCPClientBridge.c:3202-3208`); server-visible
    occupants still go through the bridge's eject guard. Verify via telemetry
    (`seated=false`) and continued
    client polling, then `restore_gameplay` and the session release. Stop the

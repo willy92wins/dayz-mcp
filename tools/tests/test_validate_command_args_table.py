@@ -1893,10 +1893,13 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("scene_id_wrong_type", {**_SPAWN, "scene_id": 1}, (False, "bad_args")),
     ),
     "vehicle_enter": (
-        ("valid", {"pos": [0.0, 0.0, 0.0]}, (True, None)),
-        ("missing_pos", {}, (False, "bad_args")),
-        ("pos_wrong_type", {"pos": "0,0,0"}, (False, "bad_args")),
-        ("extra_key", {"pos": [0.0, 0.0, 0.0], "extra": None}, (False, "bad_args")),
+        ("valid", {"pos": [0.0, 0.0, 0.0], "uid": "player-1"}, (True, None)),
+        ("missing_pos", {"uid": "player-1"}, (False, "bad_args")),
+        ("missing_uid", {"pos": [0.0, 0.0, 0.0]}, (False, "bad_args")),
+        ("blank_uid", {"pos": [0.0, 0.0, 0.0], "uid": " "}, (False, "bad_args")),
+        ("uid_wrong_type", {"pos": [0.0, 0.0, 0.0], "uid": 1}, (False, "bad_args")),
+        ("pos_wrong_type", {"pos": "0,0,0", "uid": "player-1"}, (False, "bad_args")),
+        ("extra_key", {"pos": [0.0, 0.0, 0.0], "uid": "player-1", "extra": None}, (False, "bad_args")),
     ),
     "vehicle_get_in_client": (
         ("valid", {"pos": [0.0, 0.0, 0.0]}, (True, None)),

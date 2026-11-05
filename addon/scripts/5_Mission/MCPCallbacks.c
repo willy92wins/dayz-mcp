@@ -57,6 +57,11 @@ class MCPResultCallback : RestCallback
 {
 	// The mission singleton owns the Managed bridge; this is a weak soft link.
 	protected MCPBridge m_Bridge;
+	// What PostResult sent, so a failed POST can be sent once more (d67f).
+	int result_id;
+	string request;
+	string body;
+	bool retried;
 
 	void MCPResultCallback(MCPBridge bridge)
 	{
@@ -89,7 +94,7 @@ class MCPResultCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
-			m_Bridge.OnResultError(errorCode);
+			m_Bridge.OnResultError(this, errorCode);
 			// OnError may repeat (restapi.c:53): never reuse this identity.
 			DetachBridge();
 		}
@@ -100,7 +105,7 @@ class MCPResultCallback : RestCallback
 		if (m_Bridge)
 		{
 			m_Bridge.ReleaseCallback(this);
-			m_Bridge.OnResultTimeout();
+			m_Bridge.OnResultTimeout(this);
 			DetachBridge();
 		}
 	}

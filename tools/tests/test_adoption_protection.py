@@ -23,6 +23,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp import native_launcher_transaction
 from dayz_mcp import server as server_module
 from dayz_mcp import session_handoff
 from dayz_mcp.input_activity import InputAttributor, InputSample
@@ -1041,6 +1042,23 @@ class HttpAdoptionMatrixTest(unittest.TestCase):
         self.assertEqual(queued.get("status"), "queued")
 
 
+def _isolated_client_runtime(config: ServerConfig) -> server_module.ClientRuntime:
+    """The fixture runtime, without the host's handoff or the Win32 key read."""
+    with (
+        patch.dict(os.environ),
+        # Its credential reads the fixture keyfile through the Windows file
+        # API; plain file I/O reads the same key.
+        patch.object(
+            server_module.daemon_credential.pinned_keyfile,
+            "read_pinned_keyfile",
+            new=lambda path: Path(path).read_text(encoding="utf-8").strip(),
+        ),
+    ):
+        # It reads, then deletes, a handoff carrier the environment names.
+        os.environ.pop(session_handoff.HANDOFF_ENV, None)
+        return _fixture_client_runtime(config)
+
+
 class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
     def _config(self) -> ServerConfig:
         return ServerConfig(
@@ -1199,6 +1217,99 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
             )
         stop.assert_awaited()
         self.assertEqual(payload.get("status"), "succeeded")
+
+    async def _protected_grant_error(
+        self, runtime, run_id: str, *, release_fails: bool = False
+    ) -> BaseException:
+        # What the launcher transaction raises when the worker's grant adopts
+        # run_id and the daemon refuses it as run_protected: the client
+        # releases the grant (or fails to) and answers box_protected, which
+        # does not validate.
+        if release_fails:
+            runtime.session_release = AsyncMock(side_effect=RuntimeError("release lost"))
+        else:
+            runtime.session_release = AsyncMock(return_value={"status": "released"})
+        answer = await runtime._release_protected_grant(
+            {
+                "status": "active",
+                "lease_token": "tok-protected",
+                "adopted_run": {
+                    "ok": False,
+                    "error": "run_protected",
+                    "run_id": run_id,
+                    "use_state": "human",
+                    "use_reason": None,
+                    "hint": "run_protected: in use (human); retry in 331s",
+                    "retry_after_s": 331,
+                },
+            }
+        )
+        with self.assertRaises(
+            native_launcher_transaction.NativeLauncherTransactionError
+        ) as raised:
+            native_launcher_transaction._validate_grant(answer)
+        return raised.exception
+
+    async def _stop_after_grant(
+        self, run_id: str, adopted_run_id: str, *, release_fails: bool = False
+    ):
+        # fb-20261104-143314-32cf: the check sees a RUNNING row still held by
+        # a dead client's lease and lets the stop reach the worker.
+        runtime = _isolated_client_runtime(self._config())
+        box = {
+            "occupied": True,
+            "runs": [
+                {"run_id": run_id, "state": "RUNNING", "owner_session": "deadclient"}
+            ],
+            "foreign": [],
+            "port_scan_known": True,
+        }
+        error = await self._protected_grant_error(
+            runtime, adopted_run_id, release_fails=release_fails
+        )
+        stop = AsyncMock(side_effect=error)
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = server_module.build_app(self._config())
+        with (
+            patch.object(runtime, "session_status", new=AsyncMock(return_value={"box": box})),
+            patch.object(server_module.dayz_test_tool, "execute_dayz_test_stop", stop),
+        ):
+            return await app.call_tool("dayz_test_stop", {"run_id": run_id})
+
+    async def test_stop_answers_run_protected_when_the_grant_finds_it_protected(
+        self,
+    ) -> None:
+        payload = _content_json(await self._stop_after_grant("run-owned", "run-owned"))
+        self.assertEqual(
+            payload,
+            {
+                "status": "failed",
+                "run_id": "run-owned",
+                "error_code": "run_protected",
+                "hint": "run_protected: in use (human); retry in 331s",
+                "use_state": "human",
+                "use_reason": None,
+                "retry_after_s": 331,
+            },
+        )
+
+    async def test_a_protected_grant_for_another_run_still_fails_opaquely(self) -> None:
+        with self.assertRaises(Exception) as raised:
+            await self._stop_after_grant("run-owned", "run-other")
+        self.assertIn(
+            "dayz_test_failed:NativeLauncherTransactionError", str(raised.exception)
+        )
+
+    async def test_a_protected_grant_whose_release_failed_still_fails_opaquely(
+        self,
+    ) -> None:
+        # The grant's lease may still be held, so the stop must not read as a
+        # plain refusal; the token the client kept stays off the wire.
+        with self.assertRaises(Exception) as raised:
+            await self._stop_after_grant("run-owned", "run-owned", release_fails=True)
+        message = str(raised.exception)
+        self.assertIn("dayz_test_failed:NativeLauncherTransactionError", message)
+        self.assertNotIn("tok-protected", message)
 
     async def test_protected_grant_is_released_as_box_protected(self) -> None:
         srv = DaemonHttpServer(_config(key="wrap-key"), adopt_fixture=False)
