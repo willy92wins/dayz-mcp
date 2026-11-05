@@ -63,6 +63,8 @@ class _LogString(EnforceString):
             return _LogString(self.data + str(other).encode("ascii"))
         raise TypeError(f"string + {type(other).__name__}")
 
+    __radd__ = __add__
+
 
 class Command:
     def __init__(self, ident: int, cmd: str = "work") -> None:
@@ -579,6 +581,15 @@ class _CloseEntry:
         self.reason = ""
 
 
+class _CloseFloor:
+    def __init__(self):
+        self.net_low = 0
+        self.net_high = 0
+        self.conn_gen = 0
+        self.move_id = 0
+        self.weapon_id = 0
+
+
 class _CloseCensus:
     def __init__(self):
         self.generation = ""
@@ -601,7 +612,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
-            "camera", "dialog", "action_hold", "samplers")}
+            "camera", "dialog", "action_hold", "samplers", "action_input_in_flight")}
         class _Ctl:
             def __init__(self, fn):
                 self._fn = fn
@@ -624,7 +635,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "GetGame": lambda: game,
             "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
             "ActionManagerClient": type("AMC", (), {"Cast": staticmethod(lambda x: x)}),
-            "MCPCarDrive": type("C", (), {"IsActive": staticmethod(lambda: flags["vehicle_drive"]), "Clear": staticmethod(lambda: None)}),
+            "MCPCarDrive": type("C", (), {"s_Active": flags["vehicle_drive"], "Clear": staticmethod(lambda: None)}),
             "MCPInputTriggerControl": type("I", (), {"IsHeld": staticmethod(lambda: flags["input_trigger"]), "ReleaseAll": staticmethod(lambda cause: None)}),
             "MCPPlayerMoveControl": type("M", (), {
                 "IsActive": staticmethod(lambda: flags["player_move"]),
@@ -633,12 +644,13 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 "ReleaseAll": staticmethod(lambda cause: None)}),
             "MCPWeaponControl": type("W", (), {"IsBusy": staticmethod(lambda: flags["weapon"]), "CloseRequestFloor": staticmethod(lambda: 4)}),
             "MCPLookAtControl": type("L", (), {"IsActive": staticmethod(lambda: flags["look_at"])}),
-            "MCPHoldControl": type("H", (), {"IsActive": staticmethod(lambda: flags["action_hold"]), "Shutdown": staticmethod(lambda cause: None), "InputInFlight": staticmethod(lambda: False)}),
+            "MCPHoldControl": type("H", (), {"IsActive": staticmethod(lambda: flags["action_hold"]), "Shutdown": staticmethod(lambda cause: None), "InputInFlight": staticmethod(lambda: flags.get("action_input_in_flight", False))}),
             "MCPVehicleTrace": type("V", (), {"IsActive": staticmethod(lambda: flags["samplers"]), "Abort": staticmethod(lambda cause: None)}),
             "MCPAnimTimeline": type("A", (), {"IsActive": staticmethod(lambda: False), "Abort": staticmethod(lambda cause: None)}),
             "MCPPlayerTrace": type("T", (), {"IsActive": staticmethod(lambda: False), "Abort": staticmethod(lambda cause: None)}),
             "MCPLeaseCloseCensus": _CloseCensus,
             "MCPLeaseCloseEntry": _CloseEntry,
+            "MCPLeaseCloseFloor": _CloseFloor,
             "m_ActiveCam": object() if "camera" in active else None,
             "m_CameraHandoffPending": False,
             "m_PlayerSimulationDisabled": "player_simulation" in active,
@@ -649,7 +661,9 @@ class LeaseCloseCensusTests(unittest.TestCase):
         }
         for sig, name in (
             ("protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseEntry"),
+            ("protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseDebt"),
             ("protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)", "LeaseCloseCensusClean"),
+            ("protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)", "LeaseCloseCensusSettled"),
             ("protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)", "BuildLeaseCloseCensus"),
         ):
             body = method_body(source, sig)
@@ -659,6 +673,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
                       members=("m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
                                "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner"))
         args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
+        self._last_client_ns = ns
         return ns["BuildLeaseCloseCensus"](args)
 
     def test_k26_client_census_clean_and_residue(self):
@@ -668,13 +683,39 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(census.move_floor, 7)
         self.assertEqual(census.weapon_floor, 4)
         self.assertEqual(census.conn_gen, 7)
-        # NEG: one controller left active names exactly that entry.
+        # NEG: one controller left active names exactly that entry (kills
+        # M1: a Clean that never returns false would answer clean here).
         census2 = self._client_census(source, active=("weapon",))
         residue = [e.name.text for e in census2.entries if e.state.text != "clean"]
         self.assertEqual(residue, ["weapon"])
-        # Mutant: a clean check that ignores residue must turn this red.
-        census3 = self._client_census(source, active=("weapon",), mutant_clean=True)
-        self.assertEqual(census3.state.text, "clean", "mutant clean check hides residue")
+        self.assertEqual(census2.state.text, "residue")
+        self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census2))
+        # H3: process-lifetime input debt is unverified: census residue,
+        # but the observer is settled and does not wait 25 s for it.
+        census3 = self._client_census(source, active=("action_input_in_flight",))
+        debt = [e for e in census3.entries if e.name.text == "action_input_in_flight"]
+        self.assertEqual(len(debt), 1)
+        self.assertEqual(debt[0].state.text, "unverified")
+        self.assertEqual(census3.state.text, "residue")
+        self.assertTrue(self._last_client_ns["LeaseCloseCensusSettled"](census3))
+
+    def test_h1_h2_symbol_pins(self):
+        client = _read(CLIENT_PATH)
+        census = method_body(client, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
+        self.assertIn("MCPCarDrive.s_Active", census)
+        addon = addon_root() / "scripts"
+        for path in sorted(addon.rglob("*.c")):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("MCPCarDrive.IsActive(", text, str(path))
+            self.assertNotIn(".GetFSM()", text, str(path))
+        bots = _read(SCRIPTS / "MCP_BotControl.c")
+        self.assertNotIn("GetState(", bots)
+        self.assertNotIn("GetName(", bots)
+        self.assertIn("MCP_LeaseCloseState()", bots)
+        bot_state = _read(SCRIPTS.parent / "4_World" / "MCP_BotState.c")
+        self.assertIn("m_ActiveFSM.GetCurrentState()", bot_state)
+        self.assertIn("m_IdleState", bot_state)
+        self.assertIn("modded class Bot", bot_state)
 
     def test_k29_client_not_in_game_gate(self):
         source = _read(CLIENT_PATH)
@@ -695,8 +736,6 @@ class LeaseCloseCensusTests(unittest.TestCase):
             pos = nxt
         self.assertIn('job.kind = "lease_close";', body)
         self.assertIn("GetElapsedS() + 25.0", body)
-        # Mutant: dropping AbortAll leaves jobs running (K26 jobs row).
-        self.assertNotIn("AbortAll", body.replace("AbortAll(this)", "", 1))
 
     def test_k27_k30_server_census_and_registers(self):
         source = _read(SERVER_PATH)
@@ -713,8 +752,13 @@ class LeaseCloseCensusTests(unittest.TestCase):
         for name in ("bots", "infected_drive", "move_copy", "weapon", "jobs", "rpc_in_flight", "deletion_pending"):
             self.assertIn(f'"{name}"', census, name)
         self.assertIn("LeaseCloseExtensionCensus(census);", census)
-        for kind in ("notify_players", "inventory_move", "hands_take", "hands_attach"):
-            self.assertIn(f'RegisterLeaseCloseRpc(command.id, "{kind}")', source, kind)
+        # H7: registration sits at the real send, not in Dispatch.
+        dispatch = method_body(source, "protected void Dispatch(MCPCommand command)")
+        self.assertNotIn("RegisterLeaseCloseRpc", dispatch)
+        self.assertIn('RegisterLeaseCloseRpc(job.id, "inventory_move");', method_body(source, "protected bool DispatchInventoryMove(MCPCommand command, MCPResult result)"))
+        self.assertIn('RegisterLeaseCloseRpc(command.id, "hands_take");', method_body(source, "protected bool DispatchHandsTake(MCPCommand command, MCPResult result)"))
+        self.assertIn('RegisterLeaseCloseRpc(command.id, "hands_attach");', method_body(source, "protected bool DispatchHandsAttach(MCPCommand command, MCPResult result)"))
+        self.assertIn('RegisterLeaseCloseRpc(command.id, "notify_players");', method_body(source, "protected bool DispatchNotifyPlayers(MCPCommand command, MCPResult result)"))
         # NEG pins: the RPC register never deletes a row on a job-ready readback.
         register = method_body(source, "protected void RegisterLeaseCloseRpc(int requestId, string kind)")
         self.assertNotIn("Remove", register)
@@ -732,8 +776,276 @@ class LeaseCloseCensusTests(unittest.TestCase):
         runner = _read(SCRIPTS / "MCPJobRunner.c")
         abort = method_body(runner, "void AbortAll(MCPJobRunnerOwner owner)")
         self.assertIn("MCP_PostJobTimeout(job)", abort)
-        # Mutant: AbortAll that only clears would post nothing.
-        self.assertNotIn("MCP_PostJobTimeout", abort.replace("MCP_PostJobTimeout(job)", "", 1))
+
+
+    # ---- H6: K27/K28 translated bodies (server) ----
+    def _server_census(self, source, *, flags=None, jobs=(), rpc_kinds=(), deletion=(), infected=False):
+        flags = flags or {}
+        state = {"bots": bool(flags.get("bots")), "move": bool(flags.get("move")),
+                 "weapon": bool(flags.get("weapon")), "hold": bool(flags.get("hold")),
+                 "bots_reason": flags.get("bots_reason", "bot_stop_rejected")}
+
+        class _Job:
+            def __init__(self, kind=""):
+                self.kind = kind
+
+        class _Mgr:
+            def MCP_HoldServerBusy(self):
+                return state["hold"]
+
+        class _Player:
+            def GetNetworkID(self, low, high):
+                return (11, 22)
+
+            def MCPConnGenValue(self):
+                return 7
+
+            def MCPMoveServerFloor(self):
+                return 5
+
+            def MCPWeaponServerFloor(self):
+                return 9
+
+            def MCPMoveActiveNow(self):
+                return state["move"]
+
+            def MCPWeaponPendingNow(self):
+                return state["weapon"]
+
+            def GetActionManager(self):
+                return _Mgr()
+
+        player = _Player()
+
+        class _Game:
+            def GetPlayers(self, arr):
+                arr.Insert(player)
+
+        jobs_map = EnforceMap()
+        for i, kind in enumerate(jobs):
+            job = _Job()
+            job.kind = EnforceString.of(kind) if isinstance(kind, str) else kind
+            jobs_map.Insert(100 + i, job)
+        ns = {
+            "GetGame": lambda: _Game(),
+            "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
+            "ActionManagerServer": type("AMS", (), {"Cast": staticmethod(lambda x: x)}),
+            "MCPBotControl": type("BC", (), {
+                "LeaseCloseBusy": staticmethod(lambda b: state["bots"]),
+                "LeaseCloseResidueReason": staticmethod(lambda b: _LogString.of(state["bots_reason"])),
+            }),
+            "MCPJob": _Job,
+            "EntityAI": object,
+            "MCPSceneEntry": type("SE", (), {}),
+            "MCPLeaseCloseCensus": _CloseCensus,
+            "MCPLeaseCloseEntry": _CloseEntry,
+            "MCPLeaseCloseFloor": _CloseFloor,
+            "this": object(),
+            "m_Players": EnforceArray(),
+            "m_Jobs": jobs_map,
+            "m_LeaseCloseRpcKinds": EnforceArray(_LogString.of(k) for k in rpc_kinds),
+            "m_LeaseCloseRpcIds": EnforceArray(),
+            "m_InfectedDebt": infected,
+            "m_LeaseCloseDeletion": EnforceArray(deletion),
+        }
+        self._server_ns = ns
+        self._server_state = state
+        for sig in (
+            "protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)",
+            "protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)",
+            "protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)",
+            "protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)",
+            "protected bool DeletionPendingActive()",
+            "protected void RegisterDeletionRefs(MCPJob job)",
+            "protected void LeaseCloseExtensionCensus(MCPLeaseCloseCensus census)",
+            "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)",
+        ):
+            body = method_body(source, sig)
+            body = body.replace("MCPJob other = m_Jobs.GetElement(j);", "MCPJob other;\n\t\t\tother = m_Jobs.GetElement(j);")
+            translate(_wrap(sig, body), sig, ns,
+                      class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "MCPLeaseCloseFloor", "PlayerBase", "ActionManagerServer", "MCPJob", "EntityAI", "MCPSceneEntry"),
+                      members=("m_Players", "m_Jobs", "m_LeaseCloseRpcKinds", "m_LeaseCloseRpcIds", "m_InfectedDebt", "m_LeaseCloseDeletion"))
+        args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
+        return ns["BuildLeaseCloseCensus"](args)
+
+    def test_k27_server_census_translated(self):
+        source = _read(SERVER_PATH)
+        census = self._server_census(source)
+        self.assertEqual(census.state.text, "clean")
+        self.assertEqual(len(census.floors), 1)
+        floor = census.floors.Get(0)
+        self.assertEqual((floor.conn_gen, floor.move_id, floor.weapon_id), (7, 5, 9))
+        # NEG rows, one at a time: each names exactly its entry (kills M6).
+        cases = [
+            ({"infected": True}, "infected_drive", "unverified"),
+            ({"rpc_kinds": ("inventory_move",)}, "rpc_in_flight", "unverified"),
+            ({"jobs": ("spawn",)}, "jobs", "residue"),
+            ({"flags": {"move": True}}, "move_copy", "residue"),
+            ({"flags": {"weapon": True}}, "weapon", "residue"),
+            ({"flags": {"bots": True}}, "bots", "residue"),
+            ({"deletion": (object(),)}, "deletion_pending", "residue"),
+        ]
+        for kwargs, name, want_state in cases:
+            with self.subTest(entry=name):
+                c = self._server_census(source, **kwargs)
+                bad = [(e.name.text, e.state.text) for e in c.entries if e.state.text != "clean"]
+                self.assertIn((name, want_state), bad)
+                self.assertEqual(c.state.text, "residue")
+        # Infected-only: settled at once, no 25 s observer (H3, kills M6/M2 class).
+        c_inf = self._server_census(source, infected=True)
+        self.assertTrue(self._server_ns["LeaseCloseCensusSettled"](c_inf))
+        self.assertFalse(self._server_ns["LeaseCloseCensusClean"](c_inf))
+        # RegisterDeletionRefs actually moves refs (kills M3).
+        ns = self._server_ns
+        job = type("J", (), {"loadout_cleared": EnforceArray([object()]), "scene_pending": EnforceArray()})()
+        before = ns["m_LeaseCloseDeletion"].Count()
+        ns["RegisterDeletionRefs"](job)
+        self.assertEqual(ns["m_LeaseCloseDeletion"].Count(), before + 1)
+        self.assertTrue(ns["DeletionPendingActive"]())
+
+    def test_k28_observer_timeout_translated(self):
+        # PostLeaseCloseJob with a stuck residue entry publishes observer_timeout.
+        for path, peer in ((SERVER_PATH, "server"), (CLIENT_PATH, "client")):
+            with self.subTest(peer=peer):
+                source = _read(path)
+                posted = []
+                ns = {"PostResult": lambda r: posted.append(r), "MCPLeaseCloseEntry": _CloseEntry, "MCPLeaseCloseCensus": _CloseCensus}
+
+                class _Res:
+                    pass
+
+                def build(args):
+                    c = _CloseCensus()
+                    c.state = EnforceString.of("residue")
+                    e = _CloseEntry()
+                    e.name = EnforceString.of("weapon")
+                    e.state = EnforceString.of("residue")
+                    e.reason = EnforceString.of("weapon")
+                    c.entries.Insert(e)
+                    return c
+
+                ns["BuildLeaseCloseCensus"] = build
+                ns["MCPResult"] = _Res
+                sig = "protected void PostLeaseCloseJob(MCPJob job, bool timedOut)"
+                body = method_body(source, sig)
+                # Census helpers are the real ones where present; AddCloseEntry real.
+                for helper in (
+                    "protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)",
+                    "protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)",
+                ):
+                    try:
+                        hb = method_body(source, helper)
+                    except Exception:
+                        continue
+                    translate(_wrap(helper, hb), helper, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry"))
+                translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "MCPResult"))
+                job = type("J", (), {"id": 42, "args": None, "tick_poll_sent": 1, "tick_poll_callback": 2, "tick_dispatch": 3})()
+                ns["PostLeaseCloseJob"](job, True)
+                self.assertEqual(len(posted), 1)
+                names = [(e.name.text, e.reason.text) for e in posted[0].lease_close.entries]
+                self.assertIn(("observer", "observer_timeout"), names)
+                self.assertEqual(posted[0].lease_close.state.text, "residue")
+
+    def test_bots_gone_body_is_idle_translated(self):
+        bots = _read(SCRIPTS / "MCP_BotControl.c")
+        sig = "static string LeaseCloseBotState(MCPBridge bridge, int objectId)"
+        body = "\n".join(l for l in method_body(bots, sig).splitlines() if not l.strip().startswith("#"))
+        bridge = type("B", (), {"RuntimeObjectById": staticmethod(lambda oid: None)})()
+        ns = {"PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}), "Object": object}
+        translate(_wrap(sig, body), sig, ns, class_types=("PlayerBase", "Object"))
+        self.assertEqual(ns["LeaseCloseBotState"](bridge, 99).text, "idle")
+        self.assertNotIn("GetFSM", bots)
+        self.assertIn("s_Initialized.Remove(goneIndex);", bots)
+
+
+
+    # ---- H6: K8/K17 bridge-side close bodies + conn-gen guard ----
+    def test_move_weapon_close_server_translated(self):
+        from types import SimpleNamespace as _NS
+        move_src = _read(SCRIPTS.parent / "4_World" / "MCP_PlayerMove.c")
+        weapon_src = _read(SCRIPTS.parent / "4_World" / "MCP_Weapon.c")
+        # MCPMoveCloseServer (kills M5: ignoring conn_gen would clear here)
+        released = []
+        ns = {
+            "MCPMoveServerRelease": lambda why: released.append(why),
+            "m_MCPMoveLastId": 0,
+            "m_MCPMoveActive": _NS(move_id=3),
+            "m_MCPConnGen": 7,
+        }
+        sig = "bool MCPMoveCloseServer(int floorId, int connGen)"
+        translate(_wrap(sig, method_body(move_src, sig)), sig, ns,
+                  members=("m_MCPMoveLastId", "m_MCPMoveActive", "m_MCPConnGen"))
+        self.assertFalse(ns["MCPMoveCloseServer"](10, 0))
+        self.assertEqual(ns["m_MCPMoveLastId"], 0)
+        self.assertFalse(ns["MCPMoveCloseServer"](10, 99))
+        self.assertEqual(ns["m_MCPMoveLastId"], 0)
+        self.assertTrue(ns["MCPMoveCloseServer"](10, 7))
+        self.assertEqual(ns["m_MCPMoveLastId"], 10)
+        self.assertEqual(len(released), 1)
+        # copy above floor stays
+        ns["m_MCPMoveActive"] = _NS(move_id=50)
+        released.clear()
+        self.assertTrue(ns["MCPMoveCloseServer"](10, 7))
+        self.assertEqual(released, [])
+        # MCPWeaponCloseServer (kills M4 + H5: armed raise released via override-off)
+        overrides = []
+        wns = {
+            "MCPConnGenValue": lambda: 7,
+            "MCPServerReleaseRaise": lambda: (overrides.append("release"), wns.__setitem__("m_MCPRaiseArmed", False), wns.__setitem__("m_MCPRaiseWeapon", None)),
+            "m_MCPWeaponLastId": 3,
+            "m_MCPFireRequested": True,
+            "m_MCPFireWeapon": object(),
+            "m_MCPRaiseRequested": True,
+            "m_MCPRaiseArmed": True,
+            "m_MCPRaiseWeapon": object(),
+        }
+        wsig = "bool MCPWeaponCloseServer(int floorId, int connGen)"
+        translate(_wrap(wsig, method_body(weapon_src, wsig)), wsig, wns,
+                  members=("m_MCPWeaponLastId", "m_MCPFireRequested", "m_MCPFireWeapon", "m_MCPRaiseRequested", "m_MCPRaiseArmed", "m_MCPRaiseWeapon"))
+        self.assertFalse(wns["MCPWeaponCloseServer"](10, 99))
+        self.assertTrue(wns["m_MCPFireRequested"])
+        self.assertTrue(wns["MCPWeaponCloseServer"](10, 7))
+        self.assertEqual(wns["m_MCPWeaponLastId"], 10)
+        self.assertFalse(wns["m_MCPFireRequested"])
+        self.assertEqual(overrides, ["release"])
+        self.assertFalse(wns["m_MCPRaiseArmed"])
+        # H4 pin: reconnect resets the weapon floor (source-level, same class)
+        wbody = method_body(weapon_src, "override void OnReconnect()")
+        self.assertIn("m_MCPWeaponLastId = 0;", wbody)
+        self.assertIn("super.OnReconnect();", wbody)
+
+    def test_conn_gen_onrpc_side_guard_translated(self):
+        from types import SimpleNamespace as _NS
+        move_src = _read(SCRIPTS.parent / "4_World" / "MCP_PlayerMove.c")
+        sig = "override void OnRPC(PlayerIdentity sender, int rpc_type, ParamsReadContext ctx)"
+
+        class _Ctx:
+            def __init__(self):
+                self.attempted = []
+
+            def Read(self, value):
+                self.attempted.append(value)
+                return False
+
+        # Server/dedicated must not even attempt the read (H9); only the
+        # owning client reaches it. The translator cannot propagate an
+        # `out` int from a method double, so the attempt is the evidence.
+        for is_client, dedicated, want_attempt in ((False, False, False), (True, True, False), (True, False, True)):
+            with self.subTest(is_client=is_client, dedicated=dedicated):
+                game = _NS(IsClient=lambda: is_client, IsDedicatedServer=lambda: dedicated)
+                ns = {
+                    "GetGame": lambda: game,
+                    "super": _NS(OnRPC=lambda *a: None),
+                    "MCP_RPC_CONN_GEN": 78541073,
+                    "m_MCPConnGen": 0,
+                }
+                body = method_body(move_src, sig)
+                translate(_wrap(sig, body), sig, ns, members=("m_MCPConnGen",))
+                ctx = _Ctx()
+                ns["OnRPC"](None, 78541073, ctx)
+                self.assertEqual(bool(ctx.attempted), want_attempt)
+                self.assertEqual(ns["m_MCPConnGen"], 0)
+
 
 class LeaseCloseDeliverable5Tests(unittest.TestCase):
     """Deliverable 5: RPC refuse, bot FSM, infected registry, deletion at
@@ -750,9 +1062,6 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
         self.assertNotIn("LiquidateLeaseCloseRpc", ready)
         liquidate = method_body(source, "protected void LiquidateLeaseCloseRpc(int requestId, string kind)")
         self.assertIn("m_LeaseCloseRpcIds.Remove(index);", liquidate)
-        # Mutant: liquidation before validation would accept foreign refuses.
-        mutant = body.replace('LiquidateLeaseCloseRpc(jobId, "inventory_move")', "", 1)
-        self.assertNotIn("LiquidateLeaseCloseRpc", mutant)
         # Client side: a refusal after an emit stays silent (§2.7 step 5).
         client = _read(SCRIPTS.parent / "4_World" / "MCP_InventoryMove.c")
         self.assertIn('MCPDropInventoryMove("refuse_after_emit");', client)
@@ -789,8 +1098,6 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
         self.assertLess(insert_at, loadout.find("RegisterDeletionRefs(job);", insert_at))
         timeout = method_body(server, "protected void PostJobTimeout(MCPJob job)")
         self.assertGreaterEqual(timeout.count("RegisterDeletionRefs(job);"), 2)
-        # Mutant: refs only at close (the pre-fix shape) fails the dispatch pin.
-        self.assertNotIn("RegisterDeletionRefs", scene.replace("RegisterDeletionRefs(job);", "", 1))
         client = _read(CLIENT_PATH)
         census = method_body(client, "protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)")
         self.assertIn('"action_input_in_flight"', census)
