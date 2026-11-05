@@ -150,7 +150,12 @@ class MCPBotControl
 #ifdef INPUT_OVERRIDE
 		if (botPlayer.m_Bot && botPlayer.m_Bot.GetFSM())
 		{
-			stateName = botPlayer.m_Bot.GetFSM().GetCurrState().GetName();
+			// FSM state read as the repo's Expansion adapter plan cites it
+			// for its FSM (GetFSM / GetState / GetName, each nullable).
+			if (botPlayer.m_Bot.GetFSM().GetState())
+			{
+				stateName = botPlayer.m_Bot.GetFSM().GetState().GetName();
+			}
 		}
 #endif
 #endif
