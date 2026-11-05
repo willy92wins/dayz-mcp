@@ -2266,6 +2266,21 @@ class ExecuteWaitForBoxLostReadTest(unittest.IsolatedAsyncioTestCase):
             await self._wait(client, 5.0)
         self.assertEqual(client.calls[-1], {"done": True, "ticket": "t1"})
 
+    async def test_any_other_claim_error_still_raises_and_leaves_the_fifo(
+        self,
+    ) -> None:
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("remote_error"),
+            {"box_ticket": None},
+        ])
+        with self.assertRaises(server_module.ToolError):
+            await self._wait(client, 5.0)
+        self.assertEqual(
+            [call.get("claim") for call in client.calls], [None, True, None]
+        )
+        self.assertEqual(client.calls[-1], {"done": True, "ticket": "t1"})
+
 
 def _isolated_client_runtime(config: ServerConfig) -> server_module.ClientRuntime:
     """The fixture runtime, without the host's handoff or the Win32 key read."""
