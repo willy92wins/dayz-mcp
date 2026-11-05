@@ -424,7 +424,7 @@ class LoadCountersTest(unittest.TestCase):
         server_caps_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
         server_ach_init = "\t\tm_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);\n"
         client_caps_init = "\t\tm_PollCapabilities = EncodeQueryValue(CLIENT_POLL_CAPS);\n"
-        server_caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
+        server_caps_wire = '\t\trequest = request + "&caps=" + ServerCapabilities();\n'
         server_ach_wire = '\t\trequest = request + "&ach=" + m_PollArgContractHash;\n'
         client_caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
         try_init_head = "\tprotected void TryInit()\n\t{\n"

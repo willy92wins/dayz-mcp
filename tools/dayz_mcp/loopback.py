@@ -135,6 +135,10 @@ SERVER_COMMANDS = {
     "world_spawn_batch",
     "scene_entities",
     "scene_clear",
+    # Expansion AI adapter (optional PBO): spawn names the release registry
+    # origin; the release is internal (RELEASE_REGISTRY / owner cleanup).
+    "ai_group_spawn",
+    "ai_group_release",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -282,6 +286,13 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "camera_path_play",
         "camera_path_release",
         lambda command_id, args: {"command_id": command_id},
+    ),
+    # Expansion AI: an abandoned delivered spawn is released by its token,
+    # never by group_id (a new daemon's ids cannot name the old group).
+    (
+        "ai_group_spawn",
+        "ai_group_release",
+        lambda command_id, args: {"spawn_token": args["spawn_token"]},
     ),
 )
 # Cleanup of one admitted command. The budget belongs to the runtimes; this
@@ -1052,6 +1063,35 @@ def is_scene_id(value: object) -> bool:
     return isinstance(value, str) and _SCENE_ID_PATTERN.fullmatch(value) is not None
 
 
+# Expansion AI adapter wire shapes (plan 3.1/4): flat waypoint triples.
+AI_GROUP_COUNT_MAX = 8
+AI_GROUP_WAYPOINTS_MAX = 32
+AI_BEHAVIOURS = frozenset({"HOLD", "ONCE", "LOOP", "ROAM"})
+_SPAWN_TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
+_LOADOUT_PATTERN = re.compile(r"[A-Za-z0-9_.-]{0,64}")
+
+
+def _is_spawn_token(value: object) -> bool:
+    return isinstance(value, str) and _SPAWN_TOKEN_PATTERN.fullmatch(value) is not None
+
+
+def _is_ai_short_name(value: object) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= 64
+
+
+def _is_loadout_name(value: object) -> bool:
+    return isinstance(value, str) and _LOADOUT_PATTERN.fullmatch(value) is not None
+
+
+def _is_waypoints(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) % 3 == 0
+        and len(value) <= AI_GROUP_WAYPOINTS_MAX * 3
+        and all(_is_real_number(item) for item in value)
+    )
+
+
 # 7f5d: the world_spawn_batch tool takes 1 to SPAWN_BATCH_ITEMS_MAX items and
 # sends them as commands of 1 to SPAWN_BATCH_PER_TICK_MAX items each, every one
 # created in the server tick that dispatches it. Only the per-command bound
@@ -1418,7 +1458,17 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "scene_clear",
     "survivor_drive",
     "survivor_drive_release",
+    "ai_group_release",
 })
+# Expansion AI adapter verbs (plan 2.2): the specific refusal replaces the
+# generic missing-verb one for these, after the common census and ach guards.
+_EXPANSION_ADMISSION_COMMANDS = frozenset({"ai_group_release"})
+# New adapter mutations are gated on real lease-close support (plan 5.1):
+# while no peer announces lease_close they stay inert. Internal releases
+# keep their own destination authority and are not new mutations. Each
+# adapter PR adds its mutation verb here when it ships its dispatch.
+_EXPANSION_NEW_MUTATION_COMMANDS = frozenset()
+_XAI_HASH = re.compile(r"\A[0-9a-f]{16}\Z")
 # Client verbs an older PBO must not be handed, each with the error it is
 # refused with. Checked on the census of the client bound to the run (no
 # server arg-contract hash) at enqueue, after the binding fence, and again at
@@ -1464,6 +1514,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
         "action_hold_cancel",
         "survivor_drive_release",
         "camera_path_release",
+        "ai_group_release",
     }
 )
 
@@ -2255,6 +2306,39 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     ),
     "scene_clear": _command_schema(
         _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
+    ),
+    # Expansion AI adapter: the tool sends every key but scene_id, which
+    # travels only when a scene is named (as in world_spawn).
+    "ai_group_spawn": _command_schema(
+        _schema_variant(
+            required=(
+                "faction",
+                "count",
+                "pos",
+                "loadout",
+                "formation",
+                "behaviour",
+                "waypoints",
+                "spawn_token",
+            ),
+            optional=("scene_id",),
+            validators={
+                "faction": _is_ai_short_name,
+                "count": _integer_in_range(minimum=1, maximum=AI_GROUP_COUNT_MAX),
+                "pos": _is_real_vector3,
+                "loadout": _is_loadout_name,
+                "formation": _is_ai_short_name,
+                "behaviour": _one_of(*sorted(AI_BEHAVIOURS)),
+                "waypoints": _is_waypoints,
+                "spawn_token": _is_spawn_token,
+                "scene_id": is_scene_id,
+            },
+        )
+    ),
+    "ai_group_release": _command_schema(
+        _schema_variant(
+            required=("spawn_token",), validators={"spawn_token": _is_spawn_token}
+        )
     ),
     "vehicle_enter": _command_schema(
         _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
@@ -5261,9 +5345,41 @@ class ServerState:
         ):
             return "arg_contract_mismatch"
         announced = view.get("announced_commands")
+        if cmd in _EXPANSION_ADMISSION_COMMANDS:
+            # Specific adapter branch (plan 2.2), after the common census
+            # and ach guards above: it replaces the generic missing-verb
+            # refusal, so it must not sit behind that return.
+            if not isinstance(announced, list) or cmd not in announced:
+                return "expansion_unavailable:adapter_not_loaded"
+            from dayz_mcp.bridge_readiness import (
+                EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH,
+            )
+
+            xai = view.get("announced_expansion_arg_contract_hash")
+            if (
+                not isinstance(xai, str)
+                or not _XAI_HASH.match(xai)
+                or xai != EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH
+            ):
+                return "expansion_unavailable:adapter_contract_mismatch"
+            if cmd in _EXPANSION_NEW_MUTATION_COMMANDS and (
+                not isinstance(announced, list) or "lease_close" not in announced
+            ):
+                return "expansion_unavailable:lease_close_not_supported"
+            return None
         if not isinstance(announced, list) or cmd not in announced:
             return "bridge_capability_missing"
         return None
+
+    def _expansion_refusal_payload(self, refusal: str) -> dict:
+        """Public payload for a refusal: expansion ones carry their detail."""
+
+        if refusal.startswith("expansion_unavailable:"):
+            return {
+                "error": "expansion_unavailable",
+                "detail": refusal.partition(":")[2],
+            }
+        return {"error": refusal}
 
     def _client_announce_refusal_locked(
         self, peer: str, cmd: str, instance: str | None
@@ -5693,7 +5809,7 @@ class ServerState:
             return (429, {"error": "queue_full"}), None, None, None
         refusal = self._capability_refusal_locked(peer, cmd, fence_instance, args)
         if refusal is not None:
-            return (409, {"error": refusal}), None, None, None
+            return (409, self._expansion_refusal_payload(refusal)), None, None, None
         client_refusal = self._client_announce_refusal_locked(
             peer, cmd, fence_instance
         )
@@ -7041,6 +7157,7 @@ class ServerState:
         ach: str | None = None,
         load: dict[str, int | float] | None = None,
         wait_s: float = 0.0,
+        xai: str | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -7190,7 +7307,7 @@ class ServerState:
             # After the whole binding chain: the census belongs to THIS poll,
             # so it needs this poll's accreditation, not the previous one's.
             self._record_poll_caps_locked(
-                peer, caps, accredited, ach=ach, instance=token, now=decision_at
+                peer, caps, accredited, ach=ach, instance=token, now=decision_at, xai=xai
             )
             if load is not None and self._load_reading_applies_locked(
                 peer, token, accredited
@@ -8579,6 +8696,7 @@ class ServerState:
         ach: str | None = None,
         instance: str | None = None,
         now: float | None = None,
+        xai: str | None = None,
     ) -> None:
         """Keep only the last accredited announcement, tagged with its generation.
 
@@ -8592,11 +8710,13 @@ class ServerState:
         if accredited:
             names, reason = parse_poll_caps(raw)
             ach_value = ach if isinstance(ach, str) and ach else None
+            xai_value = xai if isinstance(xai, str) and xai else None
             announced_at = now if isinstance(now, (int, float)) else self._now()
             announced_instance = instance if isinstance(instance, str) else None
         else:
             names, reason = None, "unaccredited"
             ach_value = None
+            xai_value = None
             announced_at = None
             announced_instance = None
         self._peer_caps[peer] = {
@@ -8604,6 +8724,7 @@ class ServerState:
             "commands": names,
             "reason": reason,
             "arg_contract_hash": ach_value,
+            "expansion_arg_contract_hash": xai_value,
             "announced_at": announced_at,
             "instance": announced_instance,
         }
@@ -8616,6 +8737,7 @@ class ServerState:
                 "reason": "absent",
                 "announced_commands": [],
                 "announced_arg_contract_hash": None,
+                "announced_expansion_arg_contract_hash": None,
             }
         if entry["commands"] is None:
             return {
@@ -8623,6 +8745,7 @@ class ServerState:
                 "reason": entry["reason"],
                 "announced_commands": [],
                 "announced_arg_contract_hash": None,
+                "announced_expansion_arg_contract_hash": None,
             }
         if entry["generation"] != self.daemon_generation:
             return {
@@ -8630,12 +8753,16 @@ class ServerState:
                 "reason": "stale_generation",
                 "announced_commands": [],
                 "announced_arg_contract_hash": None,
+                "announced_expansion_arg_contract_hash": None,
             }
         return {
             "state": "announced",
             "reason": entry["reason"],
             "announced_commands": list(entry["commands"]),
             "announced_arg_contract_hash": entry.get("arg_contract_hash"),
+            "announced_expansion_arg_contract_hash": entry.get(
+                "expansion_arg_contract_hash"
+            ),
         }
 
     def _peer_status_view(
@@ -10201,6 +10328,7 @@ class Handler(BaseHTTPRequestHandler):
         instance = inst_raw if inst_raw else None
         caps_raw = qs.get("caps", [""])[0]
         ach_raw = qs.get("ach", [""])[0]
+        xai_raw = qs.get("xai", [""])[0]
         load = _load_from_poll_query(qs)
         source_pid = self.state.resolve_poll_pid(
             instance, getattr(self, "connection", None)
@@ -10213,6 +10341,7 @@ class Handler(BaseHTTPRequestHandler):
             source_pid=source_pid,
             caps=caps_raw,
             ach=ach_raw,
+            xai=xai_raw,
             load=load,
             wait_s=wait_s,
         )

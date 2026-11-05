@@ -84,6 +84,35 @@ class MCPBridge : Managed
 	// still lists the same command names fails the version/capability gate.
 	protected const string SERVER_ARG_CONTRACT_HASH = "86e3c48a43e86b91";
 
+	// Extension hooks (expansion-ai-adapter plan 2.1): no Expansion types and
+	// no ifdef here, so the base PBO compiles and polls byte-identically
+	// without the adapter. A modded MCPBridge in the adapter overrides them.
+	protected string ServerCapabilities()
+	{
+		return SERVER_CAPABILITIES;
+	}
+
+	protected string ExtensionPollParams()
+	{
+		return "";
+	}
+
+	// 0 = not handled (Dispatch answers unknown_command), 1 = publish now,
+	// 2 = a job will publish. Called just before unknown_command.
+	protected int DispatchExtension(MCPCommand command, MCPResult result)
+	{
+		return 0;
+	}
+
+	// Lease-close hooks: nothing calls these until the v13 activation.
+	protected void LeaseCloseExtensionStop()
+	{
+	}
+
+	protected void LeaseCloseExtensionCensus(MCPLeaseCloseCensus census)
+	{
+	}
+
 	protected static ref MCPBridge m_Instance;
 
 	protected RestContext m_Ctx;
@@ -414,7 +443,7 @@ class MCPBridge : Managed
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&caps=" + ServerCapabilities();
 		request = request + "&ach=" + m_PollArgContractHash;
 		request = request + LoadCounterQuery();
 		if (m_PeerInstance != "")
@@ -423,6 +452,7 @@ class MCPBridge : Managed
 		}
 		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
 		request = request + "&wait_ms=800";
+		request = request + ExtensionPollParams();
 		m_Ctx.GET(cb, request);
 	}
 
@@ -904,8 +934,20 @@ class MCPBridge : Managed
 		}
 		else
 		{
-			result.ok = false;
-			result.error = "unknown_command";
+			int extensionHandled = DispatchExtension(command, result);
+			if (extensionHandled == 1)
+			{
+				postNow = true;
+			}
+			else if (extensionHandled == 2)
+			{
+				postNow = false;
+			}
+			else
+			{
+				result.ok = false;
+				result.error = "unknown_command";
+			}
 		}
 
 		if (postNow)

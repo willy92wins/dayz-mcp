@@ -60,7 +60,7 @@ CONSTRUCTOR_SIGNATURE = "void MCPBridge()"
 START_POLL_SIGNATURE = "protected void StartPoll()"
 CAPS_CACHE_DECL = "protected string m_PollCapabilities;"
 CAPS_CACHE_INIT = "m_PollCapabilities = SERVER_CAPABILITIES;"
-CAPS_WIRE = 'request = request + "&caps=" + m_PollCapabilities;'
+CAPS_WIRE = 'request = request + "&caps=" + ServerCapabilities();'
 VER_WIRE = '"&ver=" + GetPollVersion()'
 INSTANCE_GUARD = 'if (m_PeerInstance != "")'
 POLL_GET = "m_Ctx.GET(cb, request);"
@@ -624,12 +624,22 @@ def _known_good_source() -> str:
 		m_PollCapabilities = SERVER_CAPABILITIES;
 	}
 
+	protected string ServerCapabilities()
+	{
+		return SERVER_CAPABILITIES;
+	}
+
+	protected string ExtensionPollParams()
+	{
+		return "";
+	}
+
 	protected void StartPoll()
 	{
 		MCPPollCallback cb = new MCPPollCallback(this);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&caps=" + ServerCapabilities();
 		if (m_PeerInstance != "")
 		{
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
@@ -852,7 +862,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
     def test_innocuous_reads_of_cached_capabilities_are_allowed(self) -> None:
         fixture = _known_good_source()
         fixture_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
-        fixture_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
+        fixture_wire = '\t\trequest = request + "&caps=" + ServerCapabilities();\n'
         fixture_ctor = "\tvoid MCPBridge()\n"
         for needle in (fixture_init, fixture_wire, fixture_ctor):
             self.assertEqual(fixture.count(needle), 1, needle)
@@ -1266,7 +1276,7 @@ class BridgeServerCapabilitiesTest(unittest.TestCase):
         caps_line = '\tprotected const string SERVER_CAPABILITIES = "alpha," + "entities_query," + "zulu";\n'
         caps_cache_decl = "\tprotected string m_PollCapabilities;\n"
         caps_cache_init = "\t\tm_PollCapabilities = SERVER_CAPABILITIES;\n"
-        caps_wire = '\t\trequest = request + "&caps=" + m_PollCapabilities;\n'
+        caps_wire = '\t\trequest = request + "&caps=" + ServerCapabilities();\n'
         ctor_head = "\tvoid MCPBridge()\n"
         mutate_out_decl = (
             "\tprotected void MutateOut(out string value)\n"

@@ -283,6 +283,59 @@ def server_arg_contract_hash() -> str:
 EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 
 
+# Expansion AI adapter contract (expansion-ai-adapter plan 2.2): a separate
+# contract so the adapter never changes SERVER_ARG_CONTRACT or ach=. The
+# adapter announces its hash as poll xai=. Keys are the full arg sets spawn,
+# order, state and release will use, fixed here so later PRs do not change
+# the hash. Inherited keys keep their base types (pos, object_id, speed,
+# speed_set, scene_id in MCPMessages.c MCPArgs).
+EXPANSION_AI_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
+    "ai_group_order": ("behaviour", "formation", "group_id", "speed", "speed_set", "waypoints"),
+    "ai_group_release": ("spawn_token",),
+    "ai_group_spawn": (
+        "behaviour",
+        "count",
+        "faction",
+        "formation",
+        "loadout",
+        "pos",
+        "scene_id",
+        "spawn_token",
+        "waypoints",
+    ),
+    "ai_group_state": ("group_id", "scene_id"),
+}
+
+# Adapter verbs are optional in the census: a run without Expansion stays
+# match when they are not announced (plan 2.2).
+EXPANSION_AI_COMMANDS = frozenset(EXPANSION_AI_ARG_CONTRACT)
+# Public adapter tools registered so far; each adapter PR adds its own, so a
+# census without them never makes the comparator demand an unshipped tool.
+EXPANSION_AI_TOOLS = frozenset()
+
+
+def expansion_ai_arg_contract_canonical() -> str:
+    """Stable, newline-joined `cmd=k1,k2` lines (keys sorted, cmds sorted)."""
+
+    return "\n".join(
+        f"{cmd}={','.join(keys)}"
+        for cmd, keys in sorted(EXPANSION_AI_ARG_CONTRACT.items())
+    )
+
+
+def expansion_ai_arg_contract_hash() -> str:
+    """First 16 hex chars of sha256(canonical). Must match MCPExpansionAI.c."""
+
+    import hashlib
+
+    return hashlib.sha256(
+        expansion_ai_arg_contract_canonical().encode("utf-8")
+    ).hexdigest()[:16]
+
+
+EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH = expansion_ai_arg_contract_hash()
+
+
 # peer + command -> the public tool that fronts it, or None when the command is
 # deliberately not exposed. Hand written from the two Enforce dispatchers
 # (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
@@ -296,6 +349,7 @@ EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 # poll instead of on the first failed call.
 _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
+        "ai_group_release": None,  # internal: the broker's abandoned-spawn cleanup
         "bot_start": "bot_start",
         "bot_stop": "bot_stop",
         "entities_query": "entities_query",
@@ -436,7 +490,8 @@ def _compare_bridge_capabilities(
     missing_tool = sorted(
         item
         for item in announced_set
-        if mapping.get(item) in intended_bridge_tools
+        if item not in EXPANSION_AI_COMMANDS
+        and mapping.get(item) in intended_bridge_tools
         and mapping[item] not in registered_tools
     )
     announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
@@ -445,7 +500,9 @@ def _compare_bridge_capabilities(
     if peer == "client" and "camera_path_release" not in announced_set:
         announced_tools.discard("camera_path_play")
     not_announced = sorted(
-        tool for tool in registered_bridge_tools if tool not in announced_tools
+        tool
+        for tool in registered_bridge_tools
+        if tool not in announced_tools and tool not in EXPANSION_AI_TOOLS
     )
     agrees = not (unmapped or missing_tool or not_announced)
     announced_hash = block.get("announced_arg_contract_hash")

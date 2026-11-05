@@ -1281,6 +1281,25 @@ class MCPSceneClear
 	}
 };
 
+// Lease-close census entries[{name,state,reason}]; the v13 activation widens it.
+class MCPLeaseCloseEntry
+{
+	string name;
+	string state;
+	string reason;
+};
+
+class MCPLeaseCloseCensus
+{
+	string state;
+	ref array<ref MCPLeaseCloseEntry> entries;
+
+	void MCPLeaseCloseCensus()
+	{
+		entries = new array<ref MCPLeaseCloseEntry>();
+	}
+};
+
 // One object registered under a scene (165a). Not sent. obj is the object
 // itself, which Enforce nulls once it is gone: the id alone can come to name a
 // newer object, because the daemon restarts its ids at 1.
