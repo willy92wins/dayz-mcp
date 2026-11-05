@@ -516,9 +516,15 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "protected bool AIIsBehaviour(string value)",
         "protected bool AIFactionRegistered(typename factionType)",
         "protected void AIFillFactionAllowed(MCPAIGroup report)",
+        "protected string AIFormationName(int index)",
+        "protected bool AIFormationKnown(string formation)",
         "protected void AIFillFormationAllowed(MCPAIGroup report)",
+        "protected bool AIWaypointsOk(array<float> waypoints, int minPoints)",
         "protected int AICountLivingMembers()",
-        "protected void AIGroupApplyBehaviour(MCPAIGroupRecord record)",
+        "protected void AIGroupApplyRoute(MCPAIGroupRecord record)",
+        "protected void AIGroupApplyMode(MCPAIGroupRecord record)",
+        "protected void AIGroupApplyLimits(MCPAIGroupRecord record)",
+        "protected void AIFillBehaviour(eAIGroup group, MCPAIGroup report)",
         "protected void AIFillGroupReport(MCPAIGroupRecord record, MCPAIGroup report)",
         "protected void AISpawnRefuse(MCPResult result, MCPAIGroup report, string errorName, string fieldName)",
         "protected void DispatchAIGroupSpawn(MCPCommand command, MCPResult result)",
@@ -544,6 +550,12 @@ def _dispatch(namespace, args) -> SimpleNamespace:
     result = SimpleNamespace(ai_group=None, ok=False, error=EnforceString.of(""))
     namespace["DispatchAIGroupSpawn"](SimpleNamespace(args=args), result)
     return result
+
+
+def _apply_spawn_behaviour(namespace, record) -> None:
+    namespace["AIGroupApplyRoute"](record)
+    namespace["AIGroupApplyMode"](record)
+    namespace["AIGroupApplyLimits"](record)
 
 
 class AIGroupSpawnEnforceTest(unittest.TestCase):
@@ -683,19 +695,69 @@ class AIGroupSpawnEnforceTest(unittest.TestCase):
             group=group, members=EnforceArray([_member_record(member)]),
             waypoints=EnforceArray([1.0, 2.0, 3.0]),
         )
-        namespace["AIGroupApplyBehaviour"](record)
+        _apply_spawn_behaviour(namespace, record)
         self.assertEqual((group.formation_state, group.waypoint_behaviour), (0, 0))
         self.assertEqual(member.limits, [(0, 3)])
         self.assertEqual(len(group.waypoints), 1)
         self.assertFalse(group.m_BackTracking)
         record.behaviour = EnforceString.of("LOOP")
-        namespace["AIGroupApplyBehaviour"](record)
+        _apply_spawn_behaviour(namespace, record)
         self.assertEqual((group.formation_state, group.waypoint_behaviour), (1, 1))
         self.assertEqual(member.limits[-1], (2, 3))
         record.behaviour = EnforceString.of("HOLD")
-        namespace["AIGroupApplyBehaviour"](record)
-        namespace["AIGroupApplyBehaviour"](record)
+        _apply_spawn_behaviour(namespace, record)
+        _apply_spawn_behaviour(namespace, record)
         self.assertEqual(member.limits[-1], (0, 3))
+
+
+
+class SpawnThenOrderEnforceTest(unittest.TestCase):
+    """Spawn -> order on one record (the r1-H10 contract, B-r2-H2)."""
+
+    def test_spawn_then_order_uses_the_seeded_preferences(self) -> None:
+        # Mutant killed: spawn and order disagreeing on the record they
+        # share: a HOLD the spawn applied, repeated by the order, touches
+        # nothing, and LOOP restores the limits the spawn read at creation.
+        namespace, state = _spawn_namespace(files={"DefaultLoadout"})
+        source = ADAPTER.read_text(encoding="utf-8")
+        namespace["eAIGroupFormationState"] = SimpleNamespace(NONE=0, IN=1, FLANK=2)
+        class_types = ("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "MCPAIGroup", "MCPAIArgsRead", "MCPAIGroupMember", "eAIGroup", "eAIBase", "eAIFaction", "Object", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "typename", "GameInventory", "EntityAI", "eAIWaypointBehavior", "MCPArgs", "MCPCommand", "MCPResult", "eAIFormation", "eAIGroupFormationState")
+        members = ("m_AIGroups", "m_RuntimeObjects", "m_NextBatchObjectId", "AI_GROUP_COUNT_MAX", "AI_TOTAL_MAX", "AI_WAYPOINTS_MAX", "AI_MEMBER_RING_M")
+        for signature in (
+            "protected MCPAIGroupRecord FindAIGroupById(int groupId)",
+            "protected void AIFillBehaviourAllowed(MCPAIGroup report)",
+            "protected void AIOrderSaveSpeed(MCPAIGroupRecord record, int speedValue)",
+            "protected void AIFillGroupOrderFields(MCPAIGroupRecord record, MCPAIGroup report)",
+            "protected void DispatchAIGroupOrder(MCPCommand command, MCPResult result)",
+        ):
+            translate(source, signature, namespace, members=members, class_types=class_types)
+        spawn_result = _dispatch(namespace, _args(behaviour=EnforceString.of("HOLD"), waypoints=EnforceArray([1.0, 2.0, 3.0])))
+        self.assertTrue(spawn_result.ok, spawn_result.error)
+        record = namespace["m_AIGroups"].Get(0)
+        group = state["groups"][0]
+        member = state["members"][0]
+        self.assertEqual(member.limits, [(0, 3)])
+        group.m_CurrentWaypointIndex = 0
+        group.GetFormationState = lambda: group.formation_state
+        group.GetWaypoints = lambda: EnforceArray(list(group.waypoints))
+        group.IsInCombat = lambda: False
+
+        def order(behaviour: str):
+            args = SimpleNamespace(
+                group_id=record.group_id, behaviour=EnforceString.of(behaviour),
+                formation=EnforceString.of(""), waypoints=None, speed=0.0, speed_set=False,
+            )
+            result = SimpleNamespace(ai_group=None, ok=False, error=EnforceString.of(""))
+            namespace["DispatchAIGroupOrder"](SimpleNamespace(args=args), result)
+            return result
+
+        result = order("HOLD")
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(member.limits, [(0, 3)])
+        result = order("LOOP")
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(member.limits[-1], (2, 3))
+        self.assertEqual(result.ai_group.behaviour.text, "LOOP")
 
 
 if __name__ == "__main__":

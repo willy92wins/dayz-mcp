@@ -63,7 +63,8 @@ server. It ships in `addon_expansion_ai/` and packs as
   in combat, `combat_may_override: true` (the combat FSM may ignore the
   order), plus `roams_expansion_locations: true` when the behaviour is
   ROAM, and one member row per registered member with `object_id`,
-  `speed_limit` and `speed_limit_threat`. A `not_found`, and a
+  `alive`, `speed_limit` and `speed_limit_threat` (limits are 0 when
+  the entity is gone). A `not_found`, and a
   `bad_args` with no field, carry no `ai_group`.
 
 Offline coverage: `tools/tests/test_xai_group_order.py` (criteria O3 and

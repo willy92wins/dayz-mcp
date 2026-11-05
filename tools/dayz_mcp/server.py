@@ -8501,8 +8501,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "behaviour and behaviour_expansion, formation, formation_state, "
             "waypoint_count, waypoint_index, in_combat and, when in combat, "
             "combat_may_override (the combat FSM may ignore the order), plus "
-            "one member row per registered member with object_id, "
-            "speed_limit and speed_limit_threat. Errors: bad_args, "
+            "one member row per registered member with object_id, alive, "
+            "speed_limit and speed_limit_threat (limits are 0 when the "
+            "entity is gone). Errors: bad_args, "
             "not_found, expansion_unavailable."
         )
     )

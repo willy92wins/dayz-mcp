@@ -312,7 +312,10 @@ EXPANSION_AI_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
 EXPANSION_AI_COMMANDS = frozenset(EXPANSION_AI_ARG_CONTRACT)
 # Public adapter tools registered so far; each adapter PR adds its own, so a
 # census without them never makes the comparator demand an unshipped tool.
-EXPANSION_AI_TOOLS = frozenset({"ai_group_order", "ai_group_spawn"})
+EXPANSION_AI_TOOLS = frozenset({
+    "ai_group_order",
+    "ai_group_spawn",
+})
 
 
 def expansion_ai_arg_contract_canonical() -> str:

@@ -9,6 +9,7 @@ expectations reject them (R26).
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 import unittest
@@ -506,25 +507,32 @@ def _order_namespace(source: str, formations: list[str] | None = None) -> dict:
         "eAIMovementSpeed": SimpleNamespace(
             STATIC=STATIC, WALK=WALK, JOG=JOG, SPRINT=SPRINT
         ),
+        "IsFiniteFloat": lambda value: isinstance(value, (int, float)) and math.isfinite(float(value)),
+        "typename": SimpleNamespace(
+            EnumToString=lambda enum_type, value: _s("ALTERNATE")
+        ),
         "MCPAIGroup": _report,
         "MCPAIGroupMember": _member_report,
     }
     class_types = (
         "MCPAIGroupRecord", "MCPAIGroupMemberRecord", "MCPAIGroup", "MCPAIGroupMember",
-        "MCPArgs", "eAIFormation", "eAIWaypointBehavior", "eAIGroupFormationState",
+        "MCPArgs", "eAIFormation", "eAIWaypointBehavior", "eAIGroupFormationState", "eAIGroup",
     )
     for signature, members in (
         ("protected void EnsureAIRegistry()", ("m_AIGroups",)),
         ("protected MCPAIGroupRecord FindAIGroupById(int groupId)", ()),
         ("protected string AIFormationName(int index)", ()),
-        ("protected bool AIOrderFormationKnown(string formation)", ()),
-        ("protected void AIOrderFillAllowed(MCPAIGroup report, bool formations)", ()),
-        ("protected bool AIOrderWaypointsOk(MCPArgs args)", ()),
-        ("protected void AIOrderApplyLimits(MCPAIGroupRecord record, bool hold)", ()),
+        ("protected bool AIFormationKnown(string formation)", ()),
+        ("protected void AIFillFormationAllowed(MCPAIGroup report)", ()),
+        ("protected void AIFillBehaviourAllowed(MCPAIGroup report)", ()),
+        ("protected bool AIIsBehaviour(string value)", ()),
+        ("protected bool AIWaypointsOk(array<float> waypoints, int minPoints)", ()),
         ("protected void AIOrderSaveSpeed(MCPAIGroupRecord record, int speedValue)", ()),
-        ("protected void AIOrderApplyBehaviour(MCPAIGroupRecord record, string behaviour)", ()),
-        ("protected void AIOrderApplyWaypoints(MCPAIGroupRecord record, MCPArgs args)", ()),
-        ("protected void AIOrderFillReport(MCPAIGroupRecord record, MCPAIGroup report)", ()),
+        ("protected void AIGroupApplyRoute(MCPAIGroupRecord record)", ()),
+        ("protected void AIGroupApplyMode(MCPAIGroupRecord record)", ()),
+        ("protected void AIGroupApplyLimits(MCPAIGroupRecord record)", ()),
+        ("protected void AIFillBehaviour(eAIGroup group, MCPAIGroup report)", ()),
+        ("protected void AIFillGroupOrderFields(MCPAIGroupRecord record, MCPAIGroup report)", ()),
         ("protected void DispatchAIGroupOrder(MCPCommand command, MCPResult result)", ()),
     ):
         translate(source, signature, namespace, members=members, class_types=class_types)
@@ -554,6 +562,7 @@ def _record(namespace: dict, *, behaviour: str = "LOOP", group_state: str = "act
         scene_id=_s(""),
         behaviour=_s(behaviour),
         group_state=_s(group_state),
+        waypoints=EnforceArray(),
         members=EnforceArray(
             [_member_record(11, members[0]), _member_record(12, members[1])]
         ),
@@ -734,6 +743,7 @@ class ExpansionOrderEnforceTest(unittest.TestCase):
         self.assertTrue(report.in_combat)
         self.assertTrue(report.combat_may_override)
         self.assertEqual(report.group_id, GROUP_ID)
+        self.assertEqual(list(record.waypoints), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
     def test_e5_bad_speed_changes_nothing(self) -> None:
         # Mutant killed (M11): the bridge not validating speed, so an
@@ -798,6 +808,61 @@ class ExpansionOrderEnforceTest(unittest.TestCase):
         self.assertEqual(group.formation.scale, 2.5)
         self.assertEqual(group.formation.looseness, 0.75)
 
+
+    def test_e5_each_behaviour_maps_to_its_expansion_value(self) -> None:
+        # Mutant killed (E-i): ONCE applied or reported as another value.
+        for behaviour, value, name in (
+            ("HOLD", HALT, "HALT"), ("ONCE", ONCE_B, "ONCE"),
+            ("LOOP", LOOP_B, "LOOP"), ("ROAM", ROAMING_B, "ROAMING"),
+        ):
+            with self.subTest(behaviour=behaviour):
+                namespace = _order_namespace(self.source)
+                record, group, members = _record(namespace, behaviour="ONCE" if behaviour != "ONCE" else "LOOP")
+                result = _dispatch(namespace, _command(behaviour=_s(behaviour)))
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual(group.waypoint_behaviour, value)
+                self.assertEqual(result.ai_group.behaviour.text, behaviour)
+                self.assertEqual(result.ai_group.behaviour_expansion.text, name)
+
+    def test_e5_more_than_32_waypoints_change_nothing(self) -> None:
+        # Mutant killed (E-j): the bridge accepting a 33rd point.
+        record, group, members = _record(self.namespace)
+        result = _dispatch(self.namespace, _command(waypoints=EnforceArray([0.0] * 99)))
+        self.assertEqual(result.error.text, "bad_args")
+        self.assertEqual(result.ai_group.field.text, "waypoints")
+        self.assertEqual(group.waypoints.Count(), 0)
+        self.assertEqual(list(record.waypoints), [])
+
+    def test_e5_non_finite_waypoints_are_bad_args(self) -> None:
+        # Mutant killed: the order bridge skipping the IsFiniteFloat check
+        # the spawn bridge has (B-r2-H1 divergence).
+        record, group, members = _record(self.namespace)
+        result = _dispatch(self.namespace, _command(waypoints=EnforceArray([float("nan"), 0.0, 0.0])))
+        self.assertEqual(result.error.text, "bad_args")
+        self.assertEqual(result.ai_group.field.text, "waypoints")
+        self.assertEqual(group.waypoints.Count(), 0)
+
+    def test_e5_flank_is_read_back(self) -> None:
+        # Mutant killed (E-g): a FLANK the player ordered read back as "".
+        record, group, members = _record(self.namespace)
+        group.formation_state = 2
+        result = _dispatch(self.namespace, _command(speed=2.0, speed_set=True))
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.ai_group.formation_state.text, "FLANK")
+
+    def test_e5_member_without_entity_still_gets_a_row(self) -> None:
+        # Mutant killed: a deleted member vanishing from the reply, so a
+        # row count reads as a member count (B-r2-H3).
+        record, group, members = _record(self.namespace)
+        record.members.Get(1).member = None
+        result = _dispatch(self.namespace, _command(speed=2.0, speed_set=True))
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.ai_group.members.Count(), 2)
+        gone = result.ai_group.members.Get(1)
+        self.assertEqual(gone.object_id, 12)
+        self.assertFalse(gone.alive)
+        self.assertEqual((gone.speed_limit, gone.speed_limit_threat), (0, 0))
+        self.assertTrue(result.ai_group.members.Get(0).alive)
 
 class ExpansionOrderMutantTest(unittest.TestCase):
     """R26: the two named E5 mutants, on a mutated copy of the source."""
