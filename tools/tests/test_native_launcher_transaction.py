@@ -352,5 +352,33 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class ValidateGrantTests(unittest.TestCase):
+    """fb-20261104-143314-32cf: a box_protected grant keeps its refusal."""
+
+    def test_a_box_protected_grant_carries_the_client_answer(self) -> None:
+        module = importlib.import_module("dayz_mcp.native_launcher_transaction")
+        answer = {
+            "ok": False,
+            "error": "box_protected",
+            "status": "released",
+            "adopted_run": {"ok": False, "run_id": "run-1", "error": "run_protected"},
+            "use_state": "human",
+            "hint": "run_protected: in use (human)",
+        }
+        with self.assertRaisesRegex(
+            module.NativeLauncherTransactionError, "invalid_session_grant"
+        ) as raised:
+            module._validate_grant(answer)
+        self.assertEqual(raised.exception.protected_grant, answer)
+
+    def test_any_other_invalid_grant_carries_none(self) -> None:
+        module = importlib.import_module("dayz_mcp.native_launcher_transaction")
+        for response in (None, {"status": "released"}, {"status": "active"}):
+            with self.subTest(response=response):
+                with self.assertRaises(module.NativeLauncherTransactionError) as raised:
+                    module._validate_grant(response)
+                self.assertIsNone(raised.exception.protected_grant)
+
+
 if __name__ == "__main__":
     unittest.main()

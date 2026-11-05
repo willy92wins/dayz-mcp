@@ -19,7 +19,10 @@ from dayz_mcp import (
 
 
 class NativeLauncherTransactionError(RuntimeError):
-    pass
+    # The client's box_protected answer when the grant's adopt came back
+    # run_protected (server.py _release_protected_grant); None for every
+    # other failure (fb-20261104-143314-32cf).
+    protected_grant: dict[str, object] | None = None
 
 
 class _ControlClient(Protocol):
@@ -41,6 +44,12 @@ class _ControlClient(Protocol):
 def _validate_grant(response: object) -> tuple[str, str, str]:
     if not isinstance(response, dict):
         raise NativeLauncherTransactionError("invalid_session_grant")
+    if response.get("error") == "box_protected":
+        # The refusal travels with the error, so dayz_test_stop can answer
+        # run_protected instead of an opaque failure.
+        error = NativeLauncherTransactionError("invalid_session_grant")
+        error.protected_grant = dict(response)
+        raise error
     lease_token = response.get("lease_token")
     lease_id = response.get("lease_id")
     client_identity_json = response.get("client_identity_json")
