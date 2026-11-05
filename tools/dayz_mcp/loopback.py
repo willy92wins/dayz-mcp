@@ -2256,8 +2256,12 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "scene_clear": _command_schema(
         _schema_variant(required=("scene_id",), validators={"scene_id": is_scene_id})
     ),
+    # uid selects the player to seat; the bridge never seats the first human (091a).
     "vehicle_enter": _command_schema(
-        _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})
+        _schema_variant(
+            required=("pos", "uid"),
+            validators={"pos": _is_real_vector3, "uid": _is_uid},
+        )
     ),
     "vehicle_get_in_client": _command_schema(
         _schema_variant(required=("pos",), validators={"pos": _is_real_vector3})

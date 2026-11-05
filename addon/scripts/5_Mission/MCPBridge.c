@@ -82,7 +82,7 @@ class MCPBridge : Managed
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "86e3c48a43e86b91";
+	protected const string SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -1151,6 +1151,13 @@ class MCPBridge : Managed
 		}
 		if (authority == "client" || MCPInventoryMoveNeedsPlayer(op) || rootedOnPlayer)
 		{
+			// 091a: a move that needs a player names it; no first-human fallback.
+			if (command.args.uid == "")
+			{
+				result.ok = false;
+				result.error = "uid_required";
+				return true;
+			}
 			string playerError = "";
 			player = ResolvePlayer(command.args, playerError);
 			if (!player)
@@ -3187,11 +3194,12 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		Human human = GetFirstHuman();
+		// 091a: the player uid names, never the first human.
+		Human human = FindHumanByUid(command.args.uid);
 		if (!human)
 		{
 			result.ok = false;
-			result.error = "no_players";
+			result.error = "player_not_found";
 			return true;
 		}
 
@@ -7728,13 +7736,8 @@ class MCPBridge : Managed
 
 	protected bool IsSeatReady(MCPJob job)
 	{
+		// The player vehicle_enter seated. Gone, the job ends at its deadline.
 		Human human = job.actor;
-		if (!human)
-		{
-			human = GetFirstHuman();
-			job.actor = human;
-		}
-
 		if (!human)
 		{
 			return false;

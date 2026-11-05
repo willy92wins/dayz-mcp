@@ -42,7 +42,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         {"type": "CivilianSedan", "pos": [1, 2, 3], "flags": 0, "rotation": 5},
         "world_spawn",
     ),
-    ("vehicle_enter", {"pos": _POS}, "vehicle_enter"),
+    ("vehicle_enter", {"pos": _POS, "uid": "76561198000000000"}, "vehicle_enter"),
     ("scene_raycast", {"from_pos": [0.0, 10.0, 0.0], "to": [0.0, -5.0, 0.0]}, "scene_raycast"),
     (
         "scene_raycast",

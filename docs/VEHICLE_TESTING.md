@@ -284,12 +284,13 @@ server replica is.
    teardown below deletes that id, and no fixture id survives the run.
 2. `player_teleport` the driver to the surface y behind the canopy gate, as
    in the client ladder (with the player's `uid`, which is required).
-3. `vehicle_enter` near the fixture pos: the server half of the seat. It
+3. `vehicle_enter` near the fixture pos, with the same `uid` (required: it
+   never falls back to the first player, and a `uid` no connected player has
+   answers `player_not_found`): the server half of the seat. It
    runs `StartCommand_Vehicle` (`MCPBridge.c:3211`, in `DispatchVehicleEnter` `:3176`) and puts the player
    in the server crew — measured in-game 2026-06-08, driver seat
    (product-spec B2). `seated=1` means the server read the player it seated
-   (or, if that one is gone, the first player) in the driver seat of that car
-   once the get-in ended (`IsSeatReady`). The bridge checks that each tick and
+   in the driver seat of that car once the get-in ended (`IsSeatReady`). The bridge checks that each tick and
    answers `timeout` on a tick that does not read it once 5 s
    (`JOB_TIMEOUT_S`) have passed, whatever `timeout_s` is, so a `timeout` can
    still end seated: read `query_all_players` (`in_vehicle`) before retrying.
