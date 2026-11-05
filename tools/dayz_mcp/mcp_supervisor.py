@@ -463,9 +463,9 @@ class Supervisor:
             replacement = self.start_worker()
             replayed = self._replay_handshake(replacement)
             if not replayed:
-                # An exit code says the replacement died before answering, and its
-                # stderr is in the host's MCP log; None, that it still runs or is
-                # not reaped yet (fb-20261102-134653-e0ce).
+                # The replacement's exit code when the reload gave up on it, or
+                # None if it had not exited by then. It does not say whether the
+                # replacement answered initialize first (fb-20261102-134653-e0ce).
                 self._reply(
                     request_id,
                     {

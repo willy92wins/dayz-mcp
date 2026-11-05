@@ -298,16 +298,20 @@ class ControlClient:
                 except Exception:
                     registered = ""
                 if policy_cause.startswith("HostConfigError:daemon_provenance_"):
-                    # A replacement builds its policy from these same host configs
-                    # and dies at startup, so server_reload cannot help until the
-                    # registration is restored (fb-20261102-134653-e0ce).
+                    # A replacement builds its policy from these same host configs,
+                    # so while they hold no valid registration it dies at startup
+                    # and server_reload cannot help (fb-20261102-134653-e0ce).
+                    # _conflict also covers a failed read, hence "while that holds".
                     next_step = (
-                        "This server is not validly registered in the host configs "
-                        "(missing, in one only, or not the same in each). Do not call "
-                        "server_reload: its replacement reads the same configs and "
-                        "fails to start. Report this to the host/operator to restore "
-                        "the registration (install_mcp.py --register, with --instance "
-                        "for a named instance) before any server_reload. "
+                        "The host configs did not hold one valid registration of this "
+                        "server: missing, in one only, not the same in each, malformed, "
+                        "or unreadable. While that holds, server_reload cannot help: "
+                        "its replacement reads the same configs and fails to start. "
+                        "Report this to the host/operator to check both registrations, "
+                        "and restore them if needed, before any server_reload "
+                        "(install_mcp.py --register, with --instance for a named "
+                        "instance; it refuses an entry it cannot parse, which has to "
+                        "be fixed or removed by hand first). "
                     )
                 else:
                     next_step = (

@@ -726,7 +726,11 @@ class WorkerDeathTest(SupervisorTestBase):
         replacement.stdout.close()
         message = self.host.wait_for(lambda m: m.get("id") == 7)
         self.assertTrue(message["result"]["isError"])
-        self.assertEqual(result_text(message)["error"], "initialize_replay_failed")
+        # Its stdout is gone but it has not exited (fb-20261102-134653-e0ce).
+        self.assertEqual(
+            result_text(message),
+            {"error": "initialize_replay_failed", "replacement_exit_code": None},
+        )
         # The reserved failure stays internal even when the reload's own reply has
         # already gone out: an error response with a reserved id would answer a
         # request the host never made.

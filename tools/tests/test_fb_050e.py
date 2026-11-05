@@ -110,8 +110,9 @@ class Fb050eUntrustedHintTests(unittest.TestCase):
         self.assertIn("If the tool list includes server_reload", hint)
 
     def test_e0ce_missing_registration_hint_does_not_send_to_server_reload(self) -> None:
-        # A server_reload replacement would read the same host configs and die at
-        # startup, so the hint names the registration repair (fb-20261102-134653-e0ce).
+        # While the host configs hold no valid registration, a server_reload
+        # replacement reads them and dies at startup, so the hint names the
+        # registration check first (fb-20261102-134653-e0ce).
         control = importlib.import_module("dayz_mcp.control_client")
         host_config = importlib.import_module("dayz_mcp.host_config")
         identity = _identity(control)
@@ -131,8 +132,10 @@ class Fb050eUntrustedHintTests(unittest.TestCase):
                     temporary.cleanup()
                 hint = raised.exception.hint
                 self.assertTrue(hint.startswith(f"policy_cause=HostConfigError:{code}. "))
-                self.assertIn("Do not call server_reload", hint)
+                self.assertIn("While that holds, server_reload cannot help", hint)
+                self.assertIn("before any server_reload", hint)
                 self.assertIn("install_mcp.py --register", hint)
+                self.assertIn("fixed or removed by hand first", hint)
                 self.assertNotIn("If the tool list includes server_reload", hint)
                 self.assertIn("cannot open a new host session", hint)
 
