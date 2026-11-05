@@ -803,13 +803,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cas_hash_argument(value: str) -> str:
+    # The CAS compares uppercase hex; a hash typed or pasted in lowercase, or
+    # with spaces around it, is the same hash (fb-20261103-120327-1a8f).
+    # str.strip() also drops Unicode spaces. Only a stripped value that is all
+    # ASCII is uppercased: "\ufb00".upper() is "FF", so a ligature would become
+    # hex digits nobody typed. A stripped value that still holds a non-ASCII
+    # character goes to _valid_sha as it is and is refused there.
+    stripped = value.strip()
+    return stripped.upper() if stripped.isascii() else stripped
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "install-dayz-test-v1":
-            result = install_dayz_test_v1(expected_sha256=args.expected_sha256)
+            result = install_dayz_test_v1(
+                expected_sha256=_cas_hash_argument(args.expected_sha256)
+            )
         elif args.command == "replace-dayz-test-v1":
-            result = replace_dayz_test_v1(expected_sha256=args.expected_sha256)
+            result = replace_dayz_test_v1(
+                expected_sha256=_cas_hash_argument(args.expected_sha256)
+            )
         elif args.command == "bootstrap":
             result = bootstrap_registry()
             print(

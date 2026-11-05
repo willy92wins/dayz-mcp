@@ -44,12 +44,12 @@ def _identity(control, started_at_utc: str = _STARTED_AT):
     )
 
 
-def _untrusted_client(control, identity):
+def _untrusted_client(control, identity, error: Exception | None = None):
     ready = False
 
     def revalidate() -> None:
         if ready:
-            raise ValueError("daemon_provenance_conflict")
+            raise error if error is not None else ValueError("daemon_provenance_conflict")
 
     temporary = tempfile.TemporaryDirectory()
     keyfile = Path(temporary.name) / "daemon.key"
@@ -108,6 +108,52 @@ class Fb050eUntrustedHintTests(unittest.TestCase):
         self.assertTrue(hint.startswith("policy_cause="))
         self.assertIn(f"client registered at {_STARTED_AT}. ", hint)
         self.assertIn("If the tool list includes server_reload", hint)
+
+    def test_e0ce_missing_registration_hint_does_not_send_to_server_reload(self) -> None:
+        # A server_reload replacement repeats this validation and dies at startup
+        # too while the same problem affects it, so the hint names the
+        # registration check before any reload (fb-20261102-134653-e0ce).
+        control = importlib.import_module("dayz_mcp.control_client")
+        host_config = importlib.import_module("dayz_mcp.host_config")
+        identity = _identity(control)
+        for code in (
+            "daemon_provenance_unavailable",
+            "daemon_provenance_incomplete",
+            "daemon_provenance_conflict",
+        ):
+            with (
+                self.subTest(code=code),
+                # The real read calls CreateFileW and ReadFile on Windows;
+                # plain file I/O reads the same fixture key.
+                patch.object(
+                    control.daemon_credential.pinned_keyfile,
+                    "read_pinned_keyfile",
+                    new=lambda path: Path(path).read_text(encoding="utf-8").strip(),
+                ),
+            ):
+                client, temporary = _untrusted_client(
+                    control, identity, host_config.HostConfigError(code)
+                )
+                try:
+                    with self.assertRaises(control.ControlClientError) as raised:
+                        client._request_once("/session/status", {}, 1.0)
+                finally:
+                    temporary.cleanup()
+                hint = raised.exception.hint
+                self.assertTrue(hint.startswith(f"policy_cause=HostConfigError:{code}. "))
+                self.assertIn("registration in the host configs could not be validated", hint)
+                self.assertIn("this process's own executable could not be checked", hint)
+                self.assertIn(
+                    "repeats this validation and fails to start too while the same "
+                    "problem affects it",
+                    hint,
+                )
+                self.assertIn("before any server_reload", hint)
+                self.assertIn("install_mcp.py --register", hint)
+                self.assertIn("fixed or removed by hand first", hint)
+                self.assertIn("If both are intact, the failure may be local", hint)
+                self.assertNotIn("If the tool list includes server_reload", hint)
+                self.assertIn("cannot open a new host session", hint)
 
     def test_fb_050e_untrusted_hint_omits_registered_clause_when_started_at_utc_missing(
         self,
