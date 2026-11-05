@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +21,24 @@ from dayz_mcp.session_coordination import (
 )
 from tests.fence_helpers import INST_CLIENT, INST_SERVER, accredited_poll, bind_both_peers
 from tests._tiers import slow_test
+
+
+class _LoopbackSleepSpy:
+    """loopback's ``time`` with ``sleep`` recorded and still real.
+
+    The poll handler's ``time.sleep`` is the module's only one, so the record
+    holds exactly the delays the handler slept (7976).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+    def sleep(self, seconds: float) -> None:
+        self.calls.append(seconds)
+        time.sleep(seconds)
 
 
 class LoopbackTest(unittest.TestCase):
@@ -243,21 +262,31 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, {"ok": True})
         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
+        logs: list[str] = []
+        self.httpd.log_sink = logs.append
+        sleeps = _LoopbackSleepSpy()
 
-        t0 = time.monotonic()
-        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
-        first_elapsed = time.monotonic() - t0
-        self.assertEqual(status, 200)
-        self.assertEqual(len(body["commands"]), 1)
-        self.assertGreaterEqual(first_elapsed, 0.06)
+        with mock.patch.object(loopback, "time", sleeps):
+            t0 = time.monotonic()
+            status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
+            first_elapsed = time.monotonic() - t0
+            self.assertEqual(status, 200)
+            self.assertEqual(len(body["commands"]), 1)
+            self.assertGreaterEqual(first_elapsed, 0.06)
+            self.assertEqual(sleeps.calls, [0.08])
 
-        self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
-        t1 = time.monotonic()
-        status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
-        second_elapsed = time.monotonic() - t1
-        self.assertEqual(status, 200)
-        self.assertEqual(len(body["commands"]), 1)
-        self.assertLess(second_elapsed, 0.06)
+            self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
+            status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
+            self.assertEqual(status, 200)
+            self.assertEqual(len(body["commands"]), 1)
+            # The second poll slept nothing. Counting the handler's sleeps and
+            # reading the delay it logs, not timing the poll, keeps a loaded
+            # runner from failing the test (7976).
+            self.assertEqual(sleeps.calls, [0.08])
+        polls = [line for line in logs if line.startswith("HIT GET /poll ")]
+        self.assertEqual(len(polls), 2, logs)
+        self.assertTrue(polls[0].endswith(" delay_ms=80"), polls[0])
+        self.assertTrue(polls[1].endswith(" delay_ms=0"), polls[1])
 
     def test_last_poll_and_version_hook(self) -> None:
         status, body = self.request("GET", "/poll", query={"peer": "client", "ver": "4~1.29.0"})

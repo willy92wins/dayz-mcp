@@ -3549,6 +3549,162 @@ class LeaseCloseBrokerStage2bTest(unittest.TestCase):
         self._accepted(self._settle("server", self._deliver_close("server")))
         self.assertEqual(self._owed(), {})
 
+    # --- F1 split (#331): only a fresh accredited parsed census of the
+    # bound instance/generation lacking the name grants close_not_supported.
+
+    def _set_census(self, peer, commands, *, instance=None, generation=None, announced_at=None):
+        self.state._peer_caps[peer] = {
+            "generation": self.state.daemon_generation if generation is None else generation,
+            "commands": commands,
+            "reason": "ok" if commands is not None else "absent",
+            "arg_contract_hash": None,
+            "announced_at": self.broker_clock.value if announced_at is None else announced_at,
+            "instance": self.instances[peer] if instance is None else instance,
+        }
+
+    def _poll_raw(self, peer, caps):
+        query = poll_census_query(peer)
+        status, body = self.state.record_poll(
+            peer, f"{EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=self.instances[peer], source_pid=self.pids[peer],
+            caps=caps, ach=query.get("ach"),
+        )
+        self.assertEqual(status, 200, body)
+        return body
+
+    def _poll_unattributed(self, peer):
+        query = poll_census_query(peer)
+        status, body = self.state.record_poll(
+            peer, f"{EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=self.instances[peer], source_pid=None,
+            caps=query["caps"], ach=query.get("ach"),
+        )
+        self.assertEqual(status, 200, body)
+        return body
+
+    def test_f1_absent_census_owes_at_hook(self) -> None:
+        lease, _ = self._work()
+        for peer in ("server", "client"):
+            self.state._peer_caps.pop(peer, None)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_attribution_lost_before_hook_owes(self) -> None:
+        lease, _ = self._work()
+        for peer in ("server", "client"):
+            self._poll_unattributed(peer)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_unparsed_census_owes_at_hook(self) -> None:
+        causes = {
+            "oversized": "a" * 5000,
+            "too_many": ",".join(f"n{i}" for i in range(65)),
+            "malformed": "not a name",
+            "duplicate": None,  # per-peer below
+        }
+        for cause, caps in causes.items():
+            with self.subTest(cause=cause):
+                self._build()
+                lease, _ = self._work()
+                for peer in ("server", "client"):
+                    raw = caps if caps is not None else f"{_CLOSE_NAMES[peer]},{_CLOSE_NAMES[peer]}"
+                    self._poll_raw(peer, raw)
+                self._release(self.a, lease)
+                self.assertEqual(self._queued("client"), [])
+                self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_other_instance_or_generation_owes_at_hook(self) -> None:
+        for variant in ("instance", "generation"):
+            with self.subTest(variant=variant):
+                self._build()
+                lease, _ = self._work()
+                for peer in ("server", "client"):
+                    names = tuple(n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer])
+                    if variant == "instance":
+                        self._set_census(peer, names, instance="other-instance")
+                    else:
+                        self._set_census(peer, names, generation="other-generation")
+                self._release(self.a, lease)
+                self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_stale_census_without_name_owes_at_hook(self) -> None:
+        lease, _ = self._work()
+        stale = self.broker_clock.value - loopback.PEER_STALE_S
+        for peer in ("server", "client"):
+            names = tuple(n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer])
+            self._set_census(peer, names, announced_at=stale)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+
+    def test_f1_stale_census_with_name_still_publishes(self) -> None:
+        lease, _ = self._work()
+        stale = self.broker_clock.value - loopback.PEER_STALE_S
+        for peer in ("server", "client"):
+            names = [n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer]]
+            names.append(_CLOSE_NAMES[peer])
+            self._set_census(peer, tuple(names), announced_at=stale)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+
+    def test_f1_peers_with_different_support(self) -> None:
+        # Server lacks the name (fresh bridge 12), client announces it.
+        lease, _ = self._work()
+        names = tuple(n for n in poll_census_query("server")["caps"].split(",") if n and n != "lease_close")
+        self._set_census("server", names)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), ["lease_close_client"])
+        self._accepted(self._settle("client", self._deliver_close("client")))
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {})
+
+    def test_f1_client_not_supported_server_published(self) -> None:
+        lease, _ = self._work()
+        names = tuple(n for n in poll_census_query("client")["caps"].split(",") if n and n != "lease_close_client")
+        self._set_census("client", names)
+        self._release(self.a, lease)
+        self.assertEqual(self._queued("client"), [])
+        self.assertEqual(self._queued("server"), ["lease_close"])
+        self._accepted(self._settle("server", self._deliver_close("server")))
+        self.assertEqual(self._owed(), {})
+
+    def test_f1_attribution_lost_during_server_deferral_owes(self) -> None:
+        self._ended_lease()
+        client_close = self._deliver_close("client")
+        self._poll_unattributed("server")
+        self._accepted(self._settle("client", client_close))
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {"server": ["close_support_unknown"]})
+
+    def test_f1_deferred_bridge12_still_clears(self) -> None:
+        self._ended_lease()
+        client_close = self._deliver_close("client")
+        names = tuple(n for n in poll_census_query("server")["caps"].split(",") if n and n != "lease_close")
+        self._set_census("server", names)
+        self._accepted(self._settle("client", client_close))
+        self.assertEqual(self._queued("server"), [])
+        self.assertEqual(self._owed(), {})
+
+    def test_f1_owed_row_from_earlier_lease_cleared_by_fresh_bridge12(self) -> None:
+        lease, _ = self._work()
+        for peer in ("server", "client"):
+            self.state._peer_caps.pop(peer, None)
+        self._release(self.a, lease)
+        self.assertEqual(self._owed(), {"client": ["close_support_unknown"], "server": ["close_support_unknown"]})
+        grant = self._acquire(self.b)
+        for peer in ("server", "client"):
+            names = tuple(n for n in poll_census_query(peer)["caps"].split(",") if n and n != _CLOSE_NAMES[peer])
+            self._set_census(peer, names)
+        self._release(self.b, grant)
+        self.assertEqual(self._owed(), {})
+        grant2 = self._acquire(self.b)
+        self.assertNotIn("lease_end_unconfirmed", grant2.get("cleanup_degraded", []))
+
     def test_k32_close_names_are_internal_only(self) -> None:
         lease = self._acquire(self.a)
         for peer, name in _CLOSE_NAMES.items():

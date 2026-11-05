@@ -6482,13 +6482,39 @@ class ServerState:
             return False, "version_blocked"
         census = self._peer_caps.get(peer, {})
         close_command = "lease_close_client" if peer == "client" else "lease_close"
+        # F1 split (#331, plan 2.16): only a fresh, parsed census of the
+        # bound instance and generation, from an accredited poll, can grant
+        # the bridge 12 exemption. Freshness reuses PEER_STALE_S, the same
+        # 15 s bound the other vigente census checks use
+        # (_capability_refusal_locked, _client_announce_refusal_locked);
+        # the plan fixes no other value, and a game polls ~0.2 s, so 15 s
+        # is several missed polls, not a race with a healthy peer. A census
+        # that is absent, unaccredited, unparsed (commands is None),
+        # foreign says nothing about support, and a stale one says
+        # nothing when it lacks the name: those keep the row OWED and
+        # clear nothing. A stale census that names the close still gets
+        # its close published, because that only creates debt.
+        commands = census.get("commands")
+        announced_at = census.get("announced_at")
+        fresh = (
+            isinstance(announced_at, (int, float))
+            and not isinstance(announced_at, bool)
+            and (self._now() - float(announced_at)) < PEER_STALE_S
+        )
         if (
-            census.get("instance") != instance
+            not isinstance(commands, (list, tuple))
+            or census.get("instance") != instance
             or census.get("generation") != self.daemon_generation
-            or close_command not in (census.get("commands") or [])
         ):
-            return False, "close_not_supported"
-        return True, ""
+            return False, "close_support_unknown"
+        if close_command in commands:
+            # A named close is published even on a stale census of the
+            # bound instance and generation: publishing creates debt the
+            # close outcome must settle, it clears nothing on trust.
+            return True, ""
+        if not fresh:
+            return False, "close_support_unknown"
+        return False, "close_not_supported"
 
     def _reserve_close_id_locked(self) -> int:
         close_id = self._next_id
