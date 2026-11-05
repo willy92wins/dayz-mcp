@@ -121,7 +121,16 @@ class Fb050eUntrustedHintTests(unittest.TestCase):
             "daemon_provenance_incomplete",
             "daemon_provenance_conflict",
         ):
-            with self.subTest(code=code):
+            with (
+                self.subTest(code=code),
+                # The real read calls CreateFileW and ReadFile on Windows;
+                # plain file I/O reads the same fixture key.
+                patch.object(
+                    control.daemon_credential.pinned_keyfile,
+                    "read_pinned_keyfile",
+                    new=lambda path: Path(path).read_text(encoding="utf-8").strip(),
+                ),
+            ):
                 client, temporary = _untrusted_client(
                     control, identity, host_config.HostConfigError(code)
                 )
