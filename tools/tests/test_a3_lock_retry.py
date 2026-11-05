@@ -1237,6 +1237,12 @@ class _FakeAsyncClock:
         self.now += seconds
 
 
+# A gap this long between a plain thread's ticks means the whole process
+# stood still; half the 0.2 s loop gate. _SAMPLES bounds the retakes.
+_PROCESS_STALL_S = 0.1
+_SAMPLES = 3
+
+
 class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
     """P2/FIX 9: the async registry open never sleeps on the loop."""
 
@@ -1376,63 +1382,114 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
                 pass
 
     async def _open_with_ticker(self, open_coro_factory):
+        """Time the loop while ``open_coro_factory()`` runs.
+
+        Returns the largest gap between loop ticks, the elapsed time, and the
+        largest gap between ticks of a plain thread. The thread does not use
+        the loop, so a gap there means the whole process stopped (a full GC
+        pass, a starved runner, another thread holding the GIL), not that the
+        code under test blocked the loop. Run 42038243067 failed with a
+        0.844 s loop gap in one step of the test task that only enters
+        patches, calls a fake that raises, and schedules asyncio.sleep.
+        """
         ticks: list[float] = []
+        thread_ticks: list[float] = []
+        done = threading.Event()
 
         async def ticker() -> None:
             while True:
                 ticks.append(time.monotonic())
                 await asyncio.sleep(0.01)
 
+        def thread_ticker() -> None:
+            while not done.is_set():
+                thread_ticks.append(time.monotonic())
+                done.wait(0.01)
+
+        watcher = threading.Thread(target=thread_ticker, daemon=True)
         started = time.monotonic()
+        watcher.start()
         task = asyncio.create_task(ticker())
         try:
             await open_coro_factory()
         finally:
             task.cancel()
+            done.set()
         ended = time.monotonic()
+        watcher.join(5.0)
         points = [started, *ticks, ended]
         max_gap = max(b - a for a, b in zip(points, points[1:]))
-        return max_gap, ended - started
+        thread_points = [started, *thread_ticks, ended]
+        process_stall = max(b - a for a, b in zip(thread_points, thread_points[1:]))
+        return max_gap, ended - started, process_stall
+
+    async def _clean_sample(self, make_open):
+        """Measure ``make_open()`` until one sample has no process-wide stall.
+
+        A sample taken while the whole process stood still says nothing about
+        the loop, so it is taken again, at most _SAMPLES times. The verdict on
+        the loop is the first clean sample's, with the same thresholds. Code
+        that blocks the loop with a GIL-releasing wait (time.sleep, a lock)
+        leaves the thread ticking, so its samples are clean and still fail.
+        If every sample overlaps a stall, the test fails: it never passes
+        without a clean measurement.
+        """
+        stalls: list[float] = []
+        for _ in range(_SAMPLES):
+            max_gap, elapsed, process_stall = await self._open_with_ticker(make_open())
+            if process_stall < _PROCESS_STALL_S:
+                return max_gap, elapsed
+            stalls.append(process_stall)
+        self.fail(
+            "every sample overlapped a process-wide stall "
+            f"({', '.join(f'{stall:.3f}s' for stall in stalls)}): no clean measurement"
+        )
 
     async def test_async_open_keeps_loop_responsive_while_busy(self) -> None:
         # P2: with the real asyncio.sleep, a registry busy for ~0.35 s
         # is retried without freezing the loop, final instant included.
-        fake_lock = _FakeLock()
-        opened = _FakeOpenedLauncher()
-        release_at = time.monotonic() + 0.35
-        calls: list = []
+        attempts: list[list] = []
 
-        def busy_until_release(**kwargs):
-            calls.append(kwargs)
-            if time.monotonic() < release_at:
-                raise RuntimeError("launcher_registry_busy")
-            return fake_lock
+        def make_open():
+            fake_lock = _FakeLock()
+            opened = _FakeOpenedLauncher()
+            release_at = time.monotonic() + 0.35
+            calls: list = []
+            attempts.append(calls)
 
-        async def open_it() -> None:
-            with (
-                mock.patch.object(
-                    registry_lock,
-                    "acquire_registry_lock",
-                    busy_until_release,
-                ),
-                mock.patch.object(
-                    launcher_registry,
-                    "_read_canonical_registry",
-                    return_value=[_entry()],
-                ),
-                mock.patch.object(
-                    launcher_registry,
-                    "_open_validated_entry",
-                    return_value=opened,
-                ),
-            ):
-                async with launcher_registry.open_approved_launcher_async(
-                    "dayz-test-v1"
-                ) as result:
-                    self.assertIs(result, opened)
+            def busy_until_release(**kwargs):
+                calls.append(kwargs)
+                if time.monotonic() < release_at:
+                    raise RuntimeError("launcher_registry_busy")
+                return fake_lock
 
-        max_gap, elapsed = await self._open_with_ticker(open_it)
-        self.assertGreaterEqual(len(calls), 2)
+            async def open_it() -> None:
+                with (
+                    mock.patch.object(
+                        registry_lock,
+                        "acquire_registry_lock",
+                        busy_until_release,
+                    ),
+                    mock.patch.object(
+                        launcher_registry,
+                        "_read_canonical_registry",
+                        return_value=[_entry()],
+                    ),
+                    mock.patch.object(
+                        launcher_registry,
+                        "_open_validated_entry",
+                        return_value=opened,
+                    ),
+                ):
+                    async with launcher_registry.open_approved_launcher_async(
+                        "dayz-test-v1"
+                    ) as result:
+                        self.assertIs(result, opened)
+
+            return open_it
+
+        max_gap, elapsed = await self._clean_sample(make_open)
+        self.assertGreaterEqual(len(attempts[-1]), 2)
         self.assertGreaterEqual(elapsed, 0.3)
         self.assertLess(
             max_gap, 0.2, f"max tick gap {max_gap:.3f}s: event loop stalled"
@@ -1440,24 +1497,46 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_blocking_open_would_stall_the_loop(self) -> None:
         # P2 negative control: the old blocking retry (time.sleep)
-        # freezes the loop for its whole wait and fails the same gate.
+        # freezes the loop for its whole wait and fails the same gate,
+        # in a sample the process-stall filter keeps as clean.
         def blocking_retry(**_kwargs):
             time.sleep(1.0)
             raise RuntimeError("launcher_registry_busy_timeout")
 
-        async def open_it() -> None:
-            with mock.patch.object(
-                registry_lock,
-                "acquire_registry_lock_with_retry",
-                blocking_retry,
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError, "launcher_registry_busy_timeout"
+        def make_open():
+            async def open_it() -> None:
+                with mock.patch.object(
+                    registry_lock,
+                    "acquire_registry_lock_with_retry",
+                    blocking_retry,
                 ):
-                    launcher_registry.open_approved_launcher("dayz-test-v1")
+                    with self.assertRaisesRegex(
+                        RuntimeError, "launcher_registry_busy_timeout"
+                    ):
+                        launcher_registry.open_approved_launcher("dayz-test-v1")
 
-        max_gap, _elapsed = await self._open_with_ticker(open_it)
+            return open_it
+
+        max_gap, _elapsed = await self._clean_sample(make_open)
         self.assertGreaterEqual(max_gap, 0.9)
+
+    async def test_process_wide_stall_is_not_charged_to_the_loop(self) -> None:
+        # Run 42038243067, forced: one C call holds the GIL while the loop is
+        # timed (sum over a range never releases it). The loop gap is the
+        # stall's, and the thread sees the same stall, so _clean_sample
+        # would take this sample again instead of blaming the loop.
+        def hold_gil() -> None:
+            sum(range(50_000_000))
+
+        async def open_it() -> None:
+            await asyncio.sleep(0.02)
+            holder = threading.Thread(target=hold_gil)
+            holder.start()
+            await asyncio.to_thread(holder.join)
+
+        max_gap, _elapsed, process_stall = await self._open_with_ticker(open_it)
+        self.assertGreaterEqual(max_gap, _PROCESS_STALL_S)
+        self.assertGreaterEqual(process_stall, _PROCESS_STALL_S)
 
 
 if __name__ == "__main__":
