@@ -376,6 +376,8 @@ class ExpansionCloseGateAllPeersTest(unittest.TestCase):
         self.assertTrue(
             state.coordination.peer_registered("xai-run", "server", INST_SERVER)
         )
+        self.assertEqual(self._spawn_attempt(state)[0], 200)
+        state._bound_queues[INST_SERVER].clear()
         state.coordination.note_processes_gone("xai-run", None)
         status, body = self._spawn_attempt(state)
         self.assertEqual(
@@ -404,6 +406,20 @@ class ExpansionCloseGateAllPeersTest(unittest.TestCase):
             "announced_at": state._now(),
             "instance": instance,
         }
+
+    def test_h1_peer_registered_distinguishes_the_instance(self) -> None:
+        # A-r5-H4. Mutant killed: peer_registered ignoring the instance
+        # (N3: key-only lookup in the peer registry).
+        from dayz_mcp.session_coordination import SessionCoordinator
+
+        coordinator = SessionCoordinator()
+        coordinator.note_peer_bound("xai-run", "client", INST_CLIENT)
+        self.assertTrue(
+            coordinator.peer_registered("xai-run", "client", INST_CLIENT)
+        )
+        self.assertFalse(
+            coordinator.peer_registered("xai-run", "client", INST_SERVER)
+        )
 
     def test_h10_offline_binding_needs_both_closes(self) -> None:
         # Mutant killed: an offline binding treated as server-only.
@@ -885,14 +901,37 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertNotIn("discarded", body)
         self.assertEqual(self._photo().get("unconfirmed", []), [])
-        # The photo taken before the clean does not change, and the next
-        # grant does not carry the reason.
-        self.assertTrue(before.get("unconfirmed"))
+        # The next grant does not carry the reason.
         status, grant = self.coordinator.acquire(self.b, "trace")
         self.assertEqual(status, 200, grant)
         self.assertNotIn(
             "lease_end_unconfirmed", grant.get("cleanup_degraded", [])
         )
+
+    def test_o11_residue_then_clean_close_clears_adapter_debt(self) -> None:
+        # Plan O11 POS: after O10's residue, the references disappear and a
+        # valid clean close clears the adapter debt; outstanding reaches
+        # zero, the next grant does not carry the reason, and the earlier
+        # degraded grant keeps its photo.
+        import copy
+
+        self._residue_owed()
+        status, grant_b = self.coordinator.acquire(self.b, "trace")
+        self.assertEqual(status, 200, grant_b)
+        self.assertIn("lease_end_unconfirmed", grant_b.get("cleanup_degraded", []))
+        frozen = copy.deepcopy(grant_b)
+        self._release(self.b, grant_b)
+        self.assertEqual(self._settle("client", self._deliver_close("client"))[0], 200)
+        status, body = self._settle("server", self._deliver_close("server"))
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("discarded", body)
+        photo = self.coordinator.status(self.c).get("lease_end", {})
+        self.assertEqual(photo.get("unconfirmed", []), [])
+        self.assertEqual(photo.get("outstanding", 0), 0)
+        status, grant_c = self.coordinator.acquire(self.c, "trace")
+        self.assertEqual(status, 200, grant_c)
+        self.assertNotIn("lease_end_unconfirmed", grant_c.get("cleanup_degraded", []))
+        self.assertEqual(grant_b, frozen)
 
     def _late_negative(self, **field) -> None:
         # Each negative gets its own lost close, because the first
@@ -964,10 +1003,13 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
         # the coordinator status, not on the earlier grant).
         self.coordinator.note_processes_gone("other-run", None)
         self.assertTrue(self.coordinator.status(self.b)["lease_end"]["unconfirmed"])
-        # Retiring the client binding without an accredited exit does
-        # not settle the server row either.
-        self.state.retire_role("xai-close-run", "client", "test")
-        self.assertTrue(self._photo().get("unconfirmed"))
+        # Retiring the server binding (the peer that owes) without an
+        # accredited exit does not settle its row either.
+        self.state.retire_role("xai-close-run", "server", "test")
+        self.assertEqual(
+            [(r["peer"], r["reasons"]) for r in self._photo()["unconfirmed"]],
+            [("server", ["ai_group_release_unconfirmed"])],
+        )
         # Seeding restart debt neither settles nor replaces the row.
         self.coordinator.seed_restart_debt([("xai-close-run", "server")])
         rows = self._photo()["unconfirmed"]
