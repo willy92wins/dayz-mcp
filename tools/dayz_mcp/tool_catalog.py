@@ -202,7 +202,7 @@ ADMIN_TOOL_DESCRIPTIONS: dict[str, str] = {
     "wait_for": "Wait until a condition is met.",
     "surface_query": "Read terrain height at a position.",
     "entities_query": "List entities near a position.",
-    "notify_players": "Send a notification to a player.",
+    "notify_players": "Send a notification to the player with this uid, or to every player with uid all.",
     "player_teleport": "Teleport a player to a position.",
     "player_heal": "Heal a player.",
     "player_godmode": "Switch a player godmode on or off.",
