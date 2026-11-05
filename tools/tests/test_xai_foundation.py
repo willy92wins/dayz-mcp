@@ -36,6 +36,7 @@ from tests.enforce_subset_helpers import (
     translate,
 )
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
+from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands
 
 SPAWN = "ai_group_spawn"
 RELEASE = "ai_group_release"
@@ -50,23 +51,10 @@ SPAWN_WIRE = {
     "waypoints": [],
     "spawn_token": TOKEN,
 }
-GOOD_XAI = EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 ADAPTER_ROOT = addon_root().parent / "addon_expansion_ai"
 ADAPTER = ADAPTER_ROOT / "scripts" / "5_Mission" / "MCPExpansionAI.c"
-
-
-def _base_commands() -> list[str]:
-    caps = re.search(
-        r'SERVER_CAPABILITIES = ((?:"[^"]*"\s*\+?\s*)+);',
-        BRIDGE.read_text(encoding="utf-8"),
-    )
-    assert caps is not None
-    names: list[str] = []
-    for chunk in re.findall(r'"([^"]*)"', caps.group(1)):
-        names.extend(name for name in chunk.split(",") if name)
-    return names
 
 
 def _bound_state() -> loopback.ServerState:
@@ -412,17 +400,6 @@ class ExpansionO13InertTest(unittest.TestCase):
 
 
 # --- E6/E9: translated Enforce bodies -------------------------------------
-
-class _WireString(EnforceString):
-    """EnforceString with the concatenation Enforce gives string."""
-
-    __slots__ = ()
-
-    def __add__(self, other: object) -> "_WireString":
-        if isinstance(other, EnforceString):
-            return _WireString(self.data + other.data)
-        return NotImplemented
-
 
 class _FakeMember:
     def __init__(self) -> None:

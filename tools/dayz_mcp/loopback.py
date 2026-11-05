@@ -1459,15 +1459,16 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "survivor_drive",
     "survivor_drive_release",
     "ai_group_release",
+    "ai_group_spawn",
 })
 # Expansion AI adapter verbs (plan 2.2): the specific refusal replaces the
 # generic missing-verb one for these, after the common census and ach guards.
-_EXPANSION_ADMISSION_COMMANDS = frozenset({"ai_group_release"})
+_EXPANSION_ADMISSION_COMMANDS = frozenset({"ai_group_release", "ai_group_spawn"})
 # New adapter mutations are gated on real lease-close support (plan 5.1):
 # while no peer announces lease_close they stay inert. Internal releases
 # keep their own destination authority and are not new mutations. Each
 # adapter PR adds its mutation verb here when it ships its dispatch.
-_EXPANSION_NEW_MUTATION_COMMANDS = frozenset()
+_EXPANSION_NEW_MUTATION_COMMANDS = frozenset({"ai_group_spawn"})
 _XAI_HASH = re.compile(r"\A[0-9a-f]{16}\Z")
 # Client verbs an older PBO must not be handed, each with the error it is
 # refused with. Checked on the census of the client bound to the run (no

@@ -19,6 +19,7 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | 296-servermod: pruebas públicas y preflight | `tools/tests/test_server_only_mods.py`; regresiones en `test_dayz_test_request.py`, `test_dayz_test_tool.py`, `test_dayz_test_worker.py`, `test_dayz_test_storage.py`, `test_request_path_authority.py` bajo `tools/tests/` |
 | B1-P2: préstamo de profile, transición recuperable y reconciliación de endpoint | `tools/dayz_mcp/loopback.py` |
 | B1-P2: regresiones de salida abrupta sin finally y prior presente/ausente | `tools/tests/test_b1p2_profile_not_persisted.py` |
+| Expansion AI adapter (optional PBO) | `addon_expansion_ai/` (`$PBOPREFIX$`, `config.cpp`, `scripts/5_Mission/MCPExpansionAI.c`); guide `docs/expansion-ai-adapter.md` |
 | Plans | `plans` |
 | Reviews | `reviews` |
 | Decisions | `decisions` (ausente en este checkout) |
@@ -95,7 +96,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 154 KB, touched 2026-11-01 (UTC)
+- `CHANGELOG.md` - 156 KB, touched 2026-11-01 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-01 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-03 (UTC)

@@ -41,6 +41,8 @@ class MCPAIGroup
 	string behaviour;
 	string behaviour_expansion;
 	string field;
+	int living;
+	int limit;
 	ref array<string> allowed;
 	ref MCPAIArgsRead args_read;
 	string release;
@@ -61,6 +63,8 @@ class MCPAIGroupMemberRecord
 {
 	int object_id;
 	eAIBase member;
+	string type;
+	bool loadout_applied;
 	int speed_normal;
 	int speed_threat;
 	ref array<float> last_pos;
@@ -85,10 +89,12 @@ class MCPAIGroupRecord
 	string scene_id;
 	string behaviour;
 	string group_state;
+	ref array<float> waypoints;
 	ref array<ref MCPAIGroupMemberRecord> members;
 
 	void MCPAIGroupRecord()
 	{
+		waypoints = new array<float>();
 		members = new array<ref MCPAIGroupMemberRecord>();
 	}
 };
@@ -125,7 +131,7 @@ modded class MCPBridge
 
 	protected override string ServerCapabilities()
 	{
-		return super.ServerCapabilities() + ",ai_group_release";
+		return super.ServerCapabilities() + ",ai_group_release,ai_group_spawn";
 	}
 
 	protected override string ExtensionPollParams()
@@ -138,6 +144,12 @@ modded class MCPBridge
 		if (command.cmd == "ai_group_release")
 		{
 			DispatchAIGroupRelease(command, result);
+			return 1;
+		}
+
+		if (command.cmd == "ai_group_spawn")
+		{
+			DispatchAIGroupSpawn(command, result);
 			return 1;
 		}
 
@@ -333,6 +345,688 @@ modded class MCPBridge
 
 			index = index + 1;
 		}
+	}
+
+	protected bool AIIsSpawnToken(string value)
+	{
+		int index = 0;
+		int code = 0;
+		string character;
+		bool allowed = true;
+
+		if (value.Length() != 32)
+		{
+			return false;
+		}
+
+		while (index < 32 && allowed)
+		{
+			character = value.Substring(index, 1);
+			code = character.ToAscii();
+			allowed = false;
+			if (code >= 48 && code <= 57)
+			{
+				allowed = true;
+			}
+			else if (code >= 97 && code <= 102)
+			{
+				allowed = true;
+			}
+
+			index = index + 1;
+		}
+
+		return allowed;
+	}
+
+	protected string AINormalizeLoadout(string name)
+	{
+		int nameLength = name.Length();
+
+		if (nameLength > 5 && name.Substring(nameLength - 5, 5) == ".json")
+		{
+			return name.Substring(0, nameLength - 5);
+		}
+
+		return name;
+	}
+
+	protected bool AIIsBehaviour(string value)
+	{
+		if (value == "HOLD")
+		{
+			return true;
+		}
+
+		if (value == "ONCE")
+		{
+			return true;
+		}
+
+		if (value == "LOOP")
+		{
+			return true;
+		}
+
+		if (value == "ROAM")
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	protected bool AIFactionRegistered(typename factionType)
+	{
+		int index = 0;
+		int total = 0;
+
+		if (!factionType)
+		{
+			return false;
+		}
+
+		total = eAIRegisterFaction.s_FactionTypes.Count();
+		while (index < total)
+		{
+			if (eAIRegisterFaction.s_FactionTypes.GetElement(index) == factionType)
+			{
+				return true;
+			}
+
+			index = index + 1;
+		}
+
+		return false;
+	}
+
+	protected void AIFillFactionAllowed(MCPAIGroup report)
+	{
+		int index = 0;
+		int total = eAIRegisterFaction.s_FactionTypes.Count();
+		typename factionType;
+		string typeName;
+
+		while (index < total)
+		{
+			factionType = eAIRegisterFaction.s_FactionTypes.GetElement(index);
+			typeName = factionType.ToString();
+			report.allowed.Insert(typeName.Substring(10, typeName.Length() - 10));
+			index = index + 1;
+		}
+	}
+
+	protected void AIFillFormationAllowed(MCPAIGroup report)
+	{
+		int index = 0;
+		int total = eAIFormation.s_FormationTypes.Count();
+		typename formationType;
+		string typeName;
+
+		while (index < total)
+		{
+			formationType = eAIFormation.s_FormationTypes.Get(index);
+			typeName = formationType.ToString();
+			report.allowed.Insert(typeName.Substring(12, typeName.Length() - 12));
+			index = index + 1;
+		}
+	}
+
+	protected int AICountLivingMembers()
+	{
+		int groupIndex = 0;
+		int memberIndex = 0;
+		int living = 0;
+		MCPAIGroupRecord record;
+		MCPAIGroupMemberRecord memberRecord;
+
+		EnsureAIRegistry();
+		while (groupIndex < m_AIGroups.Count())
+		{
+			record = m_AIGroups.Get(groupIndex);
+			memberIndex = 0;
+			while (memberIndex < record.members.Count())
+			{
+				memberRecord = record.members.Get(memberIndex);
+				if (memberRecord.member && memberRecord.member.IsAlive())
+				{
+					living = living + 1;
+				}
+
+				memberIndex = memberIndex + 1;
+			}
+
+			groupIndex = groupIndex + 1;
+		}
+
+		return living;
+	}
+
+	protected void AIGroupApplyBehaviour(MCPAIGroupRecord record)
+	{
+		int index = 0;
+		int memberIndex = 0;
+		MCPAIGroupMemberRecord memberRecord;
+		vector waypoint;
+
+		record.group.ClearWaypoints();
+		record.group.m_BackTracking = false;
+		while (index + 2 < record.waypoints.Count())
+		{
+			waypoint = Vector(record.waypoints.Get(index), record.waypoints.Get(index + 1), record.waypoints.Get(index + 2));
+			record.group.AddWaypoint(waypoint);
+			if (index == 0)
+			{
+				record.group.SetCurrentWaypoint(waypoint);
+			}
+
+			index = index + 3;
+		}
+
+		if (record.behaviour == "HOLD")
+		{
+			record.group.SetFormationState(eAIGroupFormationState.NONE);
+			record.group.SetWaypointBehaviour(eAIWaypointBehavior.HALT);
+		}
+		else
+		{
+			record.group.SetFormationState(eAIGroupFormationState.IN);
+			if (record.behaviour == "ONCE")
+			{
+				record.group.SetWaypointBehaviour(eAIWaypointBehavior.ONCE);
+			}
+			else if (record.behaviour == "LOOP")
+			{
+				record.group.SetWaypointBehaviour(eAIWaypointBehavior.LOOP);
+			}
+			else
+			{
+				record.group.SetWaypointBehaviour(eAIWaypointBehavior.ROAMING);
+			}
+		}
+
+		while (memberIndex < record.members.Count())
+		{
+			memberRecord = record.members.Get(memberIndex);
+			if (memberRecord.member)
+			{
+				if (record.behaviour == "HOLD")
+				{
+					memberRecord.member.SetMovementSpeedLimits(eAIMovementSpeed.STATIC, memberRecord.speed_threat);
+				}
+				else
+				{
+					memberRecord.member.SetMovementSpeedLimits(memberRecord.speed_normal, memberRecord.speed_threat);
+				}
+			}
+
+			memberIndex = memberIndex + 1;
+		}
+	}
+
+	protected void AIFillGroupReport(MCPAIGroupRecord record, MCPAIGroup report)
+	{
+		int index = 0;
+		int attachIndex = 0;
+		int attachCount = 0;
+		MCPAIGroupMemberRecord memberRecord;
+		MCPAIGroupMember memberReport;
+		GameInventory inventory;
+		EntityAI attachment;
+		vector memberPos;
+		eAIWaypointBehavior waypointBehaviour;
+
+		report.created = true;
+		report.group_id = record.group_id;
+		if (record.group)
+		{
+			if (record.group.GetFaction())
+			{
+				report.faction = record.group.GetFaction().GetName();
+			}
+
+			if (record.group.GetFormation())
+			{
+				report.formation = record.group.GetFormation().GetName();
+			}
+
+			waypointBehaviour = record.group.GetWaypointBehaviour();
+			if (waypointBehaviour == eAIWaypointBehavior.HALT)
+			{
+				report.behaviour = "HOLD";
+				report.behaviour_expansion = "HALT";
+			}
+			else if (waypointBehaviour == eAIWaypointBehavior.ONCE)
+			{
+				report.behaviour = "ONCE";
+				report.behaviour_expansion = "ONCE";
+			}
+			else if (waypointBehaviour == eAIWaypointBehavior.LOOP)
+			{
+				report.behaviour = "LOOP";
+				report.behaviour_expansion = "LOOP";
+			}
+			else
+			{
+				report.behaviour = "ROAM";
+				report.behaviour_expansion = "ROAMING";
+			}
+		}
+
+		while (index < record.members.Count())
+		{
+			memberRecord = record.members.Get(index);
+			memberReport = new MCPAIGroupMember();
+			memberReport.object_id = memberRecord.object_id;
+			memberReport.loadout_applied = memberRecord.loadout_applied;
+			if (memberRecord.member)
+			{
+				memberReport.type = memberRecord.member.GetType();
+				memberPos = memberRecord.member.GetPosition();
+				memberReport.pos.Insert(memberPos[0]);
+				memberReport.pos.Insert(memberPos[1]);
+				memberReport.pos.Insert(memberPos[2]);
+				memberReport.alive = memberRecord.member.IsAlive();
+				inventory = memberRecord.member.GetInventory();
+				if (inventory)
+				{
+					attachCount = inventory.AttachmentCount();
+					if (attachCount > 16)
+					{
+						attachCount = 16;
+					}
+
+					attachIndex = 0;
+					while (attachIndex < attachCount)
+					{
+						attachment = inventory.GetAttachmentFromIndex(attachIndex);
+						if (attachment)
+						{
+							memberReport.inventory.Insert(attachment.GetType());
+						}
+
+						attachIndex = attachIndex + 1;
+					}
+				}
+			}
+			else
+			{
+				memberReport.type = memberRecord.type;
+				memberReport.alive = false;
+				if (memberRecord.last_pos.Count() == 3)
+				{
+					memberReport.pos.Insert(memberRecord.last_pos.Get(0));
+					memberReport.pos.Insert(memberRecord.last_pos.Get(1));
+					memberReport.pos.Insert(memberRecord.last_pos.Get(2));
+				}
+			}
+
+			report.members.Insert(memberReport);
+			index = index + 1;
+		}
+	}
+
+	protected void AISpawnRefuse(MCPResult result, MCPAIGroup report, string errorName, string fieldName)
+	{
+		report.created = false;
+		report.field = fieldName;
+		result.ai_group = report;
+		result.ok = false;
+		result.error = errorName;
+	}
+
+	protected void DispatchAIGroupSpawn(MCPCommand command, MCPResult result)
+	{
+		MCPAIGroup report = new MCPAIGroup();
+		MCPAIArgsRead argsRead = new MCPAIArgsRead();
+		MCPArgs args = command.args;
+		MCPAIGroupRecord existing;
+		MCPAIGroupRecord record;
+		MCPAIGroupMemberRecord memberRecord;
+		eAIFaction factionInstance;
+		eAIGroup group;
+		eAIBase member;
+		Object spawnedObject;
+		typename factionType;
+		typename formationType;
+		string loadoutName;
+		string sceneRefusal;
+		string memberType;
+		vector basePos;
+		vector wantedPos;
+		vector placementPos;
+		float ringX = 1.0;
+		float ringZ = 0.0;
+		int index = 0;
+		int living = 0;
+		bool waypointsOk = true;
+		bool failed = false;
+
+		report.args_read = argsRead;
+		result.ai_group = report;
+		if (!args)
+		{
+			AISpawnRefuse(result, report, "bad_args", "");
+			return;
+		}
+
+		argsRead.faction = args.faction;
+		argsRead.count = args.count;
+		if (args.waypoints)
+		{
+			index = 0;
+			while (index < args.waypoints.Count())
+			{
+				argsRead.waypoints.Insert(args.waypoints.Get(index));
+				index = index + 1;
+			}
+		}
+
+		// 1. A repeated delivery of the same command creates nothing.
+		existing = FindAIGroupByToken(args.spawn_token);
+		if (existing)
+		{
+			if (existing.group_state == "releasing")
+			{
+				report.created = true;
+				result.ok = false;
+				result.error = "spawn_failed";
+				return;
+			}
+
+			AIFillGroupReport(existing, report);
+			result.ok = true;
+			return;
+		}
+
+		// 2. Shapes, before anything is created.
+		if (!AIIsSpawnToken(args.spawn_token))
+		{
+			AISpawnRefuse(result, report, "bad_args", "spawn_token");
+			return;
+		}
+
+		if (args.count < 1 || args.count > AI_GROUP_COUNT_MAX)
+		{
+			AISpawnRefuse(result, report, "bad_args", "count");
+			return;
+		}
+
+		if (!AIIsBehaviour(args.behaviour))
+		{
+			AISpawnRefuse(result, report, "bad_args", "behaviour");
+			return;
+		}
+
+		if (!args.pos || args.pos.Count() != 3)
+		{
+			AISpawnRefuse(result, report, "bad_args", "pos");
+			return;
+		}
+
+		if (!IsFiniteFloat(args.pos.Get(0)) || !IsFiniteFloat(args.pos.Get(1)) || !IsFiniteFloat(args.pos.Get(2)))
+		{
+			AISpawnRefuse(result, report, "bad_args", "pos");
+			return;
+		}
+
+		if (!args.waypoints || args.waypoints.Count() > AI_WAYPOINTS_MAX * 3)
+		{
+			AISpawnRefuse(result, report, "bad_args", "waypoints");
+			return;
+		}
+
+		index = 0;
+		while (index < args.waypoints.Count() && waypointsOk)
+		{
+			if (index + 2 >= args.waypoints.Count())
+			{
+				waypointsOk = false;
+			}
+			else if (!IsFiniteFloat(args.waypoints.Get(index)) || !IsFiniteFloat(args.waypoints.Get(index + 1)) || !IsFiniteFloat(args.waypoints.Get(index + 2)))
+			{
+				waypointsOk = false;
+			}
+
+			index = index + 3;
+		}
+
+		if (!waypointsOk)
+		{
+			AISpawnRefuse(result, report, "bad_args", "waypoints");
+			return;
+		}
+
+		// 3. The faction must be registered; never a default fallback.
+		factionType = eAIFaction.GetType(args.faction);
+		if (!AIFactionRegistered(factionType))
+		{
+			AIFillFactionAllowed(report);
+			AISpawnRefuse(result, report, "bad_args", "faction");
+			return;
+		}
+
+		factionInstance = eAIFaction.Create(args.faction);
+		if (!factionInstance)
+		{
+			AISpawnRefuse(result, report, "spawn_failed", "");
+			return;
+		}
+
+		// 4. The formation must be known; Create would fall back to Vee.
+		if (args.formation == "")
+		{
+			AIFillFormationAllowed(report);
+			AISpawnRefuse(result, report, "bad_args", "formation");
+			return;
+		}
+
+		formationType = eAIFormation.GetType(args.formation);
+		if (!formationType)
+		{
+			AIFillFormationAllowed(report);
+			AISpawnRefuse(result, report, "bad_args", "formation");
+			return;
+		}
+
+		// 5. One normalized loadout name for both checks and Apply.
+		loadoutName = AINormalizeLoadout(args.loadout);
+		if (loadoutName == "")
+		{
+			loadoutName = AINormalizeLoadout(factionInstance.GetDefaultLoadout());
+		}
+
+		if (!FileExist("$profile:ExpansionMod/Loadouts/" + loadoutName + ".json"))
+		{
+			AISpawnRefuse(result, report, "bad_args", "loadout");
+			return;
+		}
+
+		if (!ExpansionPrefab.Load(loadoutName, true))
+		{
+			AISpawnRefuse(result, report, "bad_args", "loadout");
+			return;
+		}
+
+		// 6. The scene cap counts only the members, before creating.
+		sceneRefusal = SceneSpawnRefusal(args, args.count);
+		if (sceneRefusal == "bad_args")
+		{
+			AISpawnRefuse(result, report, "bad_args", "scene_id");
+			return;
+		}
+
+		if (sceneRefusal != "")
+		{
+			AISpawnRefuse(result, report, sceneRefusal, "");
+			return;
+		}
+
+		// 7. The live total across every registered group, releasing included.
+		living = AICountLivingMembers();
+		if (living + args.count > AI_TOTAL_MAX)
+		{
+			report.living = living;
+			report.limit = AI_TOTAL_MAX;
+			AISpawnRefuse(result, report, "ai_limit_reached", "");
+			return;
+		}
+
+		// 8. Create the group and its members.
+		group = eAIGroup.CreateGroup(factionInstance);
+		if (!group)
+		{
+			AISpawnRefuse(result, report, "spawn_failed", "");
+			return;
+		}
+
+		group.m_Persist = false;
+		record = new MCPAIGroupRecord();
+		record.spawn_token = args.spawn_token;
+		record.group = group;
+		record.expansion_id = group.GetID();
+		record.scene_id = args.scene_id;
+		record.behaviour = args.behaviour;
+		record.group_state = "active";
+		index = 0;
+		while (index < args.waypoints.Count())
+		{
+			record.waypoints.Insert(args.waypoints.Get(index));
+			index = index + 1;
+		}
+
+		basePos = Vector(args.pos.Get(0), args.pos.Get(1), args.pos.Get(2));
+		index = 0;
+		while (index < args.count && !failed)
+		{
+			// Fixed 8-point ring: no division, the translator rejects it.
+			ringX = 1.0;
+			ringZ = 0.0;
+			if (index == 1)
+			{
+				ringX = 0.7071;
+				ringZ = 0.7071;
+			}
+			else if (index == 2)
+			{
+				ringX = 0.0;
+				ringZ = 1.0;
+			}
+			else if (index == 3)
+			{
+				ringX = -0.7071;
+				ringZ = 0.7071;
+			}
+			else if (index == 4)
+			{
+				ringX = -1.0;
+				ringZ = 0.0;
+			}
+			else if (index == 5)
+			{
+				ringX = -0.7071;
+				ringZ = -0.7071;
+			}
+			else if (index == 6)
+			{
+				ringX = 0.0;
+				ringZ = -1.0;
+			}
+			else if (index == 7)
+			{
+				ringX = 0.7071;
+				ringZ = -0.7071;
+			}
+
+			wantedPos = Vector(basePos[0] + ringX * AI_MEMBER_RING_M, basePos[1], basePos[2] + ringZ * AI_MEMBER_RING_M);
+			placementPos = ExpansionAISpawnBase.GetPlacementPosition(wantedPos);
+			memberType = eAISurvivor.GetQuasiRandom();
+			spawnedObject = GetGame().CreateObject(memberType, placementPos);
+			member = null;
+			if (spawnedObject)
+			{
+				member = eAIBase.Cast(spawnedObject);
+			}
+
+			if (!member)
+			{
+				if (spawnedObject)
+				{
+					GetGame().ObjectDelete(spawnedObject);
+				}
+
+				failed = true;
+			}
+			else
+			{
+				memberRecord = new MCPAIGroupMemberRecord();
+				memberRecord.member = member;
+				memberRecord.type = member.GetType();
+				memberRecord.loadout_applied = ExpansionHumanLoadout.Apply(member, loadoutName, true);
+				member.SetGroup(group);
+				member.eAI_SetLootingBehavior(eAILootingBehavior.NONE);
+				memberRecord.speed_normal = member.GetMovementSpeedLimit();
+				memberRecord.speed_threat = member.GetMovementSpeedLimitUnderThreat();
+				memberRecord.last_pos.Insert(member.GetPosition()[0]);
+				memberRecord.last_pos.Insert(member.GetPosition()[1]);
+				memberRecord.last_pos.Insert(member.GetPosition()[2]);
+				memberRecord.last_health = member.GetHealth01();
+				memberRecord.last_alive = member.IsAlive();
+				record.members.Insert(memberRecord);
+			}
+
+			index = index + 1;
+		}
+
+		if (failed)
+		{
+			index = 0;
+			while (index < record.members.Count())
+			{
+				memberRecord = record.members.Get(index);
+				if (memberRecord.member)
+				{
+					memberRecord.member.eAI_Despawn();
+				}
+
+				index = index + 1;
+			}
+
+			group.Delete();
+			record.group_state = "releasing";
+			EnsureAIRegistry();
+			m_AIGroups.Insert(record);
+			report.created = true;
+			result.ok = false;
+			result.error = "spawn_failed";
+			return;
+		}
+
+		group.SetFormation(eAIFormation.Create(args.formation));
+		AIGroupApplyBehaviour(record);
+
+		// 9. Register: group id first, then the members in creation order.
+		EnsureAIRegistry();
+		m_AIGroups.Insert(record);
+		record.group_id = m_NextBatchObjectId;
+		m_NextBatchObjectId = m_NextBatchObjectId + 1;
+		index = 0;
+		while (index < record.members.Count())
+		{
+			memberRecord = record.members.Get(index);
+			memberRecord.object_id = m_NextBatchObjectId;
+			m_NextBatchObjectId = m_NextBatchObjectId + 1;
+			m_RuntimeObjects.Insert(memberRecord.object_id, memberRecord.member);
+			if (args.scene_id != "")
+			{
+				AddSceneEntry(args.scene_id, memberRecord.object_id, memberRecord.member);
+			}
+
+			index = index + 1;
+		}
+
+		AIFillGroupReport(record, report);
+		result.ok = true;
 	}
 
 	protected void DispatchAIGroupRelease(MCPCommand command, MCPResult result)
