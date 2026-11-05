@@ -125,6 +125,14 @@ class MCPBotControl
 	static void OnObjectGone(MCPBridge bridge, int objectId)
 	{
 		Release(bridge, objectId, "deleted");
+		if (s_Initialized)
+		{
+			int goneIndex = s_Initialized.Find(objectId);
+			if (goneIndex >= 0)
+			{
+				s_Initialized.Remove(goneIndex);
+			}
+		}
 	}
 
 	// Lease close (plan S1, §2.7 step 1): read the real FSM state of a bot
@@ -138,39 +146,41 @@ class MCPBotControl
 		}
 
 		Object botTarget = bridge.RuntimeObjectById(objectId);
-		PlayerBase botPlayer = PlayerBase.Cast(botTarget);
-		if (!botPlayer)
-		{
-			return "unreadable";
-		}
-
-		string stateName = "";
-#ifdef DAYZ_1_30
-#ifdef ROBOCLIENT
-#ifdef INPUT_OVERRIDE
-		if (botPlayer.m_Bot && botPlayer.m_Bot.GetFSM())
-		{
-			// FSM state read as the repo's Expansion adapter plan cites it
-			// for its FSM (GetFSM / GetState / GetName, each nullable).
-			if (botPlayer.m_Bot.GetFSM().GetState())
-			{
-				stateName = botPlayer.m_Bot.GetFSM().GetState().GetName();
-			}
-		}
-#endif
-#endif
-#endif
-		if (stateName == "")
-		{
-			return "unreadable";
-		}
-
-		if (stateName.IndexOf("Idle") >= 0)
+		if (!botTarget)
 		{
 			return "idle";
 		}
 
-		return "busy";
+		PlayerBase botPlayer = PlayerBase.Cast(botTarget);
+		if (!botPlayer)
+		{
+			return "idle";
+		}
+
+		int fsmState = -1;
+#ifdef DAYZ_1_30
+#ifdef ROBOCLIENT
+#ifdef INPUT_OVERRIDE
+		if (!botPlayer.m_Bot)
+		{
+			return "idle";
+		}
+
+		fsmState = botPlayer.m_Bot.MCP_LeaseCloseState();
+#endif
+#endif
+#endif
+		if (fsmState == 1)
+		{
+			return "idle";
+		}
+
+		if (fsmState == 0)
+		{
+			return "busy";
+		}
+
+		return "unreadable";
 	}
 
 	// Busy while any started bot is running, busy after its stop, or in a
