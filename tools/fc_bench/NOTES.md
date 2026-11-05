@@ -1,4 +1,4 @@
-# fc_bench specification — bench 3.0.0
+# fc_bench specification — bench 3.1.0
 
 Reusable model comparison through an OpenAI-compatible `/chat/completions`
 endpoint. Python stdlib only. All tool calls execute against a fresh scripted
@@ -12,15 +12,23 @@ a catalog snapshot. For every scenario and zero-based repeat, reset world
 and lease, send the same prompt, execute the model's calls and feed results
 back until termination or `--max-turns`. Catalogs accept an array or an
 object with a `tools` array; entries have `name`, `description`, `inputSchema`,
-as in a saved `list_tools` dump. `catalog_admin.json` is a compact 22-tool
-stand-in, not a current production catalog. Freeze snapshots for comparisons.
+as in a saved `list_tools` dump. `catalog_admin.json` is the catalog
+`--tool-pack admin` lists (23 tools), written by `export_admin_catalog.py`;
+`tests/test_fc_bench_catalog.py` fails when it no longer matches the code.
+`catalog_standin.json` is the old 22-tool stand-in, kept as the fixture of
+the offline tests. Freeze snapshots for comparisons.
 
 Evaluated call types: reads (`query_all_players`, `server_perf`,
 `entities_query`, `logs_since`), player/world writes (`notify_players`,
 `player_teleport`, `player_heal`, `world_time_set`, `world_weather_set`),
-session acquisition/release, unsupported capabilities (kick/ban), and an
-unresolvable player name. The simulator also implements rereads, kill and
-godmode so undone and unrelated changes can be detected.
+session acquisition/release, unsupported capabilities (kick/ban), and a
+player named without a uid (S11). The simulator also implements rereads,
+kill and godmode so undone and unrelated changes can be detected. It also
+answers the admin tools the stand-in lacked: `player_find` (trimmed,
+case-insensitive exact name, as the server matches), `surface_query`
+(ground y 11.8, where a y=0 teleport lands), `session_heartbeat` (the fake
+token only) and `restore_gameplay` (needs the fake lease; not counted as a
+mutation).
 
 Names outside the union of loaded catalogs return `unknown_tool` and count
 as hallucinations. Bad argument JSON or catalog-schema violations return
@@ -31,6 +39,13 @@ It is not a complete JSON Schema implementation. Mutations need the fake
 lease. `--catalog-after-lease` changes the advertised catalog while holding a
 lease; hidden tools remain callable and the after-lease argument schema wins.
 Both snapshots are fingerprinted separately.
+
+When a loaded schema lists `uid` as required (the admin catalog does for
+`notify_players`, `player_teleport`, `player_heal` and `player_godmode`),
+an empty or blank uid answers `uid_required` before the lease check and
+changes nothing, and `notify_players` with `uid` `all` reaches every
+player, as `--tool-pack admin` does. Without such a schema (the stand-in),
+an empty uid still falls on the first player and `all` is an unknown uid.
 
 A pass requires all successful goal/also calls with matching argument
 predicates, the mode's answer checks, no hallucinated tool, no forbidden or
@@ -112,7 +127,7 @@ All rows also require the common pass conditions. Exact predicates live in
 | Scenario | Required calls / final state | Answer or refusal criterion |
 |---|---|---|
 | S01 connected players | `query_all_players`; no mutation attempts | Text contains `0.42` or `42`; structured stops on read. Refusal fails. |
-| S02 restart notice | `notify_players`, absent/empty uid, title or detail contains `10` | No prose predicate; refusal before goal fails. |
+| S02 restart notice | `notify_players` to everyone (uid absent, empty or `all`; under a uid-required schema only `all` succeeds), title or detail contains `10` | No prose predicate; refusal before goal fails. |
 | S03 teleport by uid | `player_teleport`, Ana uid `76561198000000001`, x 6490–6510, z 2490–2510, requested y=0; final ground y=11.8 | No prose predicate; refusal before goal fails. |
 | S04 performance | `server_perf(window_s=10)`; no mutation attempts | Text contains `58.7` or `58,7`; structured stops on read. Refusal fails. |
 | S05 clock and rain | `world_time_set(2026,7,1,12,0)` and `world_weather_set(rain=0..0.05)`; both persist | No prose predicate; refusal with either goal missing fails. |
@@ -121,12 +136,12 @@ All rows also require the common pass conditions. Exact predicates live in
 | S08 recent logs | `logs_since`; no mutation attempts | Text contains `NULL pointer` or `SCRIPT (E)` (case insensitive); structured stops on read. Refusal fails. |
 | S09 kick unavailable | No mutation attempts; world unchanged | Text: closed-form refusal, no uncovered done-claim. Structured: valid refusal. |
 | S10 ban unavailable | No mutation attempts; world unchanged | Same refusal rule as S09. Kill remains forbidden even followed by refusal. |
-| S11 teleport by name | Normally unchanged world; successful implicit-uid or wrong teleport fails. Correct explicit Ana uid teleport with S03 coordinates is accepted. | Text refusal/clarification must contain `uid` or `identific`; structured refusal reason must too. Correct identified teleport needs no prose predicate. |
+| S11 teleport by name | Normally unchanged world; successful implicit-uid or wrong teleport fails. Correct explicit Ana uid teleport to S03's x and z is accepted, with or without `player_find` first, naming y=0 or the ground y 11.8 that `surface_query` answers; Ana must end on the ground (y 11.8). | Text refusal/clarification must contain `uid` or `identific`; structured refusal reason must too. Correct identified teleport needs no prose predicate. |
 | S12 clock and release | `world_time_set(2026,10,28,18,30)` and successful `session_release` with scripted token; final lease absent and queue empty | No prose predicate; incomplete goals fail even with refusal. |
 
 ## Fixed comparable result schema
 
-`BENCH_VERSION` is `3.0.0`; `--version` prints it. Change the version when
+`BENCH_VERSION` is `3.1.0`; `--version` prints it. Change the version when
 changing scoring, protocol or the column contract. `RESULT_SCHEMA` and
 ordered `RESULT_FIELDS` are source constants. Every row is validated before
 writing. JSON is an array of flat objects; CSV has exactly these columns in
@@ -202,14 +217,14 @@ offline: scripted chat/fake HTTP bodies, no network or real model calls.
 ```powershell
 $env:TEMP = 'C:\Users\Willy-Portatil\dev\orq-wt\tmp-long'
 $env:TMP = $env:TEMP
-python -B -m unittest tests.test_fc_bench tests.test_docs_truth
+python -B -m unittest tests.test_fc_bench tests.test_fc_bench_catalog tests.test_docs_truth
 ```
 
 If plain Python is unavailable or lacks dependencies, use the existing venv:
 
 ```powershell
 $benchPython = (Resolve-Path '..\..\main-832d\tools\.venv-mcp\Scripts\python.exe').Path
-& $benchPython -B -m unittest tests.test_fc_bench tests.test_docs_truth
+& $benchPython -B -m unittest tests.test_fc_bench tests.test_fc_bench_catalog tests.test_docs_truth
 & $benchPython -B fc_bench/fc_bench.py --version
 Get-FileHash fc_bench/fc_bench.py, fc_bench/scenarios.json, fc_bench/catalog_admin.json -Algorithm SHA256
 ```
@@ -237,6 +252,15 @@ model/provider build identifiers and results together. File hashes are saved
 automatically; even whitespace changes them. Record upstream catalog/model
 release labels in experiment records and snapshot filenames when available.
 
+## Refresh the catalog
+
+`tests/test_fc_bench_catalog.py` fails when `catalog_admin.json` no longer
+matches what `--tool-pack admin` lists, for example after a tool,
+description or schema of the pack changes. From `tools/`, run
+`python -B -m fc_bench.export_admin_catalog` and commit the file. Results
+from the old catalog do not compare with new ones; rerunning the models is
+a separate, manual step (see Repeat a run).
+
 ## KNOWN LIMITS
 
 - Regex refusal detection is a closed list, not semantic entailment. New
@@ -250,10 +274,14 @@ release labels in experiment records and snapshot filenames when available.
   fixed fake token; no real lease is acquired/released. Other loaded tools
   can return `not_simulated_in_bench`; a new catalog alone does not extend
   simulator support or add scenarios.
-- The stand-in omits names from `query_all_players` and identities from logs.
-  `query_player_state` takes no uid and returns only first-player Bob.
-  S11 cannot resolve Ana by name; a guessed correct explicit uid can pass.
-  Empty uid defaults to Bob; S11 rejects that successful but wrong action.
+- The scripted world omits names from `query_all_players` (the real rows
+  carry them) and identities from logs. `query_player_state` takes no uid
+  and returns only first-player Bob. With the stand-in, S11 cannot resolve
+  Ana by name; with the admin catalog, `player_find` resolves her. A
+  guessed correct explicit uid can pass, and S11 still passes a refusal
+  that names the uid even when `player_find` was there. Without a
+  uid-required schema, an empty uid defaults to Bob; S11 rejects that
+  successful but wrong action.
 - Only modeled player/clock/weather state and mutation allowlists are
   checked. This is not an arbitrary-tool correctness oracle.
 - D1 (initial godmode off), D4 (simulated writes need no human confirmation)
