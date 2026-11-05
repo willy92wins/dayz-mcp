@@ -6704,7 +6704,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			if (MCPLookAtControl.Generation() == job.generation)
 			{
-				MCPLookAtControl.Release("deadline");
+				MCPLookAtControl.ReleaseAtDeadline();
 			}
 			PostPlayerLookAtJob(job);
 			return;

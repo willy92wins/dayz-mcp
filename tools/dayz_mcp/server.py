@@ -9931,7 +9931,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "report the commanded angle as success and does not require a "
             "weapon. First person, idle, standing or crouched, weapon "
             "lowered, no freelook, tracking, scripted camera or concurrent "
-            "action. Budget 3 s."
+            "action. third_person comes from the IsInThirdPerson flag or from "
+            "a third-person camera in use (DayZPlayerCamera3rdPerson). The pose "
+            "checks run before the turn, on each tick and when the job's time "
+            "runs out, so a refused pose answers its own code, not deadline. "
+            "Budget 3 s."
         )
     )
     async def player_look_at(
