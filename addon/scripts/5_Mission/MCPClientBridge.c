@@ -5451,7 +5451,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		if (job.kind == "lease_close")
 		{
-			return LeaseCloseCensusClean(BuildLeaseCloseCensus(job.args));
+			return LeaseCloseCensusSettled(BuildLeaseCloseCensus(job.args));
 		}
 
 		if (job.kind == "camera_set")
@@ -6468,6 +6468,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "lease_close")
 		{
 			PostLeaseCloseJob(job, false);
+			return;
 		}
 
 		if (job.kind == "camera_set")
@@ -8603,7 +8604,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
-	// Lease close census (Â§2.6): state, not jobs. A controller still active
+	// Lease close census (§2.6): state, not jobs. A controller still active
 	// after its stop step is residue naming that controller.
 	protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)
 	{
@@ -8621,6 +8622,42 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		census.entries.Insert(entry);
+	}
+
+	protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		if (!active)
+		{
+			AddCloseEntry(census, name, false, "");
+			return;
+		}
+
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		entry.state = "unverified";
+		entry.reason = reason;
+		census.entries.Insert(entry);
+	}
+
+	protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state == "residue")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
 	}
 
 	protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)
@@ -8667,7 +8704,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		census.move_floor = MCPPlayerMoveControl.Generation();
 		census.weapon_floor = MCPWeaponControl.CloseRequestFloor();
-		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.IsActive(), "vehicle_drive");
+		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.s_Active, "vehicle_drive");
 		AddCloseEntry(census, "input_trigger", MCPInputTriggerControl.IsHeld(), "input_trigger");
 		bool moveActive = MCPPlayerMoveControl.IsActive();
 		if (MCPPlayerMoveControl.ServerReleasePending())
@@ -8701,7 +8738,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
-		// Â§2.9: the client half reads the action manager, not the job, so a
+		// §2.9: the client half reads the action manager, not the job, so a
 		// Take that cleared the hold control cannot make this row clean.
 		bool holdActive = MCPHoldControl.IsActive();
 		if (player)
@@ -8715,7 +8752,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
 		// §2.9: interrupt/START debt of this client process, per §2.7 types.
-		AddCloseEntry(census, "action_input_in_flight", MCPHoldControl.InputInFlight(), "action_input_in_flight");
+		AddCloseDebt(census, "action_input_in_flight", MCPHoldControl.InputInFlight(), "action_input_in_flight");
 		bool jobsActive = false;
 		if (m_JobRunner && m_JobRunner.CountExcluding("lease_close") > 0)
 		{
@@ -8766,7 +8803,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
-	// Â§2.6 stop steps, in Shutdown's order, without the bridge teardown.
+	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
 	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
 	{
 		if (m_Dialog && m_Dialog.IsOpen())
@@ -8795,7 +8832,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
-		if (LeaseCloseCensusClean(census))
+		if (LeaseCloseCensusSettled(census))
 		{
 			result.ok = true;
 			result.lease_close = census;

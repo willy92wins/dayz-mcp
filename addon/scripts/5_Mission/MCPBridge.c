@@ -745,7 +745,6 @@ class MCPBridge : Managed
 		}
 		else if (command.cmd == "notify_players")
 		{
-			RegisterLeaseCloseRpc(command.id, "notify_players");
 			postNow = DispatchNotifyPlayers(command, result);
 		}
 		else if (command.cmd == "vehicle_enter")
@@ -870,17 +869,14 @@ class MCPBridge : Managed
 		}
 		else if (command.cmd == "hands_take")
 		{
-			RegisterLeaseCloseRpc(command.id, "hands_take");
 			postNow = DispatchHandsTake(command, result);
 		}
 		else if (command.cmd == "hands_attach")
 		{
-			RegisterLeaseCloseRpc(command.id, "hands_attach");
 			postNow = DispatchHandsAttach(command, result);
 		}
 		else if (command.cmd == "inventory_move")
 		{
-			RegisterLeaseCloseRpc(command.id, "inventory_move");
 			postNow = DispatchInventoryMove(command, result);
 		}
 		else if (command.cmd == "object_doors")
@@ -1245,6 +1241,7 @@ class MCPBridge : Managed
 			// Dispatch or ProcessJobs posts the one result.
 			clientRpc = true;
 			m_Jobs.Insert(job.id, job);
+			RegisterLeaseCloseRpc(job.id, "inventory_move");
 			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot, job.id);
 		}
 		if (performError != "")
@@ -2862,6 +2859,7 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		RegisterLeaseCloseRpc(command.id, "hands_take");
 		if (!player.MCPRequestTakeToHands(item, result.type))
 		{
 			result.ok = false;
@@ -2997,6 +2995,7 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		RegisterLeaseCloseRpc(command.id, "hands_attach");
 		if (!player.MCPRequestAttachFromHands(target, target.GetType(), held, result.type, command.args.slot))
 		{
 			result.ok = false;
@@ -3199,6 +3198,7 @@ class MCPBridge : Managed
 			}
 		}
 
+		RegisterLeaseCloseRpc(command.id, "notify_players");
 		NotificationSystem.SendNotificationToPlayerIdentityExtended(targetIdentity, command.args.show_time, command.args.title, command.args.detail, command.args.icon);
 		result.ok = true;
 		result.sent = true;
@@ -7706,7 +7706,7 @@ class MCPBridge : Managed
 	{
 		if (job.kind == "lease_close")
 		{
-			return LeaseCloseCensusClean(BuildLeaseCloseCensus(job.args));
+			return LeaseCloseCensusSettled(BuildLeaseCloseCensus(job.args));
 		}
 		else if (job.kind == "object_delete")
 		{
@@ -8189,7 +8189,7 @@ class MCPBridge : Managed
 		PostResult(result);
 	}
 
-	// Extension contract for #267 (Â§4): empty in the base bridge.
+	// Extension contract for #267 (§4): empty in the base bridge.
 	protected void LeaseCloseExtensionStop()
 	{
 	}
@@ -8254,6 +8254,42 @@ class MCPBridge : Managed
 		}
 
 		census.entries.Insert(entry);
+	}
+
+	protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		if (!active)
+		{
+			AddCloseEntry(census, name, false, "");
+			return;
+		}
+
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		entry.state = "unverified";
+		entry.reason = reason;
+		census.entries.Insert(entry);
+	}
+
+	protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state == "residue")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
 	}
 
 	protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)
@@ -8322,18 +8358,22 @@ class MCPBridge : Managed
 			return false;
 		}
 
+		bool pending = false;
 		int i = 0;
 		while (i < m_LeaseCloseDeletion.Count())
 		{
 			if (m_LeaseCloseDeletion.Get(i))
 			{
-				return true;
+				pending = true;
+				i = i + 1;
 			}
-
-			i = i + 1;
+			else
+			{
+				m_LeaseCloseDeletion.Remove(i);
+			}
 		}
 
-		return false;
+		return pending;
 	}
 
 	protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)
@@ -8346,8 +8386,17 @@ class MCPBridge : Managed
 			census.lease_id = closeArgs.close_lease_id;
 		}
 
-		AddCloseEntry(census, "bots", MCPBotControl.LeaseCloseBusy(this), MCPBotControl.LeaseCloseResidueReason(this));
-		AddCloseEntry(census, "infected_drive", m_InfectedDebt, "infected_drive");
+		bool botsBusy = MCPBotControl.LeaseCloseBusy(this);
+		string botsReason = MCPBotControl.LeaseCloseResidueReason(this);
+		if (botsBusy && botsReason == "bot_state_unverified")
+		{
+			AddCloseDebt(census, "bots", true, botsReason);
+		}
+		else
+		{
+			AddCloseEntry(census, "bots", botsBusy, botsReason);
+		}
+		AddCloseDebt(census, "infected_drive", m_InfectedDebt, "infected_drive");
 		bool moveActive = false;
 		bool weaponActive = false;
 		bool holdActive = false;
@@ -8379,7 +8428,7 @@ class MCPBridge : Managed
 					weaponActive = true;
 				}
 
-				// Â§2.7 step 3: census only, no new interrupt from the server.
+				// §2.7 step 3: census only, no new interrupt from the server.
 				ActionManagerServer holdManager = ActionManagerServer.Cast(player.GetActionManager());
 				if (holdManager && holdManager.MCP_HoldServerBusy())
 				{
@@ -8411,14 +8460,41 @@ class MCPBridge : Managed
 
 		AddCloseEntry(census, "jobs", jobsActive, "jobs");
 		bool rpcActive = false;
-		string rpcReason = "rpc_in_flight";
 		if (m_LeaseCloseRpcKinds && m_LeaseCloseRpcKinds.Count() > 0)
 		{
 			rpcActive = true;
-			rpcReason = "rpc_in_flight:" + m_LeaseCloseRpcKinds.Get(0);
 		}
 
-		AddCloseEntry(census, "rpc_in_flight", rpcActive, rpcReason);
+		if (!rpcActive)
+		{
+			AddCloseEntry(census, "rpc_in_flight", false, "");
+		}
+		else
+		{
+			int rpcKindIndex = 0;
+			while (rpcKindIndex < m_LeaseCloseRpcKinds.Count())
+			{
+				string rpcKind = m_LeaseCloseRpcKinds.Get(rpcKindIndex);
+				bool rpcKindSeen = false;
+				int rpcSeenIndex = 0;
+				while (rpcSeenIndex < rpcKindIndex)
+				{
+					if (m_LeaseCloseRpcKinds.Get(rpcSeenIndex) == rpcKind)
+					{
+						rpcKindSeen = true;
+					}
+
+					rpcSeenIndex = rpcSeenIndex + 1;
+				}
+
+				if (!rpcKindSeen)
+				{
+					AddCloseDebt(census, "rpc_in_flight", true, "rpc_in_flight:" + rpcKind);
+				}
+
+				rpcKindIndex = rpcKindIndex + 1;
+			}
+		}
 		AddCloseEntry(census, "deletion_pending", DeletionPendingActive(), "deletion_pending");
 		LeaseCloseExtensionCensus(census);
 		if (LeaseCloseCensusClean(census))
@@ -8452,7 +8528,7 @@ class MCPBridge : Managed
 		PostResult(result);
 	}
 
-	// Â§2.7 stop steps. Jobs post through their timeout path; server_perf is
+	// §2.7 stop steps. Jobs post through their timeout path; server_perf is
 	// kept (it only reads). RPC and infected debt are never recalled.
 	protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)
 	{
@@ -8537,7 +8613,7 @@ class MCPBridge : Managed
 
 		LeaseCloseExtensionStop();
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
-		if (LeaseCloseCensusClean(census))
+		if (LeaseCloseCensusSettled(census))
 		{
 			result.ok = true;
 			result.lease_close = census;
