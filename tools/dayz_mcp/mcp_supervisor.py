@@ -463,8 +463,16 @@ class Supervisor:
             replacement = self.start_worker()
             replayed = self._replay_handshake(replacement)
             if not replayed:
+                # An exit code says the replacement died before answering, and its
+                # stderr is in the host's MCP log; None, that it still runs or is
+                # not reaped yet (fb-20261102-134653-e0ce).
                 self._reply(
-                    request_id, {"error": "initialize_replay_failed"}, is_error=True
+                    request_id,
+                    {
+                        "error": "initialize_replay_failed",
+                        "replacement_exit_code": replacement.process.poll(),
+                    },
+                    is_error=True,
                 )
                 return
         finally:

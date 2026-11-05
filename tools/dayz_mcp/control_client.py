@@ -297,6 +297,26 @@ class ControlClient:
                         registered = f"client registered at {started}. "
                 except Exception:
                     registered = ""
+                if policy_cause.startswith("HostConfigError:daemon_provenance_"):
+                    # A replacement builds its policy from these same host configs
+                    # and dies at startup, so server_reload cannot help until the
+                    # registration is restored (fb-20261102-134653-e0ce).
+                    next_step = (
+                        "This server is not validly registered in the host configs "
+                        "(missing, in one only, or not the same in each). Do not call "
+                        "server_reload: its replacement reads the same configs and "
+                        "fails to start. Report this to the host/operator to restore "
+                        "the registration (install_mcp.py --register, with --instance "
+                        "for a named instance) before any server_reload. "
+                    )
+                else:
+                    next_step = (
+                        "If the tool list includes server_reload, call it: it replaces "
+                        "the serving process, which re-reads the registration and "
+                        "re-accredits. Otherwise report this policy rejection to the "
+                        "host/operator for registration verification and MCP-client "
+                        "reconnection after repair. "
+                    )
                 raise ControlClientError(
                     "client_policy_untrusted_open_new_session",
                     request_stage="pre_request",
@@ -306,12 +326,8 @@ class ControlClient:
                         # The MCP adapter publishes code/hint, not exception metadata.
                         f"policy_cause={policy_cause}. "
                         f"{registered}"
-                        "If the tool list includes server_reload, call it: it replaces "
-                        "the serving process, which re-reads the registration and "
-                        "re-accredits. Otherwise report this policy rejection to the "
-                        "host/operator for registration verification and MCP-client "
-                        "reconnection after repair. This client cannot open a new host "
-                        "session by itself."
+                        f"{next_step}"
+                        "This client cannot open a new host session by itself."
                     ),
                 ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")

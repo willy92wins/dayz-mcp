@@ -669,6 +669,9 @@ class WorkerDeathTest(SupervisorTestBase):
         def dying_spawn() -> FakeWorker:
             replacement = FakeWorker(2000, auto_answer=self.auto_answer)
             replacement.stdout.close()
+            # It died at startup, as a worker without its registration does
+            # (fb-20261102-134653-e0ce): the reload must say how it ended.
+            replacement.poll = lambda: 1  # type: ignore[method-assign]
             self.workers.append(replacement)
             return replacement
 
@@ -676,7 +679,10 @@ class WorkerDeathTest(SupervisorTestBase):
         self.supervisor.handle_host_line(reload_call(7))
         message = self.host.wait_for(lambda m: m.get("id") == 7)
         self.assertTrue(message["result"]["isError"])
-        self.assertEqual(result_text(message)["error"], "initialize_replay_failed")
+        self.assertEqual(
+            result_text(message),
+            {"error": "initialize_replay_failed", "replacement_exit_code": 1},
+        )
         # The replacement that died mid-replay is the current generation; it is
         # refused from here, never forwarded into.
         self.supervisor.handle_host_line(self._call(8))
