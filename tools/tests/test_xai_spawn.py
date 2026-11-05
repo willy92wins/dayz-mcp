@@ -116,7 +116,40 @@ def _bound_state() -> loopback.ServerState:
     state = loopback.ServerState(key="k")
     state.daemon_generation = "gen-xai-spawn"
     state.install_bound_peer(instance=INST_SERVER, role="server", pid=PID_SERVER, run_id="xai-run")
+    # Real §2.12 path: attaching the coordinator replays the BOUND peer
+    # into its registry, so the §5.1 gate sees it registered.
+    from dayz_mcp.session_coordination import SessionCoordinator
+
+    state.coordination = SessionCoordinator()
+    state.retail_probe = lambda: {"known": True, "processes": []}
     return state
+
+
+def _enqueue_spawn(state: loopback.ServerState):
+    # Enqueue under a real lease from the attached coordinator, as the
+    # tool layer does; the coordinator was attached in _bound_state.
+    from tests.lease_helpers import _identity
+
+    lease = getattr(state, "_spawn_lease", None)
+    client = getattr(state, "_spawn_client", None)
+    if lease is None or client is None:
+        client = _identity("spawn")
+        coord = state.coordination
+        assert coord is not None
+        status, lease = coord.acquire(client, "trace")
+        assert status == 200, lease
+        state._spawn_client = client  # type: ignore[attr-defined]
+        state._spawn_lease = lease  # type: ignore[attr-defined]
+    payload = {
+        "platform": client.platform, "pid": client.pid, "ppid": client.ppid,
+        "started_at_utc": client.started_at_utc,
+        "session_id": client.session_id, "task_label": client.task_label,
+    }
+    return state.enqueue_command(
+        SPAWN, dict(SPAWN_WIRE), peer="server",
+        identity_payload=payload, lease_token=lease["lease_token"],
+        operation_timeout_s=30.0,
+    )
 
 
 def _commands() -> list[str]:
@@ -172,7 +205,7 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         # already answered.
         state = _bound_state()
         _announce(state)
-        status, spawn = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        status, spawn = _enqueue_spawn(state)
         self.assertEqual(status, 200, spawn)
         self.assertEqual([c["id"] for c in _delivered(state)], [spawn["id"]])
         abandoned = state.abandon_command(spawn["id"], "tool_timeout")
@@ -184,14 +217,14 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         # Not delivered: dropped, no release.
         state2 = _bound_state()
         _announce(state2)
-        status, queued = state2.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        status, queued = _enqueue_spawn(state2)
         self.assertEqual(status, 200, queued)
         self.assertEqual(state2.abandon_command(queued["id"], "cancelled"), {"status": "dropped"})
         self.assertEqual(_delivered(state2), [])
         # Result already stored: nothing queued; the lease end owns it.
         state3 = _bound_state()
         _announce(state3)
-        status, done = state3.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        status, done = _enqueue_spawn(state3)
         self.assertEqual(status, 200, done)
         self.assertEqual([c["id"] for c in _delivered(state3)], [done["id"]])
         state3.store_result({"id": done["id"], "ok": 1}, instance=INST_SERVER)
@@ -202,7 +235,7 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         # H7/O13 delivery half: the close gate is re-read at delivery.
         state = _bound_state()
         _announce(state)
-        status, spawn = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        status, spawn = _enqueue_spawn(state)
         self.assertEqual(status, 200, spawn)
         commands = [c for c in _commands() if c != "lease_close"]
         status, polled = state.record_poll(
@@ -221,7 +254,7 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         state = _bound_state()
         _announce(state)
         state._peer_caps["server"]["commands"] = [c for c in _commands() if c != "lease_close"]
-        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        status, body = _enqueue_spawn(state)
         self.assertEqual(status, 409)
         self.assertEqual(body, {"error": "expansion_unavailable", "detail": "lease_close_not_supported"})
         self.assertEqual(bound_queue(state, "server"), [])

@@ -5459,6 +5459,16 @@ class ServerState:
             ok, _cause = self._close_destination_locked(bound[0].instance, peer)
             if not ok:
                 return False
+            # Fail closed until the coordinator knows this peer: without
+            # the note_peer_bound registration (confirm/install_bound_peer
+            # or the coordination setter replay) no lease-end round opens
+            # and no close is ever sent for it.
+            coordination = self.coordination
+            registered = getattr(coordination, "peer_registered", None)
+            if not callable(registered) or not registered(
+                run_id, peer, bound[0].instance
+            ):
+                return False
         return True
 
     def _expansion_refusal_payload(self, refusal: str) -> dict:
