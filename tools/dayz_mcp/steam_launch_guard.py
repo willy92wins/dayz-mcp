@@ -55,9 +55,9 @@ def live_identity(provider) -> SteamIdentity | None:
         ticks = provider.process_creation_ticks(pid)
         if type(ticks) is not int or ticks <= 116444736000000000:
             return None
-        if not provider.process_exists(pid) or steam.ntpath.basename(
+        if not provider.process_exists(pid) or not steam.is_steam_image(
             provider.process_image_path(pid)
-        ).casefold() != "steam.exe":
+        ):
             return None
         if steam._safe_live_pids(provider) != pids or provider.process_creation_ticks(pid) != ticks:
             return None
@@ -135,5 +135,5 @@ def prepare(provider, host, consent: bool, *, wall_time=time.time) -> Preparatio
 
 
 def final_check(prepared: Preparation, provider=None) -> bool:
-    provider = provider or steam.WindowsSteamPreflightProvider()
+    provider = provider or steam.default_preflight_provider()
     return prepared.error_code is None and prepared.identity is not None and coherent_identity(provider) == prepared.identity
