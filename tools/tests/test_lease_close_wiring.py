@@ -671,10 +671,17 @@ class DaemonRestartWiringTest(unittest.TestCase):
                 # free, then require an immediate clean grant.
                 deadline = time.monotonic() + 5.0
                 with coordinator._condition:
+                    # The same slot predicate acquire() uses (slot_idle):
+                    # the release's WAL marker and handoff flag clear after
+                    # _releasing, so waiting on fewer fields races.
                     while (
                         coordinator._releasing is not None
                         or coordinator._active is not None
                         or coordinator._grant_inflight is not None
+                        or coordinator._wal_marker is not None
+                        or coordinator._handoff_pending
+                        or coordinator._lease_end_blocks_locked()
+                        or coordinator._lifecycle_recovery_fault is not None
                     ) and time.monotonic() < deadline:
                         coordinator._condition.wait(0.05)
                 status, grant = coordinator.acquire(identity, "trace")
