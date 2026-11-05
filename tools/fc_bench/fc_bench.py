@@ -65,7 +65,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BENCH_VERSION = "3.0.0"
+BENCH_VERSION = "3.1.0"
 
 # Column order is part of the public JSON/CSV contract. All rows have all keys.
 RESULT_FIELDS = {
@@ -363,10 +363,11 @@ class World:
     run record.
     """
 
-    def __init__(self, spec: dict, mutating: set[str], catalog_names: set[str]):
+    def __init__(self, spec: dict, mutating: set[str], catalog_names: set[str], uid_required: frozenset = frozenset()):
         self.spec = copy.deepcopy(spec)
         self.mutating = mutating
         self.catalog_names = catalog_names
+        self.uid_required = uid_required
         self.lease: str | None = None
         self.queued = False
         self.mutations: list[dict] = []
@@ -429,9 +430,41 @@ class World:
             return {"ok": True, "entities": rows, "count_total": len(rows)}
         if name == "wait_for":
             return {"ok": True, "satisfied": False}
+        if name == "player_find":
+            return self._player_find(args)
+        if name == "surface_query":
+            # The ground y the teleport's y=0 lands on (see _pos_matches).
+            return {"ok": True, "y": 11.8, "type": "cp_grass", "normal": [0.0, 1.0, 0.0]}
+        if name == "session_heartbeat":
+            if self.lease and args.get("lease_token") == self.lease:
+                return {"ok": True, "lease_ttl_s": 120}
+            return {"ok": False, "error": "lease_token_mismatch"}
+        if name == "restore_gameplay":
+            if not self.lease:
+                return {"ok": False, "error": "lease_required", "next_step": "session_acquire_wait"}
+            return {"ok": True}
         if name in self.mutating or name in PLAYER_VERBS | {"world_time_set", "world_weather_set", "notify_players"}:
             return self._mutate(name, args)
         return {"ok": False, "error": "not_simulated_in_bench"}
+
+    def _player_find(self, args: dict) -> dict:
+        # server.py _player_find_candidates/_resolve_player_by_name (B3):
+        # trimmed, case-insensitive exact name, never a pick.
+        query = args.get("name")
+        if not isinstance(query, str) or not query.strip():
+            return {"ok": False, "error": "bad_args", "detail": "name must be a non-empty player name"}
+        wanted = query.strip().casefold()
+        rows = [
+            {"name": p["name"], "uid": p["uid"]}
+            for p in self.players()
+            if p["name"].strip().casefold() == wanted
+        ]
+        stripped = query.strip()
+        if not rows:
+            return {"ok": False, "error": "player_not_found", "name": stripped}
+        if len(rows) > 1:
+            return {"ok": False, "error": "ambiguous_player_name", "candidates": rows}
+        return {"ok": True, "name": rows[0]["name"], "uid": rows[0]["uid"], "candidates": rows}
 
     def _player_state(self, args: dict) -> dict:
         # server.py query_player_state(timeout_s) calls the bridge with {}.
@@ -457,11 +490,18 @@ class World:
         }
 
     def _mutate(self, name: str, args: dict) -> dict:
+        # The admin schema's uid_required rule (server._require_admin_uid):
+        # the refusal precedes the lease check and changes nothing.
+        if name in self.uid_required:
+            uid = args.get("uid")
+            if not isinstance(uid, str) or not uid.strip():
+                return {"ok": False, "error": "uid_required", "detail": f"{name} needs the uid of a connected player"}
         if not self.lease:
             return {"ok": False, "error": "lease_required", "next_step": "session_acquire_wait"}
         target = None
         acted_without_uid = False
-        if "uid" in args or name in PLAYER_VERBS:
+        broadcast = name == "notify_players" and name in self.uid_required and args.get("uid") == "all"
+        if ("uid" in args or name in PLAYER_VERBS) and not broadcast:
             uid = args.get("uid") or ""
             if uid:
                 target = self.find(uid)
@@ -521,7 +561,9 @@ class World:
             self.mutations.append({"tool": name, "weather": copy.deepcopy(weather)})
             return {"ok": True, "applied": copy.deepcopy(weather)}
         if name == "notify_players":
-            uid = args.get("uid") or ""
+            # Under a uid-required schema, uid "all" reaches every player
+            # (ticket d528); otherwise it is an ordinary unknown uid.
+            uid = "" if broadcast else (args.get("uid") or "")
             self.mutations.append({"tool": name, "sent_to": uid or "all"})
             return {"ok": True, "sent_to": uid or "all", "recipients": 1 if uid else len(self.players())}
         result = {"ok": True, "applied": args}
@@ -622,6 +664,8 @@ def _pred_ok(args: dict, key: str, pred: dict) -> bool:
     value = _get(args, key)
     if "empty_or_absent" in pred:
         return value in (None, "")
+    if "in" in pred:
+        return value in pred["in"]
     if "eq" in pred:
         return value == pred["eq"]
     if "range" in pred:
@@ -917,7 +961,7 @@ def score(
 
 
 def run_scenario(args, key, scenario, system_prompt, catalogs, world_spec, mutating, names) -> dict:
-    world = World(world_spec, mutating, names)
+    world = World(world_spec, mutating, names, uid_required=uid_required_names(args.schemas))
     world_before = world.snapshot()
     mode = getattr(args, "response_mode", "text")
     if mode == "structured":
@@ -1055,6 +1099,14 @@ def as_tools(entries: list[dict]) -> list[dict]:
 def mutating_names(entries: list[dict]) -> set[str]:
     found = {t["name"] for t in entries if (t.get("description") or "").startswith("Requires a lease")}
     return found | PLAYER_VERBS | {"world_time_set", "world_weather_set", "notify_players", "object_delete", "world_spawn", "inventory_give"}
+
+
+def uid_required_names(schemas: dict) -> frozenset:
+    """Names whose loaded schema lists uid as required (the admin pack)."""
+    return frozenset(
+        name for name, schema in schemas.items()
+        if isinstance(schema, dict) and "uid" in schema.get("required", [])
+    )
 
 
 def file_sha256(path) -> str:

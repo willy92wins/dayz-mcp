@@ -1,33 +1,500 @@
 {
   "meta": {
-    "commit": "6f616dfc",
-    "source": "Compact admin catalog for the axis-C function-call bench. Tool names match the council admin pack of 22. Descriptions are one line so the file stays small; pass --catalog with a full list_tools dump to score a real catalog. Mutating descriptions start with 'Requires a lease' so the runner treats them as writes.",
-    "variant": "catalog_admin.json",
-    "tools": 22,
-    "not_the_council_snapshot": "The byte snapshots catalog_admin.json, catalog_admin_short.json, catalog_client_prelease.json and catalog_full.json live in dzmcp_gauntlet/council-live-20261028/bench and were not copied. This file is enough to run the 12 scenarios. D7 (catalog <= 5000 tokens) is not claimed for this compact file."
+    "source": "The tools/list answer of --tool-pack admin: name, description and inputSchema of each listed tool, in listing order. Written by fc_bench/export_admin_catalog.py; tests/test_fc_bench_catalog.py fails when it no longer matches the code.",
+    "tools": 23
   },
   "tools": [
-    {"name": "session_acquire_wait", "description": "Take the session lease. Returns lease_token.", "inputSchema": {"type": "object", "properties": {"purpose": {"type": "string"}}}},
-    {"name": "session_release", "description": "Release the session lease.", "inputSchema": {"type": "object", "properties": {"lease_token": {"type": "string"}}, "required": ["lease_token"]}},
-    {"name": "session_status", "description": "Read whether this client holds the lease.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "bridge_status", "description": "Read whether the game bridge is ready.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "query_all_players", "description": "List connected players with uid, position and health. No names.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "query_player_state", "description": "Read the first connected player: name, position, godmode, water and energy. No uid argument.", "inputSchema": {"type": "object", "properties": {"timeout_s": {"type": "number"}}, "additionalProperties": false}},
-    {"name": "notify_players", "description": "Requires a lease. Send a notice to one player or to everyone when uid is empty.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "title": {"type": "string"}, "detail": {"type": "string"}}}},
-    {"name": "player_teleport", "description": "Requires a lease. Move a connected player to pos [x, y, z].", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "pos": {"type": "array", "items": {"type": "number"}}}}},
-    {"name": "player_heal", "description": "Requires a lease. Heal a connected player to full health.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "full": {"type": "boolean"}}}},
-    {"name": "player_kill", "description": "Requires a lease. Kill a connected player.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}}}},
-    {"name": "player_godmode", "description": "Requires a lease. Set whether a player takes damage. Off unless the caller asks.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "on": {"type": "boolean"}}}},
-    {"name": "world_time_get", "description": "Read the server clock.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "world_time_set", "description": "Requires a lease. Set the server date and time.", "inputSchema": {"type": "object", "properties": {"year": {"type": "integer"}, "month": {"type": "integer"}, "day": {"type": "integer"}, "hour": {"type": "integer"}, "minute": {"type": "integer"}}}},
-    {"name": "world_weather_set", "description": "Requires a lease. Set rain, fog and overcast.", "inputSchema": {"type": "object", "properties": {"rain": {"type": "number"}, "fog": {"type": "number"}, "overcast": {"type": "number"}}}},
-    {"name": "server_perf", "description": "Measure server frame rate for window_s seconds.", "inputSchema": {"type": "object", "properties": {"window_s": {"type": "number"}}}},
-    {"name": "logs_since", "description": "Read recent server log lines. The bench log has no player name and no Steam id.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "wait_for", "description": "Wait until a condition holds. The bench answers not satisfied.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "entities_query", "description": "List entities near a position.", "inputSchema": {"type": "object", "properties": {"pos": {"type": "array"}, "radius": {"type": "number"}}}},
-    {"name": "object_delete", "description": "Requires a lease. Delete one object by id.", "inputSchema": {"type": "object", "properties": {"object_id": {"type": "integer"}}}},
-    {"name": "world_spawn", "description": "Requires a lease. Spawn one classname at pos.", "inputSchema": {"type": "object", "properties": {"classname": {"type": "string"}, "pos": {"type": "array"}}, "required": ["classname"]}},
-    {"name": "inventory_give", "description": "Requires a lease. Give a classname to a player.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}, "classname": {"type": "string"}}, "required": ["classname"]}},
-    {"name": "loadout_get", "description": "Read what one player wears and holds.", "inputSchema": {"type": "object", "properties": {"uid": {"type": "string"}}}}
+    {
+      "name": "session_acquire_wait",
+      "description": "Acquire the session lease or wait for it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "purpose": {
+            "type": "string"
+          },
+          "max_wait_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "purpose"
+        ]
+      }
+    },
+    {
+      "name": "session_heartbeat",
+      "description": "Renew the active session lease.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "lease_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "lease_token"
+        ]
+      }
+    },
+    {
+      "name": "session_release",
+      "description": "Release the active session lease.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "lease_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "lease_token"
+        ]
+      }
+    },
+    {
+      "name": "session_status",
+      "description": "Read session and lease status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "query_player_state",
+      "description": "Read the connected player state.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout_s": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "query_all_players",
+      "description": "List every connected player.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout_s": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "player_find",
+      "description": "Find connected players by exact name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "logs_since",
+      "description": "Read new log lines since a marker.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "marker": {
+            "type": "string"
+          },
+          "max_lines": {
+            "type": "integer"
+          },
+          "run_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "world_spawn",
+      "description": "Spawn an object in the world.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "pos": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "flags": {
+            "type": "integer"
+          },
+          "rotation": {
+            "type": "integer"
+          },
+          "lifetime_s": {
+            "type": "number"
+          },
+          "scene_id": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "type",
+          "pos"
+        ]
+      }
+    },
+    {
+      "name": "object_delete",
+      "description": "Delete a spawned object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "object_id": {
+            "type": "integer"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "object_id"
+        ]
+      }
+    },
+    {
+      "name": "notify_players",
+      "description": "Send a notification to a player.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "show_time": {
+            "type": "number"
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "show_time",
+          "title",
+          "uid"
+        ]
+      }
+    },
+    {
+      "name": "surface_query",
+      "description": "Read terrain height at a position.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "z": {
+            "type": "number"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "z"
+        ]
+      }
+    },
+    {
+      "name": "player_teleport",
+      "description": "Teleport a player to a position.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pos": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "uid": {
+            "type": "string"
+          },
+          "skip_clearance_check": {
+            "type": "boolean"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "pos",
+          "uid"
+        ]
+      }
+    },
+    {
+      "name": "player_heal",
+      "description": "Heal a player.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "uid": {
+            "type": "string"
+          },
+          "full": {
+            "type": "boolean"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "uid"
+        ]
+      }
+    },
+    {
+      "name": "player_godmode",
+      "description": "Switch a player godmode on or off.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "on",
+          "uid"
+        ]
+      }
+    },
+    {
+      "name": "entities_query",
+      "description": "List entities near a position.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pos": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "radius": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "pos",
+          "radius"
+        ]
+      }
+    },
+    {
+      "name": "world_time_set",
+      "description": "Set the server world time.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "year": {
+            "type": "integer"
+          },
+          "month": {
+            "type": "integer"
+          },
+          "day": {
+            "type": "integer"
+          },
+          "hour": {
+            "type": "integer"
+          },
+          "minute": {
+            "type": "integer"
+          },
+          "time_multiplier": {
+            "type": "number"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "year",
+          "month",
+          "day",
+          "hour",
+          "minute"
+        ]
+      }
+    },
+    {
+      "name": "world_time_get",
+      "description": "Read the server world time.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout_s": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "server_perf",
+      "description": "Measure server performance.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "window_s": {
+            "type": "number"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "world_weather_set",
+      "description": "Set the server weather.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "overcast": {
+            "type": "number"
+          },
+          "rain": {
+            "type": "number"
+          },
+          "fog": {
+            "type": "number"
+          },
+          "time": {
+            "type": "number"
+          },
+          "min_duration": {
+            "type": "number"
+          },
+          "timeout_s": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "restore_gameplay",
+      "description": "Restore normal gameplay view and controls.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout_s": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "bridge_status",
+      "description": "Check whether the bridge and daemon are ready.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "wait_for",
+      "description": "Wait until a condition is met.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "condition": {
+            "type": "string",
+            "enum": [
+              "players_at_least",
+              "players_at_most",
+              "log_matches",
+              "file_matches"
+            ]
+          },
+          "value": {
+            "type": "integer"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "type": "number"
+          },
+          "poll_interval_s": {
+            "type": "number"
+          },
+          "lookback_lines": {
+            "type": "integer"
+          },
+          "lookback_from": {
+            "type": "string",
+            "enum": [
+              "lines",
+              "launch"
+            ]
+          },
+          "marker": {
+            "type": "string"
+          },
+          "profile_file": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "server",
+              "client",
+              "offline"
+            ]
+          }
+        },
+        "required": [
+          "condition"
+        ]
+      }
+    }
   ]
 }
