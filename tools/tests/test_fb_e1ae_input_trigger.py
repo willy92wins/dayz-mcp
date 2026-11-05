@@ -443,7 +443,11 @@ class InputTriggerKeyContractTest(unittest.TestCase):
         self.assertEqual(self.code.count(".OnKeyPress("), 3)
         key_press = _method_body(self.source, "protected bool DispatchKeyPress(")
         self.assertEqual(key_press.count("GetGame().GetMission().OnKeyPress(dik);"), 1)
-        self.assertNotIn("MCPInputTriggerControl", key_press)
+        # Of the control, key_press only sets db03's origin marker.
+        self.assertEqual(
+            set(re.findall(r"MCPInputTriggerControl\.(\w+)", key_press)),
+            {"s_Injecting", "s_InjectingDik"},
+        )
         for forbidden in ("SendInput", "keybd_event", "LocalPress", "ForceEnable", "UAInput"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, deliver)

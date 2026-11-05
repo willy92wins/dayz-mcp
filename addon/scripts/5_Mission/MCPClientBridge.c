@@ -174,6 +174,10 @@ class MCPInputTriggerControl
 	static string s_ReleasedBy;
 	static int s_ReleaseTick;
 	static bool s_ReleaseDelivered;
+	// db03: set only while the MCP delivers a press, so the mission's key log
+	// names that key origin=mcp. Every other press comes from the engine.
+	static bool s_Injecting;
+	static int s_InjectingDik;
 
 	static bool IsHeld()
 	{
@@ -280,7 +284,10 @@ class MCPInputTriggerControl
 		{
 			if (press)
 			{
+				s_Injecting = true;
+				s_InjectingDik = dik;
 				GetGame().OnKeyPress(dik);
+				s_Injecting = false;
 			}
 			else
 			{
@@ -299,7 +306,10 @@ class MCPInputTriggerControl
 		}
 		if (press)
 		{
+			s_Injecting = true;
+			s_InjectingDik = dik;
 			mission.OnKeyPress(dik);
+			s_Injecting = false;
 		}
 		else
 		{
@@ -633,6 +643,23 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void OnMissionKeyPress(int key)
 	{
+		// db03: every key the mission gets on a client the MCP drives, with
+		// where it came from and whether the game window had the focus.
+		if (m_Configured)
+		{
+			string origin = "engine";
+			if (MCPInputTriggerControl.s_Injecting && MCPInputTriggerControl.s_InjectingDik == key)
+			{
+				origin = "mcp";
+			}
+			string appActive = "0";
+			if (GetGame().IsAppActive())
+			{
+				appActive = "1";
+			}
+			Log("key press key=" + key + " origin=" + origin + " app_active=" + appActive);
+		}
+
 		if (!m_Dialog)
 		{
 			return;
@@ -1605,7 +1632,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		int dik = command.args.dik;
+		MCPInputTriggerControl.s_Injecting = true;
+		MCPInputTriggerControl.s_InjectingDik = dik;
 		GetGame().GetMission().OnKeyPress(dik);
+		MCPInputTriggerControl.s_Injecting = false;
 		result.delivered = true;
 		result.dik = dik;
 		result.ok = true;
