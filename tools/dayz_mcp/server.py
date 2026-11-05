@@ -7666,10 +7666,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
     @app.tool(
         description=(
-            "Requires a lease (session_acquire_wait). Seat the first "
-            "player in the driver seat of a vehicle near pos. seated=1 "
-            "means the server read that player (or, if that one is gone, the "
-            "first player) in the driver seat of that vehicle once the get-in "
+            "Requires a lease (session_acquire_wait). Seat the player uid "
+            "names in the driver seat of a vehicle near pos. uid is required "
+            "and never falls back to the first human: no connected player "
+            "with it answers player_not_found. seated=1 means the server read "
+            "that player in the driver seat of that vehicle once the get-in "
             "ended. The bridge checks that each tick: seated=1 on the first "
             "tick that reads it, timeout on a tick that does not once 5 s have "
             "passed, whatever timeout_s is. A timeout can still end seated: "
@@ -7678,8 +7679,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "establish it with vehicle_get_in_client."
         )
     )
-    async def vehicle_enter(pos: list[StrictFloat], timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    async def vehicle_enter(
+        pos: list[StrictFloat],
+        uid: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
         args = {"pos": _require_vec3(pos, "pos")}
+        if not isinstance(uid, str) or not uid.strip():
+            raise ToolError(_bad_args("uid", uid, "be a non-empty string"))
+        args["uid"] = uid
         async with runtime.tool_lock:
             return await runtime.call_bridge("vehicle_enter", args, "server", _timeout(timeout_s))
 
@@ -8641,10 +8649,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Only a failure to read the id ends as timeout. Refusals "
             "before the call move nothing: object_not_found, not_reachable, "
             "no_room, slot_not_found, slot_occupied. uid is required and "
-            "never falls back to the first human for client moves and for "
-            "to_hands, to_inventory, split_half and split_to_hands; a "
-            "server-authority world-to-world move names no player and "
-            "needs no uid. Client moves need that player in reach "
+            "never falls back to the first human for client moves, for "
+            "to_hands, to_inventory, split_half and split_to_hands, and for "
+            "a server-authority move whose item or target is in a player's "
+            "inventory (the bridge answers uid_required); a server-authority "
+            "world-to-world move names no player and needs no uid. Client "
+            "moves need that player in reach "
             "(UAMaxDistances.DEFAULT). No OS input and no client focus."
         )
     )
@@ -10007,7 +10017,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "report the commanded angle as success and does not require a "
             "weapon. First person, idle, standing or crouched, weapon "
             "lowered, no freelook, tracking, scripted camera or concurrent "
-            "action. Budget 3 s."
+            "action. third_person comes from the IsInThirdPerson flag or from "
+            "a third-person camera in use (DayZPlayerCamera3rdPerson). The pose "
+            "checks run before the turn, on each tick and when the job's time "
+            "runs out, so a refused pose answers its own code, not deadline. "
+            "Budget 3 s."
         )
     )
     async def player_look_at(
