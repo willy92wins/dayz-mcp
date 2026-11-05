@@ -208,6 +208,23 @@ class AiGroupStateAdmissionTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(len(bound_queue(state, "server")), 1)
         self.assertNotIn(STATE, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
+        # Same v12 census: a new adapter mutation is refused, the read is not.
+        order_status, order_body = state.enqueue_command(
+            "ai_group_order", {"group_id": 7, "behaviour": "HOLD"}, peer="server"
+        )
+        self.assertEqual(order_status, 409)
+        self.assertEqual(
+            order_body,
+            {"error": "expansion_unavailable", "detail": "lease_close_not_supported"},
+        )
+        self.assertEqual(len(bound_queue(state, "server")), 1)
+
+    def test_state_is_admitted_under_the_live_profile(self) -> None:
+        # As a server read the verb is in LIVE_ALLOWED_COMMANDS; the
+        # adapter mutations stay outside it (C-r2-H3).
+        self.assertIn(STATE, loopback.LIVE_ALLOWED_COMMANDS)
+        self.assertNotIn("ai_group_spawn", loopback.LIVE_ALLOWED_COMMANDS)
+        self.assertNotIn("ai_group_order", loopback.LIVE_ALLOWED_COMMANDS)
 
     def test_o1_state_missing_verb_is_adapter_not_loaded(self) -> None:
         # Mutant killed: ai_group_state missing from the expansion
@@ -537,6 +554,13 @@ def _state_namespace() -> dict:
         "m_RuntimeObjects": EnforceMap(),
         "this": object(),
         "eAIGroup": SimpleNamespace(GetGroupByID=_lookup),
+        "eAIGroupFormationState": SimpleNamespace(NONE=0, IN=1, FLANK=2),
+        "eAIWaypointBehavior": SimpleNamespace(
+            HALT=0, LOOP=1, ALTERNATE=2, ONCE=3, ROAMING=7
+        ),
+        "typename": SimpleNamespace(
+            EnumToString=lambda enum_type, value: _S("ALTERNATE")
+        ),
         "VectorToArray": _vector_to_array,
         "IsValidSceneId": _is_valid_scene_id,
         "MCPAIGroup": _new_group,
@@ -548,7 +572,8 @@ def _state_namespace() -> dict:
         "MCPAIGroupRecord", "MCPAIGroupMemberRecord", "MCPAIGroup",
         "MCPAIGroupMember", "eAIGroup", "eAIFSM", "ExpansionState",
         "ExpansionFSM", "EmoteManager", "MCPLeaseCloseCensus",
-        "MCPLeaseCloseEntry", "Object",
+        "MCPLeaseCloseEntry", "Object", "eAIWaypointBehavior",
+        "eAIGroupFormationState",
     )
     for signature, members in (
         ("protected void EnsureAIRegistry()", ("m_AIGroups",)),
@@ -560,6 +585,10 @@ def _state_namespace() -> dict:
         ),
         (
             "protected void FillRemainingIds(MCPAIGroupRecord record, MCPAIGroup report)",
+            (),
+        ),
+        (
+            "protected void AIFillBehaviour(eAIGroup group, MCPAIGroup report)",
             (),
         ),
         ("protected MCPAIGroup BuildAIGroupState(MCPAIGroupRecord record)", ()),
@@ -654,6 +683,40 @@ class AiGroupStateEnforceTest(unittest.TestCase):
         self.assertEqual(list(member.last_pos), [11.0, 22.0, 33.0])
         self.assertEqual(member.last_health, 55.0)
         self.assertTrue(member.last_alive)
+
+    def test_e7_group_enums_map_every_stored_value(self) -> None:
+        # Mutants killed: behaviour echoed from the record or constant
+        # ("LOOP"), a swapped behaviour/formation name (HALT read as HOLD,
+        # FLANK as IN, ONCE as LOOP), and a constant waypoint_index. The
+        # record behaviour is stale ("LOOP") in every case, so only the
+        # Expansion read-back through AIFillBehaviour can pass; ALTERNATE
+        # has no tool name and reads "" like the spawn/order replies.
+        cases = (
+            (0, 0, "HOLD", "HALT", "NONE"),
+            (1, 1, "LOOP", "LOOP", "IN"),
+            (2, 2, "", "ALTERNATE", "FLANK"),
+            (3, 1, "ONCE", "ONCE", "IN"),
+            (7, 1, "ROAM", "ROAMING", "IN"),
+        )
+        for value, formation_state, behaviour, expansion, state_name in cases:
+            with self.subTest(waypoint_behaviour=value):
+                namespace = _state_namespace()
+                group = _FakeGroupEntity(
+                    waypoint_behaviour=value,
+                    formation_state=formation_state,
+                    waypoint_index=5,
+                )
+                record = _group_record(
+                    members=[_member_record(11, _FakeMemberEntity())],
+                    group=group,
+                    behaviour="LOOP",
+                )
+                _register(namespace, record, present_group=group)
+                report = _dispatch(namespace, group_id=record.group_id).ai_group
+                self.assertEqual(report.behaviour.text, behaviour)
+                self.assertEqual(report.behaviour_expansion.text, expansion)
+                self.assertEqual(report.formation_state.text, state_name)
+                self.assertEqual(report.waypoint_index, 5)
 
     def test_e7_gone_keeps_last_observation_and_dead_stays_dead(self) -> None:
         # Mutants killed: a gone member losing its last observation (empty

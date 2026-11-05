@@ -291,7 +291,6 @@ modded class MCPBridge
 	{
 		int index = 0;
 		MCPAIGroupMemberRecord memberRecord;
-		eAIGroup found;
 
 		if (!record)
 		{
@@ -309,16 +308,7 @@ modded class MCPBridge
 			index = index + 1;
 		}
 
-		if (record.group && record.expansion_id > 0)
-		{
-			found = eAIGroup.GetGroupByID(record.expansion_id, false);
-			if (found == record.group)
-			{
-				return false;
-			}
-		}
-
-		return true;
+		return !AIGroupOriginalPresent(record);
 	}
 
 	// The release request of plan 3.6, shared by ai_group_release and the
@@ -1485,9 +1475,13 @@ modded class MCPBridge
 	}
 
 	// One group read (plan 3.4). Getters of a group Expansion no longer
-	// returns are never called: its group fields stay unavailable (empty
-	// strings, waypoint_index -1, no current waypoint) while its registered
-	// members are still read. Enum names follow AIenums.c order.
+	// returns are never called: its Expansion-read fields stay unavailable
+	// (empty strings, waypoint_index -1, no current waypoint) while its
+	// registered members are still read and behaviour answers from the
+	// registry. Behaviour is read back through AIFillBehaviour, the helper
+	// the spawn and order replies share, so the three verbs answer alike
+	// for the same group; ROAMING_LOCAL refines ROAMING when Expansion
+	// roams locally (SetWaypointBehaviour stores it as ROAMING).
 	protected MCPAIGroup BuildAIGroupState(MCPAIGroupRecord record)
 	{
 		MCPAIGroup report = new MCPAIGroup();
@@ -1519,49 +1513,26 @@ modded class MCPBridge
 			}
 
 			formationStateValue = record.group.GetFormationState();
-			if (formationStateValue == 0)
+			if (formationStateValue == eAIGroupFormationState.NONE)
 			{
 				report.formation_state = "NONE";
 			}
 
-			if (formationStateValue == 1)
+			if (formationStateValue == eAIGroupFormationState.IN)
 			{
 				report.formation_state = "IN";
 			}
 
-			if (formationStateValue == 2)
+			if (formationStateValue == eAIGroupFormationState.FLANK)
 			{
 				report.formation_state = "FLANK";
 			}
 
 			waypointBehaviourValue = record.group.GetWaypointBehaviour();
-			if (waypointBehaviourValue == 0)
+			AIFillBehaviour(record.group, report);
+			if (waypointBehaviourValue == eAIWaypointBehavior.ROAMING && record.group.m_RoamingLocal)
 			{
-				report.behaviour_expansion = "HALT";
-			}
-
-			if (waypointBehaviourValue == 1)
-			{
-				report.behaviour_expansion = "LOOP";
-			}
-
-			if (waypointBehaviourValue == 2)
-			{
-				report.behaviour_expansion = "ALTERNATE";
-			}
-
-			if (waypointBehaviourValue == 3)
-			{
-				report.behaviour_expansion = "ONCE";
-			}
-
-			if (waypointBehaviourValue == 7)
-			{
-				report.behaviour_expansion = "ROAMING";
-				if (record.group.m_RoamingLocal)
-				{
-					report.behaviour_expansion = "ROAMING_LOCAL";
-				}
+				report.behaviour_expansion = "ROAMING_LOCAL";
 			}
 
 			report.waypoint_index = record.group.m_CurrentWaypointIndex;
