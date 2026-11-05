@@ -50,6 +50,7 @@ _INITIAL_CORE_NAMES = frozenset(
 _INITIAL_READ_TOOL_NAMES = frozenset(
     {
         "action_cursor",
+        "ai_group_state",
         "camera_get",
         "gameplay_state",
         "entities_query",

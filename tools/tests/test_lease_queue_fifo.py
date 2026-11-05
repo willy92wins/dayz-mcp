@@ -83,6 +83,7 @@ READ_ONLY = {
     "nav_path_query",
     "players_visibility",
     "scene_entities",
+    "ai_group_state",
 }
 
 
