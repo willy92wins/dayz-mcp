@@ -3049,6 +3049,52 @@ class ResultWaitCancel:
 class ServerState:
     """A run without an owner dispatches nothing; the fence precedes the durable transition and so does binding retirement; the diagnostic follows a successful persist."""
 
+    @property
+    def coordination(self) -> SessionCoordinator | None:
+        return self._coordination
+
+    @coordination.setter
+    def coordination(self, value: SessionCoordinator | None) -> None:
+        # §2.12: attaching a coordinator replays the bindings already BOUND,
+        # so a lease end can open a round for them. Construction assigns this
+        # before _lock/_bindings exist; tolerate that order and replay only
+        # what is already there.
+        self._coordination = value
+        if value is None:
+            return
+        bindings = getattr(self, "_bindings", None)
+        if not bindings:
+            return
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            for binding in list(bindings.values()):
+                if binding.state == BINDING_BOUND:
+                    self._note_peer_bound(binding)
+            return
+        with lock:
+            for binding in list(self._bindings.values()):
+                if binding.state == BINDING_BOUND:
+                    self._note_peer_bound_locked(binding)
+
+    def _note_peer_bound(self, binding: Binding) -> None:
+        coordination = self._coordination
+        if coordination is None:
+            return
+        note = getattr(coordination, "note_peer_bound", None)
+        if not callable(note):
+            return
+        run_id = _binding_run_id(binding)
+        instance = getattr(binding, "instance", None)
+        if run_id is None or not isinstance(instance, str) or not instance:
+            return
+        for peer in ("server", "client"):
+            if self._peer_covers(binding, peer):
+                note(run_id, peer, instance)
+
+    def _note_peer_bound_locked(self, binding: Binding) -> None:
+        # Caller holds _lock (§2.15: broker -> coordinator, memory-only).
+        self._note_peer_bound(binding)
+
     def __init__(
         self,
         key: str,
@@ -3769,6 +3815,7 @@ class ServerState:
             if isinstance(role, str) and role:
                 binding.role = role
             binding.state = BINDING_BOUND
+            self._note_peer_bound(binding)
             self._retired_roles.discard(binding.role)
             if binding.role == "offline":
                 self._retired_roles.discard("server")
@@ -4424,6 +4471,7 @@ class ServerState:
                 state=BINDING_BOUND,
             )
             self._role_index[(run_id, role)] = instance
+            self._note_peer_bound(self._bindings[instance])
             self._bound_queues.setdefault(instance, [])
             if self._test_identity_override is None:
                 self._test_identity_override = TestIdentityOverride()
@@ -8194,6 +8242,17 @@ class ServerState:
         )
         cleanup["vehicle_release_enqueued"] = 0
         self._retire_queued_holds(session_id, lease_id)
+        # §2.14: with a lease-end round open, the aggregated closes replace
+        # the per-lease vehicle_release, bot_stop and action_hold_cancel.
+        # The abandon path (abandon_command) keeps its own releases.
+        has_round = False
+        if coordination is not None:
+            with self._lock:
+                if coordination.cleanup_authority_active(session_id, lease_id):
+                    has_round = (
+                        coordination.lease_end_round(session_id, lease_id)
+                        is not None
+                    )
         quarantined = self._retail_quarantined()
         if quarantined:
             fenced = self._fence_open_holds(session_id, lease_id)
@@ -8204,6 +8263,10 @@ class ServerState:
                     values.append("retail_quarantine")
                 values.append("hold_cancel_unconfirmed")
                 cleanup["cleanup_degraded"] = values
+        elif has_round:
+            # §2.9: delivered holds are forgotten and fenced; the close, not
+            # a cancel, settles them. No action_hold_cancel is published.
+            self._fence_open_holds(session_id, lease_id)
         else:
             delivered_ids: list[int] = []
             with self._lock:
@@ -8400,7 +8463,7 @@ class ServerState:
             ):
                 cleanup["cleanup_degraded"] = ["cleanup_fenced"]
                 return cleanup
-            if vehicle_active:
+            if vehicle_active and not has_round:
                 status, payload = self.enqueue_command(
                     "vehicle_release", {}, peer="client", internal=True
                 )
@@ -8410,7 +8473,11 @@ class ServerState:
                     cleanup["vehicle_release_enqueued"] = 1
                 else:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
-            report = self.enqueue_bot_stops_for_lease(lease_id)
+            report = (
+                {"enqueued": 0, "failed": 0}
+                if has_round
+                else self.enqueue_bot_stops_for_lease(lease_id)
+            )
             drive_report = self.enqueue_survivor_drive_releases_for_lease(lease_id)
             paths = self.enqueue_camera_path_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
@@ -10273,6 +10340,34 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True})
 
 
+def _seed_restart_debt_from_lifecycle(
+    coordinator: SessionCoordinator, lifecycle: object
+) -> None:
+    """§2.12 (H4): seed daemon_restart debt for the live runs repair keeps.
+
+    Called after the manifest is validated or restored and before the
+    lifecycle fault is lifted. Nothing here reads process liveness.
+    """
+
+    manifest = getattr(lifecycle, "manifest", None)
+    if manifest is None:
+        return
+    try:
+        runs = manifest.list_runs()
+    except Exception:
+        return
+    from dayz_mcp.process_lifecycle import _ACTIVE_STATES
+
+    pairs: list[tuple[str, str | None]] = [
+        (run.run_id, getattr(record, "role", None))
+        for run in runs
+        if getattr(run, "state", None) in _ACTIVE_STATES
+        for record in (getattr(run, "processes", None) or [])
+    ]
+    if pairs:
+        coordinator.seed_restart_debt(pairs)
+
+
 def _repair_lifecycle_recovery_fault(
     state: ServerState, fault_id: str, expected_head_sha256: str
 ) -> tuple[int, dict[str, object]]:
@@ -10299,6 +10394,7 @@ def _repair_lifecycle_recovery_fault(
     ):
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
     if event.get("state") == "repaired":
+        _seed_restart_debt_from_lifecycle(coordinator, lifecycle)
         coordinator.clear_lifecycle_recovery_fault(fault_id)
         return 200, {"repaired": True, "fault_id": fault_id}
     manifest_sha = fault.get("manifest_sha256")
@@ -10391,6 +10487,7 @@ def _repair_lifecycle_recovery_fault(
         )
     except (OSError, RuntimeError, ValueError):
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
+    _seed_restart_debt_from_lifecycle(coordinator, lifecycle)
     if not coordinator.complete_lifecycle_recovery_fault(fault_id):
         return 409, {"error": "lifecycle_recovery_cas_conflict"}
     return 200, {"repaired": True, "fault_id": fault_id}

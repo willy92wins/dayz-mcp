@@ -184,7 +184,10 @@ class BotAdmissionTest(unittest.TestCase):
         )
         status, released = coordinator.release(client, active["lease_token"])
         self.assertEqual(status, 200, released)
-        self.assertEqual(released["cleanup"].get("bot_stop_enqueued"), 1)
+        # §2.14 (plan §5.4): with a lease-end round open, the aggregated
+        # close replaces the per-lease bot_stop.
+        self.assertNotIn("bot_stop_enqueued", released["cleanup"])
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
         self.assertFalse(released.get("cleanup_degraded"))
         status, polled = state.record_poll(
             "server",
@@ -196,10 +199,11 @@ class BotAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(polled["bind"], "BOUND")
-        self.assertEqual(
-            polled["commands"],
-            [{"id": body["id"] + 1, "cmd": "bot_stop", "args": {"object_id": 9}}],
-        )
+        self.assertEqual(len(polled["commands"]), 1)
+        close_cmd = polled["commands"][0]
+        self.assertEqual(close_cmd["id"], body["id"] + 1)
+        self.assertEqual(close_cmd["cmd"], "lease_close")
+        self.assertEqual(close_cmd["args"]["close_lease_id"], "bot-lease")
         self.assertIsNone(state.take_result(body["id"] + 1))
         source = Path(_TOOLS_DIR / "dayz_mcp" / "loopback.py").read_text(encoding="utf-8")
         self.assertIn("enqueue_bot_stops_for_lease(lease_id)", source)

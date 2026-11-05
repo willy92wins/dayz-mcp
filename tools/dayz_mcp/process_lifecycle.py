@@ -2408,6 +2408,11 @@ class ProcessLifecycle:
             self.manifest.replace(run)
         except Exception:
             return False
+        # §2.12: only the lifecycle proves processes gone, and only after
+        # the manifest write succeeded. A failed write calls nothing.
+        note_gone = getattr(self.coordinator, "note_processes_gone", None)
+        if callable(note_gone):
+            note_gone(run.run_id, None)
         self._release_parent_anchors_locked()
         self._best_effort_post_persist_retirement(run, event, reason, decision)
         return True
@@ -4234,6 +4239,14 @@ class ProcessLifecycle:
                         else:
                             self._invalidate_box_cache()
                             previous.processes = list(provisional.processes)
+                            # §2.12: the replaced role's processes are gone
+                            # once this write lands, before the new instance
+                            # is minted below. A failed write calls nothing.
+                            note_gone = getattr(
+                                self.coordinator, "note_processes_gone", None
+                            )
+                            if callable(note_gone):
+                                note_gone(run_id, launch_role)
                     if replace_error is not None:
                         settled = self._settle_failed_launch(
                             client=client,
