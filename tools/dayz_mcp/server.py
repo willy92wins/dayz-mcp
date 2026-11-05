@@ -7628,7 +7628,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "detail": detail,
             "icon": icon,
         }
-        if uid != "":
+        if uid != "" and not (config.tool_pack == "admin" and uid == "all"):
             args["uid"] = uid
         budget = _timeout(timeout_s)
         deadline = time.monotonic() + budget
