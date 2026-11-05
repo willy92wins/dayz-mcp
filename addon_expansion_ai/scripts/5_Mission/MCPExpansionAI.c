@@ -394,6 +394,17 @@ modded class MCPBridge
 		return name;
 	}
 
+	// ExpansionPrefab.Load returns its prefab even when the JSON does not
+	// parse (ExpansionPrefab.c:34-37: JsonLoadFile only logs), so the parse
+	// is read from vanilla JsonFileLoader.LoadFile (jsonfileloader.c:7).
+	protected bool AILoadoutParses(string path)
+	{
+		ExpansionPrefab probe = new ExpansionPrefab();
+		string parseError;
+
+		return JsonFileLoader<ExpansionPrefab>.LoadFile(path, probe, parseError);
+	}
+
 	protected bool AIIsBehaviour(string value)
 	{
 		if (value == "HOLD")
@@ -609,10 +620,15 @@ modded class MCPBridge
 				report.behaviour = "LOOP";
 				report.behaviour_expansion = "LOOP";
 			}
-			else
+			else if (waypointBehaviour == eAIWaypointBehavior.ROAMING)
 			{
 				report.behaviour = "ROAM";
 				report.behaviour_expansion = "ROAMING";
+			}
+			else
+			{
+				report.behaviour = "";
+				report.behaviour_expansion = typename.EnumToString(eAIWaypointBehavior, waypointBehaviour);
 			}
 		}
 
@@ -693,6 +709,7 @@ modded class MCPBridge
 		typename factionType;
 		typename formationType;
 		string loadoutName;
+		string loadoutPath;
 		string sceneRefusal;
 		string memberType;
 		vector basePos;
@@ -705,6 +722,8 @@ modded class MCPBridge
 		bool waypointsOk = true;
 		bool failed = false;
 
+		// args_read is published only on refusals (plan 3.1): the success
+		// and repeat paths clear it again below.
 		report.args_read = argsRead;
 		result.ai_group = report;
 		if (!args)
@@ -737,6 +756,7 @@ modded class MCPBridge
 				return;
 			}
 
+			report.args_read = null;
 			AIFillGroupReport(existing, report);
 			result.ok = true;
 			return;
@@ -816,16 +836,11 @@ modded class MCPBridge
 			return;
 		}
 
-		// 4. The formation must be known; Create would fall back to Vee.
-		if (args.formation == "")
-		{
-			AIFillFormationAllowed(report);
-			AISpawnRefuse(result, report, "bad_args", "formation");
-			return;
-		}
-
+		// 4. The formation must be known; Create would fall back to Vee, and
+		// GetType answers a random formation for "" and RANDOM
+		// (eAIFormation.c:125): only the exact class name counts.
 		formationType = eAIFormation.GetType(args.formation);
-		if (!formationType)
+		if (!formationType || formationType.ToString() != "eAIFormation" + args.formation)
 		{
 			AIFillFormationAllowed(report);
 			AISpawnRefuse(result, report, "bad_args", "formation");
@@ -839,13 +854,14 @@ modded class MCPBridge
 			loadoutName = AINormalizeLoadout(factionInstance.GetDefaultLoadout());
 		}
 
-		if (!FileExist("$profile:ExpansionMod/Loadouts/" + loadoutName + ".json"))
+		loadoutPath = ExpansionPrefab.GetPath(loadoutName);
+		if (!FileExist(loadoutPath))
 		{
 			AISpawnRefuse(result, report, "bad_args", "loadout");
 			return;
 		}
 
-		if (!ExpansionPrefab.Load(loadoutName, true))
+		if (!AILoadoutParses(loadoutPath))
 		{
 			AISpawnRefuse(result, report, "bad_args", "loadout");
 			return;
@@ -973,7 +989,7 @@ modded class MCPBridge
 				memberRecord.last_pos.Insert(member.GetPosition()[0]);
 				memberRecord.last_pos.Insert(member.GetPosition()[1]);
 				memberRecord.last_pos.Insert(member.GetPosition()[2]);
-				memberRecord.last_health = member.GetHealth01();
+				memberRecord.last_health = member.GetHealth();
 				memberRecord.last_alive = member.IsAlive();
 				record.members.Insert(memberRecord);
 			}
@@ -1028,6 +1044,7 @@ modded class MCPBridge
 			index = index + 1;
 		}
 
+		report.args_read = null;
 		AIFillGroupReport(record, report);
 		result.ok = true;
 	}

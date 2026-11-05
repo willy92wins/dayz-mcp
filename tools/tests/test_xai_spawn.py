@@ -197,6 +197,23 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         self.assertEqual(state3.abandon_command(done["id"], "tool_timeout"), {"status": "noop"})
         self.assertEqual(_delivered(state3), [])
 
+    def test_close_support_lost_before_delivery_discards_the_spawn(self) -> None:
+        # H7/O13 delivery half: the close gate is re-read at delivery.
+        state = _bound_state()
+        _announce(state)
+        status, spawn = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(status, 200, spawn)
+        commands = [c for c in _commands() if c != "lease_close"]
+        status, polled = state.record_poll(
+            "server", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_SERVER,
+            source_pid=PID_SERVER, caps=",".join(wire_caps(commands)),
+            ach=server.EXPECTED_SERVER_ARG_CONTRACT_HASH, xai=xai_wire(commands),
+        )
+        self.assertEqual((status, polled["commands"]), (200, []))
+        stored = state.take_result(spawn["id"])
+        self.assertEqual((stored["error"], stored["detail"]),
+                         ("expansion_unavailable", "lease_close_not_supported"))
+
     def test_spawn_without_close_support_is_inert(self) -> None:
         # Mutant killed: ai_group_spawn admitted while no peer announces
         # lease_close (the v13 gate of plan 5.1).
@@ -281,6 +298,9 @@ class _FakeMember:
 
     def GetHealth01(self) -> float:
         return 1.0
+
+    def GetHealth(self) -> float:
+        return 100.0
 
     def IsAlive(self) -> bool:
         return self.alive
@@ -407,16 +427,6 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "scene_entries": [], "deleted_objects": 0, "scene_size": 0, "members": [],
     }
     parseable = set(files) if parse_ok is None else set(parse_ok)
-    prefab_cache: dict = {}
-
-    def load(name, force):
-        name_text = name.text if isinstance(name, EnforceString) else str(name)
-        state["load"].append((name_text, force))
-        if name_text in prefab_cache and not force:
-            return prefab_cache[name_text]
-        prefab = object() if name_text in parseable else None
-        prefab_cache[name_text] = prefab
-        return prefab
 
     def create_object(type_name, pos):
         index = state["created_objects"]
@@ -466,7 +476,8 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         ),
         "eAIFormation": SimpleNamespace(
             s_FormationTypes=_FakeTypenames(FORMATIONS, "eAIFormation"),
-            GetType=lambda name: _Typename("eAIFormation" + (name.text if isinstance(name, EnforceString) else str(name))) if (name.text if isinstance(name, EnforceString) else str(name)) in FORMATIONS else None,
+            # eAIFormation.c:123: "" and RANDOM give a random sane formation.
+            GetType=lambda name: (lambda n: _Typename("eAIFormationColumn") if n in ("", "RANDOM") else (_Typename("eAIFormation" + n) if n in FORMATIONS else None))(name.text if isinstance(name, EnforceString) else str(name)),
             Create=lambda name: _FakeFormation(name.text if isinstance(name, EnforceString) else str(name)),
         ),
         "eAIGroup": SimpleNamespace(
@@ -476,9 +487,15 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "eAIBase": SimpleNamespace(Cast=lambda obj: obj if isinstance(obj, _FakeMember) else None),
         "eAISurvivor": SimpleNamespace(GetQuasiRandom=lambda: EnforceString.of("eAI_SurvivorM_Test")),
         "ExpansionAISpawnBase": SimpleNamespace(GetPlacementPosition=lambda pos: pos),
-        "ExpansionPrefab": SimpleNamespace(Load=load),
+        # Real Load returns its prefab even for a file that does not parse.
+        "ExpansionPrefab": SimpleNamespace(
+            Load=lambda name, force: object(),
+            GetPath=lambda name: EnforceString.of("$profile:ExpansionMod/Loadouts/" + (name.text if isinstance(name, EnforceString) else str(name)) + ".json"),
+        ),
+        "AILoadoutParses": lambda path: (state["load"].append((path.text, True)), path.text in {f"$profile:ExpansionMod/Loadouts/{name}.json" for name in parseable})[1],
         "ExpansionHumanLoadout": SimpleNamespace(Apply=lambda member, name, force: (state["apply"].append((name.text if isinstance(name, EnforceString) else str(name), force)), True)[1]),
         "eAIWaypointBehavior": SimpleNamespace(HALT=0, LOOP=1, ONCE=3, ROAMING=7),
+        "typename": SimpleNamespace(EnumToString=lambda enum_type, value: EnforceString.of("ALTERNATE")),
         "eAIGroupFormationState": SimpleNamespace(NONE=0, IN=1),
         "eAIMovementSpeed": SimpleNamespace(STATIC=0, WALK=1, JOG=2, SPRINT=3),
         "eAILootingBehavior": SimpleNamespace(NONE=0),
@@ -545,6 +562,10 @@ class AIGroupSpawnEnforceTest(unittest.TestCase):
         self.assertEqual(result.ai_group.field.text, "formation")
         self.assertEqual([a.text for a in result.ai_group.allowed], FORMATIONS)
         self.assertEqual((state["created_objects"], len(state["groups"])), (0, 0))
+        for name in ("", "RANDOM"):
+            result = _dispatch(namespace, _args(formation=EnforceString.of(name)))
+            self.assertEqual(result.ai_group.field.text, "formation", name)
+        self.assertEqual((state["created_objects"], len(state["groups"])), (0, 0))
 
     def test_e1_loadout_normalization_and_cached_failure(self) -> None:
         # Mutants killed: accepting the prefab Load cached from a failed
@@ -557,7 +578,7 @@ class AIGroupSpawnEnforceTest(unittest.TestCase):
         result = _dispatch(namespace, _args(loadout=EnforceString.of("X.json")))
         self.assertTrue(result.ok, result.error)
         self.assertEqual(state["file_exist"][-1], "$profile:ExpansionMod/Loadouts/X.json")
-        self.assertEqual(state["load"][-1], ("X", True))
+        self.assertEqual(state["load"][-1], ("$profile:ExpansionMod/Loadouts/X.json", True))
         self.assertEqual(state["apply"][-1], ("X", True))
         namespace2, _state2 = _spawn_namespace(files={"Y"}, parse_ok=set())
         result = _dispatch(namespace2, _args(loadout=EnforceString.of("Y")))
@@ -604,6 +625,11 @@ class AIGroupSpawnEnforceTest(unittest.TestCase):
         self.assertEqual(result.ai_group.group_id, 1000000000)
         self.assertTrue(all(m.loadout_applied for m in result.ai_group.members))
         self.assertEqual(result.ai_group.members[0].inventory[0].text, "AKM")
+        # H14: args_read is published only on refusals, not on success.
+        self.assertIsNone(result.ai_group.args_read)
+        # H16: the last observation uses GetHealth(), the scale state reads.
+        record = namespace["m_AIGroups"].Get(0)
+        self.assertEqual(record.members.Get(0).last_health, 100.0)
 
     def test_e3_scene_full_and_bad_scene_create_nothing(self) -> None:
         # Mutant killed: the scene check running after creation.
@@ -634,6 +660,17 @@ class AIGroupSpawnEnforceTest(unittest.TestCase):
         record.members.Get(1).member = None
         state["groups"] = []
         self.assertTrue(namespace["AIGroupGone"](record))
+
+    def test_h13_unknown_waypoint_behaviour_is_not_read_as_roam(self) -> None:
+        # Mutant killed: the report inventing ROAM for an unknown enum.
+        namespace, _state = _spawn_namespace(files={"DefaultLoadout"})
+        group = _FakeGroup(_FakeFaction("West"))
+        group.waypoint_behaviour = 99
+        record = _record(group=group, members=EnforceArray())
+        report = _report()
+        namespace["AIFillGroupReport"](record, report)
+        self.assertEqual(report.behaviour.text, "")
+        self.assertNotEqual(report.behaviour_expansion.text, "ROAMING")
 
     def test_e5_hold_and_loop_speed_limits_from_stored_preferences(self) -> None:
         # Mutants killed: HOLD leaving the threat limit at the normal one,
