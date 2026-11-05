@@ -1084,12 +1084,16 @@ def _is_loadout_name(value: object) -> bool:
 
 
 def _is_waypoints(value: object) -> bool:
-    return (
-        isinstance(value, list)
-        and len(value) % 3 == 0
-        and len(value) <= AI_GROUP_WAYPOINTS_MAX * 3
-        and all(_is_real_number(item) for item in value)
-    )
+    if (
+        not isinstance(value, list)
+        or len(value) % 3 != 0
+        or len(value) > AI_GROUP_WAYPOINTS_MAX * 3
+    ):
+        return False
+    try:
+        return all(_is_real_number(item) for item in value)
+    except (OverflowError, ValueError):
+        return False
 
 
 # 7f5d: the world_spawn_batch tool takes 1 to SPAWN_BATCH_ITEMS_MAX items and
@@ -5364,13 +5368,59 @@ class ServerState:
             ):
                 return "expansion_unavailable:adapter_contract_mismatch"
             if cmd in _EXPANSION_NEW_MUTATION_COMMANDS and (
-                not isinstance(announced, list) or "lease_close" not in announced
+                not self._run_close_supported_locked(instance)
             ):
                 return "expansion_unavailable:lease_close_not_supported"
             return None
         if not isinstance(announced, list) or cmd not in announced:
             return "bridge_capability_missing"
         return None
+
+    def _run_close_supported_locked(self, server_instance: str | None) -> bool:
+        """Plan 5.1: every peer the run binds announces its real close.
+
+        Caller holds the lock. The required peers are the ones covered by
+        the run's live bindings (server and client, or both roles of an
+        offline binding). Each must pass the same destination test the
+        lease close itself uses (_close_destination_locked), so instance
+        and generation must be current. With bridge v12 no peer announces
+        its close, so this stays False and new adapter mutations stay
+        inert, which is the designed behaviour.
+        """
+
+        if not isinstance(server_instance, str) or not server_instance:
+            return False
+        server_binding = self._bindings.get(server_instance)
+        if server_binding is None or server_binding.state != BINDING_BOUND:
+            return False
+        run_id = _binding_run_id(server_binding)
+        if run_id is None:
+            return False
+        run_bindings = [
+            binding
+            for binding in self._bindings.values()
+            if binding.state != BINDING_RETIRED
+            and _binding_run_id(binding) == run_id
+        ]
+        required: set[str] = set()
+        for binding in run_bindings:
+            for peer in ("server", "client"):
+                if self._peer_covers(binding, peer):
+                    required.add(peer)
+        if not required:
+            return False
+        for peer in sorted(required):
+            bound = [
+                binding
+                for binding in run_bindings
+                if binding.state == BINDING_BOUND and self._peer_covers(binding, peer)
+            ]
+            if len(bound) != 1:
+                return False
+            ok, _cause = self._close_destination_locked(bound[0].instance, peer)
+            if not ok:
+                return False
+        return True
 
     def _expansion_refusal_payload(self, refusal: str) -> dict:
         """Public payload for a refusal: expansion ones carry their detail."""
@@ -7453,11 +7503,13 @@ class ServerState:
                             peer, command_name, token
                         )
                     if refusal is not None:
+                        refusal, _sep, refusal_detail = refusal.partition(":")
                         self._mark_discarded(
                             command,
                             refusal,
                             discarded_exec,
                             finished_operations,
+                            detail=refusal_detail or None,
                         )
                         continue
                     if (
@@ -7689,6 +7741,7 @@ class ServerState:
         finished_operations: list[tuple[ClientIdentity, str, int, str, str]],
         *,
         hint: str | None = None,
+        detail: str | None = None,
     ) -> None:
         # Caller holds self._lock. Records the failed result and, for exec_enforce,
         # collects an audit tuple to be written by the caller outside the lock.
@@ -7718,6 +7771,8 @@ class ServerState:
             failed = {"id": command_id, "ok": False, "error": reason}
             if hint is not None:
                 failed["hint"] = hint
+            if detail is not None:
+                failed["detail"] = detail
             self._remember_result_locked(command_id, failed)
         self._enqueued_at.pop(command_id, None)
         self._operation_deadlines.pop(command_id, None)
@@ -8711,7 +8766,19 @@ class ServerState:
         if accredited:
             names, reason = parse_poll_caps(raw)
             ach_value = ach if isinstance(ach, str) and ach else None
-            xai_value = xai if isinstance(xai, str) and xai else None
+            # H3 (#321): the adapter announces verbs as an xai bitmask, not
+            # as caps names. Expand it here so the stored census, admission
+            # and the comparator all keep seeing names.
+            from dayz_mcp.bridge_readiness import parse_xai
+
+            xai_value, xai_verbs = parse_xai(xai)
+            if names is not None and xai_verbs:
+                if set(names) & set(xai_verbs):
+                    names, reason = None, "duplicate"
+                elif len(names) + len(xai_verbs) > POLL_CAPS_MAX_NAMES:
+                    names, reason = None, "too_many"
+                else:
+                    names = (*names, *xai_verbs)
             announced_at = now if isinstance(now, (int, float)) else self._now()
             announced_instance = instance if isinstance(instance, str) else None
         else:

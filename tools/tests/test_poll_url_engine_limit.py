@@ -40,6 +40,7 @@ more than the 43 minted take the saturated server poll to 1025.
 
 from __future__ import annotations
 
+import re
 import unittest
 from urllib.parse import parse_qs, urlparse
 
@@ -145,6 +146,20 @@ class PollUrlEngineLimitTest(unittest.TestCase):
                 url = _saturated_url(name)
                 self.assertIn("&lpims=2147483000&", url)
                 self.assertLessEqual(len(url), ENGINE_URL_MAX, f"{name} poll URL is {len(url)} characters")
+
+    def test_saturated_server_poll_with_the_adapter_fits(self) -> None:
+        # H3 (#321): the adapter adds no caps names; its saturated poll is
+        # the base poll plus &xai=<hash>.<mask>, and v13's ,lease_close.
+        adapter = (_MISSION.parents[2] / "addon_expansion_ai" / "scripts" / "5_Mission"
+                   / "MCPExpansionAI.c").read_text(encoding="utf-8")
+        caps = re.search(r'super\.ServerCapabilities\(\) \+ "([^"]*)"', adapter)
+        hash_ = re.search(r'EXPANSION_AI_ARG_CONTRACT_HASH = "([0-9a-f]{16})"', adapter)
+        verbs = re.search(r'EXPANSION_AI_VERBS = "([0-9]+)"', adapter)
+        self.assertIsNotNone(hash_)
+        extra = (len(caps.group(1)) if caps else 0) + len("&xai=") + len(hash_.group(1)) \
+            + (len("." + verbs.group(1)) if verbs else 0)
+        self.assertLessEqual(len(_saturated_url("MCPBridge.c")) + extra + len(",lease_close"),
+                             ENGINE_URL_MAX)
 
     def test_daemon_reads_the_saturated_server_poll(self) -> None:
         # The reads Handler.do_GET and _handle_poll make of the query.

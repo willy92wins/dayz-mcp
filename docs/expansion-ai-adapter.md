@@ -31,17 +31,33 @@ server. It ships in `addon_expansion_ai/` and packs as
   the base `m_RuntimeObjects` and, with a `scene_id`, the scene registry,
   so `object_inspect`, `object_delete` and `scene_entities` work on them.
 
+## How the adapter announces itself (deviation from plan 2.2)
+
+The adapter adds no verb names to `caps=`. With the names, the saturated
+server poll measured 1037 characters, past the 1024 limit of #321 (1067
+with order/state, 1079 with v13's `lease_close`). Instead its poll carries
+`&xai=<16 hex>.<bitmask>`: the adapter contract hash plus one bit per verb,
+in the append-only order fixed in `bridge_readiness.py`
+(`EXPANSION_AI_VERB_BITS`: release, spawn, order, state). The broker
+expands the mask to names before storing the census, so admission and the
+capability comparator keep seeing names, and the saturated poll with the
+full adapter and v13 measures 1019. This deviates from plan 2.2 ("the
+adapter adds its names to the census") and is provisional, pending
+Guillermo's confirmation.
+
 ## The lease-close gate (mutations are inert today)
 
-New adapter mutations are admitted only when the run's peers announce real
-lease-close support. Bridge v12 does not announce `lease_close`, so today
-`ai_group_spawn` is refused with `expansion_unavailable` /
-`lease_close_not_supported` before anything is created. That is the
-designed inert behaviour, not a fault: the v13 lease-close activation (its
-census, observer and floors) is a separate change, and only then do spawns
-go through. Without the adapter at all, the refusal is
-`expansion_unavailable` / `adapter_not_loaded`; with a stale adapter
-contract hash, `adapter_contract_mismatch`.
+New adapter mutations are admitted only when every peer the run binds
+announces real lease-close support (plan 5.1: server and client, or both
+roles of an offline binding), with a current instance and generation, at
+enqueue and again at delivery. Bridge v12 does not announce
+`lease_close` / `lease_close_client`, so today `ai_group_spawn` is refused
+with `expansion_unavailable` / `lease_close_not_supported` before anything
+is created. That is the designed inert behaviour, not a fault: the v13
+lease-close activation (its census, observer and floors) is a separate
+change, and only then do spawns go through. Without the adapter at all,
+the refusal is `expansion_unavailable` / `adapter_not_loaded`; with a stale
+adapter contract hash, `adapter_contract_mismatch`.
 
 ## Licence
 

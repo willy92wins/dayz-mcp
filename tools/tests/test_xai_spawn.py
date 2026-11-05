@@ -32,7 +32,7 @@ from tests.enforce_subset_helpers import (
     translate,
 )
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
-from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands
+from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands, wire_caps, xai_wire
 
 SPAWN = "ai_group_spawn"
 RELEASE = "ai_group_release"
@@ -141,9 +141,9 @@ def _delivered(state: loopback.ServerState) -> list[dict]:
         f"{EXPECTED_BRIDGE_VERSION}~1.29",
         instance=INST_SERVER,
         source_pid=PID_SERVER,
-        caps=",".join(_commands()),
+        caps=",".join(wire_caps(_commands())),
         ach=server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
-        xai=GOOD_XAI,
+        xai=xai_wire(_commands()),
     )
     if status != 200:
         raise AssertionError(polled)

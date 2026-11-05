@@ -25,6 +25,7 @@ from dayz_mcp.bridge_readiness import (
     EXPANSION_AI_ARG_CONTRACT,
     EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH,
     _compare_bridge_capabilities,
+    parse_xai,
 )
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from tests._addon_paths import addon_root
@@ -35,8 +36,8 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
-from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
-from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands
+from tests.fence_helpers import INST_CLIENT, INST_SERVER, PID_CLIENT, PID_SERVER, bound_queue
+from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands, wire_caps, xai_wire
 
 SPAWN = "ai_group_spawn"
 RELEASE = "ai_group_release"
@@ -89,10 +90,19 @@ def _announce(
     }
 
 
+def _adapter_census() -> list[str]:
+    """The stored census with the adapter loaded: base names plus the verbs
+    the broker expands out of the adapter's xai bitmask (H3/H12)."""
+
+    source = ADAPTER.read_text(encoding="utf-8")
+    verbs = re.search(r'EXPANSION_AI_VERBS = "([0-9]+)"', source)
+    assert verbs is not None
+    _hash, names = parse_xai(f"{GOOD_XAI}.{verbs.group(1)}")
+    return _base_commands() + list(names)
+
+
 def _good_commands(*, lease_close: bool = True, adapter: bool = True) -> list[str]:
-    commands = _base_commands()
-    if adapter:
-        commands += [RELEASE]
+    commands = _adapter_census() if adapter else _base_commands()
     if lease_close:
         commands += ["lease_close"]
     return commands
@@ -101,14 +111,16 @@ def _good_commands(*, lease_close: bool = True, adapter: bool = True) -> list[st
 def _poll(
     state: loopback.ServerState, commands: list[str], ach: str | None, xai: str | None
 ):
+    # commands is the stored (post-expansion) census; on the wire the
+    # adapter verbs travel in the xai mask, not in caps (H3).
     return state.record_poll(
         "server",
         f"{EXPECTED_BRIDGE_VERSION}~1.29",
         instance=INST_SERVER,
         source_pid=PID_SERVER,
-        caps=",".join(commands),
+        caps=",".join(wire_caps(commands)),
         ach=ach,
-        xai=xai,
+        xai=None if xai is None else xai_wire(commands, xai),
     )
 
 
@@ -159,7 +171,12 @@ class ExpansionAdmissionTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         delivered = _delivered(state, _good_commands(adapter=False))
         self.assertEqual(delivered, [])
-        self.assertIn("expansion_unavailable", str(state.take_result(body["id"])))
+        stored = state.take_result(body["id"])
+        self.assertEqual(
+            (stored["error"], stored["detail"]),
+            ("expansion_unavailable", "adapter_not_loaded"),
+            stored,
+        )
         self.assertEqual(bound_queue(state, "server"), [])
 
     def test_o2_bad_xai_is_adapter_contract_mismatch(self) -> None:
@@ -192,7 +209,12 @@ class ExpansionAdmissionTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         delivered = _delivered(state, _good_commands(), xai="0" * 16)
         self.assertEqual(delivered, [])
-        self.assertIn("expansion_unavailable", str(state.take_result(body["id"])))
+        stored = state.take_result(body["id"])
+        self.assertEqual(
+            (stored["error"], stored["detail"]),
+            ("expansion_unavailable", "adapter_contract_mismatch"),
+            stored,
+        )
 
     def test_o14_precedence_common_then_ach_then_verb_then_xai_then_close(self) -> None:
         # Mutants killed: any reordering of the plan 2.2 precedence chain.
@@ -227,6 +249,14 @@ class ExpansionAdmissionTest(unittest.TestCase):
                 None,
                 {"error": "expansion_unavailable", "detail": "adapter_contract_mismatch"},
             ),
+            (
+                # verb before xai: both wrong reads the missing verb (H7)
+                _good_commands(adapter=False),
+                server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+                "0" * 16,
+                None,
+                {"error": "expansion_unavailable", "detail": "adapter_not_loaded"},
+            ),
         )
         for commands, ach, xai, announced_at, expected in cases:
             with self.subTest(expected=expected):
@@ -247,7 +277,46 @@ class ExpansionAdmissionTest(unittest.TestCase):
 
     def test_o14_census_never_exceeds_the_poll_cap(self) -> None:
         # Mutant killed: the adapter census pushing the poll past 64 names.
-        self.assertLessEqual(len(_good_commands()), loopback.POLL_CAPS_MAX_NAMES)
+        names = _adapter_census() + ["lease_close"]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertLessEqual(len(names), loopback.POLL_CAPS_MAX_NAMES)
+
+
+class ExpansionCloseGateAllPeersTest(unittest.TestCase):
+    """H10 / plan 5.1: the close gate checks every peer the run binds."""
+
+    def _state_with_client(self, client_commands: list[str]) -> loopback.ServerState:
+        state = _bound_state()
+        state.install_bound_peer(
+            instance=INST_CLIENT, role="client", pid=PID_CLIENT, run_id="xai-run"
+        )
+        _announce(state, _good_commands(), server.EXPECTED_SERVER_ARG_CONTRACT_HASH, GOOD_XAI)
+        state._peer_caps["client"] = {
+            "generation": state.daemon_generation,
+            "commands": list(client_commands),
+            "reason": "ok",
+            "arg_contract_hash": None,
+            "expansion_arg_contract_hash": None,
+            "announced_at": state._now(),
+            "instance": INST_CLIENT,
+        }
+        return state
+
+    def test_h10_client_without_close_support_blocks_the_spawn(self) -> None:
+        # Mutant killed: the gate reading only the server's lease_close.
+        state = self._state_with_client(["entities_query"])
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            body, {"error": "expansion_unavailable", "detail": "lease_close_not_supported"}
+        )
+        self.assertEqual(bound_queue(state, "server"), [])
+
+    def test_h10_every_bound_peer_with_close_support_admits_the_spawn(self) -> None:
+        state = self._state_with_client(["lease_close_client"])
+        status, body = state.enqueue_command(SPAWN, dict(SPAWN_WIRE), peer="server")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(bound_queue(state, "server")), 1)
 
 
 class ExpansionComparatorTest(unittest.TestCase):
@@ -272,11 +341,9 @@ class ExpansionComparatorTest(unittest.TestCase):
     def test_o7_match_without_and_with_the_adapter_verbs(self) -> None:
         # Mutant killed: an adapter verb demanding the adapter census (a
         # run without Expansion would read mismatch).
-        base = sorted(server._BRIDGE_COMMAND_TOOLS["server"])
-        without = [name for name in base if name != RELEASE]
-        with_adapter = [*without, RELEASE]
-        for commands in (without, with_adapter):
-            with self.subTest(commands=commands[-3:]):
+        base = _base_commands()
+        for commands in (base, _adapter_census()):
+            with self.subTest(n=len(commands)):
                 verdict = _compare_bridge_capabilities(
                     "server", self._block(commands), self._registered()
                 )
@@ -296,9 +363,7 @@ class ExpansionContractTest(unittest.TestCase):
     def test_o9_every_contract_key_is_a_field_with_its_base_type(self) -> None:
         # Mutant killed: a new MCPArgs field repeating a base name, or one
         # named state (MCPResult already has state).
-        base_args = method_body(
-            MESSAGES.read_text(encoding="utf-8"), "class MCPArgs"
-        ) if False else MESSAGES.read_text(encoding="utf-8")
+        base_args = MESSAGES.read_text(encoding="utf-8")
         base_fields = set(
             re.findall(
                 r"\n\t(?:ref\s+)?[A-Za-z_][\w<> ]*?\s+(\w+);",
@@ -520,6 +585,11 @@ class ExpansionReleaseEnforceTest(unittest.TestCase):
         self.assertEqual(entry.reason.data, b"ai_group_release_unconfirmed")
         self.assertEqual((alive.despawns, group.deletes), (1, 1))
 
+        # A member entity left while Expansion already dropped the group
+        # is not clean either (H8).
+        namespace["_registry"]["by_id"] = {}
+        self.assertFalse(namespace["AIGroupGone"](record))
+        namespace["_registry"]["by_id"] = {7: group}
         # Only both gone cleans: members deleted but the group still
         # registered in Expansion is not clean, and a reused id naming
         # another group does not count as this one.
@@ -532,16 +602,67 @@ class ExpansionReleaseEnforceTest(unittest.TestCase):
         namespace["LeaseCloseExtensionCensus"](census2)
         self.assertEqual(len(census2.entries), 0)
 
-    def test_e6_unknown_token_and_gone_group_answers(self) -> None:
-        # Mutant killed: an unknown token erroring instead of released 0.
+class ExpansionReleaseDispatchTest(unittest.TestCase):
+    """E6: the real DispatchAIGroupRelease and LeaseCloseExtensionStop."""
+
+    def _namespace(self) -> dict:
+        namespace = _adapter_namespace()
         source = ADAPTER.read_text(encoding="utf-8")
-        body = method_body(source, "protected void DispatchAIGroupRelease(MCPCommand command, MCPResult result)")
-        self.assertIn("report.released = 0;", body)
-        self.assertIn('report.release = "released";', body)
-        self.assertIn("report.confirmed = true;", body)
-        self.assertIn('report.release = "pending";', body)
-        stop = method_body(source, "protected override void LeaseCloseExtensionStop()")
-        self.assertIn("AIGroupRequestRelease(m_AIGroups.Get(index))", stop)
+        namespace["MCPAIGroup"] = lambda: SimpleNamespace(
+            release=_WireString.of(""), confirmed=False, released=-1,
+            remaining_ids=EnforceArray(),
+        )
+        for signature in (
+            "protected MCPAIGroupRecord FindAIGroupByToken(string spawnToken)",
+            "protected void FillRemainingIds(MCPAIGroupRecord record, MCPAIGroup report)",
+            "protected void DispatchAIGroupRelease(MCPCommand command, MCPResult result)",
+            "protected override void LeaseCloseExtensionStop()",
+        ):
+            translate(
+                source, signature, namespace,
+                members=("m_AIGroups", "m_RuntimeObjects"),
+                class_types=("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "MCPAIGroup",
+                             "MCPCommand", "MCPResult", "Object"),
+            )
+        return namespace
+
+    def _release(self, namespace: dict, token: str) -> SimpleNamespace:
+        result = SimpleNamespace(ai_group=None, ok=False, error=_WireString.of(""))
+        command = SimpleNamespace(args=SimpleNamespace(spawn_token=_WireString.of(token)))
+        namespace["DispatchAIGroupRelease"](command, result)
+        return result
+
+    def test_e6_dispatch_pending_then_confirmed_and_unknown_token(self) -> None:
+        namespace = self._namespace()
+        alive, group = _FakeMember(), _FakeGroup()
+        record = _record(namespace, members=[_member(11, alive)], group=group)
+        namespace["m_AIGroups"] = EnforceArray([record])
+        result = self._release(namespace, TOKEN)
+        self.assertTrue(result.ok)
+        self.assertEqual((result.ai_group.release.data, result.ai_group.confirmed), (b"pending", False))
+        self.assertEqual(list(result.ai_group.remaining_ids), [11])
+        record.members.Get(0).member = None
+        namespace["_registry"]["by_id"] = {}
+        result = self._release(namespace, TOKEN)
+        self.assertEqual((result.ai_group.release.data, result.ai_group.confirmed), (b"released", True))
+        self.assertEqual((alive.despawns, group.deletes), (1, 1))
+        result = self._release(namespace, "c" * 32)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.ai_group.released, 0)
+
+    def test_e6_stop_requests_every_group_once(self) -> None:
+        namespace = self._namespace()
+        first, second = _FakeMember(), _FakeMember()
+        groups = (_FakeGroup(), _FakeGroup())
+        records = [
+            _record(namespace, members=[_member(11, first)], group=groups[0]),
+            _record(namespace, members=[_member(12, second)], group=groups[1]),
+        ]
+        namespace["m_AIGroups"] = EnforceArray(records)
+        namespace["LeaseCloseExtensionStop"]()
+        namespace["LeaseCloseExtensionStop"]()
+        self.assertEqual((first.despawns, second.despawns), (1, 1))
+        self.assertEqual([g.deletes for g in groups], [1, 1])
 
 
 class ExpansionBaseHooksTest(unittest.TestCase):

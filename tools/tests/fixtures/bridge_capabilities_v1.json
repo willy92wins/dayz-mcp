@@ -7,6 +7,8 @@
   "note": "peer + command -> public tool, or null when the command is deliberately not exposed. Never derived from app.list_tools(), from loopback's command lists or from the PBO: the census exists so it can disagree with what the daemon registers.",
   "peers": {
     "server": {
+      "ai_group_release": null,
+      "ai_group_spawn": "ai_group_spawn",
       "bot_start": "bot_start",
       "bot_stop": "bot_stop",
       "entities_query": "entities_query",

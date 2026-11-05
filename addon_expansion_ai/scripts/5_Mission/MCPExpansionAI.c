@@ -84,7 +84,9 @@ class MCPAIGroupRecord
 {
 	string spawn_token;
 	int group_id;
-	eAIGroup group;
+	// ref: eAIGroup is not Managed, so a plain pointer would dangle once
+	// Expansion drops it from s_AllGroups (eAIGroup.c:8, :153, :1009).
+	ref eAIGroup group;
 	int expansion_id;
 	string scene_id;
 	string behaviour;
@@ -129,14 +131,15 @@ modded class MCPBridge
 	// Must equal EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH in bridge_readiness.py.
 	protected const string EXPANSION_AI_ARG_CONTRACT_HASH = "68e2b957803c9a13";
 
-	protected override string ServerCapabilities()
-	{
-		return super.ServerCapabilities() + ",ai_group_release,ai_group_spawn";
-	}
+	// Adapter verbs as an xai bitmask (bridge_readiness.EXPANSION_AI_VERB_BITS,
+	// append only): bit0 ai_group_release, bit1 ai_group_spawn. The adapter
+	// adds no names to caps, so the saturated poll stays within 1024 (#321);
+	// the broker expands the mask to names before storing the census.
+	protected const string EXPANSION_AI_VERBS = "3";
 
 	protected override string ExtensionPollParams()
 	{
-		return "&xai=" + EXPANSION_AI_ARG_CONTRACT_HASH;
+		return "&xai=" + EXPANSION_AI_ARG_CONTRACT_HASH + "." + EXPANSION_AI_VERBS;
 	}
 
 	protected override int DispatchExtension(MCPCommand command, MCPResult result)

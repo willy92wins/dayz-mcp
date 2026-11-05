@@ -8,6 +8,7 @@ server.py imports every name back, so dayz_mcp.server.<name> is the same object.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from dayz_mcp.agent_loop import next_step
@@ -334,6 +335,36 @@ def expansion_ai_arg_contract_hash() -> str:
 
 
 EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH = expansion_ai_arg_contract_hash()
+
+# Adapter verb announcement (r1 H3, #321): the adapter does NOT add its verb
+# names to caps= (the saturated poll would pass 1024 chars). Its poll carries
+# &xai=<16 hex>.<bitmask> instead, one bit per verb in the order below. The
+# bit order is part of the adapter contract: append only, never reorder. The
+# broker expands the mask to names before storing the census, so admission
+# and the capability comparator keep seeing names. Provisional deviation
+# from plan 2.2, pending confirmation (docs/expansion-ai-adapter.md).
+EXPANSION_AI_VERB_BITS: tuple[str, ...] = (
+    "ai_group_release",
+    "ai_group_spawn",
+    "ai_group_order",
+    "ai_group_state",
+)
+_XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.([0-9]{1,2})\Z")
+
+
+def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
+    """'<hash>.<bits>' -> (hash, verbs); anything else -> (None, ())."""
+
+    match = _XAI_ANNOUNCE.match(raw or "")
+    if match is None:
+        return None, ()
+    bits = int(match.group(2))
+    if bits >= 1 << len(EXPANSION_AI_VERB_BITS):
+        return None, ()
+    verbs = tuple(
+        name for index, name in enumerate(EXPANSION_AI_VERB_BITS) if bits & (1 << index)
+    )
+    return match.group(1), verbs
 
 
 # peer + command -> the public tool that fronts it, or None when the command is
