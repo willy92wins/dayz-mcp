@@ -243,6 +243,8 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, {"ok": True})
         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
+        logs: list[str] = []
+        self.httpd.log_sink = logs.append
 
         t0 = time.monotonic()
         status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
@@ -252,12 +254,16 @@ class LoopbackTest(unittest.TestCase):
         self.assertGreaterEqual(first_elapsed, 0.06)
 
         self.request("POST", "/enqueue", {"cmd": "query_player_state", "args": {}})
-        t1 = time.monotonic()
         status, body = self.request("GET", "/poll", query={"inst": INST_SERVER})
-        second_elapsed = time.monotonic() - t1
         self.assertEqual(status, 200)
         self.assertEqual(len(body["commands"]), 1)
-        self.assertLess(second_elapsed, 0.06)
+        # The handler logs the delay it slept before answering each poll.
+        # Reading it there, not timing the second poll, keeps a loaded runner
+        # from failing the test (7976).
+        polls = [line for line in logs if line.startswith("HIT GET /poll ")]
+        self.assertEqual(len(polls), 2, logs)
+        self.assertTrue(polls[0].endswith(" delay_ms=80"), polls[0])
+        self.assertTrue(polls[1].endswith(" delay_ms=0"), polls[1])
 
     def test_last_poll_and_version_hook(self) -> None:
         status, body = self.request("GET", "/poll", query={"peer": "client", "ver": "4~1.29.0"})
