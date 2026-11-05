@@ -1201,11 +1201,17 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
         stop.assert_awaited()
         self.assertEqual(payload.get("status"), "succeeded")
 
-    async def _protected_grant_error(self, runtime, run_id: str) -> BaseException:
+    async def _protected_grant_error(
+        self, runtime, run_id: str, *, release_fails: bool = False
+    ) -> BaseException:
         # What the launcher transaction raises when the worker's grant adopts
         # run_id and the daemon refuses it as run_protected: the client
-        # releases the grant as box_protected, which does not validate.
-        runtime.session_release = AsyncMock(return_value={"status": "released"})
+        # releases the grant (or fails to) and answers box_protected, which
+        # does not validate.
+        if release_fails:
+            runtime.session_release = AsyncMock(side_effect=RuntimeError("release lost"))
+        else:
+            runtime.session_release = AsyncMock(return_value={"status": "released"})
         answer = await runtime._release_protected_grant(
             {
                 "status": "active",
@@ -1227,7 +1233,9 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
             native_launcher_transaction._validate_grant(answer)
         return raised.exception
 
-    async def _stop_after_grant(self, run_id: str, adopted_run_id: str):
+    async def _stop_after_grant(
+        self, run_id: str, adopted_run_id: str, *, release_fails: bool = False
+    ):
         # fb-20261104-143314-32cf: the check sees a RUNNING row still held by
         # a dead client's lease and lets the stop reach the worker.
         runtime = _fixture_client_runtime(self._config())
@@ -1239,7 +1247,9 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
             "foreign": [],
             "port_scan_known": True,
         }
-        error = await self._protected_grant_error(runtime, adopted_run_id)
+        error = await self._protected_grant_error(
+            runtime, adopted_run_id, release_fails=release_fails
+        )
         stop = AsyncMock(side_effect=error)
         with patch.object(server_module, "ClientRuntime", return_value=runtime):
             app, _built = server_module.build_app(self._config())
@@ -1272,6 +1282,17 @@ class McpProtectionMessageTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "dayz_test_failed:NativeLauncherTransactionError", str(raised.exception)
         )
+
+    async def test_a_protected_grant_whose_release_failed_still_fails_opaquely(
+        self,
+    ) -> None:
+        # The grant's lease may still be held, so the stop must not read as a
+        # plain refusal; the token the client kept stays off the wire.
+        with self.assertRaises(Exception) as raised:
+            await self._stop_after_grant("run-owned", "run-owned", release_fails=True)
+        message = str(raised.exception)
+        self.assertIn("dayz_test_failed:NativeLauncherTransactionError", message)
+        self.assertNotIn("tok-protected", message)
 
     async def test_protected_grant_is_released_as_box_protected(self) -> None:
         srv = DaemonHttpServer(_config(key="wrap-key"), adopt_fixture=False)

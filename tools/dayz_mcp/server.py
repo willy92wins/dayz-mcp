@@ -6790,8 +6790,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 if isinstance(adopted, dict) and adopted.get("run_id") == run_id:
                     # fb-20261104-143314-32cf: the check above did not see the
                     # run as protected (for one, a RUNNING row still held by a
-                    # dead client's lease), and the daemon refused the adopt of
-                    # the worker's grant as run_protected.
+                    # dead client's lease), the daemon refused the adopt of the
+                    # worker's grant as run_protected, and the client released
+                    # that grant (_validate_grant attaches no answer otherwise).
                     return _run_protected_stop(run_id, adopted)
                 # The ToolError carries the exception TYPE, plus the launcher
                 # backend's bare code when it has one (ficha ae65). The message

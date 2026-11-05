@@ -353,7 +353,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ValidateGrantTests(unittest.TestCase):
-    """fb-20261104-143314-32cf: a box_protected grant keeps its refusal."""
+    """fb-20261104-143314-32cf: a released box_protected grant keeps its refusal."""
 
     def test_a_box_protected_grant_carries_the_client_answer(self) -> None:
         module = importlib.import_module("dayz_mcp.native_launcher_transaction")
@@ -371,9 +371,33 @@ class ValidateGrantTests(unittest.TestCase):
             module._validate_grant(answer)
         self.assertEqual(raised.exception.protected_grant, answer)
 
+    def test_a_box_protected_grant_whose_release_failed_carries_none(self) -> None:
+        # Its lease may still be held, so the failure stays opaque.
+        module = importlib.import_module("dayz_mcp.native_launcher_transaction")
+        answer = {
+            "ok": False,
+            "error": "box_protected",
+            "status": "release_failed",
+            "adopted_run": {"ok": False, "run_id": "run-1", "error": "run_protected"},
+            "use_state": "human",
+            "hint": "run_protected: in use (human)",
+            "release_error": "RuntimeError",
+            "lease_token": "tok-kept",
+        }
+        with self.assertRaisesRegex(
+            module.NativeLauncherTransactionError, "invalid_session_grant"
+        ) as raised:
+            module._validate_grant(answer)
+        self.assertIsNone(raised.exception.protected_grant)
+
     def test_any_other_invalid_grant_carries_none(self) -> None:
         module = importlib.import_module("dayz_mcp.native_launcher_transaction")
-        for response in (None, {"status": "released"}, {"status": "active"}):
+        for response in (
+            None,
+            {"status": "released"},
+            {"status": "active"},
+            {"error": "box_protected"},
+        ):
             with self.subTest(response=response):
                 with self.assertRaises(module.NativeLauncherTransactionError) as raised:
                     module._validate_grant(response)
