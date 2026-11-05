@@ -2374,7 +2374,16 @@ class ProcessLifecycle:
         self._parent_anchors: dict[tuple[str, int, str], object] = {}
         self.game_path = Path(game_path).resolve()
         self.launcher = launcher or self._launch
-        self.steam_gate = steam_gate if steam_gate is not None else SteamPreparationGate()
+        if steam_gate is None:
+            if os.name == "nt":
+                steam_gate = SteamPreparationGate()
+            else:
+                # Read-only on Linux: evaluates and pins the native Steam, never
+                # repairs or restarts it (steam_linux).
+                from dayz_mcp.steam_linux import LinuxSteamPreparationGate
+
+                steam_gate = LinuxSteamPreparationGate()
+        self.steam_gate = steam_gate
         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
@@ -3098,14 +3107,24 @@ class ProcessLifecycle:
 
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
         if os.name != "nt":
-            # Linux: the server runs in rootless podman; the returned pid is
-            # DayZServer's host PID (podman_server.launch_lifecycle_process).
-            # The Proton client is not wired yet and is refused here.
-            from dayz_mcp import podman_server
+            # Linux. The argv decides the role, as for the Steam gate: a server
+            # runs as the native DayZServer paired with game_path in rootless
+            # podman (podman_server), a client or offline game as
+            # <game_path>/DayZDiag_x64.exe under Proton in a headless sway
+            # (proton_client). Both return the game's host PID. argv[0] has
+            # passed the allow rule; the binary is chosen here, from game_path.
+            from dayz_mcp import podman_server, proton_client
 
+            if "-server" in [arg.casefold() for arg in argv[1:]]:
+                try:
+                    return podman_server.launch_lifecycle_process(
+                        list(argv), cwd, server_binary=self._linux_server_executable()
+                    )
+                except podman_server.PodmanServerError as error:
+                    raise OSError(str(error)) from error
             try:
-                return podman_server.launch_lifecycle_process(list(argv), cwd)
-            except podman_server.PodmanServerError as error:
+                return proton_client.launch_client(list(argv), self.game_path, guard=self.guard)
+            except proton_client.ProtonClientError as error:
                 raise OSError(str(error)) from error
         kwargs: dict[str, object] = {
             "cwd": cwd,

@@ -13,6 +13,8 @@ Linux implementations in place before any other module binds them:
   Windows-only checks);
 - ``pinned_keyfile.read_pinned_keyfile``: a POSIX reader with the Win32 reader's refusals;
 - ``native_process_snapshot.full_image_path_of``: ``/proc/<pid>/exe``;
+- ``native_process_guard._process`` (``install_wine_argv_trim``): a Wine process's
+  argv without the trailing NUL padding Wine leaves after rewriting it;
 - ``native_process_guard``, ``accredited_daemon_transport`` and
   ``native_process_snapshot.working_directory_of``: process images and working
   directories are absolute POSIX paths, not drive paths;
@@ -246,6 +248,7 @@ def install() -> None:
     from dayz_mcp import native_process_guard
 
     native_process_guard.ntpath = _NtpathWithPosixIsabs()
+    install_wine_argv_trim(native_process_guard)
 
     from dayz_mcp import accredited_daemon_transport
 
@@ -386,6 +389,47 @@ def valid_posix_local_path(value: object) -> bool:
     normalized POSIX path.
     """
     return isinstance(value, str) and 3 <= len(value) <= 520 and valid_posix_absolute_path(value)
+
+
+class _WineArgvTrimmedProcess:
+    """A psutil process whose Wine-rewritten argv has its NUL padding removed.
+
+    Wine rewrites a process's argv in place to the Windows command line; the rest
+    of the original argv area stays NUL-filled, and ``psutil`` reads every NUL as
+    an empty argument (measured 2026-11-05: 222 trailing ``''`` after a DayZDiag
+    command line under GE-Proton11-1). ``NativeProcessGuard`` refuses any empty
+    argument, so no Proton process could be identified. Trailing empty strings are
+    dropped only when ``argv[0]`` is a Windows path (drive or backslash), i.e. for a
+    Wine process; every other process reads exactly as before.
+    """
+
+    def __init__(self, process) -> None:
+        self._process = process
+
+    def cmdline(self):
+        argv = self._process.cmdline()
+        first = argv[0] if argv else ""
+        if _windows_shaped(first) or ("\\" in first and first.casefold().endswith(".exe")):
+            while len(argv) > 1 and argv[-1] == "":
+                argv = argv[:-1]
+        return argv
+
+    def __getattr__(self, name: str):
+        return getattr(self._process, name)
+
+
+def install_wine_argv_trim(native_process_guard) -> None:
+    """``NativeProcessGuard._process`` off Windows: see ``_WineArgvTrimmedProcess``."""
+    guard = native_process_guard.NativeProcessGuard
+    if getattr(guard._process, "_wine_argv_trim", False):
+        return
+    original = guard._process
+
+    def _process(pid: int):
+        return _WineArgvTrimmedProcess(original(pid))
+
+    _process._wine_argv_trim = True
+    guard._process = staticmethod(_process)
 
 
 def install_sealed_worker_paths() -> None:

@@ -278,13 +278,18 @@ def _proc_image_name(pid: int) -> str | None:
         image = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
     except OSError:
         image = None
-    if image is None or image in _WINE_LOADERS:
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as stream:
-                first = stream.read(4096).split(b"\0", 1)[0].decode("utf-8", "replace")
-        except OSError:
-            first = ""
-        if first and (image in _WINE_LOADERS or first.casefold().endswith(".exe")):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+            first = stream.read(4096).split(b"\0", 1)[0].decode("utf-8", "replace")
+    except OSError:
+        first = ""
+    # A Windows argv[0] (drive or backslash path to an .exe) names the program a
+    # Wine process runs, whatever its loader image is called inside the runtime.
+    windows_argv0 = first.casefold().endswith(".exe") and (
+        "\\" in first or (len(first) > 1 and first[1] == ":")
+    )
+    if first and (windows_argv0 or image is None or image in _WINE_LOADERS):
+        if windows_argv0 or image in _WINE_LOADERS or first.casefold().endswith(".exe"):
             return ntpath.basename(first)
     if image is not None:
         return image

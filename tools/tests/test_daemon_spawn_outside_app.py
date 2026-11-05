@@ -228,6 +228,8 @@ class RealRegistryProviderTest(unittest.TestCase):
             snap = self._read(sp.WindowsSteamPreflightProvider(), _FakeWinreg(79, 7))
         self.assertEqual((snap.pid, snap.active_user), (79, 7))
 
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
+
     def test_production_defaults_ask_for_the_real_registry(self) -> None:
         seen: list[dict] = []
 
@@ -276,6 +278,8 @@ class MissingPywin32IsSurfacedTest(unittest.TestCase):
         ), patch.object(sp, "WindowsSteamPreflightProvider", lambda **_kw: provider):
             return sp.evaluate_steam_session(), provider
 
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
+
     def test_stale_copy_without_pywin32_names_pywin32(self) -> None:
         result, provider = self._evaluate(ImportError("pythoncom"), _FakeWinreg(0, 0), (15544,))
         self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
@@ -283,11 +287,15 @@ class MissingPywin32IsSurfacedTest(unittest.TestCase):
         self.assertEqual(provider.real_registry_unavailable, sp.REAL_REGISTRY_PYWIN32_MISSING)
         self.assertEqual(result.steam_live_pids, (15544,))
 
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
+
     def test_com_failure_keeps_the_steam_remediation(self) -> None:
         result, provider = self._evaluate(RuntimeError("com_error"), _FakeWinreg(0, 0), (15544,))
         self.assertEqual(result.error_code, sp.STEAM_SESSION_STALE)
         self.assertEqual(result.remediation, sp.REMEDIATION)
         self.assertEqual(provider.real_registry_unavailable, "wmi_error")
+
+    @unittest.skipIf(os.name != "nt", "Windows Steam registry provider defaults: off Windows the default provider is steam_linux's")
 
     def test_steam_not_running_is_unchanged_without_pywin32(self) -> None:
         result, _ = self._evaluate(ImportError("pythoncom"), _FakeWinreg(0, 0), ())

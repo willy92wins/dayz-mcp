@@ -138,7 +138,7 @@ migration completes (backup, receipt, no marker left), the client's connected-da
 (`/proc` image, argv, cwd, psutil snapshot hashes) and `session_status` answers, with the process scan known
 (`scan_known: true`) since `orphan_guard` walks `/proc`.
 
-### `dayz_test_run` on Linux (server role)
+### `dayz_test_run` on Linux
 
 The managed lifecycle runs on Linux for `mode=server`: the same request projection, box queue, lease, sealed
 worker, daemon start/ack/stop, instance minting and PID binding as on Windows. Only the two places that start
@@ -218,8 +218,49 @@ worker from the archive, the `msvcrt` shim scope, the POSIX path authority, the 
 and two relay-boundary tests in `tests/test_security_runtime_audit.py`. Tests of the Windows approval registry
 and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")`, with the reason).
 
-Not ported: the client and offline roles (Proton; `ProcessLifecycle._launch` refuses any argv that is not the
-Linux `DayZServer`), build mode, and the shared build lock in sealed `server_cli` (`build_lock_unavailable`).
+#### Client and offline roles (Proton), implemented, not yet run end to end
+
+`ProcessLifecycle._launch` off Windows picks the program by role, from `game_path`, never from the request: an
+argv with `-server` runs the paired native `DayZServer` in podman, any other (client, offline) runs
+`<game_path>/DayZDiag_x64.exe` under Proton (`dayz_mcp/proton_client.py`). The policy may therefore name either
+binary as `diag_executable`; `<game_path>/DayZDiag_x64.exe` is the Windows-parity form.
+
+- **Launch** (`proton_client.launch_client`): dayz-dev's headless chain (`dayz-client-headless.sh`), ported. One
+  headless sway (`WLR_BACKENDS=headless`) per launch runs Steam Linux Runtime 4 `_v2-entry-point` -> `proton
+  run` -> `DayZDiag_x64.exe` in the game's own prefix (`compatdata/221100`, or `1024020` for DayZ Exp), from a
+  session script that ends sway when the game exits. `DayZDiag`, not the retail `DayZ_x64.exe`: the daemon's
+  retail quarantine treats a running retail client as the user's own game, as on Windows. The worker's argv is
+  kept; POSIX paths in `-mod`, `-profiles`, `-mission`, `-config` become `Z:\...`; `-nolauncher -skipintro
+  -nosplash` are added; arguments reach the game through a file, one per line. A running `DayZ_x64.exe`,
+  `DayZDiag_x64.exe` or `DayZ_BE.exe` refuses the launch (one game per Steam account). It returns once the game
+  process exists under this session's sway and the guard reads the same identity twice; that host PID is the
+  run's record, stop kills it. Sessions whose game is gone are cleaned up at the next launch.
+  `DAYZ_MCP_PROTON` (default `GE-Proton11-1`) and `DAYZ_MCP_STEAM_ROOT` select the tool and Steam root; the
+  daemon needs `XDG_RUNTIME_DIR` and `sway`.
+- **Steam gate** (`dayz_mcp/steam_linux.py`): the Windows gate reads `HKCU\...\Steam\ActiveProcess`; Linux Steam
+  registers its PID as `SteamPID` in `~/.steam/registry.vdf`. `LinuxSteamPreflightProvider` answers the same
+  questions from that file and `/proc` (live `ubuntu12_32/steam` processes, creation time as FILETIME ticks,
+  "startup complete" = a `steamwebhelper` under that Steam), so `evaluate_steam_session` and the identity pin
+  apply unchanged. `LinuxSteamPreparationGate` is read-only: it never repairs or restarts Steam, consent or not.
+  Linux Steam does not record who is logged in there; a logged-out Steam passes this gate.
+- **Process identity of a Wine process** (`linux_compat.install_wine_argv_trim`): Wine rewrites argv in place
+  and leaves the rest NUL-padded; psutil reads that as trailing empty arguments (222 after a DayZDiag command
+  line under GE-Proton11-1) and the sealed guard refuses empty arguments, so no Proton process could be
+  identified. Off Windows the guard's process view drops trailing empty arguments when `argv[0]` is a Windows
+  path. The process scan names a process with a Windows `argv[0]` by that path's basename.
+
+Measured 2026-11-05 without a `dayz_test_run` client (the client was needed elsewhere): `DayZDiag_x64.exe`
+1.30.164289.70 under GE-Proton11-1 in this chain loads a mod from `-mod=Z:\...\@DayZ_MCP` and writes its RPT
+and logs into `-profiles=Z:\...`, and is a host process (`enfMain`, `argv[0]` = the `Z:\` path). The Steam gate
+pins the running Steam (registered PID live, startup observed, final check passes). On a running Proton
+DayZDiag, the scan names it `DayZDiag_x64.exe` and the guard reads a complete, stable identity (after the argv
+trim). `dayz_test_run mode=all preflight` passes. **Not measured**: DayZDiag joining the native DayZServer (a
+manual attempt was stopped before the join completed), the client's bridge polls arriving bound to its PID,
+and a managed client start/stop. Graceful close (`dayz_test_close`, Win32 window close) is Windows-only; on
+Linux a stop kills the PID.
+
+Not ported: build mode, the shared build lock in sealed `server_cli` (`build_lock_unavailable`), and
+`dayz_test_close`'s window close.
 
 ## Startup and health
 

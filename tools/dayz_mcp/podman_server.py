@@ -424,11 +424,14 @@ def _cgroup_names_container(pid: int, container_id: str) -> bool:
     return f"libpod-{container_id}.scope" in text
 
 
-def launch_lifecycle_process(argv: list[str], cwd: str, podman: str = "podman") -> LaunchedContainer:
+def launch_lifecycle_process(
+    argv: list[str], cwd: str, podman: str = "podman", *, server_binary: Path | None = None
+) -> LaunchedContainer:
     """``ProcessLifecycle``'s launcher on Linux: the worker's server argv, in a container.
 
-    The sealed worker builds the argv it builds on Windows, with POSIX paths from
-    the Linux launcher policy: ``<diag_executable> -server -config=<cfg>
+    ``server_binary`` is the native DayZServer the daemon pairs with its game path;
+    without it ``argv[0]`` must be one. The sealed worker builds the argv it builds
+    on Windows, with POSIX paths from the Linux launcher policy: ``<diag_executable> -server -config=<cfg>
     -profiles=<dir> -mission=<dir> -mod=<abs;...> [-filePatching] -port=<n>
     [-serverMod=<abs;...>] <server_extra_args>``. Measured on DayZServer 1.30
     (2026-11-04): absolute ``-config``/``-profiles``/``-mission`` work and are kept,
@@ -447,9 +450,14 @@ def launch_lifecycle_process(argv: list[str], cwd: str, podman: str = "podman") 
     container (``--rm`` removes it).
     """
     del cwd
-    if not argv or not os.path.isabs(argv[0]) or os.path.basename(argv[0]) != SERVER_BINARY:
+    if server_binary is None:
+        # The policy names the Linux server itself (diag_executable = .../DayZServer).
+        if not argv or not os.path.isabs(argv[0]) or os.path.basename(argv[0]) != SERVER_BINARY:
+            raise PodmanServerError("not_a_linux_server_launch")
+        server_binary = Path(argv[0])
+    elif Path(server_binary).name != SERVER_BINARY or not argv:
         raise PodmanServerError("not_a_linux_server_launch")
-    server_dir = Path(argv[0]).parent.resolve()
+    server_dir = Path(server_binary).parent.resolve()
     if not (server_dir / SERVER_BINARY).is_file():
         raise PodmanServerError("no_dayzserver")
     # -filePatching: measured 2026-11-04 on DayZServer 1.30 (Linux), twice, over
