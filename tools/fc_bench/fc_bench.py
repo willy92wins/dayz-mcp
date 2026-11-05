@@ -32,9 +32,12 @@ inside the dayz-mcp tree. Three faults from that seed are fixed here:
   uid, fails.
 * S10 accepts more refusal phrasings than the seed's short Spanish list.
 
-An empty uid on a player verb still lands on the first player (Bob), as
-the seed documented for the real server. S11 scores that success as a
-failure. Refusing an empty uid is ticket B2, not this bench.
+With a catalog whose schema does not require ``uid`` (the stand-in,
+``catalog_standin.json``), an empty uid on a player verb still lands on
+the first player (Bob), as the seed documented for the real server, and
+S11 scores that success as a failure. Under the admin catalog an empty or
+blank uid answers ``uid_required`` and changes nothing, as
+``--tool-pack admin`` does.
 
 Stdlib only. The API key is read from the environment variable named by
 ``--api-key-env`` and is never printed or written.

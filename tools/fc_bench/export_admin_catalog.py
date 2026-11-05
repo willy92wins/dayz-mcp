@@ -1,6 +1,6 @@
 """Write catalog_admin.json from the tools/list answer of --tool-pack admin.
 
-DownList only: this builds the app in-process and dumps it, as
+List only: this builds the app in-process and dumps it, as
 tests/test_admin_tool_pack.py::test_embedded_admin_catalog_is_exact does.
 No server, loopback, daemon or port. Run from ``tools/``:
 
