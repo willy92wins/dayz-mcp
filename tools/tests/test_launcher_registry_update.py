@@ -384,8 +384,9 @@ class ReplaceTransitionTest(unittest.TestCase):
             )
 
     def test_main_takes_the_cas_hash_in_lowercase(self) -> None:
-        # A lowercase hash is the same hash; main() used to refuse it with the
-        # generic invalid_launcher_registry_update (fb-20261103-120327-1a8f).
+        # A lowercase hash, with spaces around it, is the same hash; main() used
+        # to refuse it with the generic invalid_launcher_registry_update
+        # (fb-20261103-120327-1a8f).
         with TemporaryDirectory() as directory:
             root = Path(directory)
             registry, lock, receipts = self._paths(root)
@@ -401,7 +402,7 @@ class ReplaceTransitionTest(unittest.TestCase):
                     installed = updater.main([
                         "install-dayz-test-v1",
                         "--expected-sha256",
-                        updater._sha256(BASELINE).lower(),
+                        f"  {updater._sha256(BASELINE).lower()}\n",
                     ])
                 with patch.object(
                     updater, "_validated_entry", return_value=_entry_with_sha("B" * 64)
@@ -409,7 +410,7 @@ class ReplaceTransitionTest(unittest.TestCase):
                     replaced = updater.main([
                         "replace-dayz-test-v1",
                         "--expected-sha256",
-                        updater._sha256(registry.read_bytes()).lower(),
+                        f"\t{updater._sha256(registry.read_bytes()).lower()} ",
                     ])
             self.assertEqual((installed, replaced), (0, 0), stdout.getvalue())
             launchers = json.loads(registry.read_text(encoding="utf-8"))["launchers"]
@@ -507,6 +508,27 @@ class ReplaceTransitionTest(unittest.TestCase):
                         fail_at="before_apply",
                     )
             self.assertEqual(_temps(registry), [])
+
+
+class CasHashArgumentTest(unittest.TestCase):
+    def test_main_refuses_a_non_ascii_hash_that_uppercases_to_hex(self) -> None:
+        # "\ufb00".upper() is "FF": uppercased, this 63-character value would be
+        # 64 hex digits nobody typed, and a registry whose hash starts with FF
+        # would pass the CAS (Codex Sol on #334, H1). It is refused before the
+        # bundle is read, so no launcher API runs on any platform.
+        typed = "\ufb00" + "a" * 62
+        for command in ("install-dayz-test-v1", "replace-dayz-test-v1"):
+            stdout = io.StringIO()
+            with (
+                patch.object(
+                    updater, "_validated_entry", side_effect=AssertionError("read")
+                ) as validated,
+                redirect_stdout(stdout),
+            ):
+                code = updater.main([command, "--expected-sha256", typed])
+            self.assertEqual(code, 1, command)
+            self.assertIn("invalid_launcher_registry_update", stdout.getvalue())
+            validated.assert_not_called()
 
 
 @unittest.skipUnless(os.name == "nt", "ReplaceFileW and LockFileEx are Windows-only")
