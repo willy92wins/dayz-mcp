@@ -134,9 +134,13 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # read bad_args, pos and waypoints are lists, the rest strings).
         # + 2 from 3ca5 (ai_group_order group_id/timeout_s; behaviour,
         # formation and speed are strings and waypoints a list).
-        self.assertEqual(len(rows), 241)
+        # + 2 from 90f9 (ai_group_state group_id/timeout_s; scene_id is a
+        # string, not in this census).
+        self.assertEqual(len(rows), 243)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
+        self.assertIn(("ai_group_state", "group_id", "int"), rows)
+        self.assertIn(("ai_group_state", "timeout_s", "float"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)

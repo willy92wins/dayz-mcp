@@ -107,9 +107,13 @@ vocabulary) and `behaviour_expansion` (waypoint-behaviour name),
 group). A releasing group with anything left also carries
 `release: "pending"`, `confirmed: false` and the pending member ids in
 `remaining_ids`. Getters of a group Expansion no longer returns are
-never called: its group fields stay unavailable (empty strings,
+never called: its Expansion-read fields stay unavailable (empty strings,
 `waypoint_index: -1`, no current waypoint) while its registered members
-are still read.
+are still read and `behaviour` answers from the adapter registry.
+Behaviour and formation are read back through the same mapping the
+spawn and order replies use (`AIFillBehaviour` and the enum constants),
+so the three verbs answer alike for the same group; `ROAMING_LOCAL`
+refines `ROAMING` when Expansion roams locally.
 
 Per member: `object_id`, `alive`, `pos`, `health`, `fsm_state` and
 `fsm_substate` (from `GetFSM()`/`GetState()`/`GetName()` and
@@ -135,6 +139,10 @@ their defaults.
 Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, and the
 O13 part that reads residues on a v12 census). In-game validation is
 pending; this section describes the offline contract only.
+
+As a server read it is also admitted under the live profile:
+`LIVE_ALLOWED_COMMANDS` derives from `READ_ONLY_COMMANDS & SERVER_COMMANDS`
+(`loopback.py`), and the adapter mutations stay outside it.
 
 ## How the adapter announces itself (deviation from plan 2.2)
 
