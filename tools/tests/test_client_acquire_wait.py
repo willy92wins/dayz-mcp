@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 import threading
 import time
@@ -347,8 +348,14 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
             pauses, calls = await self._real_clock_timeout("duplicate", 30)
             self.assertGreaterEqual(calls["wait"], 1)
             self.assertTrue(pauses, "a duplicate quota asked for no pause")
+            # An answer on the start's own clock tick (Python 3.11 on
+            # Windows moves monotonic in 15.6 ms steps) asks for the rounded
+            # deadline minus the start, 0.30000000000001137 on CI: the
+            # rounding of the deadline, under one ulp of the clock. The check
+            # allows that ulp and nothing more (as f3 does).
+            slack = math.ulp(control_client._monotonic())
             for pause in pauses:
-                self.assertLessEqual(pause, 0.3, pauses)
+                self.assertLessEqual(pause, 0.3 + slack, pauses)
 
         await assert_answers_at_once_async(self, sample, gate_s=0.8)
 
