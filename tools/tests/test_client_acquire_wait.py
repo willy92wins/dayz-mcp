@@ -25,6 +25,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import control_client, server
 from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import MAX_OPERATION_TOMBSTONES
+from tests._answers_at_once import assert_answers_at_once_async
 from tests._tiers import slow_test
 from tests.catalog_helpers import list_tools_after_lease
 from tests.client_helpers import _fixture_client_runtime
@@ -302,29 +303,54 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(clock.pauses, pauses)
                 self.assertEqual(clock.blocking, [])
 
-    @slow_test
-    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
+    async def _real_clock_timeout(
+        self, quota: object, retry_after: object
+    ) -> tuple[list[float], dict[str, int]]:
+        """session_acquire_wait("build", 0.3) on the real clock, to its timeout.
+
+        The pauses control_client asks asyncio.sleep for are recorded and
+        still slept, so the wiring under test is the real one.
+        """
         runtime = self.runtime()
         request, calls = self._quota_requests(
             [
                 {
                     "status": "queued",
                     "position": 1,
-                    "session_wait_quota": "duplicate",
-                    "retry_after_s": 30,
+                    "session_wait_quota": quota,
+                    "retry_after_s": retry_after,
                 }
             ]
         )
         runtime._control._request_once = request
-        started = time.monotonic()
-        with self.assertRaisesRegex(Exception, "session_wait_timeout"):
-            await runtime.session_acquire_wait("build", 0.3)
-        elapsed = time.monotonic() - started
+        pauses: list[float] = []
+
+        async def recording_sleep(seconds: float) -> None:
+            pauses.append(seconds)
+            await _REAL_SLEEP(seconds)
+
+        with patch.object(
+            control_client, "asyncio", _module_view(asyncio, sleep=recording_sleep)
+        ):
+            with self.assertRaisesRegex(Exception, "session_wait_timeout"):
+                await runtime.session_acquire_wait("build", 0.3)
+        return pauses, calls
+
+    @slow_test
+    async def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
         # retry_after_s=30 asks for the whole 1s cap. Cut to the 0.3s the
         # caller has left, the wait times out near 0.3s. Without the cut it
-        # sleeps the 1s first (measured 1.002s).
-        self.assertGreaterEqual(calls["wait"], 1)
-        self.assertLess(elapsed, 0.8)
+        # sleeps the 1s first (measured 1.002s). Checked on every sample:
+        # every pause asked for fits the 0.3s budget. The 0.8s gate backs it
+        # up, at most three samples (tests/_answers_at_once.py).
+        async def sample() -> None:
+            pauses, calls = await self._real_clock_timeout("duplicate", 30)
+            self.assertGreaterEqual(calls["wait"], 1)
+            self.assertTrue(pauses, "a duplicate quota asked for no pause")
+            for pause in pauses:
+                self.assertLessEqual(pause, 0.3, pauses)
+
+        await assert_answers_at_once_async(self, sample, gate_s=0.8)
 
     @slow_test
     async def test_duplicate_with_a_huge_retry_after_does_not_overflow(
@@ -356,26 +382,16 @@ class ClientAcquireWaitTests(unittest.IsolatedAsyncioTestCase):
 
     @slow_test
     async def test_a_list_quota_is_not_a_pause(self) -> None:
-        runtime = self.runtime()
-        request, _calls = self._quota_requests(
-            [
-                {
-                    "status": "queued",
-                    "position": 1,
-                    "session_wait_quota": ["duplicate"],
-                    "retry_after_s": 10**400,
-                }
-            ]
-        )
-        runtime._control._request_once = request
-        started = time.monotonic()
-        with self.assertRaisesRegex(Exception, "session_wait_timeout"):
-            await runtime.session_acquire_wait("build", 0.3)
-        elapsed = time.monotonic() - started
         # Only a string is a quota: testing a list against the set would
         # raise TypeError. With no quota there is no pause, so retry_after_s
-        # is never read and the wait times out at the caller's 0.3s.
-        self.assertLess(elapsed, 0.8)
+        # is never read and the wait times out at the caller's 0.3s. Checked
+        # on every sample: no pause was asked for. The 0.8s gate backs it
+        # up, at most three samples (tests/_answers_at_once.py).
+        async def sample() -> None:
+            pauses, _calls = await self._real_clock_timeout(["duplicate"], 10**400)
+            self.assertEqual(pauses, [])
+
+        await assert_answers_at_once_async(self, sample, gate_s=0.8)
 
     async def test_timeout_tombstones_exact_operation_and_clears_state(self) -> None:
         runtime = self.runtime()

@@ -59,6 +59,10 @@ def gc_cb(phase, info):
 
 
 gc.callbacks.append(gc_cb)
+if os.environ.get("DIAG_GC_FREEZE") == "1":
+    from tests._gc_pauses import install
+
+    install()
 
 
 class Result(unittest.TextTestResult):
@@ -111,8 +115,21 @@ try:
 finally:
     stop.set()
     gc.callbacks.remove(gc_cb)
+    import collections
+
+    before = len(gc.get_objects())
+    top_before = collections.Counter(type(o).__name__ for o in gc.get_objects()).most_common(15)
+    frozen = gc.get_freeze_count()
+    gc.unfreeze()
+    t_collect = _perf()
+    collected = gc.collect()
+    t_collect = _perf() - t_collect
+    after = len(gc.get_objects())
+    top_after = collections.Counter(type(o).__name__ for o in gc.get_objects()).most_common(15)
     with open(os.path.join(out_dir, "gc_end.json"), "w") as fh:
-        json.dump({"objects": len(gc.get_objects()), "counts": gc.get_count(),
+        json.dump({"objects": before, "frozen": frozen, "collected_at_end": collected,
+                   "objects_after_collect": after, "final_collect_s": round(t_collect, 3),
+                   "top_before": top_before, "top_after": top_after, "counts": gc.get_count(),
                    "threshold": gc.get_threshold(), "stats": gc.get_stats()}, fh)
     names = sorted(t.name for t in threading.enumerate())
     with open(os.path.join(out_dir, "threads_at_end.json"), "w") as fh:

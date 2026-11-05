@@ -1,4 +1,8 @@
-"""Install the fast-tier desktop-gate guard, a Steam view and a bridge PBO reader that read nothing, before any test module imports.
+"""Keep full GC pauses short and install the fast-tier desktop-gate guard, a Steam view and a bridge PBO reader that read nothing, before any test module imports.
+
+Full garbage collections are kept short first (tests/_gc_pauses.py): they
+stop every thread of the process, and by the end of a shard they took up to
+1 s, which a 0.2-0.5 s wall-clock gate charged to the code under test.
 
 session_acquire, session_acquire_wait and session_status observe this app's
 view of Steam (server.observe_app_steam_view), which on Windows reads WMI and
@@ -22,8 +26,12 @@ import os
 import tempfile
 from pathlib import Path
 
+from tests._gc_pauses import install as _install_short_gc_pauses
 from tests._tiers import install_fast_tier_desktop_gate_guard
 
+# Full collections stop every thread of the test process; tests/_gc_pauses.py
+# keeps them short so a wall-clock gate measures the code, not the collector.
+_install_short_gc_pauses()
 install_fast_tier_desktop_gate_guard()
 
 os.environ.setdefault(

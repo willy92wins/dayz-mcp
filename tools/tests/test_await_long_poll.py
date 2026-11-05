@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from dayz_mcp import loopback, server
+from tests._answers_at_once import assert_answers_at_once
 from tests._tiers import slow_test
 
 _PENDING = b'{"status":"pending"}'
@@ -115,25 +116,46 @@ class AwaitHttpTest(unittest.TestCase):
         status, raw = self.daemon.open(method, query or {"id": "999999"}, payload, timeout)
         return time.monotonic() - started, status, raw
 
+    def _read_at_once(
+        self,
+        query: dict[str, str] | None = None,
+        prepare=None,
+        waits: bool = False,
+    ) -> tuple[int, bytes]:
+        """A GET /await that must answer without entering the long-poll wait.
+
+        Checked on every sample: await_stored_result never entered
+        _result_cv.wait. The 0.2 s gate backs that up; a sample over it is
+        taken again, at most three times (tests/_answers_at_once.py says why
+        the clock alone measures the runner). prepare runs before each
+        sample and is not timed. waits=True is for a read that really waits
+        (wait_ms=1): only the gate is checked, and a wait that runs to the
+        2 s cap still fails it in every sample.
+        """
+        return assert_answers_at_once(
+            self,
+            lambda: self.daemon.open("GET", query or {"id": "999999"}),
+            gate_s=0.2,
+            no_wait_on=() if waits else (self.daemon.state._result_cv,),
+            prepare=prepare,
+        )
+
     def test_absent_wait_ms_is_the_old_pending_body(self) -> None:
-        elapsed, status, raw = self._read()
+        status, raw = self._read_at_once()
         self.assertEqual(status, 200)
         self.assertEqual(raw, _PENDING)
-        self.assertLess(elapsed, 0.2)
 
     def test_unusable_wait_ms_does_not_wait(self) -> None:
         for raw_wait in ("-1", "1.5", "abc", ""):
             with self.subTest(wait_ms=raw_wait):
-                elapsed, status, raw = self._read(query={"id": "999999", "wait_ms": raw_wait})
+                status, raw = self._read_at_once({"id": "999999", "wait_ms": raw_wait})
                 self.assertEqual(status, 200)
                 self.assertEqual(raw, _PENDING)
-                self.assertLess(elapsed, 0.2)
 
     def test_zero_wait_ms_stays_the_old_pending_body(self) -> None:
-        elapsed, status, raw = self._read(query={"id": "999999", "wait_ms": "0"})
+        status, raw = self._read_at_once({"id": "999999", "wait_ms": "0"})
         self.assertEqual(status, 200)
         self.assertEqual(raw, _PENDING)
-        self.assertLess(elapsed, 0.2)
 
     def test_superscript_and_zero_padded_wait_ms(self) -> None:
         # "²" is a digit to str.isdigit and makes int() raise. Zero-padded
@@ -148,33 +170,43 @@ class AwaitHttpTest(unittest.TestCase):
         cases = (("²", False), ("00000000", False), ("00000001", True))
         for raw_wait, expect_field in cases:
             with self.subTest(wait_ms=raw_wait):
-                elapsed, status, raw = self._read(
-                    query={"id": "999999", "wait_ms": raw_wait},
-                    timeout=1.0,
+                status, raw = self._read_at_once(
+                    {"id": "999999", "wait_ms": raw_wait}, waits=expect_field
                 )
                 self.assertEqual(status, 200, raw)
                 body = json.loads(raw)
                 self.assertEqual(body.get("status"), "pending", body)
-                self.assertLess(elapsed, 0.2)
                 if expect_field:
                     self.assertIs(body.get(loopback.AWAIT_LONG_POLL_FIELD), True)
                 else:
                     self.assertEqual(raw, _PENDING)
 
     def test_stored_result_returns_without_waiting_out_the_cap(self) -> None:
-        command_id = self.daemon.enqueue()
-        code, stored = self.daemon.state.store_result({"id": command_id, "ok": 1})
-        self.assertEqual(code, 200, stored)
-        self.assertFalse(stored.get("discarded", False), stored)
-        elapsed, status, raw = self._read(
-            query={"id": str(command_id), "remove": "1", "wait_ms": "2000"}
+        # remove=1 consumes the result, so each sample stores a fresh one.
+        ids: list[int] = []
+
+        def store() -> None:
+            command_id = self.daemon.enqueue()
+            code, stored = self.daemon.state.store_result({"id": command_id, "ok": 1})
+            self.assertEqual(code, 200, stored)
+            self.assertFalse(stored.get("discarded", False), stored)
+            ids.append(command_id)
+
+        status, raw = assert_answers_at_once(
+            self,
+            lambda: self.daemon.open(
+                "GET", {"id": str(ids[-1]), "remove": "1", "wait_ms": "2000"}
+            ),
+            gate_s=0.2,
+            no_wait_on=(self.daemon.state._result_cv,),
+            prepare=store,
         )
         self.assertEqual(status, 200)
         body = json.loads(raw)
         self.assertEqual(body["status"], "done")
         self.assertNotIn(loopback.AWAIT_LONG_POLL_FIELD, body)
-        self.assertLess(elapsed, 0.2)
-        self.assertIsNone(self.daemon.state.take_result(command_id))
+        for command_id in ids:
+            self.assertIsNone(self.daemon.state.take_result(command_id))
 
     @slow_test
     def test_result_during_the_wait_is_delivered(self) -> None:
