@@ -928,8 +928,11 @@ class LeaseCloseCensusTests(unittest.TestCase):
 
     def test_k28_observer_timeout_translated(self):
         # PostLeaseCloseJob with a stuck residue entry publishes observer_timeout.
+        # D-r3-H1: an unverified-only census is Settled, so the timeout adds
+        # nothing (kills N13/N14: Settled -> Clean in the timeout guard).
         for path, peer in ((SERVER_PATH, "server"), (CLIENT_PATH, "client")):
-            with self.subTest(peer=peer):
+          for entry_state, want_timeout in (("residue", True), ("unverified", False)):
+            with self.subTest(peer=peer, entry=entry_state):
                 source = _read(path)
                 posted = []
                 ns = {"PostResult": lambda r: posted.append(r), "MCPLeaseCloseEntry": _CloseEntry, "MCPLeaseCloseCensus": _CloseCensus}
@@ -937,12 +940,12 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 class _Res:
                     pass
 
-                def build(args):
+                def build(args, _s=entry_state):
                     c = _CloseCensus()
                     c.state = EnforceString.of("residue")
                     e = _CloseEntry()
                     e.name = EnforceString.of("weapon")
-                    e.state = EnforceString.of("residue")
+                    e.state = EnforceString.of(_s)
                     e.reason = EnforceString.of("weapon")
                     c.entries.Insert(e)
                     return c
@@ -967,7 +970,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 ns["PostLeaseCloseJob"](job, True)
                 self.assertEqual(len(posted), 1)
                 names = [(e.name.text, e.reason.text) for e in posted[0].lease_close.entries]
-                self.assertIn(("observer", "observer_timeout"), names)
+                # D-r2-H7: settled (unverified-only) debt is not an observer timeout.
+                self.assertEqual(("observer", "observer_timeout") in names, want_timeout)
                 self.assertEqual(posted[0].lease_close.state.text, "residue")
 
     def test_bots_gone_body_is_idle_translated(self):
