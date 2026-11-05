@@ -138,6 +138,7 @@ SERVER_COMMANDS = {
     # Expansion AI adapter (optional PBO): spawn names the release registry
     # origin; the release is internal (RELEASE_REGISTRY / owner cleanup).
     "ai_group_spawn",
+    "ai_group_order",
     "ai_group_release",
 }
 CLIENT_COMMANDS = {
@@ -1096,6 +1097,12 @@ def _is_waypoints(value: object) -> bool:
         return False
 
 
+def _is_order_waypoints(value: object) -> bool:
+    # An order replaces the route, so an empty list is not a valid order:
+    # it would clear the waypoints and keep the old destination.
+    return _is_waypoints(value) and len(value) >= 3
+
+
 # 7f5d: the world_spawn_batch tool takes 1 to SPAWN_BATCH_ITEMS_MAX items and
 # sends them as commands of 1 to SPAWN_BATCH_PER_TICK_MAX items each, every one
 # created in the server tick that dispatches it. Only the per-command bound
@@ -1462,17 +1469,25 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "scene_clear",
     "survivor_drive",
     "survivor_drive_release",
+    "ai_group_order",
     "ai_group_release",
     "ai_group_spawn",
 })
 # Expansion AI adapter verbs (plan 2.2): the specific refusal replaces the
 # generic missing-verb one for these, after the common census and ach guards.
-_EXPANSION_ADMISSION_COMMANDS = frozenset({"ai_group_release", "ai_group_spawn"})
+_EXPANSION_ADMISSION_COMMANDS = frozenset({
+    "ai_group_order",
+    "ai_group_release",
+    "ai_group_spawn",
+})
 # New adapter mutations are gated on real lease-close support (plan 5.1):
 # while no peer announces lease_close they stay inert. Internal releases
 # keep their own destination authority and are not new mutations. Each
 # adapter PR adds its mutation verb here when it ships its dispatch.
-_EXPANSION_NEW_MUTATION_COMMANDS = frozenset({"ai_group_spawn"})
+_EXPANSION_NEW_MUTATION_COMMANDS = frozenset({
+    "ai_group_order",
+    "ai_group_spawn",
+})
 _XAI_HASH = re.compile(r"\A[0-9a-f]{16}\Z")
 # Client verbs an older PBO must not be handed, each with the error it is
 # refused with. Checked on the census of the client bound to the run (no
@@ -1522,6 +1537,18 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
         "ai_group_release",
     }
 )
+
+
+# Expansion AI adapter order validators (plan 3.3): speed travels only
+# beside speed_set, as in player_move, so the two variants below share them.
+_AI_ORDER_VALIDATORS: dict[str, _FieldValidator] = {
+    "group_id": _integer_in_range(minimum=1),
+    "behaviour": _one_of(*sorted(AI_BEHAVIOURS)),
+    "formation": _is_ai_short_name,
+    "waypoints": _is_order_waypoints,
+    "speed": _integer_in_range(minimum=1, maximum=3),
+    "speed_set": _is_true,
+}
 
 
 # Command schemas keep the authenticated ingress contract in one place. Variants
@@ -2339,6 +2366,20 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "scene_id": is_scene_id,
             },
         )
+    ),
+    # Expansion AI adapter order: group_id plus any one of the order
+    # fields; speed travels as 1, 2 or 3 only beside speed_set (plan 3.3).
+    "ai_group_order": _command_schema(
+        _schema_variant(
+            required=("group_id",),
+            optional=("behaviour", "formation", "waypoints"),
+            validators=_AI_ORDER_VALIDATORS,
+        ),
+        _schema_variant(
+            required=("group_id", "speed", "speed_set"),
+            optional=("behaviour", "formation", "waypoints"),
+            validators=_AI_ORDER_VALIDATORS,
+        ),
     ),
     "ai_group_release": _command_schema(
         _schema_variant(

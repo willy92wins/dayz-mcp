@@ -132,7 +132,11 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
         # + 1 from 173a (ai_group_spawn timeout_s; count is untyped so 1.5/true
         # read bad_args, pos and waypoints are lists, the rest strings).
-        self.assertEqual(len(rows), 239)
+        # + 2 from 3ca5 (ai_group_order group_id/timeout_s; behaviour,
+        # formation and speed are strings and waypoints a list).
+        self.assertEqual(len(rows), 241)
+        self.assertIn(("ai_group_order", "group_id", "int"), rows)
+        self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)

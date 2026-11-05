@@ -24,6 +24,8 @@ class MCPAIGroupMember
 	bool loadout_applied;
 	ref array<string> inventory;
 	bool alive;
+	int speed_limit;
+	int speed_limit_threat;
 
 	void MCPAIGroupMember()
 	{
@@ -43,6 +45,12 @@ class MCPAIGroup
 	string field;
 	int living;
 	int limit;
+	string formation_state;
+	int waypoint_count;
+	int waypoint_index;
+	bool in_combat;
+	bool combat_may_override;
+	bool roams_expansion_locations;
 	ref array<string> allowed;
 	ref MCPAIArgsRead args_read;
 	string release;
@@ -132,10 +140,11 @@ modded class MCPBridge
 	protected const string EXPANSION_AI_ARG_CONTRACT_HASH = "68e2b957803c9a13";
 
 	// Adapter verbs as an xai bitmask (bridge_readiness.EXPANSION_AI_VERB_BITS,
-	// append only): bit0 ai_group_release, bit1 ai_group_spawn. The adapter
-	// adds no names to caps, so the saturated poll stays within 1024 (#321);
-	// the broker expands the mask to names before storing the census.
-	protected const string EXPANSION_AI_VERBS = "3";
+	// append only): bit0 ai_group_release, bit1 ai_group_spawn,
+	// bit2 ai_group_order. The adapter adds no names to caps, so the
+	// saturated poll stays within 1024 (#321); the broker expands the
+	// mask to names before storing the census.
+	protected const string EXPANSION_AI_VERBS = "7";
 
 	protected override string ExtensionPollParams()
 	{
@@ -153,6 +162,12 @@ modded class MCPBridge
 		if (command.cmd == "ai_group_spawn")
 		{
 			DispatchAIGroupSpawn(command, result);
+			return 1;
+		}
+
+		if (command.cmd == "ai_group_order")
+		{
+			DispatchAIGroupOrder(command, result);
 			return 1;
 		}
 
@@ -470,20 +485,79 @@ modded class MCPBridge
 		}
 	}
 
+	// The formations this Expansion build registers (eAIFormation.c:5),
+	// named like eAIFormation.GetName() (eAIFormation.c:28): the class name
+	// without its "eAIFormation" prefix, so the resolved type is exactly
+	// eAIFormation<name>. Shared by spawn and order (plan 3.3).
+	protected string AIFormationName(int index)
+	{
+		string cls = eAIFormation.s_FormationTypes.Get(index).ToString();
+		return cls.Substring(12, cls.Length() - 12);
+	}
+
+	// The registry, not GetType: GetType answers a random formation for ""
+	// and RANDOM (eAIFormation.c:123-128).
+	protected bool AIFormationKnown(string formation)
+	{
+		int index = 0;
+
+		while (index < eAIFormation.s_FormationTypes.Count())
+		{
+			if (AIFormationName(index) == formation)
+			{
+				return true;
+			}
+			index = index + 1;
+		}
+		return false;
+	}
+
 	protected void AIFillFormationAllowed(MCPAIGroup report)
 	{
 		int index = 0;
-		int total = eAIFormation.s_FormationTypes.Count();
-		typename formationType;
-		string typeName;
 
-		while (index < total)
+		while (index < eAIFormation.s_FormationTypes.Count())
 		{
-			formationType = eAIFormation.s_FormationTypes.Get(index);
-			typeName = formationType.ToString();
-			report.allowed.Insert(typeName.Substring(12, typeName.Length() - 12));
+			report.allowed.Insert(AIFormationName(index));
 			index = index + 1;
 		}
+	}
+
+	protected void AIFillBehaviourAllowed(MCPAIGroup report)
+	{
+		report.allowed.Insert("HOLD");
+		report.allowed.Insert("ONCE");
+		report.allowed.Insert("LOOP");
+		report.allowed.Insert("ROAM");
+	}
+
+	// 0..32 finite triples for a spawn, 1..32 for an order (an empty order
+	// route would keep the old destination, eAIGroup.c:231-249).
+	protected bool AIWaypointsOk(array<float> waypoints, int minPoints)
+	{
+		int index = 0;
+
+		if (!waypoints)
+		{
+			return false;
+		}
+		if (waypoints.Count() < minPoints * 3 || waypoints.Count() > AI_WAYPOINTS_MAX * 3)
+		{
+			return false;
+		}
+		while (index < waypoints.Count())
+		{
+			if (index + 2 >= waypoints.Count())
+			{
+				return false;
+			}
+			if (!IsFiniteFloat(waypoints.Get(index)) || !IsFiniteFloat(waypoints.Get(index + 1)) || !IsFiniteFloat(waypoints.Get(index + 2)))
+			{
+				return false;
+			}
+			index = index + 3;
+		}
+		return true;
 	}
 
 	protected int AICountLivingMembers()
@@ -516,11 +590,12 @@ modded class MCPBridge
 		return living;
 	}
 
-	protected void AIGroupApplyBehaviour(MCPAIGroupRecord record)
+	// Plan 3.2 waypoints, always from record.waypoints so the record is
+	// the route. ClearWaypoints resets neither the backtracking flag nor
+	// the current destination, so both are set here (eAIGroup.c:241-249).
+	protected void AIGroupApplyRoute(MCPAIGroupRecord record)
 	{
 		int index = 0;
-		int memberIndex = 0;
-		MCPAIGroupMemberRecord memberRecord;
 		vector waypoint;
 
 		record.group.ClearWaypoints();
@@ -533,36 +608,46 @@ modded class MCPBridge
 			{
 				record.group.SetCurrentWaypoint(waypoint);
 			}
-
 			index = index + 3;
 		}
+	}
 
+	// Plan 3.2: HOLD is NONE plus HALT (HALT alone still walks the leader).
+	protected void AIGroupApplyMode(MCPAIGroupRecord record)
+	{
 		if (record.behaviour == "HOLD")
 		{
 			record.group.SetFormationState(eAIGroupFormationState.NONE);
 			record.group.SetWaypointBehaviour(eAIWaypointBehavior.HALT);
+			return;
+		}
+		record.group.SetFormationState(eAIGroupFormationState.IN);
+		if (record.behaviour == "ONCE")
+		{
+			record.group.SetWaypointBehaviour(eAIWaypointBehavior.ONCE);
+		}
+		else if (record.behaviour == "LOOP")
+		{
+			record.group.SetWaypointBehaviour(eAIWaypointBehavior.LOOP);
 		}
 		else
 		{
-			record.group.SetFormationState(eAIGroupFormationState.IN);
-			if (record.behaviour == "ONCE")
-			{
-				record.group.SetWaypointBehaviour(eAIWaypointBehavior.ONCE);
-			}
-			else if (record.behaviour == "LOOP")
-			{
-				record.group.SetWaypointBehaviour(eAIWaypointBehavior.LOOP);
-			}
-			else
-			{
-				record.group.SetWaypointBehaviour(eAIWaypointBehavior.ROAMING);
-			}
+			record.group.SetWaypointBehaviour(eAIWaypointBehavior.ROAMING);
 		}
+	}
 
-		while (memberIndex < record.members.Count())
+	// Both limits always travel together (plan 3.2, eAIBase.c:5871). In a
+	// HOLD the normal limit is STATIC and the threat preference is kept.
+	// Only living members receive setters.
+	protected void AIGroupApplyLimits(MCPAIGroupRecord record)
+	{
+		int index = 0;
+		MCPAIGroupMemberRecord memberRecord;
+
+		while (index < record.members.Count())
 		{
-			memberRecord = record.members.Get(memberIndex);
-			if (memberRecord.member)
+			memberRecord = record.members.Get(index);
+			if (memberRecord.member && memberRecord.member.IsAlive())
 			{
 				if (record.behaviour == "HOLD")
 				{
@@ -573,8 +658,45 @@ modded class MCPBridge
 					memberRecord.member.SetMovementSpeedLimits(memberRecord.speed_normal, memberRecord.speed_threat);
 				}
 			}
+			index = index + 1;
+		}
+	}
 
-			memberIndex = memberIndex + 1;
+	// Read-back translation shared by the spawn and order replies: an
+	// unknown Expansion value is named by EnumToString, never guessed.
+	protected void AIFillBehaviour(eAIGroup group, MCPAIGroup report)
+	{
+		eAIWaypointBehavior waypointBehaviour;
+
+		if (!group)
+		{
+			return;
+		}
+		waypointBehaviour = group.GetWaypointBehaviour();
+		if (waypointBehaviour == eAIWaypointBehavior.HALT)
+		{
+			report.behaviour = "HOLD";
+			report.behaviour_expansion = "HALT";
+		}
+		else if (waypointBehaviour == eAIWaypointBehavior.ONCE)
+		{
+			report.behaviour = "ONCE";
+			report.behaviour_expansion = "ONCE";
+		}
+		else if (waypointBehaviour == eAIWaypointBehavior.LOOP)
+		{
+			report.behaviour = "LOOP";
+			report.behaviour_expansion = "LOOP";
+		}
+		else if (waypointBehaviour == eAIWaypointBehavior.ROAMING)
+		{
+			report.behaviour = "ROAM";
+			report.behaviour_expansion = "ROAMING";
+		}
+		else
+		{
+			report.behaviour = "";
+			report.behaviour_expansion = typename.EnumToString(eAIWaypointBehavior, waypointBehaviour);
 		}
 	}
 
@@ -588,7 +710,6 @@ modded class MCPBridge
 		GameInventory inventory;
 		EntityAI attachment;
 		vector memberPos;
-		eAIWaypointBehavior waypointBehaviour;
 
 		report.created = true;
 		report.group_id = record.group_id;
@@ -604,32 +725,7 @@ modded class MCPBridge
 				report.formation = record.group.GetFormation().GetName();
 			}
 
-			waypointBehaviour = record.group.GetWaypointBehaviour();
-			if (waypointBehaviour == eAIWaypointBehavior.HALT)
-			{
-				report.behaviour = "HOLD";
-				report.behaviour_expansion = "HALT";
-			}
-			else if (waypointBehaviour == eAIWaypointBehavior.ONCE)
-			{
-				report.behaviour = "ONCE";
-				report.behaviour_expansion = "ONCE";
-			}
-			else if (waypointBehaviour == eAIWaypointBehavior.LOOP)
-			{
-				report.behaviour = "LOOP";
-				report.behaviour_expansion = "LOOP";
-			}
-			else if (waypointBehaviour == eAIWaypointBehavior.ROAMING)
-			{
-				report.behaviour = "ROAM";
-				report.behaviour_expansion = "ROAMING";
-			}
-			else
-			{
-				report.behaviour = "";
-				report.behaviour_expansion = typename.EnumToString(eAIWaypointBehavior, waypointBehaviour);
-			}
+			AIFillBehaviour(record.group, report);
 		}
 
 		while (index < record.members.Count())
@@ -707,7 +803,6 @@ modded class MCPBridge
 		eAIBase member;
 		Object spawnedObject;
 		typename factionType;
-		typename formationType;
 		string loadoutName;
 		string loadoutPath;
 		string sceneRefusal;
@@ -719,7 +814,6 @@ modded class MCPBridge
 		float ringZ = 0.0;
 		int index = 0;
 		int living = 0;
-		bool waypointsOk = true;
 		bool failed = false;
 
 		// args_read is published only on refusals (plan 3.1): the success
@@ -793,28 +887,7 @@ modded class MCPBridge
 			return;
 		}
 
-		if (!args.waypoints || args.waypoints.Count() > AI_WAYPOINTS_MAX * 3)
-		{
-			AISpawnRefuse(result, report, "bad_args", "waypoints");
-			return;
-		}
-
-		index = 0;
-		while (index < args.waypoints.Count() && waypointsOk)
-		{
-			if (index + 2 >= args.waypoints.Count())
-			{
-				waypointsOk = false;
-			}
-			else if (!IsFiniteFloat(args.waypoints.Get(index)) || !IsFiniteFloat(args.waypoints.Get(index + 1)) || !IsFiniteFloat(args.waypoints.Get(index + 2)))
-			{
-				waypointsOk = false;
-			}
-
-			index = index + 3;
-		}
-
-		if (!waypointsOk)
+		if (!AIWaypointsOk(args.waypoints, 0))
 		{
 			AISpawnRefuse(result, report, "bad_args", "waypoints");
 			return;
@@ -836,11 +909,8 @@ modded class MCPBridge
 			return;
 		}
 
-		// 4. The formation must be known; Create would fall back to Vee, and
-		// GetType answers a random formation for "" and RANDOM
-		// (eAIFormation.c:125): only the exact class name counts.
-		formationType = eAIFormation.GetType(args.formation);
-		if (!formationType || formationType.ToString() != "eAIFormation" + args.formation)
+		// 4. The formation must be known; Create would fall back to Vee.
+		if (!AIFormationKnown(args.formation))
 		{
 			AIFillFormationAllowed(report);
 			AISpawnRefuse(result, report, "bad_args", "formation");
@@ -1023,7 +1093,9 @@ modded class MCPBridge
 		}
 
 		group.SetFormation(eAIFormation.Create(args.formation));
-		AIGroupApplyBehaviour(record);
+		AIGroupApplyRoute(record);
+		AIGroupApplyMode(record);
+		AIGroupApplyLimits(record);
 
 		// 9. Register: group id first, then the members in creation order.
 		EnsureAIRegistry();
@@ -1047,6 +1119,243 @@ modded class MCPBridge
 
 		report.args_read = null;
 		AIFillGroupReport(record, report);
+		result.ok = true;
+	}
+
+
+	protected void AIOrderSaveSpeed(MCPAIGroupRecord record, int speedValue)
+	{
+		int index = 0;
+		MCPAIGroupMemberRecord memberRecord;
+
+		while (index < record.members.Count())
+		{
+			memberRecord = record.members.Get(index);
+			if (memberRecord.member && memberRecord.member.IsAlive())
+			{
+				memberRecord.speed_normal = speedValue;
+			}
+			index = index + 1;
+		}
+	}
+
+	// Order-only read-back fields, on top of the shared AIFillBehaviour:
+	// reusable by ai_group_state (plan 3.4). One row per registered
+	// member; limits are 0 when the entity is gone.
+	protected void AIFillGroupOrderFields(MCPAIGroupRecord record, MCPAIGroup report)
+	{
+		int index = 0;
+		MCPAIGroupMemberRecord memberRecord;
+		MCPAIGroupMember memberReport;
+		eAIFormation formation;
+		eAIGroupFormationState formationState;
+
+
+		report.group_id = record.group_id;
+		formation = record.group.GetFormation();
+		if (formation)
+		{
+			report.formation = formation.GetName();
+		}
+		AIFillBehaviour(record.group, report);
+		if (report.behaviour == "ROAM")
+		{
+			report.roams_expansion_locations = true;
+		}
+		formationState = record.group.GetFormationState();
+		if (formationState == eAIGroupFormationState.NONE)
+		{
+			report.formation_state = "NONE";
+		}
+		if (formationState == eAIGroupFormationState.IN)
+		{
+			report.formation_state = "IN";
+		}
+		if (formationState == eAIGroupFormationState.FLANK)
+		{
+			report.formation_state = "FLANK";
+		}
+		report.waypoint_count = record.group.GetWaypoints().Count();
+		report.waypoint_index = record.group.m_CurrentWaypointIndex;
+		report.in_combat = record.group.IsInCombat();
+		if (report.in_combat)
+		{
+			report.combat_may_override = true;
+		}
+		while (index < record.members.Count())
+		{
+			memberRecord = record.members.Get(index);
+			memberReport = new MCPAIGroupMember();
+			memberReport.object_id = memberRecord.object_id;
+			if (memberRecord.member)
+			{
+				memberReport.alive = memberRecord.member.IsAlive();
+				memberReport.speed_limit = memberRecord.member.GetMovementSpeedLimit();
+				memberReport.speed_limit_threat = memberRecord.member.GetMovementSpeedLimitUnderThreat();
+			}
+			report.members.Insert(memberReport);
+			index = index + 1;
+		}
+	}
+
+
+	// Plan 3.3: everything is validated before any field is applied, and
+	// only the fields present are applied. The reply is read back after.
+	protected void DispatchAIGroupOrder(MCPCommand command, MCPResult result)
+	{
+		MCPAIGroupRecord record;
+		MCPAIGroup report = new MCPAIGroup();
+		bool hasBehaviour = false;
+		bool hasFormation = false;
+		bool hasWaypoints = false;
+		bool hasSpeed = false;
+		bool wasHold = false;
+		int index = 0;
+		int speedValue = 0;
+		eAIFormation previousFormation;
+		eAIFormation nextFormation;
+
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			report.field = "group_id";
+			result.ai_group = report;
+			return;
+		}
+		record = FindAIGroupById(command.args.group_id);
+		if (!record)
+		{
+			result.ok = false;
+			result.error = "not_found";
+			return;
+		}
+		if (record.group_state == "releasing")
+		{
+			result.ok = false;
+			result.error = "not_found";
+			return;
+		}
+		if (!record.group)
+		{
+			result.ok = false;
+			result.error = "not_found";
+			return;
+		}
+		if (command.args.behaviour != "")
+		{
+			hasBehaviour = true;
+		}
+		if (command.args.formation != "")
+		{
+			hasFormation = true;
+		}
+		if (command.args.waypoints != null)
+		{
+			hasWaypoints = true;
+		}
+		if (command.args.speed_set)
+		{
+			hasSpeed = true;
+		}
+		if (!hasBehaviour && !hasFormation && !hasWaypoints && !hasSpeed)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return;
+		}
+		if (hasBehaviour && !AIIsBehaviour(command.args.behaviour))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			report.field = "behaviour";
+			AIFillBehaviourAllowed(report);
+			result.ai_group = report;
+			return;
+		}
+		if (hasFormation && !AIFormationKnown(command.args.formation))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			report.field = "formation";
+			AIFillFormationAllowed(report);
+			result.ai_group = report;
+			return;
+		}
+		if (hasWaypoints && !AIWaypointsOk(command.args.waypoints, 1))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			report.field = "waypoints";
+			result.ai_group = report;
+			return;
+		}
+		if (hasSpeed && command.args.speed != 1 && command.args.speed != 2 && command.args.speed != 3)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			report.field = "speed";
+			result.ai_group = report;
+			return;
+		}
+		if (hasSpeed)
+		{
+			if (command.args.speed == 1)
+			{
+				speedValue = eAIMovementSpeed.WALK;
+			}
+			if (command.args.speed == 2)
+			{
+				speedValue = eAIMovementSpeed.JOG;
+			}
+			if (command.args.speed == 3)
+			{
+				speedValue = eAIMovementSpeed.SPRINT;
+			}
+			AIOrderSaveSpeed(record, speedValue);
+		}
+		if (hasWaypoints)
+		{
+			record.waypoints.Clear();
+			index = 0;
+			while (index < command.args.waypoints.Count())
+			{
+				record.waypoints.Insert(command.args.waypoints.Get(index));
+				index = index + 1;
+			}
+			AIGroupApplyRoute(record);
+		}
+		if (hasFormation)
+		{
+			previousFormation = record.group.GetFormation();
+			nextFormation = eAIFormation.Create(command.args.formation);
+			if (previousFormation)
+			{
+				nextFormation.SetScale(previousFormation.GetScale());
+				nextFormation.SetLooseness(previousFormation.GetLooseness());
+			}
+			record.group.SetFormation(nextFormation);
+		}
+		if (hasBehaviour)
+		{
+			wasHold = false;
+			if (record.behaviour == "HOLD")
+			{
+				wasHold = true;
+			}
+			record.behaviour = command.args.behaviour;
+			AIGroupApplyMode(record);
+			if (!wasHold || record.behaviour != "HOLD")
+			{
+				AIGroupApplyLimits(record);
+			}
+		}
+		else if (hasSpeed && record.behaviour != "HOLD")
+		{
+			AIGroupApplyLimits(record);
+		}
+		AIFillGroupOrderFields(record, report);
+		result.ai_group = report;
 		result.ok = true;
 	}
 

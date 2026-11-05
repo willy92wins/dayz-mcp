@@ -312,7 +312,10 @@ EXPANSION_AI_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
 EXPANSION_AI_COMMANDS = frozenset(EXPANSION_AI_ARG_CONTRACT)
 # Public adapter tools registered so far; each adapter PR adds its own, so a
 # census without them never makes the comparator demand an unshipped tool.
-EXPANSION_AI_TOOLS = frozenset({"ai_group_spawn"})
+EXPANSION_AI_TOOLS = frozenset({
+    "ai_group_order",
+    "ai_group_spawn",
+})
 
 
 def expansion_ai_arg_contract_canonical() -> str:
@@ -385,6 +388,7 @@ def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
 # poll instead of on the first failed call.
 _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
+        "ai_group_order": "ai_group_order",
         "ai_group_release": None,  # internal: the broker's abandoned-spawn cleanup
         "ai_group_spawn": "ai_group_spawn",
         "bot_start": "bot_start",
