@@ -245,6 +245,19 @@ def _minimal_args(cmd: str) -> dict:
         return {"command_id": 1, "object_id": 1}
     if cmd == "camera_path_release":
         return {"command_id": 1}
+    if cmd == "ai_group_spawn":
+        return {
+            "faction": "West",
+            "count": 1,
+            "pos": [0.0, 0.0, 0.0],
+            "loadout": "",
+            "formation": "Vee",
+            "behaviour": "HOLD",
+            "waypoints": [],
+            "spawn_token": "0" * 32,
+        }
+    if cmd == "ai_group_release":
+        return {"spawn_token": "0" * 32}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
     if cmd == "server_perf":
