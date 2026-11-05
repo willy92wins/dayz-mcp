@@ -803,10 +803,19 @@ modded class PlayerBase
 
 		if (clearPending && m_MCPRaiseArmed)
 		{
-			m_MCPRaiseArmed = false;
+			MCPServerReleaseRaise();
 		}
 
 		return true;
+	}
+
+	// A reconnecting client may be a new process whose raise/fire ids start
+	// at 1 again, as m_MCPMoveLastId (MCP_PlayerMove.c OnReconnect). An old
+	// in-flight request carries the previous conn_gen and is refused there.
+	override void OnReconnect()
+	{
+		super.OnReconnect();
+		m_MCPWeaponLastId = 0;
 	}
 
 	protected void MCPReadFireRequest(ParamsReadContext ctx)

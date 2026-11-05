@@ -49,6 +49,7 @@ class MCPHoldControl
 	protected static bool s_Started;
 	protected static bool s_InterruptPending;
 	protected static bool s_InterruptSent;
+	protected static bool s_InterruptDebt;
 	protected static ref MCPHoldObservation s_Observation;
 
 	static bool IsActive()
@@ -61,7 +62,7 @@ class MCPHoldControl
 	// vanilla, so nothing in-process clears this.
 	static bool InputInFlight()
 	{
-		if (s_InterruptSent || s_InterruptPending)
+		if (s_InterruptDebt || s_InterruptSent || s_InterruptPending)
 		{
 			return true;
 		}
@@ -375,6 +376,7 @@ class MCPHoldControl
 		}
 
 		s_InterruptSent = true;
+		s_InterruptDebt = true;
 		return true;
 	}
 
@@ -581,6 +583,7 @@ class MCPHoldControl
 
 		s_Manager.RequestInterruptAction();
 		s_InterruptSent = true;
+		s_InterruptDebt = true;
 		s_Manager.MCP_HoldLocalEnd(s_Data);
 	}
 

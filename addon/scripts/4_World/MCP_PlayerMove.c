@@ -1234,6 +1234,11 @@ modded class PlayerBase
 			return;
 		}
 
+		if (!GetGame() || !GetGame().IsClient() || GetGame().IsDedicatedServer())
+		{
+			return;
+		}
+
 		int receivedGen = 0;
 		if (!ctx.Read(receivedGen))
 		{
