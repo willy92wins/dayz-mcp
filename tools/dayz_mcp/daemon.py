@@ -643,6 +643,9 @@ def _activate_server_coordination(
         child_probe=lambda: orphan_guard.snapshot_processes_with_parent(
             ["CrashReporter.exe"]
         ),
+        # fb-20261103-194855-5394: a DayZ of another install does not hold the
+        # reap of a run here.
+        image_path_of=orphan_guard.full_image_path_of,
         parent_anchor=(
             orphan_guard.open_process_anchor,
             orphan_guard.close_process_anchor,

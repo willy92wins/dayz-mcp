@@ -2153,6 +2153,9 @@ class ProcessLifecycle:
         id_fn: Callable[[], str] | None = None,
         recovery_fault_arm: RecoveryFaultArm | None = None,
         argv_of: Callable[[int], list[str] | None] | None = None,
+        # fb-20261103-194855-5394: the image path of a pid the diag probe
+        # lists. None, or no answer, keeps that DayZ holding the reap.
+        image_path_of: Callable[[int], str | None] | None = None,
         bindings: object | None = None,
         # 79e2: reads the bridge peer rows to revalidate a client replacement at
         # the instant of the kill. Read-only; None means "no answer", which is a
@@ -2180,6 +2183,7 @@ class ProcessLifecycle:
         self.id_fn = id_fn or (lambda: uuid.uuid4().hex)
         self.recovery_fault_arm = recovery_fault_arm
         self.argv_of = argv_of or _default_argv_of
+        self.image_path_of = image_path_of
         self.bindings = bindings
         self.bridge_probe = bridge_probe
         self.foreground_lock = foreground_lock
@@ -6979,7 +6983,9 @@ class ProcessLifecycle:
         not by itself a known-clean read (``reap_rejection_witness``). A
         name is ``<pid>:<role>`` for a launched role that is still owned,
         still unclassified, or still listed by the diag scan, and
-        ``<pid>:diag`` for any other diag process. Does not terminate.
+        ``<pid>:diag`` for any other diag process. A diag process of another
+        install (``_of_another_install``) does not block the reap and is not
+        named. Does not terminate.
         """
 
         run = self.manifest.get(run_id)
@@ -6998,7 +7004,7 @@ class ProcessLifecycle:
                 pid = process.get("pid")
                 if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
                     continue
-                if pid in labels:
+                if pid in labels or self._of_another_install(pid):
                     continue
                 role = roles.get(pid)
                 labels[pid] = f"{pid}:{role}" if role is not None else f"{pid}:diag"
@@ -7030,7 +7036,9 @@ class ProcessLifecycle:
             if buckets["owned"] or buckets["unknown"]:
                 return ("alive", labels)
             return ("unknown", ())
-        if labels or processes:
+        if labels or any(
+            not self._of_another_install(process["pid"]) for process in processes
+        ):
             return ("alive", labels)
         return ("clean", ())
 
@@ -8517,19 +8525,49 @@ class ProcessLifecycle:
 
     def _run_all_dead(self, run: RunRecord) -> tuple[bool, str]:
         """True if every registered process is gone or foreign and the diag
-        snapshot is known-clean. A still-owned survivor, an unknown snapshot,
-        or an unexpected DayZ returns (False, reason). Identity mismatch is
-        treated as foreign (not ours) and does not block reap. Never a basis
-        to terminate."""
+        snapshot is known to hold no DayZ of this install. A still-owned
+        survivor, an unknown snapshot, or an unexpected DayZ returns (False,
+        reason). Identity mismatch is treated as foreign (not ours) and does
+        not block reap. Never a basis to terminate."""
         buckets, unknown_reason = self._partition_registered_processes(run.processes)
         if buckets["owned"]:
             return False, "process_alive"
         if buckets["unknown"]:
             return False, unknown_reason or "process_identity_mismatch"
-        diag_ok, diag_reason = self._diag_snapshot_registered(set())
+        diag_ok, diag_reason = self._diag_snapshot_clear_of_this_install()
         if not diag_ok:
             return False, diag_reason
         return True, ""
+
+    def _diag_snapshot_clear_of_this_install(self) -> tuple[bool, str]:
+        """No DayZ the diag probe lists can be a survivor of a run here."""
+        reason, observed = self._diag_snapshot()
+        if reason is not None or observed is None:
+            return False, reason or "diag_snapshot_unknown"
+        for process in observed:
+            if not self._of_another_install(process["pid"]):
+                return False, "manual_cleanup_required"
+        return True, ""
+
+    def _of_another_install(self, pid: int) -> bool:
+        """True only when pid's image is read and is not game_path's diag exe.
+
+        start_run launches only game_path's DayZDiag_x64.exe (_canonical_error),
+        so a DayZ whose image is another file runs from another install, such
+        as the other instance's daemon (fb-20261103-194855-5394). An image that
+        cannot be read or compared is not shown to be another install's.
+        """
+        if self.image_path_of is None:
+            return False
+        try:
+            image = self.image_path_of(pid)
+            return (
+                isinstance(image, str)
+                and bool(image)
+                and not os.path.samefile(image, self.game_path / "DayZDiag_x64.exe")
+            )
+        except Exception:
+            return False
 
     def _reap_run_locked(self, run: RunRecord, *, client: ClientIdentity | None) -> str:
         """Audit-before-act retire of a confirmed-dead run to EXITED. Caller holds
