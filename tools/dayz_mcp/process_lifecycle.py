@@ -3107,19 +3107,21 @@ class ProcessLifecycle:
 
     def _launch(self, argv: list[str], cwd: str, window_style: str) -> object:
         if os.name != "nt":
-            # Linux. The argv decides the role, as for the Steam gate: a server
-            # runs as the native DayZServer paired with game_path in rootless
-            # podman (podman_server), a client or offline game as
-            # <game_path>/DayZDiag_x64.exe under Proton in a headless sway
-            # (proton_client). Both return the game's host PID. argv[0] has
-            # passed the allow rule; the binary is chosen here, from game_path.
+            # Linux. argv[0] has passed the allow rule, and the policy's binary
+            # decides. DayZServer is a server-only project in rootless podman
+            # (podman_server): the engine refuses a DayZDiag client on it
+            # (0x00020017, "Client is using Diag exe while the server is not"),
+            # so a client launch is refused here rather than left at that modal.
+            # Anything else runs <game_path>/DayZDiag_x64.exe under Proton in a
+            # headless sway, client and server alike, as on Windows
+            # (proton_client). Both return the game's host PID.
             from dayz_mcp import podman_server, proton_client
 
-            if "-server" in [arg.casefold() for arg in argv[1:]]:
+            if os.path.basename(argv[0]) == podman_server.SERVER_BINARY:
+                if "-server" not in [arg.casefold() for arg in argv[1:]]:
+                    raise OSError("client_needs_diag_executable")
                 try:
-                    return podman_server.launch_lifecycle_process(
-                        list(argv), cwd, server_binary=self._linux_server_executable()
-                    )
+                    return podman_server.launch_lifecycle_process(list(argv), cwd)
                 except podman_server.PodmanServerError as error:
                     raise OSError(str(error)) from error
             try:
@@ -3696,10 +3698,10 @@ class ProcessLifecycle:
     def _linux_server_executable(self) -> Path | None:
         """Off Windows: the native DayZServer of the Steam app next to game_path.
 
-        Derived from the bound game path only, never from a request: the
-        DayZ client app (``steamapps/common/DayZ``) pairs with
+        The one other binary the allow rule accepts, for a server-only policy.
+        Derived from the bound game path only, never from a request: the DayZ
+        client app (``steamapps/common/DayZ``) pairs with
         ``steamapps/common/DayZServer``, DayZ Exp with DayZ Server Exp.
-        podman_server runs it in a container.
         """
         if os.name == "nt":
             return None

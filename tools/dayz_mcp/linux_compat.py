@@ -468,3 +468,7 @@ def install_sealed_worker_paths() -> None:
 
         worker_rule._accepts_posix = True
         dayz_test_worker._local_path = worker_rule
+
+    from dayz_mcp import linux_build
+
+    linux_build.install_worker()

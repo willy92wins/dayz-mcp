@@ -434,9 +434,12 @@ def launch_lifecycle_process(
     on Windows, with POSIX paths from the Linux launcher policy: ``<diag_executable> -server -config=<cfg>
     -profiles=<dir> -mission=<dir> -mod=<abs;...> [-filePatching] -port=<n>
     [-serverMod=<abs;...>] <server_extra_args>``. Measured on DayZServer 1.30
-    (2026-11-04): absolute ``-config``/``-profiles``/``-mission`` work and are kept,
-    each mounted at its own path (the daemon wrote ``dayz_mcp.json`` into the
-    profiles before this call and reads the RPT there). Absolute mod paths are
+    (2026-11-04): absolute ``-config``/``-profiles`` work and are kept, each mounted at
+    its own path (the daemon wrote ``dayz_mcp.json`` into the profiles before this call
+    and reads the RPT there). An absolute ``-mission`` does not (2026-11-06): the mission
+    modules load, but ``init.c`` is not found ("Mission script has no main function,
+    player connect will stay disabled!"), so the mission is mounted into the tree and
+    named relative to it, ``mpmissions/<name>``. Absolute mod paths are
     ignored by the engine (dzo), so each mod becomes an ``@name`` link in a private
     tree that is the working directory. ``-server`` is dropped (the binary is a
     server); ``-dologs`` is added as dzo always passes it; ``-filePatching`` is
@@ -527,6 +530,14 @@ def launch_lifecycle_process(
                 key_sources.append(real / "keys")
                 names.append(mod_name)
             rewritten.append(item[:flag_length] + ";".join(names))
+        # The mount point exists before the container starts; the mission's writes
+        # (storage_1) still land in the policy's mission directory.
+        mission_in_tree = tree / "mpmissions" / mission.name
+        mission_in_tree.mkdir(parents=True)
+        rewritten = [
+            f"-mission=mpmissions/{mission.name}" if item.casefold().startswith("-mission=") else item
+            for item in rewritten
+        ]
         if not any(item.casefold() == "-dologs" for item in rewritten):
             rewritten.append("-dologs")
 
@@ -545,7 +556,7 @@ def launch_lifecycle_process(
         "--label", f"{LABEL}=1", "--label", f"{LABEL}.tree={tree}", "--label", f"{LABEL}.profiles={profiles}",
         "--label", f"{LABEL}.dropped-filepatching={int(dropped_file_patching)}",
         "-v", f"{tree}:{tree}", "-v", f"{server_dir}:{server_dir}:O",
-        "-v", f"{config}:{config}:ro", "-v", f"{profiles}:{profiles}", "-v", f"{mission}:{mission}",
+        "-v", f"{config}:{config}:ro", "-v", f"{profiles}:{profiles}", "-v", f"{mission}:{mission_in_tree}",
         *mounts, "-w", str(tree),
         f"{IMAGE_NAME}:{IMAGE_TAG}", "/bin/sh", "-c",
         'ulimit -c 0 && exec "$@" < ./stdin > ./server.out 2>&1', "sh", f"./{SERVER_BINARY}",

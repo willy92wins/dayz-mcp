@@ -75,7 +75,7 @@ class ArgumentTranslationTest(unittest.TestCase):
 @unittest.skipUnless(POSIX, "the Proton client launcher")
 class ChainResolutionTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(os.path.realpath(self.temporary.name))
 
     def tearDown(self) -> None:
@@ -83,7 +83,7 @@ class ChainResolutionTest(unittest.TestCase):
 
     def test_stable_and_experimental_resolve_their_app_and_prefix(self) -> None:
         for game, app in (("DayZ", "221100"), ("DayZ Exp", "1024020")):
-            with self.subTest(game=game), tempfile.TemporaryDirectory(dir="/tmp") as other:
+            with self.subTest(game=game), tempfile.TemporaryDirectory() as other:
                 root = Path(os.path.realpath(other))
                 game_dir = _library(root, game=game)
                 chain = proton_client.resolve_chain(game_dir, {"DAYZ_MCP_STEAM_ROOT": str(root)})
@@ -123,7 +123,7 @@ class ChainResolutionTest(unittest.TestCase):
 @unittest.skipUnless(POSIX, "the Proton client launcher")
 class LaunchRefusalTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(os.path.realpath(self.temporary.name))
         self.game_dir = _library(self.root)
         patcher = mock.patch.dict(
@@ -144,9 +144,32 @@ class LaunchRefusalTest(unittest.TestCase):
                 proton_client.launch_client(["/x/DayZDiag_x64.exe", "-connect=127.0.0.1"], self.game_dir)
             popen.assert_not_called()
 
-    def test_a_server_argv_is_not_launched_as_a_client(self) -> None:
-        with self.assertRaisesRegex(proton_client.ProtonClientError, "server_argv"):
-            proton_client.launch_client(["/x/DayZDiag_x64.exe", "-server"], self.game_dir)
+    def test_the_server_flag_is_read_from_a_real_command_line(self) -> None:
+        import subprocess
+        import sys
+
+        child = subprocess.Popen([sys.executable, "-c", "input()", "-SERVER"], stdin=subprocess.PIPE)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        # exec closes the pipe Popen waits on before the new argv is readable.
+        for _ in range(500):
+            if b"-SERVER" in Path(f"/proc/{child.pid}/cmdline").read_bytes():
+                break
+            proton_client.time.sleep(0.01)
+        self.assertTrue(proton_client._is_server_process(child.pid))
+        self.assertFalse(proton_client._is_server_process(os.getpid()))
+
+    def test_the_two_diag_roles_coexist_but_not_twice_and_never_with_retail(self) -> None:
+        roles = {1: True, 2: False}
+        with mock.patch.object(proton_client, "_is_server_process", side_effect=lambda pid: roles[pid]):
+            server = {"pid": 1, "name": "DayZDiag_x64.exe"}
+            client = {"pid": 2, "name": "DayZDiag_x64.exe"}
+            retail = {"pid": 3, "name": "DayZ_x64.exe"}
+            self.assertEqual(proton_client.conflicting_games([server], server=False), [])
+            self.assertEqual(proton_client.conflicting_games([client], server=True), [])
+            self.assertEqual(proton_client.conflicting_games([server], server=True), [server])
+            self.assertEqual(proton_client.conflicting_games([client], server=False), [client])
+            self.assertEqual(proton_client.conflicting_games([retail], server=True), [retail])
 
     def test_identity_must_read_the_same_twice_under_this_session(self) -> None:
         sway = types.SimpleNamespace(pid=100, poll=lambda: None)
@@ -216,16 +239,28 @@ class WineArgvTrimTest(unittest.TestCase):
 
 @unittest.skipUnless(POSIX, "the Linux Steam gate")
 class LinuxSteamGateTest(unittest.TestCase):
-    def test_registry_vdf_steam_pid_is_the_registered_pid(self) -> None:
-        with tempfile.TemporaryDirectory(dir="/tmp") as home:
+    def test_steam_pid_file_is_the_registered_pid(self) -> None:
+        # registry.vdf's SteamPID can name a dead start-up process: measured
+        # SteamPID 20624 (gone) with steam.pid 20622 (the live ubuntu12_32/steam).
+        with tempfile.TemporaryDirectory() as home:
             (Path(home) / ".steam").mkdir()
+            (Path(home) / ".steam" / "steam.pid").write_text("4321\n", encoding="ascii")
             (Path(home) / ".steam" / "registry.vdf").write_text(
-                '"Registry"\n{\n "HKLM"\n {\n  "Software"\n  {\n   "Valve"\n   {\n    "Steam"\n'
-                '    {\n     "SteamPID"\t\t"4321"\n    }\n   }\n  }\n }\n}\n'
+                '"Registry"\n{\n "SteamPID"\t\t"9999"\n}\n', encoding="utf-8"
             )
-            with mock.patch.object(steam_linux.Path, "home", return_value=Path(home)):
+            with mock.patch.object(Path, "home", return_value=Path(home)):
                 snapshot = steam_linux.LinuxSteamPreflightProvider().read_active_process()
-        self.assertEqual((snapshot.pid, snapshot.active_user), (4321, 1))
+        self.assertEqual(snapshot.pid, 4321)
+        self.assertEqual(snapshot.active_user, 1)
+
+    def test_empty_steam_pid_file_is_no_registered_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / ".steam").mkdir()
+            (Path(home) / ".steam" / "steam.pid").write_text("", encoding="ascii")
+            with mock.patch.object(Path, "home", return_value=Path(home)):
+                snapshot = steam_linux.LinuxSteamPreflightProvider().read_active_process()
+        self.assertEqual(snapshot.pid, 0)
+        self.assertEqual(snapshot.active_user, 0)
 
     def test_the_steam_image_is_steam_off_windows(self) -> None:
         self.assertTrue(steam.is_steam_image("/s/ubuntu12_32/steam"))
@@ -281,30 +316,30 @@ class LinuxSteamGateTest(unittest.TestCase):
 @unittest.skipUnless(POSIX, "the Linux role dispatch")
 class LaunchDispatchTest(unittest.TestCase):
     def _lifecycle(self, game_path: str) -> object:
-        stub = types.SimpleNamespace(
-            game_path=Path(game_path), guard=object(), _LINUX_SERVER_APPS=ProcessLifecycle._LINUX_SERVER_APPS
-        )
-        stub._linux_server_executable = lambda: ProcessLifecycle._linux_server_executable(stub)
-        return stub
+        return types.SimpleNamespace(game_path=Path(game_path), guard=object())
 
-    def test_server_argv_goes_to_podman_with_the_paired_server(self) -> None:
+    def test_a_dayzserver_policy_goes_to_podman(self) -> None:
         from dayz_mcp import podman_server
 
-        stub = self._lifecycle("/s/steamapps/common/DayZ")
+        stub = self._lifecycle("/s/steamapps/common/DayZServer")
+        argv = ["/s/steamapps/common/DayZServer/DayZServer", "-server"]
         with mock.patch.object(podman_server, "launch_lifecycle_process", return_value="srv") as launch:
-            result = ProcessLifecycle._launch(stub, ["/s/steamapps/common/DayZ/DayZDiag_x64.exe", "-server"], "/c", "normal")
-        self.assertEqual(result, "srv")
-        self.assertEqual(
-            launch.call_args.kwargs["server_binary"],
-            Path("/s/steamapps/common/DayZServer/DayZServer").resolve(),
-        )
+            self.assertEqual(ProcessLifecycle._launch(stub, argv, "/c", "normal"), "srv")
+        self.assertEqual(launch.call_args.args[0], argv)
 
-    def test_client_argv_goes_to_proton(self) -> None:
+    def test_a_dayzserver_policy_refuses_a_client(self) -> None:
+        # The engine would stop it at 0x00020017, "Client is using Diag exe".
+        stub = self._lifecycle("/s/steamapps/common/DayZServer")
+        with self.assertRaisesRegex(OSError, "client_needs_diag_executable"):
+            ProcessLifecycle._launch(stub, ["/x/DayZServer", "-connect=127.0.0.1"], "/c", "normal")
+
+    def test_a_diag_policy_runs_both_roles_under_proton(self) -> None:
         stub = self._lifecycle("/s/steamapps/common/DayZ")
-        with mock.patch.object(proton_client, "launch_client", return_value="cli") as launch:
-            result = ProcessLifecycle._launch(stub, ["/x/DayZDiag_x64.exe", "-connect=127.0.0.1"], "/c", "normal")
-        self.assertEqual(result, "cli")
-        self.assertEqual(launch.call_args.args[1], Path("/s/steamapps/common/DayZ"))
+        for extra in ("-connect=127.0.0.1", "-server"):
+            with mock.patch.object(proton_client, "launch_client", return_value="game") as launch:
+                result = ProcessLifecycle._launch(stub, ["/x/DayZDiag_x64.exe", extra], "/c", "normal")
+            self.assertEqual(result, "game")
+            self.assertEqual(launch.call_args.args[1], Path("/s/steamapps/common/DayZ"))
 
     def test_launcher_errors_surface_as_oserror(self) -> None:
         stub = self._lifecycle("/s/steamapps/common/DayZ")

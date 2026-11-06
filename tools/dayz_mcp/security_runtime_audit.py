@@ -1249,6 +1249,7 @@ def audit_runtime_http(tools_dir: Path) -> tuple[RuntimeHttpFinding, ...]:
 # linux_launcher.launch_registered_linux: the relay that replaces the native PE
 # off Windows (see _ProcessCreationVisitor._is_canonical_linux_relay_popen).
 _LINUX_RELAY_FUNCTIONS = frozenset({"_supervise_worker", "_run_lifecycle_child"})
+_LINUX_BUILD_FUNCTIONS = frozenset({"run_addon_builder"})
 _PROCESS_AUDIT_PATHS = frozenset(
     {
         "dayz_mcp/native_launcher_backend.py",
@@ -1376,14 +1377,27 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
         ``_run_lifecycle_child``, whose argv is the ``_host_argv(...)`` call
         itself (the approved interpreter, ``-I -m dayz_mcp.linux_worker_host``,
         the verified bundle). Anything else in that file is a finding.
+
+        The relay's build step (``linux_build``) is the counterpart of the
+        launcher's AddonBuilder child: exactly one ``subprocess.Popen`` in
+        ``run_addon_builder``, whose argv is the ``build_argv(...)`` call itself.
         """
+        expected_argv = {
+            "dayz_mcp/linux_launcher.py": "_host_argv",
+            "dayz_mcp/linux_build.py": "build_argv",
+        }.get(self.relative_path)
+        allowed_functions = (
+            _LINUX_RELAY_FUNCTIONS
+            if self.relative_path == "dayz_mcp/linux_launcher.py"
+            else _LINUX_BUILD_FUNCTIONS
+        )
         if (
             resolved != "subprocess.Popen"
-            or self.relative_path != "dayz_mcp/linux_launcher.py"
-            or self.function not in _LINUX_RELAY_FUNCTIONS
+            or expected_argv is None
+            or self.function not in allowed_functions
             or not node.args
             or not isinstance(node.args[0], ast.Call)
-            or not self._is_name(node.args[0].func, "_host_argv")
+            or not self._is_name(node.args[0].func, expected_argv)
             or any(keyword.arg == "shell" for keyword in node.keywords)
         ):
             return False

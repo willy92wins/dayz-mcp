@@ -10,6 +10,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from dayz_mcp import podman_server as ps
@@ -138,6 +139,44 @@ class MissionLoadedTest(unittest.TestCase):
             self.assertFalse(ps.mission_loaded(p))
             (p / "DayZServer_x.RPT").write_text("[StorageDirs] :: Selected storage directory x\n")
             self.assertTrue(ps.mission_loaded(p))
+
+
+class LifecycleMissionTest(unittest.TestCase):
+    """An absolute -mission boots without init.c's main (DayZServer 1.30, 2026-11-06)."""
+
+    def test_the_mission_is_mounted_into_the_tree_and_named_relative(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base)
+            server = root / "server"
+            server.mkdir()
+            (server / ps.SERVER_BINARY).write_text("")
+            config = root / "serverDZ.cfg"
+            config.write_text("")
+            mission = root / "missions" / "dayzOffline.chernarusplus"
+            mission.mkdir(parents=True)
+            calls = []
+
+            def fake_podman(_podman, *command, check=True):
+                calls.append(command)
+                return mock.Mock(returncode=1, stderr="stop here", stdout="")
+
+            argv = [
+                str(server / ps.SERVER_BINARY), "-server", f"-config={config}",
+                f"-profiles={root / 'profiles'}", f"-mission={mission}", "-port=2302",
+            ]
+            with mock.patch.object(ps, "ensure_image", return_value="image"), \
+                    mock.patch.object(ps, "_state_root", return_value=root / "runs"), \
+                    mock.patch.object(ps, "_remove_stale_trees"), \
+                    mock.patch.object(ps, "_podman", fake_podman), \
+                    self.assertRaises(ps.PodmanServerError):
+                ps.launch_lifecycle_process(argv, str(server))
+            run = next(command for command in calls if command[0] == "run")
+            self.assertIn("-mission=mpmissions/dayzOffline.chernarusplus", run)
+            self.assertFalse(any(str(item).startswith(f"-mission={root}") for item in run))
+            name = run[run.index("--name") + 1]
+            self.assertIn(
+                f"{mission}:{root / 'runs' / name / 'mpmissions' / mission.name}", run
+            )
 
 
 class FreePortsTest(unittest.TestCase):

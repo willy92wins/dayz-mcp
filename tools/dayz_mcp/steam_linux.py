@@ -3,9 +3,11 @@
 On Windows the client gate reads ``HKCU\\Software\\Valve\\Steam\\ActiveProcess`` (the
 registered ``steam.exe`` PID and the active user) and pins the live ``steam.exe``;
 with consent a helper process repairs the PID or restarts Steam
-(``steam_prepare_supervisor``). The Linux Steam client keeps its own "registry" in
-``~/.steam/registry.vdf``; the PID it registers is ``HKLM/Software/Valve/Steam/SteamPID``
-(also in ``~/.steam/steam.pid``). The ``ActiveProcess`` key inside a Proton prefix holds
+(``steam_prepare_supervisor``). The Linux Steam client records its PID in
+``~/.steam/steam.pid``, the file ``steam.sh`` itself checks. ``SteamPID`` in
+``~/.steam/registry.vdf`` is not usable: it can name a start-up process that is already
+gone (measured 2026-11-06: ``SteamPID`` 20624, no such process; ``steam.pid`` 20622, the
+live ``ubuntu12_32/steam``). The ``ActiveProcess`` key inside a Proton prefix holds
 a Wine PID that Proton's ``steam.exe`` shim writes per launch, so it says nothing about
 the native Steam.
 
@@ -13,14 +15,14 @@ the native Steam.
 ``/proc``, so ``steam_preflight.evaluate_steam_session`` and
 ``steam_launch_guard.coherent_identity`` apply unchanged:
 
-- registered PID: ``SteamPID`` from ``registry.vdf``;
+- registered PID: ``steam.pid``;
 - live Steam processes: this user's processes whose image is ``steam``
   (``ubuntu12_32/steam``), not the ``steam.sh`` wrapper;
 - creation time: in Windows FILETIME ticks, which the identity pin expects;
 - startup complete: a ``steamwebhelper`` runs under that Steam process (Windows reads a
   log marker that Linux Steam does not write);
 - active user: Linux Steam does not publish who is logged in in these files. The
-  snapshot reports 1 whenever ``SteamPID`` is present, so a logged-out Steam passes
+  snapshot reports 1 whenever ``steam.pid`` holds a PID, so a logged-out Steam passes
   this gate and the client fails at Steam initialisation instead.
 
 ``LinuxSteamPreparationGate`` has the interface ``ProcessLifecycle`` uses
@@ -33,7 +35,6 @@ running is ``steam_not_running``; one whose identity cannot be pinned is
 from __future__ import annotations
 
 import os
-import re
 import threading
 from pathlib import Path
 
@@ -43,15 +44,14 @@ from . import steam_preflight as steam
 STEAM_IMAGE = "steam"
 _WEBHELPER_IMAGE = "steamwebhelper"
 _FILETIME_UNIX_EPOCH = 116444736000000000
-_STEAM_PID = re.compile(r'"SteamPID"\s+"(\d+)"')
 REMEDIATION_LINUX = (
     "start the Steam client and log in (it must be running for the DayZ client under Proton); "
     "dayz-mcp does not start or repair Steam on Linux"
 )
 
 
-def _registry_path() -> Path:
-    return Path.home() / ".steam" / "registry.vdf"
+def _pid_path() -> Path:
+    return Path.home() / ".steam" / "steam.pid"
 
 
 def _proc_stat_fields(pid: int) -> list[bytes]:
@@ -71,9 +71,8 @@ class LinuxSteamPreflightProvider:
     """``SteamPreflightProvider`` for the native Linux Steam client."""
 
     def read_active_process(self) -> steam.SteamActiveProcessSnapshot:
-        text = _registry_path().read_text(encoding="utf-8", errors="replace")
-        found = _STEAM_PID.search(text)
-        pid = int(found.group(1)) if found else 0
+        text = _pid_path().read_text(encoding="ascii", errors="replace").strip()
+        pid = int(text) if text.isdigit() else 0
         return steam.SteamActiveProcessSnapshot(pid=pid, active_user=1 if pid > 0 else 0)
 
     def process_exists(self, pid: int) -> bool:
