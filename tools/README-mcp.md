@@ -289,7 +289,8 @@ Known limits: not ported are `dayz_test_foreground` (`window_foreground`; a head
 forward) and `shared_build_lock`, the synchronous lock nothing on the worker path calls. A binarizing
 `build=true` (no `pack_only`, `--proton-binarize`) ran through the relay function, not through a full managed
 run with binarizable assets. The in-game picture can fill less than the output (about 1600x900 of 1920x1080
-measured), which affects screenshots. The Windows suite was not run.
+measured), which affects screenshots. CI runs the whole Windows suite on this code and a Linux job with the port's
+tests; neither can start the game, so the measurements above are not repeated there.
 
 ## Startup and health
 
