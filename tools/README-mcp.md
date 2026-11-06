@@ -140,7 +140,7 @@ migration completes (backup, receipt, no marker left), the client's connected-da
 
 ### `dayz_test_run` on Linux
 
-The managed lifecycle runs on Linux for `mode=server`: the same request projection, box queue, lease, sealed
+The managed lifecycle runs on Linux for every mode, with build: the same request projection, box queue, lease, sealed
 worker, daemon start/ack/stop, instance minting and PID binding as on Windows. Only the two places that start
 a process differ.
 
@@ -180,7 +180,7 @@ a process differ.
   worker's argv is kept except: `-mod=`/`-serverMod=` become `@name` links in a private tree under
   `$LOCALAPPDATA/DayZ_MCP/podman-runs/` (the engine ignores absolute mod paths); `-server` is dropped;
   `-dologs` is added; `-filePatching` is dropped (see the measurement below; the container carries
-  `dayz-mcp.podman-server.dropped-filepatching=1`). Config, profiles and mission are mounted at their own paths.
+  `dayz-mcp.podman-server.dropped-filepatching=1`). Config and profiles are mounted at their own paths, the mission into the tree (below).
   It returns once the container's PID 1 has exec'd DayZServer (an identity taken from the `sh` before the
   exec would never match again), after checking that this host PID's cgroup is
   `libpod-<container id>.scope` and the container's image is the runtime image. The run's record is that host
@@ -198,8 +198,9 @@ a process differ.
   `runtime_state`'s coordination-fault lock uses `byte_lock.lock` (`LK_LOCK` semantics: ten tries a second
   apart) instead of refusing without `msvcrt`.
 
-Setup: a dev root with `_server/serverDZ.cfg`, `_server/profiles/` and `_client/profiles/`, the missions under a
-mission root, the mods under a mod root, `diag_executable` = the Steam `DayZServer` binary; then
+Setup: a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
+`_client/profiles/`, the missions under a mission root, the mods under a mod root, `diag_executable` =
+`<game>/DayZDiag_x64.exe` (see "Which binary runs"); then
 `python -m dayz_mcp.linux_launcher install --policy <file>` and `status`.
 
 Measured 2026-11-04 (Debian testing, DayZServer 1.30, `@DayZ_MCP`, scratch `HOME` with throwaway
@@ -211,56 +212,84 @@ container. A container killed outside the daemon was retired by the run reaper (
 `gone_pids` = its host PID). Two engine findings set the launcher's choices: with `-filePatching` DayZServer
 busy-polls `/proc/self/statm` and `/proc/meminfo` after the last building type loads and never finishes the
 landscape (4+ minutes, twice; ~10 s without); and a mod mounted read-only (`:ro`) is skipped without a log
-line, while from an overlay (`:O`) it loads. Absolute `-config`, `-profiles` and `-mission` work.
+line, while from an overlay (`:O`) it loads. Absolute `-config` and `-profiles` work; absolute `-mission` looked like it did, but left the server without `init.c`'s `main` (2026-11-06, below).
 
 Tests: `tests/test_linux_launcher.py` (bundle install and tamper refusal, the worker host running the sealed
 worker from the archive, the `msvcrt` shim scope, the POSIX path authority, the host probes, the allow rule)
 and two relay-boundary tests in `tests/test_security_runtime_audit.py`. Tests of the Windows approval registry
 and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")`, with the reason).
 
-#### Client and offline roles (Proton), implemented, not yet run end to end
+#### Which binary runs (policy decides)
 
-`ProcessLifecycle._launch` off Windows picks the program by role, from `game_path`, never from the request: an
-argv with `-server` runs the paired native `DayZServer` in podman, any other (client, offline) runs
-`<game_path>/DayZDiag_x64.exe` under Proton (`dayz_mcp/proton_client.py`). The policy may therefore name either
-binary as `diag_executable`; `<game_path>/DayZDiag_x64.exe` is the Windows-parity form.
+`ProcessLifecycle._launch` off Windows goes by the policy's `diag_executable`, the argv[0] that passed the allow rule:
+
+- **`<game_path>/DayZDiag_x64.exe`, the normal setup**: server and client are both `DayZDiag_x64.exe` under Proton,
+  as on Windows (`dayz_mcp/proton_client.py`). A `DayZDiag` client only joins a `DayZDiag` server: on the native
+  `DayZServer` it stops at the modal `CONNECTING FAILED (0x00020017): Client is using Diag exe while the server is
+  not` (measured 2026-11-06). `serverDZ.cfg` needs `allowFilePatching = 1`.
+- **`.../DayZServer`, server-only**: the native server in podman (`dayz_mcp/podman_server.py`), for a project that
+  never starts a client. A client launch is refused with `client_needs_diag_executable`.
 
 - **Launch** (`proton_client.launch_client`): dayz-dev's headless chain (`dayz-client-headless.sh`), ported. One
   headless sway (`WLR_BACKENDS=headless`) per launch runs Steam Linux Runtime 4 `_v2-entry-point` -> `proton
   run` -> `DayZDiag_x64.exe` in the game's own prefix (`compatdata/221100`, or `1024020` for DayZ Exp), from a
-  session script that ends sway when the game exits. `DayZDiag`, not the retail `DayZ_x64.exe`: the daemon's
-  retail quarantine treats a running retail client as the user's own game, as on Windows. The worker's argv is
-  kept; POSIX paths in `-mod`, `-profiles`, `-mission`, `-config` become `Z:\...`; `-nolauncher -skipintro
-  -nosplash` are added; arguments reach the game through a file, one per line. A running `DayZ_x64.exe`,
-  `DayZDiag_x64.exe` or `DayZ_BE.exe` refuses the launch (one game per Steam account). It returns once the game
-  process exists under this session's sway and the guard reads the same identity twice; that host PID is the
-  run's record, stop kills it. Sessions whose game is gone are cleaned up at the next launch.
-  `DAYZ_MCP_PROTON` (default `GE-Proton11-1`) and `DAYZ_MCP_STEAM_ROOT` select the tool and Steam root; the
-  daemon needs `XDG_RUNTIME_DIR` and `sway`.
+  session script that ends sway when the game exits. The worker's argv is kept; POSIX paths in `-mod`,
+  `-profiles`, `-mission`, `-config` become `Z:\...`; `-nolauncher -skipintro -nosplash` are added; arguments
+  reach the game through a file, one per line. A running retail `DayZ_x64.exe` or `DayZ_BE.exe` refuses any launch
+  (the retail quarantine, as on Windows); a running `DayZDiag_x64.exe` of the same role refuses this one. It returns
+  once the game process exists under this session's sway and the guard reads the same identity twice; that host
+  PID is the run's record. Sessions whose game is gone are cleaned up at the next launch. `DAYZ_MCP_PROTON`
+  (default `GE-Proton11-1`) and `DAYZ_MCP_STEAM_ROOT` select the tool and Steam root; the daemon needs
+  `XDG_RUNTIME_DIR` and `sway`.
+- **Native `-mission`** (`podman_server`): an absolute `-mission` on the native server loads the mission's modules
+  but not `init.c` (`Mission script has no main function, player connect will stay disabled!`), so the mission is
+  mounted into the private tree and named `mpmissions/<name>`.
 - **Steam gate** (`dayz_mcp/steam_linux.py`): the Windows gate reads `HKCU\...\Steam\ActiveProcess`; Linux Steam
-  registers its PID as `SteamPID` in `~/.steam/registry.vdf`. `LinuxSteamPreflightProvider` answers the same
-  questions from that file and `/proc` (live `ubuntu12_32/steam` processes, creation time as FILETIME ticks,
-  "startup complete" = a `steamwebhelper` under that Steam), so `evaluate_steam_session` and the identity pin
-  apply unchanged. `LinuxSteamPreparationGate` is read-only: it never repairs or restarts Steam, consent or not.
-  Linux Steam does not record who is logged in there; a logged-out Steam passes this gate.
+  records its PID in `~/.steam/steam.pid`, which `steam.sh` also checks. `SteamPID` in `registry.vdf` can name a
+  start-up process that is already gone (measured: `SteamPID` 20624, no such process; `steam.pid` 20622, the live
+  Steam). `LinuxSteamPreflightProvider` answers the same questions from that file and `/proc` (live
+  `ubuntu12_32/steam` processes, creation time as FILETIME ticks, "startup complete" = a `steamwebhelper` under
+  that Steam), so `evaluate_steam_session` and the identity pin apply unchanged. `LinuxSteamPreparationGate` is
+  read-only: it never repairs or restarts Steam, consent or not. Linux Steam does not record who is logged in
+  there; a logged-out Steam passes this gate.
 - **Process identity of a Wine process** (`linux_compat.install_wine_argv_trim`): Wine rewrites argv in place
   and leaves the rest NUL-padded; psutil reads that as trailing empty arguments (222 after a DayZDiag command
   line under GE-Proton11-1) and the sealed guard refuses empty arguments, so no Proton process could be
   identified. Off Windows the guard's process view drops trailing empty arguments when `argv[0]` is a Windows
   path. The process scan names a process with a Windows `argv[0]` by that path's basename.
+  The launch intent hashes the worker's argv, not the rewritten one, so a daemon that dies between a game's launch and
+  its record cannot re-match it (`lifecycle_launch_intent_unmatchable: argv_mismatch` in the audit log); the process
+  scan still reports it.
+- **Graceful close** (`dayz_mcp/linux_windows.py`, installed at daemon start as `window_close`'s functions): a game under Proton is
+  a view of its sway, and `dayz_test_close` asks sway to close that view; the sway view's PID is the game's host
+  PID. A native server has no window and gets SIGTERM, its orderly shutdown (as PID 1 of the container too).
+- **Input signal** (`linux_windows.input_fns`): managed games run in a headless sway without input devices, so
+  "no input, no foreground window" is the true reading. Without it every run read `use_state: unknown` and could
+  never be adopted. Adoption rules are then the Windows ones: another session gets `run_protected` with
+  `retry_after_s` until the 600 s abandon timer runs out.
+- **Build** (`dayz_mcp/linux_build.py`): `build=true` relays the sealed worker's `ADDON_BUILDER` frame to armake2
+  from `PATH` (https://github.com/bzed/armake2): `pack` for `pack_only`, otherwise `build --proton-binarize`, which
+  brings its own `P:` sandbox, so the worker's junction stage is not used. The argv comes only from the validated
+  frame. Unlike the sealed `AddonBuilder.exe` on Windows, the armake2 binary is **not pinned** by the bundle. The
+  PBO goes to `@Mod/Addons/` (both engines load that spelling on Linux). The `msvcrt` shared build lock is replaced
+  by a `byte_lock` port. `security_runtime_audit` accepts exactly one `subprocess.Popen` here, in `run_addon_builder`,
+  with `build_argv(...)` as its argv and no shell: the counterpart of the launcher's AddonBuilder child.
 
-Measured 2026-11-05 without a `dayz_test_run` client (the client was needed elsewhere): `DayZDiag_x64.exe`
-1.30.164289.70 under GE-Proton11-1 in this chain loads a mod from `-mod=Z:\...\@DayZ_MCP` and writes its RPT
-and logs into `-profiles=Z:\...`, and is a host process (`enfMain`, `argv[0]` = the `Z:\` path). The Steam gate
-pins the running Steam (registered PID live, startup observed, final check passes). On a running Proton
-DayZDiag, the scan names it `DayZDiag_x64.exe` and the guard reads a complete, stable identity (after the argv
-trim). `dayz_test_run mode=all preflight` passes. **Not measured**: DayZDiag joining the native DayZServer (a
-manual attempt was stopped before the join completed), the client's bridge polls arriving bound to its PID,
-and a managed client start/stop. Graceful close (`dayz_test_close`, Win32 window close) is Windows-only; on
-Linux a stop kills the PID.
+Measured 2026-11-06 (DayZDiag 1.30.164289.70, GE-Proton11-1, `@DayZ_MCP`, scratch `HOME`), all through `dayz_test_run`:
+`mode=all`: bridge `ready` with server and client polls bound to the run about 34 s after `dayz_test_run` returned
+(`ready` can precede the join); the server log shows `Player "Dev" ... is connected`, and a screenshot shows the
+player in the world with the HUD.
+`dayz_test_close` with the client still loading: `graceful: true`, `exit_metrics_valid: true` in 3.6 s, both RPTs
+ending `--- Termination successfully completed ---`. With a player in the world (2 of 2): `logout_finished: true` and
+the server's termination line, but the client exits with code 3 after `Destroying game` and before its own, so
+`graceful: false`, `exit_metrics_valid: false`; the cause is unknown. `mode=all build=true pack_only=true`: built in
+the worker, loaded by both roles, polls bound, player connected. A second session's `dayz_test_stop`: `run_protected` with `retry_after_s`.
 
-Not ported: build mode, the shared build lock in sealed `server_cli` (`build_lock_unavailable`), and
-`dayz_test_close`'s window close.
+Known limits: not ported are `dayz_test_foreground` (`window_foreground`; a headless game has nothing to bring
+forward) and `shared_build_lock`, the synchronous lock nothing on the worker path calls. A binarizing
+`build=true` (no `pack_only`, `--proton-binarize`) ran through the relay function, not through a full managed
+run with binarizable assets. The in-game picture can fill less than the output (about 1600x900 of 1920x1080
+measured), which affects screenshots. The Windows suite was not run.
 
 ## Startup and health
 

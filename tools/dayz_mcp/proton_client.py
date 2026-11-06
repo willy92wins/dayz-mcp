@@ -1,8 +1,10 @@
-"""Run the DayZ client under Proton in a headless sway session (Linux).
+"""Run DayZDiag under Proton in a headless sway session (Linux).
 
-``ProcessLifecycle._launch`` uses ``launch_client`` off Windows for the client and
-offline roles. It is the dayz-dev skill's headless chain (``dayz-client-headless.sh``,
-same author), ported, with the Windows client ``dayz_test_run`` manages everywhere:
+``ProcessLifecycle._launch`` uses ``launch_client`` off Windows for every role of a
+project whose policy names ``DayZDiag_x64.exe``. A DayZDiag client only joins a DayZDiag
+server (the native ``DayZServer`` answers 0x00020017, measured 2026-11-06), so a server
+is the same binary with ``-server``, as on Windows. It is the dayz-dev skill's headless
+chain (``dayz-client-headless.sh``, same author), ported:
 
 - a headless sway (``WLR_BACKENDS=headless``) per launch, so nothing shows on the
   user's desktop, with the game window fullscreen on its one output;
@@ -16,17 +18,15 @@ same author), ported, with the Windows client ``dayz_test_run`` manages everywhe
   ``-config`` become ``Z:\\...`` (measured 2026-11-05: DayZDiag 1.30.164289 under
   GE-Proton11-1 loads a mod from ``-mod=Z:\\...\\@Mod`` and writes its RPT and logs into
   ``-profiles=Z:\\...``), and ``-nolauncher -skipintro -nosplash`` are added;
-- one game at a time: a running ``DayZ_x64.exe``, ``DayZDiag_x64.exe`` or
-  ``DayZ_BE.exe`` refuses the launch (one Steam account, one GPU, one prefix).
+- one game per role: a running retail ``DayZ_x64.exe`` or ``DayZ_BE.exe`` refuses
+  any launch, a running ``DayZDiag_x64.exe`` of the same role (``-server`` or not)
+  refuses this one. The two roles of a run share the game's prefix.
 
 ``launch_client`` returns once the game process exists under this session's sway and
 ``NativeProcessGuard`` reads the same identity twice (Wine rewrites the process's
 argv to the Windows command line after it starts). That host PID is the run's
 record; stop kills it, and the session script then ends sway. Sessions whose game is
 gone are cleaned up at the next launch.
-
-Not measured yet (the client could not be run): the join of DayZDiag to the native
-DayZServer, and that the bridge's poll connection belongs to that PID.
 
 Environment: ``DAYZ_MCP_PROTON`` (Proton tool name, default ``GE-Proton11-1``),
 ``DAYZ_MCP_STEAM_ROOT`` (default ``~/.steam/steam`` resolved). The daemon needs
@@ -196,6 +196,22 @@ def _running_games() -> list[dict[str, object]]:
     return list(snapshot.get("processes") or [])
 
 
+def _is_server_process(pid: int) -> bool:
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return any(item.lower() == b"-server" for item in argv[1:])
+
+
+def conflicting_games(games: list[dict[str, object]], *, server: bool) -> list[dict[str, object]]:
+    return [
+        game
+        for game in games
+        if game.get("name") != CLIENT_IMAGE or _is_server_process(int(game["pid"])) == server
+    ]
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -327,20 +343,21 @@ def _log_tail(state: Path) -> str:
 
 
 def launch_client(argv: list[str], game_path: Path, *, guard: object | None = None) -> LaunchedClient:
-    """``ProcessLifecycle``'s launcher for the client and offline roles on Linux.
+    """``ProcessLifecycle``'s launcher for DayZDiag on Linux, in any role.
 
     ``argv[0]`` (the policy's executable, already checked by the daemon's allow rule)
     is replaced by ``<game_path>/DayZDiag_x64.exe``; the rest is the worker's argv.
     """
     if not argv:
         raise ProtonClientError("empty_argv")
-    if any(item.casefold() == "-server" for item in argv[1:]):
-        raise ProtonClientError("server_argv_for_client_launcher")
+    server = any(item.casefold() == "-server" for item in argv[1:])
     chain = resolve_chain(Path(game_path))
     games = _running_games()
-    if games:
+    conflicts = conflicting_games(games, server=server)
+    if conflicts:
+        role = "server" if server else "client"
         raise ProtonClientError(
-            "dayz_client_already_running:" + ",".join(f"{g['name']}:{g['pid']}" for g in games)
+            f"dayz_{role}_already_running:" + ",".join(f"{g['name']}:{g['pid']}" for g in conflicts)
         )
     if shutil.which("sway") is None:
         raise ProtonClientError("sway_missing")

@@ -1329,6 +1329,42 @@ def _supervise_worker(bundle):
             self._LINUX_RELAY.replace("{worker_call}", worker_call),
         )
 
+    def _linux_build_findings(self, body: str) -> list[object]:
+        auditor = self._auditor()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._linux_relay_tree(root, "_host_argv(bundle)")
+            source = (root / "dayz_mcp" / "linux_launcher.py").read_text(encoding="utf-8")
+            self._write(root, "dayz_mcp/linux_launcher.py", "from dayz_mcp import linux_build\n" + source)
+            self._write(root, "dayz_mcp/linux_build.py", body)
+            return [
+                finding
+                for finding in auditor.audit_process_creation(root)
+                if finding.relative_path == "dayz_mcp/linux_build.py"
+            ]
+
+    def test_linux_build_accepts_one_build_argv_popen(self) -> None:
+        self.assertEqual(
+            self._linux_build_findings(
+                "import subprocess\n"
+                "def run_addon_builder(payload):\n"
+                "    return subprocess.Popen(build_argv(payload))\n"
+            ),
+            [],
+        )
+
+    def test_linux_build_refuses_any_other_process_start(self) -> None:
+        for body in (
+            "import subprocess\ndef run_addon_builder(payload):\n    return subprocess.Popen(payload['argv'])\n",
+            "import subprocess\ndef other(payload):\n    return subprocess.Popen(build_argv(payload))\n",
+            "import subprocess\ndef run_addon_builder(payload):\n    return subprocess.Popen(build_argv(payload), shell=True)\n",
+            "import subprocess\ndef run_addon_builder(payload):\n"
+            "    subprocess.Popen(build_argv(payload))\n    return subprocess.Popen(build_argv(payload))\n",
+            "import subprocess\ndef run_addon_builder(payload):\n    return subprocess.run(build_argv(payload))\n",
+        ):
+            with self.subTest(body=body):
+                self.assertTrue(self._linux_build_findings(body))
+
     def test_linux_relay_boundary_accepts_one_host_argv_popen_per_function(self) -> None:
         auditor = self._auditor()
         with tempfile.TemporaryDirectory() as directory:

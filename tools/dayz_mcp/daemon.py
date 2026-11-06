@@ -1807,6 +1807,12 @@ def _run_daemon_body(
         )
 
     if state.lifecycle is not None:
+        if os.name != "nt":
+            # Here, not in linux_compat: that module is in the launcher's closure,
+            # and these reach the process scan and the game launchers.
+            from dayz_mcp import linux_windows
+
+            linux_windows.install()
         input_fns = input_activity.real_win32()
         install_run_reaper(state.lifecycle, log=log, stop=stop)
         install_input_sampler(

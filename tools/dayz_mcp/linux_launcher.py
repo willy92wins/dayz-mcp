@@ -488,6 +488,15 @@ def _lifecycle_command(frame: bytes) -> str | None:
     return command if isinstance(command, str) else None
 
 
+def _addon_builder_payload(frame: bytes) -> dict[str, object] | None:
+    from dayz_mcp import native_broker_protocol
+
+    request = native_broker_protocol.decode_request(frame)
+    if request.kind is not native_broker_protocol.BrokerKind.ADDON_BUILDER:
+        return None
+    return dict(request.payload)
+
+
 def _run_lifecycle_child(
     bundle: VerifiedLinuxBundle,
     frame: bytes,
@@ -608,6 +617,14 @@ def _supervise_worker(
                 # After a cancel only the cleanup stop still reaches the daemon.
                 if command is not None and (cancel_deadline is None or command == "stop"):
                     response = _run_lifecycle_child(bundle, message, command, secrets_env)
+                elif command is None and cancel_deadline is None:
+                    addon_payload = _addon_builder_payload(message)
+                    if addon_payload is not None:
+                        from dayz_mcp import linux_build
+
+                        response = linux_build.run_addon_builder(
+                            addon_payload, cancelled=cancel_signal.is_set, output_sink=output_sink
+                        )
             except Exception:
                 response = _BROKER_FAILURE
             try:
