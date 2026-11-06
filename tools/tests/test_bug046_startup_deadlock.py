@@ -1318,17 +1318,25 @@ with daemon_startup_election(paths) as elected:
             try:
                 # Wait for CONTENT, not existence: a create-then-write child races an
                 # exists()-gated read into '' (measured 1/3 under a full-suite load).
+                # On Windows the child's replace still holds the renamed file
+                # open with DELETE access for a moment after the name appears.
+                # An open() without FILE_SHARE_DELETE in that window fails
+                # with Errno 13 (run 42057059129): the signal is not readable
+                # yet, the same as when it does not exist. A denial that lasts
+                # leaves observed empty, and the assert below still fails.
                 deadline = time.monotonic() + 15.0
                 observed = ""
+                last_error: OSError | None = None
                 while time.monotonic() < deadline:
                     try:
                         observed = signal.read_text(encoding="ascii")
-                    except FileNotFoundError:
+                    except (FileNotFoundError, PermissionError) as error:
                         observed = ""
+                        last_error = error
                     if observed:
                         break
                     time.sleep(0.01)
-                self.assertEqual(observed, "1")
+                self.assertEqual(observed, "1", f"last read error: {last_error!r}")
                 paths = RuntimePaths(
                     root,
                     root / "audit",
