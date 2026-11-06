@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 
 if os.name == "nt":
     import msvcrt
@@ -32,7 +33,10 @@ else:
             ("l_pid", ctypes.c_int32),
         ]
 
-    _SETLK = getattr(fcntl, "F_OFD_SETLK", fcntl.F_SETLK)
+    # Python 3.11's fcntl does not name F_OFD_SETLK; the kernel's value on Linux is 37.
+    _SETLK = getattr(
+        fcntl, "F_OFD_SETLK", 37 if sys.platform.startswith("linux") else fcntl.F_SETLK
+    )
 
     def _fcntl_lock(descriptor: int, offset: int, kind: int) -> None:
         request = _Flock(kind, os.SEEK_SET, offset, 1, 0)

@@ -18,6 +18,28 @@ class SimulatedCrash(BaseException):
 
 
 @unittest.skipUnless(POSIX, "POSIX counterparts of the Win32 primitives")
+class ByteLockTest(unittest.TestCase):
+    """Windows semantics: the open file owns the lock, not the process."""
+
+    def test_two_descriptors_in_one_process_conflict_and_closing_a_third_keeps_it(self) -> None:
+        from dayz_mcp import byte_lock
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "lock")
+            first = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            second = os.open(path, os.O_RDWR)
+            third = os.open(path, os.O_RDWR)
+            self.addCleanup(os.close, first)
+            self.addCleanup(os.close, second)
+            byte_lock.try_lock(first)
+            with self.assertRaises(OSError):
+                byte_lock.try_lock(second)
+            os.close(third)
+            with self.assertRaises(OSError):
+                byte_lock.try_lock(second)
+
+
+@unittest.skipUnless(POSIX, "POSIX counterparts of the Win32 primitives")
 class RenameNoReplaceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
