@@ -17,6 +17,15 @@ from dayz_mcp import (
     request_path_authority,
 )
 
+# Policy paths (dev root, mod and mission roots, VPP profile files) are drive
+# paths on Windows and POSIX paths elsewhere (linux_launcher); DRIVE_PATH_AWARE
+# keeps ntpath for a drive path and uses posixpath for a POSIX one, as in
+# dayz_test_tool. Every ntpath call here is on such a path.
+if os.name != "nt":
+    from dayz_mcp.linux_compat import DRIVE_PATH_AWARE
+
+    ntpath = DRIVE_PATH_AWARE  # noqa: F811
+
 
 class NativeLauncherTransactionError(RuntimeError):
     # The client's box_protected answer when the grant's adopt came back

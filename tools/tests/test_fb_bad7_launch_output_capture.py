@@ -192,6 +192,8 @@ class LaunchOutputKwargsTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         return seen[0]
 
+    @unittest.skipIf(os.name != "nt", "Popen launch path: off Windows ProcessLifecycle._launch runs the server in podman")
+
     def test_every_role_launch_pipes_both_streams_and_reads_nothing_from_stdin(self) -> None:
         for role in ("server", "client", "offline"):
             with self.subTest(role=role):
@@ -201,6 +203,8 @@ class LaunchOutputKwargsTest(unittest.TestCase):
                 self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
                 # close_fds with std handles restricts inheritance to those three.
                 self.assertIs(kwargs["close_fds"], True)
+
+    @unittest.skipIf(os.name != "nt", "Popen launch path: off Windows ProcessLifecycle._launch runs the server in podman")
 
     def test_an_argv_without_a_profiles_folder_launches_as_before(self) -> None:
         for argv in (
@@ -213,6 +217,8 @@ class LaunchOutputKwargsTest(unittest.TestCase):
                 kwargs = self._popen_kwargs(argv)
                 for key in ("stdin", "stdout", "stderr"):
                     self.assertNotIn(key, kwargs)
+
+    @unittest.skipIf(os.name != "nt", "Popen launch path: off Windows ProcessLifecycle._launch runs the server in podman")
 
     def test_a_popen_stand_in_without_streams_starts_no_drain(self) -> None:
         before = {thread.name for thread in threading.enumerate()}
@@ -268,6 +274,7 @@ class LaunchOutputRealProcessTest(unittest.TestCase):
         return child.pid
 
     @slow_test
+    @unittest.skipIf(os.name != "nt", "Popen launch path: off Windows ProcessLifecycle._launch runs the server in podman")
     def test_a_real_child_leaves_both_streams_beside_its_rpt(self) -> None:
         pid = self._run("A", "5", "1")
         stem = Path(sys.executable).stem
@@ -284,6 +291,7 @@ class LaunchOutputRealProcessTest(unittest.TestCase):
             self.assertFalse(path.exists())
 
     @slow_test
+    @unittest.skipIf(os.name != "nt", "Popen launch path: off Windows ProcessLifecycle._launch runs the server in podman")
     def test_a_chatty_child_is_capped_and_never_blocks(self) -> None:
         # 200 000 bytes is far past the pipe buffer: a child whose pipe is
         # not drained would block, and wait() above would time out.

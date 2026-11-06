@@ -221,19 +221,25 @@ def _python_not_approved_line(error: DaemonPythonNotApproved) -> str:
 
 
 def _ensure_identity_migration(config: Any) -> None:
-    approved_python = (
-        Path(__file__).resolve().parents[1]
-        / ".venv-mcp"
-        / "Scripts"
-        / "python.exe"
-    )
-    try:
-        approved = approved_python.resolve(strict=True)
-        current = Path(sys.executable).resolve(strict=True)
-    except OSError as error:
-        raise DaemonPythonNotApproved(approved_python, sys.executable) from error
-    if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
-        raise DaemonPythonNotApproved(approved_python, sys.executable)
+    venv = Path(__file__).resolve().parents[1] / ".venv-mcp"
+    if os.name == "nt":
+        approved_python = venv / "Scripts" / "python.exe"
+        try:
+            approved = approved_python.resolve(strict=True)
+            current = Path(sys.executable).resolve(strict=True)
+        except OSError as error:
+            raise DaemonPythonNotApproved(approved_python, sys.executable) from error
+        if os.path.normcase(str(current)) != os.path.normcase(str(approved)):
+            raise DaemonPythonNotApproved(approved_python, sys.executable)
+    else:
+        # A POSIX venv's bin/python is a symlink to the system interpreter, so
+        # resolving both sides would admit any interpreter of that version. The
+        # venv path itself is the identity: it must exist and be the path this
+        # process was started as.
+        approved_python = venv / "bin" / "python"
+        approved = approved_python
+        if not approved_python.exists() or os.path.abspath(sys.executable) != str(approved_python):
+            raise DaemonPythonNotApproved(approved_python, sys.executable)
     guard = NativeProcessGuard()
     identity = guard.snapshot(os.getpid())
     if (
@@ -440,12 +446,12 @@ def _lifecycle_game_path(config: Any) -> Path:
     configured = getattr(config, "game_path", None)
     if isinstance(configured, str) and configured:
         return Path(configured)
-    return Path(
-        os.environ.get(
-            "DAYZ_GAME_PATH",
-            r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
-        )
+    default = (
+        r"C:\Program Files (x86)\Steam\steamapps\common\DayZ"
+        if os.name == "nt"
+        else str(Path.home() / ".steam" / "steam" / "steamapps" / "common" / "DayZ")
     )
+    return Path(os.environ.get("DAYZ_GAME_PATH", default))
 
 
 def _activate_server_coordination(
@@ -635,7 +641,8 @@ def _activate_server_coordination(
         # fb-20260904-114520-6927: a dedicated server that has not bound its
         # port yet is only visible by name, so the name probe lists it too.
         diag_probe=lambda: orphan_guard.snapshot_processes_by_name(
-            ["DayZDiag_x64.exe", "DayZServer_x64.exe"]
+            # Off Windows the dedicated server is the native DayZServer binary.
+            ["DayZDiag_x64.exe", "DayZServer_x64.exe", *(() if os.name == "nt" else ("DayZServer",))]
         ),
         # fb-20260904-114520-6927: the socket table is the second witness of
         # the box; a DayZ image holding a UDP port occupies it without a run.
@@ -1803,6 +1810,12 @@ def _run_daemon_body(
         )
 
     if state.lifecycle is not None:
+        if os.name != "nt":
+            # Here, not in linux_compat: that module is in the launcher's closure,
+            # and these reach the process scan and the game launchers.
+            from dayz_mcp import linux_windows
+
+            linux_windows.install()
         input_fns = input_activity.real_win32()
         install_run_reaper(state.lifecycle, log=log, stop=stop)
         install_input_sampler(

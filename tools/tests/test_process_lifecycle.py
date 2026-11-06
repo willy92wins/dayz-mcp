@@ -5075,6 +5075,7 @@ class StorageRotationAuditTest(unittest.TestCase):
 
 
 class LaunchEnvironmentTests(unittest.TestCase):
+    @unittest.skipIf(os.name != "nt", "Popen launch path: off Windows ProcessLifecycle._launch runs the server in podman")
     def test_launch_hands_popen_only_the_whitelisted_environment(self) -> None:
         seen: list[dict[str, object]] = []
 

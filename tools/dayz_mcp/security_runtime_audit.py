@@ -1246,10 +1246,16 @@ def audit_runtime_http(tools_dir: Path) -> tuple[RuntimeHttpFinding, ...]:
     )
 
 
+# linux_launcher.launch_registered_linux: the relay that replaces the native PE
+# off Windows (see _ProcessCreationVisitor._is_canonical_linux_relay_popen).
+_LINUX_RELAY_FUNCTIONS = frozenset({"_supervise_worker", "_run_lifecycle_child"})
+_LINUX_BUILD_FUNCTIONS = frozenset({"run_addon_builder"})
 _PROCESS_AUDIT_PATHS = frozenset(
     {
         "dayz_mcp/native_launcher_backend.py",
         "dayz_mcp/secure_launcher.py",
+        # Off Windows linux_compat installs it under the backend's name.
+        "dayz_mcp/linux_launcher.py",
     }
 )
 _PROCESS_CALLABLES = frozenset(
@@ -1307,6 +1313,7 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
         self.findings: list[ProcessCreationFinding] = []
         self.direct_create_process_calls = 0
         self.canonical_create_flags_definitions = 0
+        self.linux_relay_popen_calls: dict[str, int] = {}
 
     @property
     def aliases(self) -> dict[str, str]:
@@ -1360,6 +1367,43 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id == expected
         )
+
+    def _is_canonical_linux_relay_popen(self, node: ast.Call, resolved: str) -> bool:
+        """The Linux counterpart of the canonical CreateProcessW boundary.
+
+        Off Windows the launcher is ``linux_launcher``'s relay, which starts the
+        sealed worker and its lifecycle children itself. Accepted: exactly one
+        ``subprocess.Popen`` in each of ``_supervise_worker`` and
+        ``_run_lifecycle_child``, whose argv is the ``_host_argv(...)`` call
+        itself (the approved interpreter, ``-I -m dayz_mcp.linux_worker_host``,
+        the verified bundle). Anything else in that file is a finding.
+
+        The relay's build step (``linux_build``) is the counterpart of the
+        launcher's AddonBuilder child: exactly one ``subprocess.Popen`` in
+        ``run_addon_builder``, whose argv is the ``build_argv(...)`` call itself.
+        """
+        expected_argv = {
+            "dayz_mcp/linux_launcher.py": "_host_argv",
+            "dayz_mcp/linux_build.py": "build_argv",
+        }.get(self.relative_path)
+        allowed_functions = (
+            _LINUX_RELAY_FUNCTIONS
+            if self.relative_path == "dayz_mcp/linux_launcher.py"
+            else _LINUX_BUILD_FUNCTIONS
+        )
+        if (
+            resolved != "subprocess.Popen"
+            or expected_argv is None
+            or self.function not in allowed_functions
+            or not node.args
+            or not isinstance(node.args[0], ast.Call)
+            or not self._is_name(node.args[0].func, expected_argv)
+            or any(keyword.arg == "shell" for keyword in node.keywords)
+        ):
+            return False
+        count = self.linux_relay_popen_calls.get(self.function, 0) + 1
+        self.linux_relay_popen_calls[self.function] = count
+        return count == 1
 
     @classmethod
     def _is_canonical_create_process_call(cls, node: ast.Call) -> bool:
@@ -1635,7 +1679,8 @@ class _ProcessCreationVisitor(ast.NodeVisitor):
             resolved is not None
             and resolved.startswith("os.spawn")
         ):
-            self._record(node, "forbidden_python_process_surface")
+            if not self._is_canonical_linux_relay_popen(node, resolved):
+                self._record(node, "forbidden_python_process_surface")
         elif resolved in _DYNAMIC_PROCESS_CALLABLES and not (
             resolved in {"getattr", "builtins.getattr"}
             and not self._is_dynamic_process_lookup(node)
