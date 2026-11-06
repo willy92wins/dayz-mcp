@@ -59,6 +59,8 @@ def run_addon_builder(
     output_sink: Callable[[str, bytes], None] | None = None,
 ) -> bytes:
     """The relay's answer to one validated ``ADDON_BUILDER`` frame."""
+    if cancelled():
+        return _response(False)
     armake2 = shutil.which("armake2")
     if armake2 is None:
         if output_sink is not None:

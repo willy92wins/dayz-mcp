@@ -22,6 +22,7 @@ _FAKE_ARMAKE2 = """#!/bin/sh
 for last; do :; done
 echo "$@" >> "$FAKE_ARMAKE2_LOG"
 [ -z "$FAKE_ARMAKE2_FAIL" ] || { echo boom; exit 1; }
+sleep 0.3
 printf pbo > "$last"
 """
 
@@ -99,6 +100,14 @@ class RunAddonBuilderTest(unittest.TestCase):
         raw = linux_build.run_addon_builder(self.payload, cancelled=lambda: True)
         self.assertFalse(json.loads(raw)["ok"])
         self.assertFalse((self.target / "M.pbo").exists())
+        self.assertFalse(self.log.exists(), "armake2 started after the cancel")
+
+    def test_cancel_kills_a_running_build(self) -> None:
+        answers = iter([False])
+        raw = linux_build.run_addon_builder(
+            self.payload, cancelled=lambda: next(answers, True)
+        )
+        self.assertFalse(json.loads(raw)["ok"])
 
 
 @unittest.skipUnless(POSIX, "the worker's POSIX build path")

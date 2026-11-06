@@ -103,7 +103,8 @@ class BuildTreeTest(unittest.TestCase):
         self.assertIn("RConPort 30034", be)
         self.assertIn("RConIP 127.0.0.1", be)
         cfg = t / "serverDZ.cfg"
-        self.assertEqual(stat.S_IMODE(os.stat(cfg).st_mode), 0o600)
+        if os.name != "nt":  # no POSIX modes on Windows
+            self.assertEqual(stat.S_IMODE(os.stat(cfg).st_mode), 0o600)
         self.assertIn("steamQueryPort = 30017;", cfg.read_text())
 
     def test_tree_inside_install_is_refused(self):
@@ -129,7 +130,8 @@ class BuildTreeTest(unittest.TestCase):
         doc = json.loads(path.read_text())
         self.assertEqual(doc["url"], "http://127.0.0.1:33680/")
         self.assertEqual(doc["profile"], "test")
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        if os.name != "nt":  # no POSIX modes on Windows
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
 
 
 class MissionLoadedTest(unittest.TestCase):
