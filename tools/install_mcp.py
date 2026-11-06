@@ -42,6 +42,22 @@ _PE32_PLUS_MAGIC = 0x20B
 _PSUTIL_WHEEL_BYTES = 137_737
 _PSUTIL_WHEEL_SHA256 = "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988"
 _ABSENT_PROBE_NAME = "p0s-absent-fixture-do-not-create"
+# When the server does not exist, `mcp get` exits 1 with empty stdout and one
+# line on stderr (fb-20261102-122105-e9c6). The pinned claude.exe (Claude Code
+# 2.1.310) has one sentence and four endings:
+#   No MCP server named "<name>". Did you mean "<other>"? Run `claude mcp list` to see all.
+#   No MCP server named "<name>". Configured servers: <up to eight> (and N more ...)
+#   No MCP server named "<name>". Run `claude mcp add` to add one.
+#   No MCP server named "<name>". <_CLAUDE_PENDING_NOTE>
+# When a .mcp.json in the working directory has servers awaiting approval,
+# the first two end in " (<_CLAUDE_PENDING_NOTE>)" and the last one replaces
+# the third. Which line appears depends on the servers configured at that
+# moment, so a pin records only one of them.
+# The pinned codex.exe has one: Error: No MCP server named '<name>' found.
+_CLAUDE_PENDING_NOTE = (
+    ".mcp.json servers are awaiting approval \u2014 run `claude` in this "
+    "directory to review them."
+)
 _SECURITY_DIR_ENV = "DAYZ_MCP_SECURITY_DIR"
 _PIN_RECIPE = "run: python install_mcp.py --pin-clis"
 _CLI_MANIFEST_NAME = "installer-cli-manifest-v1.json"
@@ -678,10 +694,61 @@ def invoke_manifest_cli(
         [str(entry.path), *arguments],
         shell=False,
         text=True,
+        # Both CLIs write UTF-8. The locale code page (cp1252) would turn
+        # non-ASCII into other characters, and some bytes into a decode error.
+        encoding="utf-8",
         capture_output=True,
         timeout=30.0,
         check=False,
     )
+
+
+def _not_found_line(role: str, name: str) -> re.Pattern[str]:
+    """What ``mcp get`` prints on stderr when ``name`` does not exist."""
+    named = re.escape(name)
+    if role == "CODEX":
+        return re.compile(r"Error: No MCP server named '" + named + r"' found\.\n")
+    note = re.escape(_CLAUDE_PENDING_NOTE)
+    # Claude passes names through a filter that turns control and format
+    # characters and line separators into spaces; refuse those that would
+    # break the line (C0, DEL, C1, U+2028, U+2029). The list can be empty: a
+    # lone server with an empty name prints nothing after the colon.
+    char = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]"
+    return re.compile(
+        r'No MCP server named "' + named + r'"\. (?:(?:'
+        r'Did you mean "(?P<other>' + char + r'+)"\? Run `claude mcp list` to see all\.'
+        r"|Configured servers: " + char + r"*?"
+        r")(?: \(" + note + r"\))?"
+        r"|Run `claude mcp add` to add one\."
+        r"|" + note + r")\n"
+    )
+
+
+def _is_pinned_not_found(
+    role: str,
+    pinned: InstallerNotFoundEntry,
+    server_name: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> bool:
+    """True only when ``mcp get`` says that ``server_name`` does not exist.
+
+    stderr must be a not-found line for exactly ``server_name``, with the
+    pinned exit code and nothing on stdout. The pinned output must itself be a
+    not-found line for ``_ABSENT_PROBE_NAME``: --pin-clis records whatever the
+    CLI printed, and anything else is no template for an absence. Any other
+    output is not an absence.
+    """
+    if returncode != pinned.returncode or stdout or pinned.stdout:
+        return False
+    if _not_found_line(role, _ABSENT_PROBE_NAME).fullmatch(pinned.stderr) is None:
+        return False
+    match = _not_found_line(role, server_name).fullmatch(stderr)
+    # Claude suggests only a server it has, so suggesting this one would
+    # contradict the sentence before it. The list is not read: a listed name
+    # may hold a comma (a claude.ai connector keeps its display name).
+    return match is not None and match.groupdict().get("other") != server_name
 
 
 class CliRegistrationProvider:
@@ -733,16 +800,13 @@ class CliRegistrationProvider:
         completed = self._invoke(role, arguments)
         returncode, stdout, stderr = self._result_fields(completed)
         if returncode != 0:
-            expected = self.not_found.entries[role]
-            expected_stdout = expected.stdout
-            expected_stderr = expected.stderr
-            if self.server_name != "dayz-mcp":
-                expected_stdout = expected_stdout.replace("dayz-mcp", self.server_name)
-                expected_stderr = expected_stderr.replace("dayz-mcp", self.server_name)
-            if (
-                returncode == expected.returncode
-                and stdout == expected_stdout
-                and stderr == expected_stderr
+            if _is_pinned_not_found(
+                role,
+                self.not_found.entries[role],
+                self.server_name,
+                returncode,
+                stdout,
+                stderr,
             ):
                 return None
             raise InstallerExecutionError("registration_probe_failed")

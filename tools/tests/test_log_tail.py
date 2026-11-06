@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import sys
 import unittest
+import unittest.mock
+import zlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -215,6 +218,133 @@ class LogTailTest(unittest.TestCase):
 
         self.assertEqual([Path(item).name for item in found], ["a.rpt", "b.log"])
         self.assertEqual(log_tail.resolve_log_files(str(self.root / "absent")), [])
+
+    def test_incremental_read_hashes_the_prefix_once(self) -> None:
+        # A poll at EOF used to crc32 the prefix twice (rotation check, then
+        # the marker written back). The first crc is the new identity.
+        self._write("P" * 600 + "\n" + ("body line\n" * 40))
+        calls: list[int] = []
+        real = log_tail._file_identity
+
+        def counted(handle, length: int) -> int:
+            calls.append(length)
+            return real(handle, length)
+
+        with unittest.mock.patch.object(log_tail, "_file_identity", counted):
+            first = log_tail.read_since(str(self.log), None)
+            self.assertEqual(calls, [])
+            calls.clear()
+            second = log_tail.read_since(str(self.log), first["marker"])
+            self.assertEqual(calls, [512])
+        self.assertEqual(second["lines"], [])
+        self.assertFalse(second["rotated"])
+        self.assertEqual(second["marker"].identity, first["marker"].identity)
+        self.assertNotEqual(second["marker"].identity, 0)
+
+    def _identity_of(self, data: bytes) -> int:
+        length = min(log_tail.IDENTITY_PREFIX_BYTES, len(data))
+        return zlib.crc32(data[:length]) or 1
+
+    def _read_open(self, marker: TailMarker | None) -> dict:
+        with self.log.open("rb") as handle:
+            return log_tail.read_open_handle(handle, str(self.log), marker)
+
+    def test_identity_updates_when_the_file_crosses_512_bytes(self) -> None:
+        # Growing past the prefix bound changes the hashed length. That is a
+        # new identity, not a rotation, and the poll still returns only the append.
+        head = b"H" * 400 + b"\n"
+        self.log.write_bytes(head)
+        first = log_tail.read_since(str(self.log), None)
+        self.assertEqual(first["lines"], ["H" * 400])
+        self.assertEqual(first["marker"].identity, self._identity_of(head))
+        self.assertLess(first["marker"].size, log_tail.IDENTITY_PREFIX_BYTES)
+
+        extra = b"A" * 200 + b"\n"
+        with self.log.open("ab") as handle:
+            handle.write(extra)
+        whole = head + extra
+        second = log_tail.read_since(str(self.log), first["marker"])
+
+        self.assertFalse(second["rotated"])
+        self.assertEqual(second["lines"], ["A" * 200])
+        self.assertEqual(second["marker"].offset, len(whole))
+        self.assertEqual(second["marker"].size, len(whole))
+        self.assertGreaterEqual(second["marker"].size, log_tail.IDENTITY_PREFIX_BYTES)
+        self.assertEqual(second["marker"].identity, self._identity_of(whole))
+        self.assertNotEqual(second["marker"].identity, first["marker"].identity)
+
+        # Same branch through the already-open handle, once the prefix is stable.
+        third = self._read_open(second["marker"])
+        self.assertFalse(third["rotated"])
+        self.assertEqual(third["lines"], [])
+        self.assertEqual(third["marker"].identity, second["marker"].identity)
+        self.assertEqual(third["marker"].offset, second["marker"].offset)
+
+    def test_open_handle_identity_after_rewrite_and_truncation(self) -> None:
+        original = b"old-line\n" * 80
+        self.log.write_bytes(original)
+        first = self._read_open(None)
+        self.assertEqual(first["lines"], ["old-line"] * 80)
+        self.assertEqual(first["marker"].identity, self._identity_of(original))
+
+        replaced = b"new-line\n" * 80
+        self.log.write_bytes(replaced)
+        second = self._read_open(first["marker"])
+        self.assertTrue(second["rotated"])
+        self.assertEqual(second["lines"], ["new-line"] * 80)
+        self.assertEqual(second["marker"].offset, len(replaced))
+        self.assertEqual(second["marker"].size, len(replaced))
+        self.assertEqual(second["marker"].identity, self._identity_of(replaced))
+        self.assertNotEqual(second["marker"].identity, first["marker"].identity)
+
+        shortened = b"short\n"
+        self.log.write_bytes(shortened)
+        third = self._read_open(second["marker"])
+        self.assertTrue(third["rotated"])
+        self.assertEqual(third["lines"], ["short"])
+        self.assertEqual(third["marker"].offset, len(shortened))
+        self.assertEqual(third["marker"].size, len(shortened))
+        self.assertEqual(third["marker"].identity, self._identity_of(shortened))
+        self.assertNotEqual(third["marker"].identity, second["marker"].identity)
+
+    def _substitute_log(self, data: bytes) -> None:
+        # A new file swapped onto the path, not a rewrite of the same inode.
+        incoming = self.log.with_name(self.log.name + ".incoming")
+        incoming.write_bytes(data)
+        os.replace(incoming, self.log)
+
+    def test_open_handle_identity_after_file_substitution(self) -> None:
+        original = b"old-line\n" * 80
+        self._substitute_log(original)
+        first = self._read_open(None)
+        self.assertEqual(first["lines"], ["old-line"] * 80)
+        self.assertEqual(first["marker"].identity, self._identity_of(original))
+        self.assertFalse(first["rotated"])
+
+        replaced = b"new-line\n" * 80
+        self._substitute_log(replaced)
+        self.assertEqual(self.log.read_bytes(), replaced)
+        second = self._read_open(first["marker"])
+        self.assertTrue(second["rotated"])
+        self.assertEqual(second["lines"], ["new-line"] * 80)
+        self.assertEqual(second["marker"].offset, len(replaced))
+        self.assertEqual(second["marker"].size, len(replaced))
+        self.assertEqual(second["marker"].identity, self._identity_of(replaced))
+        self.assertNotEqual(second["marker"].identity, first["marker"].identity)
+
+        shortened = b"short\n"
+        self.log.unlink()
+        recreated = self.log.with_name(self.log.name + ".recreated")
+        recreated.write_bytes(shortened)
+        os.replace(recreated, self.log)
+        self.assertEqual(self.log.read_bytes(), shortened)
+        third = self._read_open(second["marker"])
+        self.assertTrue(third["rotated"])
+        self.assertEqual(third["lines"], ["short"])
+        self.assertEqual(third["marker"].offset, len(shortened))
+        self.assertEqual(third["marker"].size, len(shortened))
+        self.assertEqual(third["marker"].identity, self._identity_of(shortened))
+        self.assertNotEqual(third["marker"].identity, second["marker"].identity)
 
 
 if __name__ == "__main__":

@@ -402,7 +402,7 @@ class InputTriggerCensusTest(unittest.TestCase):
     def test_daemon_map_names_its_tool_and_the_version_and_hash_stay(self) -> None:
         self.assertEqual(_BRIDGE_COMMAND_TOOLS["client"].get(COMMAND), COMMAND)
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
 
@@ -443,7 +443,11 @@ class InputTriggerKeyContractTest(unittest.TestCase):
         self.assertEqual(self.code.count(".OnKeyPress("), 3)
         key_press = _method_body(self.source, "protected bool DispatchKeyPress(")
         self.assertEqual(key_press.count("GetGame().GetMission().OnKeyPress(dik);"), 1)
-        self.assertNotIn("MCPInputTriggerControl", key_press)
+        # Of the control, key_press only sets db03's origin marker.
+        self.assertEqual(
+            set(re.findall(r"MCPInputTriggerControl\.(\w+)", key_press)),
+            {"s_Injecting", "s_InjectingDik"},
+        )
         for forbidden in ("SendInput", "keybd_event", "LocalPress", "ForceEnable", "UAInput"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, deliver)

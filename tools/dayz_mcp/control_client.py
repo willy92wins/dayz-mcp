@@ -297,6 +297,38 @@ class ControlClient:
                         registered = f"client registered at {started}. "
                 except Exception:
                     registered = ""
+                if policy_cause.startswith("HostConfigError:daemon_provenance_"):
+                    # A server_reload replacement repeats this validation, so it
+                    # dies at startup too while the same problem affects it
+                    # (fb-20261102-134653-e0ce). _conflict also covers a failed
+                    # read, and a failed check of this process's own executable
+                    # with both registrations intact, which the replacement
+                    # repeats for its own process and may pass: hence "could not
+                    # be validated", and a reload only once both registrations
+                    # are known to be intact.
+                    next_step = (
+                        "This server's registration in the host configs could not be "
+                        "validated (for example: missing, in one config only, not the "
+                        "same in each, malformed or unreadable, or this process's own "
+                        "executable could not be checked). A server_reload replacement "
+                        "repeats this validation and fails to start too while the same "
+                        "problem affects it. "
+                        "Report this to the host/operator to check both registrations, "
+                        "and restore them if needed, before any server_reload "
+                        "(install_mcp.py --register, with --instance for a named "
+                        "instance; it refuses an entry it cannot parse, which has to "
+                        "be fixed or removed by hand first). If both are intact, the "
+                        "failure may be local to this process, and a server_reload may "
+                        "then help. "
+                    )
+                else:
+                    next_step = (
+                        "If the tool list includes server_reload, call it: it replaces "
+                        "the serving process, which re-reads the registration and "
+                        "re-accredits. Otherwise report this policy rejection to the "
+                        "host/operator for registration verification and MCP-client "
+                        "reconnection after repair. "
+                    )
                 raise ControlClientError(
                     "client_policy_untrusted_open_new_session",
                     request_stage="pre_request",
@@ -306,12 +338,8 @@ class ControlClient:
                         # The MCP adapter publishes code/hint, not exception metadata.
                         f"policy_cause={policy_cause}. "
                         f"{registered}"
-                        "If the tool list includes server_reload, call it: it replaces "
-                        "the serving process, which re-reads the registration and "
-                        "re-accredits. Otherwise report this policy rejection to the "
-                        "host/operator for registration verification and MCP-client "
-                        "reconnection after repair. This client cannot open a new host "
-                        "session by itself."
+                        f"{next_step}"
+                        "This client cannot open a new host session by itself."
                     ),
                 ) from None
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -1031,6 +1059,35 @@ class ControlClient:
                         return self._with_own_identity(response)
                     if response.get("status") != "queued":
                         self._bad_session_response()
+                    quota = response.get("session_wait_quota")
+                    if isinstance(quota, str) and quota in {"duplicate", "full"}:
+                        # The admitted wait still holds the ticket. Sleeping
+                        # the whole retry would hide a grant until that
+                        # deadline. Cap the pause at 1s, and never past the
+                        # caller's own deadline.
+                        retry_after = response.get("retry_after_s")
+                        pause_s = 0.05
+                        retry_value: float | None
+                        try:
+                            if isinstance(retry_after, bool) or not isinstance(
+                                retry_after, (int, float)
+                            ):
+                                retry_value = None
+                            else:
+                                retry_value = float(retry_after)
+                        except (TypeError, ValueError, OverflowError):
+                            retry_value = None
+                        if (
+                            retry_value is not None
+                            and math.isfinite(retry_value)
+                            and retry_value > 0.0
+                        ):
+                            pause_s = min(1.0, retry_value)
+                        if deadline is not None:
+                            pause_s = min(
+                                pause_s, max(0.0, deadline - _monotonic())
+                            )
+                        await asyncio.sleep(pause_s)
                     if progress_cb is not None:
                         elapsed = max(0.0, _monotonic() - started)
                         await progress_cb(

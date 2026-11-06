@@ -1,13 +1,26 @@
-"""Pure-logic tests for the G0 ABBA in-game diagnostic driver."""
+"""Tests for the G0 ABBA in-game diagnostic driver.
+
+Its pure logic, and its session wait loop against a fake daemon.
+"""
 
 from __future__ import annotations
 
 import copy
 import math
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dayz_mcp.loopback import validate_command_args
+from tests._tiers import slow_test
+from tests.session_wait_quota_cases import (
+    DEADLINE_CASES,
+    MAX_VIRTUAL_WAITS,
+    QUOTA_PAUSE_CASES,
+    SEQUENCE_CASES,
+    queued,
+)
 
 try:
     import g0_abba_gate as gate
@@ -344,6 +357,166 @@ class G0AbbaPureLogicTest(unittest.TestCase):
 
         self.assertEqual("SETUP_FAILED", result["status"])
         self.assertEqual("wheel_counts", result["field"])
+
+
+ACTIVE_WAIT = {"status": "active", "lease_token": "token-a", "lease_id": "lease-a"}
+
+
+class _VirtualTime:
+    """Stands in for the gate's time module.
+
+    monotonic() only moves when the fake transport or the gate's sleep moves
+    it, and sleep() records each pause. Like time.sleep, sleep() refuses a
+    negative length. Dyadic values keep the arithmetic exact, so a pause
+    compares with ==.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1024.0
+        self.pauses: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.pauses.append(seconds)
+        if seconds < 0:
+            raise ValueError("sleep length must be non-negative")
+        self.now += seconds
+
+
+class G0AbbaSessionWaitQuotaTest(unittest.TestCase):
+    """The gate's pause after a /session/wait 202 with session_wait_quota (#317).
+
+    The gate keeps its own copy of dayz_mcp.control_client's rule, the one
+    tests/session_wait_quota_cases.py spells out, and never pauses past the
+    caller's deadline. A virtual clock checks each pause; the real-time tests
+    are the smoke.
+    """
+
+    def setUp(self) -> None:
+        self.assertIsNotNone(gate, "g0_abba_gate.py does not exist yet")
+
+    def daemon(
+        self, *waits: dict, clock: _VirtualTime | None = None, transport_s: float = 0.0
+    ) -> tuple[object, dict[str, int]]:
+        """A gate.Daemon whose /session/wait answers ``waits`` in order.
+
+        The last answer repeats. Nothing goes on the network. With a clock,
+        each /session/wait takes transport_s of its time to answer.
+        """
+        daemon = gate.Daemon(1, "test-key")
+        calls = {"wait": 0, "cancel": 0}
+        operation: list[str] = []
+
+        def session_call(path, payload=None, timeout_s=35.0):
+            if path == "/session/enqueue":
+                operation.append(payload["operation_id"])
+                return {
+                    "status": "queued",
+                    "ticket": "ticket-a",
+                    "position": 1,
+                    "operation_id": operation[0],
+                }
+            if path == "/session/wait":
+                if clock is not None:
+                    # Without a pause and with a transport that takes no
+                    # time, nothing moves the clock: fail, do not spin.
+                    if calls["wait"] >= MAX_VIRTUAL_WAITS:
+                        raise AssertionError(
+                            f"{calls['wait']} /session/wait calls on a clock nothing moves"
+                        )
+                    clock.now += transport_s
+                answer = dict(waits[min(calls["wait"], len(waits) - 1)])
+                calls["wait"] += 1
+                answer.update(ticket="ticket-a", operation_id=operation[0])
+                return answer
+            if path == "/session/cancel-operation":
+                calls["cancel"] += 1
+                return {"cancelled": True, "operation_id": payload["operation_id"]}
+            raise AssertionError(path)
+
+        daemon._session_call = session_call
+        return daemon, calls
+
+    def test_the_deadline_cuts_the_pause(self) -> None:
+        # The cut reads the clock when the answer arrives: a cut to what was
+        # left before the request would sleep 0.375s and return 0.25s late.
+        # It applies to the fallback as well, and it never asks for a
+        # negative pause.
+        for label, max_wait_s, transport_s, quota, retry_after, pauses, end in DEADLINE_CASES:
+            with self.subTest(label):
+                clock = _VirtualTime()
+                daemon, calls = self.daemon(
+                    queued(quota, retry_after), clock=clock, transport_s=transport_s
+                )
+                with patch.object(gate, "time", clock):
+                    with self.assertRaisesRegex(RuntimeError, "session_wait_timeout"):
+                        daemon.session_acquire_wait("build", max_wait_s)
+
+                self.assertEqual(1, calls["wait"])
+                self.assertEqual(1, calls["cancel"])
+                self.assertEqual(pauses, clock.pauses)
+                self.assertEqual(end, clock.now)
+
+    def test_the_quota_pause_follows_the_retry_rule(self) -> None:
+        for label, quota, retry_after, pauses in QUOTA_PAUSE_CASES:
+            with self.subTest(label):
+                clock = _VirtualTime()
+                daemon, calls = self.daemon(
+                    queued(quota, retry_after), ACTIVE_WAIT, clock=clock
+                )
+                with patch.object(gate, "time", clock):
+                    result = daemon.session_acquire_wait("build", 64.0)
+
+                self.assertEqual("active", result["status"])
+                self.assertEqual(2, calls["wait"])
+                self.assertEqual(pauses, clock.pauses)
+
+    def test_quota_answer_sequences(self) -> None:
+        for label, answers, max_wait_s, pauses in SEQUENCE_CASES:
+            with self.subTest(label):
+                clock = _VirtualTime()
+                daemon, calls = self.daemon(*answers, ACTIVE_WAIT, clock=clock)
+                with patch.object(gate, "time", clock):
+                    result = daemon.session_acquire_wait("build", max_wait_s)
+
+                self.assertEqual("active", result["status"])
+                self.assertEqual(len(answers) + 1, calls["wait"])
+                self.assertEqual(pauses, clock.pauses)
+
+    @slow_test
+    def test_full_quota_pauses_before_the_next_wait(self) -> None:
+        daemon, calls = self.daemon(
+            {"status": "queued", "session_wait_quota": "full", "retry_after_s": 30},
+            ACTIVE_WAIT,
+        )
+        started = time.monotonic()
+        result = daemon.session_acquire_wait("build", 5.0)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual("active", result["status"])
+        self.assertEqual(2, calls["wait"])
+        # The cap is 1s. 0.9s still fails if the pause is removed, and 2.5s
+        # leaves room when the machine is busy.
+        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertLess(elapsed, 2.5)
+
+    @slow_test
+    def test_duplicate_pause_stays_inside_the_caller_deadline(self) -> None:
+        daemon, calls = self.daemon(
+            {"status": "queued", "session_wait_quota": "duplicate", "retry_after_s": 30},
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "session_wait_timeout"):
+            daemon.session_acquire_wait("build", 0.3)
+        elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(calls["wait"], 1)
+        self.assertEqual(1, calls["cancel"])
+        # Cut to the 0.3s left. Without the cut the gate sleeps the whole 1s
+        # cap first (measured 1.000s).
+        self.assertLess(elapsed, 0.8)
 
 
 if __name__ == "__main__":

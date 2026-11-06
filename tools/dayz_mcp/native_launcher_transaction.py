@@ -28,7 +28,11 @@ if os.name != "nt":
 
 
 class NativeLauncherTransactionError(RuntimeError):
-    pass
+    # The client's box_protected answer when the grant's adopt came back
+    # run_protected and the client released the grant (server.py
+    # _release_protected_grant); None for every other failure, a failed
+    # release included (fb-20261104-143314-32cf).
+    protected_grant: dict[str, object] | None = None
 
 
 class _ControlClient(Protocol):
@@ -50,6 +54,14 @@ class _ControlClient(Protocol):
 def _validate_grant(response: object) -> tuple[str, str, str]:
     if not isinstance(response, dict):
         raise NativeLauncherTransactionError("invalid_session_grant")
+    if response.get("error") == "box_protected":
+        error = NativeLauncherTransactionError("invalid_session_grant")
+        if response.get("status") == "released":
+            # The refusal travels with the error, so dayz_test_stop can
+            # answer run_protected instead of an opaque failure. A failed
+            # release keeps its lease token and stays an opaque failure.
+            error.protected_grant = dict(response)
+        raise error
     lease_token = response.get("lease_token")
     lease_id = response.get("lease_id")
     client_identity_json = response.get("client_identity_json")
@@ -689,6 +701,95 @@ def enforce_vpp_preflight(
     if result.error_code is not None:
         raise ValueError(result.error_code)
     return result
+
+
+# --- Bridge arg-contract preflight (fb-20261102-120351-9077) -----------------
+#
+# The server bridge announces the arg-contract hash compiled into its PBO, and
+# the loopback refuses the verbs that need it when that hash is not the one
+# the tools send (loopback._capability_refusal_locked). A PBO built from
+# another commit showed up only after the launch (9535, 9077, 7e14), so
+# dayz_test_run reads the hash out of the PBO it is about to load. Only a hash
+# it reads counts: a folder, file or declaration it cannot read refuses
+# nothing, and the loopback still answers per verb.
+_SERVER_ARG_CONTRACT_DECL = re.compile(
+    rb'\bconst\s+string\s+SERVER_ARG_CONTRACT_HASH\s*=\s*"([0-9a-f]{16})"\s*;'
+)
+_MAX_BRIDGE_PBO_BYTES = 8_000_000
+
+
+def _read_bridge_pbos(mod_path: str) -> list[bytes]:
+    """Every *.pbo in mod_path's addons folder, whole. OSError when it cannot."""
+    addons = os.path.join(mod_path, "addons")
+    blobs: list[bytes] = []
+    for name in sorted(os.listdir(addons)):
+        if not name.casefold().endswith(".pbo"):
+            continue
+        with open(os.path.join(addons, name), "rb") as handle:
+            blob = handle.read(_MAX_BRIDGE_PBO_BYTES + 1)
+        if len(blob) > _MAX_BRIDGE_PBO_BYTES:
+            raise OSError(f"{name} is larger than {_MAX_BRIDGE_PBO_BYTES} bytes")
+        blobs.append(blob)
+    return blobs
+
+
+# tests/__init__.py replaces this with a reader that reads nothing: the
+# fixture policies name P:\Mods, where the deployed PBO lives on the dev PC.
+read_bridge_pbos: Callable[[str], list[bytes]] = _read_bridge_pbos
+
+
+def bridge_contract_mismatch(
+    payload: dict[str, object],
+    policy: dayz_test_request.RequestProjectPolicy,
+    *,
+    expected: str,
+) -> tuple[str, ...]:
+    """The arg contracts the bridge PBOs announce, when none of them is expected.
+
+    Empty when the run starts no server, builds the bridge itself, or when a
+    bridge folder, PBO or declaration cannot be read.
+    """
+    if not mode_starts_server(str(payload["mode"])):
+        return ()
+    if payload.get("build") is True and str(payload["mod"]).casefold() == "dayz_mcp":
+        return ()
+    announced: set[str] = set()
+    for entry in (*effective_mod_entries(payload), *payload.get("server_only_mods", [])):
+        if ntpath.basename(str(entry)).casefold() not in dayz_test_request._BRIDGE_BASENAMES:
+            continue
+        path = _resolved_mod_path(str(entry), policy)
+        if path is None:
+            return ()
+        try:
+            blobs = read_bridge_pbos(path)
+        except OSError:
+            return ()
+        for blob in blobs:
+            announced.update(
+                match.decode("ascii")
+                for match in _SERVER_ARG_CONTRACT_DECL.findall(blob)
+            )
+    if expected in announced:
+        return ()
+    return tuple(sorted(announced))
+
+
+def preflight_bridge_contract_request(
+    raw_request: bytes,
+    *,
+    sealed_policies: tuple[object, ...],
+    expected: str,
+) -> tuple[str, ...]:
+    """bridge_contract_mismatch over the request the launcher itself will parse."""
+    semantic = tuple(item.policy for item in sealed_policies)
+    parsed = dayz_test_request.parse_dayz_test_request(
+        raw_request, policies=semantic
+    )
+    return bridge_contract_mismatch(
+        parsed.payload,
+        select_request_policy(parsed.payload, semantic),
+        expected=expected,
+    )
 
 
 async def execute_native_launcher_transaction(

@@ -82,7 +82,7 @@ class MCPBridge : Managed
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "86e3c48a43e86b91";
+	protected const string SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -1151,6 +1151,13 @@ class MCPBridge : Managed
 		}
 		if (authority == "client" || MCPInventoryMoveNeedsPlayer(op) || rootedOnPlayer)
 		{
+			// 091a: a move that needs a player names it; no first-human fallback.
+			if (command.args.uid == "")
+			{
+				result.ok = false;
+				result.error = "uid_required";
+				return true;
+			}
 			string playerError = "";
 			player = ResolvePlayer(command.args, playerError);
 			if (!player)
@@ -3187,11 +3194,12 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		Human human = GetFirstHuman();
+		// 091a: the player uid names, never the first human.
+		Human human = FindHumanByUid(command.args.uid);
 		if (!human)
 		{
 			result.ok = false;
-			result.error = "no_players";
+			result.error = "player_not_found";
 			return true;
 		}
 
@@ -7728,13 +7736,8 @@ class MCPBridge : Managed
 
 	protected bool IsSeatReady(MCPJob job)
 	{
+		// The player vehicle_enter seated. Gone, the job ends at its deadline.
 		Human human = job.actor;
-		if (!human)
-		{
-			human = GetFirstHuman();
-			job.actor = human;
-		}
-
 		if (!human)
 		{
 			return false;
@@ -8233,6 +8236,10 @@ class MCPBridge : Managed
 		{
 			resultRequest = resultRequest + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
+		cb.result_id = result.id;
+		cb.request = resultRequest;
+		cb.body = body;
+		cb.retried = false;
 		// Result JSON bytes submitted, not acknowledgements or HTTP overhead.
 		m_CmdBytes = AddLoadCounter(m_CmdBytes, body.Length());
 		m_Ctx.POST(cb, resultRequest, body);
@@ -8263,6 +8270,9 @@ class MCPBridge : Managed
 
 	void RecycleResultCallback(MCPResultCallback cb)
 	{
+		// The pool keeps no request (it carries the key) and no body.
+		cb.request = "";
+		cb.body = "";
 		if (m_ResultCallbackPool && m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS)
 		{
 			m_ResultCallbackPool.Insert(cb);
@@ -8274,14 +8284,39 @@ class MCPBridge : Managed
 		Log("result ack size=" + dataSize);
 	}
 
-	void OnResultError(int errorCode)
+	void OnResultError(MCPResultCallback cb, int errorCode)
 	{
 		Log("result post error=" + errorCode);
+		RetryResult(cb);
 	}
 
-	void OnResultTimeout()
+	void OnResultTimeout(MCPResultCallback cb)
 	{
 		Log("result post timeout");
+		RetryResult(cb);
+	}
+
+	// d67f: a failed result POST is sent once more, marked retry=1, so a
+	// result the daemon never got still reaches it. The daemon answers a copy
+	// of a result it already has without acting on it again. The failed
+	// callback left m_CallbackRefs just before, so admission debt is unchanged.
+	protected void RetryResult(MCPResultCallback failed)
+	{
+		if (!failed || failed.retried || !m_Configured || !m_Ctx)
+		{
+			return;
+		}
+
+		MCPResultCallback cb = AcquireResultCallback();
+		m_CallbackRefs.Insert(cb);
+		cb.result_id = failed.result_id;
+		cb.request = failed.request;
+		cb.body = failed.body;
+		cb.retried = true;
+		m_CmdBytes = AddLoadCounter(m_CmdBytes, cb.body.Length());
+		m_Ctx.POST(cb, cb.request + "&retry=1", cb.body);
+		// Never the request: it carries the key.
+		Log("result retry posted id=" + cb.result_id);
 	}
 
 	void ReleaseCallback(RestCallback cb)

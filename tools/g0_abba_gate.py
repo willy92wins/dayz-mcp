@@ -833,6 +833,31 @@ class Daemon:
                     raise RuntimeError(
                         f"session_acquire_wait bad wait response: {response}"
                     )
+                quota = response.get("session_wait_quota")
+                if isinstance(quota, str) and quota in {"duplicate", "full"}:
+                    # The admitted wait still holds the ticket. The same pause
+                    # as dayz_mcp.control_client, which this module does not
+                    # import: at most 1s, and never past the caller's deadline.
+                    retry_after = response.get("retry_after_s")
+                    pause_s = 0.05
+                    retry_value: float | None
+                    try:
+                        if isinstance(retry_after, bool) or not isinstance(
+                            retry_after, (int, float)
+                        ):
+                            retry_value = None
+                        else:
+                            retry_value = float(retry_after)
+                    except (TypeError, ValueError, OverflowError):
+                        retry_value = None
+                    if (
+                        retry_value is not None
+                        and math.isfinite(retry_value)
+                        and retry_value > 0.0
+                    ):
+                        pause_s = min(1.0, retry_value)
+                    pause_s = min(pause_s, max(0.0, deadline - time.monotonic()))
+                    time.sleep(pause_s)
         finally:
             if not active:
                 try:

@@ -53,7 +53,11 @@ async def _open_launcher():
     else:
         with context as opened:
             yield opened
-from dayz_mcp.native_launcher_transaction import preflight_vpp_request
+from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
+from dayz_mcp.native_launcher_transaction import (
+    preflight_bridge_contract_request,
+    preflight_vpp_request,
+)
 from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.client_steam_bootstrap import (
     ClientDumpBaseline,
@@ -134,6 +138,14 @@ _BRIDGE_MOD_MISSING_IN_BASE_MODS = (
     "pass an explicit base_mods without the bridge. dayz_test_run does not "
     "copy a base_mods entry into extra_mods, because that would list the "
     "folder twice on -mod="
+)
+# fb-20261102-120351-9077. {announced} and {expected} are 16-hex hashes.
+_ARG_CONTRACT_MISMATCH_REMEDIATION = (
+    "the @DayZ_MCP PBO this run would load announces arg contract "
+    "{announced}, and this MCP's tools send {expected}, so the server bridge "
+    "would refuse the commands that need the contract with "
+    "arg_contract_mismatch. Nothing was launched. Deploy a @DayZ_MCP built "
+    "from this MCP's commit, or use the MCP whose commit built that PBO"
 )
 _HELD_LEASE_RUN = (
     "session_transition_conflict: release your session lease first - "
@@ -2349,6 +2361,51 @@ def _stamp_preflight(
     return result
 
 
+async def _bridge_contract_refusal(
+    raw_request: bytes,
+    sealed_policies: tuple[object, ...],
+    *,
+    project: str,
+    mode: str,
+    started_at: float,
+    vpp: object,
+) -> dict[str, object] | None:
+    """The refusal of a server start whose bridge PBO announces another contract.
+
+    fb-20261102-120351-9077. A request gate like the admin-tools gate: it runs
+    before the desktop gate, Steam, the lifecycle, the lease or a process. The
+    PBO is read off the event loop.
+    """
+    announced = await asyncio.to_thread(
+        preflight_bridge_contract_request,
+        raw_request,
+        sealed_policies=sealed_policies,
+        expected=EXPECTED_SERVER_ARG_CONTRACT_HASH,
+    )
+    if not announced:
+        return None
+    return _compact_result(
+        terminal=WorkerTerminal(
+            cleanup_degraded=False,
+            error_code="arg_contract_mismatch",
+            exit_code=1,
+            ok=False,
+            run_id=None,
+        ),
+        project=project,
+        mode=mode,
+        started_at=started_at,
+        artifacts_paths=[],
+        phase="validating",
+        remediation=_ARG_CONTRACT_MISMATCH_REMEDIATION.format(
+            announced=", ".join(announced),
+            expected=EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        ),
+        vpp_missing=list(vpp.missing),
+        vpp_warnings=list(vpp.warnings),
+    )
+
+
 async def _execute_preflight(
     runtime: _Runtime,
     *,
@@ -2447,6 +2504,16 @@ async def _execute_preflight(
                     vpp_warnings=list(vpp.warnings),
                 )
                 return finish(refused, bridge_default)
+            refused = await _bridge_contract_refusal(
+                raw_request,
+                bundle.sealed_policies,
+                project=policy.mod,
+                mode=mode,
+                started_at=started_at,
+                vpp=vpp,
+            )
+            if refused is not None:
+                return finish(refused, bridge_default)
             display = None
             if _mode_starts_client(mode):
                 desktop = await asyncio.to_thread(evaluate_prerun_desktop)
@@ -2541,17 +2608,6 @@ async def _execute_preflight(
                 effective_directories = dayz_test_worker._effective_directories(
                     parsed.payload, runtime_policy
                 )
-                # The launch accredits server_only_mods in every mode
-                # (request_path_authority.accredit_request_paths), so a client
-                # preflight checks them too instead of reporting success.
-                if parsed.payload.get("mode") == "client":
-                    effective_directories = (
-                        *effective_directories,
-                        *(
-                            dayz_test_worker._mod_path(value, runtime_policy)
-                            for value in parsed.payload.get("server_only_mods", [])
-                        ),
-                    )
             except dayz_test_worker.DayzTestWorkerError as error:
                 failed = _compact_result(
                     terminal=WorkerTerminal(
@@ -2591,6 +2647,15 @@ async def _execute_preflight(
                 try:
                     if selected is None:
                         raise ValueError("invalid_dayz_test_path_authority")
+                    # The launch accredits every declared mod list, in every
+                    # mode and against all sealed roots, before it asks for the
+                    # lease (native_launcher_transaction, accredit_request_paths).
+                    # The preflight runs that same check on the same request; the
+                    # runtime check below covers what the roles actually load.
+                    with request_path_authority.accredit_request_paths(
+                        parsed, policies=sealed
+                    ):
+                        pass
                     with request_path_authority.accredit_runtime_resolved_paths(
                         selected,
                         directories=effective_directories,
@@ -2820,6 +2885,16 @@ async def execute_dayz_test_run(
                 )
                 if preflight:
                     refused["preflight_skipped_checks"] = preflight_skipped_checks
+                return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
+            refused = await _bridge_contract_refusal(
+                raw_request,
+                bundle.sealed_policies,
+                project=policy.mod,
+                mode=mode,
+                started_at=started_at,
+                vpp=vpp,
+            )
+            if refused is not None:
                 return _annotate_bridge_default(refused, bridge_default, project_mod_replaced=project_mod_override)
             display = None
             if _mode_starts_client(mode):

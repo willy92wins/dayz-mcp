@@ -463,8 +463,16 @@ class Supervisor:
             replacement = self.start_worker()
             replayed = self._replay_handshake(replacement)
             if not replayed:
+                # The replacement's exit code when the reload gave up on it, or
+                # None if it had not exited by then. It does not say whether the
+                # replacement answered initialize first (fb-20261102-134653-e0ce).
                 self._reply(
-                    request_id, {"error": "initialize_replay_failed"}, is_error=True
+                    request_id,
+                    {
+                        "error": "initialize_replay_failed",
+                        "replacement_exit_code": replacement.process.poll(),
+                    },
+                    is_error=True,
                 )
                 return
         finally:

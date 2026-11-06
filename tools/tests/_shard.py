@@ -48,6 +48,7 @@ arguments are wrong.
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 import sys
 import unittest
@@ -396,11 +397,26 @@ def _decorated_slow(node: ast.AST) -> bool:
 
 
 def _slow_tests_in_source(source: str) -> int:
+    # A matching decorator's source text contains "slow_test" (a Name or an
+    # attribute), so an ASCII source without that substring counts zero
+    # without a parse. A non-ASCII source skips the shortcut: an identifier
+    # character that NFKC-folds to ASCII (U+017F folds to "s") could spell
+    # the name without the substring appearing.
+    if "slow_test" not in source and source.isascii():
+        return 0
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return 0
     return _slow_tests_in_body(tree.body)
+
+
+# module name -> (sha256 of the source counted, count). group_weight runs
+# once per group per assign_groups call, and callers assign the same groups
+# more than once in a process (the partition test assigns twice to prove
+# stability); re-reading the source is cheap next to parsing it, so the
+# digest decides reuse and a rewritten file recounts.
+_SLOW_COUNT_CACHE: dict[str, tuple[str, int]] = {}
 
 
 def _slow_tests_in_body(body: Iterable[ast.AST]) -> int:
@@ -425,7 +441,13 @@ def slow_test_count(module_name: str) -> int:
     source = _module_source(module_name)
     if source is None:
         return 0
-    return _slow_tests_in_source(source)
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    cached = _SLOW_COUNT_CACHE.get(module_name)
+    if cached is not None and cached[0] == digest:
+        return cached[1]
+    count = _slow_tests_in_source(source)
+    _SLOW_COUNT_CACHE[module_name] = (digest, count)
+    return count
 
 
 def group_weight(group: Group) -> int:
