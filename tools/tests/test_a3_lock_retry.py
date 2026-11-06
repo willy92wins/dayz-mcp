@@ -1237,6 +1237,10 @@ class _FakeAsyncClock:
         self.now += seconds
 
 
+# How many times the loop-responsiveness gate measures before it fails.
+_SAMPLES = 3
+
+
 class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
     """P2/FIX 9: the async registry open never sleeps on the loop."""
 
@@ -1375,12 +1379,14 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
             ):
                 pass
 
-    async def _open_with_ticker(self, open_coro_factory):
+    async def _open_with_ticker(self, open_coro_factory, events=None):
         ticks: list[float] = []
 
         async def ticker() -> None:
             while True:
                 ticks.append(time.monotonic())
+                if events is not None:
+                    events.append("tick")
                 await asyncio.sleep(0.01)
 
         started = time.monotonic()
@@ -1397,45 +1403,77 @@ class AsyncApprovedLauncherTest(unittest.IsolatedAsyncioTestCase):
     async def test_async_open_keeps_loop_responsive_while_busy(self) -> None:
         # P2: with the real asyncio.sleep, a registry busy for ~0.35 s
         # is retried without freezing the loop, final instant included.
-        fake_lock = _FakeLock()
-        opened = _FakeOpenedLauncher()
-        release_at = time.monotonic() + 0.35
-        calls: list = []
+        #
+        # Two checks on each sample.
+        # 1. Order, which load cannot change: every backoff wait lets the
+        #    loop run, so a tick lands between any two attempts. A blocking
+        #    backoff (time.sleep, a busy wait) leaves none.
+        # 2. Wall clock: no gap between ticks, final instant included,
+        #    reaches 0.2 s. A gap can also come from the OS not running the
+        #    loop thread. On Python 3.11 under Windows, with the CPU
+        #    saturated, the loop thread alone waits 0.2-0.3 s while a sibling
+        #    thread keeps ticking, so the gap cannot be blamed on the code
+        #    (CI: 0.844 s in run 42038243067, 0.609 s on PR #349). The code
+        #    runs against fakes, and the release time counts from its first
+        #    attempt, so a gap the code causes repeats in every sample. A
+        #    sample over the gate is taken again, at most _SAMPLES times,
+        #    and the test fails if none passes.
+        gaps: list[float] = []
+        for _ in range(_SAMPLES):
+            events: list[str] = []
+            fake_lock = _FakeLock()
+            opened = _FakeOpenedLauncher()
+            first_attempt: list[float] = []
 
-        def busy_until_release(**kwargs):
-            calls.append(kwargs)
-            if time.monotonic() < release_at:
-                raise RuntimeError("launcher_registry_busy")
-            return fake_lock
+            def busy_until_release(**_kwargs):
+                events.append("acquire")
+                now = time.monotonic()
+                if not first_attempt:
+                    first_attempt.append(now)
+                if now < first_attempt[0] + 0.35:
+                    raise RuntimeError("launcher_registry_busy")
+                return fake_lock
 
-        async def open_it() -> None:
-            with (
-                mock.patch.object(
-                    registry_lock,
-                    "acquire_registry_lock",
-                    busy_until_release,
-                ),
-                mock.patch.object(
-                    launcher_registry,
-                    "_read_canonical_registry",
-                    return_value=[_entry()],
-                ),
-                mock.patch.object(
-                    launcher_registry,
-                    "_open_validated_entry",
-                    return_value=opened,
-                ),
-            ):
-                async with launcher_registry.open_approved_launcher_async(
-                    "dayz-test-v1"
-                ) as result:
-                    self.assertIs(result, opened)
+            async def open_it() -> None:
+                with (
+                    mock.patch.object(
+                        registry_lock,
+                        "acquire_registry_lock",
+                        busy_until_release,
+                    ),
+                    mock.patch.object(
+                        launcher_registry,
+                        "_read_canonical_registry",
+                        return_value=[_entry()],
+                    ),
+                    mock.patch.object(
+                        launcher_registry,
+                        "_open_validated_entry",
+                        return_value=opened,
+                    ),
+                ):
+                    async with launcher_registry.open_approved_launcher_async(
+                        "dayz-test-v1"
+                    ) as result:
+                        self.assertIs(result, opened)
 
-        max_gap, elapsed = await self._open_with_ticker(open_it)
-        self.assertGreaterEqual(len(calls), 2)
-        self.assertGreaterEqual(elapsed, 0.3)
-        self.assertLess(
-            max_gap, 0.2, f"max tick gap {max_gap:.3f}s: event loop stalled"
+            max_gap, elapsed = await self._open_with_ticker(open_it, events)
+            attempts = [index for index, event in enumerate(events) if event == "acquire"]
+            self.assertGreaterEqual(len(attempts), 2)
+            for before, after in zip(attempts, attempts[1:]):
+                self.assertIn(
+                    "tick",
+                    events[before + 1 : after],
+                    "a backoff wait did not let the loop run: event loop stalled",
+                )
+            self.assertGreaterEqual(elapsed, 0.3)
+            if max_gap < 0.2:
+                return
+            gaps.append(max_gap)
+        self.fail(
+            "max tick gap "
+            + ", ".join(f"{gap:.3f}s" for gap in gaps)
+            + " in every sample: event loop stalled"
         )
 
     async def test_blocking_open_would_stall_the_loop(self) -> None:

@@ -80,6 +80,24 @@ class _Runtime:
         raise AssertionError("file_matches must not acquire")
 
 
+class _JumpClock:
+    """The server's ``time`` module with a monotonic clock a test can jump.
+
+    Everything but ``monotonic`` is the real module. A test sets ``offset``
+    to move the server past a deadline at a point it chooses, instead of
+    racing a short budget against the runner's load.
+    """
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.offset
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
 class _StopDeaf:
     """A stop signal that never fires: what a reader without cooperation sees.
 
@@ -813,16 +831,39 @@ class FileMatchesTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state["alive"].is_alive())
 
     async def test_f8_read_oserror_stays_in_scan(self) -> None:
+        # The budget must not run out before the first read. With
+        # timeout_s=0.2 it did on a loaded CI runner: two off-loop hops
+        # (_profiles_dir_for_role before the loop and again in the first
+        # probe) took the 0.2 s, the read never ran, and the scan report was
+        # empty (run 42054363045). The budget is now one load cannot use up,
+        # and the server's clock jumps past the deadline only at the second
+        # probe's heartbeat, after the failed read was recorded.
         self.server_file.write_text("READY\n", encoding="utf-8")
+        reads: list[int] = []
 
         def boom(*_args, **_kwargs):
+            reads.append(1)
             raise OSError("read unavailable")
 
-        with patch.object(server, "_marker_rewound_handle", side_effect=boom):
+        clock = _JumpClock()
+        first_beat = self.runtime.session_heartbeat
+
+        async def beat(token: str) -> dict:
+            if reads:
+                clock.offset = 3600.0
+            return await first_beat(token)
+
+        self.runtime.session_heartbeat = beat
+        with (
+            patch.object(server, "_marker_rewound_handle", side_effect=boom),
+            patch.object(server, "time", clock),
+        ):
             result = await execute_wait_for(
                 self.runtime, "file_matches", pattern="READY", profile_file="mission.log",
-                timeout_s=0.2, poll_interval_s=0.5, lookback_lines=5,
+                timeout_s=60.0, poll_interval_s=0.01, lookback_lines=5,
             )
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(result["probes"], 2)
         self.assertFalse(result["satisfied"])
         self.assertIn("scanned", result)
         self.assertTrue(result["scanned"].get("unreadable") or any(
