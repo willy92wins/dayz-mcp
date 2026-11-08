@@ -314,6 +314,11 @@ class SessionE2ETest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 409, refused)
         self.assertEqual(refused.get("error"), "run_protected", refused)
         await runtime_b.session_release(acquired_b["lease_token"])
+        # B's lease_close is delivered on a later server poll; wait for it
+        # instead of snapshotting the command log right after the release.
+        await self.wait_until(
+            lambda: server_peer.command_names().count("lease_close") == 2
+        )
 
         mutations = [
             name
