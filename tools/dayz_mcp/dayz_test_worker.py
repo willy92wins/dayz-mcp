@@ -652,10 +652,15 @@ def _start_core(
         argv.extend(runtime.server_extra_args)
         profiles = server_profiles
     elif role == "client":
+        connect_host = (
+            str(payload["host"])
+            if isinstance(payload.get("host"), str) and payload.get("host")
+            else "127.0.0.1"
+        )
         argv = [
             runtime.diag_executable,
             "-mod=" + mod_string,
-            "-connect=127.0.0.1",
+            f"-connect={connect_host}",
             f"-port={port}",
             "-profiles=" + client_profiles,
             "-name=" + str(payload["player_name"]),
@@ -1881,12 +1886,16 @@ async def execute_dayz_test_worker(
             )
             created_run_id = attempt_run_id = run_id
         elif mode == "client":
-            if run_id is None:
+            if run_id is None and payload.get("host") is None:
                 raise _failed()
             capture("client")
-            run_id, _acknowledged, _operation = await _start(
+            run_id, _acknowledged, operation = await _start(
                 broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
             )
+            attempt_run_id = run_id
+            if supplied_run_id is None:
+                created_run_id = run_id
+                attempt_operation_id = operation
         elif mode == "offline":
             capture("offline")
             run_id, _acknowledged, operation = await _start(

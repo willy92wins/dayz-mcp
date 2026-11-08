@@ -3576,12 +3576,19 @@ WEAPON_AIM_ABS_MAX = 3.141593
 
 RUN_ID_MATRIX_MODE_DESCRIPTION = (
     "Launch mode. client reattaches only the client to a live run and REQUIRES "
-    "run_id (server and world state preserved); server and all launch fresh and "
-    "must NOT pass run_id."
+    "run_id (server and world state preserved), or launches a standalone remote "
+    "client when host is given without run_id; server and all launch fresh and "
+    "must NOT pass run_id or host."
 )
 RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
-    "Live run to reattach to. Required with mode=client; forbidden with "
-    "mode=server|all (bad_dayz_test_request otherwise)."
+    "Live run to reattach to. Required with mode=client unless host is given; "
+    "forbidden when host is given or with mode=server|all (bad_dayz_test_request otherwise)."
+)
+HOST_DESCRIPTION = (
+    "Optional remote server IPv4, IPv6, or RFC-1123 hostname for mode=client. "
+    "When given, run_id must be omitted and the client launches with "
+    "-connect=<host> -port=<port> (port in 1..65535, default 2302). "
+    "Rejected on modes other than client."
 )
 NAVMESH_DATA_SERVER_DESCRIPTION = (
     "Opt-in. Default false. With mode=server, adds -startNavmeshDataServer "
@@ -3677,6 +3684,7 @@ def _describe_run_parameters(app: FastMCP, tool_name: str) -> None:
     for field, text in (
         ("mode", RUN_ID_MATRIX_MODE_DESCRIPTION),
         ("run_id", RUN_ID_MATRIX_RUN_ID_DESCRIPTION),
+        ("host", HOST_DESCRIPTION),
         ("extra_mods", EXTRA_MODS_DESCRIPTION),
         ("server_only_mods", SERVER_ONLY_MODS_DESCRIPTION),
         ("auto_remediate_steam", AUTO_REMEDIATE_STEAM_DESCRIPTION),
@@ -6257,9 +6265,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ownerless runs the grant adopts none (adopted_run error "
             "multiple_idle_runs). "
             "Reattach sequence: server -> run_id -> client(run_id). "
-            "mode=client requires run_id: it reattaches only the client to a "
-            "live run, preserving the server and the world state (no server "
-            "reboot); mode=server|all must NOT pass run_id. "
+            "mode=client requires run_id (unless host is given): it reattaches "
+            "only the client to a live run, preserving the server and the world "
+            "state (no server reboot); when host is given on mode=client, run_id "
+            "must be omitted and the client launches against -connect=<host> "
+            "-port=<port> (port in 1..65535, default 2302); mode=server|all must "
+            "NOT pass run_id or host. "
             "mode=all plus wait_for(players_at_least, 1) after "
             "session_acquire_wait can complete without human intervention "
             "(viable night session). "
@@ -6369,6 +6380,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         server_only_mods: list[str] | None = None,
         no_base_mods: bool = False,
         no_file_patching: bool = False,
+        host: StrictStr | None = None,
         port: StrictInt = 2302,
         width: StrictInt = 1920,
         height: StrictInt = 1080,
@@ -6409,6 +6421,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(
                 "bad_dayz_test_request:server_adminlog_requires_server"
             )
+        if host is not None:
+            if not dayz_test_tool.dayz_test_request._is_valid_host(host):
+                raise ToolError("bad_dayz_test_request:host_invalid")
+            if mode != "client":
+                raise ToolError("bad_dayz_test_request:host_requires_client_mode")
+            if run_id is not None:
+                raise ToolError("bad_dayz_test_request:client_host_forbids_run_id")
+            if type(port) is not int or not (1 <= port <= 65535):
+                raise ToolError("bad_dayz_test_request:port_out_of_range")
         client = _client_runtime()
         # The runtime's monotonic clock (ClientRuntime(time_fn=...)), the one
         # its own call deadlines use; it holds the box wait budget below.
@@ -6477,6 +6498,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         no_file_patching=no_file_patching,
                         navmesh_data_server=navmesh_data_server,
                         server_adminlog=server_adminlog,
+                        host=host,
                         port=port,
                         width=width,
                         height=height,

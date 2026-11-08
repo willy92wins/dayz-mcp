@@ -1496,5 +1496,68 @@ class WorkerAttemptContextTest(unittest.TestCase):
         self.assertEqual(caught.exception.launch_operation_id, self.OPERATION)
 
 
+class RemoteClientWorkerTest(unittest.TestCase):
+    TARGET = "12345678-1234-4234-8234-1234567890ab"
+    OPERATION = "87654321-4321-4321-8321-ba0987654321"
+
+    def _execute(self, broker: _Broker, **overrides: object) -> dayz_test_worker.WorkerResult:
+        parsed = dayz_test_request.parse_dayz_test_request(
+            _raw(mode="client", **overrides), policies=(POLICY,)
+        )
+        ids = iter((self.TARGET, self.OPERATION, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+        return asyncio.run(
+            dayz_test_worker.execute_dayz_test_worker(
+                parsed.canonical_bytes,
+                request_sha256=parsed.sha256,
+                request_policies=(POLICY,),
+                runtime_policy=RUNTIME,
+                broker=broker,
+                id_fn=lambda: next(ids),
+                readiness_probe=None,
+                has_binarizable_assets=lambda _source: True,
+            )
+        )
+
+    def test_remote_client_launches_without_run_id_or_adopt_and_passes_host_and_port(
+        self,
+    ) -> None:
+        cases = (
+            ("198.51.100.7", 2402, 2402),
+            ("2001:db8::42", None, 2302),
+            ("dayz.example.com", 27016, 27016),
+        )
+        for host, port, expected_port in cases:
+            with self.subTest(host=host, port=port):
+                broker = _Broker()
+                overrides: dict[str, object] = {"host": host}
+                if port is not None:
+                    overrides["port"] = port
+                result = self._execute(broker, **overrides)
+                self.assertEqual(result.exit_code, 0)
+                self.assertEqual(result.run_id, self.TARGET)
+                commands = [req.payload.get("command") for req in broker.requests]
+                self.assertEqual(commands, ["start", "ack"])
+                start_stdin = json.loads(broker.requests[0].stdin)
+                self.assertEqual(start_stdin["new_run_id"], self.TARGET)
+                self.assertNotIn("run_id", start_stdin)
+                self.assertEqual(start_stdin["role"], "client")
+                self.assertIn(f"-connect={host}", start_stdin["argv"])
+                self.assertIn(f"-port={expected_port}", start_stdin["argv"])
+                self.assertNotIn("-connect=127.0.0.1", start_stdin["argv"])
+
+    def test_local_client_path_argv_is_unchanged(self) -> None:
+        broker = _Broker()
+        result = self._execute(broker, run_id=self.TARGET)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.run_id, self.TARGET)
+        commands = [req.payload.get("command") for req in broker.requests]
+        self.assertEqual(commands, ["adopt", "start"])
+        start_stdin = json.loads(broker.requests[1].stdin)
+        self.assertEqual(start_stdin["run_id"], self.TARGET)
+        self.assertNotIn("new_run_id", start_stdin)
+        self.assertIn("-connect=127.0.0.1", start_stdin["argv"])
+        self.assertIn("-port=2302", start_stdin["argv"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2843,5 +2843,173 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        vpp_patcher = patch.object(
+            dayz_test_tool,
+            "preflight_vpp_request",
+            return_value=native_launcher_transaction.VppPreflightResult(
+                error_code=None,
+                missing=(),
+                warnings=(),
+                hint=native_launcher_transaction.VPP_PREFLIGHT_HINT,
+            ),
+        )
+        vpp_patcher.start()
+        self.addCleanup(vpp_patcher.stop)
+        desktop_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_prerun_desktop",
+            return_value=mcp_capture.PrerunDesktopResult(
+                error_code=None,
+                desktop="unlocked",
+                mean_brightness=80.0,
+                nonblack_ratio=0.9,
+                waited_s=0.01,
+                remediation="",
+            ),
+        )
+        desktop_patcher.start()
+        self.addCleanup(desktop_patcher.stop)
+
+    def test_build_run_request_accepts_remote_client_and_translates_rejections(
+        self,
+    ) -> None:
+        policy = _policy()
+        sealed = _sealed(policy)
+        for host in ("198.51.100.7", "2001:db8::42", "play.example.com"):
+            raw, _ = dayz_test_tool.build_run_request(
+                sealed,
+                project="ExampleMod",
+                mode="client",
+                host=host,
+                extra_mods=["@DayZ_MCP"],
+            )
+            doc = json.loads(raw)
+            self.assertEqual(doc["host"], host)
+            self.assertEqual(doc["port"], 2302)
+            self.assertIsNone(doc["run_id"])
+
+        for bad_host in ("", "1.2.3.4 -mod=x", "a;b", "-x", "a" * 254):
+            with self.subTest(bad_host=bad_host):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    dayz_test_tool.build_run_request(
+                        sealed,
+                        project="ExampleMod",
+                        mode="client",
+                        host=bad_host,
+                        extra_mods=["@DayZ_MCP"],
+                    )
+                self.assertEqual(
+                    caught.exception.code, "bad_dayz_test_request:host_invalid"
+                )
+
+        for bad_port in (0, 65536, True, "2302", 2302.0):
+            with self.subTest(bad_port=bad_port):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    dayz_test_tool.build_run_request(
+                        sealed,
+                        project="ExampleMod",
+                        mode="client",
+                        host="198.51.100.7",
+                        port=bad_port,  # type: ignore[arg-type]
+                        extra_mods=["@DayZ_MCP"],
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "bad_dayz_test_request:port_out_of_range",
+                )
+
+        for non_client in ("server", "all"):
+            with self.subTest(non_client=non_client):
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    dayz_test_tool.build_run_request(
+                        sealed,
+                        project="ExampleMod",
+                        mode=non_client,
+                        host="198.51.100.7",
+                        extra_mods=["@DayZ_MCP"],
+                    )
+                self.assertEqual(
+                    caught.exception.code,
+                    "bad_dayz_test_request:host_requires_client_mode",
+                )
+
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+            dayz_test_tool.build_run_request(
+                sealed,
+                project="ExampleMod",
+                mode="client",
+                host="198.51.100.7",
+                run_id=RUN_ID,
+                extra_mods=["@DayZ_MCP"],
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "bad_dayz_test_request:client_host_forbids_run_id",
+        )
+
+    async def test_execute_dayz_test_run_remote_client_creates_fresh_run(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        seen_requests: list[dict[str, object]] = []
+
+        async def launch(raw_request: bytes, **kwargs: object) -> int:
+            seen_requests.append(json.loads(raw_request))
+            await kwargs["execution_started_cb"]()
+            kwargs["output_sink"](
+                "stdout",
+                _terminal(
+                    {
+                        "cleanup_degraded": False,
+                        "error_code": None,
+                        "exit_code": 0,
+                        "ok": True,
+                        "run_id": RUN_ID,
+                    }
+                ),
+            )
+            return 0
+
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            side_effect=launch,
+        ), patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            return_value=steam_preflight.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=4321,
+                steam_live_pids=(4321,),
+                remediation=steam_preflight.REMEDIATION,
+            ),
+        ), patch.object(
+            dayz_test_tool, "require_extension_run"
+        ) as extension_spy:
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                host="198.51.100.7",
+                port=2402,
+                extra_mods=["@DayZ_MCP"],
+            )
+
+        extension_spy.assert_not_called()
+        self.assertEqual(len(seen_requests), 1)
+        self.assertEqual(seen_requests[0]["host"], "198.51.100.7")
+        self.assertEqual(seen_requests[0]["port"], 2402)
+        self.assertIsNone(seen_requests[0]["run_id"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["run_id"], RUN_ID)
+
+
 if __name__ == "__main__":
     unittest.main()

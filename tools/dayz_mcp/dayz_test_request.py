@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import ntpath
 import re
@@ -23,6 +24,7 @@ _REQUEST_KEYS_V1 = frozenset(
         "base_mods",
         "server_mods",
         "no_base_mods",
+        "host",
         "port",
         "width",
         "height",
@@ -69,12 +71,12 @@ _SERVER_ALL_FORBID_RUN_ID = "server_all_forbid_run_id"
 # exact failure a rollback of this window would hit. Keep the pre-navmesh
 # canonical forms too; omitted optional fields retain their false defaults.
 _CANONICAL_KEYSETS = frozenset(
-    variant
+    variant | host_keys
     for keys in (
-        _REQUEST_KEYS,
-        _REQUEST_KEYS - {"replace_if_not_polling_since"},
-        _REQUEST_KEYS - {"auto_remediate_steam"},
-        _REQUEST_KEYS - {"replace_if_not_polling_since", "auto_remediate_steam"},
+        _REQUEST_KEYS - {"host"},
+        _REQUEST_KEYS - {"host", "replace_if_not_polling_since"},
+        _REQUEST_KEYS - {"host", "auto_remediate_steam"},
+        _REQUEST_KEYS - {"host", "replace_if_not_polling_since", "auto_remediate_steam"},
     )
     for omitted in (
         frozenset(),
@@ -100,13 +102,20 @@ _CANONICAL_KEYSETS = frozenset(
         (keys - omitted - extra - adminlog) | {"server_only_mods"},
         (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods"},
     )
+    for host_keys in (
+        frozenset(),
+        frozenset({"host"}),
+    )
 )
 
 
 REQUEST_REJECTION_REASONS = frozenset(
     {
+        "client_host_forbids_run_id",
         "duplicate_key",
         "flag_not_boolean",
+        "host_invalid",
+        "host_requires_client_mode",
         "json_constant_rejected",
         "json_undecodable",
         "kill_conflicts_with_other_work",
@@ -244,6 +253,55 @@ def _request_mode_view() -> tuple[str, tuple[str, ...]]:
 
 def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
     return type(value) is int and minimum <= value <= maximum
+
+
+_RFC1123_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _is_valid_host(value: object) -> bool:
+    if type(value) is not str or not (1 <= len(value) <= 253) or not value.isascii():
+        return False
+    if value.startswith("-"):
+        return False
+    if any(
+        ord(char) <= 32
+        or ord(char) >= 127
+        or char
+        in {
+            '"',
+            "'",
+            "=",
+            ";",
+            "&",
+            "|",
+            "%",
+            "/",
+            "\\",
+            "`",
+            "$",
+            "(",
+            ")",
+            "<",
+            ">",
+            "[",
+            "]",
+        }
+        for char in value
+    ):
+        return False
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    if ":" in value:
+        return False
+    labels = value.split(".")
+    if any(not _RFC1123_LABEL.fullmatch(label) for label in labels):
+        return False
+    if all(label.isdigit() for label in labels):
+        return False
+    return True
 
 
 def _bounded_text(value: object, minimum: int, maximum: int) -> bool:
@@ -468,6 +526,7 @@ def parse_dayz_test_request(
     server_mods = value.get("server_mods", [])
     server_only_mods = value.get("server_only_mods", [])
     no_base_mods = value.get("no_base_mods", False)
+    host = value.get("host")
     port = value.get("port", 2302)
     width = value.get("width", 1920)
     height = value.get("height", 1080)
@@ -557,7 +616,12 @@ def parse_dayz_test_request(
         )
     ):
         _invalid("flag_not_boolean")
-    if not _bounded_int(port, 1024, 65530):
+    if host is not None and not _is_valid_host(host):
+        _invalid("host_invalid")
+    if host is not None and (kill or mode != "client"):
+        _invalid("host_requires_client_mode")
+    port_min, port_max = (1, 65535) if host is not None else (1024, 65530)
+    if not _bounded_int(port, port_min, port_max):
         _invalid("port_out_of_range")
     if not _bounded_int(width, 320, 16384) or not _bounded_int(
         height, 320, 16384
@@ -599,8 +663,11 @@ def parse_dayz_test_request(
         _invalid("kill_requires_offline_mode")
     if not kill and mode in {"server", "all"} and run_id is not None:
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
-    if not kill and mode == "client" and run_id is None:
-        raise ValueError(_CLIENT_REQUIRES_RUN_ID)
+    if not kill and mode == "client":
+        if host is not None and run_id is not None:
+            _invalid("client_host_forbids_run_id")
+        if host is None and run_id is None:
+            raise ValueError(_CLIENT_REQUIRES_RUN_ID)
     if project_mod_override:
         if effective_build:
             _invalid("project_mod_override_conflicts_with_build")
@@ -626,7 +693,7 @@ def parse_dayz_test_request(
     # one call that supersedes a live client, so any other shape is a rejection
     # and not a field quietly dropped.
     if replace_witness is not None:
-        if kill or mode != "client":
+        if kill or mode != "client" or host is not None:
             _invalid("replace_witness_not_allowed")
         if not _bounded_int(replace_witness, 1, 4_102_444_800_000):
             _invalid("replace_witness_invalid")
@@ -660,6 +727,8 @@ def parse_dayz_test_request(
         "version": 3 if server_only_mods else (2 if project_mod_override else 1),
         "width": width,
     }
+    if host is not None:
+        payload["host"] = host
     if not project_mod_override:
         payload.pop("project_mod_override")
     if server_only_mods:

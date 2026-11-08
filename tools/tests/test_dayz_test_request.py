@@ -938,5 +938,161 @@ class RequestRejectionReasonsTests(unittest.TestCase):
         self.assertEqual(len(offenders), 1, offenders)
 
 
+class RemoteClientHostRequestTests(unittest.TestCase):
+    POLICY_KWARGS = RequestRejectionReasonsTests.POLICY_KWARGS
+
+    def setUp(self) -> None:
+        self.request_module = importlib.import_module("dayz_mcp.dayz_test_request")
+        self.policy = self.request_module.RequestProjectPolicy(**self.POLICY_KWARGS)
+        self.base = {
+            "version": 1,
+            "dev_root": r"P:\ExampleMod_Suite",
+            "mod": "ExampleMod",
+            "mode": "client",
+        }
+
+    def _parse(self, **overrides: object):
+        document = {**self.base, **overrides}
+        raw = json.dumps(document).encode("utf-8")
+        return self.request_module.parse_dayz_test_request(
+            raw, policies=(self.policy,)
+        )
+
+    def test_valid_ipv4_ipv6_and_rfc1123_hostnames_without_run_id(self) -> None:
+        hosts = (
+            "127.0.0.1",
+            "192.168.1.50",
+            "10.0.0.1",
+            "::1",
+            "2001:db8::1",
+            "fe80::1",
+            "localhost",
+            "play.example.com",
+            "srv-01.eu-west.example.org",
+            "a",
+            "a" * 63 + "." + "b" * 63,
+            ("a" * 63 + ".") * 3 + ("b" * 61),
+        )
+        for host in hosts:
+            with self.subTest(host=host):
+                parsed = self._parse(host=host)
+                self.assertEqual(parsed.payload["host"], host)
+                self.assertEqual(parsed.payload["port"], 2302)
+                self.assertIsNone(parsed.payload["run_id"])
+                reparsed = self.request_module.parse_dayz_test_request(
+                    parsed.canonical_bytes, policies=(self.policy,)
+                )
+                self.assertEqual(reparsed, parsed)
+
+        for port in (1, 80, 2302, 2402, 65535):
+            with self.subTest(port=port):
+                parsed = self._parse(host="198.51.100.10", port=port)
+                self.assertEqual(parsed.payload["port"], port)
+
+    def test_invalid_hosts_are_rejected_with_host_invalid(self) -> None:
+        invalid_hosts: tuple[object, ...] = (
+            "",
+            "1.2.3.4 -mod=x",
+            "a;b",
+            "-x",
+            "-connect=1.2.3.4",
+            "host=1",
+            "a&b",
+            "a|b",
+            "fe80::1%eth0",
+            "[::1]",
+            "host/path",
+            "host\\path",
+            'host"quote',
+            "host'quote",
+            "host space",
+            "host\t",
+            "host\n",
+            "a..b.com",
+            ".example.com",
+            "example.com.",
+            "-bad.example.com",
+            "bad-.example.com",
+            "999.999.999.999",
+            "1.2.3.4.5",
+            "12345",
+            "a" * 64 + ".com",
+            ("a" * 63 + ".") * 3 + ("b" * 62),
+            123,
+            True,
+            ["1.2.3.4"],
+        )
+        for bad_host in invalid_hosts:
+            with self.subTest(bad_host=bad_host):
+                with self.assertRaises(ValueError) as caught:
+                    self._parse(host=bad_host)
+                self.assertEqual(
+                    str(caught.exception),
+                    "invalid_dayz_test_request:host_invalid",
+                )
+
+    def test_invalid_ports_with_remote_host_are_rejected(self) -> None:
+        for bad_port in (0, -1, 65536, True, False, "2302", 2302.0, None):
+            with self.subTest(bad_port=bad_port):
+                with self.assertRaises(ValueError) as caught:
+                    self._parse(host="198.51.100.10", port=bad_port)
+                self.assertEqual(
+                    str(caught.exception),
+                    "invalid_dayz_test_request:port_out_of_range",
+                )
+
+    def test_host_on_non_client_modes_or_kill_is_rejected(self) -> None:
+        for mode in ("server", "all", "offline"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError) as caught:
+                    self._parse(mode=mode, host="198.51.100.10")
+                self.assertEqual(
+                    str(caught.exception),
+                    "invalid_dayz_test_request:host_requires_client_mode",
+                )
+        with self.assertRaises(ValueError) as caught:
+            self._parse(
+                mode="offline",
+                kill=True,
+                run_id="12345678-1234-4234-8234-1234567890ab",
+                host="198.51.100.10",
+            )
+        self.assertEqual(
+            str(caught.exception),
+            "invalid_dayz_test_request:host_requires_client_mode",
+        )
+
+    def test_host_combined_with_run_id_or_replace_witness_is_rejected(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._parse(
+                host="198.51.100.10",
+                run_id="12345678-1234-4234-8234-1234567890ab",
+            )
+        self.assertEqual(
+            str(caught.exception),
+            "invalid_dayz_test_request:client_host_forbids_run_id",
+        )
+        with self.assertRaises(ValueError) as caught:
+            self._parse(
+                host="198.51.100.10",
+                replace_if_not_polling_since=1_700_000_000_000,
+            )
+        self.assertEqual(
+            str(caught.exception),
+            "invalid_dayz_test_request:replace_witness_not_allowed",
+        )
+
+    def test_local_client_without_host_remains_byte_for_byte_identical(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._parse()
+        self.assertEqual(str(caught.exception), "client_requires_run_id")
+
+        run_id = "12345678-1234-4234-8234-1234567890ab"
+        omitted = self._parse(run_id=run_id)
+        explicit_none = self._parse(run_id=run_id, host=None)
+        self.assertNotIn("host", omitted.payload)
+        self.assertEqual(omitted.canonical_bytes, explicit_none.canonical_bytes)
+
+
 if __name__ == "__main__":
     unittest.main()

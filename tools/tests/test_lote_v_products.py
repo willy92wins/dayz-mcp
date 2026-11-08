@@ -306,6 +306,54 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
         seen = await self._kwargs_from({"mode": "server"})
         self.assertIsNone(seen.get("client_start_budget_s"))
         self.assertIs(seen.get("auto_remediate_steam"), False)
+        self.assertIsNone(seen.get("host"))
+
+    async def test_remote_client_host_and_port_reach_the_executor(self) -> None:
+        seen = await self._kwargs_from(
+            {"mode": "client", "host": "play.example.com", "port": 2402}
+        )
+        self.assertEqual(seen.get("host"), "play.example.com")
+        self.assertEqual(seen.get("port"), 2402)
+        self.assertIsNone(seen.get("run_id"))
+
+    async def test_invalid_remote_client_host_never_reaches_the_box_queue(self) -> None:
+        from tests.client_helpers import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _m: None,
+        )
+        runtime = _fixture_client_runtime(config)
+        with patch.object(server, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+        props = app._tool_manager.get_tool("dayz_test_run").parameters["properties"]
+        self.assertEqual(props["host"]["description"], server.HOST_DESCRIPTION)
+        waits: list[object] = []
+
+        async def spy_wait(*a: object, **k: object) -> dict:
+            waits.append(a)
+            return {"ok": False, "error": "box_queue_saturated", "box": {}}
+
+        with patch.object(server, "execute_wait_for_box", spy_wait):
+            for bad_args in (
+                {"mode": "client", "host": "1.2.3.4 -mod=x", "wait_for_box_s": 5.0},
+                {"mode": "server", "host": "1.2.3.4", "wait_for_box_s": 5.0},
+                {
+                    "mode": "client",
+                    "host": "1.2.3.4",
+                    "run_id": "12345678-1234-4234-8234-1234567890ab",
+                    "wait_for_box_s": 5.0,
+                },
+                {"mode": "client", "host": "1.2.3.4", "port": 0, "wait_for_box_s": 5.0},
+            ):
+                with self.subTest(bad_args=bad_args), self.assertRaises(ToolError):
+                    await app.call_tool(
+                        "dayz_test_run", {"project": "ExampleMod", **bad_args}
+                    )
+        self.assertEqual(waits, [])
 
 
 if __name__ == "__main__":

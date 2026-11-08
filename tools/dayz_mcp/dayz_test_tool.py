@@ -458,6 +458,7 @@ def build_run_request(
     auto_remediate_steam: bool = False,
     navmesh_data_server: bool = False,
     server_adminlog: bool = False,
+    host: str | None = None,
     port: int = 2302,
     width: int = 1920,
     height: int = 1080,
@@ -521,6 +522,8 @@ def build_run_request(
         }
         if project_mod_override:
             document["project_mod_override"] = True
+        if host is not None:
+            document["host"] = host
         if mods is not None:
             document["extra_mods"] = mods
         if public_base is not None:
@@ -2423,6 +2426,7 @@ async def _execute_preflight(
     server_adminlog: bool,
     project_mod_override: bool,
     started_at: float,
+    host: str | None = None,
 ) -> dict[str, object]:
     """Validate without a lease, a queue slot, a repair, or a process start."""
     skipped = _preflight_skipped_checks(mode, run_id)
@@ -2465,6 +2469,7 @@ async def _execute_preflight(
                 navmesh_data_server=navmesh_data_server,
                 server_adminlog=server_adminlog,
                 auto_remediate_steam=auto_remediate_steam,
+                host=host,
                 port=port,
                 width=width,
                 height=height,
@@ -2756,6 +2761,7 @@ async def execute_dayz_test_run(
     server_only_mods: list[str] | None = None,
     no_base_mods: bool = False,
     no_file_patching: bool = False,
+    host: str | None = None,
     port: int = 2302,
     width: int = 1920,
     height: int = 1080,
@@ -2800,6 +2806,7 @@ async def execute_dayz_test_run(
             server_only_mods=server_only_mods,
             no_base_mods=no_base_mods,
             no_file_patching=no_file_patching,
+            host=host,
             port=port,
             width=width,
             height=height,
@@ -2834,6 +2841,7 @@ async def execute_dayz_test_run(
                 "navmesh_data_server": navmesh_data_server,
                 "server_adminlog": server_adminlog,
                 "auto_remediate_steam": auto_remediate_steam,
+                "host": host,
                 "port": port,
                 "width": width,
                 "height": height,
