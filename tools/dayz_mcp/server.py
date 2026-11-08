@@ -8548,12 +8548,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 if (
                     not isinstance(point, list)
                     or len(point) != 3
-                    or any(
-                        isinstance(item, bool)
-                        or not isinstance(item, (int, float))
-                        or not math.isfinite(float(item))
-                        for item in point
-                    )
+                    or not all(_is_wire_number(item) for item in point)
                 ):
                     raise ToolError(
                         _bad_args(
