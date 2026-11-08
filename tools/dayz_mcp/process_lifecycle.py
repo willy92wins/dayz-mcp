@@ -424,7 +424,7 @@ def _is_dayz_image(name: object) -> bool:
 def _has_connect_arg(argv: object) -> bool:
     if not isinstance(argv, list):
         return False
-    for item in argv:
+    for item in argv[1:]:
         if not isinstance(item, str):
             continue
         lowered = item.casefold()
@@ -434,9 +434,7 @@ def _has_connect_arg(argv: object) -> bool:
 
 
 def _requested_port(argv: object) -> int | None:
-    """The -port this launch asked for, or None when argv names none or connects out."""
-    if _has_connect_arg(argv):
-        return None
+    """The -port this launch asked for, or None when argv names none."""
     ports = parse_dayz_launch_argv(argv).get("ports")
     if isinstance(ports, list) and ports and isinstance(ports[0], int):
         return ports[0]
@@ -4070,11 +4068,12 @@ class ProcessLifecycle:
                     "active_run_exists",
                     audit_reason=foreign_diag_reason,
                 )
+            folded_args = [arg.casefold() for arg in parsed["argv"][1:]]
             requested_port = (
                 None
                 if existing is None
-                and str(parsed.get("role")) == "client"
-                and isinstance(new_run_id, str)
+                and _has_connect_arg(parsed["argv"])
+                and "-server" not in folded_args
                 else _requested_port(parsed["argv"])
             )
             foreign_port_reason = self._foreign_port_reason(
@@ -4091,7 +4090,7 @@ class ProcessLifecycle:
                 return self._reject_reserved(authority, command, "retail_quarantine")
             # The process arguments decide whether Steam is needed. A forged
             # role label must not bypass the client gate on the direct route.
-            if "-server" not in [arg.casefold() for arg in parsed["argv"][1:]]:
+            if "-server" not in folded_args:
                 if steam is None:
                     if not self.steam_gate.claim():
                         code = "steam_cleanup_degraded" if self.steam_gate.degraded else "steam_prepare_busy"

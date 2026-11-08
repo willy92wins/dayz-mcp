@@ -256,6 +256,7 @@ def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
 
 
 _RFC1123_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_NUMERIC_LABEL = re.compile(r"^(?:[0-9]+|0[xX][0-9A-Fa-f]+)$")
 
 
 def _is_valid_host(value: object) -> bool:
@@ -304,9 +305,9 @@ def _is_valid_host(value: object) -> bool:
     labels = value.split(".")
     if any(not _RFC1123_LABEL.fullmatch(label) for label in labels):
         return False
-    if labels[-1].isdigit():
-        return False
-    if any(label.casefold().startswith("0x") for label in labels):
+    if _NUMERIC_LABEL.fullmatch(labels[-1]) or all(
+        _NUMERIC_LABEL.fullmatch(label) for label in labels
+    ):
         return False
     return True
 

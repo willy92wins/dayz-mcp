@@ -563,11 +563,10 @@ def build_run_request(
             token = str(exc)
             if token == dayz_test_request._INVALID_RUN_ID:
                 _fail("bad_run_id")
-            if token == dayz_test_request._CLIENT_REQUIRES_RUN_ID:
-                _fail(
-                    f"bad_dayz_test_request:{token}: pass run_id to reattach to a local run or host to connect to a remote server"
-                )
-            if token == dayz_test_request._SERVER_ALL_FORBID_RUN_ID:
+            if token in {
+                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
+                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
+            }:
                 _fail(f"bad_dayz_test_request:{token}")
             # 8f8c point 3. The 25 conditions of the parser used to arrive here as
             # one token. A declared reason is republished with the same shape the
@@ -659,15 +658,24 @@ def _is_client_only_run(run: dict[str, object]) -> bool:
     if isinstance(label, str) and label.endswith(" client"):
         return True
     processes = run.get("processes")
-    if isinstance(processes, list) and processes:
-        roles = {
-            item.get("role")
-            for item in processes
-            if isinstance(item, dict) and isinstance(item.get("role"), str)
-        }
-        if roles == {"client"}:
-            return True
-    return False
+    if not isinstance(processes, list) or not processes:
+        return False
+    roles: set[str] = set()
+    for item in processes:
+        if not isinstance(item, dict):
+            return False
+        role = item.get("role")
+        pid = item.get("pid")
+        if (
+            not isinstance(role, str)
+            or not role
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+        ):
+            return False
+        roles.add(role)
+    return roles == {"client"}
 
 
 def require_extension_run(

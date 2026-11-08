@@ -317,8 +317,11 @@ class PortOccupancyTest(unittest.TestCase):
     def test_requested_port_parsing(self) -> None:
         self.assertEqual(_requested_port(["x.exe", "-port=2402"]), 2402)
         self.assertEqual(_requested_port(["x.exe", "-port", "2302"]), 2302)
-        self.assertIsNone(
-            _requested_port(["x.exe", "-connect=203.0.113.5", "-port=5353"])
+        self.assertEqual(
+            _requested_port(["x.exe", "-connect=127.0.0.1", "-port=2302"]), 2302
+        )
+        self.assertEqual(
+            _requested_port(["x.exe", "-connect=203.0.113.5", "-port=5353"]), 5353
         )
         self.assertIsNone(_requested_port(["x.exe", "-mission=test"]))
         self.assertIsNone(_requested_port(None))
@@ -603,6 +606,94 @@ class PortOccupancyRound2Test(PortOccupancyTest):
         refused_dayz = self.lifecycle.start_run(IDENTITY_A, self.token_a, req2)
         self.assertEqual(refused_dayz.get("error"), "active_run_exists")
         self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
+
+    def test_forged_client_role_with_server_argv_cannot_bypass_foreign_port(
+        self,
+    ) -> None:
+        import hashlib
+
+        self.port_holders = _holders((2302, 31338, "python.exe"))
+        exe = str((self.game / "DayZDiag_x64.exe").resolve())
+        for index, argv in enumerate(
+            (
+                [exe, "-server", "-port=2302", "-profiles=profiles"],
+                [
+                    exe,
+                    "-server",
+                    "-connect=203.0.113.5",
+                    "-port=2302",
+                    "-profiles=profiles",
+                ],
+            ),
+            start=1,
+        ):
+            with self.subTest(argv=argv):
+                core: dict[str, object] = {
+                    "argv": argv,
+                    "cwd": str(self.game),
+                    "role": "client",
+                    "window_style": "normal",
+                    "label": "@SameMod client",
+                    "mod": "@SameMod",
+                    "profiles": "profiles",
+                    "mission": "test",
+                    "new_run_id": f"{index}2345678-1234-4234-8234-1234567890ab",
+                    "launch_operation_id": f"8765432{index}-4321-4321-8321-ba0987654321",
+                }
+                canonical = json.dumps(
+                    core, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                core["launch_request_sha256"] = hashlib.sha256(canonical).hexdigest()
+
+                result = self.lifecycle.start_run(IDENTITY_A, self.token_a, core)
+                self.assertEqual(result.get("error"), "active_run_exists")
+                self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
+                self.assertEqual(self.launcher.calls, [])
+                self.assertEqual(self.store.list_runs(), [])
+
+    def test_local_client_extension_port_protection_is_unchanged(self) -> None:
+        server_proc = process(4242, role="server")
+        self.guard.snapshots[server_proc.pid] = snapshot(server_proc)
+        run = self.add_run(server_proc, owner="A", state="RUNNING")
+        exe = str((self.game / "DayZDiag_x64.exe").resolve())
+        local_client_req = {
+            "argv": [
+                exe,
+                "-mod=@SameMod",
+                "-connect=127.0.0.1",
+                "-port=2302",
+                "-profiles=profiles",
+            ],
+            "cwd": str(self.game),
+            "role": "client",
+            "window_style": "normal",
+            "label": "@SameMod client",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": "mission",
+            "run_id": run.run_id,
+        }
+
+        # Foreign non-DayZ process holding UDP 2302 blocks a local client
+        # extending an existing run.
+        self.port_holders = _holders((2302, 31338, "python.exe"))
+        refused = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, local_client_req
+        )
+        self.assertEqual(refused.get("error"), "active_run_exists")
+        self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
+        self.assertEqual(self.launcher.calls, [])
+
+        # When the run's own registered server PID holds UDP 2302, the local
+        # client extension proceeds normally.
+        self.port_holders = _holders((2302, 4242, "DayZDiag_x64.exe"))
+        launched_client = process(self.launcher.pid, role="client")
+        self.guard.snapshots[launched_client.pid] = snapshot(launched_client)
+        allowed = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, local_client_req
+        )
+        self.assertTrue(allowed.get("ok"), allowed)
+        self.assertEqual(len(self.launcher.calls), 1)
 
 
 if __name__ == "__main__":

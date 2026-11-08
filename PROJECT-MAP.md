@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-11-08 20:40:44 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-11-08 21:12:41 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.

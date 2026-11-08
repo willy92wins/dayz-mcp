@@ -2845,6 +2845,18 @@ class SteamAutoRemediationTest(unittest.IsolatedAsyncioTestCase):
 
 class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        steam_patcher = patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            return_value=steam_preflight.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=4321,
+                steam_live_pids=(4321,),
+                remediation=steam_preflight.REMEDIATION,
+            ),
+        )
+        steam_patcher.start()
+        self.addCleanup(steam_patcher.stop)
         vpp_patcher = patch.object(
             dayz_test_tool,
             "preflight_vpp_request",
@@ -2877,7 +2889,13 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         policy = _policy()
         sealed = _sealed(policy)
-        for host in ("198.51.100.7", "203.0.113.5", "play.example.com"):
+        for host in (
+            "198.51.100.7",
+            "203.0.113.5",
+            "play.example.com",
+            "0xide.example.com",
+            "lab.0xbeef.net",
+        ):
             raw, _ = dayz_test_tool.build_run_request(
                 sealed,
                 project="ExampleMod",
@@ -2904,6 +2922,7 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
             "2001:db8::42",
             "0x7f000001",
             "0x7f.0.0.1",
+            "127.0.0.0x1",
         ):
             with self.subTest(bad_host=bad_host):
                 with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
@@ -2925,11 +2944,10 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
                 mode="client",
                 extra_mods=["@DayZ_MCP"],
             )
-        self.assertIn(
-            "bad_dayz_test_request:client_requires_run_id",
+        self.assertEqual(
             missing_both.exception.code,
+            "bad_dayz_test_request:client_requires_run_id",
         )
-        self.assertIn("host", missing_both.exception.code)
 
         for bad_port in (0, 65536, True, "2302", 2302.0):
             with self.subTest(bad_port=bad_port):
