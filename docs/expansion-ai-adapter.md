@@ -21,7 +21,7 @@ server. It ships in `addon_expansion_ai/` and packs as
 ## What it does
 
 - `ai_group_spawn` (tool, lease required) creates one `eAIGroup` of 1-8
-  `eAISurvivor` members under a caller-generated `spawn_token`, applies the
+  `eAISurvivor` members under a tool-generated `spawn_token`, applies the
   faction loadout, formation and one of HOLD / ONCE / LOOP / ROAM, and
   answers with what the server reads back (faction, formation, members).
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
