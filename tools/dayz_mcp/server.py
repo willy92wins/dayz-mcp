@@ -280,6 +280,7 @@ from dayz_mcp.tool_args import (
     _patch_closed_tool_schema,
     _patch_mode_enum_from_authority,
     _patch_public_argument_alias,
+    _is_wire_number,
     _require_float_list,
     _require_range,
     _require_vec3,
@@ -8453,7 +8454,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("loadout", loadout, "use only A-Z a-z 0-9 _ . - and at most 64 characters"))
         if behaviour not in AI_BEHAVIOURS:
             raise ToolError(_bad_args("behaviour", behaviour, "be one of HOLD, ONCE, LOOP, ROAM"))
-        if not isinstance(pos, list) or len(pos) != 3 or not all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in pos):
+        if not isinstance(pos, list) or len(pos) != 3 or not all(_is_wire_number(item) for item in pos):
             raise ToolError(_bad_args("pos", pos, "be [x, y, z] finite numbers"))
         pos_wire = [float(item) for item in pos]
         waypoint_items = [] if waypoints is None else waypoints
