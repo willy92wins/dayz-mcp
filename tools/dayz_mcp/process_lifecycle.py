@@ -421,8 +421,22 @@ def _is_dayz_image(name: object) -> bool:
     return isinstance(name, str) and name.casefold() in _DAYZ_IMAGE_NAMES
 
 
+def _has_connect_arg(argv: object) -> bool:
+    if not isinstance(argv, list):
+        return False
+    for item in argv:
+        if not isinstance(item, str):
+            continue
+        lowered = item.casefold()
+        if lowered == "-connect" or lowered.startswith("-connect="):
+            return True
+    return False
+
+
 def _requested_port(argv: object) -> int | None:
-    """The -port this launch asked for, or None when argv names none."""
+    """The -port this launch asked for, or None when argv names none or connects out."""
+    if _has_connect_arg(argv):
+        return None
     ports = parse_dayz_launch_argv(argv).get("ports")
     if isinstance(ports, list) and ports and isinstance(ports[0], int):
         return ports[0]
@@ -3983,7 +3997,7 @@ class ProcessLifecycle:
                 existing = self.manifest.get(supplied_run_id)
                 if existing is None:
                     return self._start_rejection(client, authority, "run_not_found")
-                if existing.state != "RUNNING":
+                if existing.state != "RUNNING" or existing.label.endswith(" client"):
                     return self._start_rejection(
                         client, authority, "run_not_extensible"
                     )
@@ -4056,7 +4070,13 @@ class ProcessLifecycle:
                     "active_run_exists",
                     audit_reason=foreign_diag_reason,
                 )
-            requested_port = _requested_port(parsed["argv"])
+            requested_port = (
+                None
+                if existing is None
+                and str(parsed.get("role")) == "client"
+                and isinstance(new_run_id, str)
+                else _requested_port(parsed["argv"])
+            )
             foreign_port_reason = self._foreign_port_reason(
                 registered_pids, requested_port
             )

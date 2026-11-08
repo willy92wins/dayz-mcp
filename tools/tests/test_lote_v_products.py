@@ -340,6 +340,11 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "execute_wait_for_box", spy_wait):
             for bad_args in (
                 {"mode": "client", "host": "1.2.3.4 -mod=x", "wait_for_box_s": 5.0},
+                {"mode": "client", "host": "0.0.0.0", "wait_for_box_s": 5.0},
+                {"mode": "client", "host": "255.255.255.255", "wait_for_box_s": 5.0},
+                {"mode": "client", "host": "224.0.0.1", "wait_for_box_s": 5.0},
+                {"mode": "client", "host": "::1", "wait_for_box_s": 5.0},
+                {"mode": "client", "host": "0x7f000001", "wait_for_box_s": 5.0},
                 {"mode": "server", "host": "1.2.3.4", "wait_for_box_s": 5.0},
                 {
                     "mode": "client",
@@ -354,6 +359,83 @@ class ReachableCapabilityWireTest(unittest.IsolatedAsyncioTestCase):
                         "dayz_test_run", {"project": "ExampleMod", **bad_args}
                     )
         self.assertEqual(waits, [])
+
+    async def test_remote_client_queue_skips_local_foreign_port_check_in_server(
+        self,
+    ) -> None:
+        from tests.client_helpers import _fixture_client_runtime
+
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _m: None,
+        )
+        runtime = _fixture_client_runtime(config)
+
+        async def status_with_local_5353() -> dict:
+            return {
+                "box": {
+                    "occupied": False,
+                    "runs": [],
+                    "foreign": [],
+                    "ports_in_use": [],
+                    "foreign_ports": [],
+                    "foreign_ports_all": [{"port": 5353, "dayz_relevant": False}],
+                    "queue": [],
+                    "scan_known": True,
+                    "port_scan_known": True,
+                }
+            }
+
+        runtime.session_status = status_with_local_5353
+        runtime.session_box_status = status_with_local_5353
+        with patch.object(server, "ClientRuntime", return_value=runtime):
+            app, _built = build_app(config)
+
+        seen_kwargs: list[dict[str, object]] = []
+
+        async def fake_execute(_client: object, **kwargs: object) -> dict:
+            seen_kwargs.append(kwargs)
+            return {
+                "status": "succeeded",
+                "project": "ExampleMod",
+                "mode": "client",
+                "phase": "completed",
+                "run_id": "12345678-1234-4234-8234-1234567890ab",
+                "error_code": None,
+                "cleanup_degraded": False,
+                "artifacts_paths": [],
+                "elapsed_s": 0.1,
+            }
+
+        async def fake_wait_for_box(
+            _client: object, _budget: float, *, abort_if=None, **_kw: object
+        ) -> dict:
+            box = (await status_with_local_5353())["box"]
+            if callable(abort_if):
+                self.assertIsNone(abort_if(box))
+            return {"ok": True, "ticket": None, "box": box}
+
+        with patch.object(
+            server.dayz_test_tool, "execute_dayz_test_run", side_effect=fake_execute
+        ), patch.object(server, "execute_wait_for_box", side_effect=fake_wait_for_box):
+            raw = await app.call_tool(
+                "dayz_test_run",
+                {
+                    "project": "ExampleMod",
+                    "mode": "client",
+                    "host": "203.0.113.5",
+                    "port": 5353,
+                    "on_busy": "queue",
+                },
+            )
+        payload = raw[1] if isinstance(raw, tuple) else json.loads(raw[0].text)
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertEqual(len(seen_kwargs), 1)
+        self.assertEqual(seen_kwargs[0]["host"], "203.0.113.5")
+        self.assertEqual(seen_kwargs[0]["port"], 5353)
 
 
 if __name__ == "__main__":

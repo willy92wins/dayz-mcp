@@ -563,10 +563,11 @@ def build_run_request(
             token = str(exc)
             if token == dayz_test_request._INVALID_RUN_ID:
                 _fail("bad_run_id")
-            if token in {
-                dayz_test_request._CLIENT_REQUIRES_RUN_ID,
-                dayz_test_request._SERVER_ALL_FORBID_RUN_ID,
-            }:
+            if token == dayz_test_request._CLIENT_REQUIRES_RUN_ID:
+                _fail(
+                    f"bad_dayz_test_request:{token}: pass run_id to reattach to a local run or host to connect to a remote server"
+                )
+            if token == dayz_test_request._SERVER_ALL_FORBID_RUN_ID:
                 _fail(f"bad_dayz_test_request:{token}")
             # 8f8c point 3. The 25 conditions of the parser used to arrive here as
             # one token. A declared reason is republished with the same shape the
@@ -653,6 +654,22 @@ def _run_unknown_to_store(status: object, run_id: str) -> bool:
 _STOPPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
 
 
+def _is_client_only_run(run: dict[str, object]) -> bool:
+    label = run.get("label")
+    if isinstance(label, str) and label.endswith(" client"):
+        return True
+    processes = run.get("processes")
+    if isinstance(processes, list) and processes:
+        roles = {
+            item.get("role")
+            for item in processes
+            if isinstance(item, dict) and isinstance(item.get("role"), str)
+        }
+        if roles == {"client"}:
+            return True
+    return False
+
+
 def require_extension_run(
     status: object,
     selected_policy: dayz_test_request.RequestProjectPolicy,
@@ -669,6 +686,8 @@ def require_extension_run(
         _fail("run_project_mismatch")
     if _validated_recorded_leaf(selected_policy, run) is None:
         _fail("lifecycle_status_invalid")
+    if _is_client_only_run(run):
+        raise DayzTestToolError("run_not_extensible", cause="client_only_run")
     return run
 
 

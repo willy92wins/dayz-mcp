@@ -3585,10 +3585,12 @@ RUN_ID_MATRIX_RUN_ID_DESCRIPTION = (
     "forbidden when host is given or with mode=server|all (bad_dayz_test_request otherwise)."
 )
 HOST_DESCRIPTION = (
-    "Optional remote server IPv4, IPv6, or RFC-1123 hostname for mode=client. "
-    "When given, run_id must be omitted and the client launches with "
-    "-connect=<host> -port=<port> (port in 1..65535, default 2302). "
-    "Rejected on modes other than client."
+    "Optional remote server IPv4 literal or RFC-1123 hostname for mode=client "
+    "(IPv6 literals are rejected). When given, run_id must be omitted and the "
+    "client launches with -connect=<host> -port=<port> (port in 1..65535, "
+    "default 2302); remote readiness is not observable via the local bridge, "
+    "and -filePatching stays enabled unless no_file_patching=true is passed "
+    "(or the server allows filePatching). Rejected on modes other than client."
 )
 NAVMESH_DATA_SERVER_DESCRIPTION = (
     "Opt-in. Default false. With mode=server, adds -startNavmeshDataServer "
@@ -6269,8 +6271,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "only the client to a live run, preserving the server and the world "
             "state (no server reboot); when host is given on mode=client, run_id "
             "must be omitted and the client launches against -connect=<host> "
-            "-port=<port> (port in 1..65535, default 2302); mode=server|all must "
-            "NOT pass run_id or host. "
+            "-port=<port> (port in 1..65535, default 2302; remote readiness is "
+            "not observable via the local bridge, and the server must allow "
+            "filePatching or no_file_patching=true must be passed); "
+            "mode=server|all must NOT pass run_id or host. "
             "mode=all plus wait_for(players_at_least, 1) after "
             "session_acquire_wait can complete without human intervention "
             "(viable night session). "
@@ -6537,6 +6541,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
         # Match the sealed request: clean only modifies an explicit build.
         built = bool(build)
+        local_port: int | None = None if host is not None else port
         box_wait_deadline: float | None = None
 
         def box_was_taken(admitted: object, box_now: object) -> bool:
@@ -6556,10 +6561,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                     box_now,
                     built=built,
                     caller_session=caller_session,
-                    port=port,
+                    port=local_port,
                 )
             refused = _enrich_active_run_result(
-                result, box_now, caller_session=caller_session, port=port
+                result, box_now, caller_session=caller_session, port=local_port
             )
             if _box_was_free_for(admitted, caller_session):
                 # The box read free and nothing visible holds it now: what
@@ -6582,7 +6587,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             if on_busy == "queue":
                 peeked = await peek_box()
                 cannot = _box_wait_cannot_help(
-                    peeked, caller_session=caller_session, port=port
+                    peeked, caller_session=caller_session, port=local_port
                 )
                 if (
                     cannot in {"own_run", "adopt"}
@@ -6598,7 +6603,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         box=peeked,
                         started=started,
                         caller_session=caller_session,
-                        port=port,
+                        port=local_port,
                     )
                     if peeked.get("port_scan_known") is False:
                         failed["error_code"] = "port_scan_unknown"
@@ -6625,7 +6630,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
 
                     def abort(box: dict[str, Any]) -> object:
                         reason = _box_wait_cannot_help(
-                            box, caller_session=session_for_wait, port=port
+                            box, caller_session=session_for_wait, port=local_port
                         )
                         if (
                             reason in {"own_run", "adopt"}
@@ -6650,7 +6655,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                                 box=waited.get("box"),
                                 started=started,
                                 caller_session=caller_session,
-                                port=port,
+                                port=local_port,
                             ),
                         )
                     )
@@ -6693,7 +6698,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             box=box,
                             started=started,
                             caller_session=caller_session,
-                            port=port,
+                            port=local_port,
                         )
                     )
                 if target is not None and not takeover:
@@ -6704,7 +6709,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                             box=box,
                             started=started,
                             caller_session=caller_session,
-                            port=port,
+                            port=local_port,
                         )
                     )
                 if target is not None and takeover:
@@ -6798,7 +6803,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         box=await peek_box(),
                         started=started,
                         caller_session=caller_session,
-                        port=port,
+                        port=local_port,
                     )
                     if requeued:
                         failed["box_requeued"] = True

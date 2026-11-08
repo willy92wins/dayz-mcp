@@ -285,21 +285,28 @@ def _is_valid_host(value: object) -> bool:
             ">",
             "[",
             "]",
+            ":",
         }
         for char in value
     ):
         return False
     try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        pass
-    if ":" in value:
-        return False
+        addr = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError:
+        addr = None
+    if addr is not None:
+        return (
+            not addr.is_unspecified
+            and not addr.is_multicast
+            and not addr.is_reserved
+            and value != "255.255.255.255"
+        )
     labels = value.split(".")
     if any(not _RFC1123_LABEL.fullmatch(label) for label in labels):
         return False
-    if all(label.isdigit() for label in labels):
+    if labels[-1].isdigit():
+        return False
+    if any(label.casefold().startswith("0x") for label in labels):
         return False
     return True
 

@@ -1,6 +1,6 @@
 # DayZ_MCP - location map
 
-Generated 2026-11-01 19:29:07 UTC by `tools\gen-project-map.ps1`.
+Generated 2026-11-08 20:40:44 UTC by `tools\gen-project-map.ps1`.
 Este mapa indica DÓNDE están las cosas. El estado actual vive en `HANDOFF.md`.
 Regenerar tras mover o cambiar archivos: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\gen-project-map.ps1`.
 Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más cercano.
@@ -13,12 +13,6 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | Mod source (censo Enforce) | `addon` |
 | Tools | `tools` |
 | Tests | `tools\tests` |
-| 296-servermod: parámetro MCP y composición de request | `tools/dayz_mcp/server.py`, `tools/dayz_mcp/dayz_test_tool.py` |
-| 296-servermod: payload v3 y acreditación de roles/rutas | `tools/dayz_mcp/dayz_test_request.py`, `tools/dayz_mcp/request_path_authority.py` |
-| 296-servermod: argv y provenance del sello de mods | `tools/dayz_mcp/dayz_test_worker.py`, `tools/dayz_mcp/dayz_test_storage.py` |
-| 296-servermod: pruebas públicas y preflight | `tools/tests/test_server_only_mods.py`; regresiones en `test_dayz_test_request.py`, `test_dayz_test_tool.py`, `test_dayz_test_worker.py`, `test_dayz_test_storage.py`, `test_request_path_authority.py` bajo `tools/tests/` |
-| B1-P2: préstamo de profile, transición recuperable y reconciliación de endpoint | `tools/dayz_mcp/loopback.py` |
-| B1-P2: regresiones de salida abrupta sin finally y prior presente/ausente | `tools/tests/test_b1p2_profile_not_persisted.py` |
 | Plans | `plans` |
 | Reviews | `reviews` |
 | Decisions | `decisions` (ausente en este checkout) |
@@ -33,7 +27,7 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (25 files, 711 KB)
+## Enforce scripts (25 files, 716 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
@@ -47,7 +41,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/4_World/MCP_DiagPlugins.c` - 3 KB
 - `scripts/4_World/MCP_Emote.c` - 2 KB
 - `scripts/4_World/MCP_InventoryMove.c` - 7 KB
-- `scripts/4_World/MCP_LookAt.c` - 8 KB
+- `scripts/4_World/MCP_LookAt.c` - 9 KB
 - `scripts/4_World/MCP_PlayerCare.c` - 15 KB
 - `scripts/4_World/MCP_PlayerMove.c` - 31 KB
 - `scripts/4_World/MCP_PlayerTrace.c` - 17 KB
@@ -59,9 +53,9 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCP_BotControl.c` - 8 KB
 - `scripts/5_Mission/MCP_CameraPath.c` - 11 KB
 - `scripts/5_Mission/MCP_SurvivorDrive.c` - 6 KB
-- `scripts/5_Mission/MCPBridge.c` - 210 KB
+- `scripts/5_Mission/MCPBridge.c` - 212 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
-- `scripts/5_Mission/MCPClientBridge.c` - 218 KB
+- `scripts/5_Mission/MCPClientBridge.c` - 219 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 2 KB
 - `scripts/5_Mission/MCPMessages.c` - 45 KB
@@ -93,16 +87,16 @@ Los módulos unittest están en `tools/tests/`; el gate de este mapa es `tests.t
 
 Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar autorreferencia.
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
-- `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
-- `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
+- `AGENTS.md` - 381 B, touched 2026-11-08 (UTC)
+- `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-08 (UTC)
 - `CHANGELOG.md` - 176 KB, touched 2026-11-08 (UTC)
-- `CLAUDE.md` - 7 KB, touched 2026-11-01 (UTC)
-- `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
-- `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-03 (UTC)
-- `GATES.md` - 4 KB, touched 2026-11-01 (UTC)
-- `product-spec.md` - 73 KB, touched 2026-11-01 (UTC)
-- `QUICKSTART.md` - 6 KB, touched 2026-11-05 (UTC)
-- `README.md` - 37 KB, touched 2026-11-03 (UTC)
+- `CLAUDE.md` - 7 KB, touched 2026-11-08 (UTC)
+- `dayz-harness-apis.md` - 26 KB, touched 2026-11-08 (UTC)
+- `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-08 (UTC)
+- `GATES.md` - 4 KB, touched 2026-11-08 (UTC)
+- `product-spec.md` - 73 KB, touched 2026-11-08 (UTC)
+- `QUICKSTART.md` - 6 KB, touched 2026-11-08 (UTC)
+- `README.md` - 37 KB, touched 2026-11-08 (UTC)
 
 ## Reparse points omitidos
 

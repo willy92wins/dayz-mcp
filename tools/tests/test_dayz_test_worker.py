@@ -1523,7 +1523,7 @@ class RemoteClientWorkerTest(unittest.TestCase):
     ) -> None:
         cases = (
             ("198.51.100.7", 2402, 2402),
-            ("2001:db8::42", None, 2302),
+            ("203.0.113.5", None, 2302),
             ("dayz.example.com", 27016, 27016),
         )
         for host, port, expected_port in cases:
@@ -1544,6 +1544,79 @@ class RemoteClientWorkerTest(unittest.TestCase):
                 self.assertIn(f"-connect={host}", start_stdin["argv"])
                 self.assertIn(f"-port={expected_port}", start_stdin["argv"])
                 self.assertNotIn("-connect=127.0.0.1", start_stdin["argv"])
+
+    def test_remote_client_failure_after_start_runs_best_effort_stop_cleanup(
+        self,
+    ) -> None:
+        for fail_stop in (False, True):
+            with self.subTest(fail_stop=fail_stop):
+                broker = _Broker()
+                broker.fail_stop = fail_stop
+                parsed = dayz_test_request.parse_dayz_test_request(
+                    _raw(mode="client", host="198.51.100.7", port=2402),
+                    policies=(POLICY,),
+                )
+                ids = iter(
+                    (
+                        self.TARGET,
+                        self.OPERATION,
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    )
+                )
+
+                async def fail_attest(*_args: object, **_kwargs: object) -> object:
+                    raise dayz_test_worker.DayzTestWorkerError(
+                        "project_attestation_initialization_missing"
+                    )
+
+                original_attest = dayz_test_worker._attest_initialization
+                original_selected = dayz_test_worker._selected_attestation
+                original_artifacts = dayz_test_worker._attest_artifacts_or_raise
+                original_capture = dayz_test_worker._capture_role_boundary
+                dayz_test_worker._attest_initialization = fail_attest  # type: ignore[assignment]
+                dayz_test_worker._selected_attestation = lambda _p, _d: object()  # type: ignore[assignment]
+                dayz_test_worker._attest_artifacts_or_raise = lambda *_a, **_k: ("passed", [])  # type: ignore[assignment]
+                dayz_test_worker._capture_role_boundary = lambda *_a, **_k: {}  # type: ignore[assignment]
+                try:
+                    with self.assertRaises(
+                        dayz_test_worker.DayzTestWorkerError
+                    ) as caught:
+                        asyncio.run(
+                            dayz_test_worker.execute_dayz_test_worker(
+                                parsed.canonical_bytes,
+                                request_sha256=parsed.sha256,
+                                request_policies=(POLICY,),
+                                runtime_policy=RUNTIME,
+                                broker=broker,
+                                id_fn=lambda: next(ids),
+                                readiness_probe=None,
+                                has_binarizable_assets=lambda _source: True,
+                            )
+                        )
+                finally:
+                    dayz_test_worker._attest_initialization = original_attest  # type: ignore[assignment]
+                    dayz_test_worker._selected_attestation = original_selected  # type: ignore[assignment]
+                    dayz_test_worker._attest_artifacts_or_raise = original_artifacts  # type: ignore[assignment]
+                    dayz_test_worker._capture_role_boundary = original_capture  # type: ignore[assignment]
+
+                commands = [req.payload.get("command") for req in broker.requests]
+                self.assertEqual(commands, ["start", "ack", "stop"])
+                self.assertEqual(
+                    broker.requests[2].payload.get("run_id"), self.TARGET
+                )
+                self.assertEqual(
+                    caught.exception.code,
+                    "project_attestation_initialization_missing",
+                )
+                self.assertEqual(caught.exception.attempt_run_id, self.TARGET)
+                self.assertEqual(
+                    caught.exception.launch_operation_id, self.OPERATION
+                )
+                self.assertIs(caught.exception.cleanup_degraded, fail_stop)
+                if fail_stop:
+                    self.assertEqual(caught.exception.run_id, self.TARGET)
+                else:
+                    self.assertIsNone(caught.exception.run_id)
 
     def test_local_client_path_argv_is_unchanged(self) -> None:
         broker = _Broker()

@@ -317,6 +317,9 @@ class PortOccupancyTest(unittest.TestCase):
     def test_requested_port_parsing(self) -> None:
         self.assertEqual(_requested_port(["x.exe", "-port=2402"]), 2402)
         self.assertEqual(_requested_port(["x.exe", "-port", "2302"]), 2302)
+        self.assertIsNone(
+            _requested_port(["x.exe", "-connect=203.0.113.5", "-port=5353"])
+        )
         self.assertIsNone(_requested_port(["x.exe", "-mission=test"]))
         self.assertIsNone(_requested_port(None))
 
@@ -503,6 +506,103 @@ class PortOccupancyRound2Test(PortOccupancyTest):
         self.assertEqual(self.lifecycle._diag_snapshot_empty(), (True, ""))
         self.lifecycle.port_probe = None
         self.assertEqual(self.lifecycle._diag_snapshot_empty(), (True, ""))
+
+    def _remote_client_start_request(
+        self,
+        *,
+        new_run_id: str = "12345678-1234-4234-8234-1234567890ab",
+        operation_id: str = "87654321-4321-4321-8321-ba0987654321",
+        host: str = "203.0.113.5",
+        port: int = 5353,
+    ) -> dict[str, object]:
+        import hashlib
+
+        core: dict[str, object] = {
+            "argv": [
+                str((self.game / "DayZDiag_x64.exe").resolve()),
+                "-mod=@SameMod",
+                f"-connect={host}",
+                f"-port={port}",
+                "-profiles=profiles",
+                "-name=Dev",
+                "-window",
+                "-noPause",
+            ],
+            "cwd": str(self.game),
+            "role": "client",
+            "window_style": "normal",
+            "label": "@SameMod client",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": "test",
+            "new_run_id": new_run_id,
+            "launch_operation_id": operation_id,
+        }
+        canonical = json.dumps(
+            core, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        core["launch_request_sha256"] = hashlib.sha256(canonical).hexdigest()
+        return core
+
+    def test_remote_client_start_with_new_run_id_and_no_storage_seal_skips_local_port_but_keeps_dayz_image_check(
+        self,
+    ) -> None:
+        launched = process(self.launcher.pid, role="client")
+        self.guard.snapshots[launched.pid] = snapshot(launched)
+        # Non-DayZ local process holds UDP 5353 (and 2302): remote client does
+        # not bind it locally, so start_run admits the new client run without a
+        # storage_seal.
+        self.port_holders = _holders(
+            (5353, 31337, "svchost.exe"),
+            (2302, 31338, "python.exe"),
+        )
+        req = self._remote_client_start_request(port=5353)
+        self.assertNotIn("storage_seal", req)
+
+        result = self.lifecycle.start_run(IDENTITY_A, self.token_a, req)
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("run_id"), req["new_run_id"])
+        stored = self.store.get(str(req["new_run_id"]))
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertIsNone(stored.storage_rotated)
+
+        # Reattaching by run_id to that standalone client-only run is refused.
+        reattach = {
+            "argv": [
+                str((self.game / "DayZDiag_x64.exe").resolve()),
+                "-mod=@SameMod",
+                "-connect=127.0.0.1",
+                "-port=2302",
+            ],
+            "cwd": str(self.game),
+            "role": "client",
+            "window_style": "normal",
+            "label": "@SameMod client",
+            "mod": "@SameMod",
+            "profiles": "profiles",
+            "mission": "test",
+            "run_id": str(req["new_run_id"]),
+        }
+        refused_reattach = self.lifecycle.start_run(
+            IDENTITY_A, self.token_a, reattach
+        )
+        self.assertEqual(refused_reattach.get("error"), "run_not_extensible")
+
+        # Stop the run and verify a foreign DayZ image on any UDP port still
+        # blocks a remote client start.
+        stopped = self.lifecycle.stop_run(
+            IDENTITY_A, self.token_a, str(req["new_run_id"])
+        )
+        self.assertTrue(stopped.get("ok"), stopped)
+        self.port_holders = _holders((2402, 777, "DayZServer_x64.exe"))
+        req2 = self._remote_client_start_request(
+            new_run_id="22345678-1234-4234-8234-1234567890ab",
+            port=5353,
+        )
+        refused_dayz = self.lifecycle.start_run(IDENTITY_A, self.token_a, req2)
+        self.assertEqual(refused_dayz.get("error"), "active_run_exists")
+        self.assertEqual(self.rejected_reasons()[-1], "port_in_use_foreign")
 
 
 if __name__ == "__main__":

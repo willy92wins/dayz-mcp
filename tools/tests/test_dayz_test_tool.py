@@ -2877,7 +2877,7 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         policy = _policy()
         sealed = _sealed(policy)
-        for host in ("198.51.100.7", "2001:db8::42", "play.example.com"):
+        for host in ("198.51.100.7", "203.0.113.5", "play.example.com"):
             raw, _ = dayz_test_tool.build_run_request(
                 sealed,
                 project="ExampleMod",
@@ -2890,7 +2890,21 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(doc["port"], 2302)
             self.assertIsNone(doc["run_id"])
 
-        for bad_host in ("", "1.2.3.4 -mod=x", "a;b", "-x", "a" * 254):
+        for bad_host in (
+            "",
+            "1.2.3.4 -mod=x",
+            "a;b",
+            "-x",
+            "a" * 254,
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::",
+            "::1",
+            "2001:db8::42",
+            "0x7f000001",
+            "0x7f.0.0.1",
+        ):
             with self.subTest(bad_host=bad_host):
                 with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
                     dayz_test_tool.build_run_request(
@@ -2903,6 +2917,19 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     caught.exception.code, "bad_dayz_test_request:host_invalid"
                 )
+
+        with self.assertRaises(dayz_test_tool.DayzTestToolError) as missing_both:
+            dayz_test_tool.build_run_request(
+                sealed,
+                project="ExampleMod",
+                mode="client",
+                extra_mods=["@DayZ_MCP"],
+            )
+        self.assertIn(
+            "bad_dayz_test_request:client_requires_run_id",
+            missing_both.exception.code,
+        )
+        self.assertIn("host", missing_both.exception.code)
 
         for bad_port in (0, 65536, True, "2302", 2302.0):
             with self.subTest(bad_port=bad_port):
@@ -3009,6 +3036,99 @@ class RemoteClientToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(seen_requests[0]["run_id"])
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["run_id"], RUN_ID)
+
+    async def test_reattach_to_client_only_remote_run_is_rejected(self) -> None:
+        policy = _policy()
+        for label, processes in (
+            ("@ExampleMod client", [{"pid": 5001, "role": "client"}]),
+            ("@ExampleMod client", []),
+            ("idle", [{"pid": 5001, "role": "client"}]),
+        ):
+            with self.subTest(label=label, processes=processes):
+                status = {
+                    "runs": [
+                        {
+                            "run_id": RUN_ID,
+                            "state": "RUNNING_IDLE",
+                            "label": label,
+                            "mod": "@ExampleMod",
+                            "profiles": r"P:\ExampleMod_Suite\_client\profiles",
+                            "processes": processes,
+                        }
+                    ]
+                }
+                with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
+                    dayz_test_tool.require_extension_run(status, policy, RUN_ID)
+                self.assertEqual(caught.exception.code, "run_not_extensible")
+                self.assertEqual(caught.exception.cause, "client_only_run")
+
+                runtime = _Runtime(status)
+                launch_mock = AsyncMock()
+                with patch.object(
+                    dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+                ), patch.object(
+                    dayz_test_tool.secure_launcher,
+                    "load_verified_bundle",
+                    return_value=_Bundle(_sealed(policy)),
+                ), patch.object(
+                    dayz_test_tool.secure_launcher,
+                    "execute_secure_launcher_request",
+                    new=launch_mock,
+                ):
+                    result = await dayz_test_tool.execute_dayz_test_run(
+                        runtime,
+                        project="ExampleMod",
+                        mode="client",
+                        run_id=RUN_ID,
+                        extra_mods=["@DayZ_MCP"],
+                    )
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["error_code"], "run_not_extensible")
+                self.assertEqual(
+                    result.get("run_not_extensible_cause"), "client_only_run"
+                )
+                self.assertEqual(result["run_id"], RUN_ID)
+                self.assertEqual(runtime.bridge_calls, 0)
+                launch_mock.assert_not_awaited()
+
+    async def test_preflight_with_remote_host_validates_without_launching(self) -> None:
+        policy = _policy()
+        runtime = _Runtime()
+        launch_mock = AsyncMock()
+        with patch.object(
+            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "load_verified_bundle",
+            return_value=_Bundle(_sealed(policy)),
+        ), patch.object(
+            dayz_test_tool.secure_launcher,
+            "execute_secure_launcher_request",
+            new=launch_mock,
+        ), patch.object(
+            dayz_test_tool,
+            "evaluate_steam_session",
+            return_value=steam_preflight.SteamSessionResult(
+                error_code=None,
+                steam_registered_pid=4321,
+                steam_live_pids=(4321,),
+                remediation=steam_preflight.REMEDIATION,
+            ),
+        ) as steam_spy:
+            result = await dayz_test_tool.execute_dayz_test_run(
+                runtime,
+                project="ExampleMod",
+                mode="client",
+                host="198.51.100.7",
+                port=443,
+                preflight=True,
+                extra_mods=["@DayZ_MCP"],
+            )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIs(result["preflight"], True)
+        self.assertIsNone(result["run_id"])
+        steam_spy.assert_called_once()
+        launch_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":
