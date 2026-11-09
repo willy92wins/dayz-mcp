@@ -41,7 +41,7 @@ def _scenario(spec: dict, sid: str) -> dict:
 
 
 def _catalog() -> list:
-    return json.loads((ROOT / "catalog_admin.json").read_text(encoding="utf-8"))["tools"]
+    return json.loads((ROOT / "catalog_standin.json").read_text(encoding="utf-8"))["tools"]
 
 
 def _names() -> set:
@@ -61,7 +61,7 @@ def _call(name: str, args: dict, result: dict) -> dict:
 
 class _Args:
     model = "scripted"
-    catalog_name = "catalog_admin"
+    catalog_name = "catalog_standin"
     max_turns = 6
     echo_reasoning = False
     tool_msg_name = False
@@ -434,7 +434,7 @@ class MainRunnerTest(unittest.TestCase):
             "fc_bench",
             "--base-url", "http://127.0.0.1:9/v1",
             "--model", "scripted",
-            "--catalog", str(ROOT / "catalog_admin.json"),
+            "--catalog", str(ROOT / "catalog_standin.json"),
             "--scenarios", str(SCENARIOS),
             "--out", out,
             "--only", only,
@@ -749,7 +749,7 @@ class StructuredResponseTest(unittest.TestCase):
                                      float(value) if "number" in kinds else value)
                 self.assertEqual(FC.validate(FC.RESULT_SCHEMA, decoded), [])
                 self.assertEqual(decoded, row)
-                self.assertEqual(row["catalog_sha256"], hashlib.sha256((ROOT / "catalog_admin.json").read_bytes()).hexdigest())
+                self.assertEqual(row["catalog_sha256"], hashlib.sha256((ROOT / "catalog_standin.json").read_bytes()).hexdigest())
                 self.assertEqual(row["bench_version"], FC.BENCH_VERSION)
                 self.assertEqual(row["bench_sha256"], hashlib.sha256(BENCH.read_bytes()).hexdigest())
                 self.assertEqual(row["prompt_tokens"], 8)
@@ -762,6 +762,228 @@ class StructuredResponseTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FC.write_results(Path(tmp), "scripted", [broken])
             self.assertEqual(json.loads(paths[0].read_text(encoding="utf-8")), rows)
+
+
+def _admin_tools() -> list:
+    return json.loads((ROOT / "catalog_admin.json").read_text(encoding="utf-8"))["tools"]
+
+
+class RealAdminCatalogTest(unittest.TestCase):
+    """The world answers the tools the 22-tool stand-in lacked."""
+
+    def _world(self) -> "FC.World":
+        tools = _admin_tools()
+        world = FC.World(
+            _spec()["world"],
+            FC.mutating_names(tools),
+            {t["name"] for t in tools},
+            uid_required=FC.uid_required_names({t["name"]: t["inputSchema"] for t in tools}),
+        )
+        world.lease = FC.LEASE_TOKEN
+        return world
+
+    def _argv(self, out: str, only: str) -> list[str]:
+        return [
+            "fc_bench",
+            "--base-url", "http://127.0.0.1:9/v1",
+            "--model", "scripted",
+            "--catalog", str(ROOT / "catalog_admin.json"),
+            "--scenarios", str(SCENARIOS),
+            "--out", out,
+            "--only", only,
+            "--max-turns", "8",
+            "--retries", "0",
+            "--timeout", "1",
+        ]
+
+    def test_catalog_has_23_tools_and_uid_required_names(self) -> None:
+        tools = _admin_tools()
+        names = {t["name"] for t in tools}
+        self.assertEqual(len(tools), 23)
+        self.assertLessEqual({"player_find", "surface_query", "session_heartbeat", "restore_gameplay"}, names)
+        self.assertEqual({"player_kill", "inventory_give", "loadout_get"} & names, set())
+        required = FC.uid_required_names({t["name"]: t["inputSchema"] for t in tools})
+        self.assertEqual(
+            required,
+            frozenset({"notify_players", "player_teleport", "player_heal", "player_godmode"}),
+        )
+        standin = FC.uid_required_names({t["name"]: t["inputSchema"] for t in _catalog()})
+        self.assertEqual(standin, frozenset())
+
+    def test_player_find_matches_trimmed_casefold_and_never_picks(self) -> None:
+        world = self._world()
+        found = world.call("player_find", {"name": "  survivor_ana "})
+        self.assertEqual(found["uid"], "76561198000000001")
+        self.assertEqual(found["candidates"], [{"name": "Survivor_Ana", "uid": "76561198000000001"}])
+        self.assertEqual(world.call("player_find", {"name": "Ana"})["error"], "player_not_found")
+        self.assertEqual(world.call("player_find", {"name": "   "})["error"], "bad_args")
+        world.players().append({"uid": "76561198000000003", "name": "Bob", "pos": [0.0, 0.0, 0.0], "health": 1.0, "in_vehicle": False, "godmode": False})
+        ambiguous = world.call("player_find", {"name": "bob"})
+        self.assertEqual(ambiguous["error"], "ambiguous_player_name")
+        self.assertEqual(ambiguous["candidates"], [
+            {"name": "Bob", "uid": "76561198000000002"},
+            {"name": "Bob", "uid": "76561198000000003"},
+        ])
+        self.assertEqual(world.mutations, [])
+
+    def test_surface_query_heartbeat_and_restore_gameplay_answer_without_mutation(self) -> None:
+        world = self._world()
+        self.assertEqual(
+            world.call("surface_query", {"x": 6500.0, "z": 2500.0}),
+            {"ok": True, "y": 11.8, "type": "cp_grass", "normal": [0.0, 1.0, 0.0]},
+        )
+        self.assertEqual(
+            world.call("session_heartbeat", {"lease_token": FC.LEASE_TOKEN}),
+            {"ok": True, "lease_ttl_s": 120},
+        )
+        self.assertEqual(world.call("session_heartbeat", {"lease_token": "wrong"})["error"], "lease_token_mismatch")
+        self.assertEqual(world.call("restore_gameplay", {}), {"ok": True})
+        world.lease = None
+        self.assertEqual(
+            world.call("restore_gameplay", {}),
+            {"ok": False, "error": "lease_required", "next_step": "session_acquire_wait"},
+        )
+        self.assertEqual(world.mutations, [])
+
+    def test_empty_or_blank_uid_answers_uid_required_and_changes_nothing(self) -> None:
+        world = self._world()
+        bob_before = next(p for p in world.snapshot()["players"] if p["uid"] == "76561198000000002")
+        for uid in ("", "   "):
+            teleport = world.call("player_teleport", {"uid": uid, "pos": [6500, 0, 2500]})
+            self.assertFalse(teleport["ok"])
+            self.assertEqual(teleport["error"], "uid_required")
+            notify = world.call("notify_players", {"uid": uid, "show_time": 10, "title": "aviso"})
+            self.assertFalse(notify["ok"])
+            self.assertEqual(notify["error"], "uid_required")
+        bob_after = next(p for p in world.snapshot()["players"] if p["uid"] == "76561198000000002")
+        self.assertEqual(bob_after["pos"], bob_before["pos"])
+        self.assertEqual(world.mutations, [])
+
+    def test_notify_all_reaches_everyone_under_admin_and_fails_on_the_standin(self) -> None:
+        broadcast = self._world().call("notify_players", {"uid": "all", "show_time": 10, "title": "aviso"})
+        self.assertEqual(broadcast["sent_to"], "all")
+        self.assertEqual(broadcast["recipients"], 2)
+        all_unknown = _world().call("notify_players", {"uid": "all"})
+        self.assertFalse(all_unknown["ok"])
+        self.assertEqual(all_unknown["error"], "player_not_found")
+
+    def test_s02_scores_uid_all_and_fails_a_real_uid(self) -> None:
+        scenario = _scenario(_spec(), "S02")
+        mutating = FC.mutating_names(_admin_tools())
+        good = FC.score(scenario, [
+            _call(
+                "notify_players",
+                {"uid": "all", "show_time": 10, "title": "El servidor se reinicia en 10 minutos"},
+                {"ok": True, "sent_to": "all", "recipients": 2},
+            ),
+        ], "Avisados con 10 de antelación.", mutating)
+        self.assertTrue(good["pass"])
+        bad = FC.score(scenario, [
+            _call(
+                "notify_players",
+                {"uid": "76561198000000001", "show_time": 10, "title": "El servidor se reinicia en 10 minutos"},
+                {"ok": True, "sent_to": "76561198000000001", "recipients": 1},
+            ),
+        ], "Avisados con 10 de antelación.", mutating)
+        self.assertFalse(bad["pass"])
+        self.assertFalse(bad["goal_ok"])
+
+    def test_s11_scripted_run_finds_ana_and_teleports_to_the_ground(self) -> None:
+        spec = _spec()
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S11"}),
+                    _tool("2", "player_find", {"name": "Survivor_Ana"}),
+                    _tool("3", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 0, 2500]}),
+                    {"kind": "text", "content": "Hecho."},
+                ])
+                sys.argv = self._argv(tmp, "S11")
+                self.assertEqual(FC.main(), 0)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertTrue(record["score"]["pass"])
+                self.assertTrue(record["score"]["identified_ok"])
+                ana = next(p for p in record["world_after"]["players"] if p["uid"] == "76561198000000001")
+                self.assertEqual(ana["pos"], [6500, 11.8, 2500])
+        finally:
+            FC.chat, sys.argv = original, argv
+
+    def test_s11_scripted_run_with_the_surface_query_y_passes(self) -> None:
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S11"}),
+                    _tool("2", "player_find", {"name": "Survivor_Ana"}),
+                    _tool("3", "surface_query", {"x": 6500, "z": 2500}),
+                    _tool("4", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 11.8, 2500]}),
+                    {"kind": "text", "content": "Hecho."},
+                ])
+                sys.argv = self._argv(tmp, "S11")
+                self.assertEqual(FC.main(), 0)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertTrue(record["score"]["pass"])
+                self.assertTrue(record["score"]["identified_ok"])
+                self.assertFalse(record["score"]["forbidden"])
+                self.assertTrue(record["score"]["final_ok"])
+                ana = next(p for p in record["world_after"]["players"] if p["uid"] == "76561198000000001")
+                self.assertEqual(ana["pos"], [6500, 11.8, 2500])
+        finally:
+            FC.chat, sys.argv = original, argv
+
+    def test_s11_a_later_teleport_off_the_ground_fails_the_final_state(self) -> None:
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S11"}),
+                    _tool("2", "player_find", {"name": "Survivor_Ana"}),
+                    _tool("3", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 11.8, 2500]}),
+                    _tool("4", "player_teleport", {"uid": "76561198000000001", "pos": [6500, 50, 2500]}),
+                    {"kind": "text", "content": "Hecho."},
+                ])
+                sys.argv = self._argv(tmp, "S11")
+                self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertTrue(record["score"]["identified_ok"])
+                self.assertFalse(record["score"]["final_ok"])
+                self.assertFalse(record["score"]["pass"])
+                ana = next(p for p in record["world_after"]["players"] if p["uid"] == "76561198000000001")
+                self.assertEqual(ana["pos"], [6500, 50, 2500])
+        finally:
+            FC.chat, sys.argv = original, argv
+
+    def test_s02_broadcast_passes_and_blank_uid_refuses_through_main(self) -> None:
+        original, argv = FC.chat, sys.argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S02"}),
+                    _tool("2", "notify_players", {"uid": "all", "show_time": 10, "title": "El servidor se reinicia en 10 minutos"}),
+                    {"kind": "text", "content": "Avisados."},
+                ])
+                sys.argv = self._argv(tmp, "S02")
+                self.assertEqual(FC.main(), 0)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertTrue(record["score"]["pass"])
+        finally:
+            FC.chat, sys.argv = original, argv
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                FC.chat = _scripted_chat([
+                    _tool("1", "session_acquire_wait", {"purpose": "S02"}),
+                    _tool("2", "notify_players", {"uid": "", "show_time": 10, "title": "El servidor se reinicia en 10 minutos"}),
+                    {"kind": "text", "content": "Avisados."},
+                ])
+                sys.argv = self._argv(tmp, "S02")
+                self.assertEqual(FC.main(), 1)
+                record = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertFalse(record["score"]["pass"])
+                call = next(c for c in record["calls"] if c["name"] == "notify_players")
+                self.assertEqual(call["result"]["error"], "uid_required")
+        finally:
+            FC.chat, sys.argv = original, argv
 
 
 if __name__ == "__main__":

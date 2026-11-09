@@ -35,7 +35,7 @@ class MCPBotControl
 		array<int> due;
 		Object target;
 		PlayerBase player;
-		if (!s_Running)
+		if (!s_Running || s_Running.Count() == 0)
 		{
 			return;
 		}

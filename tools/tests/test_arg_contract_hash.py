@@ -490,12 +490,13 @@ class ArgContractHashTest(unittest.TestCase):
             "server_perf=window_s\n"
             "survivor_drive=heading,heading_set,mode,object_id,speed,speed_set\n"
             "survivor_drive_release=command_id,object_id\n"
+            "vehicle_enter=pos,uid\n"
             "vehicle_prepare_fixture=mode,pos,radius,type\n"
             "world_spawn=flags,lifetime_s,lifetime_s_set,pos,rotation,scene_id,type\n"
             "world_spawn_batch=items,scene_id",
         )
         self.assertEqual(
-            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "86e3c48a43e86b91"
+            server_module.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c"
         )
         self.assertEqual(
             server_module.server_arg_contract_hash(),

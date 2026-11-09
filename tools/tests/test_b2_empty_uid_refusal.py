@@ -5,7 +5,8 @@ named refusal (bad_args naming uid) and nothing must reach the bridge; the
 daemon (loopback.validate_command_args / enqueue) refuses the same wire
 shapes so a client that bypasses the tool layer cannot queue them either.
 Calls with a uid behave as before. player_kill already had this contract
-(test_player_kill.py) and is included here for completeness.
+(test_player_kill.py) and is included here for completeness. vehicle_enter
+joined with the rest of 091a, when its bridge stopped seating the first human.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ TOOL_CASES = {
     "hands_attach": ({"object_id": 1, "slot": "Body"}, {"object_id": 1, "slot": "Body", "uid": UID}, "hands_attach"),
     "inventory_move": ({"item_object_id": 1, "op": "to_hands"}, {"item_object_id": 1, "op": "to_hands", "uid": UID}, "inventory_move"),
     "loadout_apply": ({"loadout": {}}, {"loadout": {}, "uid": UID}, "loadout_apply"),
+    "vehicle_enter": ({"pos": [1.0, 2.0, 3.0]}, {"pos": [1.0, 2.0, 3.0], "uid": UID}, "vehicle_enter"),
 }
 
 
@@ -91,6 +93,7 @@ class EmptyUidDaemonRefusalTest(unittest.TestCase):
         "inventory_move": ({"item_object_id": 1, "op": "to_hands"}, {"item_object_id": 1, "op": "to_hands", "uid": UID}),
         "loadout_apply": ({"loadout_items": []}, {"loadout_items": [], "uid": UID}),
         "loadout_clear": ({}, {"uid": UID}),
+        "vehicle_enter": ({"pos": [1.0, 2.0, 3.0]}, {"pos": [1.0, 2.0, 3.0], "uid": UID}),
     }
 
     def test_validate_command_args(self) -> None:

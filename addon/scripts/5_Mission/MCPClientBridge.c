@@ -174,6 +174,10 @@ class MCPInputTriggerControl
 	static string s_ReleasedBy;
 	static int s_ReleaseTick;
 	static bool s_ReleaseDelivered;
+	// db03: set only while the MCP delivers a press, so the mission's key log
+	// names that key origin=mcp. Every other press comes from the engine.
+	static bool s_Injecting;
+	static int s_InjectingDik;
 
 	static bool IsHeld()
 	{
@@ -280,7 +284,10 @@ class MCPInputTriggerControl
 		{
 			if (press)
 			{
+				s_Injecting = true;
+				s_InjectingDik = dik;
 				GetGame().OnKeyPress(dik);
+				s_Injecting = false;
 			}
 			else
 			{
@@ -299,7 +306,10 @@ class MCPInputTriggerControl
 		}
 		if (press)
 		{
+			s_Injecting = true;
+			s_InjectingDik = dik;
 			mission.OnKeyPress(dik);
+			s_Injecting = false;
 		}
 		else
 		{
@@ -550,6 +560,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref MCPClientPollCallback m_PollCallback;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref MCPJobRunner m_JobRunner;
+	// §4 #266: actor_emote started an emote that may outlive its job; the
+	// lease close stops and censuses only an emote this flag marks.
+	protected bool m_MCPEmoteStarted;
 	protected ref array<Object> m_ReadyObjects;
 	protected ref array<CargoBase> m_ReadyProxyCargos;
 	protected ref MCPDialogController m_Dialog;
@@ -633,6 +646,23 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	void OnMissionKeyPress(int key)
 	{
+		// db03: every key the mission gets on a client the MCP drives, with
+		// where it came from and whether the game window had the focus.
+		if (m_Configured)
+		{
+			string origin = "engine";
+			if (MCPInputTriggerControl.s_Injecting && MCPInputTriggerControl.s_InjectingDik == key)
+			{
+				origin = "mcp";
+			}
+			string appActive = "0";
+			if (GetGame().IsAppActive())
+			{
+				appActive = "1";
+			}
+			Log("key press key=" + key + " origin=" + origin + " app_active=" + appActive);
+		}
+
 		if (!m_Dialog)
 		{
 			return;
@@ -1609,7 +1639,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		int dik = command.args.dik;
+		MCPInputTriggerControl.s_Injecting = true;
+		MCPInputTriggerControl.s_InjectingDik = dik;
 		GetGame().GetMission().OnKeyPress(dik);
+		MCPInputTriggerControl.s_Injecting = false;
 		result.delivered = true;
 		result.dik = dik;
 		result.ok = true;
@@ -6701,7 +6734,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			if (MCPLookAtControl.Generation() == job.generation)
 			{
-				MCPLookAtControl.Release("deadline");
+				MCPLookAtControl.ReleaseAtDeadline();
 			}
 			PostPlayerLookAtJob(job);
 			return;
@@ -7701,6 +7734,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return true;
 			}
 			emotes.CreateEmoteCBFromMenu(emoteId);
+			m_MCPEmoteStarted = true;
 		}
 		job = new MCPJob();
 		job.id = command.id;
@@ -7930,6 +7964,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return false;
 			}
 			job.emote_finished_s = nowS;
+			m_MCPEmoteStarted = false;
 			return true;
 		}
 		if (playing)
@@ -7946,6 +7981,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 		job.emote_finished_s = nowS;
+		m_MCPEmoteStarted = false;
 		return true;
 	}
 
@@ -8731,6 +8767,28 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "camera_path", cameraPathPlaying, "camera_path");
+		// §4 #266: only the emote actor_emote started counts, read through
+		// IsEmotePlaying (playing or pending), not m_bEmoteIsPlaying alone.
+		bool emoteActive = false;
+		if (m_MCPEmoteStarted)
+		{
+			EmoteManager closeEmotes;
+			if (player)
+			{
+				closeEmotes = player.GetEmoteManager();
+			}
+
+			if (!closeEmotes || closeEmotes.IsEmotePlaying())
+			{
+				emoteActive = true;
+			}
+			else
+			{
+				m_MCPEmoteStarted = false;
+			}
+		}
+
+		AddCloseEntry(census, "emote", emoteActive, "emote");
 		AddCloseEntry(census, "player_simulation", m_PlayerSimulationDisabled, "player_simulation");
 		AddCloseEntry(census, "controls_hud", m_ControlsSuppressed, "controls_hud");
 		bool dialogOpen = false;
@@ -8812,6 +8870,40 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
+	// §4 #266: end the emote actor_emote started if it still plays. An
+	// emote MCP did not start is neither ended nor counted. The end is
+	// async: the census below and the 25 s observer read IsEmotePlaying
+	// until it stops.
+	protected void StopLeaseCloseEmote()
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		if (!m_MCPEmoteStarted)
+		{
+			return;
+		}
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			return;
+		}
+
+		emotes = player.GetEmoteManager();
+		if (!emotes)
+		{
+			return;
+		}
+
+		if (!emotes.IsEmotePlaying())
+		{
+			m_MCPEmoteStarted = false;
+			return;
+		}
+
+		emotes.MCP_RequestEmoteEnd();
+	}
+
 	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
 	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
 	{
@@ -8839,6 +8931,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPVehicleTrace.Abort("shutdown");
 		MCPAnimTimeline.Abort("shutdown");
 		MCPPlayerTrace.Abort("shutdown");
+		StopLeaseCloseEmote();
 		if (m_JobRunner)
 		{
 			m_JobRunner.AbortAll(this);

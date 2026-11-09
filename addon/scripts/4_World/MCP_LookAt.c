@@ -117,6 +117,25 @@ class MCPLookAtControl
 		s_Generation = s_Generation + 1;
 	}
 
+	// The job's deadline (352f): a pose PoseError refuses ends the look with
+	// that code and names it as the pose, not "deadline" with the pose Begin
+	// set. A look that already ended keeps its report.
+	static void ReleaseAtDeadline()
+	{
+		string poseError = "";
+		if (s_Active && !s_Finished && s_Player)
+		{
+			poseError = PoseError(s_Player);
+		}
+		if (poseError == "")
+		{
+			Release("deadline");
+			return;
+		}
+		s_Pose = poseError;
+		Release(poseError);
+	}
+
 	static void Disable(PlayerBase player)
 	{
 		HumanInputController hic;
@@ -219,6 +238,7 @@ class MCPLookAtControl
 		HumanInputController hic;
 		HumanMovementState state;
 		ActionManagerBase actionManager;
+		DayZPlayerCamera playerCamera;
 		if (!player || !player.IsAlive())
 		{
 			return "player_dead";
@@ -236,6 +256,17 @@ class MCPLookAtControl
 			return "in_vehicle";
 		}
 		if (player.IsInThirdPerson())
+		{
+			return "third_person";
+		}
+		// 352f: IsInThirdPerson is the view flag, not the camera on screen
+		// (dayzplayerimplement.c:302-305 in 1.30, :299-302 in 1.29). Every
+		// third-person camera on foot inherits DayZPlayerCamera3rdPerson
+		// (dayzplayercamera3rdperson.c:4 in both). DayZPlayer.GetCurrentCamera
+		// (dayzplayer.c:1234 in 1.30, :1216 in 1.29), not the static
+		// Camera.GetCurrentCamera of the SUB_BRZ crash.
+		playerCamera = player.GetCurrentCamera();
+		if (playerCamera && playerCamera.IsInherited(DayZPlayerCamera3rdPerson))
 		{
 			return "third_person";
 		}

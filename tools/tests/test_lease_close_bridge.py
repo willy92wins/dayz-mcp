@@ -608,7 +608,7 @@ class _CloseCensus:
 class LeaseCloseCensusTests(unittest.TestCase):
     """K26-K30: census builders, observer, gate, and registers (offline)."""
 
-    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False):
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
@@ -621,10 +621,15 @@ class LeaseCloseCensusTests(unittest.TestCase):
         def ctl(name):
             return _Ctl(lambda *a, n=name: flags.get(n, False))
         manager = type("AM", (), {"MCP_HoldBusy": lambda self: flags["action_hold"]})()
+        emote_mgr = type("EM", (), {
+            "IsEmotePlaying": lambda self: emote_playing,
+            "MCP_RequestEmoteEnd": lambda self: True,
+        })()
         player = type("P", (), {
             "GetNetworkID": lambda self, low, high: None,
             "MCPConnGenValue": lambda self: conn_gen,
             "GetActionManager": lambda self: manager,
+            "GetEmoteManager": lambda self: emote_mgr,
         })()
         game = type("G", (), {"GetPlayer": lambda self: player})()
         runner = type("R", (), {
@@ -659,6 +664,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "m_Dialog": type("D", (), {"IsOpen": lambda self: "dialog" in active})() if "dialog" in active else None,
             "m_UiPreviewRoot": object() if "ui_preview" in active else None,
             "m_JobRunner": runner,
+            "m_MCPEmoteStarted": emote_mcp,
         }
         for sig, name in (
             ("protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseEntry"),
@@ -670,9 +676,13 @@ class LeaseCloseCensusTests(unittest.TestCase):
             body = method_body(source, sig)
             if mutant_clean and name == "LeaseCloseCensusClean":
                 body = body.replace('census.entries.Get(i).state != "clean"', "false", 1)
-            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient"),
+            if mutant_emote == "census_ignores_emote" and name == "BuildLeaseCloseCensus":
+                body = body.replace('AddCloseEntry(census, "emote", emoteActive', 'AddCloseEntry(census, "emote", false', 1)
+            if mutant_emote == "census_counts_foreign" and name == "BuildLeaseCloseCensus":
+                body = body.replace('if (m_MCPEmoteStarted)', 'if (true)', 1)
+            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient", "EmoteManager"),
                       members=("m_CameraPath", "m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
-                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner"))
+                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner", "m_MCPEmoteStarted"))
         args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
         self._last_client_ns = ns
         return ns["BuildLeaseCloseCensus"](args)
@@ -706,6 +716,77 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(debt[0].state.text, "unverified")
         self.assertEqual(census3.state.text, "residue")
         self.assertTrue(self._last_client_ns["LeaseCloseCensusSettled"](census3))
+
+    def _emote_stop(self, source, *, started, playing, mutant=None):
+        calls = []
+        emote_mgr = type("EM", (), {
+            "IsEmotePlaying": lambda self: playing,
+            "MCP_RequestEmoteEnd": lambda self: calls.append(1) or True,
+        })()
+        player = type("P", (), {"GetEmoteManager": lambda self: emote_mgr})()
+        game = type("G", (), {"GetPlayer": lambda self: player})()
+        ns = {
+            "GetGame": lambda: game,
+            "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
+            "m_MCPEmoteStarted": started,
+        }
+        sig = "protected void StopLeaseCloseEmote()"
+        body = method_body(source, sig)
+        if mutant == "no_stop":
+            body = body.replace("emotes.MCP_RequestEmoteEnd();", "", 1)
+        if mutant == "stop_counts_foreign":
+            body = body.replace("if (!m_MCPEmoteStarted)", "if (false)", 1)
+        translate(_wrap(sig, body), sig, ns, class_types=("PlayerBase", "EmoteManager"),
+                  members=("m_MCPEmoteStarted",))
+        ns["StopLeaseCloseEmote"]()
+        return calls, ns
+
+    def test_emote_close_census_pos_neg(self):
+        source = _read(CLIENT_PATH)
+        # POS: MCP-started emote still playing is the only residue, and
+        # the observer does not settle while it plays.
+        census = self._client_census(source, emote_mcp=True, emote_playing=True)
+        residue = [e.name.text for e in census.entries if e.state.text != "clean"]
+        self.assertEqual(residue, ["emote"])
+        self.assertEqual(census.state.text, "residue")
+        self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census))
+        # POS settled: the same emote ended, so the census is clean and
+        # the MCP-started mark is cleared for a later foreign emote.
+        census2 = self._client_census(source, emote_mcp=True, emote_playing=False)
+        self.assertEqual(census2.state.text, "clean")
+        self.assertFalse(self._last_client_ns["m_MCPEmoteStarted"])
+        # NEG: a foreign emote playing, none started by MCP, is no residue.
+        census3 = self._client_census(source, emote_mcp=False, emote_playing=True)
+        self.assertEqual(census3.state.text, "clean")
+        # Mutant: a census that ignores the emote answers clean on POS.
+        mutant = self._client_census(source, emote_mcp=True, emote_playing=True, mutant_emote="census_ignores_emote")
+        self.assertEqual(mutant.state.text, "clean")
+        # Mutant: a census without the MCP-started limit counts the foreigner.
+        mutant_f = self._client_census(source, emote_mcp=False, emote_playing=True, mutant_emote="census_counts_foreign")
+        self.assertEqual([e.name.text for e in mutant_f.entries if e.state.text != "clean"], ["emote"])
+
+    def test_emote_close_stop_pos_neg(self):
+        source = _read(CLIENT_PATH)
+        # POS: the close ends the MCP-started emote that still plays.
+        calls, _ns = self._emote_stop(source, started=True, playing=True)
+        self.assertEqual(len(calls), 1)
+        # NEG: a foreign emote is not ended; an MCP emote already over neither.
+        calls_f, _ = self._emote_stop(source, started=False, playing=True)
+        self.assertEqual(calls_f, [])
+        calls_done, ns_done = self._emote_stop(source, started=True, playing=False)
+        self.assertEqual(calls_done, [])
+        self.assertFalse(ns_done["m_MCPEmoteStarted"])
+        # Mutant: without the end call, POS sends nothing.
+        calls_m, _ = self._emote_stop(source, started=True, playing=True, mutant="no_stop")
+        self.assertEqual(calls_m, [])
+        # Mutant: without the MCP-started guard, the foreigner is ended.
+        calls_mf, _ = self._emote_stop(source, started=False, playing=True, mutant="stop_counts_foreign")
+        self.assertEqual(len(calls_mf), 1)
+        # Wiring: the stop runs in the client close before the census.
+        body = method_body(source, "protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)")
+        self.assertLess(body.find("StopLeaseCloseEmote()"), body.find("BuildLeaseCloseCensus(command.args)"))
+        dispatch = method_body(source, "protected bool DispatchActorEmote(MCPCommand command, MCPResult result)")
+        self.assertIn("m_MCPEmoteStarted = true;", dispatch)
 
     def test_h3_settled_gates_dispatch_and_observer(self):
         # H3 (D-r2-H3): unverified debt must not hold the answer; residue must.
@@ -752,7 +833,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         steps = ["FinishLeaseClosed()", "m_UiPreviewRoot.Unlink()", "MCPCarDrive.Clear()",
                  'MCPInputTriggerControl.ReleaseAll("shutdown")', 'MCPPlayerMoveControl.ReleaseAll("shutdown")',
                  "StopCameraPath()", "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
-                 'MCPVehicleTrace.Abort("shutdown")', "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
+                 'MCPVehicleTrace.Abort("shutdown")', "StopLeaseCloseEmote()", "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
         pos = -1
         for step in steps:
             nxt = body.find(step, pos + 1)
@@ -801,6 +882,219 @@ class LeaseCloseCensusTests(unittest.TestCase):
         abort = method_body(runner, "void AbortAll(MCPJobRunnerOwner owner)")
         self.assertIn("MCP_PostJobTimeout(job)", abort)
 
+
+    # ---- D-r2-H4: a failure before Send leaves no RPC row ----
+    def _rpc_register_ns(self, source):
+        ns = {
+            "_S": _LogString,
+            "m_LeaseCloseRpcIds": PendingArray(),
+            "m_LeaseCloseRpcKinds": PendingArray(),
+        }
+        for sig in (
+            "protected void RegisterLeaseCloseRpc(int requestId, string kind)",
+            "protected void LiquidateLeaseCloseRpc(int requestId, string kind)",
+        ):
+            translate(_wrap(sig, method_body(source, sig)), sig, ns,
+                      members=("m_LeaseCloseRpcIds", "m_LeaseCloseRpcKinds"))
+        return ns
+
+    def _rpc_census_for(self, source, ns):
+        kinds = tuple(k.text for k in ns["m_LeaseCloseRpcKinds"])
+        census = self._server_census(source, rpc_kinds=kinds)
+        return census, self._server_ns
+
+    def _run_hands_tail(self, source, kind, *, sent, mutant=None):
+        if kind == "hands_take":
+            dispatch_sig = "protected bool DispatchHandsTake(MCPCommand command, MCPResult result)"
+            tail_sig = "bool HandsTakeTail()"
+        else:
+            dispatch_sig = "protected bool DispatchHandsAttach(MCPCommand command, MCPResult result)"
+            tail_sig = "bool HandsAttachTail()"
+        body = method_body(source, dispatch_sig)
+        register = f'RegisterLeaseCloseRpc(command.id, "{kind}");'
+        start = body.find(register)
+        self.assertGreaterEqual(start, 0, register)
+        fragment = body[start:]
+        liquidate = f'LiquidateLeaseCloseRpc(command.id, "{kind}");'
+        if mutant == "no_liquidate":
+            self.assertIn(liquidate, fragment)
+            fragment = fragment.replace(liquidate, "", 1)
+        if mutant == "liquidate_after_send":
+            self.assertIn("\t\tresult.ok = true;", fragment)
+            fragment = fragment.replace("\t\tresult.ok = true;", "\t\t" + liquidate + "\n\t\tresult.ok = true;", 1)
+        ns = self._rpc_register_ns(source)
+        result = type("R", (), {})()
+        result.ok = False
+        result.accepted = False
+        result.confirmed = False
+        result.error = _LogString.of("")
+        result.type = _LogString.of("Bandage")
+        calls = []
+        if kind == "hands_take":
+            player = type("P", (), {
+                "MCPRequestTakeToHands": lambda self, item, typ: calls.append(1) or sent,
+            })()
+            command = type("C", (), {"id": 77, "args": None})()
+            ns.update({"command": command, "player": player, "item": object(), "result": result})
+        else:
+            target = type("T", (), {"GetType": lambda self: _LogString.of("BatteryCharger")})()
+            player = type("P", (), {
+                "MCPRequestAttachFromHands": lambda self, tgt, tgt_type, item, item_type, slot: calls.append(1) or sent,
+            })()
+            args = type("A", (), {"slot": _LogString.of("battery")})()
+            command = type("C", (), {"id": 77, "args": args})()
+            ns.update({"command": command, "player": player, "target": target, "held": object(), "result": result})
+        translate(_wrap(tail_sig, fragment), tail_sig, ns,
+                  members=("m_LeaseCloseRpcIds", "m_LeaseCloseRpcKinds"))
+        returned = ns[tail_sig.split("(")[0].split()[-1]]()
+        return ns, result, returned, calls
+
+    def _run_inventory_tail(self, source, *, send_error, mutant=None):
+        body = method_body(source, "protected bool DispatchInventoryMove(MCPCommand command, MCPResult result)")
+        register = 'RegisterLeaseCloseRpc(job.id, "inventory_move");'
+        start = body.find(register)
+        self.assertGreaterEqual(start, 0, register)
+        if_start = body.find('if (performError != "")', start)
+        self.assertGreaterEqual(if_start, 0)
+        brace = body.index("{", if_start)
+        depth = 0
+        end = -1
+        for index in range(brace, len(body)):
+            if body[index] == "{":
+                depth += 1
+            elif body[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        self.assertGreater(end, brace)
+        fragment = body[start:end + 1].replace("\n\t\t}\n", "\n", 1)
+        liquidate = 'LiquidateLeaseCloseRpc(job.id, "inventory_move");'
+        if mutant == "no_liquidate":
+            self.assertIn(liquidate, fragment)
+            fragment = fragment.replace(liquidate, "", 1)
+        prelude = '\t\tbool clientRpc = true;\n\t\tstring performError = "";\n\t\tm_Jobs.Insert(job.id, job);\n'
+        tail_body = prelude + fragment + "\n\t\treturn false;\n"
+        if mutant == "liquidate_after_send":
+            tail_body = prelude + fragment + "\n\t\t" + liquidate + "\n\t\treturn false;\n"
+        ns = self._rpc_register_ns(source)
+        job = type("J", (), {"id": 77})()
+        result = type("R", (), {})()
+        result.ok = True
+        result.error = _LogString.of("")
+        args = type("A", (), {"slot": _LogString.of("")})()
+        command = type("C", (), {"id": 77, "args": args})()
+        ns.update({
+            "m_Jobs": EnforceMap(),
+            "job": job,
+            "player": object(),
+            "item": object(),
+            "target": None,
+            "op": _LogString.of("combine"),
+            "command": command,
+            "result": result,
+            "MCPSendInventoryMove": lambda p, i, t, o, s, j: _LogString.of(send_error),
+        })
+        tail_sig = "bool InventoryMoveTail()"
+        translate(_wrap(tail_sig, tail_body), tail_sig, ns,
+                  members=("m_Jobs", "m_LeaseCloseRpcIds", "m_LeaseCloseRpcKinds"))
+        returned = ns["InventoryMoveTail"]()
+        return ns, result, returned
+
+    def test_h4_request_bodies_fail_only_before_send(self):
+        # Every return false of the three request bodies sits before its
+        # single rpc.Send, so a false return means the RPC was never sent.
+        weapon = _read(SCRIPTS.parent / "4_World" / "MCP_Weapon.c")
+        inventory = _read(SCRIPTS.parent / "4_World" / "MCP_InventoryMove.c")
+        for src, sig in (
+            (weapon, "bool MCPRequestTakeToHands(EntityAI item, string validatedType)"),
+            (weapon, "bool MCPRequestAttachFromHands(EntityAI target, string targetType, EntityAI item, string itemType, string slotName)"),
+            (inventory, "bool MCPRequestInventoryMove(int jobId, EntityAI item, string itemType, EntityAI target, string targetType, string op, string slotName)"),
+        ):
+            with self.subTest(sig=sig):
+                body = method_body(src, sig)
+                self.assertEqual(body.count("rpc.Send("), 1)
+                send_at = body.find("rpc.Send(")
+                self.assertGreater(send_at, 0)
+                for match in re.finditer(r"return false", body):
+                    self.assertLess(match.start(), send_at, sig)
+        # MCPSendInventoryMove: its three errors all precede a Send too.
+        source = _read(SERVER_PATH)
+        send_body = method_body(source, "protected string MCPSendInventoryMove(PlayerBase player, EntityAI item, EntityAI target, string op, string slotName, int jobId)")
+        for error in ('return "not_networked";', 'return "no_identity";'):
+            self.assertLess(send_body.find(error), send_body.find("MCPRequestInventoryMove("), error)
+        self.assertIn('return "rpc_failed";', send_body)
+        # notify_players has no failure path after registration: its Send
+        # is void, so there is nothing to liquidate (same-pattern audit).
+        notify = method_body(source, "protected bool DispatchNotifyPlayers(MCPCommand command, MCPResult result)")
+        self.assertLess(notify.find('RegisterLeaseCloseRpc(command.id, "notify_players");'),
+                        notify.find("NotificationSystem.SendNotificationToPlayerIdentityExtended("))
+        self.assertNotIn("LiquidateLeaseCloseRpc", notify)
+
+    def test_h4_never_sent_rpc_leaves_no_row_translated(self):
+        source = _read(SERVER_PATH)
+        # POS inventory_move: each pre-Send error leaves no row, no job,
+        # and a clean census.
+        for send_error in ("not_networked", "no_identity", "rpc_failed"):
+            with self.subTest(kind="inventory_move", error=send_error):
+                ns, result, returned = self._run_inventory_tail(source, send_error=send_error)
+                self.assertTrue(returned)
+                self.assertFalse(result.ok)
+                self.assertEqual(ns["m_LeaseCloseRpcKinds"].Count(), 0)
+                self.assertEqual(ns["m_Jobs"].Count(), 0)
+                census, _cns = self._rpc_census_for(source, ns)
+                self.assertEqual(census.state.text, "clean")
+        # POS hands_take / hands_attach: rpc_failed (never sent) leaves
+        # no row and a clean census.
+        for kind in ("hands_take", "hands_attach"):
+            with self.subTest(kind=kind):
+                ns, result, returned, calls = self._run_hands_tail(source, kind, sent=False)
+                self.assertTrue(returned)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error.text, "rpc_failed")
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(ns["m_LeaseCloseRpcKinds"].Count(), 0)
+                census, _cns = self._rpc_census_for(source, ns)
+                self.assertEqual(census.state.text, "clean")
+        # NEG inventory_move: after a Send the row stays even when the
+        # job ends (its m_Jobs entry is removed, as the job paths do).
+        ns, _result, returned = self._run_inventory_tail(source, send_error="")
+        self.assertFalse(returned)
+        self.assertEqual(ns["m_LeaseCloseRpcKinds"].Count(), 1)
+        ns["m_Jobs"].Remove(77)
+        self.assertEqual(ns["m_Jobs"].Count(), 0)
+        self.assertEqual(ns["m_LeaseCloseRpcKinds"].Count(), 1)
+        census, cns = self._rpc_census_for(source, ns)
+        self.assertEqual(census.state.text, "residue")
+        self.assertFalse(cns["LeaseCloseCensusClean"](census))
+        self.assertTrue(cns["LeaseCloseCensusSettled"](census))
+        rpc_rows = [(e.name.text, e.state.text) for e in census.entries if e.name.text == "rpc_in_flight"]
+        self.assertIn(("rpc_in_flight", "unverified"), rpc_rows)
+        # NEG hands: the dispatch ends the job at once (returns true),
+        # and the row still stays as unverified debt.
+        for kind in ("hands_take", "hands_attach"):
+            with self.subTest(kind=kind, sent=True):
+                ns, result, returned, calls = self._run_hands_tail(source, kind, sent=True)
+                self.assertTrue(returned)
+                self.assertTrue(result.ok)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(ns["m_LeaseCloseRpcKinds"].Count(), 1)
+                self.assertEqual(ns["m_LeaseCloseRpcKinds"].Get(0).text, kind)
+                census, cns = self._rpc_census_for(source, ns)
+                self.assertEqual(census.state.text, "residue")
+                self.assertTrue(cns["LeaseCloseCensusSettled"](census))
+        # Mutant (in a copy): never liquidating keeps the POS row.
+        ns_m, _r, _ret = self._run_inventory_tail(source, send_error="rpc_failed", mutant="no_liquidate")
+        self.assertEqual(ns_m["m_LeaseCloseRpcKinds"].Count(), 1)
+        for kind in ("hands_take", "hands_attach"):
+            ns_m, _r, _ret, _c = self._run_hands_tail(source, kind, sent=False, mutant="no_liquidate")
+            self.assertEqual(ns_m["m_LeaseCloseRpcKinds"].Count(), 1, kind)
+        # Mutant (in a copy): liquidating also after a Send drops the NEG row.
+        ns_m, _r, _ret = self._run_inventory_tail(source, send_error="", mutant="liquidate_after_send")
+        self.assertEqual(ns_m["m_LeaseCloseRpcKinds"].Count(), 0)
+        for kind in ("hands_take", "hands_attach"):
+            ns_m, _r, _ret, _c = self._run_hands_tail(source, kind, sent=True, mutant="liquidate_after_send")
+            self.assertEqual(ns_m["m_LeaseCloseRpcKinds"].Count(), 0, kind)
 
     # ---- H6: K27/K28 translated bodies (server) ----
     def _server_census(self, source, *, flags=None, jobs=(), rpc_kinds=(), deletion=(), infected=False):
