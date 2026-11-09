@@ -30,6 +30,15 @@ which only names the class in the reply, are left out:
   bool IsMan()
 - CarWheel.EEHealthLevelChanged: 4_world/entities/core/inherited/inventoryitem.c:220
   override void EEHealthLevelChanged(int oldLevel, int newLevel, string zone)
+
+Added after the 9/11 in-game round, where GetMaxHealth threw a Virtual
+Machine Exception for an object with no damage system and for a zone the
+object does not have (cites read on the maintainer's PC):
+
+- Object.HasDamageSystem: 3_game/entities/object.c:976 (its comment at :974:
+  the damage system is initialized)
+- Object.GetDamageZones: 3_game/entities/object.c:1153, the names vanilla's
+  TransferEntityHealth looks a zone up in (miscgameplayfunctions.c:398-410)
 """
 from __future__ import annotations
 
@@ -38,6 +47,7 @@ import math
 import re
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from dayz_mcp import bridge_errors, loopback, result_prune, server
@@ -57,6 +67,7 @@ from dayz_mcp.session_coordination import (
     command_requires_lease,
 )
 from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import EnforceArray, EnforceString, fake_class, translate
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bind_both_peers, bound_queue
 from tests.mcp_helpers import _content_json
 
@@ -845,6 +856,204 @@ class ObjectSetHealthEnforceTest(unittest.TestCase):
         self.assertIn("target", names)
         self.assertIn("report", names)
         self.assertGreater(len(names), 0)
+
+
+DISPATCH_SIGNATURE = (
+    f"protected bool {DISPATCHER}(MCPCommand command, MCPResult result)"
+)
+POPULATE_SIGNATURE = (
+    "protected void PopulateTelemetryObject(Object found, MCPTelemetry telemetry)"
+)
+
+
+class _HealthTarget:
+    """A world object as object_set_health and telemetry_read read it.
+
+    zones=None is an object with no damage system (StaticObj_Misc_SupplyBox1_DE
+    in the 9/11 round). A health call on it, or on a named zone it does not
+    list, fails the test the way GetMaxHealth threw a Virtual Machine
+    Exception in that round.
+    """
+
+    def __init__(self, zones: list[str] | None, health01: float = 1.0) -> None:
+        self.zones = zones
+        self.health01 = health01
+        self.calls: list[str] = []
+
+    def _health_call(self, name: str, zone: EnforceString) -> None:
+        self.calls.append(f"{name}({zone.text})")
+        if self.zones is None:
+            raise AssertionError(f"{name} on an object with no damage system")
+        if zone.text and zone.text not in self.zones:
+            raise AssertionError(f"{name} on zone {zone.text!r} the object does not have")
+
+    def IsMan(self) -> bool:
+        return False
+
+    def GetType(self) -> EnforceString:
+        return EnforceString.of("Barrel_Blue")
+
+    def ClassName(self) -> EnforceString:
+        return EnforceString.of("Barrel_Blue")
+
+    def GetPosition(self) -> tuple[float, float, float]:
+        return (0.0, 0.0, 0.0)
+
+    def GetOrientation(self) -> tuple[float, float, float]:
+        return (0.0, 0.0, 0.0)
+
+    def GetDirection(self) -> tuple[float, float, float]:
+        return (0.0, 0.0, 1.0)
+
+    def HasDamageSystem(self) -> bool:
+        self.calls.append("HasDamageSystem")
+        return self.zones is not None
+
+    def GetDamageZones(self, names: EnforceArray) -> None:
+        self.calls.append("GetDamageZones")
+        if self.zones is None:
+            raise AssertionError("GetDamageZones on an object with no damage system")
+        for zone in self.zones:
+            names.Insert(EnforceString.of(zone))
+
+    def GetMaxHealth(self, zone: EnforceString, _type: EnforceString) -> float:
+        self._health_call("GetMaxHealth", zone)
+        return 100.0
+
+    def GetHealth01(self, zone: EnforceString, _type: EnforceString) -> float:
+        self._health_call("GetHealth01", zone)
+        return self.health01
+
+    def GetHealthLevel(self, zone: EnforceString) -> int:
+        self._health_call("GetHealthLevel", zone)
+        return 0 if self.health01 > 0.7 else 4
+
+    def SetHealth01(
+        self, zone: EnforceString, _type: EnforceString, value: float
+    ) -> None:
+        self._health_call("SetHealth01", zone)
+        self.health01 = value
+
+
+class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
+    """c703 after the 9/11 round: the real DispatchObjectSetHealth body runs on
+    fakes, so these fail if either guard before GetMaxHealth is dropped."""
+
+    def setUp(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        messages = MESSAGES_PATH.read_text(encoding="utf-8")
+        self.namespace: dict[str, object] = {
+            "IsFiniteFloat": math.isfinite,
+            "RuntimeObjectId": lambda _target: 7,
+            "TStringArray": EnforceArray,
+        }
+        fake_class(messages, "MCPObjectHealth", self.namespace)
+        self.result_class = fake_class(messages, "MCPResult", self.namespace)
+        self.dispatch = translate(
+            source,
+            DISPATCH_SIGNATURE,
+            self.namespace,
+            class_types={"Object", "EntityAI", "MCPObjectHealth", "TStringArray"},
+        )
+
+    def _run(self, target: _HealthTarget, zone: str) -> object:
+        self.namespace["ResolveCommandObject"] = lambda _args, _error: target
+        command = SimpleNamespace(
+            args=SimpleNamespace(
+                health01=0.5,
+                zone=EnforceString.of(zone),
+                slot=EnforceString.of(""),
+            )
+        )
+        result = self.result_class()
+        self.assertIs(self.dispatch(command, result), True)
+        return result
+
+    def _assert_no_health(self, result: object) -> None:
+        self.assertIs(result.ok, False)
+        self.assertEqual(result.error, EnforceString.of("no_health"))
+        self.assertEqual(result.type, EnforceString.of("Barrel_Blue"))
+        self.assertIsNone(result.object_health)
+
+    def test_g1_no_damage_system_is_no_health_before_any_health_call(self) -> None:
+        for zone in ("", "Engine"):
+            with self.subTest(zone=zone):
+                target = _HealthTarget(zones=None)
+                result = self._run(target, zone)
+                self._assert_no_health(result)
+                self.assertEqual(target.calls, ["HasDamageSystem"])
+
+    def test_g2_a_zone_the_object_does_not_list_is_no_health(self) -> None:
+        target = _HealthTarget(zones=["Engine", "Body"])
+        result = self._run(target, "Bogus")
+        self._assert_no_health(result)
+        self.assertEqual(target.calls, ["HasDamageSystem", "GetDamageZones"])
+        self.assertEqual(target.health01, 1.0)
+
+    def test_g3_a_listed_zone_is_set_and_read_back(self) -> None:
+        target = _HealthTarget(zones=["Body", "Engine"])
+        result = self._run(target, "Engine")
+        self.assertIs(result.ok, True)
+        self.assertEqual(result.error, EnforceString.of(""))
+        self.assertEqual(target.calls[:3], ["HasDamageSystem", "GetDamageZones", "GetMaxHealth(Engine)"])
+        self.assertIn("SetHealth01(Engine)", target.calls)
+        self.assertEqual(result.object_health.health01_after, 0.5)
+
+    def test_g4_the_empty_zone_is_the_global_one_and_skips_the_lookup(self) -> None:
+        target = _HealthTarget(zones=["Engine"])
+        result = self._run(target, "")
+        self.assertIs(result.ok, True)
+        self.assertNotIn("GetDamageZones", target.calls)
+        self.assertEqual(target.calls[:2], ["HasDamageSystem", "GetMaxHealth()"])
+        self.assertEqual(result.object_health.health01_after, 0.5)
+
+
+class TelemetryHealthGuardTest(unittest.TestCase):
+    """telemetry_read object_at reads GetHealth01 only on an object with a
+    damage system (c703); without one, health01 keeps its default 0."""
+
+    def setUp(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        no_cast = SimpleNamespace(Cast=lambda _value: None)
+        self.namespace: dict[str, object] = {
+            "EntityAI": no_cast,
+            "Car": no_cast,
+            "GetVelocity": lambda _found: (0.0, 0.0, 0.0),
+            "VectorToArray": lambda _vec, _arr: None,
+        }
+        self.populate = translate(
+            source,
+            POPULATE_SIGNATURE,
+            self.namespace,
+            class_types={"EntityAI", "Car", "string"},
+        )
+
+    def _run(self, found: _HealthTarget) -> SimpleNamespace:
+        telemetry = SimpleNamespace(
+            found=False,
+            type=EnforceString.of(""),
+            class_name=EnforceString.of(""),
+            pos=[],
+            orientation=[],
+            direction=[],
+            velocity=[],
+            health01=0.0,
+        )
+        self.populate(found, telemetry)
+        return telemetry
+
+    def test_t1_no_damage_system_skips_the_read_and_keeps_zero(self) -> None:
+        found = _HealthTarget(zones=None)
+        telemetry = self._run(found)
+        self.assertIs(telemetry.found, True)
+        self.assertEqual(telemetry.health01, 0.0)
+        self.assertEqual(found.calls, ["HasDamageSystem"])
+
+    def test_t2_a_damage_system_reads_the_global_health(self) -> None:
+        found = _HealthTarget(zones=["Engine"], health01=0.25)
+        telemetry = self._run(found)
+        self.assertEqual(telemetry.health01, 0.25)
+        self.assertEqual(found.calls, ["HasDamageSystem", "GetHealth01()"])
 
 
 class ObjectSetHealthDescriptionTest(unittest.IsolatedAsyncioTestCase):

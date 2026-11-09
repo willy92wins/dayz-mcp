@@ -5758,7 +5758,10 @@ class MCPBridge : Managed
 		EntityAI host;
 		EntityAI attached;
 		int slotId;
+		int zoneScan;
+		bool zoneFound;
 		MCPObjectHealth report;
+		TStringArray zones;
 
 		if (!command.args || !IsFiniteFloat(command.args.health01) || command.args.health01 < 0.0 || command.args.health01 > 1.0)
 		{
@@ -5810,6 +5813,46 @@ class MCPBridge : Managed
 			result.ok = false;
 			result.error = "target_is_player";
 			return true;
+		}
+
+		// c703: in the 9/11 round GetMaxHealth threw a Virtual Machine
+		// Exception for an object with no damage system
+		// (StaticObj_Misc_SupplyBox1_DE) and for a zone the object does not
+		// have ("Bogus" on Barrel_Blue). Both answer no_health before it.
+		// HasDamageSystem checks the damage system is initialized (vanilla
+		// object.c:974-976). A named zone must be one of the names
+		// GetDamageZones lists (object.c:1153), the by-name lookup vanilla's
+		// TransferEntityHealth does (miscgameplayfunctions.c:398-410); an
+		// empty zone is the global health and skips the lookup.
+		if (!target.HasDamageSystem())
+		{
+			result.ok = false;
+			result.error = "no_health";
+			result.type = target.GetType();
+			return true;
+		}
+
+		if (zone != "")
+		{
+			zones = new TStringArray();
+			target.GetDamageZones(zones);
+			zoneFound = false;
+			zoneScan = 0;
+			while (zoneScan < zones.Count())
+			{
+				if (zones.Get(zoneScan) == zone)
+				{
+					zoneFound = true;
+				}
+				zoneScan = zoneScan + 1;
+			}
+			if (!zoneFound)
+			{
+				result.ok = false;
+				result.error = "no_health";
+				result.type = target.GetType();
+				return true;
+			}
 		}
 
 		if (target.GetMaxHealth(zone, "Health") <= 0)
@@ -7025,7 +7068,14 @@ class MCPBridge : Managed
 		VectorToArray(found.GetDirection(), telemetry.direction);
 		VectorToArray(GetVelocity(found), telemetry.velocity);
 		string empty = "";
-		telemetry.health01 = found.GetHealth01(empty, empty);
+		// c703: the same HasDamageSystem guard as object_set_health, where
+		// a health read on an object with no damage system threw a VM
+		// exception in the 9/11 round (vanilla object.c:974-976). Without
+		// one, health01 stays 0.
+		if (found.HasDamageSystem())
+		{
+			telemetry.health01 = found.GetHealth01(empty, empty);
+		}
 
 		EntityAI entity = EntityAI.Cast(found);
 		if (entity)
