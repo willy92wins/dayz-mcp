@@ -94,7 +94,7 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
     def test_closed_schema_with_one_required_name(self) -> None:
         self.assertIsNotNone(self.tool)
         parameters = self.tool.parameters
-        self.assertEqual(set(parameters["properties"]), {"emote", "wait_s", "timeout_s"})
+        self.assertEqual(set(parameters["properties"]), {"emote", "wait_s", "object_id", "timeout_s"})
         self.assertEqual(parameters.get("required"), ["emote"])
         self.assertIs(parameters.get("additionalProperties"), False)
         self.assertIn(COMMAND, server._CLOSED_SCHEMA_TOOLS)
@@ -118,9 +118,11 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
             "is still watching its own, end included",
             "watches EmoteManager.m_bEmoteIsPlaying, which a request still pending does not set",
             "A looping emote (greeting, sita, salute...) answers started and plays until "
-            "emote='end'; a one-time one (nod, clap, shrug...) answers finished when it "
+            "emote='end'; on a member a static pose also ends by itself about wait_s "
+            "after it starts (Expansion's autoCancel); temporary gestures are not "
+            "cancelled; a one-time one (nod, clap, shrug...) answers finished when it "
             "ends within wait_s.",
-            "Only the local player, by this tool's scope: there is no object_id.",
+            "Without object_id, only the local player.",
             "or for end the emote still plays (the end may not have been sent:",
             "no_emote_playing for end while no emote plays",
             "rps_s, nod, shake, shrug, or end,",
@@ -170,7 +172,7 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_extra_keys_and_wrong_types_never_reach_the_bridge(self) -> None:
         for arguments, part in (
-            ({"emote": "greeting", "object_id": 4}, "unexpected arguments: object_id"),
+            ({"emote": "greeting", "uid": "4"}, "unexpected arguments: uid"),
             ({"emote": "greeting", "timeout": 4}, "unexpected arguments: timeout"),
             ({"emote": "greeting", "wait_s": True}, "wait_s"),
             ({"emote": 1}, "emote"),
@@ -223,7 +225,9 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
     def test_the_watch_scalars_are_owned_by_actor_emote(self) -> None:
         for field in ("emote_state", "started_after_s", "finished_after_s"):
             with self.subTest(field=field):
-                self.assertEqual(result_prune.OWNED_SCALAR_FIELDS[field], frozenset({COMMAND}))
+                self.assertEqual(
+                    result_prune.OWNED_SCALAR_FIELDS[field], frozenset({COMMAND, "ai_emote"})
+                )
                 kept = result_prune.prune_unfilled_fields(COMMAND, {"ok": 1, field: 0.0})
                 self.assertIn(field, kept)
                 dropped = result_prune.prune_unfilled_fields("player_move", {"ok": 1, field: 0.0})

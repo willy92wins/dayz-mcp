@@ -150,7 +150,9 @@ tool. Without `object_id` it is the client verb of 36fa, unchanged. With
 `object_id` (a member of an `ai_group_spawn` group) the broker sends
 `ai_emote` to the server with a lease; the emote catalog and the
 `wait_s` bounds (0.5 to 30 s) are the client verb's, and the states gain
-`cancelled`. Every server answer also carries `emote_pending`.
+`cancelled`. Every server answer also carries `emote_pending`; on an
+error answer it travels in the message text as `emote_pending=true` or
+`emote_pending=false`, since only that text crosses to the caller.
 
 Three layers are kept apart: the Expansion request
 (`m_Expansion_EmoteID`), the vanilla request
@@ -180,7 +182,8 @@ carry `started_after_s` / `finished_after_s` from the request and
 `emote_pending` read on that tick, so a `finished` with
 `emote_pending: true` warns the request was never consumed and the
 gesture can play again. At `wait_s`: `started` if it started and has
-not stopped, else `emote_timed_out` with `emote_pending`. A member that
+not stopped, else `emote_timed_out` with `emote_pending` read when that
+answer is published (the lease close publishes it with no tick at all). A member that
 dies or whose entity disappears answers `emote_interrupted`; that end
 never proves the lease close (the close deletes the member, and its
 census — not this job — is the proof).

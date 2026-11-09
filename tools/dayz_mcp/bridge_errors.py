@@ -532,6 +532,19 @@ _ACTOR_EMOTE_STATE_CODES = frozenset(
 )
 
 
+def _ai_emote_detail(result: dict[str, Any]) -> str:
+    # ai_emote (plan 3.5): only this text crosses on ok=false, and the plan
+    # requires emote_pending on these answers.
+    code = str(result.get("error") or "")
+    if code not in _ACTOR_EMOTE_STATE_CODES and code != "emote_interrupted":
+        return ""
+    pending = "true" if result.get("emote_pending") else "false"
+    state = result.get("emote_state")
+    if isinstance(state, str) and state in _ACTOR_EMOTE_ERROR_STATES:
+        return f"observed=emote_state={state} emote_pending={pending}"
+    return f"observed=emote_pending={pending}"
+
+
 def _actor_emote_detail(result: dict[str, Any]) -> str:
     if str(result.get("error") or "") not in _ACTOR_EMOTE_STATE_CODES:
         return ""
@@ -615,8 +628,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _scene_shared_detail(result)
     if cmd == "object_set_health":
         return _object_set_health_detail(result)
-    if cmd in ("actor_emote", "ai_emote"):
+    if cmd == "actor_emote":
         return _actor_emote_detail(result)
+    if cmd == "ai_emote":
+        return _ai_emote_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []

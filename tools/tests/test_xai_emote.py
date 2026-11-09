@@ -21,6 +21,7 @@ if str(_TOOLS_DIR) not in sys.path:
 from mcp.server.fastmcp.exceptions import ToolError
 
 from dayz_mcp import loopback, server
+from dayz_mcp.bridge_errors import _bridge_error
 from dayz_mcp.bridge_readiness import (
     EXPANSION_AI_VERB_BITS,
     EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH,
@@ -139,6 +140,21 @@ class AiEmoteToolTest(unittest.TestCase):
                         )
                     self.assertIn("bad_args", str(raised.exception))
         call.assert_not_awaited()
+
+    def test_ai_emote_pending_crosses_the_tool_error(self) -> None:
+        # Mutant killed: emote_pending dropped on ok=false, where only the
+        # ToolError text crosses (plan 3.5/4).
+        timed_out = {"ok": False, "error": "emote_timed_out", "emote_state": "timed_out", "emote_pending": True}
+        self.assertEqual(str(_bridge_error(timed_out, EMOTE)),
+                         "emote_timed_out; observed=emote_state=timed_out emote_pending=true")
+        self.assertEqual(str(_bridge_error(timed_out, "actor_emote")),
+                         "emote_timed_out; observed=emote_state=timed_out")
+        rejected = {"ok": False, "error": "emote_rejected", "emote_state": "rejected", "emote_pending": True}
+        self.assertEqual(str(_bridge_error(rejected, EMOTE)),
+                         "emote_rejected; observed=emote_state=rejected emote_pending=true")
+        interrupted = {"ok": False, "error": "emote_interrupted", "emote_state": "interrupted", "emote_pending": False}
+        self.assertEqual(str(_bridge_error(interrupted, EMOTE)),
+                         "emote_interrupted; observed=emote_pending=false")
 
     def test_o8_server_states_keep_times_only_where_reached(self) -> None:
         # Mutant killed: a cancelled/timed_out answer keeping a start time
@@ -586,6 +602,64 @@ class AiEmoteEnforceTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.error.text, "emote_timed_out")
         self.assertTrue(result.emote_pending)
+
+    def test_e8_started_requires_the_requested_gesture(self) -> None:
+        # Mutant killed: started without comparing the gesture id (an
+        # ambient Expansion gesture would read as the requested one).
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace)
+        member.m_Expansion_EmoteID = 0
+        member.emotes.m_bEmoteIsPlaying = True
+        member.emotes.gesture = _EMOTE_IDS["shrug"]
+        _tick(namespace, 101.0)
+        member.emotes.m_bEmoteIsPlaying = False
+        member.emotes.gesture = 0
+        _tick(namespace, 102.0)
+        self.assertEqual(namespace["_posted"], [])
+        _tick(namespace, 111.0)
+        self.assertEqual(namespace["_posted"][0].error.text, "emote_timed_out")
+
+    def test_e8_timeout_reads_pending_at_the_timeout(self) -> None:
+        # Mutant killed: PostJobTimeout reusing the last IsJobReady read
+        # (stale past wait_s, and absent on the lease-close path).
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace, wait_s=0.5)
+        _tick(namespace, 100.6)  # first tick already past wait_s
+        self.assertTrue(namespace["_posted"][0].emote_pending)
+
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace)
+        _tick(namespace, 109.0)
+        member.m_Expansion_EmoteID = 0  # consumed after the last read
+        _tick(namespace, 110.5)
+        self.assertFalse(namespace["_posted"][0].emote_pending)
+
+    def test_e8_the_job_tick_writes_no_field_of_either_layer(self) -> None:
+        # Mutant killed: the job tick assigning a field of either layer
+        # (e.g. m_bEmoteIsRequestPending = false) instead of only reading.
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace)
+        member.emotes.m_bEmoteIsRequestPending = True
+        before = (dict(vars(member)), dict(vars(member.emotes)))
+        _tick(namespace, 101.0)
+        self.assertEqual((dict(vars(member)), dict(vars(member.emotes))), before)
+        member.emotes.m_bEmoteIsRequestPending = False
+        member.emotes.m_bEmoteIsPlaying = True
+        member.emotes.gesture = _EMOTE_IDS["nod"]
+        _tick(namespace, 102.0)
+        member.emotes.m_bEmoteIsPlaying = False
+        before = (dict(vars(member)), dict(vars(member.emotes)))
+        _tick(namespace, 103.0)  # publishes through PostJobSuccess
+        self.assertEqual(len(namespace["_posted"]), 1)
+        self.assertEqual((dict(vars(member)), dict(vars(member.emotes))), before)
 
     def test_e8_member_death_or_disappearance_interrupts(self) -> None:
         # Mutant killed: a dead member's job waiting out wait_s as a

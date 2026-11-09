@@ -2194,6 +2194,7 @@ modded class MCPBridge
 	protected override void PostJobTimeout(MCPJob job)
 	{
 		MCPResult result;
+		eAIBase member;
 
 		if (job.kind != "ai_emote")
 		{
@@ -2206,7 +2207,13 @@ modded class MCPBridge
 		result.tick_poll_sent = job.tick_poll_sent;
 		result.tick_poll_callback = job.tick_poll_callback;
 		result.tick_dispatch = job.tick_dispatch;
-		result.emote_pending = job.emote_pending;
+		// Read here: this tick is past the last IsJobReady read, and the
+		// lease close calls this without any tick (MCPBridge.c:8661).
+		member = eAIBase.Cast(job.subject);
+		if (member)
+		{
+			result.emote_pending = AIEmotePending(member, member.GetEmoteManager());
+		}
 		if (job.emote_started && !job.emote_end)
 		{
 			result.ok = true;
