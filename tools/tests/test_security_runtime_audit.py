@@ -1641,6 +1641,50 @@ if TYPE_CHECKING:
                 self._write(root, "dayz_mcp/secure_launcher.py", source)
                 self.assertEqual(auditor.audit_process_creation(root), ())
 
+    def test_process_auditor_flags_posix_process_creation(self) -> None:
+        auditor = self._auditor()
+        sources = {
+            "os.fork": "import os\ndef launch():\n    return os.fork()\n",
+            "os.forkpty": "import os\ndef launch():\n    return os.forkpty()\n",
+            "os.posix_spawn": "import os\ndef launch():\n    return os.posix_spawn('/bin/true', ['true'], {})\n",
+            "os.posix_spawnp": "from os import posix_spawnp\ndef launch():\n    return posix_spawnp('true', ['true'], {})\n",
+            "pty.spawn": "import pty\ndef launch():\n    return pty.spawn(['true'])\n",
+            "pty.fork": "import pty as terminal\ndef launch():\n    return terminal.fork()\n",
+            "_posixsubprocess.fork_exec": (
+                "import _posixsubprocess\ndef launch():\n    return _posixsubprocess.fork_exec()\n"
+            ),
+        }
+        for label, source in sources.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write(root, "dayz_mcp/secure_launcher.py", source)
+                findings = auditor.audit_process_creation(root)
+                self.assertTrue(
+                    any(finding.kind == "forbidden_python_process_surface" for finding in findings),
+                    findings,
+                )
+
+    def test_process_auditor_flags_posix_star_imports(self) -> None:
+        auditor = self._auditor()
+        sources = {
+            "pty": "from pty import *\ndef launch():\n    return spawn(['true'])\n",
+            "_posixsubprocess": "from _posixsubprocess import *\ndef launch():\n    return fork_exec()\n",
+        }
+        for label, source in sources.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write(root, "dayz_mcp/secure_launcher.py", source)
+                findings = auditor.audit_process_creation(root)
+                self.assertIn("process_star_import", [finding.kind for finding in findings], findings)
+
+    def test_process_auditor_leaves_platform_system_alone(self) -> None:
+        auditor = self._auditor()
+        source = "import platform\ndef host():\n    return platform.system()\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write(root, "dayz_mcp/secure_launcher.py", source)
+            self.assertEqual(auditor.audit_process_creation(root), ())
+
     def test_process_auditor_does_not_export_comprehension_target_shadowing(self) -> None:
         auditor = self._auditor()
         source = """import subprocess as runner

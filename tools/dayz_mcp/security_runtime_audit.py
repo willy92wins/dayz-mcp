@@ -1260,11 +1260,18 @@ _PROCESS_AUDIT_PATHS = frozenset(
 )
 _PROCESS_CALLABLES = frozenset(
     {
+        "_posixsubprocess.fork_exec",
         "asyncio.create_subprocess_exec",
         "asyncio.create_subprocess_shell",
+        "os.fork",
+        "os.forkpty",
         "os.popen",
+        "os.posix_spawn",
+        "os.posix_spawnp",
         "os.startfile",
         "os.system",
+        "pty.fork",
+        "pty.spawn",
         "subprocess.call",
         "subprocess.check_call",
         "subprocess.check_output",
@@ -1274,7 +1281,7 @@ _PROCESS_CALLABLES = frozenset(
         "subprocess.run",
     }
 )
-_PROCESS_MODULES = frozenset({"asyncio", "os", "subprocess"})
+_PROCESS_MODULES = frozenset({"_posixsubprocess", "asyncio", "os", "pty", "subprocess"})
 _DYNAMIC_PROCESS_CALLABLES = frozenset(
     {
         "__import__",
