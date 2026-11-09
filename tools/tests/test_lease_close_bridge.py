@@ -608,7 +608,7 @@ class _CloseCensus:
 class LeaseCloseCensusTests(unittest.TestCase):
     """K26-K30: census builders, observer, gate, and registers (offline)."""
 
-    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False):
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
@@ -621,10 +621,15 @@ class LeaseCloseCensusTests(unittest.TestCase):
         def ctl(name):
             return _Ctl(lambda *a, n=name: flags.get(n, False))
         manager = type("AM", (), {"MCP_HoldBusy": lambda self: flags["action_hold"]})()
+        emote_mgr = type("EM", (), {
+            "IsEmotePlaying": lambda self: emote_playing,
+            "MCP_RequestEmoteEnd": lambda self: True,
+        })()
         player = type("P", (), {
             "GetNetworkID": lambda self, low, high: None,
             "MCPConnGenValue": lambda self: conn_gen,
             "GetActionManager": lambda self: manager,
+            "GetEmoteManager": lambda self: emote_mgr,
         })()
         game = type("G", (), {"GetPlayer": lambda self: player})()
         runner = type("R", (), {
@@ -659,6 +664,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "m_Dialog": type("D", (), {"IsOpen": lambda self: "dialog" in active})() if "dialog" in active else None,
             "m_UiPreviewRoot": object() if "ui_preview" in active else None,
             "m_JobRunner": runner,
+            "m_MCPEmoteStarted": emote_mcp,
         }
         for sig, name in (
             ("protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseEntry"),
@@ -670,9 +676,13 @@ class LeaseCloseCensusTests(unittest.TestCase):
             body = method_body(source, sig)
             if mutant_clean and name == "LeaseCloseCensusClean":
                 body = body.replace('census.entries.Get(i).state != "clean"', "false", 1)
-            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient"),
+            if mutant_emote == "census_ignores_emote" and name == "BuildLeaseCloseCensus":
+                body = body.replace('AddCloseEntry(census, "emote", emoteActive', 'AddCloseEntry(census, "emote", false', 1)
+            if mutant_emote == "census_counts_foreign" and name == "BuildLeaseCloseCensus":
+                body = body.replace('if (m_MCPEmoteStarted)', 'if (true)', 1)
+            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient", "EmoteManager"),
                       members=("m_CameraPath", "m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
-                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner"))
+                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner", "m_MCPEmoteStarted"))
         args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
         self._last_client_ns = ns
         return ns["BuildLeaseCloseCensus"](args)
@@ -706,6 +716,77 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(debt[0].state.text, "unverified")
         self.assertEqual(census3.state.text, "residue")
         self.assertTrue(self._last_client_ns["LeaseCloseCensusSettled"](census3))
+
+    def _emote_stop(self, source, *, started, playing, mutant=None):
+        calls = []
+        emote_mgr = type("EM", (), {
+            "IsEmotePlaying": lambda self: playing,
+            "MCP_RequestEmoteEnd": lambda self: calls.append(1) or True,
+        })()
+        player = type("P", (), {"GetEmoteManager": lambda self: emote_mgr})()
+        game = type("G", (), {"GetPlayer": lambda self: player})()
+        ns = {
+            "GetGame": lambda: game,
+            "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
+            "m_MCPEmoteStarted": started,
+        }
+        sig = "protected void StopLeaseCloseEmote()"
+        body = method_body(source, sig)
+        if mutant == "no_stop":
+            body = body.replace("emotes.MCP_RequestEmoteEnd();", "", 1)
+        if mutant == "stop_counts_foreign":
+            body = body.replace("if (!m_MCPEmoteStarted)", "if (false)", 1)
+        translate(_wrap(sig, body), sig, ns, class_types=("PlayerBase", "EmoteManager"),
+                  members=("m_MCPEmoteStarted",))
+        ns["StopLeaseCloseEmote"]()
+        return calls, ns
+
+    def test_emote_close_census_pos_neg(self):
+        source = _read(CLIENT_PATH)
+        # POS: MCP-started emote still playing is the only residue, and
+        # the observer does not settle while it plays.
+        census = self._client_census(source, emote_mcp=True, emote_playing=True)
+        residue = [e.name.text for e in census.entries if e.state.text != "clean"]
+        self.assertEqual(residue, ["emote"])
+        self.assertEqual(census.state.text, "residue")
+        self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census))
+        # POS settled: the same emote ended, so the census is clean and
+        # the MCP-started mark is cleared for a later foreign emote.
+        census2 = self._client_census(source, emote_mcp=True, emote_playing=False)
+        self.assertEqual(census2.state.text, "clean")
+        self.assertFalse(self._last_client_ns["m_MCPEmoteStarted"])
+        # NEG: a foreign emote playing, none started by MCP, is no residue.
+        census3 = self._client_census(source, emote_mcp=False, emote_playing=True)
+        self.assertEqual(census3.state.text, "clean")
+        # Mutant: a census that ignores the emote answers clean on POS.
+        mutant = self._client_census(source, emote_mcp=True, emote_playing=True, mutant_emote="census_ignores_emote")
+        self.assertEqual(mutant.state.text, "clean")
+        # Mutant: a census without the MCP-started limit counts the foreigner.
+        mutant_f = self._client_census(source, emote_mcp=False, emote_playing=True, mutant_emote="census_counts_foreign")
+        self.assertEqual([e.name.text for e in mutant_f.entries if e.state.text != "clean"], ["emote"])
+
+    def test_emote_close_stop_pos_neg(self):
+        source = _read(CLIENT_PATH)
+        # POS: the close ends the MCP-started emote that still plays.
+        calls, _ns = self._emote_stop(source, started=True, playing=True)
+        self.assertEqual(len(calls), 1)
+        # NEG: a foreign emote is not ended; an MCP emote already over neither.
+        calls_f, _ = self._emote_stop(source, started=False, playing=True)
+        self.assertEqual(calls_f, [])
+        calls_done, ns_done = self._emote_stop(source, started=True, playing=False)
+        self.assertEqual(calls_done, [])
+        self.assertFalse(ns_done["m_MCPEmoteStarted"])
+        # Mutant: without the end call, POS sends nothing.
+        calls_m, _ = self._emote_stop(source, started=True, playing=True, mutant="no_stop")
+        self.assertEqual(calls_m, [])
+        # Mutant: without the MCP-started guard, the foreigner is ended.
+        calls_mf, _ = self._emote_stop(source, started=False, playing=True, mutant="stop_counts_foreign")
+        self.assertEqual(len(calls_mf), 1)
+        # Wiring: the stop runs in the client close before the census.
+        body = method_body(source, "protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)")
+        self.assertLess(body.find("StopLeaseCloseEmote()"), body.find("BuildLeaseCloseCensus(command.args)"))
+        dispatch = method_body(source, "protected bool DispatchActorEmote(MCPCommand command, MCPResult result)")
+        self.assertIn("m_MCPEmoteStarted = true;", dispatch)
 
     def test_h3_settled_gates_dispatch_and_observer(self):
         # H3 (D-r2-H3): unverified debt must not hold the answer; residue must.
@@ -752,7 +833,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         steps = ["FinishLeaseClosed()", "m_UiPreviewRoot.Unlink()", "MCPCarDrive.Clear()",
                  'MCPInputTriggerControl.ReleaseAll("shutdown")', 'MCPPlayerMoveControl.ReleaseAll("shutdown")',
                  "StopCameraPath()", "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
-                 'MCPVehicleTrace.Abort("shutdown")', "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
+                 'MCPVehicleTrace.Abort("shutdown")', "StopLeaseCloseEmote()", "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
         pos = -1
         for step in steps:
             nxt = body.find(step, pos + 1)
