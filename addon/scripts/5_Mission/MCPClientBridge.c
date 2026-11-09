@@ -706,6 +706,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// camera_path_play moves its camera here on every frame, never from a
 		// job, by this frame's timeslice. Returns at once while no path plays.
 		TickCameraPath(timeslice);
+		// §4 #266: the MCP-started mark falls as soon as its emote stops,
+		// even after its job ended. Before the job runner, as proposed.
+		MaintainMCPEmoteStarted();
 
 		if (m_JobRunner)
 		{
@@ -8768,7 +8771,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		AddCloseEntry(census, "camera_path", cameraPathPlaying, "camera_path");
 		// §4 #266: only the emote actor_emote started counts, read through
-		// IsEmotePlaying (playing or pending), not m_bEmoteIsPlaying alone.
+		// MCP_IsEmoteLive (playing, pending, surrender or queued launcher),
+		// not m_bEmoteIsPlaying alone.
 		bool emoteActive = false;
 		if (m_MCPEmoteStarted)
 		{
@@ -8778,7 +8782,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				closeEmotes = player.GetEmoteManager();
 			}
 
-			if (!closeEmotes || closeEmotes.IsEmotePlaying())
+			if (!closeEmotes || closeEmotes.MCP_IsEmoteLive())
 			{
 				emoteActive = true;
 			}
@@ -8870,6 +8874,37 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
+	// §4 #266: the mark lives exactly as long as the emote it names.
+	// Without this, an emote that ended after its job (by wait_s, or a
+	// request the server refused) leaves the mark on, and a later foreign
+	// emote would be ended and counted by the close. No player or no
+	// manager keeps the mark: nothing can be read either way.
+	protected void MaintainMCPEmoteStarted()
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		if (!m_MCPEmoteStarted)
+		{
+			return;
+		}
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			emotes = player.GetEmoteManager();
+		}
+
+		if (!emotes)
+		{
+			return;
+		}
+
+		if (!emotes.MCP_IsEmoteLive())
+		{
+			m_MCPEmoteStarted = false;
+		}
+	}
+
 	// §4 #266: end the emote actor_emote started if it still plays. An
 	// emote MCP did not start is neither ended nor counted. The end is
 	// async: the census below and the 25 s observer read IsEmotePlaying
@@ -8895,7 +8930,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		if (!emotes.IsEmotePlaying())
+		emotes.MCP_CancelQueuedEmote();
+		if (!emotes.MCP_IsEmoteLive())
 		{
 			m_MCPEmoteStarted = false;
 			return;
