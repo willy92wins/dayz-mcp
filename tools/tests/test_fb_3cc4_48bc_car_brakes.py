@@ -12,6 +12,11 @@ ActionPushCar.OnEndServer restores it (actionpushcar.c:111).
 over without a Clear, so the previous car kept its driverless brake off. Set
 now restores it on the previous car before the reassignment.
 
+fb-20261026-142708-3efe (9/11 round): below idle the engine was never ready,
+so an automatic in D at 616.5 rpm against an idle of 625 never got throttle.
+Below idle only an engine that is off or stalled (vanilla: on with rpm < 1)
+is not ready, and a manual gearbox keeps the old rule.
+
 File-only: reads the Enforce sources; does not import the server stack.
 """
 
@@ -38,6 +43,10 @@ TTL_EXPIRY = (
 BELOW_IDLE = r"\bif\s*\(\s*rpm\s*<\s*EngineGetRPMIdle\(\)\s*\)"
 THROTTLE_ASKED = r"\bif\s*\(\s*MCPCarDrive\.s_Throttle\s*>\s*0(?:\.0+)?\s*\)"
 ENGINE_READY = r"\bif\s*\(\s*engineReady\s*\)"
+NOT_READY = (
+    r"\bif\s*\(\s*GearboxGetType\(\)\s*==\s*CarGearboxType\.MANUAL\s*\|\|\s*"
+    r"!\s*EngineIsOn\(\)\s*\|\|\s*rpm\s*<\s*1(?:\.0+)?\s*\)"
+)
 CAR_GUARD = r"\bif\s*\(\s*s_Car\s*\)"
 SET = re.escape("static void Set(")
 TAKEOVER_GUARD = r"\bif\s*\(\s*s_Car\s*&&\s*s_Car\s*!=\s*car\s*\)"
@@ -215,8 +224,13 @@ class CarBrakesSourceContractTest(unittest.TestCase):
         for call in ("EngineStart();", "EngineStop();"):
             self.assertEqual(on_input.count(call), 1, call)
             self.assertIn(call, asked)
-        # Below idle the engine is not ready whatever the throttle.
-        self.assertIn("engineReady = false;", below_idle)
+        # Below idle the engine is not ready, whatever the throttle, only when
+        # it is off or stalled (on with rpm < 1), or the gearbox is manual
+        # (3efe): an automatic below idle with its engine running gets throttle.
+        self.assertEqual(on_input.count("engineReady = false;"), 1)
+        not_ready = _block(below_idle, NOT_READY)
+        self.assertEqual(not_ready.strip(), "engineReady = false;")
+        self.assertEqual(_depth_at(below_idle, re.search(NOT_READY, below_idle).start()), 0)
         self.assertNotIn("engineReady = false;", asked)
 
     def _assert_clear_restores_driverless_brake(self, clear: str) -> None:
@@ -294,6 +308,17 @@ class CarBrakesSourceContractTest(unittest.TestCase):
         shutdown = _block(bridge, re.escape("void Shutdown()"))
         self.assertIn("MCPCarDrive.Clear();", release)
         self.assertIn("MCPCarDrive.Clear();", shutdown)
+
+    def test_fb_3efe_never_ready_below_idle_fails_the_contract(self) -> None:
+        # The 3cc4 shape the 9/11 round ran: not ready below idle on any gearbox.
+        on_input = _on_input()
+        not_ready = re.search(NOT_READY, on_input)
+        self.assertIsNotNone(not_ready)
+        assert not_ready is not None
+        end = on_input.index("}", not_ready.end()) + 1
+        before = on_input[: not_ready.start()] + "engineReady = false;" + on_input[end:]
+        with self.assertRaises(AssertionError):
+            self._assert_engine_start_needs_throttle(before)
 
     def test_fb_3cc4_48bc_pre_fix_shape_fails_the_contracts(self) -> None:
         on_input = _block(PRE_FIX_ON_INPUT, ON_INPUT)
