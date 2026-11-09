@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -166,7 +167,7 @@ class LifecycleMissionTest(unittest.TestCase):
                 str(server / ps.SERVER_BINARY), "-server", f"-config={config}",
                 f"-profiles={root / 'profiles'}", f"-mission={mission}", "-port=2302",
             ]
-            with mock.patch.object(ps, "ensure_image", return_value="image"), \
+            with mock.patch.object(ps, "_runtime_image_id", return_value="image"), \
                     mock.patch.object(ps, "_state_root", return_value=root / "runs"), \
                     mock.patch.object(ps, "_remove_stale_trees"), \
                     mock.patch.object(ps, "_podman", fake_podman), \
@@ -205,6 +206,56 @@ class RemoveStaleTreesTest(unittest.TestCase):
             self.assertTrue((root / "unrelated").is_dir())
             self.assertEqual(len(calls), 3)
             self.assertTrue(all(command[:2] == ("container", "exists") for command in calls))
+
+
+class LifecycleImageTest(unittest.TestCase):
+    def test_a_missing_runtime_image_is_refused_not_built(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base)
+            server = root / "server"
+            server.mkdir()
+            (server / ps.SERVER_BINARY).write_text("")
+            config = root / "serverDZ.cfg"
+            config.write_text("")
+            mission = root / "missions" / "dayzOffline.chernarusplus"
+            mission.mkdir(parents=True)
+            calls = []
+
+            def fake_podman(_podman, *command, check=True):
+                calls.append(command)
+                return mock.Mock(returncode=1, stderr="", stdout="")
+
+            argv = [
+                str(server / ps.SERVER_BINARY), f"-config={config}",
+                f"-profiles={root / 'profiles'}", f"-mission={mission}", "-port=2302",
+            ]
+            with mock.patch.object(ps, "_state_root", return_value=root / "runs"), \
+                    mock.patch.object(ps, "_podman", fake_podman), \
+                    self.assertRaisesRegex(ps.PodmanServerError, "runtime_image_missing"):
+                ps.launch_lifecycle_process(argv, str(server))
+            self.assertEqual([command[:2] for command in calls], [("image", "exists")])
+            self.assertFalse((root / "runs").exists(), "a run tree was staged without an image")
+
+    def test_a_podman_error_is_not_read_as_a_missing_image(self):
+        def fake_podman(_podman, *command, check=True):
+            if check:
+                raise subprocess.CalledProcessError(125, ["podman", *command], stderr="database is locked")
+            return mock.Mock(returncode=125, stderr="database is locked", stdout="")
+
+        with mock.patch.object(ps, "_podman", fake_podman), self.assertRaises(subprocess.CalledProcessError):
+            ps._runtime_image_id("podman")
+
+    def test_an_existing_image_is_used_without_a_build(self):
+        calls = []
+
+        def fake_podman(_podman, *command, check=True):
+            calls.append(command)
+            return mock.Mock(returncode=0, stderr="", stdout="sha256:abc\n")
+
+        with mock.patch.object(ps, "_podman", fake_podman):
+            self.assertEqual(ps._runtime_image_id("podman"), "sha256:abc")
+            self.assertEqual(ps.ensure_image("podman"), "sha256:abc")
+        self.assertFalse(any(command[0] == "build" for command in calls))
 
 
 class FreePortsTest(unittest.TestCase):

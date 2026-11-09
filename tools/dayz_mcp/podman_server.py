@@ -104,13 +104,25 @@ def _podman(spec_or_bin: RunSpec | str, *args: str, check: bool = True, **kw) ->
     return subprocess.run([binary, *args], check=check, capture_output=True, text=True, **kw)
 
 
+def _runtime_image_id(podman: str) -> str | None:
+    """The runtime image's ID, or None when it has not been built.
+
+    ``image exists`` exits 1 only for an absent image; ``image inspect`` exits 125 both
+    for that and for podman's own errors, which must not read as "build it".
+    """
+    ref = f"{IMAGE_NAME}:{IMAGE_TAG}"
+    if _podman(podman, "image", "exists", ref, check=False).returncode == 1:
+        return None
+    return _podman(podman, "image", "inspect", "--format", "{{.Id}}", ref).stdout.strip() or None
+
+
 def ensure_image(podman: str = "podman", rebuild: bool = False) -> str:
     """Build the runtime image once; return its image ID (sha256 of its config)."""
     ref = f"{IMAGE_NAME}:{IMAGE_TAG}"
     if not rebuild:
-        found = _podman(podman, "image", "inspect", "--format", "{{.Id}}", ref, check=False)
-        if found.returncode == 0 and found.stdout.strip():
-            return found.stdout.strip()
+        found = _runtime_image_id(podman)
+        if found is not None:
+            return found
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="dayz-mcp-image-") as context:  # empty build context
@@ -488,7 +500,11 @@ def launch_lifecycle_process(
         raise PodmanServerError("config_or_mission_missing")
     profiles.mkdir(parents=True, exist_ok=True)
 
-    image_id = ensure_image(podman)
+    # Never built here: the lifecycle child waits 235 s for this start, and a build
+    # (apt-get over the network) can take longer. Setup builds it once.
+    image_id = _runtime_image_id(podman)
+    if image_id is None:
+        raise PodmanServerError("runtime_image_missing: run python -m dayz_mcp.podman_server image")
     root = _state_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     _remove_stale_trees(root, podman)
