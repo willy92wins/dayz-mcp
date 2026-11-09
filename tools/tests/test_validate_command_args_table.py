@@ -2945,6 +2945,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("object_id", {"emote": "sita", "wait_s": 10.0, "object_id": 1}, (False, "bad_args")),
         ("extra_key", {"emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
     ),
+    # ai_emote (36fa NPC): actor_emote's catalog and bounds plus object_id.
+    "ai_emote": (
+        ("valid", {"object_id": 1, "emote": "nod", "wait_s": 10.0}, (True, None)),
+        ("valid_end", {"object_id": 7, "emote": "end", "wait_s": 0.5}, (True, None)),
+        ("wait_at_maximum", {"object_id": 1, "emote": "sita", "wait_s": 30.0}, (True, None)),
+        ("unknown_emote", {"object_id": 1, "emote": "nope", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_zero", {"object_id": 0, "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_bool", {"object_id": True, "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_string", {"object_id": "1", "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("missing_object_id", {"emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("wait_below", {"object_id": 1, "emote": "sita", "wait_s": 0.49}, (False, "bad_args")),
+        ("wait_nan", {"object_id": 1, "emote": "sita", "wait_s": float("nan")}, (False, "bad_args")),
+        ("extra_key", {"object_id": 1, "emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
+    ),
     # survivor_drive_release (c801), internal: the id of one drive command and
     # its survivor's object_id, both required.
     "survivor_drive_release": (

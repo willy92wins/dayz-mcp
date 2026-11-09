@@ -589,7 +589,7 @@ class ExpansionContractTest(unittest.TestCase):
                 self.assertIn(key, known)
         result_block = adapter.split("modded class MCPResult")[1].split("};")[0]
         result_fields = re.findall(r"\n\t(?:ref\s+)?[A-Za-z_][\w<> ]*?\s+(\w+);", result_block)
-        self.assertEqual(set(result_fields), {"ai_group", "ai_groups"})
+        self.assertEqual(set(result_fields), {"ai_group", "ai_groups", "emote_pending"})
         # Inherited keys keep their base types.
         self.assertIn("ref array<float> pos;", base_args)
         self.assertIn("int object_id;", base_args)

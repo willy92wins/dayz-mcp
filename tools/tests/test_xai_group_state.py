@@ -956,7 +956,7 @@ class AiGroupStateEnforceTest(unittest.TestCase):
         self.assertIsNotNone(verbs)
         _hash, names = parse_xai(f"{GOOD_XAI}.{verbs.group(1)}")
         self.assertIn(STATE, names)
-        self.assertEqual(EXPANSION_AI_VERB_BITS[-1], STATE)
+        self.assertEqual(EXPANSION_AI_VERB_BITS[3], STATE)
         dispatch = method_body(
             source,
             "protected override int DispatchExtension(MCPCommand command, MCPResult result)",

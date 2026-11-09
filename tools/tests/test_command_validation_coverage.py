@@ -241,6 +241,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"view": "third"}
     if cmd == "actor_emote":
         return {"emote": "greeting", "wait_s": 10.0}
+    if cmd == "ai_emote":
+        return {"object_id": 1, "emote": "greeting", "wait_s": 10.0}
     if cmd == "survivor_drive":
         return {"object_id": 1, "mode": "release"}
     if cmd == "survivor_drive_release":

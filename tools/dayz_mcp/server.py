@@ -10316,8 +10316,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the managed client through EmoteManager.CreateEmoteCBFromMenu, the "
             "call the gestures menu makes: the client asks the server, which "
             "checks it and plays it on every peer as it does a person's "
-            "gesture. Only the local player, by this tool's scope: there is no "
-            "object_id. emote "
+            "gesture. Without object_id, only the local player. With "
+            "object_id (an ai_group_spawn member), the same call goes to the "
+            "server as ai_emote with a lease instead (plan 3.5): it is "
+            "refused with bad_target when the id is not a living member of "
+            "an active group, and its states gain cancelled (end with only "
+            "an Expansion request pending) and every answer carries "
+            "emote_pending, true while a request in either emote layer is "
+            "still pending; a member that dies or vanishes mid-wait answers "
+            "emote_interrupted, and the lease-close member delete can end "
+            "its job the same way without proving the close. emote "
             f"is one of {', '.join(ACTOR_EMOTES)}, or {ACTOR_EMOTE_END}, which "
             "asks the server to end the emote that is playing (a looping one, "
             "such as sita), as the client does to end one. wait_s (default 10, "
@@ -10362,8 +10370,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def actor_emote(
         emote: StrictStr,
         wait_s: StrictFloat = 10.0,
+        object_id: StrictInt | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        if object_id is not None and (
+            isinstance(object_id, bool)
+            or not isinstance(object_id, int)
+            or object_id <= 0
+        ):
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if emote not in ACTOR_EMOTES and emote != ACTOR_EMOTE_END:
             raise ToolError(
                 _bad_args(
@@ -10385,6 +10400,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # transport waits wait_s plus the slack, as player_move does for
         # hold_s.
         timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
+        if object_id is not None:
+            # With object_id the same catalog and bounds go to the server as
+            # ai_emote, with a lease; the states gain cancelled and every
+            # answer carries emote_pending (plan 3.5/4).
+            args = {"object_id": int(object_id), "emote": emote, "wait_s": wait}
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "ai_emote", args, "server", timeout
+                )
+            state = result.get("emote_state")
+            if state not in ("started", "finished") or emote == ACTOR_EMOTE_END:
+                result.pop("started_after_s", None)
+            if state != "finished":
+                result.pop("finished_after_s", None)
+            return result
         args = {"emote": emote, "wait_s": wait}
         async with runtime.tool_lock:
             result = await runtime.call_bridge("actor_emote", args, "client", timeout)

@@ -30,6 +30,8 @@ server. It ships in `addon_expansion_ai/` and packs as
   and sends nothing).
 - `ai_group_state` (tool, no lease) reads one group by `group_id`, or
   every group registered under a `scene_id`, exactly one of the two.
+- `ai_emote` is not a tool: `actor_emote(object_id=...)` sends it to the
+  server with a lease (see "Playing an emote on a member" below).
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
   when a delivered spawn is abandoned (timeout or cancel). It is not a
   public tool and never runs from lease-end cleanup.
@@ -141,6 +143,70 @@ Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, and the
 O13 part that reads residues on a v12 census). In-game validation is
 pending; this section describes the offline contract only.
 
+## Playing an emote on a member (`ai_emote`, 36fa NPC half)
+
+`actor_emote(emote, wait_s=10.0, object_id=None, timeout_s)` is the one
+tool. Without `object_id` it is the client verb of 36fa, unchanged. With
+`object_id` (a member of an `ai_group_spawn` group) the broker sends
+`ai_emote` to the server with a lease; the emote catalog and the
+`wait_s` bounds (0.5 to 30 s) are the client verb's, and the states gain
+`cancelled`. Every server answer also carries `emote_pending`.
+
+Three layers are kept apart: the Expansion request
+(`m_Expansion_EmoteID`), the vanilla request
+(`m_bEmoteIsRequestPending`) and playback (`m_bEmoteIsPlaying`). The
+dispatch, in this order, is the only place the verb writes:
+
+1. `object_id` not a living member of an `active` group: `bad_target`.
+2. Another emote job already watching that member (an `end` included):
+   `emote_rejected`.
+3. An Expansion request pending, or `IsEmotePlaying()` true (either
+   layer): `emote_rejected`. Nothing is sounding when the job starts,
+   so what it sees afterwards is its own.
+4. Fighting (`m_eAI_IsFightingFSM`), group in combat, or
+   `GetThreatToSelf(true) > 0.2`: `emote_rejected`, no write.
+5. One write: `Expansion_SetEmote(id, true, wait_s * 1000)`. With
+   `autoCancel=true` Expansion consumes the request in its own attempt
+   even if nothing plays, and schedules the cancel of static poses
+   `autoCancelDelay` ms after that attempt; temporary poses are not
+   cancelled. `Expansion_PlayEmote` is never called (it would skip the
+   FSM guard).
+
+The job in `m_Jobs` only reads the member's `EmoteManager` and Expansion
+request, and writes only its own fields. `started` is the first tick
+with `m_bEmoteIsPlaying` true and `Expansion_GetCurrentGesture()` equal
+to the requested id; `finished` follows a seen start and stop. Both
+carry `started_after_s` / `finished_after_s` from the request and
+`emote_pending` read on that tick, so a `finished` with
+`emote_pending: true` warns the request was never consumed and the
+gesture can play again. At `wait_s`: `started` if it started and has
+not stopped, else `emote_timed_out` with `emote_pending`. A member that
+dies or whose entity disappears answers `emote_interrupted`; that end
+never proves the lease close (the close deletes the member, and its
+census — not this job — is the proof).
+
+With `emote="end"`, after steps 1-2: if it plays, the dispatch clears
+any Expansion request with `Expansion_SetEmote(0)`, requests
+`ServerRequestEmoteCancel()`, and a job watches to `finished` (or
+`emote_timed_out` at `wait_s`). If only an Expansion request is
+pending, `Expansion_SetEmote(0)` clears it and the dispatch answers
+`emote_state: "cancelled"` with `emote_pending` read after the write.
+If only a vanilla request is in flight, `emote_rejected` with
+`emote_pending: true` and no write; the `end` can be repeated. With
+nothing, `no_emote_playing`. A request that stays pending is cleared by
+an `end` or by the lease-close member delete.
+
+The verb is bit 4 of the `&xai` mask (append-only: release, spawn,
+order, state, emote; the widened mask `31` is the same two characters
+as `15`, so the saturated poll stays at its measured size). As a new
+mutation it sits behind the v13 lease-close gate: without real close
+support on every bound peer the broker answers
+`expansion_unavailable` / `lease_close_not_supported`.
+
+Offline coverage: `tools/tests/test_xai_emote.py` (O8, E8; mutants: the
+job calling `Expansion_SetEmote`, and a `started` accepting the gesture
+already sounding with the same id). In-game validation is pending.
+
 As a server read it is also admitted under the live profile:
 `LIVE_ALLOWED_COMMANDS` derives from `READ_ONLY_COMMANDS & SERVER_COMMANDS`
 (`loopback.py`), and the adapter mutations stay outside it.
@@ -152,7 +218,7 @@ server poll measured 1037 characters, past the 1024 limit of #321 (1067
 with order/state, 1079 with v13's `lease_close`). Instead its poll carries
 `&xai=<16 hex>.<bitmask>`: the adapter contract hash plus one bit per verb,
 in the append-only order fixed in `bridge_readiness.py`
-(`EXPANSION_AI_VERB_BITS`: release, spawn, order, state). The broker
+(`EXPANSION_AI_VERB_BITS`: release, spawn, order, state, emote). The broker
 expands the mask to names before storing the census, so admission and the
 capability comparator keep seeing names, and the saturated poll with the
 full adapter (widest mask) and v13 measures 1020, four characters under
@@ -166,8 +232,8 @@ New adapter mutations are admitted only when every peer the run binds
 announces real lease-close support (plan 5.1: server and client, or both
 roles of an offline binding), with a current instance and generation, at
 enqueue and again at delivery. On bridge v13 both peers announce
-`lease_close` / `lease_close_client`, so `ai_group_spawn` and
-`ai_group_order` are admitted and the adapter takes part in the lease
+`lease_close` / `lease_close_client`, so `ai_group_spawn`,
+`ai_group_order` and `ai_emote` are admitted and the adapter takes part in the lease
 close: its groups are stopped by `LeaseCloseExtensionStop` and reported
 as `ai_group:<spawn_token>` `residue` entries by
 `LeaseCloseExtensionCensus` until they disappear. A peer still on v12

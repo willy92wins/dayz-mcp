@@ -294,6 +294,7 @@ EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 # the hash. Inherited keys keep their base types (pos, object_id, speed,
 # speed_set, scene_id in MCPMessages.c MCPArgs).
 EXPANSION_AI_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
+    "ai_emote": ("emote", "object_id", "wait_s"),
     "ai_group_order": ("behaviour", "formation", "group_id", "speed", "speed_set", "waypoints"),
     "ai_group_release": ("spawn_token",),
     "ai_group_spawn": (
@@ -355,6 +356,7 @@ EXPANSION_AI_VERB_BITS: tuple[str, ...] = (
     "ai_group_spawn",
     "ai_group_order",
     "ai_group_state",
+    "ai_emote",
 )
 _XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.(0|[1-9][0-9]{0,3})\Z")
 
@@ -392,6 +394,7 @@ def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
 # poll instead of on the first failed call.
 _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
+        "ai_emote": "actor_emote",
         "ai_group_order": "ai_group_order",
         "ai_group_release": None,  # internal: the broker's abandoned-spawn cleanup
         "ai_group_spawn": "ai_group_spawn",
@@ -547,10 +550,17 @@ def _compare_bridge_capabilities(
     # Report the same capability requirement here instead of a false match.
     if peer == "client" and "camera_path_release" not in announced_set:
         announced_tools.discard("camera_path_play")
+    optional_tools = {
+        mapping[item]
+        for item in EXPANSION_AI_COMMANDS
+        if mapping.get(item)
+    }
     not_announced = sorted(
         tool
         for tool in registered_bridge_tools
-        if tool not in announced_tools and tool not in EXPANSION_AI_TOOLS
+        if tool not in announced_tools
+        and tool not in EXPANSION_AI_TOOLS
+        and tool not in optional_tools
     )
     agrees = not (unmapped or missing_tool or not_announced)
     announced_hash = block.get("announced_arg_contract_hash")

@@ -615,7 +615,7 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _scene_shared_detail(result)
     if cmd == "object_set_health":
         return _object_set_health_detail(result)
-    if cmd == "actor_emote":
+    if cmd in ("actor_emote", "ai_emote"):
         return _actor_emote_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""

@@ -136,7 +136,9 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # formation and speed are strings and waypoints a list).
         # + 2 from 90f9 (ai_group_state group_id/timeout_s; scene_id is a
         # string, not in this census).
-        self.assertEqual(len(rows), 243)
+        # + 1 from 36fa NPC (actor_emote object_id; no new tool).
+        self.assertEqual(len(rows), 244)
+        self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
         self.assertIn(("ai_group_state", "group_id", "int"), rows)
