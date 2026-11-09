@@ -4393,6 +4393,102 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	// 204e: a deploy whose Can was false says why when its hologram is the
+	// cause. ActionDeployObject's client condition wants the local player
+	// placing (IsPlacingLocal) with a hologram that does not collide
+	// (GetHologramLocal().IsColliding()). no_hologram: the player is not
+	// placing (ActionTogglePlaceObject starts it). hologram_colliding: the
+	// hologram collides, and hologram carries the checks of the five below
+	// that refuse it, the projection's position, and min_m and max_m: vanilla
+	// floats the hologram unless the camera ray's hit is farther from the
+	// player than the projection radius and nearer than twice it (1 m and 2 m
+	// under a 1 m radius, 6 m at most), as Hologram.GetProjectionEntityPosition
+	// does; that band is restated here, not read. Any other refusal of a
+	// deploy, and every refusal of another action, stays condition_failed.
+	protected void ApplyDeployRefusal(ActionBase action, PlayerBase player, MCPResult result)
+	{
+		Hologram hologram;
+		Object projection;
+		MCPHologram report;
+		float radius;
+
+		if (!ActionDeployObject.Cast(action))
+		{
+			return;
+		}
+
+		if (!player.IsPlacingLocal())
+		{
+			result.error = "no_hologram";
+			return;
+		}
+
+		hologram = player.GetHologramLocal();
+		if (!hologram)
+		{
+			result.error = "no_hologram";
+			return;
+		}
+
+		projection = hologram.GetProjectionEntity();
+		if (!projection)
+		{
+			result.error = "no_hologram";
+			return;
+		}
+
+		if (!hologram.IsColliding())
+		{
+			return;
+		}
+
+		report = new MCPHologram();
+		report.checks = new array<string>();
+		if (hologram.IsFloating())
+		{
+			report.checks.Insert("is_floating");
+		}
+
+		if (hologram.IsCollidingBBox())
+		{
+			report.checks.Insert("is_colliding_bbox");
+		}
+
+		if (hologram.IsClippingRoof())
+		{
+			report.checks.Insert("is_clipping_roof");
+		}
+
+		if (!hologram.IsBaseViable())
+		{
+			report.checks.Insert("is_base_viable");
+		}
+
+		if (!hologram.HeightPlacementCheck())
+		{
+			report.checks.Insert("height_placement_check");
+		}
+
+		report.pos = new array<float>();
+		VectorToArray(projection.GetPosition(), report.pos);
+		radius = hologram.GetProjectionRadius();
+		report.min_m = radius;
+		report.max_m = radius * 2.0;
+		if (radius < 1.0)
+		{
+			report.min_m = 1.0;
+			report.max_m = 2.0;
+		}
+
+		if (report.max_m > 6.0)
+		{
+			report.max_m = 6.0;
+		}
+
+		result.error = "hologram_colliding";
+		result.hologram = report;
+	}
+
 	// Starts a user action on the local player. Returns after PerformActionStart;
 	// UseAcknowledgment() is true (actionbase.c:1146-1148) so the server still
 	// re-evaluates. Waiting here would freeze the sim tick.
@@ -4655,6 +4751,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "condition_failed";
+			ApplyDeployRefusal(action, player, result);
 			return true;
 		}
 
@@ -4707,6 +4804,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPActionUseWatch.Begin(action, actionTarget);
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		int starts = MCPActionUseWatch.End();
+		// 204e: whether the local player is placing once the call ran, which
+		// after ActionTogglePlaceObject says which way the toggle went.
+		result.placing = player.IsPlacingLocal();
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.

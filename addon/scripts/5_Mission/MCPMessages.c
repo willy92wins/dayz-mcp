@@ -1328,6 +1328,19 @@ class MCPGameplayState
 	bool player_simulation_disabled;
 };
 
+// action_use / action_hold (204e): the local hologram of a deploy refused with
+// hologram_colliding. checks names those of is_floating, is_colliding_bbox,
+// is_clipping_roof, is_base_viable and height_placement_check that refuse it,
+// pos is the projection's position, and the hologram floats unless the camera
+// ray's hit is farther than min_m and nearer than max_m from the player.
+class MCPHologram
+{
+	ref array<string> checks;
+	ref array<float> pos;
+	float min_m;
+	float max_m;
+};
+
 class MCPResult
 {
 	int id;
@@ -1407,6 +1420,13 @@ class MCPResult
 	string target;
 	float distance;
 	bool started;
+	// action_use (204e): whether the local player is placing once the call
+	// ran, which after ActionTogglePlaceObject says which way it went.
+	// Unassigned on its refusals before the start and on other commands.
+	bool placing;
+	// action_use / action_hold (204e): the hologram of a deploy refused with
+	// hologram_colliding. Unassigned otherwise.
+	ref MCPHologram hologram;
 	// action_use_door / action_use_component. Same default-0 rule as
 	// MCPArgs.door_index: 0 is a valid door and a valid component, so
 	// the command name, not these fields, is what turns the mode on.

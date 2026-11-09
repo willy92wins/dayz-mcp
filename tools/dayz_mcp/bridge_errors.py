@@ -560,6 +560,60 @@ def _actor_emote_detail(result: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+# action_use's and action_hold's deploy (204e): an ActionDeployObject whose Can
+# was false answers hologram_colliding with the local hologram the client read
+# (MCPClientBridge.c ApplyDeployRefusal): the checks that refuse it, the
+# projection's position, and the distances from the player between which the
+# camera ray's hit must fall for it not to float. Only the five check names,
+# three finite coordinates and finite non-negative distances cross.
+_HOLOGRAM_COMMANDS = frozenset(
+    {
+        "action_use",
+        "action_use_door",
+        "action_use_target",
+        "action_use_component",
+        "action_hold",
+    }
+)
+_HOLOGRAM_CHECKS = (
+    "is_floating",
+    "is_colliding_bbox",
+    "is_clipping_roof",
+    "is_base_viable",
+    "height_placement_check",
+)
+
+
+def _is_finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _hologram_colliding_detail(result: dict[str, Any]) -> str:
+    report = result.get("hologram")
+    if not isinstance(report, dict):
+        return ""
+    pairs: list[str] = []
+    checks = report.get("checks")
+    if isinstance(checks, list):
+        names = [name for name in _HOLOGRAM_CHECKS if name in checks]
+        if names:
+            pairs.append("hologram_checks=" + ",".join(names))
+    pos = report.get("pos")
+    if isinstance(pos, list) and len(pos) == 3 and all(_is_finite_number(v) for v in pos):
+        pairs.append("hologram_pos=" + ",".join(repr(float(v)) for v in pos))
+    for key in ("min_m", "max_m"):
+        value = report.get(key)
+        if _is_finite_number(value) and float(value) >= 0.0:
+            pairs.append(f"hologram_{key}={float(value)!r}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -603,6 +657,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     emote_rejected from a new emote's checks also carries reason= (the check
     that refused it) and stance= in observed= (36fa).
 
+    action_use and action_hold are the tenth: a deploy's hologram_colliding
+    carries observed= with hologram_checks, hologram_pos, hologram_min_m and
+    hologram_max_m (204e).
+
     world_spawn's vehicle_eject_failed carries the retained object_id so an
     MCP caller can retry cleanup after its unsupported-lifetime rollback.
 
@@ -638,6 +696,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _object_set_health_detail(result)
     if cmd == "actor_emote":
         return _actor_emote_detail(result)
+    if cmd in _HOLOGRAM_COMMANDS and str(result.get("error") or "") == "hologram_colliding":
+        return _hologram_colliding_detail(result)
     if cmd not in _UI_ECHO_VERBS:
         return ""
     parts: list[str] = []
@@ -683,6 +743,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # after read-back,
     # actor_emote, whose refusals carry observed=emote_state= (and reason= and
     # stance= on a new emote's emote_rejected),
+    # action_use and action_hold, whose deploy's hologram_colliding carries
+    # observed= with the hologram the client read,
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)

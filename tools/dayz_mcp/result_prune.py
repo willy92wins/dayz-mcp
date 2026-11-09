@@ -75,6 +75,8 @@ PRUNABLE_FIELDS = (
     "entities",
     "ui",
     "ui_request",
+    # action_use and action_hold fill it on a deploy's hologram_colliding (204e).
+    "hologram",
     "dialog",
     "weapon_state",
     # Nested probe (ficha 4f50) lives inside this object. prune does not
@@ -275,6 +277,16 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "finished_after_s": frozenset({"actor_emote"}),
     # The local player's stance on that refusal (36fa).
     "stance": frozenset({"actor_emote"}),
+    # Whether the local player is placing once action_use ran (204e).
+    # action_hold shares DispatchActionUse, so the census names it too; its
+    # tool builds its own reply, which leaves placing out.
+    "placing": frozenset({
+        "action_use",
+        "action_use_door",
+        "action_use_target",
+        "action_use_component",
+        "action_hold",
+    }),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries
