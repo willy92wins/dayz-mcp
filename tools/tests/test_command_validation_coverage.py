@@ -43,7 +43,9 @@ def _minimal_args(cmd: str) -> dict:
     # The rest of the verbs that were schemaless before 6ce4.
     if cmd == "world_spawn":
         return {"type": "Item", "pos": [0.0, 0.0, 0.0], "flags": 0, "rotation": 0}
-    if cmd in {"vehicle_enter", "vehicle_get_in_client"}:
+    if cmd == "vehicle_enter":
+        return {"pos": [0.0, 0.0, 0.0], "uid": "player-1"}
+    if cmd == "vehicle_get_in_client":
         return {"pos": [0.0, 0.0, 0.0]}
     if cmd == "scene_raycast":
         return {

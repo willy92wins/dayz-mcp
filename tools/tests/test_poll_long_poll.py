@@ -23,6 +23,7 @@ from pathlib import Path
 
 from dayz_mcp import loopback
 from tests._addon_paths import addon_root
+from tests._answers_at_once import assert_answers_at_once
 from tests._tiers import slow_test
 from tests.enforce_subset_helpers import EnforceArray, method_body, translate
 
@@ -178,6 +179,26 @@ class PollLongPollTest(unittest.TestCase):
         status, raw = self.daemon.open(query or {"peer": "client"}, timeout)
         return time.monotonic() - started, status, raw
 
+    def _read_at_once(
+        self, query: dict[str, str] | None = None, prepare=None, waits: bool = False
+    ) -> tuple[int, bytes]:
+        """A GET /poll that must answer without entering the long-poll wait.
+
+        Checked on every sample: /poll never entered Condition.wait on the
+        client peer's condition. The 0.2 s gate backs that up; a sample over
+        it is taken again, at most three times (tests/_answers_at_once.py
+        says why the clock alone measures the runner). prepare runs before
+        each sample and is not timed. waits=True is for a read that really
+        waits (wait_ms=1): only the gate is checked.
+        """
+        return assert_answers_at_once(
+            self,
+            lambda: self.daemon.open(query or {"peer": "client"}, 2.0),
+            gate_s=0.2,
+            no_wait_on=() if waits else (self.daemon.state._command_cv["client"],),
+            prepare=prepare,
+        )
+
     def _twin_commands(self, cmd: str, peer: str) -> bytes:
         twin = loopback.ServerState(self.daemon.key)
         status, payload = twin.enqueue_command(
@@ -189,20 +210,16 @@ class PollLongPollTest(unittest.TestCase):
         return _commands_body(polled["commands"])
 
     def test_absent_wait_ms_is_the_old_empty_body(self) -> None:
-        elapsed, status, raw = self._read()
+        status, raw = self._read_at_once()
         self.assertEqual(status, 200)
         self.assertEqual(raw, _EMPTY)
-        self.assertLess(elapsed, 0.2)
 
     def test_unusable_and_zero_wait_ms_do_not_wait(self) -> None:
         for raw_wait in ("", "-1", "1.5", "abc", "0"):
             with self.subTest(wait_ms=raw_wait):
-                elapsed, status, raw = self._read(
-                    {"peer": "client", "wait_ms": raw_wait}
-                )
+                status, raw = self._read_at_once({"peer": "client", "wait_ms": raw_wait})
                 self.assertEqual(status, 200)
                 self.assertEqual(raw, _EMPTY)
-                self.assertLess(elapsed, 0.2)
 
     def test_absent_wait_ms_does_not_see_a_command_enqueued_after_it(self) -> None:
         # The enqueue waits until this GET has copied the queue. A sleep
@@ -233,15 +250,27 @@ class PollLongPollTest(unittest.TestCase):
         self.assertEqual(polled["commands"][0]["cmd"], "camera_get")
 
     def test_queued_command_returns_without_waiting_out_the_cap(self) -> None:
-        self.daemon.enqueue()
+        # The GET delivers the command, so each sample queues a fresh one.
+        # The twin numbers its command like the first one; later samples
+        # carry later ids, so only the first sample's body is compared.
         expected = self._twin_commands("camera_get", "client")
-        elapsed, status, raw = self._read(
-            {"peer": "client", "wait_ms": "800"}, timeout=2.0
+        bodies: list[bytes] = []
+
+        def read() -> tuple[int, bytes]:
+            status, raw = self.daemon.open({"peer": "client", "wait_ms": "800"}, 2.0)
+            bodies.append(raw)
+            return status, raw
+
+        status, raw = assert_answers_at_once(
+            self,
+            read,
+            gate_s=0.2,
+            no_wait_on=(self.daemon.state._command_cv["client"],),
+            prepare=self.daemon.enqueue,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(raw, expected)
+        self.assertEqual(bodies[0], expected)
         self.assertIn(b'"cmd":"camera_get"', raw)
-        self.assertLess(elapsed, 0.2)
 
     def test_delay_ms_still_sleeps_after_delivery(self) -> None:
         status, payload = self.daemon.state.set_poll_delay(200)
@@ -600,25 +629,25 @@ class PollWaitMsParseTest(unittest.TestCase):
         )
         for raw_wait in ("00000000", "00000001"):
             with self.subTest(wait_ms=raw_wait):
-                elapsed, status, raw = self._read(raw_wait)
+                status, raw = self._read_at_once(raw_wait, waits=raw_wait == "00000001")
                 self.assertEqual(status, 200, raw)
                 self.assertEqual(raw, _EMPTY)
-                self.assertLess(elapsed, 0.2)
 
     def test_superscript_wait_ms_does_not_raise(self) -> None:
         # "²" passes str.isdigit and int() raises. It is not a wait.
         self.assertEqual(loopback._parse_poll_wait_s({"wait_ms": ["²"]}), 0.0)
-        elapsed, status, raw = self._read("²")
+        status, raw = self._read_at_once("²")
         self.assertEqual(status, 200, raw)
         self.assertEqual(raw, _EMPTY)
-        self.assertLess(elapsed, 0.2)
 
-    def _read(self, raw_wait: str) -> tuple[float, int, bytes]:
-        started = time.monotonic()
-        status, raw = self.daemon.open(
-            {"peer": "client", "wait_ms": raw_wait}, timeout=2.0
+    def _read_at_once(self, raw_wait: str, waits: bool = False) -> tuple[int, bytes]:
+        # Same check as PollLongPollTest._read_at_once.
+        return assert_answers_at_once(
+            self,
+            lambda: self.daemon.open({"peer": "client", "wait_ms": raw_wait}, 2.0),
+            gate_s=0.2,
+            no_wait_on=() if waits else (self.daemon.state._command_cv["client"],),
         )
-        return time.monotonic() - started, status, raw
 
 
 class PollQuotaTest(unittest.TestCase):

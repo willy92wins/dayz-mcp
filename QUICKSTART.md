@@ -7,6 +7,23 @@ Everything else in this repo is optional until this works.
 and a DayZ server you may load mods on. The daemon binds `127.0.0.1` and drives a game on the same machine;
 there is no remote mode.
 
+You also need **Claude Code and Codex CLI, both installed as native executables**.
+The daemon only starts when both clients hold an identical `dayz-mcp`
+registration: with just one of them it refuses with
+`daemon_provenance_incomplete` (`tools/dayz_mcp/host_config.py`,
+`resolve_daemon_provenance`), and the installer already refuses a non-native
+CLI with `installer_cli_not_native_exe` (`tools/install-mcp.ps1`). A machine
+without Codex CLI therefore cannot run the daemon, even if you only use
+Claude Code.
+
+AddonBuilder also needs the **Visual C++ runtimes**. Without any of them it
+dies with `System.BadImageFormatException: Could not load file or assembly
+'SteamHelper.dll' ... (0x800700C1)` (exit `-532462766`) before packing
+anything. Steam ships the installers under
+`<Steam>\steamapps\common\Steamworks Shared\_CommonRedist\vcredist\{2010,2012,2013,2019}`,
+but only runs them the first time a game is launched from its UI; on a clean
+machine, run those installers yourself first.
+
 **GitHub Release variant.** If you downloaded `DayZ_MCP-v<version>-addon.zip`,
 verify it against the `SHA256SUMS.txt` published beside it, then extract the archive
 without changing its layout. It contains `@DayZ_MCP/Addons/DayZ_MCP.pbo` and
@@ -47,7 +64,11 @@ except editor backups and Markdown:
 
 **4 — Load it.** Add `-mod=<DayZ>\!Workshop\@DayZ_MCP` to your existing server command
 line. Nothing else changes. Retail works for everything here; `DayZDiag_x64.exe` is only
-needed if you want `-filePatching`.
+needed if you want `-filePatching`. If the path contains spaces (the default
+Steam location does), quote **the whole argument**, never just the value:
+`"-mod=C:\Program Files (x86)\Steam\steamapps\common\DayZ\!Workshop\@DayZ_MCP"`.
+To load the addon only on the server instead, see
+[docs/SERVERMOD.md](docs/SERVERMOD.md) (`-serverMod=`).
 
 **5 — Ask the agent for `bridge_status`.** `ready: true` with `server_peer.last_poll_age_s`
 under a second or two means the tools are live — try `query_all_players`, then
@@ -62,3 +83,17 @@ If you need the installer `--client` on stdin/stdout instead of the host MCP cha
 Not needed for any of this: the native launcher, `dayz_test_run`, and the launcher
 registry — those let the agent *start* the game itself. [README.md](README.md) covers
 them, the run modes, the security model, and what this project cannot do.
+
+## Troubleshooting
+
+**Packing must not need Steam open.** `pack-addon.ps1` passes
+`-toolsDirectory=<DayZ Tools root>` to AddonBuilder itself, so packing works
+from a session that cannot see a running Steam (SSH, a service, another
+logon session). If your copy of the script does not do that yet and
+AddonBuilder logs `[ERROR]: DayZ Tools path is unknown, Steam must be running
+or specify -toolsDirectory.` and exits 0 without writing the PBO, pass the
+argument manually as a workaround: add
+`-toolsDirectory=<DayZ Tools folder>` (the folder containing
+`Bin\AddonBuilder\AddonBuilder.exe`) to the AddonBuilder invocation. Writing
+the `HKCU\Software\Bohemia Interactive\Dayz Tools` registry key does not fix
+this on its own.

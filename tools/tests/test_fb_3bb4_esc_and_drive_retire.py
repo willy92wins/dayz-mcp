@@ -165,7 +165,7 @@ class Fb3bb4EscAndDriveRetireTest(unittest.TestCase):
             # Payloads the tools actually send: since 6ce4 these verbs have a
             # schema, and an empty payload is bad_args.
             enter_status, _enter = state.enqueue_command(
-                "vehicle_enter", {"pos": [0.0, 0.0, 0.0]}
+                "vehicle_enter", {"pos": [0.0, 0.0, 0.0], "uid": "76561198000000001"}
             )
             engine_status, _engine = state.enqueue_command(
                 "engine_set", {"mode": "start"}

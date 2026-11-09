@@ -470,6 +470,7 @@ _NEW = (("new MCPJob()", "NewJob()"), ("new MCPResult()", "NewResult()"))
 _MEMBERS = (
     (re.compile(r"(?<![\w.])(m_Jobs|m_ElapsedS)\b"), r"R.\1"),
     (re.compile(r"(?<![\w.])m_DialogJob\b"), "B.m_DialogJob"),
+    (re.compile(r"(?<![\w.])m_MCPEmoteStarted\b"), "B.m_MCPEmoteStarted"),
 )
 _TICK_S = 0.1
 # The id the end helper asks both checks about and sends. Its value does not
@@ -645,7 +646,7 @@ class _ClientModel:
                 **{f"ID_EMOTE_{name.upper()}": index + 1 for index, name in enumerate(names)}
             ),
             "m_JobRunner": self.runner,
-            "B": SimpleNamespace(m_DialogJob=None),
+            "B": SimpleNamespace(m_DialogJob=None, m_MCPEmoteStarted=False),
             "m_Dialog": None,
             "IsStrictFinite": math.isfinite,
             "ACTOR_EMOTE_WAIT_MIN_S": loopback.ACTOR_EMOTE_WAIT_MIN_S,

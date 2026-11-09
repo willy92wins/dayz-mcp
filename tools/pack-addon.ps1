@@ -481,6 +481,10 @@ if (-not (Test-Path -LiteralPath $prefixFile)) {
 }
 
 $builder = Resolve-AddonBuilder -Explicit $ToolsPath
+# The DayZ Tools root is the folder holding Bin\AddonBuilder\AddonBuilder.exe.
+# It is derived from the resolved builder, whichever origin found it
+# (-ToolsPath, DAYZ_TOOLS_PATH or the default Steam path).
+$toolsRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $builder))
 $temp = Join-Path $env:TEMP "dayz-pack-$ModName"
 if (-not (Test-Path -LiteralPath $Destination)) {
   New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -490,7 +494,11 @@ if (-not (Test-Path -LiteralPath $Destination)) {
 # Without it AddonBuilder packs the whole folder: measured 2026-08-21, three
 # `.bak_*` copies of the bridge (~220 kB of stale source) shipped inside the pbo.
 $includeList = Join-Path $Source "include.lst"
-$args = @($Source, $Destination, "-prefix=$ModName", "-temp=$temp", "-binarizeFullLogs")
+# Always pass -toolsDirectory: without it AddonBuilder looks for DayZ Tools
+# through a running Steam, so a session that cannot see one (SSH, a service,
+# another logon session) logs "DayZ Tools path is unknown" and exits 0
+# without writing the PBO. The registry key alone does not help it.
+$args = @($Source, $Destination, "-prefix=$ModName", "-temp=$temp", "-binarizeFullLogs", "-toolsDirectory=$toolsRoot")
 if (Test-Path -LiteralPath $includeList) {
   $args += "-include=$includeList"
 } else {
@@ -541,10 +549,20 @@ $stampBefore = try { (Get-Item -LiteralPath $pboPath -ErrorAction Stop).LastWrit
 
 $previousPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-try { & $builder @args } finally { $ErrorActionPreference = $previousPreference }
+$builderLines = @()
+try { & $builder @args 2>&1 | Tee-Object -Variable builderLines | Out-Host } finally { $ErrorActionPreference = $previousPreference }
 if ($LASTEXITCODE -ne 0) { throw "AddonBuilder failed with exit code $LASTEXITCODE" }
+$builderOutput = ($builderLines | Out-String)
 
 $pbo = Join-Path $Destination "$ModName.pbo"
+if ($builderOutput -match 'DayZ Tools path is unknown') {
+  throw ("AddonBuilder could not find the DayZ Tools path ('DayZ Tools path is unknown, " +
+         "Steam must be running or specify -toolsDirectory') and wrote no PBO. " +
+         "This script passed -toolsDirectory=$toolsRoot (derived from $builder). " +
+         "Check that folder is a DayZ Tools root (it must contain Bin\AddonBuilder\AddonBuilder.exe); " +
+         "if your tools live elsewhere, pass -ToolsPath <DayZ Tools folder> or set DAYZ_TOOLS_PATH to it. " +
+         "Starting Steam is not required once -toolsDirectory points at a valid tools root.")
+}
 if (-not (Test-Path -LiteralPath $pbo)) { throw "AddonBuilder reported success but $pbo is missing" }
 
 # Existence is not delivery. AddonBuilder can pack correctly and still fail its own final

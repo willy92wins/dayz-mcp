@@ -3,6 +3,9 @@
 Static contract over both bridge sources. The spacing lives in OnTick, on
 m_InitAccumS, because a CallLater would still fire after ShutdownInstance.
 ia stays m_InitAttempts: skipped frames must not increment it.
+
+MCPBotControl.Tick, which the server's OnTick calls every frame, is translated
+and run: with no bot running it builds no array (inbox b320, the rest of A2).
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import re
 import unittest
 
+from tests import enforce_subset_helpers as enforce
 from tests._addon_paths import addon_root
 
 
@@ -171,6 +175,78 @@ class TryInitSpacingTest(unittest.TestCase):
         self.assertEqual(
             _attempt_frames([0.0] + [0.5] * 8),
             [0, 2, 4, 6, 8],
+        )
+
+
+_BOT_TICK = "static void Tick(MCPBridge bridge, float nowS)"
+
+
+class _Session:
+    def __init__(self, object_id: int, deadline_s: float) -> None:
+        self.object_id = object_id
+        self.deadline_s = deadline_s
+
+
+class _Player:
+    def IsAlive(self) -> bool:
+        return True
+
+
+class _PlayerBase:
+    @staticmethod
+    def Cast(target: object) -> object:
+        return target if isinstance(target, _Player) else None
+
+
+class _Bridge:
+    def __init__(self, objects: dict[int, object]) -> None:
+        self.objects = objects
+
+    def RuntimeObjectById(self, object_id: int) -> object:
+        return self.objects.get(object_id)
+
+
+class BotTickIdleTest(unittest.TestCase):
+    """b320: Tick builds its array only while a bot runs."""
+
+    def tick(self, running: object, objects: dict[int, object]) -> tuple[int, list]:
+        built: list[int] = []
+        released: list[tuple[int, str]] = []
+
+        def array() -> enforce.EnforceArray:
+            built.append(1)
+            return enforce.EnforceArray()
+
+        namespace = {
+            "array": array,
+            "s_Running": running,
+            "PlayerBase": _PlayerBase,
+            "Release": lambda bridge, object_id, why: released.append(
+                (object_id, why.text)
+            ),
+        }
+        tick = enforce.translate(
+            _source("MCP_BotControl.c"),
+            _BOT_TICK,
+            namespace,
+            class_types=("array", "Object", "PlayerBase"),
+            members=("s_Running",),
+        )
+        tick(_Bridge(objects), 10.0)
+        return len(built), released
+
+    def test_no_running_bot_builds_no_array(self) -> None:
+        # s_Running is created by the first bot_start and never set back to null.
+        self.assertEqual(self.tick(enforce.EnforceArray(), {}), (0, []))
+        self.assertEqual(self.tick(None, {}), (0, []))
+
+    def test_a_running_bot_is_still_checked(self) -> None:
+        running = enforce.EnforceArray()
+        running.Insert(_Session(7, 20.0))
+        self.assertEqual(self.tick(running, {7: _Player()}), (1, []))
+        running.Insert(_Session(8, 5.0))
+        self.assertEqual(
+            self.tick(running, {7: _Player(), 8: _Player()}), (1, [(8, "ttl")])
         )
 
 

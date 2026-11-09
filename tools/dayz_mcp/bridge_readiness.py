@@ -248,6 +248,9 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "server_perf": ("window_s",),
     "survivor_drive": ("heading", "heading_set", "mode", "object_id", "speed", "speed_set"),
     "survivor_drive_release": ("command_id", "object_id"),
+    # vehicle_enter takes uid (091a): an older bridge ignores it and seats the
+    # first human, and only this hash tells that bridge from this one.
+    "vehicle_enter": ("pos", "uid"),
     "vehicle_prepare_fixture": ("mode", "pos", "radius", "type"),
     # world_spawn joins for scene_id (165a): only this hash tells an older
     # bridge, which would leave the object out of the scene, from this one.

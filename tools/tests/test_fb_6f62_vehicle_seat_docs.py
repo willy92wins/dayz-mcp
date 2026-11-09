@@ -60,8 +60,9 @@ class SeatJobSourceTest(unittest.TestCase):
             body,
         )
         self.assertEqual(body.count("return true;"), 1)
-        # The description's "or, if that one is gone, the first player".
-        self.assertIn("if (!human) { human = GetFirstHuman(); job.actor = human; }", body)
+        # 091a: the player vehicle_enter seated, never the first human.
+        self.assertIn("Human human = job.actor;", body)
+        self.assertNotIn("GetFirstHuman", body)
         success = method_body(BRIDGE, "protected void PostSeatSuccess(MCPJob job)")
         self.assertIn("result.seated = true;", success)
         self.assertIn('result.seat = "driver";', success)
@@ -90,7 +91,8 @@ class SeatDescriptionsTest(unittest.IsolatedAsyncioTestCase):
             description,
         )
         self.assertIn("seated=1 on the first tick that reads it", description)
-        self.assertIn("(or, if that one is gone, the first player)", description)
+        self.assertIn("never falls back to the first human", description)
+        self.assertNotIn("the first player", description)
         self.assertIn("once the get-in ended", description)
         self.assertIn("read query_all_players (in_vehicle) before you retry", description)
         self.assertNotIn("at most", description)
@@ -128,9 +130,8 @@ class VehicleTestingDocTest(unittest.TestCase):
         start = text.index("3. `vehicle_enter` near the fixture pos")
         step = _squashed(text[start : text.index("4. `vehicle_get_in_client`", start)])
         self.assertIn(
-            "`seated=1` means the server read the player it seated (or, if that one "
-            "is gone, the first player) in the driver seat of that car once the "
-            "get-in ended (`IsSeatReady`).",
+            "`seated=1` means the server read the player it seated in the driver "
+            "seat of that car once the get-in ended (`IsSeatReady`).",
             step,
         )
         self.assertIn(
