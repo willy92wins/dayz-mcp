@@ -246,7 +246,8 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "hold_protocol": frozenset({"action_hold", "action_hold_cancel"}),
     "hold_id": frozenset({"action_hold", "action_hold_cancel"}),
     "end_state": frozenset({"action_hold"}),
-    "reason": frozenset({"action_hold"}),
+    # actor_emote writes it too: the check that refused a new emote (36fa).
+    "reason": frozenset({"action_hold", "actor_emote"}),
     "action_state": frozenset({"action_hold"}),
     "action_state_known": frozenset({"action_hold"}),
     "duration_s": frozenset({"action_hold"}),
@@ -272,6 +273,8 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "emote_state": frozenset({"actor_emote"}),
     "started_after_s": frozenset({"actor_emote"}),
     "finished_after_s": frozenset({"actor_emote"}),
+    # The local player's stance on that refusal (36fa).
+    "stance": frozenset({"actor_emote"}),
 }
 
 # Scalars MCPResult declares and no command assigns (dde3). Every result carries

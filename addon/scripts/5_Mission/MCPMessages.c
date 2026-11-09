@@ -1470,6 +1470,7 @@ class MCPResult
 	int hold_protocol;
 	string hold_id;
 	string end_state;
+	// Also actor_emote's: the check that refused a new emote (36fa).
 	string reason;
 	int action_state;
 	bool action_state_known;
@@ -1523,6 +1524,10 @@ class MCPResult
 	string emote_state;
 	float started_after_s;
 	float finished_after_s;
+	// actor_emote's emote_rejected from a new emote's three checks (36fa):
+	// reason names the check, and stance is the local player's then. ""
+	// otherwise, and unassigned on other commands.
+	string stance;
 	// camera_path_play state (d026). Unassigned on other commands.
 	ref MCPCameraPathState camera_path;
 	// hud_set read-back (f427). Unassigned on other commands.

@@ -7706,11 +7706,35 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		else
 		{
-			if (emotes.IsEmotePlaying() || !emotes.CanPlayEmote(emoteId) || !emotes.CanPlayEmoteClientCheck(emoteId))
+			// 36fa: each check refuses on its own, naming itself in reason,
+			// with the player's stance: rps_r, rps_p and rps_s are standing
+			// only in 1.30 (emoteclasses.c:528, emotemanager.c:262), and
+			// dabbing is not registered there (emoteconstructor.c:53).
+			if (emotes.IsEmotePlaying())
 			{
 				result.ok = false;
 				result.error = "emote_rejected";
 				result.emote_state = "rejected";
+				result.reason = "is_emote_playing";
+				result.stance = ActorEmoteStance(player);
+				return true;
+			}
+			if (!emotes.CanPlayEmote(emoteId))
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				result.reason = "can_play_emote";
+				result.stance = ActorEmoteStance(player);
+				return true;
+			}
+			if (!emotes.CanPlayEmoteClientCheck(emoteId))
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				result.reason = "can_play_emote_client_check";
+				result.stance = ActorEmoteStance(player);
 				return true;
 			}
 			emotes.CreateEmoteCBFromMenu(emoteId);
@@ -7727,6 +7751,41 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		job.tick_dispatch = result.tick_dispatch;
 		m_JobRunner.AddJob(job);
 		return false;
+	}
+
+	// The local player's stance for an actor_emote refusal (36fa): the
+	// DayZPlayerConstants name of HumanMovementState.m_iStanceIdx
+	// (human.c:1153-1157), "" for another index.
+	protected string ActorEmoteStance(PlayerBase player)
+	{
+		HumanMovementState state;
+		state = new HumanMovementState();
+		player.GetMovementState(state);
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_ERECT)
+		{
+			return "erect";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_CROUCH)
+		{
+			return "crouch";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_PRONE)
+		{
+			return "prone";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_RAISEDERECT)
+		{
+			return "raised_erect";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_RAISEDCROUCH)
+		{
+			return "raised_crouch";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_RAISEDPRONE)
+		{
+			return "raised_prone";
+		}
+		return "";
 	}
 
 	// actor_emote's closed catalog: each name is the EmoteConstants id of the

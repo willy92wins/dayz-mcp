@@ -525,20 +525,39 @@ def _scene_shared_detail(result: dict[str, Any]) -> str:
 # actor_emote fills emote_state before its three refusals (MCPClientBridge.c
 # DispatchActorEmote, PostActorEmoteJob): rejected for emote_rejected and
 # no_emote_playing, timed_out for emote_timed_out. Only those two values
-# cross, and only on those codes.
+# cross, and only on those codes. An emote_rejected from a new emote's three
+# checks also fills reason, the check that refused it, and stance, the local
+# player's then (36fa); only these names cross, and only on emote_rejected.
 _ACTOR_EMOTE_ERROR_STATES = frozenset({"rejected", "timed_out"})
 _ACTOR_EMOTE_STATE_CODES = frozenset(
     {"emote_rejected", "no_emote_playing", "emote_timed_out"}
 )
+_ACTOR_EMOTE_REASONS = frozenset(
+    {"is_emote_playing", "can_play_emote", "can_play_emote_client_check"}
+)
+_ACTOR_EMOTE_STANCES = frozenset(
+    {"erect", "crouch", "prone", "raised_erect", "raised_crouch", "raised_prone"}
+)
 
 
 def _actor_emote_detail(result: dict[str, Any]) -> str:
-    if str(result.get("error") or "") not in _ACTOR_EMOTE_STATE_CODES:
+    code = str(result.get("error") or "")
+    if code not in _ACTOR_EMOTE_STATE_CODES:
         return ""
+    parts: list[str] = []
+    reason = result.get("reason")
+    if code == "emote_rejected" and isinstance(reason, str) and reason in _ACTOR_EMOTE_REASONS:
+        parts.append(f"reason={reason}")
+    pairs: list[str] = []
     state = result.get("emote_state")
     if isinstance(state, str) and state in _ACTOR_EMOTE_ERROR_STATES:
-        return f"observed=emote_state={state}"
-    return ""
+        pairs.append(f"emote_state={state}")
+    stance = result.get("stance")
+    if code == "emote_rejected" and isinstance(stance, str) and stance in _ACTOR_EMOTE_STANCES:
+        pairs.append(f"stance={stance}")
+    if pairs:
+        parts.append("observed=" + " ".join(pairs))
+    return "; ".join(parts)
 
 
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
@@ -580,7 +599,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     observed=health01_after=<v> health_level_after=<n>, the same-tick read-back.
 
     actor_emote is the ninth: emote_rejected, no_emote_playing and
-    emote_timed_out carry observed=emote_state= (rejected or timed_out).
+    emote_timed_out carry observed=emote_state= (rejected or timed_out). An
+    emote_rejected from a new emote's checks also carries reason= (the check
+    that refused it) and stance= in observed= (36fa).
 
     world_spawn's vehicle_eject_failed carries the retained object_id so an
     MCP caller can retry cleanup after its unsupported-lifetime rollback.
@@ -660,7 +681,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # scene_clear/scene_shared, which carries the pair that blocked it,
     # object_set_health/health_not_applied, which carries observed= with its
     # after read-back,
-    # actor_emote, whose refusals carry observed=emote_state=,
+    # actor_emote, whose refusals carry observed=emote_state= (and reason= and
+    # stance= on a new emote's emote_rejected),
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
