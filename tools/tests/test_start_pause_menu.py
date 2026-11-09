@@ -4,8 +4,9 @@ In the 9/11 round's P1b the client started with the in-game pause menu open in
 2 of 3 launches; ui_click(continuebtn) closed it and key_press(dik=1) did not.
 MCPClientBridge.ContinueStartPauseMenu, called from OnTick once the bridge is
 configured, closes a pause menu (MENU_INGAME) on top with the mission's
-Continue() within the first START_PAUSE_WINDOW_S of the mission, once, and
-logs one line: closed, not open or skipped.
+Continue() within START_PAUSE_WINDOW_S of the first call that sees the local
+player (vanilla opens that pause only once the player is loaded), once, and
+logs one line: closed or not open.
 
 ContinueStartPauseMenu runs as Python (enforce_subset_helpers) against fakes of
 the game, its UI manager, the menu on top and the mission; OnTick is read for
@@ -30,7 +31,7 @@ BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
 CONTINUE = "protected void ContinueStartPauseMenu()"
 ON_TICK = "void OnTick(float timeslice)"
 CONSTRUCTOR = "void MCPClientBridge()"
-MEMBERS = ("m_StartPauseDone", "m_StartPauseWatched", "m_JobRunner", "START_PAUSE_WINDOW_S")
+MEMBERS = ("m_StartPauseDone", "m_StartPauseFromS", "m_JobRunner", "START_PAUSE_WINDOW_S")
 # Any value: the model compares the menu's id with the namespace's constant.
 MENU_INGAME = 2
 MENU_OPTIONS = 9
@@ -58,8 +59,9 @@ class Menu:
 
 
 class Client:
-    """The game a ContinueStartPauseMenu sees: the menu on top, the mission and
-    the job runner's clock; Continue closes a pause menu on top, as vanilla's."""
+    """The game a ContinueStartPauseMenu sees: the local player, the menu on
+    top, the mission and the job runner's clock; Continue closes a pause menu
+    on top, as vanilla's."""
 
     def __init__(self, source: str, *, mission_gameplay: bool = True) -> None:
         self.now = 0.0
@@ -68,6 +70,7 @@ class Client:
         self.log: list[str] = []
         self.has_game = True
         self.has_ui = True
+        self.has_player = True
         self.mission = SimpleNamespace(Continue=self._continue) if mission_gameplay else None
         ui = SimpleNamespace(GetMenu=lambda: self.menu)
         game = SimpleNamespace(
@@ -77,11 +80,12 @@ class Client:
         self.namespace: dict = {
             "_S": _LogLine,
             "GetGame": lambda: game if self.has_game else None,
+            "IsClientInGame": lambda: self.has_game and self.has_player,
             "MissionGameplay": SimpleNamespace(Cast=lambda mission: mission),
             "MENU_INGAME": MENU_INGAME,
             "Log": lambda line: self.log.append(line.text),
             "m_StartPauseDone": False,
-            "m_StartPauseWatched": False,
+            "m_StartPauseFromS": -1.0,
             "m_JobRunner": SimpleNamespace(GetElapsedS=lambda: self.now),
             "START_PAUSE_WINDOW_S": constant(source),
         }
@@ -125,7 +129,7 @@ class StartPauseMenuModelTest(unittest.TestCase):
         client.at(0.5, MENU_INGAME)
         self.assertEqual(client.continues, 1)
         self.assertIsNone(client.menu)
-        self.assertEqual(client.log, ["start pause menu closed elapsed_s=0.5"])
+        self.assertEqual(client.log, ["start pause menu closed elapsed_s=0.5 from_s=0.0"])
         # One shot: a pause menu opened later in the window stays open.
         client.at(10.0, MENU_INGAME)
         client.at(61.0, MENU_INGAME)
@@ -138,7 +142,7 @@ class StartPauseMenuModelTest(unittest.TestCase):
             client.at(now)
         client.at(60.0, MENU_INGAME)
         self.assertEqual(client.continues, 1)
-        self.assertEqual(client.log, ["start pause menu closed elapsed_s=60.0"])
+        self.assertEqual(client.log, ["start pause menu closed elapsed_s=60.0 from_s=0.0"])
 
     def test_no_pause_menu_in_the_window_logs_not_open_and_leaves_a_later_one(self) -> None:
         client = self.client()
@@ -146,18 +150,38 @@ class StartPauseMenuModelTest(unittest.TestCase):
             client.at(now)
         self.assertEqual(client.log, [])
         client.at(60.5)
-        self.assertEqual(client.log, ["start pause menu not open elapsed_s=60.5"])
+        self.assertEqual(client.log, ["start pause menu not open elapsed_s=60.5 from_s=0.0"])
         client.at(75.0, MENU_INGAME)
         self.assertEqual(client.continues, 0)
         self.assertEqual(client.menu.GetID(), MENU_INGAME)
         self.assertEqual(len(client.log), 1)
 
-    def test_a_bridge_configured_after_the_window_skips_and_leaves_the_menu(self) -> None:
+    def test_the_window_opens_on_the_first_call_that_sees_the_local_player(self) -> None:
         client = self.client()
+        client.has_player = False
+        client.at(0.0)
+        client.at(30.0, MENU_INGAME)
         client.at(75.0, MENU_INGAME)
+        self.assertEqual((client.continues, client.log), (0, []))
+        client.has_player = True
+        client.at(100.0)
+        client.at(159.0, MENU_INGAME)
+        self.assertEqual(client.continues, 1)
+        self.assertEqual(client.log, ["start pause menu closed elapsed_s=159.0 from_s=100.0"])
+
+    def test_a_slow_load_with_no_pause_menu_logs_not_open_from_the_player(self) -> None:
+        client = self.client()
+        client.has_player = False
+        client.at(0.0)
+        client.at(89.0)
+        client.has_player = True
+        client.at(90.0)
+        client.at(150.0)
+        self.assertEqual(client.log, [])
+        client.at(150.5)
+        self.assertEqual(client.log, ["start pause menu not open elapsed_s=150.5 from_s=90.0"])
+        client.at(151.0, MENU_INGAME)
         self.assertEqual(client.continues, 0)
-        self.assertEqual(client.log, ["start pause menu skipped elapsed_s=75.0"])
-        client.at(76.0, MENU_INGAME)
         self.assertEqual(len(client.log), 1)
 
     def test_another_menu_on_top_is_left_and_the_watch_goes_on(self) -> None:
@@ -166,7 +190,7 @@ class StartPauseMenuModelTest(unittest.TestCase):
         self.assertEqual((client.continues, client.log), (0, []))
         client.at(2.0, MENU_INGAME)
         self.assertEqual(client.continues, 1)
-        self.assertEqual(client.log, ["start pause menu closed elapsed_s=2.0"])
+        self.assertEqual(client.log, ["start pause menu closed elapsed_s=2.0 from_s=1.0"])
 
     def test_nothing_to_read_keeps_watching_until_the_window_passes(self) -> None:
         client = self.client()
@@ -184,8 +208,8 @@ class StartPauseMenuModelTest(unittest.TestCase):
         client = self.client(mission_gameplay=False)
         client.at(1.0, MENU_INGAME)
         self.assertEqual((client.continues, client.log), (0, []))
-        client.at(61.0, MENU_INGAME)
-        self.assertEqual(client.log, ["start pause menu not open elapsed_s=61.0"])
+        client.at(61.5, MENU_INGAME)
+        self.assertEqual(client.log, ["start pause menu not open elapsed_s=61.5 from_s=1.0"])
 
 
 class StartPauseMenuSourceTest(unittest.TestCase):
@@ -205,7 +229,7 @@ class StartPauseMenuSourceTest(unittest.TestCase):
     def test_a_new_bridge_has_not_looked(self) -> None:
         body = re.sub(r"\s+", "", method_body(self.code, CONSTRUCTOR))
         self.assertIn("m_StartPauseDone=false;", body)
-        self.assertIn("m_StartPauseWatched=false;", body)
+        self.assertIn("m_StartPauseFromS=-1.0;", body)
 
     def test_it_closes_only_through_the_mission_s_continue(self) -> None:
         body = method_body(self.code, CONTINUE)
