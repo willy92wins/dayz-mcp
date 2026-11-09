@@ -125,6 +125,7 @@ jobs:
         run: >-
           .venv-mcp/bin/python -B -m unittest
           tests.test_linux_build
+          tests.test_linux_compat
           tests.test_linux_launcher
           tests.test_linux_windows
           tests.test_podman_server
