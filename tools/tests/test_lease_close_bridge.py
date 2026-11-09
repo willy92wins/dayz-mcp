@@ -614,7 +614,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         # are the real MCP_Emote.c bodies, run on this fake vanilla state
         # (IsEmotePlaying = playing || surrendered || pending).
         state = {"cancelled": 0, "ended": 0}
-        launcher = type("EL", (), {"m_SyncRequestSent": synced})() if queued else None
+        launcher = type("EL", (), {"WasSynced": lambda self: synced})() if queued else None
         emote_source = _read(EMOTE_PATH)
         helper_ns = {
             "IsEmotePlaying": lambda: playing or pending or surrendered,
@@ -766,8 +766,10 @@ class LeaseCloseCensusTests(unittest.TestCase):
         ns["_emote_state"] = emote_state
         return [1] * emote_state["ended"], ns
 
-    def _emote_maintain(self, source, *, started, mutant=None, **live_kwargs):
+    def _emote_maintain(self, source, *, started, mutant=None, no_manager=False, **live_kwargs):
         emote_mgr, _emote_state = self._emote_manager(**live_kwargs)
+        if no_manager:
+            emote_mgr = None
         player = type("P", (), {"GetEmoteManager": lambda self: emote_mgr})()
         game = type("G", (), {"GetPlayer": lambda self: player})()
         ns = {
@@ -835,7 +837,9 @@ class LeaseCloseCensusTests(unittest.TestCase):
         source = _read(CLIENT_PATH)
         # Wiring: the tick maintains the mark before the job runner.
         tick = method_body(source, "void OnTick(float timeslice)")
-        self.assertLess(tick.find("MaintainMCPEmoteStarted();"), tick.find("m_JobRunner.Tick"))
+        maintain_at = tick.find("MaintainMCPEmoteStarted();")
+        self.assertGreaterEqual(maintain_at, 0)
+        self.assertLess(maintain_at, tick.find("m_JobRunner.Tick"))
         # POS live: queued, pending or playing keeps the mark.
         self.assertTrue(self._emote_maintain(source, started=True, queued=True))
         self.assertTrue(self._emote_maintain(source, started=True, pending=True))
@@ -844,6 +848,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         # stops with no job), a foreign emote plays, then the close.
         flag = self._emote_maintain(source, started=True, playing=False)
         self.assertFalse(flag)
+        # M4: with no manager the mark is kept (nothing can be read).
+        self.assertTrue(self._emote_maintain(source, started=True, no_manager=True))
         calls, _ns = self._emote_stop(source, started=flag, playing=True)
         self.assertEqual(calls, [])
         census = self._client_census(source, emote_mcp=flag, emote_playing=True)
@@ -858,6 +864,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual([e.name.text for e in census_m.entries if e.state.text != "clean"], ["emote"])
 
     def test_emote_queued_launcher_close_and_no_manager_census(self):
+        self.assertNotIn("m_SyncRequestSent", _read(EMOTE_PATH))
         source = _read(CLIENT_PATH)
         # P3-1 POS: a queued, unsynced launcher is cancelled, not ended,
         # and the mark falls; a synced launcher is not cancelled here.

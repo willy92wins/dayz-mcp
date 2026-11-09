@@ -707,7 +707,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// job, by this frame's timeslice. Returns at once while no path plays.
 		TickCameraPath(timeslice);
 		// §4 #266: the MCP-started mark falls as soon as its emote stops,
-		// even after its job ended. Before the job runner, as proposed.
+		// even after its job ended. Before the job runner.
 		MaintainMCPEmoteStarted();
 
 		if (m_JobRunner)
@@ -8907,7 +8907,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// §4 #266: end the emote actor_emote started if it still plays. An
 	// emote MCP did not start is neither ended nor counted. The end is
-	// async: the census below and the 25 s observer read IsEmotePlaying
+	// async: the census below and the 25 s observer read MCP_IsEmoteLive
 	// until it stops.
 	protected void StopLeaseCloseEmote()
 	{

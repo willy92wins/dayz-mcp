@@ -31,7 +31,7 @@ modded class EmoteManager
 	}
 
 	// §4 #266: live means IsEmotePlaying() (playing, pending or surrender)
-	// or a launcher still queued in m_MenuEmote (emotemanager.c:130),
+	// or a launcher still queued in m_MenuEmote (1.30 emotemanager.c:125),
 	// which CreateEmoteCBFromMenu leaves before EmoteManager.Update sends
 	// it. Without the launcher, that frame reads not playing.
 	bool MCP_IsEmoteLive()
@@ -48,11 +48,11 @@ modded class EmoteManager
 	}
 
 	// §4 #266: drop a queued launcher that was never synced
-	// (EmoteLauncher.m_SyncRequestSent, emotemanager.c:72), so a close in
-	// the queued frame does not leave an emote to start afterwards.
+	// (EmoteLauncher.WasSynced, 1.30 emotemanager.c:110; 1.29 :115), so a close
+	// in the queued frame does not leave an emote to start afterwards.
 	void MCP_CancelQueuedEmote()
 	{
-		if (m_MenuEmote && !m_MenuEmote.m_SyncRequestSent)
+		if (m_MenuEmote && !m_MenuEmote.WasSynced())
 		{
 			ClearEmoteLauncher();
 		}
