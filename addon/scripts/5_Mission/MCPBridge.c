@@ -3218,6 +3218,17 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		// 9/11 round, seq 17, 21, 62 and 74: a player already seated was
+		// handed a second StartCommand_Vehicle. Vanilla's get-in refuses a
+		// player with a vehicle command (actiongetintransport.c:42), and
+		// query_get_in_condition names it already_in_vehicle.
+		if (human.GetCommand_Vehicle() || human.IsInTransport())
+		{
+			result.ok = false;
+			result.error = "already_in_vehicle";
+			return true;
+		}
+
 		int crew = 0;
 		int seatAnim = vehicle.GetSeatAnimationType(crew);
 		HumanCommandVehicle vehicleCommand = human.StartCommand_Vehicle(vehicle, crew, seatAnim);

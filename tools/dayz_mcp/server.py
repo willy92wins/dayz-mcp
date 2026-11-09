@@ -7713,7 +7713,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ended. The bridge checks that each tick: seated=1 on the first "
             "tick that reads it, timeout on a tick that does not once 5 s have "
             "passed, whatever timeout_s is. A timeout can still end seated: "
-            "read query_all_players (in_vehicle) before you retry. "
+            "read query_all_players (in_vehicle) before you retry. A player "
+            "the server already reads in a vehicle (a vehicle command or in "
+            "transport) answers already_in_vehicle and is not seated again. "
             "engine_set and vehicle_control require client-side ownership; "
             "establish it with vehicle_get_in_client."
         )
