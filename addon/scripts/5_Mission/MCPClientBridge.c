@@ -575,6 +575,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref MCPDialogSink m_DialogSink;
 	protected MCPJob m_DialogJob;
 	protected bool m_DialogHostTried;
+	//! ContinueStartPauseMenu (inbox 5880/1d31): it has closed the start pause
+	//! menu or its window has passed, and whether it looked inside the window.
+	protected bool m_StartPauseDone;
+	protected bool m_StartPauseWatched;
+	protected const float START_PAUSE_WINDOW_S = 60.0;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -625,6 +630,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ReadyObjects = new array<Object>();
 		m_ReadyProxyCargos = new array<CargoBase>();
 		m_DialogHostTried = false;
+		m_StartPauseDone = false;
+		m_StartPauseWatched = false;
 	}
 
 	void ~MCPClientBridge()
@@ -735,6 +742,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_DialogHostTried = true;
 			EnsureDialogHost();
 		}
+
+		ContinueStartPauseMenu();
 
 		DrainPending();
 
@@ -1208,6 +1217,80 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool IsClientInGame()
 	{
 		return GetGame() && GetGame().GetPlayer();
+	}
+
+	// Inbox 5880/1d31: the client started with the in-game pause menu open in
+	// 2 of 3 launches of the 9/11 round (P1b), which ui_click(continuebtn)
+	// closed and key_press(dik=1) did not. The reading, not measured: vanilla
+	// MissionGameplay pauses when the window is not active at its first update.
+	// OnTick calls this once the bridge is configured. Within the first
+	// START_PAUSE_WINDOW_S of the mission, on the job runner's clock, which
+	// starts with the bridge at OnMissionStart, a pause menu (MENU_INGAME) on
+	// top is closed by the mission's Continue(), the call behind the pause
+	// menu's Continue button. It runs once: after it closed one, or once the
+	// window has passed, it never runs again in this mission, so a pause menu
+	// opened after that stays open. One Log line says what it did: closed, not
+	// open (none on top in the window) or skipped (configured after it).
+	protected void ContinueStartPauseMenu()
+	{
+		float elapsedS;
+		UIManager ui;
+		UIScriptedMenu menu;
+		MissionGameplay missionGP;
+
+		if (m_StartPauseDone || !m_JobRunner)
+		{
+			return;
+		}
+
+		elapsedS = m_JobRunner.GetElapsedS();
+		if (elapsedS > START_PAUSE_WINDOW_S)
+		{
+			m_StartPauseDone = true;
+			if (m_StartPauseWatched)
+			{
+				Log("start pause menu not open elapsed_s=" + elapsedS);
+			}
+			else
+			{
+				Log("start pause menu skipped elapsed_s=" + elapsedS);
+			}
+
+			return;
+		}
+
+		m_StartPauseWatched = true;
+		if (!GetGame())
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		menu = ui.GetMenu();
+		if (!menu)
+		{
+			return;
+		}
+
+		if (menu.GetID() != MENU_INGAME)
+		{
+			return;
+		}
+
+		missionGP = MissionGameplay.Cast(GetGame().GetMission());
+		if (!missionGP)
+		{
+			return;
+		}
+
+		m_StartPauseDone = true;
+		missionGP.Continue();
+		Log("start pause menu closed elapsed_s=" + elapsedS);
 	}
 
 	protected bool HasExclusiveJob()
