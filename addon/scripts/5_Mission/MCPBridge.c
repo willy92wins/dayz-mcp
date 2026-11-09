@@ -1257,6 +1257,14 @@ class MCPBridge : Managed
 			{
 				m_Jobs.Remove(job.id);
 			}
+			if (clientRpc)
+			{
+				// Every error path of MCPSendInventoryMove returns before
+				// rpc.Send (MCP_InventoryMove.c MCPRequestInventoryMove):
+				// the RPC was never sent, so its row is not debt. A row
+				// after a Send is never removed here (§2.7 step 5).
+				LiquidateLeaseCloseRpc(job.id, "inventory_move");
+			}
 			result.ok = false;
 			result.error = performError;
 			return true;
@@ -2869,6 +2877,9 @@ class MCPBridge : Managed
 		RegisterLeaseCloseRpc(command.id, "hands_take");
 		if (!player.MCPRequestTakeToHands(item, result.type))
 		{
+			// MCPRequestTakeToHands returns false only before rpc.Send
+			// (MCP_Weapon.c): the RPC was never sent, so no debt.
+			LiquidateLeaseCloseRpc(command.id, "hands_take");
 			result.ok = false;
 			result.error = "rpc_failed";
 			return true;
@@ -3005,6 +3016,9 @@ class MCPBridge : Managed
 		RegisterLeaseCloseRpc(command.id, "hands_attach");
 		if (!player.MCPRequestAttachFromHands(target, target.GetType(), held, result.type, command.args.slot))
 		{
+			// MCPRequestAttachFromHands returns false only before
+			// rpc.Send (MCP_Weapon.c): the RPC was never sent, so no debt.
+			LiquidateLeaseCloseRpc(command.id, "hands_attach");
 			result.ok = false;
 			result.error = "rpc_failed";
 			return true;
