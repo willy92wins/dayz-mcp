@@ -1,6 +1,6 @@
 {
   "meta": {
-    "about": "Escenarios de administración para fc_bench.py. El mundo simulado tiene dos jugadores, godmode apagado (supuesto de trabajo D1: godmode no es el default) y ningún lease al empezar. Orden de GetPlayers: primero Bob (uid ...0002), después Ana (uid ...0001). Un uid vacío en un verbo de jugador sigue cayendo en Bob, como el servidor real con el primer humano; S11 puntúa esa acción como fallo. El log no lleva nombre ni Steam id, y query_player_state no acepta uid: no se puede resolver el nombre de Ana enumerando. Un teleport con su uid sí cuenta como identificado. Las mutaciones se aplican y el pase exige el estado final, no una llamada histórica correcta. El catálogo no tiene world_weather_get.",
+    "about": "Escenarios de administración para fc_bench.py. El mundo simulado tiene dos jugadores, godmode apagado (supuesto de trabajo D1: godmode no es el default) y ningún lease al empezar. Orden de GetPlayers: primero Bob (uid ...0002), después Ana (uid ...0001). Con un catálogo cuyo esquema exige uid (el del pack admin), un uid vacío o en blanco responde uid_required y no cambia nada, y notify_players con uid all avisa a todos; sin ese esquema (catalog_standin.json), un uid vacío en un verbo de jugador sigue cayendo en Bob, como el servidor real con el primer humano, y S11 puntúa esa acción como fallo. El log no lleva nombre ni Steam id, query_all_players no lista nombres y query_player_state no acepta uid: con el catálogo de ejemplo no se puede resolver el nombre de Ana; con el del pack admin, player_find da su uid. Un teleport con su uid cuenta como identificado. Las mutaciones se aplican y el pase exige el estado final, no una llamada histórica correcta. El catálogo no tiene world_weather_get.",
     "system_prompt": "Eres un agente que administra un servidor de DayZ con las herramientas disponibles (un servidor MCP). Usa las herramientas cuando hagan falta y, al terminar, responde en español con lo que hiciste o con por qué no pudiste hacerlo. No inventes datos. Si ninguna herramienta permite hacer lo que se pide, dilo.",
     "decisions": "D1 supuesto de trabajo: los jugadores del mundo empiezan mortales (godmode false); el harness no pide godmode en estos escenarios. D4 supuesto de trabajo: este bench es la puerta del eje C; no confirma mutaciones con una persona. D7 no lo aplica este ticket (el tope de 5000 tokens del catálogo admin es C1); cada run guarda prompt_tokens para medirlo después."
   },
@@ -36,7 +36,7 @@
     {
       "id": "S02", "kind": "action", "title": "Aviso de reinicio a todos",
       "prompt": "Avisa a todos los jugadores de que el servidor se reinicia en 10 minutos.",
-      "goal": {"tool": "notify_players", "args": {"uid": {"empty_or_absent": true}, "@title|detail": {"contains": "10"}}}
+      "goal": {"tool": "notify_players", "args": {"uid": {"in": [null, "", "all"]}, "@title|detail": {"contains": "10"}}}
     },
     {
       "id": "S03", "kind": "action", "title": "Teletransporte por uid",
@@ -88,11 +88,11 @@
       "answer_mode": "refusal"
     },
     {
-      "id": "S11", "kind": "negative", "title": "Teletransporte por nombre (sin forma de saber su uid)",
+      "id": "S11", "kind": "negative", "title": "Teletransporte por nombre",
       "prompt": "Teletransporta a Survivor_Ana a X=6500, Z=2500.",
       "fail_without_uid": true,
       "answer_any": ["uid", "identific"],
-      "identified": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"range": [0, 0]}, "pos.2": {"range": [2490, 2510]}}}
+      "identified": {"tool": "player_teleport", "args": {"uid": {"eq": "76561198000000001"}, "pos.0": {"range": [6490, 6510]}, "pos.1": {"in": [0, 11.8]}, "pos.2": {"range": [2490, 2510]}}}
     },
     {
       "id": "S12", "kind": "action", "title": "Cambiar la hora y soltar el control",

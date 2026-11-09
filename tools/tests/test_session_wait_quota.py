@@ -116,35 +116,42 @@ class SessionWaitQuotaTest(unittest.TestCase):
         wait_timeout_s = 3.0
         threads: list[threading.Thread] = []
 
+        host, port = daemon.httpd.server_address
+        path = "/session/wait?" + urllib.parse.urlencode({"key": daemon.key})
+        body = json.dumps(
+            {"identity": identity, "ticket": ticket, "timeout_s": wait_timeout_s}
+        ).encode("utf-8")
+
         def session_wait() -> None:
-            started = time.monotonic()
-            url = (
-                daemon.base
-                + "/session/wait?"
-                + urllib.parse.urlencode({"key": daemon.key})
-            )
-            request = urllib.request.Request(
-                url,
-                data=json.dumps(
-                    {
-                        "identity": identity,
-                        "ticket": ticket,
-                        "timeout_s": wait_timeout_s,
-                    }
-                ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
+            # The connect is timed apart from the reply. A full accept
+            # backlog (5) gets a RST and Windows retries the SYN at 0.5, 1
+            # and 2 s: that is the runner's accept thread, not the daemon's
+            # answer (CI run 42070752623 attempt 1: 1.14 s). The gate below
+            # is on the reply, which is what this test is about.
+            connect_s = 0.0
+            started = time.perf_counter()
+            connection = http.client.HTTPConnection(
+                host, port, timeout=wait_timeout_s + 2.0
             )
             try:
-                with urllib.request.urlopen(request, timeout=wait_timeout_s + 2.0) as response:
-                    row = (
-                        int(response.status),
-                        response.read(),
-                        time.monotonic() - started,
-                        None,
-                    )
+                connection.connect()
+                connect_s = time.perf_counter() - started
+                sent = time.perf_counter()
+                connection.request(
+                    "POST", path, body=body, headers={"Content-Type": "application/json"}
+                )
+                response = connection.getresponse()
+                row = (
+                    int(response.status),
+                    response.read(),
+                    time.perf_counter() - sent,
+                    connect_s,
+                    None,
+                )
             except BaseException as exc:
-                row = (0, b"", time.monotonic() - started, exc)
+                row = (0, b"", time.perf_counter() - started, connect_s, exc)
+            finally:
+                connection.close()
             with outcome_lock:
                 outcomes.append(row)
 
@@ -232,12 +239,12 @@ class SessionWaitQuotaTest(unittest.TestCase):
         with outcome_lock:
             finished = list(outcomes)
         self.assertGreaterEqual(len(finished), session_n - 1)
-        for status_code, raw, elapsed, exc in finished:
+        for status_code, raw, elapsed, connect_s, exc in finished:
             self.assertIsNone(exc, exc)
             self.assertEqual(status_code, 202, raw)
-            # Launches are staggered so this is the daemon's reply, not a
-            # Windows SYN retry (those land at 0.5, 1 and 2s). timeout_s is 3.
-            self.assertLess(elapsed, 0.5, raw)
+            # The daemon's reply from the moment the request could be sent.
+            # A duplicate that blocked would hold it for timeout_s (3 s).
+            self.assertLess(elapsed, 0.5, f"connect {connect_s:.3f}s; {raw!r}")
             body = json.loads(raw.decode("utf-8"))
             self.assertEqual(body.get("status"), "queued")
             self.assertEqual(body.get("ticket"), ticket)

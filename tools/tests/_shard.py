@@ -513,6 +513,22 @@ def _runner_warnings() -> str | None:
 def run_assigned(
     groups: list[Group], *, index: int, count: int, list_only: bool
 ) -> int:
+    selected = select_assigned(groups, index=index, count=count, list_only=list_only)
+    if isinstance(selected, int):
+        return selected
+    return run_selected(selected, index=index, count=count)
+
+
+def select_assigned(
+    groups: list[Group], *, index: int, count: int, list_only: bool
+) -> int | unittest.TestSuite:
+    """The shard's suite, or the exit code when there is nothing to run.
+
+    The suite holds only the original discovery children. Group.tests, the
+    flattened leaves, is not in it: main() drops the groups before the run,
+    so unittest's suite cleanup can free each case once it has run (see
+    run_selected).
+    """
     chosen = assign_groups(groups, count)[index - 1]
     if not chosen:
         print(f"shard {index}/{count} has no tests", file=sys.stderr)
@@ -543,6 +559,20 @@ def run_assigned(
         # addTest keeps the suite. addTests iterates it and would drop a
         # load_tests suite's own run() (suite.py).
         suite.addTest(original)
+    return suite
+
+
+def run_selected(suite: unittest.TestSuite, *, index: int, count: int) -> int:
+    """Run the shard's suite; exit 1 on a failure or when no test ran.
+
+    TestSuite.run drops each case once it has run (_removeTestAtIndex), so
+    what a test left on self is freed with it, unless something else still
+    holds the case. A Group does (Group.tests): kept for the whole run, it
+    kept every case of the shard alive with what setUp built, about 1.4
+    million objects by the end of a shard. Every full garbage collection
+    walks them, and on the CI runners that stopped all threads for up to
+    1.3 s (CHANGELOG.md). main() therefore passes only the suite here.
+    """
     result = unittest.TextTestRunner(verbosity=1, warnings=_runner_warnings()).run(suite)
     # Same order as TestProgram.runTests: a failure wins, then no tests ran.
     # Exit 1 on both, including on 3.11 where the CLI does not do this itself.
@@ -575,7 +605,13 @@ def main(argv: list[str] | None = None) -> int:
     except UnsupportedSuite as exc:
         print(exc, file=sys.stderr)
         return 1
-    return run_assigned(groups, index=index, count=count, list_only=list_only)
+    selected = select_assigned(groups, index=index, count=count, list_only=list_only)
+    # The last reference to the groups, and with them to every leaf: the
+    # run must not keep the cases it has finished alive (run_selected).
+    del groups
+    if isinstance(selected, int):
+        return selected
+    return run_selected(selected, index=index, count=count)
 
 
 if __name__ == "__main__":

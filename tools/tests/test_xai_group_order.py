@@ -134,6 +134,8 @@ class AiGroupOrderToolTest(unittest.IsolatedAsyncioTestCase):
             [[float("nan"), 0.0, 0.0]],
             [[1.0, 2.0]],
             [[1.0, 2.0, float("inf")]],
+            [[10**400, 0, 0]],
+            [[-(10**400), 0, 0]],
         )
         for waypoints in bad:
             with self.subTest(waypoints=str(waypoints)[:40]):

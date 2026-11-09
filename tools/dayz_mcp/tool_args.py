@@ -67,7 +67,7 @@ def _require_vec3(value: list[float] | None, name: str) -> list[float]:
         raise ToolError(error)
     try:
         vec = [float(value[0]), float(value[1]), float(value[2])]
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ToolError(error) from exc
     if not all(math.isfinite(item) for item in vec):
         raise ToolError(error)

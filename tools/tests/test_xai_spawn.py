@@ -99,6 +99,15 @@ class AIGroupSpawnToolTest(unittest.IsolatedAsyncioTestCase):
         text = await self._refused({**TOOL_ARGS, "pos": [1.0, 2.0]})
         self.assertIn("bad_args", text)
         self.assertIn("pos", text)
+        # Integers past the double range raise OverflowError in float();
+        # the tool must still answer bad_args and enqueue nothing.
+        for huge in (10**400, -(10**400)):
+            with self.subTest(pos=huge):
+                text = await self._refused({**TOOL_ARGS, "pos": [huge, 0, 0]})
+                self.assertIn("bad_args", text)
+            with self.subTest(waypoints=huge):
+                text = await self._refused({**TOOL_ARGS, "waypoints": [[huge, 0, 0]]})
+                self.assertIn("bad_args", text)
 
     async def test_o3_counts_1_and_8_forward_with_a_fresh_token(self) -> None:
         # Mutant killed: the tool echoing a caller token or sending the
