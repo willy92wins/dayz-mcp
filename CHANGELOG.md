@@ -108,6 +108,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 
+- The foreground lock that each `dayz_test_run` launch took (#253, inbox fade, 75e7). A launch no longer calls `LockSetForegroundWindow`, its outcome row (`lifecycle_start_outcome`) no longer has `foreground_lock`, and `dayz_test_foreground` no longer lets go of a lock before its one `SetForegroundWindow`; it otherwise works as before (inbox 8b1c). In the in-game round of 2026-11-09 (DayZDiag 1.30.164289, PBO 5a218dea) Windows answered `refused` on both peers at every launch, and DayZ came to the front by itself 2 to 17 s after it started. `tools/dayz_mcp/foreground_lock.py` and `tools/tests/test_foreground_lock.py` are removed.
 - Repository files that nothing live reads any more: the five root audits `AUDITORIA_*.md` (2026-08-22 to 2026-09-07), `HANDOFF-ARCHIVE.md` (the live state is `HANDOFF.md`, and `tools/gen-project-map.ps1` already treats the archive as optional), `NEXT-SESSION-PROMPT.txt`, the September lane briefs and reports in `_orquestacion/`, and the August gate experiment (`_gate.py`, `_bench/`, `_gate-selftest/`). Git history keeps them; notes under `reviews/`, `reports/`, `plans/` and `gates/` that cite them are historical. `PROJECT-MAP.md` is regenerated.
 
 ### Fixed
