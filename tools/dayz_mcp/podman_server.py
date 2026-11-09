@@ -395,12 +395,22 @@ def _absolute_path(value: str | None, what: str) -> Path:
     return Path(value)
 
 
+def _container_absent(name: str, podman: str) -> bool:
+    """``podman container exists``: 0 present, 1 absent, any other exit a podman error."""
+    return _podman(podman, "container", "exists", name, check=False).returncode == 1
+
+
 def _remove_stale_trees(root: Path, podman: str) -> None:
-    """Trees of containers that no longer exist (a stopped run leaves its tree)."""
+    """Trees of containers that no longer exist (a stopped run leaves its tree).
+
+    Only when podman says the container is absent: ``container inspect`` also fails on
+    podman's own errors (locked storage, a broken rootless setup), and the tree of a
+    running server must survive those.
+    """
     if not root.is_dir():
         return
     for entry in root.iterdir():
-        if entry.name.startswith(CONTAINER_PREFIX) and not status(entry.name, podman).get("exists"):
+        if entry.name.startswith(CONTAINER_PREFIX) and _container_absent(entry.name, podman):
             shutil.rmtree(entry, ignore_errors=True)
 
 
