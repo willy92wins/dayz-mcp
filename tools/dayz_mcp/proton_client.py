@@ -237,8 +237,31 @@ def _read_pid(path: Path) -> int | None:
     return value if value > 0 else None
 
 
+def _cmdline(pid: int) -> list[bytes]:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return []
+
+
+def _is_session_sway(pid: int, state: Path) -> bool:
+    """The PID still runs this session's sway: its arguments name ``<state>/sway.conf``.
+
+    A session directory outlives a reboot, and by then its PID may belong to any
+    process: only the session's own sway may be signalled. argv[0] is not compared:
+    a wrapper on PATH that execs sway leaves its own path there, and one that runs
+    sway as its child holds the PID with sway's arguments after its own. The conf
+    path carries the session's random name.
+    """
+    return os.fsencode(state / "sway.conf") in _cmdline(pid)[1:]
+
+
 def remove_stale_sessions(root: Path, games: list[dict[str, object]]) -> None:
-    """End sessions whose game is gone (their sway idles otherwise) and drop their state."""
+    """End sessions whose game is gone (their sway idles otherwise) and drop their state.
+
+    A session with a running game is kept. Otherwise a PID that no longer runs the
+    session's sway is not signalled, and its directory goes.
+    """
     if not root.is_dir():
         return
     for entry in root.iterdir():
@@ -248,11 +271,12 @@ def remove_stale_sessions(root: Path, games: list[dict[str, object]]) -> None:
         if sway is not None and _alive(sway):
             if any(descends_from(int(game["pid"]), sway) for game in games):
                 continue
-            try:
-                os.killpg(sway, signal.SIGTERM)
-            except OSError:
-                pass
-            continue
+            if _is_session_sway(sway, entry):
+                try:
+                    os.killpg(sway, signal.SIGTERM)
+                except OSError:
+                    pass
+                continue
         shutil.rmtree(entry, ignore_errors=True)
 
 
