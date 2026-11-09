@@ -200,8 +200,9 @@ a process differ.
 
 Setup: Steam installed natively, since the Steam check reads `~/.steam/steam.pid` (a Flatpak Steam keeps it
 elsewhere and is not seen); for `DayZDiag_x64.exe`, server and client alike (the normal setup), Steam Linux
-Runtime 4, the Proton tool `DAYZ_MCP_PROTON` names and `sway`; for the native `DayZServer`, rootless podman (`python -m dayz_mcp.podman_server image` builds its runtime
-image); for `build=true`, `armake2` on `PATH`. Then a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
+Runtime 4, the Proton tool `DAYZ_MCP_PROTON` names and `sway`; for the native `DayZServer`, rootless podman and
+its runtime image, built once with `python -m dayz_mcp.podman_server image` (a start refuses with
+`runtime_image_missing` without it, and never builds it); for `build=true`, `armake2` on `PATH`. Then a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
 `_client/profiles/`, the missions under a mission root, the mods under a mod root, `diag_executable` =
 `<game>/DayZDiag_x64.exe` (see "Which binary runs"); then
 `python -m dayz_mcp.linux_launcher install --policy <file>` and `status`.
