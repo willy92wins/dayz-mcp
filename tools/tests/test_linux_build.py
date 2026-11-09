@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +27,37 @@ echo "$@" >> "$FAKE_ARMAKE2_LOG"
 sleep 0.3
 printf pbo > "$last"
 """
+
+# A binarizing armake2 runs Proton as its child; this one leaves a sleep behind.
+_FAKE_ARMAKE2_WITH_CHILD = """#!/bin/sh
+sleep 300 &
+echo $! > child.pid
+wait
+"""
+
+
+def _running(pid: int) -> bool:
+    """Alive and not a zombie: a killed orphan stays a zombie until init reaps it."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+            return stream.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+
+def _gone_soon(pid: int, timeout_s: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while _running(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 @unittest.skipUnless(POSIX, "armake2 relay")
@@ -101,6 +134,22 @@ class RunAddonBuilderTest(unittest.TestCase):
         self.assertFalse(json.loads(raw)["ok"])
         self.assertFalse((self.target / "M.pbo").exists())
         self.assertFalse(self.log.exists(), "armake2 started after the cancel")
+
+    def test_cancel_also_kills_what_armake2_started(self) -> None:
+        (self.root / "bin" / "armake2").write_text(_FAKE_ARMAKE2_WITH_CHILD)
+        child_pid = self.root / "temp" / "child.pid"
+
+        def cancelled() -> bool:
+            return child_pid.is_file() and child_pid.read_text().strip() != ""
+
+        raw = linux_build.run_addon_builder(self.payload, cancelled=cancelled)
+        self.assertFalse(json.loads(raw)["ok"])
+        pid = int(child_pid.read_text())
+        try:
+            self.assertTrue(_gone_soon(pid), "armake2's child outlived the cancel")
+        finally:
+            if _running(pid):
+                os.kill(pid, signal.SIGKILL)
 
     def test_cancel_kills_a_running_build(self) -> None:
         answers = iter([False])

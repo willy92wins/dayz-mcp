@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -85,11 +86,17 @@ def run_addon_builder(
                 stderr=subprocess.STDOUT,
                 cwd=str(temp),
                 close_fds=True,
+                # Its own process group: a binarizing build runs Proton under armake2,
+                # and a cancel must end those too (the job object does on Windows).
+                start_new_session=True,
             )
             deadline = time.monotonic() + BUILD_DEADLINE_S
             while child.poll() is None:
                 if cancelled() or time.monotonic() > deadline:
-                    child.kill()
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     child.wait()
                     return _response(False)
                 time.sleep(0.2)
