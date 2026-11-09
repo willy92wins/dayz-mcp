@@ -1212,7 +1212,9 @@ class MCPServerPerfCounts
 
 // players_visibility row, one per PlayerBase with a PlayerIdentity. uid is
 // GetPlainId, as query_all_players names it. distance is head to pos. visible
-// is in_fov and line_of_sight both. Primitives only: no entity reference.
+// is in_fov and line_of_sight both. heading_deg is the compass heading in_fov
+// is measured against (33c5), 0 when it cannot be read. Primitives only: no
+// entity reference.
 class MCPPlayerVisibility
 {
 	string uid;
@@ -1220,6 +1222,7 @@ class MCPPlayerVisibility
 	bool in_fov;
 	bool line_of_sight;
 	bool visible;
+	float heading_deg;
 };
 
 // world_spawn_batch row (7f5d), one per item in input order: object_id when the

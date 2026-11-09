@@ -805,10 +805,21 @@ class VisibilityEnforceTest(unittest.TestCase):
                 "row.in_fov = IsInApproxFov(player, head, target, radius);",
                 "row.line_of_sight = HasLineOfSight(player, head, target, radius);",
                 "row.visible = row.in_fov && row.line_of_sight;",
+                "hic = player.GetInputController();",
+                "headingRad = hic.GetHeadingAngle();",
+                "row.heading_deg = -headingRad * Math.RAD2DEG;",
                 "result.players_visibility.Insert(row);",
                 "result.ok = true;",
             ),
         )
+        # 33c5: the heading in_fov is measured against, IsInApproxFov's compass
+        # degrees, and only when the controller is there to read it.
+        self.assertEqual(
+            _if_body(self.code, "hic").strip().split(),
+            "headingRad = hic.GetHeadingAngle(); row.heading_deg = -headingRad * Math.RAD2DEG;".split(),
+        )
+        fov = _method_code(self.source, "IsInApproxFov")
+        self.assertIn("headingDeg = -headingDeg * Math.RAD2DEG;", fov)
 
     def test_the_view_ray_is_scene_raycast_default_and_ignores_the_player(self) -> None:
         code = _method_code(self.source, "HasLineOfSight")
@@ -900,6 +911,7 @@ class VisibilityEnforceTest(unittest.TestCase):
                 ("bool", "in_fov"),
                 ("bool", "line_of_sight"),
                 ("bool", "visible"),
+                ("float", "heading_deg"),
             ],
         )
         self.assertEqual(

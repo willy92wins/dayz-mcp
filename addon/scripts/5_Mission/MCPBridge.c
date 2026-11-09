@@ -6188,6 +6188,8 @@ class MCPBridge : Managed
 		PlayerBase player;
 		PlayerIdentity identity;
 		MCPPlayerVisibility row;
+		HumanInputController hic;
+		float headingRad;
 		int i;
 
 		if (!command.args || !IsFiniteVec3(command.args.pos))
@@ -6229,6 +6231,14 @@ class MCPBridge : Managed
 				row.in_fov = IsInApproxFov(player, head, target, radius);
 				row.line_of_sight = HasLineOfSight(player, head, target, radius);
 				row.visible = row.in_fov && row.line_of_sight;
+				// 33c5: the heading in_fov is measured against, as compass
+				// degrees the way IsInApproxFov turns it, for diagnosis.
+				hic = player.GetInputController();
+				if (hic)
+				{
+					headingRad = hic.GetHeadingAngle();
+					row.heading_deg = -headingRad * Math.RAD2DEG;
+				}
 				result.players_visibility.Insert(row);
 			}
 
