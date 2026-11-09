@@ -18,6 +18,7 @@ from tests.enforce_subset_helpers import EnforceArray, EnforceMap, EnforceString
 SCRIPTS = addon_root() / "scripts" / "5_Mission"
 SERVER_PATH = SCRIPTS / "MCPBridge.c"
 CLIENT_PATH = SCRIPTS / "MCPClientBridge.c"
+EMOTE_PATH = addon_root() / "scripts" / "4_World" / "MCP_Emote.c"
 SERVER_FLAG = "bool deferFromWorldSpawn = m_Pending.Count() > 0;"
 CLIENT_FLAG = "bool deferBehindPending = m_Pending.Count() > 0;"
 POLL_SIG = "void OnPollSuccess(string data, int dataSize)"
@@ -608,7 +609,34 @@ class _CloseCensus:
 class LeaseCloseCensusTests(unittest.TestCase):
     """K26-K30: census builders, observer, gate, and registers (offline)."""
 
-    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None):
+    def _emote_manager(self, *, playing=False, pending=False, surrendered=False, queued=False, synced=False):
+        # EmoteManager double whose MCP_IsEmoteLive / MCP_CancelQueuedEmote
+        # are the real MCP_Emote.c bodies, run on this fake vanilla state
+        # (IsEmotePlaying = playing || surrendered || pending).
+        state = {"cancelled": 0, "ended": 0}
+        launcher = type("EL", (), {"WasSynced": lambda self: synced})() if queued else None
+        emote_source = _read(EMOTE_PATH)
+        helper_ns = {
+            "IsEmotePlaying": lambda: playing or pending or surrendered,
+            "m_MenuEmote": launcher,
+        }
+
+        def _clear():
+            state["cancelled"] += 1
+            helper_ns["m_MenuEmote"] = None
+
+        helper_ns["ClearEmoteLauncher"] = _clear
+        for sig in ("bool MCP_IsEmoteLive()", "void MCP_CancelQueuedEmote()"):
+            translate(_wrap(sig, method_body(emote_source, sig)), sig, helper_ns, members=("m_MenuEmote",))
+        manager = type("EM", (), {
+            "IsEmotePlaying": lambda self: playing or pending or surrendered,
+            "MCP_IsEmoteLive": lambda self: helper_ns["MCP_IsEmoteLive"](),
+            "MCP_CancelQueuedEmote": lambda self: helper_ns["MCP_CancelQueuedEmote"](),
+            "MCP_RequestEmoteEnd": lambda self: state.__setitem__("ended", state["ended"] + 1) or True,
+        })()
+        return manager, state
+
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
@@ -621,10 +649,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         def ctl(name):
             return _Ctl(lambda *a, n=name: flags.get(n, False))
         manager = type("AM", (), {"MCP_HoldBusy": lambda self: flags["action_hold"]})()
-        emote_mgr = type("EM", (), {
-            "IsEmotePlaying": lambda self: emote_playing,
-            "MCP_RequestEmoteEnd": lambda self: True,
-        })()
+        _emote_mgr_real, _emote_state = self._emote_manager(playing=emote_playing, pending=emote_pending, queued=emote_queued)
+        emote_mgr = None if emote_no_mgr else _emote_mgr_real
         player = type("P", (), {
             "GetNetworkID": lambda self, low, high: None,
             "MCPConnGenValue": lambda self: conn_gen,
@@ -680,6 +706,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 body = body.replace('AddCloseEntry(census, "emote", emoteActive', 'AddCloseEntry(census, "emote", false', 1)
             if mutant_emote == "census_counts_foreign" and name == "BuildLeaseCloseCensus":
                 body = body.replace('if (m_MCPEmoteStarted)', 'if (true)', 1)
+            if mutant_emote == "no_manager_clean" and name == "BuildLeaseCloseCensus":
+                body = body.replace('if (!closeEmotes || closeEmotes.MCP_IsEmoteLive())', 'if (closeEmotes && closeEmotes.MCP_IsEmoteLive())', 1)
             translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient", "EmoteManager"),
                       members=("m_CameraPath", "m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
                                "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner", "m_MCPEmoteStarted"))
@@ -717,12 +745,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(census3.state.text, "residue")
         self.assertTrue(self._last_client_ns["LeaseCloseCensusSettled"](census3))
 
-    def _emote_stop(self, source, *, started, playing, mutant=None):
-        calls = []
-        emote_mgr = type("EM", (), {
-            "IsEmotePlaying": lambda self: playing,
-            "MCP_RequestEmoteEnd": lambda self: calls.append(1) or True,
-        })()
+    def _emote_stop(self, source, *, started, playing, mutant=None, queued=False, synced=False):
+        emote_mgr, emote_state = self._emote_manager(playing=playing, queued=queued, synced=synced)
         player = type("P", (), {"GetEmoteManager": lambda self: emote_mgr})()
         game = type("G", (), {"GetPlayer": lambda self: player})()
         ns = {
@@ -739,7 +763,28 @@ class LeaseCloseCensusTests(unittest.TestCase):
         translate(_wrap(sig, body), sig, ns, class_types=("PlayerBase", "EmoteManager"),
                   members=("m_MCPEmoteStarted",))
         ns["StopLeaseCloseEmote"]()
-        return calls, ns
+        ns["_emote_state"] = emote_state
+        return [1] * emote_state["ended"], ns
+
+    def _emote_maintain(self, source, *, started, mutant=None, no_manager=False, **live_kwargs):
+        emote_mgr, _emote_state = self._emote_manager(**live_kwargs)
+        if no_manager:
+            emote_mgr = None
+        player = type("P", (), {"GetEmoteManager": lambda self: emote_mgr})()
+        game = type("G", (), {"GetPlayer": lambda self: player})()
+        ns = {
+            "GetGame": lambda: game,
+            "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
+            "m_MCPEmoteStarted": started,
+        }
+        sig = "protected void MaintainMCPEmoteStarted()"
+        body = method_body(source, sig)
+        if mutant == "no_maintain":
+            body = body.replace("if (!emotes.MCP_IsEmoteLive())", "if (false)", 1)
+        translate(_wrap(sig, body), sig, ns, class_types=("PlayerBase", "EmoteManager"),
+                  members=("m_MCPEmoteStarted",))
+        ns["MaintainMCPEmoteStarted"]()
+        return ns["m_MCPEmoteStarted"]
 
     def test_emote_close_census_pos_neg(self):
         source = _read(CLIENT_PATH)
@@ -787,6 +832,76 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertLess(body.find("StopLeaseCloseEmote()"), body.find("BuildLeaseCloseCensus(command.args)"))
         dispatch = method_body(source, "protected bool DispatchActorEmote(MCPCommand command, MCPResult result)")
         self.assertIn("m_MCPEmoteStarted = true;", dispatch)
+
+    def test_emote_mark_falls_after_job_ends_reviewer_case(self):
+        source = _read(CLIENT_PATH)
+        # Wiring: the tick maintains the mark before the job runner.
+        tick = method_body(source, "void OnTick(float timeslice)")
+        maintain_at = tick.find("MaintainMCPEmoteStarted();")
+        self.assertGreaterEqual(maintain_at, 0)
+        self.assertLess(maintain_at, tick.find("m_JobRunner.Tick"))
+        # POS live: queued, pending or playing keeps the mark.
+        self.assertTrue(self._emote_maintain(source, started=True, queued=True))
+        self.assertTrue(self._emote_maintain(source, started=True, pending=True))
+        self.assertTrue(self._emote_maintain(source, started=True, playing=True))
+        # Exact reviewer case: job ended by wait_s (started, then the emote
+        # stops with no job), a foreign emote plays, then the close.
+        flag = self._emote_maintain(source, started=True, playing=False)
+        self.assertFalse(flag)
+        # M4: with no manager the mark is kept (nothing can be read).
+        self.assertTrue(self._emote_maintain(source, started=True, no_manager=True))
+        calls, _ns = self._emote_stop(source, started=flag, playing=True)
+        self.assertEqual(calls, [])
+        census = self._client_census(source, emote_mcp=flag, emote_playing=True)
+        self.assertEqual(census.state.text, "clean")
+        # Mutant: a maintain that never drops the mark leaves it on, and
+        # the same foreign emote is then ended and counted.
+        flag_m = self._emote_maintain(source, started=True, playing=False, mutant="no_maintain")
+        self.assertTrue(flag_m)
+        calls_m, _ = self._emote_stop(source, started=flag_m, playing=True)
+        self.assertEqual(len(calls_m), 1)
+        census_m = self._client_census(source, emote_mcp=flag_m, emote_playing=True)
+        self.assertEqual([e.name.text for e in census_m.entries if e.state.text != "clean"], ["emote"])
+
+    def test_emote_queued_launcher_close_and_no_manager_census(self):
+        self.assertNotIn("m_SyncRequestSent", _read(EMOTE_PATH))
+        source = _read(CLIENT_PATH)
+        # P3-1 POS: a queued, unsynced launcher is cancelled, not ended,
+        # and the mark falls; a synced launcher is not cancelled here.
+        calls, ns_q = self._emote_stop(source, started=True, playing=False, queued=True, synced=False)
+        self.assertEqual(calls, [])
+        self.assertEqual(ns_q["_emote_state"]["cancelled"], 1)
+        self.assertFalse(ns_q["m_MCPEmoteStarted"])
+        calls_s, ns_s = self._emote_stop(source, started=True, playing=False, queued=True, synced=True)
+        self.assertEqual(ns_s["_emote_state"]["cancelled"], 0)
+        # Census counts the queued launcher as live residue.
+        census_q = self._client_census(source, emote_mcp=True, emote_playing=False, emote_queued=True)
+        self.assertEqual([e.name.text for e in census_q.entries if e.state.text != "clean"], ["emote"])
+        # E13: with no manager the census reads residue, not clean.
+        census_nm = self._client_census(source, emote_mcp=True, emote_no_mgr=True)
+        self.assertEqual([e.name.text for e in census_nm.entries if e.state.text != "clean"], ["emote"])
+        mutant_nm = self._client_census(source, emote_mcp=True, emote_no_mgr=True, mutant_emote="no_manager_clean")
+        self.assertEqual(mutant_nm.state.text, "clean")
+
+    def test_emote_stop_then_census_stays_residue_e11(self):
+        source = _read(CLIENT_PATH)
+        # E11: Stop asks for the end (async) and does not clear the mark
+        # while the emote still plays, so the following census is residue.
+        calls, ns = self._emote_stop(source, started=True, playing=True)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(ns["m_MCPEmoteStarted"])
+        census = self._client_census(source, emote_mcp=ns["m_MCPEmoteStarted"], emote_playing=True)
+        self.assertEqual([e.name.text for e in census.entries if e.state.text != "clean"], ["emote"])
+
+    def test_h4_inventory_liquidate_only_in_pre_send_branch(self):
+        # R5/R6 (P3-3): the only Liquidate of DispatchInventoryMove sits
+        # in the performError branch, before the phase==1 and Ready paths
+        # that run after a Send, so a sent RPC keeps its row (§2.7).
+        source = _read(SERVER_PATH)
+        body = method_body(source, "protected bool DispatchInventoryMove(MCPCommand command, MCPResult result)")
+        self.assertEqual(body.count("LiquidateLeaseCloseRpc("), 1)
+        self.assertLess(body.find('if (performError != "")'), body.find("LiquidateLeaseCloseRpc("))
+        self.assertLess(body.find("LiquidateLeaseCloseRpc("), body.find("if (clientRpc && job.phase == 1)"))
 
     def test_h3_settled_gates_dispatch_and_observer(self):
         # H3 (D-r2-H3): unverified debt must not hold the answer; residue must.
