@@ -625,6 +625,22 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
             [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
         )
 
+    def test_a_lease_end_after_the_run_ended_queues_and_degrades_nothing(self) -> None:
+        # Round of 2026-11-09: session_release after dayz_test_close answered
+        # survivor_drive_release_unconfirmed. The close retired the server's
+        # binding, and the survivor and its drive went with that server.
+        state, coordinator = _leased_state()
+        token = _acquire(coordinator, OWNER_A)
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([command["id"] for command in _delivered(state)], [drive])
+        _answered(state, drive)
+        state.retire_run("drive-run", "stopped")
+        released = _release(coordinator, OWNER_A, token)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+        self.assertEqual(released["cleanup_degraded"], [])
+        self.assertEqual(state._drive_by_lease, {})
+        self.assertEqual(state._fire_and_forget_ids, set())
+
     def test_a_drive_the_queue_drops_at_the_lease_end_leaves_the_delivered_one_named(self) -> None:
         # The id is taken at delivery: the queued drive is discarded by the
         # release and never runs, so the release names the one before it.

@@ -1488,7 +1488,7 @@ class Runtime:
         expected_fence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.touch()
-        early = _world_read_not_ready(self, cmd, self.status())
+        early = _world_read_not_ready(self, cmd, self.status(), peer=peer)
         if early is not None:
             return early
         self.ensure_peer_allowed(peer)
@@ -3053,7 +3053,7 @@ class ClientRuntime:
                 except Exception:
                     snapshot = None
             if _has_ready_snapshot_shape(snapshot):
-                early = _world_read_not_ready(self, cmd, snapshot)
+                early = _world_read_not_ready(self, cmd, snapshot, peer=peer)
                 if early is not None:
                     return early
         lease_token, _ticket = self._session_state_snapshot()
@@ -11514,8 +11514,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "binding_not_ready is retried until "
             "timeout_s (not_ready_probes, last_error in the response); any "
             "other not-ready reason aborts on the first probe. "
-            "client_not_polling is the normal client-load window after launch; "
-            "a dead client still stops at timeout_s with that last_error. "
+            "players_* probes are server reads and need no client: while a "
+            "client loads they count the players the server has, so a client "
+            "that never joins ends the wait at timeout_s with satisfied false. "
             "A probe refused with run_not_owned (the run has no owner) aborts on "
             "the first probe with the daemon's hint: adopt the run first with "
             "session_acquire_wait, whose grant adopts the single ownerless "

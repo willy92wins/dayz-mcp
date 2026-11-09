@@ -8390,6 +8390,21 @@ class ServerState:
                 close_outcomes = self._drain_close_outcomes_locked()
             self._flush_close_outcomes(close_outcomes)
         with self._lock:
+            # A peer whose binding is retired with none bound since is a run
+            # that has ended (dayz_test_close, a reap): its game, and the
+            # vehicle or drive in it, is gone, and a release there could only
+            # be refused as binding_retired (_enqueue_fence_target). Those
+            # obligations end here, with nothing queued and nothing degraded.
+            ended = {
+                peer
+                for peer in ("server", "client")
+                if not self._active_bindings_for_peer(peer)
+                and (peer in self._retired_roles or "offline" in self._retired_roles)
+            }
+            if "client" in ended:
+                vehicle_active = False
+            if "server" in ended:
+                self._drive_by_lease.pop(lease_id, None)
             pending_bots = bool(self._bot_by_lease.get(lease_id))
             pending_drives = bool(self._drive_by_lease.get(lease_id))
             pending_paths = bool(self._camera_path_play_by_lease.get(lease_id))

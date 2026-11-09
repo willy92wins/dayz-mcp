@@ -26,9 +26,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from dayz_mcp import loopback, result_prune, server
+from dayz_mcp import bridge_readiness, loopback, result_prune, server
 from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.peer_liveness import PEER_STALE_S
 from dayz_mcp.server import (
     DEFAULT_TOOL_TIMEOUT_S,
     LEASE_TOOL_LINE,
@@ -44,7 +45,9 @@ from dayz_mcp.session_coordination import (
 )
 from tests._addon_paths import addon_root
 from tests._tiers import slow_test
+from tests.client_helpers import _fixture_client_runtime
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bind_both_peers, bound_queue
+from tests.lease_helpers import FakeClock
 from tests.mcp_helpers import FakePeer, _content_json
 
 
@@ -1268,6 +1271,219 @@ class ReadsCatalogTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(name, server._INITIAL_READ_TOOL_NAMES)
                 self.assertIn(name, listed)
                 self.assertEqual(listed[name].description, description)
+
+
+_LIVE_PEER = {
+    "last_poll_age_s": 0.2,
+    "version_state": "ok",
+    "binding_state": "BOUND",
+    "bound_last_poll_age_s": 0.2,
+}
+_NEVER_POLLED = {
+    "last_poll_age_s": None,
+    "version_state": "never_polled_this_generation",
+    "binding_state": "LEGACY_UNBOUND",
+    "bound_last_poll_age_s": None,
+}
+_ACCREDITED = {
+    "state": "announced",
+    "announced_arg_contract_hash": EXPECTED_SERVER_ARG_CONTRACT_HASH,
+}
+
+
+class ServerReadGateTest(unittest.TestCase):
+    """33c5 (#265): a world read sent to the server peer needs only that peer.
+
+    The gate asked compute_bridge_ready, which needs both peers, so with no
+    client (a server-only run, or no player joined yet) players_visibility
+    answered game_not_ready:reason=client_not_polling instead of running.
+    """
+
+    RUNTIME = types.SimpleNamespace(_registered_tool_names={"bridge_status"})
+
+    def test_with_a_ready_client_the_server_checks_are_compute_bridge_ready(self) -> None:
+        live = {**_LIVE_PEER, "capabilities": dict(_ACCREDITED)}
+        servers = {
+            "ready": live,
+            "stale": {**live, "last_poll_age_s": PEER_STALE_S + 1.0,
+                      "bound_last_poll_age_s": PEER_STALE_S + 1.0},
+            "never polled": {**_NEVER_POLLED, "binding_state": None},
+            "bound, never polled": {**live, "last_poll_age_s": None,
+                                    "bound_last_poll_age_s": None},
+            "starting": {**live, "binding_state": "STARTING"},
+            "older contract": {**live, "capabilities": {
+                **_ACCREDITED, "announced_arg_contract_hash": PREVIOUS_ARG_CONTRACT_HASH}},
+            "census unknown": {**live, "capabilities": {}},
+            "census mismatch": {**live, "capabilities": {
+                "state": "mismatch", "reason": "arg_contract_mismatch"}},
+            "version mismatch": {**live, "version_state": "version_mismatch"},
+        }
+        for name, row in servers.items():
+            with self.subTest(server=name):
+                status = {"server_peer": row, "client_peer": dict(_LIVE_PEER)}
+                self.assertEqual(
+                    bridge_readiness._server_read_ready(status),
+                    server.compute_bridge_ready(status),
+                )
+
+    def test_a_ready_server_read_passes_without_a_client(self) -> None:
+        status = {
+            "server_peer": {**_LIVE_PEER, "capabilities": dict(_ACCREDITED)},
+            "client_peer": dict(_NEVER_POLLED),
+        }
+        self.assertEqual(
+            server.compute_bridge_ready(status)["reason"], "client_not_polling"
+        )
+        self.assertIsNone(
+            server._world_read_not_ready(
+                self.RUNTIME, "players_visibility", status, peer="server"
+            )
+        )
+
+    def test_a_stale_server_still_refuses_a_server_read(self) -> None:
+        status = {
+            "server_peer": {
+                **_LIVE_PEER,
+                "last_poll_age_s": PEER_STALE_S + 1.0,
+                "bound_last_poll_age_s": PEER_STALE_S + 1.0,
+                "capabilities": dict(_ACCREDITED),
+            },
+            "client_peer": dict(_NEVER_POLLED),
+        }
+        refused = server._world_read_not_ready(
+            self.RUNTIME, "players_visibility", status, peer="server"
+        )
+        assert refused is not None
+        self.assertEqual(refused["error"], "game_not_ready:reason=server_poll_stale")
+        self.assertEqual(refused["reason"], server.compute_bridge_ready(status)["reason"])
+
+    def test_a_client_read_still_needs_the_client(self) -> None:
+        status = {
+            "server_peer": {**_LIVE_PEER, "capabilities": dict(_ACCREDITED)},
+            "client_peer": dict(_NEVER_POLLED),
+        }
+        refused = server._world_read_not_ready(
+            self.RUNTIME, "camera_get", status, peer="client"
+        )
+        assert refused is not None
+        self.assertEqual(refused["error"], "game_not_ready:reason=client_not_polling")
+
+
+class ServerReadWithoutClientToolTest(unittest.IsolatedAsyncioTestCase):
+    """The same gate through the tools, the embedded runtime and the ingress.
+
+    The fake server bridge is this test: it polls the broker and stores the
+    answer, as the PBO does.
+    """
+
+    def setUp(self) -> None:
+        self.app, self.runtime = build_app(
+            ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+        self.clock = FakeClock()
+        self.clock.advance(1000.0)
+        self.state = loopback.ServerState("test-key", time_fn=self.clock)
+        self.state.daemon_generation = "gen-reads"
+        self.state.install_bound_peer(
+            instance=INST_SERVER, role="server", pid=PID_SERVER, run_id="reads-run"
+        )
+        self.runtime.loopback = types.SimpleNamespace(state=self.state)
+        self.assertEqual(self._server_poll(), [])
+
+    def _server_poll(self) -> list[dict]:
+        status, polled = self.state.record_poll(
+            "server",
+            f"{EXPECTED_BRIDGE_VERSION}~1.29.0",
+            instance=INST_SERVER,
+            source_pid=PID_SERVER,
+            caps=",".join(_server_commands()),
+            ach=EXPECTED_SERVER_ARG_CONTRACT_HASH,
+        )
+        self.assertEqual(status, 200, polled)
+        return list(polled["commands"])
+
+    async def test_players_visibility_reaches_the_server_bridge_and_returns_its_rows(self) -> None:
+        self.assertEqual(
+            server.compute_bridge_ready(self.runtime.status())["reason"],
+            "client_not_polling",
+        )
+        row = {
+            "uid": "76561198000000001",
+            "name": "Dev",
+            "distance": 12.5,
+            "in_fov": 1,
+            "line_of_sight": 1,
+            "visible": 1,
+        }
+        for rows in ([], [row]):
+            with self.subTest(rows=len(rows)):
+                call = asyncio.create_task(
+                    self.app.call_tool(
+                        "players_visibility",
+                        {"pos": [10.0, 5.0, 20.0], "timeout_s": 5.0},
+                    )
+                )
+                delivered: list[dict] = []
+                deadline = time.monotonic() + 5.0
+                while not delivered and not call.done() and time.monotonic() < deadline:
+                    await asyncio.sleep(0.01)
+                    delivered = self._server_poll()
+                self.assertEqual(
+                    [(item["cmd"], item["args"]) for item in delivered],
+                    [("players_visibility", WIRE_ARGS["players_visibility"])],
+                )
+                self.state.store_result(
+                    {"id": delivered[0]["id"], "ok": 1, "players_visibility": rows},
+                    instance=INST_SERVER,
+                )
+                result = _content_json(await call)
+                self.assertEqual(result["ok"], 1)
+                self.assertEqual(result["players_visibility"], rows)
+
+    async def test_a_stale_server_answers_server_poll_stale_and_sends_nothing(self) -> None:
+        self.clock.advance(PEER_STALE_S + 1.0)
+        result = _content_json(
+            await self.app.call_tool(
+                "players_visibility", {"pos": [10.0, 5.0, 20.0], "timeout_s": 1.0}
+            )
+        )
+        self.assertEqual(result["error"], "game_not_ready:reason=server_poll_stale")
+        self.assertEqual(bound_queue(self.state, "server"), [])
+
+    async def test_a_client_read_with_no_client_is_refused_as_before(self) -> None:
+        result = _content_json(
+            await self.app.call_tool("camera_get", {"timeout_s": 1.0})
+        )
+        self.assertEqual(result["error"], "game_not_ready:reason=client_not_polling")
+        self.assertEqual(bound_queue(self.state, "server"), [])
+
+    async def test_a_client_mode_server_read_reaches_the_daemon(self) -> None:
+        # The other caller of the gate: a --client process reads the daemon's
+        # /status, then posts the read to /enqueue.
+        runtime = _fixture_client_runtime(
+            ServerConfig(mode="client", key="k", port=12345, log_sink=lambda _m: None)
+        )
+        status = {
+            "server_peer": {**_LIVE_PEER, "capabilities": dict(_ACCREDITED)},
+            "client_peer": dict(_NEVER_POLLED),
+        }
+        runtime.bridge_status_payload = AsyncMock(return_value=status)
+        posted: list[tuple[str, str, object]] = []
+
+        def daemon(method: str, path: str, payload: object, *_rest: object):
+            posted.append((method, path, payload))
+            return 503, {"error": "queue_full"}
+
+        runtime._call = daemon
+        with self.assertRaises(ToolError) as raised:
+            await runtime.call_bridge(
+                "players_visibility", dict(WIRE_ARGS["players_visibility"]), "server", 1.0
+            )
+        self.assertNotIn("game_not_ready", str(raised.exception))
+        self.assertEqual(
+            [(method, path, body["cmd"], body["peer"]) for method, path, body in posted],
+            [("POST", "/enqueue", "players_visibility", "server")],
+        )
 
 
 class NavPathRoundTripTest(unittest.IsolatedAsyncioTestCase):
