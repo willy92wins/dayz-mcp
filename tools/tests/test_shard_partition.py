@@ -1630,5 +1630,81 @@ class SlowCountGateTest(unittest.TestCase):
             parse.assert_called_once()
 
 
+# Runs main() of the shard file in argv[1] on whatever tests/ is in cwd.
+_SHARD_MAIN = """\
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("shard_under_test", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+raise SystemExit(module.main([sys.argv[2]]))
+"""
+
+
+class ShardRunnerReleaseTest(unittest.TestCase):
+    def test_main_frees_a_finished_case_before_the_next_module(self) -> None:
+        """A case that has run is freed with what it left on self.
+
+        main() used to hand the run the Groups, whose tests tuple held every
+        case of the shard until the process ended. Each kept what setUp built
+        (a FastMCP server and its pydantic models): about 1.4 million objects
+        by the end of a CI shard, all walked by every full garbage collection,
+        which stopped the test threads for up to 1.3 s. A cycle on the case
+        makes the check need the collector, as those objects do.
+        """
+        with tempfile.TemporaryDirectory(prefix="shard-release-", ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            _write(root / "tests" / "__init__.py", "REFS = []\n")
+            _write(
+                root / "tests" / "test_a_holds.py",
+                """
+                import unittest
+                import weakref
+
+                import tests
+
+
+                class Payload:
+                    pass
+
+
+                class Holds(unittest.TestCase):
+                    def test_holds(self):
+                        self.payload = Payload()
+                        self.payload.case = self
+                        tests.REFS.append(weakref.ref(self.payload))
+                """,
+            )
+            _write(
+                root / "tests" / "test_b_checks.py",
+                """
+                import gc
+                import unittest
+
+                import tests
+
+
+                class Checks(unittest.TestCase):
+                    def test_finished_case_was_freed(self):
+                        gc.collect()
+                        self.assertEqual(len(tests.REFS), 1)
+                        self.assertIsNone(tests.REFS[0](), "the finished case is still alive")
+                """,
+            )
+            driver = root / "_main.py"
+            driver.write_text(_SHARD_MAIN, encoding="utf-8")
+            run = subprocess.run(
+                [sys.executable, "-B", str(driver), str(_SHARD_FILE), "1/1"],
+                cwd=root,
+                env=_fresh_env(),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("Ran 2 tests", run.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

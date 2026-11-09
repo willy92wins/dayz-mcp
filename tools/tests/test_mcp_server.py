@@ -72,7 +72,7 @@ class MCPServerTest(unittest.TestCase):
         # The payload each tool sends; since 6ce4 the ingress checks it.
         for cmd, args in (
             ("world_spawn", {"type": "X", "pos": [1, 2, 3], "flags": 0, "rotation": 0}),
-            ("vehicle_enter", {"pos": [0, 0, 0]}),
+            ("vehicle_enter", {"pos": [0, 0, 0], "uid": "76561198000000001"}),
             (
                 "camera_set",
                 {"cam_mode": "orient", "cam_pos": [0, 0, 0], "cam_orientation": [0, 0, 0], "fov": 0, "settle_ticks": 0},

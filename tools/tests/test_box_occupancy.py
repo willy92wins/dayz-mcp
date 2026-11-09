@@ -4,6 +4,7 @@ from tests.steam_helpers import FakeSteamGate
 
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
@@ -1768,7 +1769,7 @@ class BoxWaitQueueTest(unittest.TestCase):
 
 
 class FakeBoxClient:
-    def __init__(self, statuses: list[dict[str, object]]) -> None:
+    def __init__(self, statuses: list[dict[str, object] | BaseException]) -> None:
         self.tool_lock = asyncio.Lock()
         self.identity = IDENTITY_WAITER
         self.statuses = list(statuses)
@@ -1779,7 +1780,10 @@ class FakeBoxClient:
         self.calls.append(dict(kwargs))
         if not self.statuses:
             raise AssertionError("no remaining box statuses")
-        return dict(self.statuses.pop(0))
+        status = self.statuses.pop(0)
+        if isinstance(status, BaseException):
+            raise status
+        return dict(status)
 
 
 class ExecuteWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
@@ -1928,6 +1932,373 @@ class ExecuteWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
                 _Client(), "t1", sleep_fn=sleeper
             )
         self.assertGreaterEqual(calls["n"], 2)
+
+
+class ExecuteWaitForBoxLostReadTest(unittest.IsolatedAsyncioTestCase):
+    # fb-788c: a read whose answer was lost keeps the FIFO place.
+    QUEUED = {
+        "occupied": True,
+        "runs": [],
+        "foreign": [],
+        "ports_in_use": [],
+        "queue": [{"session": "waiter-sessi", "waiting_s": 0.0}],
+    }
+    FREE = {
+        "occupied": False,
+        "runs": [],
+        "foreign": [],
+        "ports_in_use": [],
+        "queue": [{"session": "waiter-sessi", "waiting_s": 1.0}],
+    }
+
+    async def _wait(self, client: FakeBoxClient, wait_s: float) -> dict[str, object]:
+        clock = {"now": 0.0}
+
+        async def sleeper(delay: float) -> None:
+            clock["now"] += delay
+
+        return await server_module.execute_wait_for_box(
+            client,
+            wait_s,
+            sleep_fn=sleeper,
+            time_fn=lambda: clock["now"],
+            poll_interval_s=0.05,
+        )
+
+    async def test_a_lost_read_keeps_the_ticket_and_reads_again(self) -> None:
+        client = FakeBoxClient([
+            {"box": self.QUEUED, "box_ticket": "t1"},
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box": self.FREE, "box_ticket": "t1"},
+            {"box": self.FREE, "box_ticket": "t1", "box_claimed": True},
+        ])
+        result = await self._wait(client, 5.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertEqual(
+            [call.get("ticket") for call in client.calls], [None, "t1", "t1", "t1"]
+        )
+        self.assertFalse(any(call.get("done") for call in client.calls))
+
+    async def test_a_lost_first_join_is_swept_before_the_next_join(self) -> None:
+        client = FakeBoxClient([
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box_ticket": None},
+            {"box": self.FREE, "box_ticket": "t1"},
+            {"box": self.FREE, "box_ticket": "t1", "box_claimed": True},
+        ])
+        result = await self._wait(client, 5.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertEqual(client.calls[1], {"done": True, "ticket": None})
+        self.assertEqual(client.calls[2], {"wait": True, "ticket": None})
+
+    async def test_a_first_join_that_never_went_out_is_not_swept(self) -> None:
+        # daemon_unavailable: the request never left, so nothing was queued
+        # and leave-session could only take another wait's ticket.
+        client = FakeBoxClient([
+            server_module.ToolError("daemon_unavailable"),
+            {"box": self.FREE, "box_ticket": "t1"},
+            {"box": self.FREE, "box_ticket": "t1", "box_claimed": True},
+        ])
+        result = await self._wait(client, 5.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            client.calls,
+            [
+                {"wait": True, "ticket": None},
+                {"wait": True, "ticket": None},
+                {"wait": True, "ticket": "t1", "claim": True},
+            ],
+        )
+
+    async def test_a_wait_cancelled_after_its_sweep_does_not_sweep_again(
+        self,
+    ) -> None:
+        # GA14 H1: after the sweep, a second leave-session from the cleanup
+        # would take the session's only ticket, which by then can be another
+        # wait's.
+        client = FakeBoxClient([
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box_ticket": None},
+        ])
+        sleeping = asyncio.Event()
+
+        async def sleeper(_delay: float) -> None:
+            sleeping.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(
+            server_module.execute_wait_for_box(
+                client,
+                5.0,
+                sleep_fn=sleeper,
+                time_fn=lambda: 0.0,
+                poll_interval_s=0.05,
+            )
+        )
+        # Bounded, so a wait that ends before it sleeps fails here, not hangs.
+        await asyncio.wait_for(sleeping.wait(), 5.0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(
+            client.calls,
+            [{"wait": True, "ticket": None}, {"done": True, "ticket": None}],
+        )
+
+    async def _cancel_during_first_join(
+        self, outcome: object
+    ) -> list[dict[str, object]]:
+        # Cancels the wait while its first join is in flight; that join then
+        # ends with ``outcome``, raised if it is an exception.
+        calls: list[dict[str, object]] = []
+        sent = asyncio.Event()
+        answer = asyncio.Event()
+
+        class Client:
+            tool_lock = asyncio.Lock()
+            identity = IDENTITY_WAITER
+
+            async def session_box_status(self, **kwargs: object) -> object:
+                calls.append(dict(kwargs))
+                if kwargs.get("wait"):
+                    sent.set()
+                    await answer.wait()
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    return outcome
+                return {"box_ticket": None}
+
+        task = asyncio.create_task(
+            server_module.execute_wait_for_box(
+                Client(), 5.0, time_fn=lambda: 0.0, poll_interval_s=0.05
+            )
+        )
+        await asyncio.wait_for(sent.wait(), 5.0)
+        task.cancel()
+        answer.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        return calls
+
+    async def test_a_wait_cancelled_during_its_first_join_still_sweeps(
+        self,
+    ) -> None:
+        # The join in flight may queue a ticket the wait never sees, so the
+        # cleanup still sends leave-session for it, as before.
+        calls = await self._cancel_during_first_join(
+            server_module.ToolError("daemon_response_ambiguous")
+        )
+        self.assertEqual(
+            calls, [{"wait": True, "ticket": None}, {"done": True, "ticket": None}]
+        )
+
+    async def test_a_first_join_the_cleanup_sees_or_that_never_went_out_is_not_swept(
+        self,
+    ) -> None:
+        # The cleanup reads the join's answer (here, no ticket queued), or
+        # learns it never left: nothing of this wait is left to sweep.
+        for outcome in (
+            {"box": self.QUEUED, "box_wait_error": "box_queue_saturated"},
+            server_module.ToolError("daemon_unavailable"),
+        ):
+            with self.subTest(outcome=outcome):
+                calls = await self._cancel_during_first_join(outcome)
+                self.assertEqual(calls, [{"wait": True, "ticket": None}])
+
+    async def test_a_recovered_claim_seen_after_until_does_not_count(
+        self,
+    ) -> None:
+        # The touch that confirms a lost claim comes back after the end: like
+        # a claim answer after it, it is not a grant (inbox 3997).
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box": self.QUEUED, "box_ticket": "t1", "box_claimed": True},
+        ])
+        # Seven clock reads up to the touch's reply; then the end has passed.
+        times = [0.0] * 7
+        result = await server_module.execute_wait_for_box(
+            client,
+            0.05,
+            sleep_fn=AsyncMock(),
+            time_fn=lambda: times.pop(0) if times else 0.06,
+            poll_interval_s=0.05,
+            until=0.05,
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertNotIn("error", result)
+
+    async def test_a_recovered_claim_still_ends_on_port_scan_unknown(
+        self,
+    ) -> None:
+        # GA14 H3: the touch that confirms a lost claim is a read like any
+        # other; its box is checked before the claim counts.
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("daemon_response_ambiguous"),
+            {
+                "box": {**self.QUEUED, "port_scan_known": False},
+                "box_ticket": "t1",
+                "box_claimed": True,
+            },
+        ])
+        result = await self._wait(client, 5.0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertEqual(result["error"], "port_scan_unknown")
+
+    async def test_a_recovered_claim_still_ends_on_abort_if(self) -> None:
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box": self.QUEUED, "box_ticket": "t1", "box_claimed": True},
+        ])
+        verdicts = iter([None, "own_run"])
+        clock = {"now": 0.0}
+
+        async def sleeper(delay: float) -> None:
+            clock["now"] += delay
+
+        result = await server_module.execute_wait_for_box(
+            client,
+            5.0,
+            sleep_fn=sleeper,
+            time_fn=lambda: clock["now"],
+            poll_interval_s=0.05,
+            abort_if=lambda _box: next(verdicts),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertEqual(result["error"], "own_run")
+
+    async def test_a_wait_whose_joins_all_get_lost_sweeps_each_once(
+        self,
+    ) -> None:
+        # GA14 H5: no join ever answers, so there is no ticket; each lost join
+        # is swept once and the end of the budget names the lost read.
+        client = FakeBoxClient([
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box_ticket": None},
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box_ticket": None},
+        ])
+        result = await self._wait(client, 0.05)
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "ticket": None,
+                "box": server_module.empty_box(occupied=True),
+                "error": "daemon_response_ambiguous",
+            },
+        )
+        self.assertEqual(
+            client.calls,
+            [
+                {"wait": True, "ticket": None},
+                {"done": True, "ticket": None},
+            ]
+            * 2,
+        )
+
+    async def test_a_lost_claim_that_landed_counts_on_the_next_touch(self) -> None:
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("daemon_response_ambiguous"),
+            {"box": self.QUEUED, "box_ticket": "t1", "box_claimed": True},
+        ])
+        result = await self._wait(client, 5.0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertEqual(
+            [call.get("claim") for call in client.calls], [None, True, None]
+        )
+
+    async def test_a_wait_that_runs_out_on_a_lost_read_names_it(self) -> None:
+        client = FakeBoxClient([
+            {"box": self.QUEUED, "box_ticket": "t1"},
+            server_module.ToolError("daemon_unavailable"),
+        ])
+        result = await self._wait(client, 0.05)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertEqual(result["error"], "daemon_unavailable")
+        self.assertEqual(result["box"]["queue"], self.QUEUED["queue"])
+        # The caller hands the ticket back, not the wait.
+        self.assertFalse(any(call.get("done") for call in client.calls))
+
+    async def test_a_requeue_that_runs_out_on_a_lost_claim_ends_as_before(
+        self,
+    ) -> None:
+        # With until (the 3997 re-queue) the caller answers with the refusal
+        # it proved, so the wait does not name the lost read.
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("daemon_response_ambiguous"),
+        ])
+        # Four reads before the claim's answer, then the end has passed.
+        times = [0.0, 0.0, 0.0, 0.0]
+
+        result = await server_module.execute_wait_for_box(
+            client,
+            0.05,
+            sleep_fn=AsyncMock(side_effect=AssertionError("no sleep")),
+            time_fn=lambda: times.pop(0) if times else 0.06,
+            poll_interval_s=0.05,
+            until=0.05,
+        )
+        self.assertEqual(client.calls[-1].get("claim"), True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["ticket"], "t1")
+        self.assertNotIn("error", result)
+
+    async def test_any_other_error_still_raises_and_leaves_the_fifo(self) -> None:
+        client = FakeBoxClient([
+            {"box": self.QUEUED, "box_ticket": "t1"},
+            server_module.ToolError("remote_error"),
+            {"box_ticket": None},
+        ])
+        with self.assertRaises(server_module.ToolError):
+            await self._wait(client, 5.0)
+        self.assertEqual(client.calls[-1], {"done": True, "ticket": "t1"})
+
+    async def test_any_other_claim_error_still_raises_and_leaves_the_fifo(
+        self,
+    ) -> None:
+        client = FakeBoxClient([
+            {"box": self.FREE, "box_ticket": "t1"},
+            server_module.ToolError("remote_error"),
+            {"box_ticket": None},
+        ])
+        with self.assertRaises(server_module.ToolError):
+            await self._wait(client, 5.0)
+        self.assertEqual(
+            [call.get("claim") for call in client.calls], [None, True, None]
+        )
+        self.assertEqual(client.calls[-1], {"done": True, "ticket": "t1"})
+
+
+def _isolated_client_runtime(config: ServerConfig) -> server_module.ClientRuntime:
+    """The fixture runtime, without the host's handoff or the Win32 key read."""
+    from tests.client_helpers import _fixture_client_runtime
+
+    with (
+        patch.dict(os.environ),
+        # Its credential reads the fixture keyfile through the Windows file
+        # API; plain file I/O reads the same key.
+        patch.object(
+            server_module.daemon_credential.pinned_keyfile,
+            "read_pinned_keyfile",
+            new=lambda path: Path(path).read_text(encoding="utf-8").strip(),
+        ),
+    ):
+        # It reads, then deletes, a handoff carrier the environment names.
+        os.environ.pop(server_module.session_handoff.HANDOFF_ENV, None)
+        return _fixture_client_runtime(config)
 
 
 class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
@@ -2108,6 +2479,117 @@ class DayzTestRunWaitForBoxTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.get("label"), "heli")
         self.assertFalse(payload.get("foreign"))
         self.assertEqual(payload.get("hint"), "retry with wait_for_box_s=<n>")
+
+    async def test_a_wait_that_ends_on_a_lost_read_names_it(self) -> None:
+        # fb-788c: the failure names the lost read and keeps the queue offer.
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _isolated_client_runtime(config)
+        box = {
+            "occupied": True,
+            "runs": [{"run_id": "run-live", "mod": "@LFHeli", "age_s": 44.0}],
+            "foreign": [],
+            "ports_in_use": [2302],
+            "queue": [],
+        }
+
+        async def wait_box(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {
+                "ok": False,
+                "ticket": "box-ticket",
+                "box": box,
+                "error": "daemon_response_ambiguous",
+            }
+
+        execute = AsyncMock(side_effect=AssertionError("must not launch"))
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = server_module.build_app(config)
+        with (
+            patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", execute
+            ),
+            patch.object(
+                server_module, "execute_wait_for_box", side_effect=wait_box
+            ),
+            patch.object(
+                runtime, "session_box_status", new=AsyncMock(return_value={})
+            ),
+        ):
+            payload = _content_json(
+                await app.call_tool(
+                    "dayz_test_run",
+                    {
+                        "project": "ExampleMod",
+                        "mode": "server",
+                        "wait_for_box_s": 5.0,
+                    },
+                )
+            )
+        execute.assert_not_awaited()
+        self.assertEqual(payload.get("error_code"), "daemon_response_ambiguous")
+        self.assertEqual(payload.get("occupied_by_run_id"), "run-live")
+        self.assertIn("queue_offer", payload)
+
+    async def test_a_wait_whose_joins_all_get_lost_names_the_lost_read(
+        self,
+    ) -> None:
+        # GA14 H5: the real wait under dayz_test_run, with no join answered.
+        config = ServerConfig(
+            mode="client",
+            key="k",
+            port=12345,
+            client_platform="codex",
+            log_sink=lambda _message: None,
+        )
+        runtime = _isolated_client_runtime(config)
+        calls: list[dict[str, object]] = []
+
+        async def box_status(**kwargs: object) -> dict[str, object]:
+            calls.append(dict(kwargs))
+            if kwargs.get("wait"):
+                raise server_module.ToolError("daemon_response_ambiguous")
+            return {}
+
+        execute = AsyncMock(side_effect=AssertionError("must not launch"))
+        with patch.object(server_module, "ClientRuntime", return_value=runtime):
+            app, _built = server_module.build_app(config)
+        with (
+            patch.object(
+                server_module.dayz_test_tool, "execute_dayz_test_run", execute
+            ),
+            patch.object(
+                runtime,
+                "session_box_status",
+                new=AsyncMock(side_effect=box_status),
+            ),
+        ):
+            payload = _content_json(
+                await app.call_tool(
+                    "dayz_test_run",
+                    {
+                        "project": "ExampleMod",
+                        "mode": "server",
+                        "wait_for_box_s": 0.2,
+                    },
+                )
+            )
+        execute.assert_not_awaited()
+        self.assertEqual(payload.get("error_code"), "daemon_response_ambiguous")
+        self.assertIn("queue_offer", payload)
+        # The admission read, then each lost join swept once. No ticket was
+        # ever seen, so nothing is handed back by ticket.
+        self.assertEqual(calls[0], {})
+        joins, sweeps = calls[1::2], calls[2::2]
+        self.assertGreaterEqual(len(joins), 1)
+        self.assertEqual(len(joins), len(sweeps))
+        for join, sweep in zip(joins, sweeps):
+            self.assertEqual(join, {"wait": True, "ticket": None})
+            self.assertEqual(sweep, {"done": True, "ticket": None})
 
     async def test_timeout_returns_takeover_required_for_foreign_running_run(
         self,
