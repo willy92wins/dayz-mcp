@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -200,6 +202,65 @@ class LaunchRefusalTest(unittest.TestCase):
         sway = types.SimpleNamespace(pid=100, poll=lambda: 0)
         with self.assertRaisesRegex(proton_client.ProtonClientError, "client_session_ended:.*could not start"):
             proton_client._wait_for_game(sway, state, proton_client.time.monotonic() + 5, object())
+
+    def test_a_recycled_sway_pid_is_not_signalled(self) -> None:
+        """Run, reboot, run: the stored PID now leads an unrelated process group."""
+        root = self.root / "sessions"
+        stale = root / (proton_client.SESSION_PREFIX + "stale")
+        stale.mkdir(parents=True)
+        other = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        # Popen can return before the kernel has put sleep's arguments in place, and
+        # /proc/<pid>/cmdline reads empty until then.
+        deadline = time.monotonic() + 5
+        while proton_client._cmdline(other.pid)[:2] != [b"sleep", b"30"]:
+            self.assertLess(time.monotonic(), deadline, "sleep never showed its command line")
+            time.sleep(0.01)
+        (stale / "sway.pid").write_text(f"{other.pid}\n")
+        proton_client.remove_stale_sessions(root, [])
+        with self.assertRaises(subprocess.TimeoutExpired, msg="an unrelated process group got SIGTERM"):
+            other.wait(timeout=0.5)
+        self.assertFalse(stale.exists())
+
+    def test_the_sessions_own_idle_sway_is_ended(self) -> None:
+        # sway from PATH; a wrapper that execs it (argv[0] is the wrapper's path); a
+        # wrapper that runs it as a child (the PID is the shell running the wrapper).
+        launched = {
+            "plain": [b"sway"],
+            "exec_wrapper": [b"/usr/bin/sway"],
+            "child_wrapper": [b"/bin/sh", b"/home/user/bin/sway"],
+        }
+        root = self.root / "sessions"
+        for label, head in launched.items():
+            with self.subTest(label=label):
+                idle = root / (proton_client.SESSION_PREFIX + label)
+                idle.mkdir(parents=True)
+                sway = subprocess.Popen(["sleep", "30"], start_new_session=True)
+                self.addCleanup(sway.wait)
+                self.addCleanup(sway.kill)
+                (idle / "sway.pid").write_text(f"{sway.pid}\n")
+                argv = [*head, b"-c", os.fsencode(idle / "sway.conf"), b""]
+                with mock.patch.object(proton_client, "_cmdline", return_value=argv):
+                    proton_client.remove_stale_sessions(root, [])
+                self.assertEqual(sway.wait(timeout=5), -15)
+                self.assertTrue(idle.exists(), "the directory goes at the next launch, once sway is gone")
+
+    def test_a_session_with_a_running_game_is_kept(self) -> None:
+        """Whatever its PID reads as: the identity check only guards the signal."""
+        root = self.root / "sessions"
+        live = root / (proton_client.SESSION_PREFIX + "live")
+        live.mkdir(parents=True)
+        sway = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(sway.wait)
+        self.addCleanup(sway.kill)
+        (live / "sway.pid").write_text(f"{sway.pid}\n")
+        game = {"pid": 300, "name": "DayZDiag_x64.exe"}
+        with mock.patch.object(proton_client, "_ppid", side_effect=lambda pid: {300: sway.pid}.get(pid)):
+            proton_client.remove_stale_sessions(root, [game])
+        with self.assertRaises(subprocess.TimeoutExpired, msg="the session's sway got SIGTERM"):
+            sway.wait(timeout=0.5)
+        self.assertTrue(live.exists())
 
     def test_stale_sessions_without_a_game_are_removed(self) -> None:
         root = self.root / "sessions"
