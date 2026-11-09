@@ -200,11 +200,14 @@ LIVE_PROFILE_ADMIN_DISABLED = "live_profile_admin_disabled"
 _LIVE_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "live"})
 # The only mutations the profile can ever allow, and only with admin
 # enabled: the player/world mutations the admin tool pack
-# (tool_pack.ADMIN_TOOL_NAMES) enqueues on the server bridge. Each name was
-# checked against SERVER_COMMANDS. The pack's world_spawn stays out (spawn
-# family) and its restore_gameplay stays out (camera/client family), as do
-# bot_*, player_move, weapon_fire, player_view_set, vehicle_* and every
-# other command, with or without admin.
+# (tool_pack.ADMIN_TOOL_NAMES) enqueues on the server bridge, and
+# notify_players, the warning to players. The owner moved the warning here
+# on 2026-11-08 after the C6 bench: with no kick tool, the target model sent
+# a player a false kick notice. Each name was checked against
+# SERVER_COMMANDS. The pack's world_spawn stays out (spawn family) and its
+# restore_gameplay stays out (camera/client family), as do bot_*,
+# player_move, weapon_fire, player_view_set, vehicle_* and every other
+# command, with or without admin.
 LIVE_ADMIN_COMMANDS = frozenset(
     {
         "player_teleport",
@@ -213,17 +216,18 @@ LIVE_ADMIN_COMMANDS = frozenset(
         "world_time_set",
         "world_weather_set",
         "object_delete",
+        "notify_players",
     }
 )
-# Reads the profile allows by default, plus notify_players, the warning:
-# only server-side state reads of server/player/world. Client reads that
-# consult UI, camera or input stay out (camera_get, ui_tree, input_describe,
-# action_cursor and its server correlate action_cursor_ids, and the client
-# vehicle_telemetry read). players_visibility stays out too: although it
-# runs on the server, it reads the player's camera/input heading
+# Reads the profile allows by default: only server-side state reads of
+# server/player/world. Client reads that consult UI, camera or input stay
+# out (camera_get, ui_tree, input_describe, action_cursor and its server
+# correlate action_cursor_ids, and the client vehicle_telemetry read).
+# players_visibility stays out too: although it runs on the server, it
+# reads the player's camera/input heading
 # (GetInputController().GetHeadingAngle()), like action_cursor.
 LIVE_ALLOWED_COMMANDS = frozenset(
-    ((READ_ONLY_COMMANDS & SERVER_COMMANDS) | {"notify_players"})
+    (READ_ONLY_COMMANDS & SERVER_COMMANDS)
     - {"action_cursor_ids", "players_visibility"}
 )
 

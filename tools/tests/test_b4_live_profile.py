@@ -7,10 +7,10 @@ routes the real dayz_test* tools use) before delegating to the lifecycle.
 Camera, input, UI, spawn, exec_enforce, bot_*, vehicle_* and the test
 tools stay out even when admin mutations are enabled: only the explicit
 LIVE_ADMIN_COMMANDS are gated on admin, refused with
-live_profile_admin_disabled until expressly enabled. Server/player/world
-reads and warnings (notify_players) are allowed by default. Daemon-
-internal publications, owner cleanup and releases are not filtered.
-Profile off changes nothing.
+live_profile_admin_disabled until expressly enabled; the warning
+(notify_players) is one of them since 2026-11-08. Server/player/world
+reads are allowed by default. Daemon-internal publications, owner cleanup
+and releases are not filtered. Profile off changes nothing.
 """
 
 from __future__ import annotations
@@ -127,18 +127,46 @@ class PlayersVisibilityTest(unittest.TestCase):
                 )
 
 
-class ReadsAndWarningsTest(unittest.TestCase):
-    def test_reads_and_warnings_allowed_by_default(self) -> None:
+class ReadsTest(unittest.TestCase):
+    def test_reads_allowed_by_default(self) -> None:
         state = _state(live_profile=True)
         for cmd, args, peer in (
             ("query_all_players", {}, "server"),
             ("query_player_state", {}, "server"),
             ("world_time_get", {}, "server"),
-            ("notify_players", {"show_time": 1.0, "title": "hi"}, "server"),
         ):
             with self.subTest(cmd=cmd):
                 status, body = state.enqueue_command(cmd, args, peer=peer)
                 self.assertEqual(status, 200, body)
+
+
+class WarningsTest(unittest.TestCase):
+    """notify_players is gated on admin like the mutations (2026-11-08)."""
+
+    WARNING = {"show_time": 1.0, "title": "hi"}
+
+    def test_warning_refused_until_admin_enabled(self) -> None:
+        state = _state(live_profile=True)
+        status, body = state.enqueue_command(
+            "notify_players", dict(self.WARNING), peer="server"
+        )
+        self.assertEqual(
+            (status, body), (403, {"error": "live_profile_admin_disabled"})
+        )
+
+    def test_warning_allowed_with_admin(self) -> None:
+        state = _state(live_profile=True, live_admin_enabled=True)
+        status, body = state.enqueue_command(
+            "notify_players", dict(self.WARNING), peer="server"
+        )
+        self.assertEqual(status, 200, body)
+
+    def test_warning_unchanged_with_profile_off(self) -> None:
+        state = _state()
+        status, body = state.enqueue_command(
+            "notify_players", dict(self.WARNING), peer="server"
+        )
+        self.assertEqual(status, 200, body)
 
 
 class ProfileOffTest(unittest.TestCase):
@@ -267,11 +295,13 @@ class PartitionTest(unittest.TestCase):
         }
         self.assertFalse(loopback.LIVE_ADMIN_COMMANDS & excluded)
         self.assertFalse(loopback.LIVE_ALLOWED_COMMANDS & excluded)
-        # Only server/player/world state reads (plus notify_players) allowed.
+        # Only server/player/world state reads are allowed by default; the
+        # warning (notify_players) is gated on admin.
         self.assertLessEqual(
             loopback.LIVE_ALLOWED_COMMANDS,
-            loopback.SERVER_COMMANDS | {"notify_players"},
+            loopback.READ_ONLY_COMMANDS & loopback.SERVER_COMMANDS,
         )
+        self.assertIn("notify_players", loopback.LIVE_ADMIN_COMMANDS)
 
 
 IDENTITY_PAYLOAD = {
