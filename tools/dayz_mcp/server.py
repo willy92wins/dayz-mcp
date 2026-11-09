@@ -167,6 +167,10 @@ from dayz_mcp.session_coordination import (
     public_audit_stage,
 )
 from dayz_mcp.steam_preflight import STEAM_APP_VIEW_STALE, observe_app_steam_view
+from dayz_mcp.steam_update_pending import (
+    STEAM_UPDATE_PENDING,
+    observe_steam_update_pending,
+)
 from dayz_mcp.vehicle_trace import normalize_bridge_result, normalize_request
 from dayz_mcp import anim_timeline as anim_timeline_contract
 from dayz_mcp import camera_path as camera_path_contract
@@ -5402,6 +5406,30 @@ def _annotate_steam_app_view(
     return payload
 
 
+# The same three tools carry steam_update_pending (steam_update_pending.py): an
+# update Steam has to apply to DayZ or DayZ Tools. Two small local files per call,
+# read off the event loop.
+async def _observe_steam_update_pending() -> dict[str, Any] | None:
+    try:
+        return await asyncio.to_thread(observe_steam_update_pending)
+    except Exception:
+        return None
+
+
+def _annotate_steam_update_pending(
+    payload: Any, advice: dict[str, Any] | None
+) -> Any:
+    if advice is None or not isinstance(payload, dict):
+        return payload
+    warnings = payload.get("warnings")
+    warnings = list(warnings) if isinstance(warnings, list) else []
+    if STEAM_UPDATE_PENDING not in warnings:
+        warnings.append(STEAM_UPDATE_PENDING)
+    payload["warnings"] = warnings
+    payload["steam_update_pending"] = dict(advice)
+    return payload
+
+
 # fb-20260930-171015-4fdf. This process builds the request with the modules it
 # loaded at start, and the sealed worker it launches comes from the bundle on
 # disk; load_verified_bundle compares that bundle with the files on disk, not
@@ -5988,10 +6016,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError("bad_purpose")
         client = _client_runtime()
         steam_view = await _observe_steam_app_view()
+        steam_update = await _observe_steam_update_pending()
         async with client.tool_lock:
             return _profile_ok_next_step(
                 _annotate_steam_app_view(
-                    await client.session_acquire(purpose.strip()), steam_view
+                    _annotate_steam_update_pending(
+                        await client.session_acquire(purpose.strip()), steam_update
+                    ),
+                    steam_view,
                 ),
                 "session_acquire",
                 allowed=_effective_next_tools(config, runtime=runtime),
@@ -6057,6 +6089,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         )
         client = _client_runtime()
         steam_view = await _observe_steam_app_view()
+        steam_update = await _observe_steam_update_pending()
         async with client.tool_lock:
             payload = await client.session_acquire_wait(
                 purpose.strip(), validated_wait, report
@@ -6065,7 +6098,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # _install_catalog_change_notice once this call returns.
         return _profile_ok_next_step(
             _annotate_steam_app_view(
-                _annotate_caller_tool_registry(payload, caller_stale), steam_view
+                _annotate_steam_update_pending(
+                    _annotate_caller_tool_registry(payload, caller_stale), steam_update
+                ),
+                steam_view,
             ),
             "session_acquire_wait",
             allowed=_effective_next_tools(config, runtime=runtime),
@@ -6159,6 +6195,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     async def session_status() -> dict[str, Any]:
         client = _client_runtime()
         steam_view = await _observe_steam_app_view()
+        steam_update = await _observe_steam_update_pending()
         async with client.tool_lock:
             status = await client.session_status()
             box = status.get("box")
@@ -6185,7 +6222,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
             await _attach_revalidated_runs_retired_recently(client, status)
             return _profile_ok_next_step(
-                _annotate_steam_app_view(status, steam_view),
+                _annotate_steam_app_view(
+                    _annotate_steam_update_pending(status, steam_update), steam_view
+                ),
                 "session_status",
                 allowed=_effective_next_tools(config, runtime=runtime),
             )
