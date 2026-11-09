@@ -167,7 +167,7 @@ a process differ.
   `open_osfhandle` only while it is imported (the cancel handle is a pipe descriptor; a module named `msvcrt`
   left in `sys.modules` turns `subprocess` into its Windows branch), and points its bundle root at `--bundle`.
   Not rebuilt: the debugger gate on every image a child maps and the job object. Build mode
-  (AddonBuilder) is not available.
+  runs armake2 instead of AddonBuilder (**Build**, below).
 - **Sealed path semantics** (`linux_compat.install_sealed_worker_paths`): `dayz_test_request`,
   `dayz_test_worker`, `dayz_test_attestation` and `dayz_test_storage` get `linux_compat.DRIVE_PATH_AWARE`
   as their `ntpath` (each call takes `ntpath` for a drive or UNC path, `posixpath` otherwise, so
@@ -198,7 +198,10 @@ a process differ.
   `runtime_state`'s coordination-fault lock uses `byte_lock.lock` (`LK_LOCK` semantics: ten tries a second
   apart) instead of refusing without `msvcrt`.
 
-Setup: a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
+Setup: Steam installed natively, since the Steam check reads `~/.steam/steam.pid` (a Flatpak Steam keeps it
+elsewhere and is not seen); for `DayZDiag_x64.exe`, server and client alike (the normal setup), Steam Linux
+Runtime 4, the Proton tool `DAYZ_MCP_PROTON` names and `sway`; for the native `DayZServer`, rootless podman (`python -m dayz_mcp.podman_server image` builds its runtime
+image); for `build=true`, `armake2` on `PATH`. Then a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
 `_client/profiles/`, the missions under a mission root, the mods under a mod root, `diag_executable` =
 `<game>/DayZDiag_x64.exe` (see "Which binary runs"); then
 `python -m dayz_mcp.linux_launcher install --policy <file>` and `status`.
