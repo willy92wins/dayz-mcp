@@ -24,7 +24,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
-from dayz_mcp import dayz_test_storage, window_close, window_foreground
+from dayz_mcp import box_holder, dayz_test_storage, window_close, window_foreground
 from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
@@ -793,6 +793,8 @@ class _BoxProbes:
     foreign_ports_dayz_related: tuple[int, ...] = ()
     # 250f: registered pids the diag scan saw alive; None when it did not run.
     live_pids: frozenset[int] | None = None
+    # fb-6330: another instance's run that holds every foreign pid, or None.
+    foreign_holder: Mapping[str, str] | None = None
 
 
 def _activity_from_snapshot(
@@ -1295,7 +1297,7 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
         runs.append(row)
     scans_known = probes.scan_known and probes.port_scan_known
     occupied = True if not scans_known else bool(runs or probes.foreign)
-    return {
+    box: dict[str, object] = {
         "occupied": occupied,
         "runs": runs,
         "foreign": [dict(item) for item in probes.foreign],
@@ -1316,6 +1318,11 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
             "kind": "os_socket_table_ignored_for_occupancy",
         },
     }
+    if probes.foreign_holder is not None:
+        # fb-6330: only when another instance's record names the foreign
+        # DayZ; without one the box reads exactly as before.
+        box["foreign_holder"] = dict(probes.foreign_holder)
+    return box
 
 
 def _wait_hint(box: object) -> str:
@@ -2431,6 +2438,42 @@ class ProcessLifecycle:
                 self._unfence_runs([run.run_id])
             except Exception:
                 pass
+        # fb-6330: the run has ended; nothing may name it any more.
+        box_holder.clear(run.run_id)
+
+    def _publish_box_holder(self, run: RunRecord, client: ClientIdentity) -> None:
+        """fb-6330: name this run for another instance on the box. Best effort.
+
+        The holder is the session that launched it, as session_status shows a
+        client (platform and the 12-character session prefix). The purpose is
+        its task label, else the purpose of the lease that started the run.
+        """
+        try:
+            purpose = client.task_label
+            owner, lease = run.owner_session_id, run.owner_lease_id
+            if not purpose and owner and lease:
+                try:
+                    purpose = self.coordinator.lease_purpose(owner, lease) or ""
+                except Exception:
+                    purpose = ""
+            box_holder.publish(
+                run_id=run.run_id,
+                holder=f"{client.platform}/{client.session_id[:12]}",
+                purpose=purpose,
+                processes={
+                    record.pid: _utc_epoch(record.creation_time_utc)
+                    for record in run.processes
+                },
+            )
+        except Exception:
+            pass
+
+    def _sync_box_holder(self, run: RunRecord, client: ClientIdentity) -> None:
+        """fb-6330: after a failed launch the record follows what the run still holds."""
+        if run.state == "EXITED" or not run.processes:
+            box_holder.clear(run.run_id)
+        else:
+            self._publish_box_holder(run, client)
 
     def _note_post_persist_fault(self, run_id: str, reason: str) -> None:
         try:
@@ -3798,6 +3841,7 @@ class ProcessLifecycle:
                 state = durable.state if durable is not None else "STARTING"
                 result = self._error("manual_cleanup_required", 409)
 
+        self._sync_box_holder(target, client)
         result["run_id"] = provisional.run_id
         result["state"] = state
         if manifest_failure or persistence_failed:
@@ -4415,6 +4459,9 @@ class ProcessLifecycle:
                 completed = RunRecord.from_payload(dataclasses.asdict(provisional))
                 completed.processes.append(record)
                 completed.state = "RUNNING"
+                # fb-6330: the other instance can name this run from now on; a
+                # failed persist settles below and the settle clears it.
+                self._publish_box_holder(completed, client)
                 try:
                     self.manifest.replace(completed)
                 except Exception:
@@ -9028,7 +9075,44 @@ class ProcessLifecycle:
                 sorted(foreign_ports_dayz_related)
             ),
             live_pids=live_pids,
+            foreign_holder=self._foreign_holder(
+                observed, diag_foreign_pids, rows_by_pid
+            ),
         )
+
+    def _foreign_holder(
+        self,
+        observed: list[dict[str, object]],
+        diag_pids: set[int],
+        port_pids: Mapping[int, object],
+    ) -> dict[str, str] | None:
+        """fb-6330: the other instance's run that holds every foreign pid, or None.
+
+        Only a fully known scan gets here. A creation time the diag scan does
+        not give is read from the guard, and only for pids a record claims.
+        """
+        seen: dict[int, float | None] = {
+            int(process["pid"]): _utc_epoch(process.get("creation_time_utc"))
+            for process in observed
+            if int(process["pid"]) in diag_pids
+        }
+        for pid in port_pids:
+            seen.setdefault(int(pid), None)
+        if not seen:
+            return None
+        try:
+            return box_holder.attribute(seen, created_of=self._process_created)
+        except Exception:
+            return None
+
+    def _process_created(self, pid: int) -> float | None:
+        try:
+            actual = self.guard.snapshot(pid)
+        except Exception:
+            return None
+        if not isinstance(actual, dict) or actual.get("pid") != pid:
+            return None
+        return _utc_epoch(actual.get("creation_time_utc"))
 
     def _probes_for_snapshot(
         self, snapshot: _BoxSnapshot, *, use_cache: bool
