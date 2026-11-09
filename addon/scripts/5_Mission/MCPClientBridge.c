@@ -68,6 +68,11 @@ class MCPClientResultCallback : RestCallback
 		m_Bridge = bridge;
 	}
 
+	void AttachBridge(MCPClientBridge bridge)
+	{
+		m_Bridge = bridge;
+	}
+
 	void DetachBridge()
 	{
 		m_Bridge = null;
@@ -79,6 +84,8 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultSuccess(data, dataSize);
+			// Back to the free list detached: an idle callback holds no bridge.
+			m_Bridge.RecycleResultCallback(this);
 			DetachBridge();
 		}
 	}
@@ -89,6 +96,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultError(errorCode);
+			// OnError may repeat (restapi.c:53): never reuse this identity.
 			DetachBridge();
 		}
 	}
@@ -558,6 +566,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
+	protected ref array<ref MCPClientResultCallback> m_ResultCallbackPool;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref MCPJobRunner m_JobRunner;
 	protected ref array<Object> m_ReadyObjects;
@@ -610,6 +619,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_CameraPathPlayTick = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
+		m_ResultCallbackPool = new array<ref MCPClientResultCallback>();
 		m_Pending = new array<ref MCPCommand>();
 		m_JobRunner = new MCPJobRunner();
 		m_ReadyObjects = new array<Object>();
@@ -8538,7 +8548,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		MCPClientResultCallback cb = new MCPClientResultCallback(this);
+		MCPClientResultCallback cb = AcquireResultCallback();
 		m_CallbackRefs.Insert(cb);
 		string resultRequest = "result?key=" + m_Key;
 		if (m_PeerInstance != "")
@@ -8554,6 +8564,43 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			okStr = "1";
 		}
 		Log("client result posted id=" + result.id + " ok=" + okStr + " sent_tick=" + result.tick_poll_sent + " callback_tick=" + result.tick_poll_callback + " dispatch_tick=" + result.tick_dispatch);
+	}
+
+	// The server's free list (MCPBridge.c AcquireResultCallback), on the
+	// client too. The 9/11 round counted 138/138, 50 and 394/394
+	// MCPClientResultCallback instances alive on the client, one new per
+	// result, against 1-4 on the server. Not measured: native RestApi seems
+	// to keep every distinct callback until the mission is cleaned. Only
+	// successful requests enter the list; each in-flight POST owns a
+	// distinct callback in m_CallbackRefs, and the StartPoll reservation
+	// bounds active + idle callbacks to MAX_CALLBACK_REFS.
+	protected MCPClientResultCallback AcquireResultCallback()
+	{
+		MCPClientResultCallback cb;
+		int last = -1;
+		if (m_ResultCallbackPool)
+		{
+			last = m_ResultCallbackPool.Count() - 1;
+		}
+		if (last >= 0)
+		{
+			cb = m_ResultCallbackPool.Get(last);
+			m_ResultCallbackPool.Remove(last);
+			cb.AttachBridge(this);
+		}
+		else
+		{
+			cb = new MCPClientResultCallback(this);
+		}
+		return cb;
+	}
+
+	void RecycleResultCallback(MCPClientResultCallback cb)
+	{
+		if (m_ResultCallbackPool && m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS)
+		{
+			m_ResultCallbackPool.Insert(cb);
+		}
 	}
 
 	void OnResultSuccess(string data, int dataSize)
@@ -8736,6 +8783,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				i = i + 1;
 			}
 		}
+
+		// After the terminal POSTs above, which take their callbacks from
+		// it. Idle callbacks were already detached in OnSuccess.
+		if (m_ResultCallbackPool)
+		{
+			m_ResultCallbackPool.Clear();
+		}
+		m_ResultCallbackPool = null;
 
 		bool pollDistinct = false;
 		if (m_PollCtx && m_PollCtx != m_Ctx)
