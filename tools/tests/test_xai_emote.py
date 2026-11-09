@@ -155,6 +155,9 @@ class AiEmoteToolTest(unittest.TestCase):
         interrupted = {"ok": False, "error": "emote_interrupted", "emote_state": "interrupted", "emote_pending": False}
         self.assertEqual(str(_bridge_error(interrupted, EMOTE)),
                          "emote_interrupted; observed=emote_pending=false")
+        nothing = {"ok": False, "error": "no_emote_playing", "emote_state": "rejected"}
+        self.assertEqual(str(_bridge_error(nothing, EMOTE)),
+                         "no_emote_playing; observed=emote_state=rejected emote_pending=false")
 
     def test_o8_server_states_keep_times_only_where_reached(self) -> None:
         # Mutant killed: a cancelled/timed_out answer keeping a start time
@@ -639,6 +642,37 @@ class AiEmoteEnforceTest(unittest.TestCase):
         member.m_Expansion_EmoteID = 0  # consumed after the last read
         _tick(namespace, 110.5)
         self.assertFalse(namespace["_posted"][0].emote_pending)
+
+    def test_e8_death_seen_at_the_first_tick_past_wait_s_interrupts(self) -> None:
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace)
+        namespace["m_Jobs"].GetElement(0).subject = None
+        _tick(namespace, 110.5)
+        self.assertEqual(namespace["_posted"][0].error.text, "emote_interrupted")
+
+    def test_e8_timeout_with_the_member_gone_still_answers(self) -> None:
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace)
+        job = namespace["m_Jobs"].GetElement(0)
+        job.subject = None
+        namespace["PostJobTimeout"](job)
+        self.assertEqual(namespace["_posted"][0].error.text, "emote_timed_out")
+        self.assertFalse(namespace["_posted"][0].emote_pending)
+
+    def test_e8_a_start_past_wait_s_is_not_started(self) -> None:
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _dispatch(namespace)
+        member.m_Expansion_EmoteID = 0
+        member.emotes.m_bEmoteIsPlaying = True
+        member.emotes.gesture = _EMOTE_IDS["nod"]
+        _tick(namespace, 110.5)
+        self.assertEqual(namespace["_posted"][0].error.text, "emote_timed_out")
 
     def test_e8_the_job_tick_writes_no_field_of_either_layer(self) -> None:
         # Mutant killed: the job tick assigning a field of either layer

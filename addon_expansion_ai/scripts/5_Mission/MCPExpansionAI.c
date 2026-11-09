@@ -1980,6 +1980,7 @@ modded class MCPBridge
 			result.ok = false;
 			result.error = "emote_rejected";
 			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
 			return 1;
 		}
 
@@ -2099,11 +2100,6 @@ modded class MCPBridge
 		}
 
 		nowS = GetGame().GetTickTime();
-		if (nowS - job.emote_request_s > job.wait_s)
-		{
-			return false;
-		}
-
 		member = eAIBase.Cast(job.subject);
 		if (!member || !member.IsAlive())
 		{
@@ -2115,6 +2111,11 @@ modded class MCPBridge
 			}
 
 			return true;
+		}
+
+		if (nowS - job.emote_request_s > job.wait_s)
+		{
+			return false;
 		}
 
 		emotes = member.GetEmoteManager();
