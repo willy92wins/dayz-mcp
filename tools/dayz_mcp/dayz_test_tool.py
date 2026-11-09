@@ -645,9 +645,22 @@ def _run_unknown_to_store(status: object, run_id: str) -> bool:
 # one layer above the lifecycle, so the only remaining route was a human
 # killing processes by hand. The worker adopts before it stops
 # (dayz_test_worker: adopt then stop on the kill path), and adopt now accepts
-# that state, so the call has somewhere to go. EXITED and the two transient
-# states stay closed.
-_STOPPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
+# that state, so the call has somewhere to go.
+#
+# ah-starting-cancel-20261109-1444: STARTING is the launch window. Refusing it
+# here answered run_not_active before the stop's own lease was ever asked for,
+# so an owned launch could not be cancelled by the protocol that already
+# exists. The stop now asks for the box lease like any other request; the
+# in-flight launch holds that lease under the lifecycle operation lock, so the
+# worker's adopt/stop runs only after the launch settled its row (RUNNING,
+# RUNNING_IDLE, UNRECONCILED or EXITED). A row still STARTING when the worker
+# reaches it is refused there as run_not_adoptable, which is the explicit
+# fail-closed answer, never a silent success. STOPPING stays closed: that stop
+# is already in flight and will settle on its own. EXITED stays closed too,
+# except the never-started row handled by resolve_stop_run.
+_STOPPABLE_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "UNRECONCILED"}
+)
 
 
 def require_extension_run(

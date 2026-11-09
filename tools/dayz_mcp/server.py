@@ -6805,6 +6805,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Queue adoption and shutdown of one exact approved DayZ run. "
+            "A run still in its launch window (STARTING) is accepted: the "
+            "stop joins the box queue, the in-flight launch holds the lease "
+            "and settles its row first, and the stop then adopts and kills "
+            "it. A row still STARTING when the worker reaches it is refused "
+            "as run_not_adoptable, never a silent success. "
             "Stop uses forced process kill, not orderly mission teardown: "
             "RPT exit metrics (Leaked counts, Destroying game, Termination "
             "successfully completed) are not valid after this tool. status "

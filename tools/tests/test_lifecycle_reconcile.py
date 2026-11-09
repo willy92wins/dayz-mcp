@@ -372,10 +372,12 @@ class LifecycleReconcileTest(unittest.TestCase):
         self.assertEqual(recovered.get(RUN_ID).state, "RUNNING_IDLE")
         self.assertIsNone(recovered.get(RUN_ID).owner_session_id)
 
-    def test_dayz_test_stop_accepts_unreconciled_and_still_refuses_the_rest(self) -> None:
+    def test_dayz_test_stop_accepts_starting_and_still_refuses_the_rest(self) -> None:
         policies = _sealed_policies()
 
-        for state in ("RUNNING", "RUNNING_IDLE", "UNRECONCILED"):
+        # STARTING is the launch window: the stop's own lease waits for the
+        # launch that holds it, so the pre-check must not answer run_not_active.
+        for state in ("STARTING", "RUNNING", "RUNNING_IDLE", "UNRECONCILED"):
             with self.subTest(state=state):
                 policy, run = dayz_test_tool.resolve_stop_run(
                     _status_row(state), policies, _UUID
@@ -383,7 +385,7 @@ class LifecycleReconcileTest(unittest.TestCase):
                 self.assertEqual(run["state"], state)
                 self.assertEqual(policy.mod, "SameMod")
 
-        for state in ("EXITED", "STARTING", "STOPPING"):
+        for state in ("EXITED", "STOPPING"):
             with self.subTest(state=state):
                 with self.assertRaises(dayz_test_tool.DayzTestToolError) as caught:
                     dayz_test_tool.resolve_stop_run(_status_row(state), policies, _UUID)
