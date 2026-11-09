@@ -181,6 +181,32 @@ class LifecycleMissionTest(unittest.TestCase):
             )
 
 
+class RemoveStaleTreesTest(unittest.TestCase):
+    """Only a container podman reports absent loses its tree (``container exists`` exits 1)."""
+
+    def test_only_an_absent_container_loses_its_tree(self):
+        codes = {"absent": 1, "present": 0, "error": 125}
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base)
+            for key in codes:
+                (root / (ps.CONTAINER_PREFIX + key)).mkdir()
+            (root / "unrelated").mkdir()
+            calls = []
+
+            def fake_podman(_podman, *command, check=True):
+                calls.append(command)
+                return mock.Mock(returncode=codes[command[-1][len(ps.CONTAINER_PREFIX):]], stdout="", stderr="")
+
+            with mock.patch.object(ps, "_podman", fake_podman):
+                ps._remove_stale_trees(root, "podman")
+            self.assertFalse((root / (ps.CONTAINER_PREFIX + "absent")).exists())
+            self.assertTrue((root / (ps.CONTAINER_PREFIX + "present")).is_dir())
+            self.assertTrue((root / (ps.CONTAINER_PREFIX + "error")).is_dir())
+            self.assertTrue((root / "unrelated").is_dir())
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(command[:2] == ("container", "exists") for command in calls))
+
+
 class FreePortsTest(unittest.TestCase):
     def test_spacing_and_defaults(self):
         ports = ps.free_ports(3)
