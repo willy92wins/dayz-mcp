@@ -190,9 +190,10 @@ WHITELISTED_COMMANDS = SERVER_COMMANDS | CLIENT_COMMANDS
 # enqueue every client command passes before it can reach the bridge (and
 # at Handler._handle_lifecycle, the route the dayz_test* tools pass).
 # Off by default; the daemon turns it on only from the environment below
-# (or an explicit ServerState argument). Working assumption D4, not
-# confirmed by the owner: reads and warnings alone, admin mutations only
-# when expressly enabled, after passing the bench.
+# (or an explicit ServerState argument). D4, as the owner decided it on
+# 2026-10-28 and changed on 2026-11-08 for the warning: reads alone by
+# default; the admin mutations and notify_players only when expressly
+# enabled, after passing the bench.
 LIVE_PROFILE_ENV = "DAYZ_MCP_LIVE_PROFILE"
 LIVE_ADMIN_ENV = "DAYZ_MCP_LIVE_ADMIN"
 LIVE_PROFILE_REFUSED = "live_profile_refused"
