@@ -701,7 +701,7 @@ def enforce_vpp_preflight(
 # the tools send (loopback._capability_refusal_locked). A PBO built from
 # another commit showed up only after the launch (9535, 9077, 7e14), so
 # dayz_test_run reads the hash out of the PBO it is about to load. Only a hash
-# it reads counts: a folder, file or declaration it cannot read refuses
+# it reads counts: a folder, file or declaration it cannot read adds
 # nothing, and the loopback still answers per verb.
 _SERVER_ARG_CONTRACT_DECL = re.compile(
     rb'\bconst\s+string\s+SERVER_ARG_CONTRACT_HASH\s*=\s*"([0-9a-f]{16})"\s*;'
@@ -729,6 +729,20 @@ def _read_bridge_pbos(mod_path: str) -> list[bytes]:
 read_bridge_pbos: Callable[[str], list[bytes]] = _read_bridge_pbos
 
 
+def _bridge_mod_paths(
+    entry: str, policy: dayz_test_request.RequestProjectPolicy
+) -> tuple[str, ...]:
+    """Every path a bridge entry may load from (fb-20261109-130856-f28c).
+
+    An absolute entry is exact. A relative one joins each declared root, in
+    order: the worker uses one of them (_resolved_mod_path), and which one is
+    not known here, so the gate reads them all.
+    """
+    if ntpath.isabs(entry):
+        return (ntpath.normpath(entry),)
+    return tuple(ntpath.join(root, entry) for root in policy.mod_roots)
+
+
 def bridge_contract_mismatch(
     payload: dict[str, object],
     policy: dayz_test_request.RequestProjectPolicy,
@@ -737,8 +751,10 @@ def bridge_contract_mismatch(
 ) -> tuple[str, ...]:
     """The arg contracts the bridge PBOs announce, when none of them is expected.
 
-    Empty when the run starts no server, builds the bridge itself, or when a
-    bridge folder, PBO or declaration cannot be read.
+    Empty when the run starts no server, builds the bridge itself, or when no
+    PBO it can read declares a contract. A relative bridge entry is read under
+    every declared root, and one root that announces the expected contract is
+    enough.
     """
     if not mode_starts_server(str(payload["mode"])):
         return ()
@@ -748,18 +764,16 @@ def bridge_contract_mismatch(
     for entry in (*effective_mod_entries(payload), *payload.get("server_only_mods", [])):
         if ntpath.basename(str(entry)).casefold() not in dayz_test_request._BRIDGE_BASENAMES:
             continue
-        path = _resolved_mod_path(str(entry), policy)
-        if path is None:
-            return ()
-        try:
-            blobs = read_bridge_pbos(path)
-        except OSError:
-            return ()
-        for blob in blobs:
-            announced.update(
-                match.decode("ascii")
-                for match in _SERVER_ARG_CONTRACT_DECL.findall(blob)
-            )
+        for path in _bridge_mod_paths(str(entry), policy):
+            try:
+                blobs = read_bridge_pbos(path)
+            except OSError:
+                continue
+            for blob in blobs:
+                announced.update(
+                    match.decode("ascii")
+                    for match in _SERVER_ARG_CONTRACT_DECL.findall(blob)
+                )
     if expected in announced:
         return ()
     return tuple(sorted(announced))
