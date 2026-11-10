@@ -1178,6 +1178,10 @@ async def _start(
             operation_id=operation_id,
         )
         if not _successful_run(ack, target_run_id, "RUNNING"):
+            # ah-starting-spawn-20261110: a same-session stop cancelled this
+            # launch after its process spawned and before this ack.
+            if _lifecycle_rejection(ack) == "launch_cancelled":
+                raise _failed("launch_cancelled")
             raise _failed()
     except BaseException as error:
         if pre_admission_rejection is not None:
