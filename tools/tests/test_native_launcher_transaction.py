@@ -64,7 +64,16 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
         # The mod folder and the serverDZ.cfg with vppDisablePassword = 1 are
         # what dayz-test.ps1 used to guarantee; without them the transaction
         # now refuses to start a server.
-        for path in (source, missions, mods / "@CF", mods / "@VPPAdminTools"):
+        chernarus = missions / "dayzOffline.chernarusplus"
+        # FINDING-launch-modroot: the launch also accredits what the roles
+        # load (implicit @ExampleMod, mission alias), so the fixture has them.
+        for path in (
+            source,
+            chernarus,
+            mods / "@CF",
+            mods / "@VPPAdminTools",
+            mods / "@ExampleMod",
+        ):
             path.mkdir(parents=True, exist_ok=True)
         # ficha df93 ronda 3: the gate proves the mod's identity from its own
         # meta.cpp, so the fixture carries the lines every install has.
@@ -87,6 +96,18 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
             mod_roots=(str(mods),),
         )
         sealed = authority._seal_project_policy_for_test(policy)
+        worker = importlib.import_module("dayz_mcp.dayz_test_worker")
+        runtime = worker.WorkerRuntimePolicy(
+            dev_root=str(project),
+            mod="ExampleMod",
+            diag_executable=str(root / "DayZ" / "DayZDiag_x64.exe"),
+            game_directory=str(root / "DayZ"),
+            mission_aliases=(("chernarus", str(chernarus)),),
+            mods_root=str(mods),
+            build_temp_root=str(root / "build-temp"),
+            build_source_basename=None,
+        )
+        self._runtime = lambda _mod, _dev_root: runtime
         raw = json.dumps(
             {
                 "version": 1,
@@ -120,6 +141,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
             result = await module.execute_native_launcher_transaction(
                 raw,
                 sealed_policies=(sealed,),
+                worker_runtime=self._runtime,
                 control_client=control,
                 consumer=consumer,
                 max_wait_s=None,
@@ -164,6 +186,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                     await module.execute_native_launcher_transaction(
                         raw,
                         sealed_policies=(sealed,),
+                        worker_runtime=self._runtime,
                         control_client=control,
                         consumer=consumer,
                     )
@@ -182,6 +205,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                 await module.execute_native_launcher_transaction(
                     raw,
                     sealed_policies=(sealed,),
+                    worker_runtime=self._runtime,
                     control_client=control,
                     consumer=consumer,
                 )
@@ -206,6 +230,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                 await module.execute_native_launcher_transaction(
                     raw,
                     sealed_policies=(sealed,),
+                    worker_runtime=self._runtime,
                     control_client=control,
                     consumer=consumer,
                 )
@@ -272,6 +297,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                 await module.execute_native_launcher_transaction(
                     raw,
                     sealed_policies=(sealed,),
+                    worker_runtime=self._runtime,
                     control_client=control,
                     consumer=consumer,
                 )
@@ -300,6 +326,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                 await module.execute_native_launcher_transaction(
                     raw,
                     sealed_policies=(sealed,),
+                    worker_runtime=self._runtime,
                     control_client=control,
                     consumer=consumer,
                 )
@@ -331,6 +358,7 @@ class NativeLauncherTransactionTests(unittest.IsolatedAsyncioTestCase):
                 module.execute_native_launcher_transaction(
                     raw,
                     sealed_policies=(sealed,),
+                    worker_runtime=self._runtime,
                     control_client=control,
                     consumer=consumer,
                 )
