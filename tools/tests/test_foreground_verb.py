@@ -1,7 +1,7 @@
 """dayz_test_foreground asks Windows once to bring a run's DayZ client forward (inbox 8b1c).
 
-No test calls SetForegroundWindow, GetForegroundWindow or
-LockSetForegroundWindow: the windows, the foreground and the lock are fakes.
+No test calls SetForegroundWindow or GetForegroundWindow: the windows and the
+foreground are fakes.
 """
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from dayz_mcp import control_client, server, window_close, window_foreground
-from dayz_mcp.foreground_lock import LSFW_LOCK, LSFW_UNLOCK, ForegroundLock
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     RunManifestStore,
@@ -468,79 +467,6 @@ class WindowForegroundTest(unittest.TestCase):
         self.assertEqual(bound.area(5), 0)
 
 
-class _Timer:
-    def __init__(self, interval, function, args=()) -> None:
-        self.interval = interval
-        self.function = function
-        self.args = args
-        self.daemon = False
-        self.cancelled = False
-
-    def start(self) -> None:
-        return None
-
-    def cancel(self) -> None:
-        self.cancelled = True
-
-    def fire(self) -> None:
-        self.function(*self.args)
-
-
-class _LockCall:
-    def __init__(self) -> None:
-        self.codes: list[int] = []
-        self.timers: list[_Timer] = []
-
-    def __call__(self, code: int) -> bool:
-        self.codes.append(code)
-        return True
-
-    def timer(self, interval, function, args=()) -> _Timer:
-        timer = _Timer(interval, function, args)
-        self.timers.append(timer)
-        return timer
-
-
-class ForegroundLockReleaseTest(unittest.TestCase):
-    def test_release_unlocks_now_and_drops_the_pending_release(self) -> None:
-        call = _LockCall()
-        held = ForegroundLock(call, timer=call.timer)
-        held.hold()
-        held.release()
-        self.assertEqual(call.codes, [LSFW_LOCK, LSFW_UNLOCK])
-        (timer,) = call.timers
-        self.assertTrue(timer.cancelled)
-        # A release timer that fired anyway finds nothing left to unlock.
-        timer.fire()
-        self.assertEqual(call.codes, [LSFW_LOCK, LSFW_UNLOCK])
-        # A later launch schedules its own release again.
-        held.hold()
-        call.timers[-1].fire()
-        self.assertEqual(call.codes, [LSFW_LOCK, LSFW_UNLOCK, LSFW_LOCK, LSFW_UNLOCK])
-
-    def test_release_unlocks_once_without_a_hold_and_nothing_without_the_call(
-        self,
-    ) -> None:
-        call = _LockCall()
-        ForegroundLock(call, timer=call.timer).release()
-        self.assertEqual(call.codes, [LSFW_UNLOCK])
-        self.assertEqual(call.timers, [])
-        self.assertIsNone(ForegroundLock(None, timer=call.timer).release())
-
-
-class _Lock:
-    """The daemon's foreground lock: release() is all the verb may call."""
-
-    def __init__(self, desktop: _Desktop) -> None:
-        self.desktop = desktop
-
-    def release(self) -> None:
-        self.desktop.calls.append("unlock")
-
-    def hold(self) -> bool:
-        raise AssertionError("the verb took the lock")
-
-
 class ForegroundRunTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
@@ -581,7 +507,6 @@ class ForegroundRunTest(unittest.TestCase):
             game_path=game,
             launcher=FakeLauncher(),
             id_fn=lambda: "run-1",
-            foreground_lock=_Lock(self.desktop),
         )
         self.lifecycle.window_fns = self.desktop.window_fns()
         self.lifecycle.foreground_fns = self.desktop.foreground_fns()
@@ -657,11 +582,11 @@ class ForegroundRunTest(unittest.TestCase):
             {"run_id": RUN_ID, "state": "foreground", "granted": True, "held_s": 0.0},
         )
         self.assertEqual(self.desktop.asks, [420])
-        # The client's identity is read again right before the ask, the lock
-        # is let go before it, and the ask runs under the operation lock while
-        # the reads of the foreground after it do not.
+        # The client's identity is read again right before the ask, and the
+        # ask runs under the operation lock while the reads of the foreground
+        # after it do not.
         self.assertEqual(self.guard.snapshot_calls, [42, 42])
-        self.assertEqual(self.desktop.calls, ["iconic", "unlock", "ask"])
+        self.assertEqual(self.desktop.calls, ["iconic", "ask"])
         self.assertEqual(self.desktop.taken_at_ask, [True])
         self.assertEqual(self.desktop.taken_at_read, [False])
         (row,) = self.rows()
@@ -851,7 +776,7 @@ class ForegroundRunTest(unittest.TestCase):
         self.add_run()
         self.desktop.passes_to = 43
         self.assertRefused(self.foreground(), "window_not_found", 404)
-        self.assertEqual(self.desktop.calls, ["iconic", "unlock"])
+        self.assertEqual(self.desktop.calls, ["iconic"])
         self.assertEqual(self.in_flight(), [])
 
     def test_a_client_gone_or_unclear_after_the_audit_row_is_not_asked_for(
@@ -950,7 +875,7 @@ class ForegroundRunTest(unittest.TestCase):
             self.desktop.foreground_fns(), set_foreground=raises
         )
         self.assertRefused(self.foreground(), "foreground_failed", 503)
-        self.assertEqual(self.desktop.calls, ["iconic", "unlock"])
+        self.assertEqual(self.desktop.calls, ["iconic"])
         self.assertEqual(self.in_flight(), [])
         self.lifecycle.foreground_fns = self.desktop.foreground_fns()
         self.assertEqual(self.foreground()["state"], "foreground")
