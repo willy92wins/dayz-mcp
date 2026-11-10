@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 107 typed
+game, put the world into a state, act, and read back what the engine did — 108 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -32,7 +32,7 @@ frame, raycast a placement, record a 20 Hz drive trace as a regression fixture
 | **Set up the scene** | `world_spawn`, `world_spawn_batch`, `player_teleport`, `player_heal`, `player_godmode`, `object_set_health`, `vehicle_enter`, `inventory_attach`, `inventory_give`, `loadout_apply`, `hands_attach`, `hands_take`, `world_time_set`, `world_weather_set`, `engine_set` | Put the world into the state the test needs — deterministically, from script. Heal a player at once, seated or not, or switch its godmode. Set one object's Health and read it back. Spawn up to 200 objects in one call, sent in groups of `per_tick` that the bridge each creates in one server tick, every one registered under a scene when given a `scene_id`. |
 | **Act** | `vehicle_control`, `object_anim`, `vehicle_door`, `camera_set`, `camera_path_play`, `hud_set`, `player_view_set`, `notify_players`, `weapon_raise`, `weapon_aim`, `weapon_fire`, `weapon_sights`, `input_trigger`, `player_move`, `actor_emote`, `survivor_drive` | Drive, animate, open or close a car door, frame the shot (focus included), move the camera along a keyed path, hide the HUD, set the local player's first or third person view, raise, aim and fire the local weapon, click, hold or press a key through the script key handlers, walk the on-foot player in a direction or to a point, play an emote on it, and walk a spawned survivor on the server. |
 | **Iterate the UI** | `ui_reload_layout`, `ui_tree`, `ui_dialog`, `capture_screenshot` | Reload a `.layout` written into the client's profile directory and read back the rectangles the engine computed for it. The file is re-read on every call, so a panel can be edited and re-measured in seconds instead of one repack-and-boot per change. `ui_dialog` is the client modal (acknowledge/confirm/form) for the local player. |
-| **Observe** | `wait_for`, `logs_since`, `query_player_state`, `weapon_state`, `object_inspect`, `object_doors`, `loadout_get`, `input_describe`, `world_time_get`, `scene_entities`, `vehicle_telemetry`, `vehicle_trace`, `player_trace`, `anim_timeline`, `scene_raycast`, `surface_query`, `server_perf`, `nav_path_query`, `players_visibility`, `capture_screenshot` | Structured state from the server, log tails since a cursor, 20 Hz vehicle and on-foot player traces, client action/animation-phase timelines, raycasts, frames. Building door flags, registered input bindings, the in-game clock, what a scene holds, the server frame rate with its entity counts, a navmesh path and which players could see a point are reads. Data an agent can assert on, not pixels to squint at. |
+| **Observe** | `wait_for`, `logs_since`, `chat_read`, `query_player_state`, `weapon_state`, `object_inspect`, `object_doors`, `loadout_get`, `input_describe`, `world_time_get`, `scene_entities`, `vehicle_telemetry`, `vehicle_trace`, `player_trace`, `anim_timeline`, `scene_raycast`, `surface_query`, `server_perf`, `nav_path_query`, `players_visibility`, `capture_screenshot` | Structured state from the server, log tails and client chat lines since a cursor, 20 Hz vehicle and on-foot player traces, client action/animation-phase timelines, raycasts, frames. Building door flags, registered input bindings, the in-game clock, what a scene holds, the server frame rate with its entity counts, a navmesh path and which players could see a point are reads. Data an agent can assert on, not pixels to squint at. |
 | **Reset + repeat** | `scene_clear`, `restore_gameplay`, `dayz_test_stop`, `session_acquire_wait`, `session_release`, `session_status` | Delete the objects a scene spawned, as `object_delete` deletes one (or nothing, when one shares a hierarchy with another scene's), return the world to normal, stop the managed run, hand the game to the next session. |
 
 An agent that can call these can iterate on a mod the way it iterates on code: change,
@@ -105,9 +105,9 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` writes nothing unless the client starts with `-autotest` (T165276),
 and dayz-mcp does not start it that way yet, so frames come from an external window grab of the rendered client, which only reads pixels.
 
-**107 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**108 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
-`action_cursor`, `action_hold`, `action_use`, `actor_emote`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `gameplay_state`,
+`action_cursor`, `action_hold`, `action_use`, `actor_emote`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,

@@ -411,6 +411,8 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     # Both views player_view_set sends (854c).
     ("player_view_set", {"view": "first"}, "player_view_set"),
     ("player_view_set", {"view": "third"}, "player_view_set"),
+    ("chat_read", {}, "chat_read"),
+    ("chat_read", {"marker": 10, "max_lines": 50}, "chat_read"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and

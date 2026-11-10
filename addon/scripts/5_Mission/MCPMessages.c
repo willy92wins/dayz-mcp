@@ -309,6 +309,9 @@ class MCPArgs
 	float focus_blur;
 	// hud_set (f427). The tool always sends it; an absent key reads false.
 	bool visible;
+	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
+	// max_lines above is reused.
+	int marker;
 
 	void MCPArgs()
 	{
@@ -1325,6 +1328,43 @@ class MCPGameplayState
 	bool player_simulation_disabled;
 };
 
+class MCPChatLine
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordLine shortened sender or text to its cap.
+	bool cut;
+};
+
+class MCPChatDrop
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordDrop shortened sender or text to its cap.
+	bool cut;
+	string reason;
+};
+
+class MCPChatRead
+{
+	ref array<ref MCPChatLine> lines;
+	ref array<ref MCPChatDrop> dropped;
+	int marker;
+	bool truncated;
+
+	void MCPChatRead()
+	{
+		lines = new array<ref MCPChatLine>();
+		dropped = new array<ref MCPChatDrop>();
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1525,6 +1565,7 @@ class MCPResult
 	// hud_set read-back (f427). Unassigned on other commands.
 	ref MCPHudState hud;
 	ref MCPGameplayState gameplay;
+	ref MCPChatRead chat_read;
 };
 
 class MCPJob

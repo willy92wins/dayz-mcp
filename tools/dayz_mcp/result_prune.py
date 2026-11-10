@@ -137,6 +137,7 @@ PRUNABLE_FIELDS = (
     # hud_set and gameplay_state fill it with the HUD flags they read (f427).
     "hud",
     "gameplay",
+    "chat_read",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
