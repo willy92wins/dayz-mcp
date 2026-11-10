@@ -51,8 +51,9 @@ class MCPLookAtControl
 	protected static string s_Termination;
 	protected static string s_Pose;
 	protected static int s_CommandId;
-	// The look the server was sent a copy of (0: none), and a release of a
-	// sent look that has not left yet, with its id.
+	// The look the server was sent a copy of and no release for (0: none; a
+	// converged look keeps it, EndServerLook), and a release of a sent look
+	// that has not left yet, with its id.
 	protected static int s_ServerLookId;
 	protected static bool s_ServerReleasePending;
 	protected static int s_ServerReleaseId;
@@ -89,28 +90,48 @@ class MCPLookAtControl
 		s_CommandId = 0;
 	}
 
-	static int Begin(PlayerBase player, vector target, float budgetS, int commandId)
+	// "" once the look runs (Generation() names it), else input_busy. The
+	// server's copy is sent first, as player_move's start (DispatchPlayerMove):
+	// a start the input channel cannot take now (taken or full, or a release
+	// still waiting for it) leaves both sides as they were, where a look on
+	// this side only would be pulled back by the server's reconciliation.
+	// Offline the local pulses are the whole look (SendServerStart).
+	static string Begin(PlayerBase player, vector target, float budgetS, int commandId)
 	{
+		int lookId;
+		float budget;
+		string serverStart;
+		budget = budgetS;
+		if (budget > MAX_CONTROL_S)
+		{
+			budget = MAX_CONTROL_S;
+		}
+		// Release below advances the generation to this id.
+		lookId = s_Generation + 1;
+		serverStart = SendServerStart(lookId, target, budget);
+		if (serverStart == "input_busy")
+		{
+			return serverStart;
+		}
+		// The start supersedes there the copy of a converged look still kept
+		// (MCPLookAccept), so Release below sends that one no release.
+		if (serverStart == "sent")
+		{
+			s_ServerLookId = 0;
+		}
 		Release("replaced");
-		s_Generation = s_Generation + 1;
 		Reset();
 		s_Active = true;
 		s_Player = player;
 		s_Target = target;
-		s_BudgetS = budgetS;
-		if (s_BudgetS > MAX_CONTROL_S)
-		{
-			s_BudgetS = MAX_CONTROL_S;
-		}
+		s_BudgetS = budget;
 		s_Pose = "first_idle";
 		s_CommandId = commandId;
-		// A look whose start cannot be sent (offline, or the input channel
-		// busy) runs on this side only, as before.
-		if (SendServerStart(s_Generation, s_Target, s_BudgetS) == "sent")
+		if (serverStart == "sent")
 		{
-			s_ServerLookId = s_Generation;
+			s_ServerLookId = lookId;
 		}
-		return s_Generation;
+		return "";
 	}
 
 	static int Generation()
@@ -221,20 +242,23 @@ class MCPLookAtControl
 
 	// The end of a look the server was sent. A converged look leaves the
 	// server's copy to reach its own band, both sides turning toward the same
-	// bearing; any other end sends that copy its release, now or from a later
-	// command tick (FlushServerRelease). The release names its look, so it
-	// never ends a newer one; the server's deadman ends its copy in any case.
+	// bearing, and keeps its id: a later Release (restore_gameplay) still
+	// sends that copy its release, and the next look's start supersedes it.
+	// Any other end sends the copy its release, now or from a later command
+	// tick (FlushServerRelease). The release names its look, so it never ends
+	// a newer one; the server's deadman ends its copy in any case.
 	static void EndServerLook(bool converged)
 	{
 		if (s_ServerLookId <= 0)
 		{
 			return;
 		}
-		if (!converged)
+		if (converged)
 		{
-			s_ServerReleasePending = true;
-			s_ServerReleaseId = s_ServerLookId;
+			return;
 		}
+		s_ServerReleasePending = true;
+		s_ServerReleaseId = s_ServerLookId;
 		s_ServerLookId = 0;
 		FlushServerRelease();
 	}

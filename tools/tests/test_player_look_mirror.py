@@ -41,9 +41,10 @@ SCRIPTS = addon_root() / "scripts"
 LOOK_PATH = SCRIPTS / "4_World" / "MCP_LookAt.c"
 MOVE_PATH = SCRIPTS / "4_World" / "MCP_PlayerMove.c"
 WEAPON_PATH = SCRIPTS / "4_World" / "MCP_Weapon.c"
+CLIENT_BRIDGE_PATH = SCRIPTS / "5_Mission" / "MCPClientBridge.c"
 
 UDT = "MCP_INPUT_UDT_PLAYER_LOOK"
-BEGIN = "static int Begin(PlayerBase player, vector target, float budgetS, int commandId)"
+BEGIN = "static string Begin(PlayerBase player, vector target, float budgetS, int commandId)"
 RESET = "static void Reset()"
 RELEASE = "static void Release(string why)"
 FINISH = "static void Finish(string termination, bool converged)"
@@ -68,6 +69,7 @@ SERVER_NOTE = "protected void MCPLookNote(int lookId, string reason)"
 SERVER_RECONNECT = "override void OnReconnect()"
 COMMAND_HANDLER = "override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)"
 CONSUME = "protected override event void ConsumeMove(PawnMove pMove)"
+DISPATCH = "protected bool DispatchPlayerLookAt(MCPCommand command, MCPResult result)"
 COMPASS = "static float CompassFromHeading(float headingRad)"
 BEARING = "static float BearingDeg(vector from, vector target)"
 WRAP = "static float WrapDeg180(float angle)"
@@ -177,7 +179,10 @@ class _OwnerModel:
         self.disabled += 1
 
     def begin(self, target=(10.0, 0.0, 0.0), budget: float = 3.0) -> int:
-        return self.namespace["Begin"](object(), target, budget, 7)
+        """The look's id, which the dispatch reads from Generation() once Begin
+        answers ""; 0 when Begin refuses, its code then in self.refusal."""
+        self.refusal = self.namespace["Begin"](object(), target, budget, 7).text
+        return 0 if self.refusal else self.state.s_Generation
 
     def finish(self, termination: str, converged: bool) -> None:
         self.namespace["Finish"](_LogString.of(termination), converged)
@@ -508,13 +513,21 @@ class LookMirrorWireTest(unittest.TestCase):
 
     def test_the_owner_sends_on_begin_and_ends_on_every_end(self) -> None:
         begin = _method_body(self.source, BEGIN)
-        _in_order(self, begin, 'Release("replaced");', "s_Generation = s_Generation + 1;", "Reset();",
-                  "s_CommandId = commandId;",
-                  'if (SendServerStart(s_Generation, s_Target, s_BudgetS) == "sent")', "return s_Generation;")
-        self.assertEqual(
-            _flat(_if_body(begin, 'SendServerStart(s_Generation, s_Target, s_BudgetS) == "sent"')),
-            "s_ServerLookId = s_Generation;",
-        )
+        _in_order(self, begin, "lookId = s_Generation + 1;",
+                  "serverStart = SendServerStart(lookId, target, budget);",
+                  'if (serverStart == "input_busy")', 'Release("replaced");', "Reset();",
+                  "s_Active = true;", "s_CommandId = commandId;", "s_ServerLookId = lookId;", 'return "";')
+        self.assertEqual(_flat(_if_body(begin, 'serverStart == "input_busy"')), "return serverStart;")
+        # The start goes first: nothing of the look changes before it is sent
+        # or known to be unavailable.
+        head = _without_comments(begin[: begin.index('if (serverStart == "input_busy")')])
+        self.assertIsNone(re.search(r"\bs_\w+ = ", head), head)
+        self.assertNotIn("Release(", head)
+        end = _method_body(self.source, END_SERVER)
+        _in_order(self, end, "if (s_ServerLookId <= 0)", "if (converged)", "s_ServerReleasePending = true;",
+                  "s_ServerReleaseId = s_ServerLookId;", "s_ServerLookId = 0;", "FlushServerRelease();")
+        # A converged look keeps its id, so a later Release still ends its copy.
+        self.assertEqual(_if_body(end, "converged").strip(), "return;")
         _in_order(self, _method_body(self.source, RELEASE), "Disable(s_Player);", "EndServerLook(false);",
                   "if (s_Active && !s_Finished)")
         _in_order(self, _method_body(self.source, FINISH), "Disable(s_Player);", "EndServerLook(converged);",
@@ -526,6 +539,16 @@ class LookMirrorWireTest(unittest.TestCase):
         # The local player's own look is driven from MCP_Weapon.c only.
         self.assertEqual(_source(WEAPON_PATH).count("MCPLookAtControl.OnCommandHandler(live, pDt);"), 1)
         self.assertNotIn("MCPLookAtControl.OnCommandHandler(", self.code)
+
+    def test_the_dispatch_answers_a_refused_begin_before_any_job(self) -> None:
+        dispatch = _method_body(_source(CLIENT_BRIDGE_PATH), DISPATCH)
+        tail = dispatch[dispatch.index("refusal = MCPLookAtControl.Begin(player, target, budget, command.id);") :]
+        _in_order(self, tail, 'if (refusal != "")', "generation = MCPLookAtControl.Generation();",
+                  "job = new MCPJob();", "job.generation = generation;", "m_JobRunner.AddJob(job);")
+        self.assertEqual(
+            _flat(_if_body(tail, 'refusal != ""')),
+            "result.ok = false; result.error = refusal; return true;",
+        )
 
 
     def test_compile_hazards_locals_on_top_no_local_keyword_no_ternary(self) -> None:
@@ -553,49 +576,68 @@ class LookMirrorOwnerModelTest(unittest.TestCase):
     def setUp(self) -> None:
         self.model = _OwnerModel(_source(LOOK_PATH))
 
-    def test_a_sent_look_names_itself_and_a_converged_one_is_left_to_the_server(self) -> None:
+    def test_a_converged_look_is_left_to_the_server_and_the_next_start_supersedes_it(self) -> None:
         model = self.model
         first = model.begin(target=(10.0, 1.5, 0.0), budget=3.0)
         self.assertEqual(model.channel.sent, [[model.udt, True, first, (10.0, 1.5, 0.0), 3.0]])
         self.assertEqual(model.state.s_ServerLookId, first)
         model.finish("converged", True)
-        # The server's copy reaches its own band: no release, nothing pending.
+        # The server's copy reaches its own band: no release, nothing pending,
+        # and the id kept for a later Release.
         self.assertEqual(len(model.channel.sent), 1)
-        self.assertEqual((model.state.s_ServerLookId, model.state.s_ServerReleasePending), (0, False))
+        self.assertEqual((model.state.s_ServerLookId, model.state.s_ServerReleasePending), (first, False))
         second = model.begin()
         self.assertGreater(second, first)
+        # The new start replaces the copy there (MCPLookAccept): no release first.
+        self.assertEqual(model.channel.sent[1:], [[model.udt, True, second, (10.0, 0.0, 0.0), 3.0]])
         model.finish("deadline", False)
         self.assertEqual(model.channel.sent[-1], [model.udt, False, second])
         # A later release finds nothing left to send.
         model.release("restore")
         self.assertEqual(len(model.channel.sent), 3)
 
-    def test_a_replaced_or_cancelled_look_releases_before_the_next_start(self) -> None:
+    def test_a_restore_after_a_converged_look_releases_its_copy(self) -> None:
+        model = self.model
+        first = model.begin()
+        model.finish("converged", True)
+        model.release("restore")
+        self.assertEqual(model.channel.sent[-1], [model.udt, False, first])
+        self.assertEqual((model.state.s_ServerLookId, model.state.s_ServerReleasePending), (0, False))
+        model.release("restore")
+        self.assertEqual(len(model.channel.sent), 2)
+
+    def test_a_running_look_cancelled_sends_its_release(self) -> None:
         model = self.model
         first = model.begin()
         second = model.begin()
-        self.assertEqual(
-            model.channel.sent[1:],
-            [[model.udt, False, first], [model.udt, True, second, (10.0, 0.0, 0.0), 3.0]],
-        )
+        self.assertGreater(second, first)
         model.release("cancelled")
         self.assertEqual(model.channel.sent[-1], [model.udt, False, second])
+        self.assertEqual(len(model.channel.sent), 3)
         self.assertGreaterEqual(model.disabled, 3)
 
-    def test_a_start_that_cannot_be_sent_leaves_a_look_on_this_side_only(self) -> None:
-        for setup in ("busy", "offline"):
-            with self.subTest(setup=setup):
-                model = _OwnerModel(_source(LOOK_PATH))
-                if setup == "busy":
-                    model.channel.free = False
-                else:
-                    model.multiplayer = False
-                model.begin()
-                self.assertEqual(model.state.s_ServerLookId, 0)
-                model.channel.free = True
-                model.multiplayer = True
-                model.finish("deadline", False)
-                self.assertEqual(model.channel.sent, [])
+    def test_a_start_the_channel_cannot_take_is_refused_and_changes_nothing(self) -> None:
+        model = self.model
+        model.channel.free = False
+        self.assertEqual(model.begin(), 0)
+        self.assertEqual(model.refusal, "input_busy")
+        self.assertEqual(model.channel.sent, [])
+        # No local look either, and the next id is still free.
+        self.assertEqual((model.state.s_Active, model.state.s_Generation, model.disabled), (False, 0, 0))
+        model.channel.free = True
+        look = model.begin()
+        self.assertEqual((look, model.refusal), (1, ""))
+        self.assertEqual(model.channel.sent, [[model.udt, True, 1, (10.0, 0.0, 0.0), 3.0]])
+        self.assertEqual((model.state.s_Active, model.state.s_ServerLookId), (True, 1))
+
+    def test_offline_the_look_runs_on_this_side_only(self) -> None:
+        model = self.model
+        model.multiplayer = False
+        look = model.begin()
+        self.assertEqual((model.refusal, model.state.s_Active, model.state.s_ServerLookId), ("", True, 0))
+        self.assertGreater(look, 0)
+        model.finish("deadline", False)
+        self.assertEqual(model.channel.sent, [])
 
     def test_a_release_waits_for_a_local_player_and_holds_the_next_start(self) -> None:
         model = self.model
@@ -604,14 +646,17 @@ class LookMirrorOwnerModelTest(unittest.TestCase):
         model.finish("player_changed", False)
         self.assertEqual(len(model.channel.sent), 1)
         self.assertTrue(model.state.s_ServerReleasePending)
-        model.begin()
-        # The pending release cannot leave, so the start is not sent either.
+        generation = model.state.s_Generation
+        # The pending release cannot leave, so the start is refused and the
+        # look does not start.
+        self.assertEqual((model.begin(), model.refusal), (0, "input_busy"))
         self.assertEqual(len(model.channel.sent), 1)
-        self.assertEqual(model.state.s_ServerLookId, 0)
+        self.assertEqual((model.state.s_Active, model.state.s_Generation), (False, generation))
         model.local_player = True
         model.flush()
         self.assertEqual(model.channel.sent[-1], [model.udt, False, first])
         self.assertFalse(model.state.s_ServerReleasePending)
+        self.assertGreater(model.begin(), first)
 
 
 class LookMirrorServerModelTest(unittest.TestCase):
@@ -734,6 +779,47 @@ class LookMirrorServerModelTest(unittest.TestCase):
         self.assertEqual((model.active, model.log[-1]), (1, _verdict(1, 1, "")))
 
 
+class LookMirrorRoundTripTest(unittest.TestCase):
+    """The owner's messages delivered to the server copy late, in the order sent."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+
+    def _deliver(self, owner: _OwnerModel, server: _ServerLookModel) -> None:
+        for message in owner.channel.sent:
+            self.assertEqual(message[0], owner.udt)
+            if message[1]:
+                server.start(message[2], target=message[3], budget=message[4])
+            else:
+                server.release(message[2])
+        owner.channel.sent = []
+
+    def test_a_start_that_arrives_after_converged_and_restore_is_released_there(self) -> None:
+        owner = _OwnerModel(self.source)
+        server = _ServerLookModel(self.source)
+        look = owner.begin()
+        owner.finish("converged", True)
+        owner.release("restore")
+        self._deliver(owner, server)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.log, [_verdict(1, look, ""), _released(look, "client")])
+        server.tick()
+        self.assertEqual(server.player.overrides, [])
+
+    def test_the_next_look_supersedes_a_converged_copy_still_running(self) -> None:
+        owner = _OwnerModel(self.source)
+        server = _ServerLookModel(self.source)
+        server.player.turns = False
+        first = owner.begin()
+        self._deliver(owner, server)
+        server.tick()
+        owner.finish("converged", True)
+        second = owner.begin(target=(-10.0, 0.0, 0.0))
+        self._deliver(owner, server)
+        self.assertEqual(server.active, second)
+        self.assertEqual(server.log[-2:], [_released(first, "superseded", consumed=1), _verdict(1, second, "")])
+
+
 class LookMirrorDescriptionTest(unittest.TestCase):
     def test_player_look_at_says_the_server_turns_and_what_a_miss_answers(self) -> None:
         from dayz_mcp import server
@@ -746,6 +832,8 @@ class LookMirrorDescriptionTest(unittest.TestCase):
             "The bridge sends the look to the server too, which turns the player's heading "
             "with it (yaw only)",
             "players_visibility's heading_deg and in_fov follow the look",
+            "A full input channel, or a previous look's release that cannot be sent yet, is "
+            "input_busy and turns neither side",
             "answers its termination with observed=error_final_deg=, ticks= and pulses=",
         ):
             with self.subTest(part=part):

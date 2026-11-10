@@ -10176,6 +10176,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Budget 3 s. The bridge sends the look to the server too, which "
             "turns the player's heading with it (yaw only), so "
             "players_visibility's heading_deg and in_fov follow the look. A "
+            "full input channel, or a previous look's release that cannot be "
+            "sent yet, is input_busy and turns neither side. A "
             "look that does not converge answers its termination with "
             "observed=error_final_deg=, ticks= and pulses= as the bridge "
             "measured them."

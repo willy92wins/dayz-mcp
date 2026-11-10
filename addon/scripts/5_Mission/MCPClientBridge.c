@@ -7581,7 +7581,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			budget = 3.0;
 		}
-		generation = MCPLookAtControl.Begin(player, target, budget, command.id);
+		// input_busy leaves both sides as they were (MCPLookAtControl.Begin).
+		refusal = MCPLookAtControl.Begin(player, target, budget, command.id);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+		generation = MCPLookAtControl.Generation();
 		job = new MCPJob();
 		job.id = command.id;
 		job.kind = "player_look_at";
