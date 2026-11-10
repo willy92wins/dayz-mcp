@@ -1,9 +1,11 @@
-"""Install the fast-tier desktop-gate guard, a Steam view and a bridge PBO reader that read nothing, before any test module imports.
+"""Install the fast-tier desktop-gate guard, a Steam view, a Steam manifest observation and a bridge PBO reader that read nothing, before any test module imports.
 
 session_acquire, session_acquire_wait and session_status observe this app's
 view of Steam (server.observe_app_steam_view), which on Windows reads WMI and
 the process list. Every test gets a view that agrees instead; a test of the
-observation patches its own. A child whose PYTHONPATH is the fixture site
+observation patches its own. The same tools read Steam's appmanifest for DayZ
+and DayZ Tools (server.observe_steam_update_pending); every test gets an
+observation that reads no manifest. A child whose PYTHONPATH is the fixture site
 (tests/fixtures/dayz_mcp) imports this package from its sitecustomize, so it
 gets the same view.
 
@@ -39,6 +41,13 @@ def no_steam_app_view() -> None:
 
 
 _server.observe_app_steam_view = no_steam_app_view
+
+
+def no_steam_update_pending() -> None:
+    return None
+
+
+_server.observe_steam_update_pending = no_steam_update_pending
 
 
 def no_bridge_pbos(mod_path: str) -> list[bytes]:

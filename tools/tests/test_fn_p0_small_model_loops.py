@@ -279,7 +279,9 @@ class HonestReadyAfterLaunchTest(unittest.TestCase):
             "server_peer": {"last_poll_age_s": None, "version_state": "ok"},
             "client_peer": {"last_poll_age_s": None, "version_state": "ok"},
         }
-        envelope = server._world_read_not_ready(runtime, "query_all_players", status)
+        envelope = server._world_read_not_ready(
+            runtime, "query_all_players", status, peer="server"
+        )
         self.assertIsNotNone(envelope)
         assert envelope is not None
         self.assertIs(envelope["ok"], False)
