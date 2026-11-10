@@ -3590,17 +3590,18 @@ async def execute_dayz_test_stop(
     *,
     progress_cb: _ProgressCallback | None = None,
     direct_inflight: bool = False,
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     started_at = time.monotonic()
     if direct_inflight:
-        direct = await _direct_inflight_stop(
+        # None means the STARTING prelude does not apply. The caller must
+        # take tool_lock and call again without direct_inflight. Never fall
+        # through to the ordinary stop without that lock.
+        return await _direct_inflight_stop(
             runtime,
             run_id,
             started_at=started_at,
             progress_cb=progress_cb,
         )
-        if direct is not None:
-            return direct
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")

@@ -55,6 +55,7 @@ from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
     _Opened,
+    _Runtime,
     _terminal,
 )
 from tests.lifecycle_helpers import stamp_launcher
@@ -1208,6 +1209,48 @@ class ToolSurfaceStartingStopTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual((stored.state, stored.processes), ("EXITED", []))
+
+
+class DirectInflightStopLockTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_inflight_returns_none_without_ordinary_stop(self) -> None:
+        # SHOULD-1: when the STARTING prelude does not apply (own RUNNING
+        # row, lease held), execute_dayz_test_stop(direct_inflight=True)
+        # returns None and must not fall through to the ordinary stop.
+        runtime = _Runtime(
+            {
+                "runs": [
+                    {
+                        "run_id": RUN_ID,
+                        "state": "RUNNING",
+                        "owner_session_id": "sess-1",
+                        "owner_lease_id": "lease-1",
+                    }
+                ]
+            }
+        )
+        runtime.active_lease_token = "lease-1"
+        runtime.identity = SimpleNamespace(session_id="sess-1")
+        stop_calls: list[str] = []
+
+        async def lifecycle_stop(run_id: str) -> dict[str, object]:
+            stop_calls.append(run_id)
+            return {"ok": True}
+
+        runtime.lifecycle_stop = lifecycle_stop  # type: ignore[attr-defined]
+        idle_calls: list[object] = []
+
+        async def require_idle(*args: object, **kwargs: object) -> None:
+            idle_calls.append((args, kwargs))
+            raise AssertionError("ordinary stop must not run")
+
+        with patch.object(dayz_test_tool, "_require_idle_session", require_idle):
+            result = await dayz_test_tool.execute_dayz_test_stop(
+                runtime, RUN_ID, direct_inflight=True
+            )
+        self.assertIsNone(result)
+        self.assertEqual(stop_calls, [])
+        self.assertEqual(idle_calls, [])
+        self.assertEqual(runtime.lifecycle_calls, 1)
 
 
 if __name__ == "__main__":
