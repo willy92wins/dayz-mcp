@@ -161,6 +161,7 @@ async def execute_secure_launcher_request(
     return await execute_native_launcher_transaction(
         raw_request,
         sealed_policies=sealed_policies,
+        worker_runtime=verified_bundle.validated_worker_runtime,
         control_client=control_client,
         consumer=consume_registered_launcher,
         max_wait_s=None if max_wait_s is None else float(max_wait_s),

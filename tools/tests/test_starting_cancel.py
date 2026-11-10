@@ -730,11 +730,16 @@ class StopErrorExplicitTest(unittest.TestCase):
 def _surface_policy(root: Path) -> RequestProjectPolicy:
     """A project whose accredited roots exist under the fixture's temp dir."""
     dev = root / "dev"
-    (dev / "_server" / "mpmissions").mkdir(parents=True)
+    # FINDING-launch-modroot: the launch also accredits what the roles load,
+    # the chernarus alias and the implicit @StorageMod among them.
+    (dev / "_server" / "mpmissions" / "dayzOffline.chernarusplus").mkdir(
+        parents=True
+    )
     source = dev / "staged-source" / "StorageMod"
     source.mkdir(parents=True)
     mods = root / "mods"
     (mods / "@CF").mkdir(parents=True)
+    (mods / "@StorageMod").mkdir(parents=True)
     # build_run_request adds the bridge mod as a default extra mod.
     (mods / "@DayZ_MCP").mkdir(parents=True)
     return RequestProjectPolicy(
