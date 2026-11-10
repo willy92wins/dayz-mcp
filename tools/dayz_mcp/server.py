@@ -6913,16 +6913,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         caller_session = str(
             getattr(getattr(client, "identity", None), "session_id", "") or ""
         ) or None
-        lock_acquired = False
-        if not client.tool_lock.locked():
-            await client.tool_lock.acquire()
-            lock_acquired = True
-        if not lock_acquired:
-            # A same-session dayz_test_run holds tool_lock and this runtime's
-            # lease for the whole launch. If the target is that launch's
-            # STARTING row, cancel it through /lifecycle/stop with the lease
-            # already held, instead of waiting for the launch to finish. Any
-            # other shape falls through to the ordinary locked path.
+        if client.tool_lock.locked():
+            # STARTING prelude only: a same-session dayz_test_run holds
+            # tool_lock and this runtime's lease for the whole launch. If
+            # the target is that launch's STARTING row, cancel it through
+            # /lifecycle/stop with the lease already held, instead of
+            # waiting for the launch to finish. execute_dayz_test_stop
+            # with direct_inflight=True returns None when that route does
+            # not apply; it must not run the ordinary stop without the
+            # lock. Any other shape falls through to the locked path.
             try:
                 with _typed_dayz_test_value_errors():
                     direct = await dayz_test_tool.execute_dayz_test_stop(
@@ -6948,9 +6947,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 direct = None
             if direct is not None:
                 return direct
-            await client.tool_lock.acquire()
-            lock_acquired = True
-        try:
+        async with client.tool_lock:
             try:
                 snapshot = await client.session_status()
             except Exception:
@@ -6992,9 +6989,6 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_stop", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
-        finally:
-            if lock_acquired:
-                client.tool_lock.release()
         if (
             isinstance(result, dict)
             and result.get("error_code") == dayz_test_tool.WORKER_INTERNAL_FAILURE
