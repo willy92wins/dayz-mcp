@@ -6315,6 +6315,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "queued": 1.0,
                 "executing": 2.0,
                 "finalizing": 3.0,
+                "stopping": 3.0,
             }[stage]
             await ctx.report_progress(progress, 4.0, message or stage)
 
