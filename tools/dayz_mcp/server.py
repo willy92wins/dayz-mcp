@@ -2725,6 +2725,15 @@ class ClientRuntime:
     async def lifecycle_status(self) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(self._control.lifecycle_status)
 
+    async def lifecycle_stop(self, run_id: str) -> dict[str, Any]:
+        result = await self._control_with_lazy_spawn(
+            self._control.lifecycle_stop, run_id
+        )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
+
     async def lifecycle_close(self, run_id: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
             self._control.lifecycle_close, run_id
@@ -6805,11 +6814,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Queue adoption and shutdown of one exact approved DayZ run. "
-            "A run still in its launch window (STARTING) is accepted: the "
-            "stop joins the box queue, the in-flight launch holds the lease "
-            "and settles its row first, and the stop then adopts and kills "
-            "it. A row still STARTING when the worker reaches it is refused "
-            "as run_not_adoptable, never a silent success. "
+            "A run still in its launch window (STARTING) is cancelled, not "
+            "killed after the launch finishes: the stop signals the in-flight "
+            "launch through the lifecycle, which terminates exactly its owned "
+            "process and settles the row terminal before it can become "
+            "RUNNING. If the launch cannot be reached within the bound the "
+            "stop is refused as launch_cancel_pending, never a silent success. "
             "Stop uses forced process kill, not orderly mission teardown: "
             "RPT exit metrics (Leaked counts, Destroying game, Termination "
             "successfully completed) are not valid after this tool. status "
@@ -6829,7 +6839,30 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         caller_session = str(
             getattr(getattr(client, "identity", None), "session_id", "") or ""
         ) or None
-        async with client.tool_lock:
+        lock_acquired = False
+        if not client.tool_lock.locked():
+            await client.tool_lock.acquire()
+            lock_acquired = True
+        if not lock_acquired:
+            # A same-session dayz_test_run holds tool_lock and this runtime's
+            # lease for the whole launch. If the target is that launch's
+            # STARTING row, cancel it through /lifecycle/stop with the lease
+            # already held, instead of waiting for the launch to finish. Any
+            # other shape falls through to the ordinary locked path.
+            try:
+                with _typed_dayz_test_value_errors():
+                    direct = await dayz_test_tool.execute_dayz_test_stop(
+                        client, run_id, progress_cb=report, direct_inflight=True
+                    )
+            except (dayz_test_tool.DayzTestToolError, ToolError):
+                direct = None
+            except Exception:
+                direct = None
+            if direct is not None:
+                return direct
+            await client.tool_lock.acquire()
+            lock_acquired = True
+        try:
             try:
                 snapshot = await client.session_status()
             except Exception:
@@ -6871,6 +6904,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 # __cause__ for LOCAL diagnosis (needed to see why build:true failed), not for the wire.
                 _log_opaque_failure(client, "dayz_test_stop", exc)
                 raise ToolError(_opaque_dayz_test_failure(exc)) from exc
+        finally:
+            if lock_acquired:
+                client.tool_lock.release()
         if (
             isinstance(result, dict)
             and result.get("error_code") == dayz_test_tool.WORKER_INTERNAL_FAILURE

@@ -74,6 +74,11 @@ _ACTIVE_STATES = RUN_STATES - {"EXITED"}
 # lifecycle operation. STARTING/STOPPING (operation in progress under the lock) are
 # left to recover_after_restart; EXITED is terminal.
 _REAPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
+# ah-starting-cancel-20261109-1444: the bound a stop waits for an in-flight
+# launch to notice its cancellation and settle. The launch itself is a Popen
+# that returns immediately; the bound only covers a slow host call, never a
+# deadlock. Instance state so a test can shorten it.
+_STARTING_CANCEL_SETTLE_S = 5.0
 _HEX = frozenset("0123456789abcdef")
 _IDENTITY_SCHEMES = frozenset({"legacy-wmi-v1", "psutil-argv-v2"})
 _BOX_MOD_CAP = 12
@@ -649,6 +654,22 @@ def _launch_rpt(profiles: str, launched_at: float) -> tuple[str, int, float] | N
         if newest is None or fresh.st_mtime > newest[2]:
             newest = (path, int(fresh.st_size), float(fresh.st_mtime))
     return newest
+
+
+@dataclass
+class _LaunchCancel:
+    """One in-flight launch a concurrent same-session stop may cancel.
+
+    ``requested`` is set by stop_run without taking ``_operation_lock``; the
+    launching thread checks it at every boundary before the row settles.
+    ``settled`` is set once that thread has persisted a terminal row, so the
+    stop can answer from the durable state instead of waiting on the lock.
+    """
+
+    requested: threading.Event = field(default_factory=threading.Event)
+    settled: threading.Event = field(default_factory=threading.Event)
+    outcome: dict[str, object] | None = None
+    terminated: int = 0
 
 
 @dataclass
@@ -2194,6 +2215,13 @@ class ProcessLifecycle:
         self._box_cache: tuple[float, int, _BoxProbes] | None = None
         self._box_revision = 0
         self._operation_lock = threading.RLock()
+        # ah-starting-cancel-20261109-1444: one cancellable launch per run_id
+        # while its row is STARTING. The lock is a leaf; stop_run never takes
+        # _operation_lock to set the request, so a launch that holds the
+        # operation lock cannot keep the stop from reaching this table.
+        self._launch_cancel_lock = threading.Lock()
+        self._launch_cancels: dict[str, _LaunchCancel] = {}
+        self._starting_cancel_settle_s = _STARTING_CANCEL_SETTLE_S
         self._command_id = -1
         self._last_start_error: str | None = None
         # The storage refusal behind the public code, when one was decided.
@@ -2356,6 +2384,87 @@ class ProcessLifecycle:
         if bindings is None:
             return
         bindings.retire_run(run_id, reason)
+
+    def _register_launch_cancel(self, run_id: str) -> _LaunchCancel:
+        """Make a STARTING row cancellable before its durable write lands."""
+        cancel = _LaunchCancel()
+        with self._launch_cancel_lock:
+            self._launch_cancels[run_id] = cancel
+        return cancel
+
+    def _launch_cancel_for(self, run_id: str) -> _LaunchCancel | None:
+        with self._launch_cancel_lock:
+            return self._launch_cancels.get(run_id)
+
+    def _settle_launch_cancel(
+        self,
+        run_id: str,
+        cancel: _LaunchCancel,
+        outcome: dict[str, object] | None,
+        terminated: int,
+    ) -> None:
+        """Publish the launch settlement and stop accepting new requests."""
+        cancel.outcome = outcome
+        cancel.terminated = terminated
+        cancel.settled.set()
+        with self._launch_cancel_lock:
+            if self._launch_cancels.get(run_id) is cancel:
+                del self._launch_cancels[run_id]
+
+    def _settle_cancelled_launch(
+        self,
+        *,
+        client: ClientIdentity,
+        previous: RunRecord | None,
+        provisional: RunRecord,
+        launched: object | None,
+        record: ProcessRecord | None,
+        minted: str | None,
+        launch_role: str,
+        attempt_started_at: float | None,
+        cancel: _LaunchCancel,
+    ) -> dict[str, object]:
+        """Cancel an in-flight launch before it can become RUNNING.
+
+        Reuses the failed-launch settlement so the row, bindings, launch intent
+        and crash-reporter anchors are left exactly as a failed Popen leaves
+        them: EXITED with no owner when the process is confirmed gone, or
+        UNRECONCILED with the record when the kill could not be confirmed.
+        """
+        if previous is None:
+            # A cancelled fresh launch was never acknowledged. The row must
+            # read as the never-started EXITED a stop can close idempotently.
+            provisional.launch_acknowledged = False
+        self._retire_minted(
+            provisional.run_id, launch_role, minted, "launch_cancelled"
+        )
+        result = self._settle_failed_launch(
+            client=client,
+            previous=previous,
+            provisional=provisional,
+            launched=launched,
+            record=record,
+            confirmed_error="launch_cancelled",
+            attempt_started_at=attempt_started_at,
+        )
+        # A degraded cancel leaves UNRECONCILED. Release the owner here, as the
+        # ordinary stop does for an unclassifiable process, so the row can be
+        # adopted by the same session later instead of blocking on a dead owner.
+        current = self.manifest.get(provisional.run_id)
+        if current is not None and current.state == "UNRECONCILED":
+            current.owner_session_id = None
+            current.owner_lease_id = None
+            try:
+                self.manifest.replace(current)
+            except Exception:
+                self._add_degradation(result, "manifest_failed")
+        self._settle_launch_cancel(
+            provisional.run_id,
+            cancel,
+            result,
+            1 if launched is not None else 0,
+        )
+        return result
 
     def _adopt_dispatchable(self, run_id: str) -> bool:
         # Caller holds _operation_lock. ServerState.run_has_bound_binding
@@ -4151,6 +4260,9 @@ class ProcessLifecycle:
                 )
             )
             provisional.state = "STARTING"
+            # The row is cancellable from the instant it can be read. A stop
+            # that sees STARTING must find this entry, not race the write.
+            cancel = self._register_launch_cancel(run_id)
             try:
                 if existing is None:
                     self.manifest.add(provisional)
@@ -4159,6 +4271,7 @@ class ProcessLifecycle:
             except Exception:
                 self._finish_committed(authority, command_id)
                 result = self._error("manifest_failed", 503)
+                self._settle_launch_cancel(run_id, cancel, result, 0)
                 return self._terminal_outcome(
                     result,
                     "lifecycle_start_outcome",
@@ -4177,6 +4290,18 @@ class ProcessLifecycle:
             launch_role = str(parsed["role"])
             attempt_started_at = time.time()
             try:
+                if cancel.requested.is_set():
+                    return self._settle_cancelled_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        minted=None,
+                        launch_role=launch_role,
+                        attempt_started_at=attempt_started_at,
+                        cancel=cancel,
+                    )
                 if self._quarantined():
                     return self._settle_failed_launch(
                         client=client,
@@ -4397,6 +4522,18 @@ class ProcessLifecycle:
                         )
                     except Exception:
                         lock_decision = "failed"
+                if cancel.requested.is_set():
+                    return self._settle_cancelled_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        minted=minted,
+                        launch_role=launch_role,
+                        attempt_started_at=attempt_started_at,
+                        cancel=cancel,
+                    )
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -4436,6 +4573,21 @@ class ProcessLifecycle:
                         confirmed_error="identity_unavailable",
                         attempt_started_at=attempt_started_at,
                         foreground_lock=lock_decision,
+                    )
+                if cancel.requested.is_set():
+                    # The process exists and its identity is known, so the
+                    # cancel path can terminate exactly the owned PID and
+                    # settle with its record if the kill is not confirmed.
+                    return self._settle_cancelled_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=launched,
+                        record=record,
+                        minted=minted,
+                        launch_role=launch_role,
+                        attempt_started_at=attempt_started_at,
+                        cancel=cancel,
                     )
                 self._confirm_instance(minted, record)
 
@@ -4511,6 +4663,11 @@ class ProcessLifecycle:
                 self._finish_committed(authority, command_id)
                 if intent is not None:
                     self._settle_launch_intent(run_id)
+                # A stop may be waiting on this launch. Publish the settlement
+                # even when the launch won the race: the stop then reads the
+                # durable RUNNING row and takes the ordinary stop path.
+                if not cancel.settled.is_set():
+                    self._settle_launch_cancel(run_id, cancel, None, 0)
 
     def _launch_intent_path(self) -> Path | None:
         paths = getattr(self.manifest, "paths", None)
@@ -5689,6 +5846,75 @@ class ProcessLifecycle:
         finally:
             self._finish_committed(authority, command_id)
 
+    def _cancelled_stop_outcome(
+        self,
+        client: ClientIdentity,
+        authority: tuple[str, str, str],
+        command: str,
+        run_id: str,
+        cancel: _LaunchCancel,
+    ) -> dict[str, object]:
+        """The stop answer after a launch cancelled itself in STARTING.
+
+        The durable row is the authority: EXITED is the effective cancel,
+        UNRECONCILED is the named fail-closed degradation, and any other
+        state is an explicit pending refusal. No kill happens here; the
+        launching thread already terminated exactly its owned handle.
+        """
+        current = self.manifest.get(run_id)
+        terminated = cancel.terminated
+        if current is None or current.state == "EXITED":
+            result: dict[str, object] = {
+                "ok": True,
+                "run_id": run_id,
+                "state": "EXITED",
+                "terminated": terminated,
+                "stop_method": "cancelled_during_start",
+                "exit_metrics_valid": False,
+            }
+            state = "EXITED"
+            decision = "cancelled"
+        elif current.state == "UNRECONCILED":
+            result = {
+                "ok": False,
+                "error": "launch_cancel_degraded",
+                "run_id": run_id,
+                "state": "UNRECONCILED",
+                "terminated": terminated,
+                "_http_status": 409,
+            }
+            if current.processes:
+                result["cleanup_degraded"] = ["launch_cancel_degraded"]
+            state = "UNRECONCILED"
+            decision = "manual_cleanup_required"
+        else:
+            result = {
+                "ok": False,
+                "error": "launch_cancel_pending",
+                "run_id": run_id,
+                "state": current.state,
+                "terminated": terminated,
+                "_http_status": 409,
+            }
+            state = current.state
+            decision = "pending"
+        command_id = self._commit_reserved(authority, command)
+        if command_id is None:
+            return self._error("lease_invalid", 409)
+        try:
+            return self._terminal_outcome(
+                result,
+                "lifecycle_stop_outcome",
+                client,
+                reason=str(result.get("error") or "cancelled_during_start"),
+                decision=decision,
+                run_id=run_id,
+                state=state,
+                terminated=terminated,
+            )
+        finally:
+            self._finish_committed(authority, command_id)
+
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         """Stop the run. Ordinary callers are unchanged.
 
@@ -5709,6 +5935,43 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
+        # ah-starting-cancel-20261109-1444: the launch window is the one state
+        # in which the launch itself holds _operation_lock for its whole
+        # duration. A stop that waits for that lock is a kill after the launch,
+        # not a cancel. Signal the in-flight launch first, without the lock,
+        # and answer from the durable settlement it publishes. The lock is
+        # only taken below when the launch won the race and left RUNNING.
+        cancel: _LaunchCancel | None = None
+        if isinstance(run_id, str) and run_id:
+            starting = self.manifest.get(run_id)
+            cancel = self._launch_cancel_for(run_id)
+            if (
+                starting is not None
+                and starting.state == "STARTING"
+                and cancel is not None
+            ):
+                if not self._reservation_active(authority, command):
+                    return self._error("lease_invalid", 409)
+                if (
+                    starting.owner_session_id != client.session_id
+                    or starting.owner_lease_id != authority[1]
+                ):
+                    return self._reject_reserved(
+                        authority, command, "run_not_adopted"
+                    )
+                cancel.requested.set()
+                if not cancel.settled.wait(self._starting_cancel_settle_s):
+                    refused = self._reject_reserved(
+                        authority, command, "launch_cancel_pending"
+                    )
+                    refused["run_id"] = run_id
+                    refused["state"] = "STARTING"
+                    return refused
+                settled_run = self.manifest.get(run_id)
+                if settled_run is None or settled_run.state != "RUNNING":
+                    return self._cancelled_stop_outcome(
+                        client, authority, command, run_id, cancel
+                    )
         with self._operation_lock:
             if not self._reservation_active(authority, command):
                 return self._error("lease_invalid", 409)

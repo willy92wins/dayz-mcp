@@ -648,16 +648,17 @@ def _run_unknown_to_store(status: object, run_id: str) -> bool:
 # that state, so the call has somewhere to go.
 #
 # ah-starting-cancel-20261109-1444: STARTING is the launch window. Refusing it
-# here answered run_not_active before the stop's own lease was ever asked for,
-# so an owned launch could not be cancelled by the protocol that already
-# exists. The stop now asks for the box lease like any other request; the
-# in-flight launch holds that lease under the lifecycle operation lock, so the
-# worker's adopt/stop runs only after the launch settled its row (RUNNING,
-# RUNNING_IDLE, UNRECONCILED or EXITED). A row still STARTING when the worker
-# reaches it is refused there as run_not_adoptable, which is the explicit
-# fail-closed answer, never a silent success. STOPPING stays closed: that stop
-# is already in flight and will settle on its own. EXITED stays closed too,
-# except the never-started row handled by resolve_stop_run.
+# here answered run_not_active before the stop could reach the launch. The
+# stop now reaches the lifecycle: the daemon's stop_run signals the in-flight
+# launch (registered while its row is STARTING) and answers from the durable
+# settlement the launch publishes. A same-session caller goes further and uses
+# the lease the launch already holds (execute_dayz_test_stop direct_inflight),
+# so neither tool_lock nor a second session acquire is a wait for the launch to
+# finish. A STARTING row with no reachable launch is refused explicitly
+# (launch_cancel_pending, or run_not_adopted by the daemon), never a silent
+# success. STOPPING stays closed: that stop is already in flight and will
+# settle on its own. EXITED stays closed too, except the never-started row
+# handled by resolve_stop_run.
 _STOPPABLE_STATES = frozenset(
     {"STARTING", "RUNNING", "RUNNING_IDLE", "UNRECONCILED"}
 )
@@ -3349,13 +3350,144 @@ def _h14_owned_stop_kill(runtime: _Runtime) -> Iterator[None]:
         yield
 
 
+def _active_lease_id(runtime: _Runtime) -> str | None:
+    value = getattr(runtime, "active_lease_id", None)
+    if isinstance(value, str) and value:
+        return value
+    control = getattr(runtime, "_control", None)
+    value = getattr(control, "active_lease_id", None) if control is not None else None
+    return value if isinstance(value, str) and value else None
+
+
+def _direct_stop_envelope(
+    run_id: str,
+    result: dict[str, object],
+    row: dict[str, object],
+    started_at: float,
+) -> dict[str, object]:
+    """The stop envelope of a /lifecycle/stop answered during STARTING."""
+    ok = result.get("ok") is True
+    error_code = result.get("error")
+    if not isinstance(error_code, str) or not error_code:
+        error_code = None if ok else "dayz_test_stop_failed"
+    terminal = WorkerTerminal(
+        cleanup_degraded=bool(result.get("cleanup_degraded")),
+        error_code=error_code,
+        exit_code=0 if ok else 1,
+        ok=ok,
+        run_id=run_id,
+    )
+    project = row.get("mod")
+    if isinstance(project, str) and project.startswith("@"):
+        project = project[1:]
+    if not isinstance(project, str) or not project:
+        project = "unknown"
+    envelope = _compact_result(
+        terminal=terminal,
+        project=project,
+        mode="stop",
+        started_at=started_at,
+        artifacts_paths=[],
+        phase="completed" if ok else "stopping",
+    )
+    if ok:
+        stop_method = result.get("stop_method")
+        envelope["stop_method"] = (
+            stop_method if isinstance(stop_method, str) and stop_method else "forced_kill"
+        )
+        envelope["exit_metrics_valid"] = False
+    state = result.get("state")
+    if isinstance(state, str) and _STOP_ENVELOPE_STATE.fullmatch(state):
+        envelope["state"] = state
+    terminated = result.get("terminated")
+    if isinstance(terminated, int) and not isinstance(terminated, bool):
+        envelope["terminated"] = terminated
+    return envelope
+
+
+async def _direct_inflight_stop(
+    runtime: _Runtime,
+    run_id: str,
+    *,
+    started_at: float,
+    progress_cb: _ProgressCallback | None,
+) -> dict[str, object] | None:
+    """Stop a same-session STARTING launch with the lease it already holds.
+
+    None means the direct route does not apply and the caller must take the
+    ordinary lock/lease path. This route exists because a concurrent
+    dayz_test_run holds tool_lock and the runtime's active lease for the whole
+    launch: waiting for either is a kill after the launch, not a cancel. The
+    daemon's /lifecycle/stop cancel branch signals the in-flight launch, which
+    settles the row terminal before it can become RUNNING.
+    """
+    token = getattr(runtime, "active_lease_token", None)
+    stop = getattr(runtime, "lifecycle_stop", None)
+    if not (isinstance(token, str) and token) or not callable(stop):
+        return None
+    try:
+        status = await runtime.lifecycle_status()
+    except Exception:
+        return None
+    row = _run_row(status, run_id)
+    if row is None or row.get("state") != "STARTING":
+        return None
+    owner = row.get("owner_session_id")
+    if not isinstance(owner, str) or not owner:
+        owner = row.get("owner_session")
+    if not isinstance(owner, str) or owner != _h14_caller_session(runtime):
+        return None
+    held_lease = _active_lease_id(runtime)
+    row_lease = row.get("owner_lease_id")
+    if (
+        isinstance(held_lease, str)
+        and isinstance(row_lease, str)
+        and held_lease != row_lease
+    ):
+        return None
+    if progress_cb is not None:
+        await progress_cb("stopping", None)
+    try:
+        result = await stop(run_id)
+    except Exception as error:
+        code = getattr(error, "code", None)
+        return _direct_stop_envelope(
+            run_id,
+            {
+                "ok": False,
+                "error": code if isinstance(code, str) and code else "dayz_test_stop_failed",
+                "state": "STARTING",
+            },
+            row,
+            started_at,
+        )
+    if not isinstance(result, dict):
+        return _direct_stop_envelope(
+            run_id,
+            {"ok": False, "error": "dayz_test_stop_failed", "state": "STARTING"},
+            row,
+            started_at,
+        )
+    return _direct_stop_envelope(run_id, result, row, started_at)
+
+
 async def execute_dayz_test_stop(
     runtime: _Runtime,
     run_id: str,
     *,
     progress_cb: _ProgressCallback | None = None,
+    direct_inflight: bool = False,
 ) -> dict[str, object]:
     started_at = time.monotonic()
+    if direct_inflight:
+        direct = await _direct_inflight_stop(
+            runtime,
+            run_id,
+            started_at=started_at,
+            progress_cb=progress_cb,
+        )
+        if direct is not None:
+            return direct
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")

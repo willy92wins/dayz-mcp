@@ -57,6 +57,12 @@ LIFECYCLE_REJECTION_CODES = frozenset(
     {
         "bridge_state_unreadable",
         "client_polling_since_decision",
+        # ah-starting-cancel-20261109-1444: a launch cancelled during its
+        # STARTING window is a named outcome, not worker_failed. The degraded
+        # and pending variants are the fail-closed answers of the same path.
+        "launch_cancel_degraded",
+        "launch_cancel_pending",
+        "launch_cancelled",
         "port_still_held",
         "replace_witness_missing",
         "replace_witness_stale",

@@ -451,6 +451,21 @@ class ControlClient:
     async def lifecycle_status(self) -> dict[str, object]:
         return await self._session_call("/lifecycle/status")
 
+    async def lifecycle_stop(self, run_id: str) -> dict[str, object]:
+        """Stop one run with the lease this runtime already holds.
+
+        ah-starting-cancel-20261109-1444: the in-flight launch's transaction
+        sets active_lease_token on this same runtime. A same-session stop
+        during STARTING sends this command with that exact lease, so the
+        daemon's cancel branch can signal the launch without a second
+        acquire, reconcile or tool_lock wait.
+        """
+        payload: dict[str, object] = {"run_id": run_id}
+        token = self.active_lease_token
+        if isinstance(token, str) and token:
+            payload["lease_token"] = token
+        return await self._session_call("/lifecycle/stop", payload)
+
     async def lifecycle_close(self, run_id: str) -> dict[str, object]:
         payload: dict[str, object] = {"run_id": run_id}
         token = self.active_lease_token
