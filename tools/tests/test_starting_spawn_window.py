@@ -208,6 +208,28 @@ class AckLosesToPendingStopTest(_SpawnWindowCase):
         self.assertEqual(stop.get("terminated"), 0)
         self.assertEqual(len(self.fixture.guard.terminate_calls), 1)
 
+    def test_unauthorized_stop_never_registers(self) -> None:
+        # Review 028c3425 SHOULD-1: registration happens only after the stop
+        # is authorized, so a stop with no valid token cannot make the ack
+        # lose, not even while its authorization is being decided.
+        self._launch_to_running()
+        lifecycle = self.fixture.lifecycle
+        original = lifecycle._authorize
+        seen: list[bool] = []
+
+        def authorize(client, token, command):
+            if command == "lifecycle_stop":
+                seen.append(lifecycle._start_stop_pending(RUN_ID, _OP_ID))
+            return original(client, token, command)
+
+        with patch.object(lifecycle, "_authorize", authorize):
+            refused = lifecycle.stop_run(IDENTITY_A, "not-a-token", RUN_ID)
+        self.assertIsNot(refused.get("ok"), True, refused)
+        self.assertEqual(seen, [False])
+        self.assertFalse(lifecycle._start_stop_pending(RUN_ID, _OP_ID))
+        self.assertIs(self._ack().get("ok"), True)
+        self.assertEqual(self.fixture.guard.terminate_calls, [])
+
     def test_no_pending_stop_lets_the_ack_through(self) -> None:
         self._launch_to_running()
         self.assertFalse(self.fixture.lifecycle._start_stop_pending(RUN_ID, _OP_ID))

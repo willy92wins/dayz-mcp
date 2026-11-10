@@ -2462,12 +2462,18 @@ class ProcessLifecycle:
                 del self._spawn_window_cancels[run_id]
             return True
 
-    def _begin_start_stop(self, client: ClientIdentity, run_id: object) -> str | None:
-        """Register a same-session stop aimed at an unacknowledged launch.
+    def _begin_start_stop(
+        self,
+        client: ClientIdentity,
+        authority: tuple[str, str, str],
+        run_id: object,
+    ) -> str | None:
+        """Register an authorized same-owner stop aimed at an unacknowledged launch.
 
-        Read without _operation_lock, like the cancel branch of stop_run. Only
-        the owning session can register, and the entry only makes that
-        launch's own ack lose; it never kills or changes a row by itself.
+        Called only after _authorize, with the stop's own lease (review
+        028c3425 SHOULD-1). Read without _operation_lock, like the cancel
+        branch of stop_run. The entry only makes that launch's own ack lose;
+        it never kills or changes a row by itself.
         """
         if not isinstance(run_id, str) or not run_id:
             return None
@@ -2475,6 +2481,7 @@ class ProcessLifecycle:
         if (
             row is None
             or row.owner_session_id != client.session_id
+            or row.owner_lease_id != authority[1]
             or not isinstance(row.launch_operation_id, str)
             or not row.launch_operation_id
             or not (row.state == "STARTING" or self._in_spawn_window(row))
@@ -6075,14 +6082,20 @@ class ProcessLifecycle:
         its whole duration, so the launch's ack cannot take _operation_lock
         ahead of it and turn the cancel into a stop of an acknowledged run.
         """
-        pending = self._begin_start_stop(client, run_id)
+        pending: list[str] = []
         try:
-            return self._stop_run(client, token, run_id)
+            return self._stop_run(client, token, run_id, pending)
         finally:
-            if pending is not None and isinstance(run_id, str):
-                self._end_start_stop(run_id, pending)
+            if pending and isinstance(run_id, str):
+                self._end_start_stop(run_id, pending[0])
 
-    def _stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
+    def _stop_run(
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        pending: list[str],
+    ) -> dict[str, object]:
         """Stop the run. Ordinary callers are unchanged.
 
         Warden path, residual contract:
@@ -6102,6 +6115,11 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
+        # ah-starting-spawn-20261110: authorized, same owner and lease; the
+        # wrapper stop_run releases the registration on every return.
+        operation = self._begin_start_stop(client, authority, run_id)
+        if operation is not None:
+            pending.append(operation)
         # ah-starting-cancel-20261109-1444: the launch window is the one state
         # in which the launch itself holds _operation_lock for its whole
         # duration. A stop that waits for that lock is a kill after the launch,
