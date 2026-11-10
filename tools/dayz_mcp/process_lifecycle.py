@@ -2233,10 +2233,15 @@ class ProcessLifecycle:
         self._launch_cancel_lock = threading.Lock()
         self._launch_cancels: dict[str, _LaunchCancel] = {}
         # ah-starting-spawn-20261110: launches stopped in their spawn window
-        # (RUNNING, launch not yet acknowledged), run_id -> launch_operation_id.
-        # ack_run answers launch_cancelled for exactly that operation, once.
+        # (RUNNING, launch not yet acknowledged), run_id -> (launch_operation_id,
+        # session_id, lease_id) of the stopping owner. ack_run answers
+        # launch_cancelled for exactly that operation and owner, once.
         # Guarded by _launch_cancel_lock; bounded, oldest dropped first.
-        self._spawn_window_cancels: dict[str, str] = {}
+        self._spawn_window_cancels: dict[str, tuple[str, str, str]] = {}
+        # Same-owner stops in flight against a STARTING or spawn-window row,
+        # run_id -> (launch_operation_id, count). While one is pending, the
+        # launch's ack loses to it (review 5dff34ab SHOULD-1).
+        self._pending_start_stops: dict[str, tuple[str, int]] = {}
         self._starting_cancel_settle_s = _STARTING_CANCEL_SETTLE_S
         self._starting_cancel_kill_s = _STARTING_CANCEL_KILL_WAIT_S
         self._command_id = -1
@@ -2430,20 +2435,72 @@ class ProcessLifecycle:
             and bool(run.launch_operation_id)
         )
 
-    def _note_spawn_window_cancel(self, run_id: str, operation_id: str) -> None:
+    def _note_spawn_window_cancel(
+        self, run_id: str, operation_id: str, session_id: str, lease_id: str
+    ) -> None:
         with self._launch_cancel_lock:
             self._spawn_window_cancels.pop(run_id, None)
-            self._spawn_window_cancels[run_id] = operation_id
+            self._spawn_window_cancels[run_id] = (operation_id, session_id, lease_id)
             while len(self._spawn_window_cancels) > _SPAWN_WINDOW_CANCEL_CAP:
                 oldest = next(iter(self._spawn_window_cancels))
                 del self._spawn_window_cancels[oldest]
 
-    def _take_spawn_window_cancel(self, run_id: str, operation_id: str) -> bool:
+    def _spawn_window_cancel_matches(
+        self,
+        run_id: str,
+        operation_id: object,
+        session_id: str,
+        lease_id: str,
+        *,
+        consume: bool,
+    ) -> bool:
         with self._launch_cancel_lock:
-            if self._spawn_window_cancels.get(run_id) != operation_id:
+            noted = self._spawn_window_cancels.get(run_id)
+            if noted is None or noted != (operation_id, session_id, lease_id):
                 return False
-            del self._spawn_window_cancels[run_id]
+            if consume:
+                del self._spawn_window_cancels[run_id]
             return True
+
+    def _begin_start_stop(self, client: ClientIdentity, run_id: object) -> str | None:
+        """Register a same-session stop aimed at an unacknowledged launch.
+
+        Read without _operation_lock, like the cancel branch of stop_run. Only
+        the owning session can register, and the entry only makes that
+        launch's own ack lose; it never kills or changes a row by itself.
+        """
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        row = self.manifest.get(run_id)
+        if (
+            row is None
+            or row.owner_session_id != client.session_id
+            or not isinstance(row.launch_operation_id, str)
+            or not row.launch_operation_id
+            or not (row.state == "STARTING" or self._in_spawn_window(row))
+        ):
+            return None
+        operation = row.launch_operation_id
+        with self._launch_cancel_lock:
+            current = self._pending_start_stops.get(run_id)
+            count = current[1] if current is not None and current[0] == operation else 0
+            self._pending_start_stops[run_id] = (operation, count + 1)
+        return operation
+
+    def _end_start_stop(self, run_id: str, operation: str) -> None:
+        with self._launch_cancel_lock:
+            current = self._pending_start_stops.get(run_id)
+            if current is None or current[0] != operation:
+                return
+            if current[1] <= 1:
+                del self._pending_start_stops[run_id]
+            else:
+                self._pending_start_stops[run_id] = (operation, current[1] - 1)
+
+    def _start_stop_pending(self, run_id: str, operation: object) -> bool:
+        with self._launch_cancel_lock:
+            current = self._pending_start_stops.get(run_id)
+            return current is not None and current[0] == operation
 
     def _settle_launch_cancel(
         self,
@@ -5087,7 +5144,13 @@ class ProcessLifecycle:
                     run is not None
                     and run.state == "EXITED"
                     and run.launch_operation_id == launch_operation_id
-                    and self._take_spawn_window_cancel(run_id, launch_operation_id)
+                    and self._spawn_window_cancel_matches(
+                        run_id,
+                        launch_operation_id,
+                        client.session_id,
+                        authority[1],
+                        consume=True,
+                    )
                 ):
                     return self._reject_reserved(
                         authority, command, "launch_cancelled"
@@ -5095,6 +5158,12 @@ class ProcessLifecycle:
                 return self._reject_reserved(
                     authority, command, "launch_identity_conflict"
                 )
+            if self._start_stop_pending(run_id, launch_operation_id):
+                # ah-starting-spawn-20261110 (review 5dff34ab SHOULD-1): a stop
+                # of the same session is already on its way to this launch.
+                # The ack loses: the row stays RUNNING and unacknowledged, and
+                # that stop cancels it in the spawn window.
+                return self._reject_reserved(authority, command, "launch_cancelled")
             if not self._audit(
                 "lifecycle_ack",
                 client,
@@ -5999,6 +6068,21 @@ class ProcessLifecycle:
             self._finish_committed(authority, command_id)
 
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
+        """Stop the run; see _stop_run.
+
+        ah-starting-spawn-20261110 (review 5dff34ab SHOULD-1): a same-session
+        stop aimed at a launch that is not acknowledged yet is registered for
+        its whole duration, so the launch's ack cannot take _operation_lock
+        ahead of it and turn the cancel into a stop of an acknowledged run.
+        """
+        pending = self._begin_start_stop(client, run_id)
+        try:
+            return self._stop_run(client, token, run_id)
+        finally:
+            if pending is not None and isinstance(run_id, str):
+                self._end_start_stop(run_id, pending)
+
+    def _stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
         """Stop the run. Ordinary callers are unchanged.
 
         Warden path, residual contract:
@@ -6689,7 +6773,25 @@ class ProcessLifecycle:
                     # ah-starting-spawn-20261110: a cancel of the start, not
                     # a stop of a started run. Same kill, same terminal row;
                     # the in-flight launcher's ack answers launch_cancelled.
-                    self._note_spawn_window_cancel(run_id, spawn_window_operation)
+                    self._note_spawn_window_cancel(
+                        run_id, spawn_window_operation, client.session_id, authority[1]
+                    )
+                    stop_method = "cancelled_during_start"
+                    outcome_reason = "cancelled_during_start"
+                    outcome_decision = "cancelled"
+                elif (
+                    never_started
+                    and terminated == 0
+                    and self._spawn_window_cancel_matches(
+                        run_id,
+                        run.launch_operation_id,
+                        client.session_id,
+                        authority[1],
+                        consume=False,
+                    )
+                ):
+                    # The launcher's own cleanup stop got the lock first and
+                    # cancelled this start; this stop finds it already done.
                     stop_method = "cancelled_during_start"
                     outcome_reason = "cancelled_during_start"
                     outcome_decision = "cancelled"

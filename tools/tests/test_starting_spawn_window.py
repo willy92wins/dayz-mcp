@@ -139,6 +139,81 @@ class CancelAfterLastBoundaryCheckTest(_SpawnWindowCase):
         self._assert_cancel(fixture.stop_result["value"])
 
 
+class AckLosesToPendingStopTest(_SpawnWindowCase):
+    """Review 5dff34ab SHOULD-1: the ack must not overtake a waiting stop.
+
+    The stop is registered before it waits for _operation_lock. The test holds
+    that lock (an RLock) so the stop is parked exactly there, then sends the
+    launcher's ack from the lock owner: the ack loses with launch_cancelled
+    and the row stays RUNNING and unacknowledged for the stop to cancel.
+    """
+
+    def _park_stop(self) -> threading.Thread:
+        thread = self.fixture.stop_in_thread()
+        lifecycle = self.fixture.lifecycle
+        for _ in range(400):
+            if lifecycle._start_stop_pending(RUN_ID, _OP_ID):
+                return thread
+            threading.Event().wait(0.005)
+        self.fail("stop never registered")
+
+    def test_ack_while_same_session_stop_waits_for_the_lock(self) -> None:
+        self._launch_to_running()
+        lock = self.fixture.lifecycle._operation_lock
+        lock.acquire()
+        try:
+            stop_thread = self._park_stop()
+            ack = self._ack()
+            self.assertEqual(ack.get("error"), "launch_cancelled", ack)
+            stored = self.fixture.store.get(RUN_ID)
+            assert stored is not None
+            self.assertEqual(
+                (stored.state, stored.launch_acknowledged), ("RUNNING", False)
+            )
+        finally:
+            lock.release()
+        self._join(stop_thread)
+        stop = self.fixture.stop_result["value"]
+        self.assertIs(stop.get("ok"), True, stop)
+        self.assertEqual(stop.get("stop_method"), "cancelled_during_start", stop)
+        self.assertEqual(stop.get("terminated"), 1)
+        self.assertEqual(
+            [item.pid for item in self.fixture.guard.terminate_calls],
+            [self.fixture.launcher.pid],
+        )
+        self.assertFalse(
+            self.fixture.lifecycle._start_stop_pending(RUN_ID, _OP_ID)
+        )
+
+    def test_launcher_cleanup_first_then_the_waiting_stop_still_says_cancel(self) -> None:
+        self._launch_to_running()
+        lock = self.fixture.lifecycle._operation_lock
+        lock.acquire()
+        try:
+            stop_thread = self._park_stop()
+            self.assertEqual(self._ack().get("error"), "launch_cancelled")
+            # The launcher's own cleanup stop (same session and lease) wins
+            # the lock and cancels the start.
+            cleanup = self.fixture.lifecycle.stop_run(
+                IDENTITY_A, self.fixture.token, RUN_ID
+            )
+            self.assertEqual(cleanup.get("stop_method"), "cancelled_during_start", cleanup)
+            self.assertEqual(cleanup.get("terminated"), 1)
+        finally:
+            lock.release()
+        self._join(stop_thread)
+        stop = self.fixture.stop_result["value"]
+        self.assertIs(stop.get("ok"), True, stop)
+        self.assertEqual(stop.get("stop_method"), "cancelled_during_start", stop)
+        self.assertEqual(stop.get("terminated"), 0)
+        self.assertEqual(len(self.fixture.guard.terminate_calls), 1)
+
+    def test_no_pending_stop_lets_the_ack_through(self) -> None:
+        self._launch_to_running()
+        self.assertFalse(self.fixture.lifecycle._start_stop_pending(RUN_ID, _OP_ID))
+        self.assertIs(self._ack().get("ok"), True)
+
+
 class StopAfterAckStaysAStopTest(_SpawnWindowCase):
     def test_acknowledged_run_is_not_relabelled(self) -> None:
         self._launch_to_running()
