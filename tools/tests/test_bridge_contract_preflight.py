@@ -130,18 +130,36 @@ class BridgeContractGateTest(unittest.TestCase):
         self.assertEqual(self.gate(mod="DayZ_MCP", extra_mods=[], build=True), ())
         self.assertEqual(self.reads, [])
 
-    def test_a_bridge_folder_that_cannot_be_placed_refuses_nothing(self) -> None:
-        policy = dataclasses.replace(
-            self.policy, mod_roots=(r"P:\Mods", r"P:\Other")
-        )
+    # fb-20261109-130856-f28c: LFPowerGrid declares three mod roots, the gate
+    # read no PBO for its @DayZ_MCP, and 44 launches loaded a bridge of another
+    # contract. The worker uses one of the roots; the gate cannot tell which.
+    def _roots(self, *roots: str):
+        return dataclasses.replace(self.policy, mod_roots=roots)
+
+    def test_a_relative_bridge_is_read_under_every_root(self) -> None:
+        policy = self._roots(r"P:\Other", r"P:\Mods", r"P:\Third")
+        self.assertEqual(self.gate(policy), (OTHER,))
         self.assertEqual(
-            self.gate(
-                policy,
-                extra_mods=[BRIDGE],
-                server_only_mods=["@DayZ_MCP"],
-            ),
-            (),
+            self.reads, [r"P:\Other\@DayZ_MCP", BRIDGE, r"P:\Third\@DayZ_MCP"]
         )
+
+    def test_the_expected_contract_under_any_root_passes(self) -> None:
+        self.disk[r"P:\Third\@DayZ_MCP"] = [_bridge_pbo(EXPECTED)]
+        self.assertEqual(
+            self.gate(self._roots(r"P:\Other", r"P:\Mods", r"P:\Third")), ()
+        )
+
+    def test_roots_with_nothing_to_read_refuse_nothing(self) -> None:
+        self.disk.clear()
+        self.assertEqual(self.gate(self._roots(r"P:\Other", r"P:\Mods")), ())
+        self.assertEqual(self.reads, [r"P:\Other\@DayZ_MCP", BRIDGE])
+        self.reads.clear()
+        self.assertEqual(self.gate(self._roots()), ())
+        self.assertEqual(self.reads, [])
+
+    def test_an_absolute_bridge_is_read_only_at_its_path(self) -> None:
+        policy = self._roots(r"P:\Other", r"P:\Mods")
+        self.assertEqual(self.gate(policy, extra_mods=[BRIDGE]), (OTHER,))
         self.assertEqual(self.reads, [BRIDGE])
 
 

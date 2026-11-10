@@ -4324,6 +4324,15 @@ class SessionCoordinator:
             return self._active, ""
         return None, "lease_invalid"
 
+    def lease_purpose(self, owner_session_id: str, lease_id: str) -> str | None:
+        """The purpose of that exact lease, or None. A read: nothing expires here.
+
+        fb-20261028-001246-6330: the box record names why a run holds the box.
+        """
+        with self._condition:
+            lease = self._exact_lease_locked(owner_session_id, lease_id)
+            return lease.purpose if lease is not None else None
+
     def _exact_lease_locked(
         self, owner_session_id: str, lease_id: str
     ) -> _Lease | None:

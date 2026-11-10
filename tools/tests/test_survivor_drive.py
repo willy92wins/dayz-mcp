@@ -636,6 +636,26 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         _lease_close(state)
         self.assertEqual(_delivered(state), [])
 
+    def test_a_lease_end_after_the_run_ended_queues_and_degrades_nothing(self) -> None:
+        # Round of 2026-11-09: session_release after dayz_test_close answered
+        # survivor_drive_release_unconfirmed. The close retired the server's
+        # binding, and the survivor and its drive went with that server, so
+        # under v13 there is no per-lease release to queue and nothing
+        # degrades; the drive bookkeeping is cleared with the lease.
+        state, coordinator = _leased_state()
+        token = _acquire(coordinator, OWNER_A)
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([command["id"] for command in _delivered(state)], [drive])
+        _answered(state, drive)
+        state.retire_run("drive-run", "stopped")
+        released = _release(coordinator, OWNER_A, token)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+        self.assertEqual(released["cleanup_degraded"], [])
+        # v13 has no per-lease drive registry: nothing is queued for the
+        # retired server and no fire-and-forget release is outstanding.
+        self.assertEqual(bound_queue(state, "server"), [])
+        self.assertEqual(state._fire_and_forget_ids, set())
+
     def test_a_drive_the_queue_drops_at_the_lease_end_is_cancelled_not_released(self) -> None:
         # The queued drive is discarded by the release and never runs.
         # The delivered one is stopped by the close, which names no drive.

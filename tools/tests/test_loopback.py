@@ -1134,6 +1134,54 @@ class OwnerScopedQueueStateTest(unittest.TestCase):
         self.assertEqual(state.pending_for_owner("released-owner"), 0)
 
 
+class ReleaseAfterRunEndTest(unittest.TestCase):
+    """A lease that drove a vehicle owes its release only to a live client.
+
+    In the round of 2026-11-09, session_release after dayz_test_close answered
+    cleanup_degraded with vehicle_release_failed: the close had retired the
+    bindings, so the release had nowhere to go and nothing to release.
+    """
+
+    def _released(self, state: loopback.ServerState) -> dict[str, object]:
+        return state.cleanup_owner(
+            "released-owner", "released-lease", "owner_release", True
+        )
+
+    def test_release_after_the_run_closed_queues_and_degrades_nothing(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        state.retire_run("test-run", "stopped")
+        with mock.patch.object(
+            state, "enqueue_command", wraps=state.enqueue_command
+        ) as enqueue:
+            cleanup = self._released(state)
+        enqueue.assert_not_called()
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 0)
+        self.assertEqual(cleanup.get("cleanup_degraded", []), [])
+        self.assertEqual(state._fire_and_forget_ids, set())
+
+    def test_release_while_the_run_is_live_queues_the_vehicle_release(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        cleanup = self._released(state)
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 1)
+        self.assertEqual(cleanup.get("cleanup_degraded", []), [])
+        self.assertEqual(
+            [command["cmd"] for command in state._bound_queues[INST_CLIENT]],
+            ["vehicle_release"],
+        )
+
+    def test_release_while_the_run_is_live_reports_a_refused_enqueue(self) -> None:
+        state = loopback.ServerState("k")
+        bind_both_peers(state)
+        with mock.patch.object(
+            state, "enqueue_command", return_value=(429, {"error": "queue_full"})
+        ):
+            cleanup = self._released(state)
+        self.assertEqual(cleanup["vehicle_release_enqueued"], 0)
+        self.assertEqual(cleanup["cleanup_degraded"], ["vehicle_release_failed"])
+
+
 class FenceExemptionTest(unittest.TestCase):
     """P-J1: daemon fire-and-forget cleanup survives the owner fence."""
 
