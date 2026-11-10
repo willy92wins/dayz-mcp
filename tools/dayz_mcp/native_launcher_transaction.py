@@ -261,18 +261,28 @@ def mode_starts_server(mode: str) -> bool:
 def effective_mod_entries(payload: dict[str, object]) -> tuple[str, ...]:
     """The -mod= list the sealed worker will build, in the order it builds it.
 
-    Same composition as dayz_test_worker._mods (dayz_test_worker.py:205-211),
-    read off the CANONICAL payload, where no_base_mods and the policy defaults
-    are already resolved (dayz_test_request.py:364-387). There is exactly one
-    source of the effective list: the document the launcher itself receives,
-    which is the very payload this function is handed.
+    Same composition as dayz_test_worker._mod_entries: base_mods, then the
+    implicit @<mod> unless project_mod_override or mod_dir is set, then the
+    isolated mod_dir when present, then extra_mods. Read off the CANONICAL
+    payload, where no_base_mods and the policy defaults are already resolved
+    (dayz_test_request.py:364-387). There is exactly one source of the
+    effective list: the document the launcher itself receives, which is the
+    very payload this function is handed.
     """
     base = payload.get("base_mods") or []
     extra = payload.get("extra_mods") or []
-    project = () if payload.get("project_mod_override") is True else ("@" + str(payload["mod"]),)
+    isolated = payload.get("mod_dir")
+    has_isolated = isinstance(isolated, str) and isolated
+    project = (
+        ()
+        if payload.get("project_mod_override") is True or has_isolated
+        else ("@" + str(payload["mod"]),)
+    )
+    isolated_entries = (str(isolated),) if has_isolated else ()
     return (
         *(str(item) for item in base),
         *project,
+        *isolated_entries,
         *(str(item) for item in extra),
     )
 
@@ -754,17 +764,33 @@ def bridge_contract_mismatch(
     Empty when the run starts no server, builds the bridge itself, or when no
     PBO it can read declares a contract. A relative bridge entry is read under
     every declared root, and one root that announces the expected contract is
-    enough.
+    enough. An isolated mod_dir is the project the worker loads, so it is read
+    even if its basename is not @DayZ_MCP, and the implicit @<mod> under
+    policy.mod_roots is omitted, as in dayz_test_worker._mod_entries.
     """
     if not mode_starts_server(str(payload["mode"])):
         return ()
     if payload.get("build") is True and str(payload["mod"]).casefold() == "dayz_mcp":
         return ()
     announced: set[str] = set()
+    isolated = payload.get("mod_dir")
+    isolated_key = (
+        ntpath.normcase(ntpath.normpath(str(isolated)))
+        if isinstance(isolated, str) and isolated
+        else None
+    )
     for entry in (*effective_mod_entries(payload), *payload.get("server_only_mods", [])):
-        if ntpath.basename(str(entry)).casefold() not in dayz_test_request._BRIDGE_BASENAMES:
+        entry_s = str(entry)
+        is_isolated = (
+            isolated_key is not None
+            and ntpath.normcase(ntpath.normpath(entry_s)) == isolated_key
+        )
+        if (
+            ntpath.basename(entry_s).casefold() not in dayz_test_request._BRIDGE_BASENAMES
+            and not is_isolated
+        ):
             continue
-        for path in _bridge_mod_paths(str(entry), policy):
+        for path in _bridge_mod_paths(entry_s, policy):
             try:
                 blobs = read_bridge_pbos(path)
             except OSError:
