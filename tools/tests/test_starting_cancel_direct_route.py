@@ -79,7 +79,14 @@ def _complete_start_request(
     completed["label"] = str(completed["mod"]) + " " + str(completed["role"])
     completed["window_style"] = "normal"
     completed["cwd"] = str(game)
-    completed["argv"] = [str(exe), "-mission=" + str(mission)]
+    # ProcessLifecycle gates Steam on argv, not the role label. Without
+    # -server, a mode=server request still requires a live Steam session.
+    # CI (windows-latest, no Steam) refused /lifecycle/start as
+    # steam_session_stale before the file-gated hold launcher ran.
+    argv = [str(exe), "-mission=" + str(mission)]
+    if completed["role"] == "server":
+        argv.append("-server")
+    completed["argv"] = argv
     completed["profiles"] = str(game / "profiles-sckeyerr")
     completed["mission"] = str(mission)
     completed["auto_remediate_steam"] = False
@@ -401,9 +408,19 @@ class DirectRouteStartingCancelLiveDaemonTest(unittest.TestCase):
                     error_code = raw_error
                     terminal_run_id = result.get("run_id") if cleanup_degraded else None
                 else:
-                    cleanup_degraded = True
+                    # A start that never created a run must publish a failed
+                    # terminal (cleanup_degraded=False, run_id=None). Setting
+                    # cleanup_degraded with a missing run_id is terminal_invalid
+                    # and hides the daemon reason.
+                    cleanup_degraded = False
                     error_code = "launch_cancel_degraded"
-                    terminal_run_id = result.get("run_id")
+                    terminal_run_id = None
+                    logs.append(
+                        "lifecycle_start_error="
+                        + repr(raw_error)
+                        + " result_keys="
+                        + repr(sorted(result))
+                    )
                 if callable(output_sink):
                     output_sink(
                         "stdout",
