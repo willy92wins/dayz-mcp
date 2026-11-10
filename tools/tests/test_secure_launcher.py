@@ -543,7 +543,10 @@ class SecureLauncherRuntimeTests(unittest.TestCase):
                 execute(
                     public_request,
                     opened_launcher=object(),
-                    verified_bundle=SimpleNamespace(sealed_policies=(object(),)),
+                    verified_bundle=SimpleNamespace(
+                        sealed_policies=(object(),),
+                        validated_worker_runtime=lambda _mod, _dev_root: None,
+                    ),
                     control_client=object(),
                     daemon_policy=object(),
                     output_sink=lambda channel, chunk: captured.append((channel, chunk)),
@@ -572,6 +575,9 @@ class SecureLauncherRuntimeTests(unittest.TestCase):
         class Bundle:
             sealed_policies = (object(),)
             exited = False
+
+            def validated_worker_runtime(self, _mod: str, _dev_root: str) -> None:
+                return None
 
             def __enter__(self) -> "Bundle":
                 return self
