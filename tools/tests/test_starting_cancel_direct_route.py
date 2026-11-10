@@ -161,11 +161,16 @@ def _tool_payload(result: object) -> dict[str, object]:
 
 def _surface_policy(root: Path) -> RequestProjectPolicy:
     dev = root / "dev"
-    (dev / "_server" / "mpmissions").mkdir(parents=True)
+    # FINDING-launch-modroot: the launch also accredits what the roles load,
+    # the chernarus alias and the implicit @StorageMod among them.
+    (dev / "_server" / "mpmissions" / "dayzOffline.chernarusplus").mkdir(
+        parents=True
+    )
     source = dev / "staged-source" / "StorageMod"
     source.mkdir(parents=True)
     mods = root / "mods"
     (mods / "@CF").mkdir(parents=True)
+    (mods / "@StorageMod").mkdir(parents=True)
     (mods / "@DayZ_MCP").mkdir(parents=True)
     return RequestProjectPolicy(
         mod="StorageMod",
