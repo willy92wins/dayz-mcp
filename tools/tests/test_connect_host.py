@@ -4,7 +4,7 @@ import json
 import unittest
 
 from dayz_mcp import dayz_test_request, dayz_test_worker
-from tests.test_dayz_test_worker import POLICY, RUNTIME
+from tests.dayz_test_worker_helpers import POLICY, RUNTIME
 
 
 def _raw(**overrides: object) -> bytes:
