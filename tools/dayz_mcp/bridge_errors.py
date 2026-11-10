@@ -82,6 +82,12 @@ _REMOTE_ERROR_CODES = frozenset({
     "lease_expired",
     "lease_invalid",
     "lease_required",
+    # ah-starting-cancel-20261109-1444: the named fail-closed answers of a
+    # stop that reaches the in-flight launch in STARTING. Without these the
+    # daemon's 409 became remote_error and the caller could not tell a
+    # pending cancel from a degraded one.
+    "launch_cancel_pending",
+    "launch_cancel_degraded",
     "not_found",
     "not_whitelisted",
     "queue_full",

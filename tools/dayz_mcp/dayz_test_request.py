@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import ntpath
 import re
@@ -47,7 +48,7 @@ _REQUEST_KEYS_V1 = frozenset(
 # Version 1 stays this set. Version 2 adds exactly one closed field.
 _REQUEST_KEYS = _REQUEST_KEYS_V1
 _REQUEST_KEYS_V2 = _REQUEST_KEYS_V1 | {"project_mod_override"}
-_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods"}
+_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods", "connect_host", "mod_dir"}
 _BRIDGE_BASENAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 _INVALID_RUN_ID = "invalid_run_id"
@@ -94,11 +95,19 @@ _CANONICAL_KEYSETS = frozenset(
         frozenset(),
         frozenset({"server_adminlog"}),
     )
-    for variant in (
+    for base_variant in (
         keys - omitted - extra - adminlog,
         (keys - omitted - extra - adminlog) | {"project_mod_override"},
         (keys - omitted - extra - adminlog) | {"server_only_mods"},
         (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods"},
+        (keys - omitted - extra - adminlog) | {"connect_host"},
+        (keys - omitted - extra - adminlog) | {"project_mod_override", "connect_host"},
+        (keys - omitted - extra - adminlog) | {"server_only_mods", "connect_host"},
+        (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods", "connect_host"},
+    )
+    for variant in (
+        base_variant,
+        base_variant | {"mod_dir"},
     )
 )
 
@@ -141,6 +150,13 @@ REQUEST_REJECTION_REASONS = frozenset(
         "unknown_key",
         "version_unsupported",
         "window_size_out_of_range",
+        "connect_host_invalid",
+        "connect_host_requires_client",
+        "mod_dir_invalid",
+        "mod_dir_conflicts_with_build",
+        "mod_dir_in_default_source",
+        "mod_dir_in_workshop",
+        "mod_dir_is_original_project",
     }
 )
 
@@ -158,6 +174,40 @@ def _reject_json_constant(_value: str) -> object:
     _invalid("json_constant_rejected")
 
 
+
+def _path_has_workshop_component(path: str) -> bool:
+    """True when any path segment is the Steam Workshop folder."""
+    return any(part.casefold() == "!workshop" for part in ntpath.normpath(path).split("\\"))
+
+
+def _validate_mod_dir(raw: object, default_source: str) -> str:
+    """Absolute isolated @mod folder; never Workshop or default_source."""
+    if not _valid_local_absolute_path(raw):
+        _invalid("mod_dir_invalid")
+    path = ntpath.normpath(raw)
+    if ";" in path:
+        _invalid("mod_dir_invalid")
+    if _path_has_workshop_component(path):
+        _invalid("mod_dir_in_workshop")
+    if _path_is_within(path, (default_source,)):
+        _invalid("mod_dir_in_default_source")
+    return path
+
+
+def _same_windows_path(left: str, right: str) -> bool:
+    return ntpath.normcase(ntpath.normpath(left)) == ntpath.normcase(
+        ntpath.normpath(right)
+    )
+
+
+def _mod_dir_is_policy_project(path: str, policy: RequestProjectPolicy) -> bool:
+    """True when path is the implicit project folder under a sealed mod root."""
+    for root in policy.mod_roots:
+        if _same_windows_path(path, ntpath.join(root, "@" + policy.mod)):
+            return True
+    return False
+
+
 def reject_original_project_directory(
     payload: dict[str, object], mods_root: str
 ) -> None:
@@ -166,8 +216,6 @@ def reject_original_project_directory(
     Comparison is the normalized runtime path, not the leaf name. The public
     token stays the closed request reason.
     """
-    if payload.get("project_mod_override") is not True:
-        return
     from dayz_mcp.dayz_test_storage import StorageError, normalize_mod_path
 
     mod = payload.get("mod")
@@ -177,18 +225,27 @@ def reject_original_project_directory(
         original = ntpath.normcase(normalize_mod_path("@" + mod, mods_root))
     except StorageError:
         return
-    listed: list[object] = []
-    for field in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
-        values = payload.get(field)
-        if isinstance(values, list):
-            listed.extend(values)
-    for value in listed:
+    if payload.get("project_mod_override") is True:
+        listed: list[object] = []
+        for field in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
+            values = payload.get(field)
+            if isinstance(values, list):
+                listed.extend(values)
+        for value in listed:
+            try:
+                resolved = ntpath.normcase(normalize_mod_path(value, mods_root))
+            except StorageError:
+                continue
+            if resolved == original:
+                _invalid("project_mod_override_includes_original")
+    mod_dir = payload.get("mod_dir")
+    if isinstance(mod_dir, str) and mod_dir:
         try:
-            resolved = ntpath.normcase(normalize_mod_path(value, mods_root))
+            resolved_dir = ntpath.normcase(normalize_mod_path(mod_dir, mods_root))
         except StorageError:
-            continue
-        if resolved == original:
-            _invalid("project_mod_override_includes_original")
+            resolved_dir = None
+        if resolved_dir == original:
+            _invalid("mod_dir_is_original_project")
 
 
 def validate_server_only_mods(
@@ -240,6 +297,40 @@ def _request_mode_view() -> tuple[str, tuple[str, ...]]:
     except dayz_test_modes.ModeAuthorityError:
         _invalid("mode_authority_unreadable")
     return default.name, names
+
+
+def _is_loopback_connect_host(host: str) -> bool:
+    folded = host.strip().lower()
+    if folded in {"localhost", "localhost."}:
+        return True
+    candidate = folded[1:-1] if folded.startswith("[") and folded.endswith("]") else folded
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _valid_connect_host(raw: object) -> str | None:
+    """Accept IPv4, IPv6, or a short DNS name. Refuse shell metacharacters."""
+    if type(raw) is not str:
+        return None
+    if not _bounded_text(raw, 1, 253):
+        return None
+    if any(ch in raw for ch in (" ", "\t", "\n", "\r", ";", '"', "'")):
+        return None
+    candidate = raw[1:-1] if raw.startswith("[") and raw.endswith("]") else raw
+    try:
+        ipaddress.ip_address(candidate)
+        return raw
+    except ValueError:
+        pass
+    if re.fullmatch(
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*",
+        raw,
+    ):
+        return raw
+    return None
 
 
 def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
@@ -489,6 +580,22 @@ def parse_dayz_test_request(
     else:
         project_mod_override = False
     run_id = value.get("run_id")
+    connect_host_raw = value.get("connect_host") if "connect_host" in value else None
+    connect_host = "127.0.0.1"
+    remote_connect = False
+    if connect_host_raw is not None and connect_host_raw != "":
+        validated = _valid_connect_host(connect_host_raw)
+        if validated is None:
+            _invalid("connect_host_invalid")
+        connect_host = validated
+        remote_connect = not _is_loopback_connect_host(connect_host)
+    mod_dir_raw = value.get("mod_dir") if "mod_dir" in value else None
+    mod_dir: str | None = None
+    if mod_dir_raw is not None and mod_dir_raw != "":
+        # validated against policy.default_source after policy is known (already is).
+        mod_dir = _validate_mod_dir(mod_dir_raw, policy.default_source)
+    elif "mod_dir" in value and mod_dir_raw == "":
+        _invalid("mod_dir_invalid")
     replace_witness = value.get("replace_if_not_polling_since")
     shared_lock_root = value.get("shared_lock_root") if "shared_lock_root" in value else None
     instance_token = value.get("instance_token") if "instance_token" in value else None
@@ -584,6 +691,13 @@ def parse_dayz_test_request(
         _invalid("server_adminlog_requires_server")
     if pack_only and not effective_build:
         _invalid("pack_only_requires_build")
+    if mod_dir is not None and (effective_build or pack_only):
+        _invalid("mod_dir_conflicts_with_build")
+    if mod_dir is not None and _mod_dir_is_policy_project(mod_dir, policy):
+        # Same identity the worker also checks once mods_root is known.
+        # A shared basename under a root that is not in this policy is a
+        # different directory and is not rejected here.
+        _invalid("mod_dir_is_original_project")
     canonical_default_source = (
         set(value) in _CANONICAL_KEYSETS
         and source == policy.default_source
@@ -599,8 +713,13 @@ def parse_dayz_test_request(
         _invalid("kill_requires_offline_mode")
     if not kill and mode in {"server", "all"} and run_id is not None:
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
+    if remote_connect and mode != "client":
+        # Non-default -connect only belongs on a client-only launch.
+        # mode=all starts a local client that must keep loopback.
+        _invalid("connect_host_requires_client")
     if not kill and mode == "client" and run_id is None:
-        raise ValueError(_CLIENT_REQUIRES_RUN_ID)
+        if not remote_connect:
+            raise ValueError(_CLIENT_REQUIRES_RUN_ID)
     if project_mod_override:
         if effective_build:
             _invalid("project_mod_override_conflicts_with_build")
@@ -617,8 +736,9 @@ def parse_dayz_test_request(
         ]
         if not candidates:
             _invalid("project_mod_override_requires_candidate")
-    # Path identity of the original project folder is checked once the
-    # selected runtime mods root is known (reject_original_project_directory).
+    # Path identity of the original project folder for mod_dir is checked
+    # above against policy.mod_roots. The worker still calls
+    # reject_original_project_directory with the selected runtime mods root.
     # A shared basename under another root is a different directory.
     # fb-20260904-200816-79e2. The witness of the client-replacement gate: the
     # instant, in epoch milliseconds, at which the gate READ the bridge and
@@ -657,7 +777,7 @@ def parse_dayz_test_request(
         "server_mods": list(server_mods),
         "server_wait_s": server_wait_s,
         "source": policy.default_source if source is None else source,
-        "version": 3 if server_only_mods else (2 if project_mod_override else 1),
+        "version": 3 if (server_only_mods or ("connect_host" in value and connect_host_raw not in (None, "")) or mod_dir is not None) else (2 if project_mod_override else 1),
         "width": width,
     }
     if not project_mod_override:
@@ -669,6 +789,10 @@ def parse_dayz_test_request(
         payload["shared_lock_root"] = shared_lock_root
     if "instance_token" in value:
         payload["instance_token"] = instance_token
+    if "connect_host" in value and connect_host_raw not in (None, ""):
+        payload["connect_host"] = connect_host
+    if mod_dir is not None:
+        payload["mod_dir"] = mod_dir
     if "build_lock_wait_s" in value:
         assert isinstance(build_lock_wait_s, (int, float))
         payload["build_lock_wait_s"] = (

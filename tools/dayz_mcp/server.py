@@ -2517,6 +2517,28 @@ class ClientRuntime:
                 return error.code
             return "remote_error"
 
+        def tool_error(error: ControlClientError) -> ToolError:
+            """Carry the daemon's stable code and run state on the exception.
+
+            ToolError's message is the public text (sometimes a recipe), so a
+            caller cannot recover the bare code from it. The attributes keep
+            launch_cancel_pending/degraded and the durable UNRECONCILED state
+            available to dayz_test_stop's envelope without parsing prose.
+            """
+            raised = ToolError(public_error_code(error))
+            try:
+                raised.code = error.code
+                body = error.body
+                if (
+                    isinstance(body, VerifiedErrorBody)
+                    and isinstance(body.state, str)
+                    and body.state
+                ):
+                    raised.state = body.state
+            except Exception:
+                pass
+            return raised
+
         try:
             try:
                 return await invoke()
@@ -2536,9 +2558,9 @@ class ClientRuntime:
                         await self._observe_lifecycle_error(
                             lifecycle, retry_error, held_token
                         )
-                        raise ToolError(public_error_code(retry_error)) from None
+                        raise tool_error(retry_error) from None
                 await self._observe_lifecycle_error(lifecycle, error, held_token)
-                raise ToolError(public_error_code(error)) from None
+                raise tool_error(error) from None
         finally:
             await self._finish_carrier_io()
 
@@ -2729,6 +2751,15 @@ class ClientRuntime:
 
     async def lifecycle_status(self) -> dict[str, Any]:
         return await self._control_with_lazy_spawn(self._control.lifecycle_status)
+
+    async def lifecycle_stop(self, run_id: str) -> dict[str, Any]:
+        result = await self._control_with_lazy_spawn(
+            self._control.lifecycle_stop, run_id
+        )
+        await self._accept_command_renewal(result)
+        if isinstance(result, dict):
+            result.pop("lease_id", None)
+        return result
 
     async def lifecycle_close(self, run_id: str) -> dict[str, Any]:
         result = await self._control_with_lazy_spawn(
@@ -6399,6 +6430,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "initialized. Launch success has no project-attestation meaning "
             "unless the project policy enables attestation, and attestation "
             "success does not prove feature acceptance. "
+            "connect_host, when set, is the client -connect= address "
+            "(IPv4, IPv6 including [::1], or a short DNS name). Omitted, "
+            "the worker uses 127.0.0.1. A non-loopback host is allowed "
+            "only with mode=client, which may then omit run_id; "
+            "mode=server or mode=all with a remote host is "
+            "connect_host_requires_client. "
+            "mod_dir is an absolute isolated @mod folder loaded on -mod= "
+            "instead of the implicit project folder; build must be false, "
+            "and the path must not be the Workshop, default_source, or the "
+            "original project folder under a sealed mod root "
+            "(mod_dir_is_original_project, rejected at parse). "
+            "Both keys belong to request v3. The MCP tool and the parser "
+            "in this tree accept them, but a dayz-test-v1 launcher built "
+            "before they were added rejects them with unknown_key. "
+            "Using them end-to-end requires rebuilding that launcher from "
+            "this tree (tools/packaged-modules.lock.json must already "
+            "pin the parser and worker) and renewing the registry with "
+            "launcher_registry_update. This tree does not install or "
+            "replace a live launcher. "
             f"{GODMODE_DEFAULT_LINE}"
         )
     )
@@ -6428,6 +6478,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         server_adminlog: StrictBool = False,
         takeover: StrictBool = False,
         project_mod_override: StrictBool = False,
+        connect_host: StrictStr | None = None,
+        mod_dir: StrictStr | None = None,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
         ctx: Context | None = None,
@@ -6534,6 +6586,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         auto_remediate_steam=auto_remediate_steam,
                         client_start_budget_s=budget_s,
                         project_mod_override=project_mod_override,
+                        connect_host=connect_host,
+                        mod_dir=mod_dir,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
@@ -6853,15 +6907,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     @app.tool(
         description=(
             "Queue adoption and shutdown of one exact approved DayZ run. "
+            "A run still in its launch window (STARTING) is cancelled, not "
+            "killed after the launch finishes: the stop signals the in-flight "
+            "launch through the lifecycle, which terminates exactly its owned "
+            "process and settles the row terminal before it can become "
+            "RUNNING. If the launch cannot be reached within the bound the "
+            "stop is refused as launch_cancel_pending, never a silent success. "
             "Stop uses forced process kill, not orderly mission teardown: "
             "RPT exit metrics (Leaked counts, Destroying game, Termination "
             "successfully completed) are not valid after this tool. status "
             "succeeded means processes are gone; exit_metrics_valid is false. "
-            "For an orderly shutdown first, use dayz_test_close."
+            "For an orderly shutdown first, use dayz_test_close. "
+            "run_id may be omitted while this session has exactly one run in "
+            "STARTING: the stop then names the in-flight launch itself, so a "
+            "caller that could not learn the worker-minted id can still cancel "
+            "it instead of waiting for RUNNING."
         )
     )
     async def dayz_test_stop(
-        run_id: str,
+        run_id: str | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         client = _client_runtime()
@@ -6872,6 +6936,40 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         caller_session = str(
             getattr(getattr(client, "identity", None), "session_id", "") or ""
         ) or None
+        if client.tool_lock.locked():
+            # STARTING prelude only: a same-session dayz_test_run holds
+            # tool_lock and this runtime's lease for the whole launch. If
+            # the target is that launch's STARTING row, cancel it through
+            # /lifecycle/stop with the lease already held, instead of
+            # waiting for the launch to finish. execute_dayz_test_stop
+            # with direct_inflight=True returns None when that route does
+            # not apply; it must not run the ordinary stop without the
+            # lock. Any other shape falls through to the locked path.
+            try:
+                with _typed_dayz_test_value_errors():
+                    direct = await dayz_test_tool.execute_dayz_test_stop(
+                        client, run_id, progress_cb=report, direct_inflight=True
+                    )
+            except (dayz_test_tool.DayzTestToolError, ToolError):
+                # The direct route does not apply (or refused by name): take
+                # the ordinary locked path. The progress "stopping" may have
+                # been reported already; that is a report, not a result.
+                direct = None
+            except Exception as exc:
+                # Not silent: the cause stays local, the fallback stays the
+                # contract. The lock wait below is the older, slower route.
+                log = getattr(client, "_log", None)
+                if callable(log):
+                    try:
+                        log(
+                            "[dayz_test_stop] direct route fallback: "
+                            f"{type(exc).__name__}"
+                        )
+                    except Exception:
+                        pass
+                direct = None
+            if direct is not None:
+                return direct
         async with client.tool_lock:
             try:
                 snapshot = await client.session_status()
