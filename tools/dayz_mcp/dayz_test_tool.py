@@ -3392,6 +3392,28 @@ def _held_lease_matches(runtime: _Runtime, row: dict[str, object]) -> bool:
     return True
 
 
+def _in_start_window(row: dict[str, object]) -> bool:
+    """STARTING, or RUNNING with the launch not yet acknowledged.
+
+    ah-starting-spawn-20261110: the daemon row leaves STARTING right after
+    the spawn, while the launch (and tool_lock) is still in flight until the
+    launcher acknowledges it. The daemon treats a same-owner stop in that
+    spawn window as a cancel of the start; the direct route must reach it
+    instead of waiting for tool_lock and killing a run that is acknowledged
+    by then.
+    """
+    state = row.get("state")
+    if state == "STARTING":
+        return True
+    operation = row.get("launch_operation_id")
+    return (
+        state == "RUNNING"
+        and row.get("launch_acknowledged") is False
+        and isinstance(operation, str)
+        and bool(operation)
+    )
+
+
 def _owned_starting_row(
     runtime: _Runtime, status: object
 ) -> dict[str, object] | None:
@@ -3409,7 +3431,7 @@ def _owned_starting_row(
     matches = [
         row
         for row in _runs(status)
-        if row.get("state") == "STARTING"
+        if _in_start_window(row)
         and _row_owner(row) == caller
         and _held_lease_matches(runtime, row)
     ]
@@ -3565,7 +3587,7 @@ async def _direct_inflight_stop(
             return None
     else:
         row = _run_row(status, run_id)
-        if row is None or row.get("state") != "STARTING":
+        if row is None or not _in_start_window(row):
             return None
         if _row_owner(row) != _h14_caller_session(runtime):
             return None
