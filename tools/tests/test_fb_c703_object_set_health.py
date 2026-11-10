@@ -35,10 +35,17 @@ Added after the 9/11 in-game round, where GetMaxHealth threw a Virtual
 Machine Exception for an object with no damage system and for a zone the
 object does not have (cites read on the maintainer's PC):
 
-- Object.HasDamageSystem: 3_game/entities/object.c:976 (its comment at :974:
-  the damage system is initialized)
+- Object.ConfigIsExisting: 3_game/entities/object.c:929
+  proto native bool ConfigIsExisting(string entryName)
+  The handler asks for the DamageSystem class, where the damage system's data
+  comes from.
 - Object.GetDamageZones: 3_game/entities/object.c:1153, the names vanilla's
   TransferEntityHealth looks a zone up in (miscgameplayfunctions.c:398-410)
+
+Object.HasDamageSystem (object.c:976) is not the guard: its comment at
+:972-976 says it only tells whether the damage system is initialized, and in
+the 10/11 round it read false on the 1.30 server for barrels, wheels and other
+items whose health GetMaxHealth reads, so a guard on it refused them all.
 """
 from __future__ import annotations
 
@@ -872,12 +879,20 @@ class _HealthTarget:
     zones=None is an object with no damage system (StaticObj_Misc_SupplyBox1_DE
     in the 9/11 round). A health call on it, or on a named zone it does not
     list, fails the test the way GetMaxHealth threw a Virtual Machine
-    Exception in that round.
+    Exception in that round. initialized is what HasDamageSystem answers:
+    false by default, as it read on the 1.30 server in the 10/11 round for
+    items whose health the engine reads and writes.
     """
 
-    def __init__(self, zones: list[str] | None, health01: float = 1.0) -> None:
+    def __init__(
+        self,
+        zones: list[str] | None,
+        health01: float = 1.0,
+        initialized: bool = False,
+    ) -> None:
         self.zones = zones
         self.health01 = health01
+        self.initialized = initialized
         self.calls: list[str] = []
 
     def _health_call(self, name: str, zone: EnforceString) -> None:
@@ -905,9 +920,13 @@ class _HealthTarget:
     def GetDirection(self) -> tuple[float, float, float]:
         return (0.0, 0.0, 1.0)
 
+    def ConfigIsExisting(self, entry: EnforceString) -> bool:
+        self.calls.append(f"ConfigIsExisting({entry.text})")
+        return entry.text == "DamageSystem" and self.zones is not None
+
     def HasDamageSystem(self) -> bool:
         self.calls.append("HasDamageSystem")
-        return self.zones is not None
+        return self.initialized
 
     def GetDamageZones(self, names: EnforceArray) -> None:
         self.calls.append("GetDamageZones")
@@ -981,13 +1000,13 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
                 target = _HealthTarget(zones=None)
                 result = self._run(target, zone)
                 self._assert_no_health(result)
-                self.assertEqual(target.calls, ["HasDamageSystem"])
+                self.assertEqual(target.calls, ["ConfigIsExisting(DamageSystem)"])
 
     def test_g2_a_zone_the_object_does_not_list_is_no_health(self) -> None:
         target = _HealthTarget(zones=["Engine", "Body"])
         result = self._run(target, "Bogus")
         self._assert_no_health(result)
-        self.assertEqual(target.calls, ["HasDamageSystem", "GetDamageZones"])
+        self.assertEqual(target.calls, ["ConfigIsExisting(DamageSystem)", "GetDamageZones"])
         self.assertEqual(target.health01, 1.0)
 
     def test_g3_a_listed_zone_is_set_and_read_back(self) -> None:
@@ -995,7 +1014,10 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
         result = self._run(target, "Engine")
         self.assertIs(result.ok, True)
         self.assertEqual(result.error, EnforceString.of(""))
-        self.assertEqual(target.calls[:3], ["HasDamageSystem", "GetDamageZones", "GetMaxHealth(Engine)"])
+        self.assertEqual(
+            target.calls[:3],
+            ["ConfigIsExisting(DamageSystem)", "GetDamageZones", "GetMaxHealth(Engine)"],
+        )
         self.assertIn("SetHealth01(Engine)", target.calls)
         self.assertEqual(result.object_health.health01_after, 0.5)
 
@@ -1004,7 +1026,17 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
         result = self._run(target, "")
         self.assertIs(result.ok, True)
         self.assertNotIn("GetDamageZones", target.calls)
-        self.assertEqual(target.calls[:2], ["HasDamageSystem", "GetMaxHealth()"])
+        self.assertEqual(target.calls[:2], ["ConfigIsExisting(DamageSystem)", "GetMaxHealth()"])
+        self.assertEqual(result.object_health.health01_after, 0.5)
+
+    def test_g5_an_item_whose_damage_system_reads_uninitialized_is_still_set(self) -> None:
+        # The 10/11 round: Barrel_Blue to 0.5 answered no_health because
+        # HasDamageSystem read false, though GetMaxHealth reads its health.
+        target = _HealthTarget(zones=[], initialized=False)
+        result = self._run(target, "")
+        self.assertIs(result.ok, True)
+        self.assertNotIn("HasDamageSystem", target.calls)
+        self.assertIn("SetHealth01()", target.calls)
         self.assertEqual(result.object_health.health01_after, 0.5)
 
 
@@ -1047,13 +1079,13 @@ class TelemetryHealthGuardTest(unittest.TestCase):
         telemetry = self._run(found)
         self.assertIs(telemetry.found, True)
         self.assertEqual(telemetry.health01, 0.0)
-        self.assertEqual(found.calls, ["HasDamageSystem"])
+        self.assertEqual(found.calls, ["ConfigIsExisting(DamageSystem)"])
 
     def test_t2_a_damage_system_reads_the_global_health(self) -> None:
-        found = _HealthTarget(zones=["Engine"], health01=0.25)
+        found = _HealthTarget(zones=[], health01=0.25, initialized=False)
         telemetry = self._run(found)
         self.assertEqual(telemetry.health01, 0.25)
-        self.assertEqual(found.calls, ["HasDamageSystem", "GetHealth01()"])
+        self.assertEqual(found.calls, ["ConfigIsExisting(DamageSystem)", "GetHealth01()"])
 
 
 class ObjectSetHealthDescriptionTest(unittest.IsolatedAsyncioTestCase):

@@ -5828,14 +5828,20 @@ class MCPBridge : Managed
 
 		// c703: in the 9/11 round GetMaxHealth threw a Virtual Machine
 		// Exception for an object with no damage system
-		// (StaticObj_Misc_SupplyBox1_DE) and for a zone the object does not
-		// have ("Bogus" on Barrel_Blue). Both answer no_health before it.
-		// HasDamageSystem checks the damage system is initialized (vanilla
-		// object.c:974-976). A named zone must be one of the names
+		// (StaticObj_Misc_SupplyBox1_DE: "No DamageSystemData or not
+		// initialized yet") and for a zone the object does not have
+		// ("Bogus" on Barrel_Blue: "Could not find zone"). Both answer
+		// no_health before it. The object must have a DamageSystem class in
+		// its config (Object.ConfigIsExisting, vanilla object.c:929), where
+		// that data comes from. HasDamageSystem is not the test: its comment
+		// (object.c:972-976) says it does not tell whether the object is
+		// configured with one, and on the 1.30 server it read false for
+		// barrels, wheels and other items whose health GetMaxHealth reads
+		// (10/11 round). A named zone must be one of the names
 		// GetDamageZones lists (object.c:1153), the by-name lookup vanilla's
 		// TransferEntityHealth does (miscgameplayfunctions.c:398-410); an
 		// empty zone is the global health and skips the lookup.
-		if (!target.HasDamageSystem())
+		if (!target.ConfigIsExisting("DamageSystem"))
 		{
 			result.ok = false;
 			result.error = "no_health";
@@ -7089,11 +7095,10 @@ class MCPBridge : Managed
 		VectorToArray(found.GetDirection(), telemetry.direction);
 		VectorToArray(GetVelocity(found), telemetry.velocity);
 		string empty = "";
-		// c703: the same HasDamageSystem guard as object_set_health, where
-		// a health read on an object with no damage system threw a VM
-		// exception in the 9/11 round (vanilla object.c:974-976). Without
-		// one, health01 stays 0.
-		if (found.HasDamageSystem())
+		// c703: the same DamageSystem config guard as object_set_health,
+		// where a health read on an object with no damage system threw a VM
+		// exception in the 9/11 round. Without one, health01 stays 0.
+		if (found.ConfigIsExisting("DamageSystem"))
 		{
 			telemetry.health01 = found.GetHealth01(empty, empty);
 		}
