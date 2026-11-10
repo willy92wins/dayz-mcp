@@ -694,7 +694,7 @@ def parse_dayz_test_request(
         _invalid("kill_requires_offline_mode")
     if not kill and mode in {"server", "all"} and run_id is not None:
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
-    if connect_host != "127.0.0.1" and mode != "client":
+    if remote_connect and mode != "client":
         # Non-default -connect only belongs on a client-only launch.
         # mode=all starts a local client that must keep loopback.
         _invalid("connect_host_requires_client")

@@ -407,6 +407,68 @@ class SupervisorLogicTests(unittest.TestCase):
         self.assertFalse(r.claimed_real_shutdown)
         self.assertEqual(self.stop.calls, [])
 
+    def test_stop_ok_but_run_row_missing_does_not_claim(self):
+        self._put("RUNNING")
+        self.metrics.private_by_pid[11] = 9 * GiB
+
+        def stop_and_drop(run_id):
+            self.stop.calls.append(run_id)
+            self.life.runs.pop(run_id, None)
+            return {
+                "ok": True,
+                "error_code": None,
+                "stop_method": "forced_kill",
+                "raw_status": "succeeded",
+                "state": "EXITED",
+                "run_id": run_id,
+                "terminated": 1,
+                "cleanup_degraded": False,
+            }
+
+        self.stop.stop = stop_and_drop  # type: ignore
+        r = run_supervisor(
+            run_id="run-a",
+            lifecycle=self.life,
+            metrics=self.metrics,
+            stop=self.stop,
+            thresholds=self.thresholds,
+            tick_s=0.0,
+            max_ticks=5,
+        )
+        self.assertEqual(r.outcome, StopOutcomeKind.STOP_FAILED)
+        self.assertFalse(r.claimed_real_shutdown)
+
+    def test_reused_pid_after_stop_is_not_the_owned_process(self):
+        self._put("RUNNING")
+        self.metrics.private_by_pid[11] = 9 * GiB
+
+        def stop_and_reuse(run_id):
+            self.stop.calls.append(run_id)
+            self._put("EXITED", pid=11, creation="2026-11-09T02:00:00Z")
+            return {
+                "ok": True,
+                "error_code": None,
+                "stop_method": "forced_kill",
+                "raw_status": "succeeded",
+                "state": "EXITED",
+                "run_id": run_id,
+                "terminated": 1,
+                "cleanup_degraded": False,
+            }
+
+        self.stop.stop = stop_and_reuse  # type: ignore
+        r = run_supervisor(
+            run_id="run-a",
+            lifecycle=self.life,
+            metrics=self.metrics,
+            stop=self.stop,
+            thresholds=self.thresholds,
+            tick_s=0.0,
+            max_ticks=5,
+        )
+        self.assertEqual(r.outcome, StopOutcomeKind.SUCCEEDED_PIDS_ZERO)
+        self.assertTrue(r.claimed_real_shutdown)
+
     def test_stop_exception_fail_closed(self):
         self._put("RUNNING")
         self.metrics.private_by_pid[11] = 9 * GiB

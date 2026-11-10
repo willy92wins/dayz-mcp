@@ -314,6 +314,7 @@ def run_supervisor(
                 message="threshold breach but no owned pids yet",
             )
 
+        owned_at_decision = dict(owned)
         t_decision = time.monotonic()
         events.append(
             _event(
@@ -462,13 +463,43 @@ def run_supervisor(
                     _event(
                         "pids_zero_check",
                         run_missing=True,
-                        remaining=[],
+                        remaining=None,
                     )
                 )
+                return _result(
+                    run_id=run_id,
+                    events=events,
+                    outcome=StopOutcomeKind.STOP_FAILED,
+                    cadence=cadence,
+                    message=(
+                        "stop ok but run row missing after stop; "
+                        "cannot re-read owned pid+creation; "
+                        "NOT claiming real shutdown"
+                    ),
+                    stop_state=stop_result.get("state"),
+                    stop_error_code=None,
+                    stop_method=stop_result.get("stop_method"),
+                    t_decision=t_decision,
+                    t_stop_return=t_stop_return,
+                )
             else:
-                remaining = [
-                    p.pid for p in after.processes if p.pid in probe
-                ]
+                # N4: remaining means the same (pid, creation_time_utc)
+                # identity is still on the durable row. A reused PID with a
+                # new creation is not the owned process. Missing creation on
+                # a previously owned PID is fail-closed (still remaining).
+                remaining = []
+                owned_pids_at_decision = {pid for pid, _ in owned_at_decision}
+                for proc in after.processes:
+                    if probe and proc.pid not in probe:
+                        continue
+                    reason = reject_foreign_pid(
+                        proc.pid, proc.creation_time_utc, owned_at_decision
+                    )
+                    if reason is None or (
+                        reason == "no_creation_time_attribution"
+                        and proc.pid in owned_pids_at_decision
+                    ):
+                        remaining.append(proc.pid)
                 events.append(
                     _event(
                         "pids_zero_check",
