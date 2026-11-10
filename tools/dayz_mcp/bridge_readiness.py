@@ -97,6 +97,49 @@ def _finite_poll_age(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _server_caps_not_ready(server: dict[str, Any]) -> str | None:
+    """The census check of a live server peer: None, or the not-ready reason.
+
+    0878: name-only census can green-wash a stale PBO that rejects current
+    tool args (vehicle_prepare_fixture mode/radius). Server ready requires an
+    accredited caps census AND a matching ach. Capability comparison (B1)
+    must run before this so published status sees mismatch/unknown, not raw
+    announced. Raw announced (no comparison yet) still checks ach directly.
+    Unknown / missing / malformed caps: ready=false (B2).
+    """
+    s_caps = server.get("capabilities") if isinstance(server.get("capabilities"), dict) else {}
+    caps_state = s_caps.get("state")
+    if caps_state == "match":
+        return None
+    if caps_state == "announced":
+        ach = s_caps.get("announced_arg_contract_hash")
+        if (
+            not isinstance(ach, str)
+            or ach == ""
+            or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
+        ):
+            return "arg_contract_mismatch"
+        return None
+    if caps_state == "mismatch":
+        # Fail-closed on arg-contract hash independently of the primary
+        # compare reason. Census disagreement used to hide absent/wrong ach
+        # (B2 residual): missing census cmd + bad/absent ach must not
+        # green-wash ready=true. Matching ach + census-only mismatch keeps
+        # historical ready behavior.
+        if s_caps.get("reason") == "arg_contract_mismatch":
+            return "arg_contract_mismatch"
+        ach = s_caps.get("announced_arg_contract_hash")
+        if (
+            not isinstance(ach, str)
+            or ach == ""
+            or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
+        ):
+            return "arg_contract_mismatch"
+        # Name-census disagreement with matching ach: historical ready.
+        return None
+    return "capabilities_unknown"
+
+
 def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
     """Return {ready, reason} for a bridge_status snapshot. Additive field.
 
@@ -127,44 +170,10 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
         return {"ready": False, "reason": "legacy_unbound"}
     if c_bind == "LEGACY_UNBOUND" and c_age is not None:
         return {"ready": False, "reason": "legacy_unbound"}
-    # 0878: name-only census can green-wash a stale PBO that rejects current
-    # tool args (vehicle_prepare_fixture mode/radius). Server ready requires an
-    # accredited caps census AND a matching ach. Capability comparison (B1)
-    # must run before this so published status sees mismatch/unknown, not raw
-    # announced. Raw announced (no comparison yet) still checks ach directly.
-    # Unknown / missing / malformed caps: ready=false (B2).
-    s_caps = server.get("capabilities") if isinstance(server.get("capabilities"), dict) else {}
     if s_live:
-        caps_state = s_caps.get("state")
-        if caps_state == "match":
-            pass
-        elif caps_state == "announced":
-            ach = s_caps.get("announced_arg_contract_hash")
-            if (
-                not isinstance(ach, str)
-                or ach == ""
-                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
-            ):
-                return {"ready": False, "reason": "arg_contract_mismatch"}
-        elif caps_state == "mismatch":
-            # Fail-closed on arg-contract hash independently of the primary
-            # compare reason. Census disagreement used to hide absent/wrong ach
-            # (B2 residual): missing census cmd + bad/absent ach must not
-            # green-wash ready=true. Matching ach + census-only mismatch keeps
-            # historical ready behavior.
-            if s_caps.get("reason") == "arg_contract_mismatch":
-                return {"ready": False, "reason": "arg_contract_mismatch"}
-            ach = s_caps.get("announced_arg_contract_hash")
-            if (
-                not isinstance(ach, str)
-                or ach == ""
-                or ach != EXPECTED_SERVER_ARG_CONTRACT_HASH
-            ):
-                return {"ready": False, "reason": "arg_contract_mismatch"}
-            # Name-census disagreement with matching ach: historical ready.
-            pass
-        else:
-            return {"ready": False, "reason": "capabilities_unknown"}
+        caps_reason = _server_caps_not_ready(server)
+        if caps_reason is not None:
+            return {"ready": False, "reason": caps_reason}
     if s_live and c_live and s_state == "ok" and c_state == "ok":
         return {"ready": True, "reason": "ready"}
     if s_bind == "BOUND" and not _finite_poll_age(server.get("bound_last_poll_age_s")):
@@ -192,13 +201,52 @@ def compute_bridge_ready(status: dict[str, Any]) -> dict[str, Any]:
 _BRIDGE_WORLD_READ_COMMANDS = READ_ONLY_COMMANDS - {"logs_since"}
 
 
+def _server_read_ready(status: dict[str, Any]) -> dict[str, Any]:
+    """compute_bridge_ready for a read the server peer answers alone (inbox 33c5).
+
+    The server's checks in the same order, and none of the client's: with no
+    client (a server-only run, or no player joined yet) a server read still
+    runs. The client's poll age only names no_run, as there, when neither peer
+    has polled.
+    """
+    server = status.get("server_peer") if isinstance(status.get("server_peer"), dict) else {}
+    client = status.get("client_peer") if isinstance(status.get("client_peer"), dict) else {}
+    s_age = server.get("last_poll_age_s")
+    s_live = _peer_is_live(server)
+    s_bind = server.get("binding_state")
+    s_block = _FENCE_BLOCK_READY.get(s_bind)
+    if s_block:
+        return {"ready": False, "reason": s_block}
+    if s_bind == "LEGACY_UNBOUND" and s_age is not None:
+        return {"ready": False, "reason": "legacy_unbound"}
+    if s_live:
+        caps_reason = _server_caps_not_ready(server)
+        if caps_reason is not None:
+            return {"ready": False, "reason": caps_reason}
+        if server.get("version_state") == "ok":
+            return {"ready": True, "reason": "ready"}
+    if s_bind == "BOUND" and not _finite_poll_age(server.get("bound_last_poll_age_s")):
+        return {"ready": False, "reason": "binding_not_ready"}
+    if s_age is None and client.get("last_poll_age_s") is None:
+        return {"ready": False, "reason": "no_run"}
+    if not s_live:
+        return {"ready": False, "reason": "server_poll_stale"}
+    return {"ready": False, "reason": "version_mismatch"}
+
+
 def _world_read_not_ready(
-    runtime: Any, cmd: str, status: dict[str, Any]
+    runtime: Any, cmd: str, status: dict[str, Any], *, peer: str
 ) -> dict[str, Any] | None:
-    """Return the short fail-fast envelope for bridge world reads, or None."""
+    """Return the short fail-fast envelope for bridge world reads, or None.
+
+    A read sent to the server peer needs only that peer; one sent to the
+    client needs both, as compute_bridge_ready says.
+    """
     if cmd not in _BRIDGE_WORLD_READ_COMMANDS:
         return None
-    verdict = compute_bridge_ready(status)
+    verdict = (
+        _server_read_ready(status) if peer == "server" else compute_bridge_ready(status)
+    )
     if verdict["ready"]:
         return None
     reason = str(verdict["reason"])
