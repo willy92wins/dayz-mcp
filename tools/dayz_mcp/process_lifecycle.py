@@ -78,7 +78,13 @@ _REAPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
 # launch to notice its cancellation and settle. The launch itself is a Popen
 # that returns immediately; the bound only covers a slow host call, never a
 # deadlock. Instance state so a test can shorten it.
-_STARTING_CANCEL_SETTLE_S = 5.0
+#
+# B2: this bound must be STRICTLY LONGER than the kill confirmation the launch
+# performs after it notices the cancel (_STARTING_CANCEL_KILL_WAIT_S), or a
+# process that refuses to die makes the stop expire as launch_cancel_pending
+# before the durable UNRECONCILED/launch_cancel_degraded answer can exist.
+_STARTING_CANCEL_KILL_WAIT_S = 5.0
+_STARTING_CANCEL_SETTLE_S = _STARTING_CANCEL_KILL_WAIT_S + 7.0
 _HEX = frozenset("0123456789abcdef")
 _IDENTITY_SCHEMES = frozenset({"legacy-wmi-v1", "psutil-argv-v2"})
 _BOX_MOD_CAP = 12
@@ -2222,6 +2228,7 @@ class ProcessLifecycle:
         self._launch_cancel_lock = threading.Lock()
         self._launch_cancels: dict[str, _LaunchCancel] = {}
         self._starting_cancel_settle_s = _STARTING_CANCEL_SETTLE_S
+        self._starting_cancel_kill_s = _STARTING_CANCEL_KILL_WAIT_S
         self._command_id = -1
         self._last_start_error: str | None = None
         # The storage refusal behind the public code, when one was decided.
@@ -2446,18 +2453,10 @@ class ProcessLifecycle:
             record=record,
             confirmed_error="launch_cancelled",
             attempt_started_at=attempt_started_at,
+            # S5: the degraded row is persisted ownerless inside the failed-launch
+            # compensation, before the audit outcome; no second write afterwards.
+            release_owner_on_unreconciled=True,
         )
-        # A degraded cancel leaves UNRECONCILED. Release the owner here, as the
-        # ordinary stop does for an unclassifiable process, so the row can be
-        # adopted by the same session later instead of blocking on a dead owner.
-        current = self.manifest.get(provisional.run_id)
-        if current is not None and current.state == "UNRECONCILED":
-            current.owner_session_id = None
-            current.owner_lease_id = None
-            try:
-                self.manifest.replace(current)
-            except Exception:
-                self._add_degradation(result, "manifest_failed")
         self._settle_launch_cancel(
             provisional.run_id,
             cancel,
@@ -3875,8 +3874,17 @@ class ProcessLifecycle:
         manifest_failure: bool = False,
         attempt_started_at: float | None = None,
         foreground_lock: str | None = None,
+        release_owner_on_unreconciled: bool = False,
     ) -> dict[str, object]:
-        """Leave every failed Popen attempt in a durable, reconcilable state."""
+        """Leave every failed Popen attempt in a durable, reconcilable state.
+
+        ``release_owner_on_unreconciled`` is the cancel contract's addition
+        (S5): the UNRECONCILED row is written ownerless inside the failed-launch
+        compensation, before the audit outcome is written, instead of being
+        cleared afterwards, so the durable row the audit describes already has
+        no owner. The durable row and the audit record cannot disagree on who
+        owns a degraded cancel.
+        """
 
         self._last_start_error = confirmed_error
         confirmed_closed = launched is None or self._terminate_open_handle(launched)
@@ -3906,6 +3914,13 @@ class ProcessLifecycle:
             else:
                 target = RunRecord.from_payload(dataclasses.asdict(provisional))
                 target.state = "UNRECONCILED"
+                if release_owner_on_unreconciled:
+                    # S5: the row the audit outcome will describe is already
+                    # ownerless. The ordinary stop releases the owner of an
+                    # unclassifiable process for the same reason: the session
+                    # can adopt it later instead of blocking on a dead owner.
+                    target.owner_session_id = None
+                    target.owner_lease_id = None
                 if record is not None and record not in target.processes:
                     target.processes.append(record)
                 persistence_failed = self._persist_failed_launch_target(
@@ -5036,8 +5051,7 @@ class ProcessLifecycle:
             finally:
                 self._finish_committed(authority, command_id)
 
-    @staticmethod
-    def _terminate_open_handle(launched: object) -> bool:
+    def _terminate_open_handle(self, launched: object) -> bool:
         try:
             launched.terminate()
         except Exception:
@@ -5049,7 +5063,7 @@ class ProcessLifecycle:
                     return False
             return False
         try:
-            launched.wait(timeout=5.0)
+            launched.wait(timeout=self._starting_cancel_kill_s)
             return True
         except Exception:
             poll = getattr(launched, "poll", None)
@@ -5941,6 +5955,19 @@ class ProcessLifecycle:
         # not a cancel. Signal the in-flight launch first, without the lock,
         # and answer from the durable settlement it publishes. The lock is
         # only taken below when the launch won the race and left RUNNING.
+        #
+        # S4: this branch deliberately skips the guards the locked path runs
+        # (_quarantined, _refuse_unconfirmed_owner, the warden). It is limited
+        # to a row owned by the same session with the same lease, and the
+        # launch already passed those gates before it registered the cancel
+        # entry; re-running them without the lock would read state that the
+        # launch is about to change. The ordinary path below keeps them.
+        #
+        # S3: a cancel that arrives after the launch's last pre-Popen check
+        # still lets storage rotation, the Steam final check and the intent
+        # write run before the next check. That is the existing failed-launch
+        # behaviour, and the settlement above is still clean: the cancel path
+        # reuses it, so the row/bindings/intent end terminal, not half-written.
         cancel: _LaunchCancel | None = None
         if isinstance(run_id, str) and run_id:
             starting = self.manifest.get(run_id)

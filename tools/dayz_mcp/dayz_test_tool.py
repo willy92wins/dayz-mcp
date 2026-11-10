@@ -3359,6 +3359,70 @@ def _active_lease_id(runtime: _Runtime) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _row_owner(row: dict[str, object]) -> str | None:
+    owner = row.get("owner_session_id")
+    if not isinstance(owner, str) or not owner:
+        owner = row.get("owner_session")
+    return owner if isinstance(owner, str) and owner else None
+
+
+def _held_lease_matches(runtime: _Runtime, row: dict[str, object]) -> bool:
+    held = _active_lease_id(runtime)
+    row_lease = row.get("owner_lease_id")
+    if isinstance(held, str) and held and isinstance(row_lease, str) and row_lease:
+        return held == row_lease
+    return True
+
+
+def _owned_starting_row(
+    runtime: _Runtime, status: object
+) -> dict[str, object] | None:
+    """The one STARTING row this session owns with the lease it holds now.
+
+    ah-starting-cancel-20261109-1444 / B3: a fresh run_id is minted inside the
+    worker, so a same-session caller cannot always name it while the launch is
+    in STARTING. The in-flight launch of this session and lease is unique by
+    construction; naming it from the durable status resolves B3 without
+    waiting for RUNNING. More than one match is not guessed at.
+    """
+    caller = _h14_caller_session(runtime)
+    if not caller:
+        return None
+    matches = [
+        row
+        for row in _runs(status)
+        if row.get("state") == "STARTING"
+        and _row_owner(row) == caller
+        and _held_lease_matches(runtime, row)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _unique_locked_stop_row(
+    runtime: _Runtime, status: object
+) -> str | None:
+    """The one run this session may stop once the launch is no longer in flight.
+
+    Used only when the caller omitted run_id and the direct route did not apply.
+    Ownership is the same predicate the ordinary stop uses; an ambiguous set is
+    a named failure, never a guess.
+    """
+    matches: list[str] = []
+    for row in _runs(status):
+        run_id = row.get("run_id")
+        if not isinstance(run_id, str) or not _valid_uuid4(run_id):
+            continue
+        state = row.get("state")
+        never_started = (
+            state == "EXITED" and row.get("launch_acknowledged") is False
+        )
+        if not never_started and state not in _STOPPABLE_STATES:
+            continue
+        if _h14_owned_stop(runtime, status, run_id):
+            matches.append(run_id)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _direct_stop_envelope(
     run_id: str,
     result: dict[str, object],
@@ -3405,9 +3469,50 @@ def _direct_stop_envelope(
     return envelope
 
 
+def _safe_failure_code(error: BaseException) -> str:
+    """The stable code of a failed stop, never a prose message.
+
+    The runtime's ToolError now carries the daemon code; older paths only carry
+    the code in the message (and sometimes a recipe after a colon). A token
+    that is not identifier-shaped falls back to the generic named failure.
+    """
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    token = str(error).split(":", 1)[0].strip()
+    if 3 <= len(token) <= 64 and token[0].isascii() and token[0].isalpha():
+        if all(
+            char.isascii() and (char.isalnum() or char == "_") for char in token
+        ):
+            return token
+    return "dayz_test_stop_failed"
+
+
+async def _stop_state_after_failure(
+    runtime: _Runtime, run_id: str, fallback: object
+) -> str:
+    """Read the durable row after a refused stop so the answer is not stale.
+
+    A degraded cancel leaves UNRECONCILED with a live PID record; reporting the
+    pre-stop STARTING is exactly the misattribution B2 names. A status that
+    cannot be read keeps the pre-stop state.
+    """
+    try:
+        status = await runtime.lifecycle_status()
+    except Exception:
+        status = None
+    row = _run_row(status, run_id)
+    state = row.get("state") if isinstance(row, dict) else None
+    if isinstance(state, str) and _STOP_ENVELOPE_STATE.fullmatch(state):
+        return state
+    if isinstance(fallback, str) and _STOP_ENVELOPE_STATE.fullmatch(fallback):
+        return fallback
+    return "STARTING"
+
+
 async def _direct_inflight_stop(
     runtime: _Runtime,
-    run_id: str,
+    run_id: str | None,
     *,
     started_at: float,
     progress_cb: _ProgressCallback | None,
@@ -3420,6 +3525,10 @@ async def _direct_inflight_stop(
     launch: waiting for either is a kill after the launch, not a cancel. The
     daemon's /lifecycle/stop cancel branch signals the in-flight launch, which
     settles the row terminal before it can become RUNNING.
+
+    An omitted run_id is resolved from the durable status (B3): the one
+    STARTING row owned by this session and lease. The daemon still receives an
+    explicit id and enforces the same ownership.
     """
     token = getattr(runtime, "active_lease_token", None)
     stop = getattr(runtime, "lifecycle_stop", None)
@@ -3429,42 +3538,46 @@ async def _direct_inflight_stop(
         status = await runtime.lifecycle_status()
     except Exception:
         return None
-    row = _run_row(status, run_id)
-    if row is None or row.get("state") != "STARTING":
-        return None
-    owner = row.get("owner_session_id")
-    if not isinstance(owner, str) or not owner:
-        owner = row.get("owner_session")
-    if not isinstance(owner, str) or owner != _h14_caller_session(runtime):
-        return None
-    held_lease = _active_lease_id(runtime)
-    row_lease = row.get("owner_lease_id")
-    if (
-        isinstance(held_lease, str)
-        and isinstance(row_lease, str)
-        and held_lease != row_lease
-    ):
-        return None
+    if not isinstance(run_id, str) or not run_id:
+        row = _owned_starting_row(runtime, status)
+        if row is None:
+            return None
+        run_id = row.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return None
+    else:
+        row = _run_row(status, run_id)
+        if row is None or row.get("state") != "STARTING":
+            return None
+        if _row_owner(row) != _h14_caller_session(runtime):
+            return None
+        if not _held_lease_matches(runtime, row):
+            return None
     if progress_cb is not None:
         await progress_cb("stopping", None)
     try:
         result = await stop(run_id)
     except Exception as error:
-        code = getattr(error, "code", None)
+        state = getattr(error, "state", None)
+        if not isinstance(state, str) or not _STOP_ENVELOPE_STATE.fullmatch(
+            state
+        ):
+            state = await _stop_state_after_failure(
+                runtime, run_id, row.get("state")
+            )
         return _direct_stop_envelope(
             run_id,
-            {
-                "ok": False,
-                "error": code if isinstance(code, str) and code else "dayz_test_stop_failed",
-                "state": "STARTING",
-            },
+            {"ok": False, "error": _safe_failure_code(error), "state": state},
             row,
             started_at,
         )
     if not isinstance(result, dict):
+        state = await _stop_state_after_failure(
+            runtime, run_id, row.get("state")
+        )
         return _direct_stop_envelope(
             run_id,
-            {"ok": False, "error": "dayz_test_stop_failed", "state": "STARTING"},
+            {"ok": False, "error": "dayz_test_stop_failed", "state": state},
             row,
             started_at,
         )
@@ -3473,7 +3586,7 @@ async def _direct_inflight_stop(
 
 async def execute_dayz_test_stop(
     runtime: _Runtime,
-    run_id: str,
+    run_id: str | None,
     *,
     progress_cb: _ProgressCallback | None = None,
     direct_inflight: bool = False,
@@ -3496,6 +3609,14 @@ async def execute_dayz_test_stop(
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
                 status_snapshot = await runtime.lifecycle_status()
+            if not isinstance(run_id, str) or not run_id:
+                # B3: no run_id was named. The launch is no longer in flight
+                # here (tool_lock was free), so the target is the unique run
+                # this session may stop. Zero or several is a named failure.
+                resolved = _unique_locked_stop_row(runtime, status_snapshot)
+                if resolved is None:
+                    _fail("run_not_found")
+                run_id = resolved
             try:
                 policy, run = resolve_stop_run(
                     status_snapshot, bundle.sealed_policies, run_id

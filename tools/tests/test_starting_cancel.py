@@ -14,12 +14,17 @@ The classes below are the GATES contract names; each one drives product code
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import sys
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -29,19 +34,31 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from dayz_mcp import dayz_test_request, dayz_test_tool
+from dayz_mcp import (
+    control_client,
+    dayz_test_tool,
+    host_config,
+    loopback,
+    native_broker_protocol,
+    native_launcher_backend,
+    process_lifecycle,
+    request_path_authority,
+    server,
+)
+from dayz_mcp.dayz_test_request import RequestProjectPolicy
 from dayz_mcp.process_lifecycle import ProcessLifecycle, RunManifestStore, RunRecord
 from dayz_mcp.runtime_state import RuntimePaths
+from dayz_mcp.server import ServerConfig
 from dayz_mcp.session_coordination import SessionCoordinator
+from tests.daemon_helpers import _http
 from tests.dayz_test_tool_helpers import (
     RUN_ID,
     _Bundle,
     _Opened,
-    _policy,
-    _sealed,
     _terminal,
 )
 from tests.lifecycle_helpers import stamp_launcher
+from tests.mcp_helpers import _content_json
 from tests.process_lifecycle_helpers import (
     AuditSink,
     FakeGuard,
@@ -58,9 +75,16 @@ _OP_ID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
 class _BlockingLauncher:
     """A launcher that holds the launch window open until the test releases it."""
 
-    def __init__(self, pid: int = 91001, *, confirmed_exit: bool = True) -> None:
+    def __init__(
+        self,
+        pid: int = 91001,
+        *,
+        confirmed_exit: bool = True,
+        wait_delay: float = 0.0,
+    ) -> None:
         self.pid = pid
         self.confirmed_exit = confirmed_exit
+        self.wait_delay = wait_delay
         self.entered = threading.Event()
         self.release = threading.Event()
         self.terminate_calls = 0
@@ -75,6 +99,8 @@ class _BlockingLauncher:
         self.terminate_calls += 1
 
     def wait(self, timeout: float) -> int:
+        if self.wait_delay:
+            time.sleep(self.wait_delay)
         if not self.confirmed_exit:
             raise TimeoutError("still running")
         return 0
@@ -119,6 +145,17 @@ def _fresh_request(game: Path, mission: Path) -> dict[str, object]:
     ).encode("utf-8")
     request["launch_request_sha256"] = hashlib.sha256(canonical).hexdigest()
     return request
+
+
+def _extension_request(request: dict[str, object]) -> dict[str, object]:
+    """The same launch, but extending a known run instead of creating one."""
+    extension = dict(request)
+    extension.pop("new_run_id", None)
+    extension.pop("launch_operation_id", None)
+    extension.pop("launch_request_sha256", None)
+    extension["run_id"] = RUN_ID
+    # An extension carries no launch identity: the run already exists.
+    return extension
 
 
 class _Fixture:
@@ -329,60 +366,61 @@ class StartingWindowStopTest(_StartingCancelTestCase):
         self.assertEqual(started.get("error"), "launch_cancelled")
         self._assert_cancelled()
 
-
-class SameSessionStopLeaseTest(unittest.TestCase):
-    def test_same_session_with_its_lease_uses_the_inflight_lease(self) -> None:
-        from tests.dayz_test_tool_helpers import _Runtime
-
-        runtime = _Runtime({"runs": []})
-        runtime.identity = SimpleNamespace(session_id=IDENTITY_A.session_id)
-        runtime.active_lease_token = "token-1"
-        runtime.active_lease_id = "lease-1"
-        runtime.lifecycle = {
-            "runs": [
-                {
-                    "run_id": RUN_ID,
-                    "state": "STARTING",
-                    "mod": "@StorageMod",
-                    "owner_session_id": IDENTITY_A.session_id,
-                    "owner_lease_id": "lease-1",
-                }
-            ]
-        }
-        calls: list[str] = []
-
-        async def lifecycle_stop(run_id: str) -> dict[str, object]:
-            calls.append(run_id)
-            return {
-                "ok": True,
-                "run_id": run_id,
-                "state": "EXITED",
-                "terminated": 1,
-                "stop_method": "cancelled_during_start",
-                "exit_metrics_valid": False,
-            }
-
-        runtime.lifecycle_stop = lifecycle_stop
-
-        result = asyncio.run(
-            dayz_test_tool.execute_dayz_test_stop(
-                runtime, RUN_ID, direct_inflight=True
-            )
+    def test_bounds_are_ordered_client_settle_kill(self) -> None:
+        # B2: the named answers only exist if the client outlives the daemon's
+        # settle wait and the settle wait outlives the kill confirmation.
+        self.assertGreater(
+            process_lifecycle._STARTING_CANCEL_SETTLE_S,
+            process_lifecycle._STARTING_CANCEL_KILL_WAIT_S,
+        )
+        self.assertGreater(
+            control_client.LIFECYCLE_STOP_TIMEOUT_S,
+            process_lifecycle._STARTING_CANCEL_SETTLE_S,
         )
 
-        self.assertEqual(result["status"], "succeeded", result)
-        self.assertEqual(result["run_id"], RUN_ID)
-        self.assertEqual(result["state"], "EXITED")
-        self.assertEqual(result["terminated"], 1)
-        self.assertEqual(calls, [RUN_ID])
-        # The direct route never reconciled the session or acquired a second
-        # lease: the in-flight launch's own lease authorized the stop.
-        self.assertEqual(runtime.reconcile_calls, 0)
-        self.assertEqual(runtime.active_lease_token, "token-1")
-
-    def test_foreign_session_without_the_lease_is_rejected(self) -> None:
+    def test_settle_wait_covers_a_slow_kill_confirmation(self) -> None:
         fixture = _Fixture()
         self.addCleanup(fixture.close)
+        fixture.lifecycle._starting_cancel_kill_s = 0.2
+        fixture.lifecycle._starting_cancel_settle_s = 1.0
+        fixture.launcher.wait_delay = 0.2
+        start_thread = fixture.start_in_thread()
+        stop_thread = fixture.stop_in_thread()
+        self.assertTrue(fixture.wait_for_cancel_request())
+        fixture.launcher.release.set()
+        stop_thread.join(3.0)
+        start_thread.join(3.0)
+        self.assertFalse(stop_thread.is_alive())
+        self.assertFalse(start_thread.is_alive())
+        stop = fixture.stop_result["value"]
+        # A kill that takes 0.2s is inside the 1.0s settle bound: the stop
+        # answers the effective cancel, not launch_cancel_pending.
+        self.assertIs(stop.get("ok"), True, stop)
+        self.assertEqual(stop.get("stop_method"), "cancelled_during_start")
+
+
+class SameSessionStopLeaseTest(_StartingCancelTestCase):
+    def test_same_session_with_its_lease_uses_the_inflight_lease(self) -> None:
+        # The stop is authorized by the real coordinator with the lease the
+        # launch itself holds; no fake runtime and no test-set direct flag.
+        start_thread = self.fixture.start_in_thread()
+        stop_thread = self.fixture.stop_in_thread()
+        self.assertTrue(self.fixture.wait_for_cancel_request())
+        self.fixture.launcher.release.set()
+        self._join(stop_thread)
+        self._join(start_thread)
+
+        stop = self.fixture.stop_result["value"]
+        self.assertIs(stop.get("ok"), True, stop)
+        self.assertEqual(stop.get("stop_method"), "cancelled_during_start")
+        self.assertEqual(stop.get("terminated"), 1)
+        self.assertEqual(self.fixture.launcher.terminate_calls, 1)
+        # The launch's own lease authorized it: the same token the fixture
+        # acquired, not a second one.
+        self.assertEqual(self.fixture.coordinator.status(IDENTITY_A)["self"]["state"], "active")
+
+    def test_foreign_session_without_the_lease_is_rejected(self) -> None:
+        fixture = self.fixture
         record = process(7300, role="client")
         run = fixture.add_run([record], run_id="run-foreign", state="RUNNING")
         fixture.guard.snapshots[record.pid] = snapshot(record)
@@ -512,6 +550,49 @@ class StartingCancelRollbackTest(_StartingCancelTestCase):
         self.assertEqual(stored.state, "UNRECONCILED")
         self.assertIsNone(stored.owner_session_id)
         self.assertEqual([item.pid for item in stored.processes], [fixture.launcher.pid])
+
+    def test_extension_cancel_restores_and_stops_the_previous_run(self) -> None:
+        # S2: the launch extends a RUNNING run. Cancelling the extension
+        # restores that row, and the same stop then ends it through the
+        # ordinary kill path. The answer is forced_kill, not a silent
+        # cancelled_during_start that would leave the server alive.
+        fixture = _Fixture()
+        self.addCleanup(fixture.close)
+        previous_record = process(7400, role="server")
+        previous = fixture.add_run(
+            [previous_record], run_id=RUN_ID, state="RUNNING"
+        )
+        fixture.guard.snapshots[previous_record.pid] = snapshot(previous_record)
+        fixture.guard.snapshots[fixture.launcher.pid] = snapshot(
+            process(fixture.launcher.pid, role="client")
+        )
+        fixture.request = _extension_request(fixture.request)
+        fixture.request["role"] = "client"
+
+        start_thread = fixture.start_in_thread()
+        stop_thread = fixture.stop_in_thread()
+        self.assertTrue(fixture.wait_for_cancel_request())
+        fixture.launcher.release.set()
+        stop_thread.join(3.0)
+        start_thread.join(3.0)
+        self.assertFalse(stop_thread.is_alive())
+        self.assertFalse(start_thread.is_alive())
+
+        stop = fixture.stop_result["value"]
+        self.assertIs(stop.get("ok"), True, stop)
+        self.assertEqual(stop.get("state"), "EXITED")
+        self.assertEqual(stop.get("stop_method"), "forced_kill")
+        self.assertEqual(
+            [item.pid for item in fixture.guard.terminate_calls],
+            [previous_record.pid],
+        )
+        stored = fixture.store.get(RUN_ID)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(
+            (stored.state, stored.owner_session_id, stored.processes),
+            ("EXITED", None, []),
+        )
 
 
 class StopCompatStatesTest(unittest.TestCase):
@@ -645,150 +726,364 @@ class StopErrorExplicitTest(unittest.TestCase):
         )
 
 
-class ToolSurfaceStartingStopTest(unittest.IsolatedAsyncioTestCase):
-    """dayz_test_run -> dayz_test_stop, both through the product adapters."""
+def _surface_policy(root: Path) -> RequestProjectPolicy:
+    """A project whose accredited roots exist under the fixture's temp dir."""
+    dev = root / "dev"
+    (dev / "_server" / "mpmissions").mkdir(parents=True)
+    source = dev / "staged-source" / "StorageMod"
+    source.mkdir(parents=True)
+    mods = root / "mods"
+    (mods / "@CF").mkdir(parents=True)
+    # build_run_request adds the bridge mod as a default extra mod.
+    (mods / "@DayZ_MCP").mkdir(parents=True)
+    return RequestProjectPolicy(
+        mod="StorageMod",
+        dev_root=str(dev),
+        default_source=str(source),
+        default_base_mods=("@CF",),
+        mission_roots=(str(dev / "_server" / "mpmissions"),),
+        mod_roots=(str(mods),),
+    )
 
-    async def test_tool_surface_reaches_the_cancel_during_the_window(self) -> None:
-        fixture = _Fixture()
-        self.addCleanup(fixture.close)
-        policy = _policy(
-            mod="StorageMod",
-            dev_root=r"C:\Tools\LFV_D2_Executor",
-            default_source=r"C:\Tools\LFV_D2_Executor\staged-source\StorageMod",
-            default_base_mods=("@CF",),
+
+class _LoopbackSurface:
+    """The real public surface: FastMCP tools -> ClientRuntime -> ControlClient
+    -> loopback /lifecycle routes, with the lease from the real transaction.
+
+    Only the host primitives are faked: the launcher handle, the process guard
+    and Steam. The worker process is the native launcher's transport, replaced
+    by a fake that speaks the same broker frame and calls /lifecycle/start (or
+    adopt+stop) over the loopback; it never calls start_run/stop_run in-process.
+    """
+
+    def __init__(self, fixture: _Fixture) -> None:
+        self.fixture = fixture
+        self.key = "surface-key"
+        self.keyfile = fixture.root / "daemon.key"
+        self.keyfile.write_text(self.key, encoding="utf-8")
+        self.state = loopback.ServerState(self.key)
+        self.state.coordination = fixture.coordinator
+        self.state.lifecycle = fixture.lifecycle
+        self.httpd = loopback.create_http_server(
+            0, self.state, log_sink=lambda _message: None, reclaim_orphans=False
         )
-
-        class _ToolRuntime:
-            def __init__(self) -> None:
-                self.identity = IDENTITY_A
-                self.active_lease_token = None
-                self.active_lease_id = None
-                self.active_ticket = None
-                self.active_operation_id = None
-                self.daemon_policy = object()
-                self.reconcile_calls = 0
-                self.bridge_payload = {"ready": {"ready": True, "reason": "ready"}}
-
-            async def lifecycle_status(self) -> dict[str, object]:
-                return await asyncio.to_thread(
-                    fixture.lifecycle.status, IDENTITY_A
+        self.port = int(self.httpd.server_address[1])
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
+        self.thread.start()
+        self.policy = _surface_policy(fixture.root / "surface")
+        self.sealed = request_path_authority._seal_project_policy_for_test(
+            self.policy
+        )
+        self.launcher_path = str(Path(sys.executable).resolve())
+        self.config = ServerConfig(
+            mode="client",
+            key=self.key,
+            keyfile=str(self.keyfile),
+            port=self.port,
+            client_platform="codex",
+            auto_spawn_daemon=False,
+            log_sink=lambda _message: None,
+        )
+        self.provenance = host_config.DaemonProvenance(
+            launch_executable=self.launcher_path,
+            native_executable=self.launcher_path,
+            argv=tuple(
+                server.daemon.build_daemon_argv(
+                    self.config, python=self.launcher_path
                 )
+            ),
+            cwd=server.daemon.daemon_runtime_cwd(),
+            port=self.port,
+            keyfile=str(self.keyfile),
+            auto_spawn_daemon=False,
+        )
+        self._stack = contextlib.ExitStack()
+        self.app = None
+        self.runtime = None
 
-            async def lifecycle_stop(self, run_id: str) -> dict[str, object]:
-                token = self.active_lease_token
-                assert isinstance(token, str) and token
-                return await asyncio.to_thread(
-                    fixture.lifecycle.stop_run, IDENTITY_A, token, run_id
-                )
+    def _build_runtime(self) -> server.ClientRuntime:
+        with (
+            patch.object(
+                host_config,
+                "resolve_daemon_provenance",
+                return_value=self.provenance,
+            ),
+            patch.object(
+                host_config, "_local_launch_executable", return_value=self.launcher_path
+            ),
+            patch.object(
+                host_config, "_local_native_executable", return_value=self.launcher_path
+            ),
+        ):
+            return server.ClientRuntime(self.config)
 
-            async def bridge_status_payload(self) -> dict[str, object]:
-                return self.bridge_payload
+    def _transport(self, **kwargs: object) -> tuple[int, bytes]:
+        host = str(kwargs["host"])
+        port = int(kwargs["port"])
+        key = str(kwargs["key"])
+        path = str(kwargs["path"])
+        method = str(kwargs["method"])
+        query = dict(kwargs.get("query") or {})
+        query["key"] = key
+        url = f"http://{host}:{port}{path}?" + urllib.parse.urlencode(query)
+        request = urllib.request.Request(
+            url,
+            data=kwargs.get("body"),
+            headers=dict(kwargs.get("headers") or {}),
+            method=method,
+        )
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                with urllib.request.urlopen(request, timeout=30.0) as response:
+                    return int(response.status), response.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                return int(exc.code), exc.read()
+            finally:
+                exc.close()
 
-            async def reconcile_idle_session(self) -> dict[str, object]:
-                self.reconcile_calls += 1
-                return {"reconciled": False}
+    async def _not_stale(self, *_args: object) -> bool:
+        return False
 
-            async def lifecycle_close(self, run_id: str) -> dict[str, object]:
-                return {"ok": True, "run_id": run_id, "state": "EXITED"}
+    def _post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+        _status, body = _http(
+            self.base, "POST", path, self.key, payload=payload, timeout=30.0
+        )
+        return body
 
-            async def lifecycle_reap(self, run_id: str) -> dict[str, object]:
-                return {"ok": True, "run_id": run_id, "state": "EXITED"}
-
-        runtime = _ToolRuntime()
-
-        async def acquire() -> None:
-            status, acquired = fixture.coordinator.acquire(IDENTITY_A, "dayz-test")
-            assert status == 200
-            runtime.active_lease_token = acquired["lease_token"]
-            runtime.active_lease_id = acquired["lease_id"]
-
-        async def fake_execute(raw_request: bytes, **kwargs: object) -> int:
-            started = kwargs.get("execution_started_cb")
-            if started is not None:
-                await started()
-            await acquire()
-            token = runtime.active_lease_token
-            assert isinstance(token, str)
-            result = await asyncio.to_thread(
-                fixture.lifecycle.start_run,
-                IDENTITY_A,
-                token,
-                fixture.request,
+    async def _launch(
+        self,
+        opened_launcher: object,
+        *,
+        verified_bundle: object,
+        canonical_request: bytes,
+        lease_token: str,
+        identity_json: str,
+        daemon_policy_json: str,
+        cancel_event: object,
+        output_sink: object = None,
+        **_kwargs: object,
+    ) -> int:
+        del opened_launcher, verified_bundle, daemon_policy_json, cancel_event
+        frame = native_broker_protocol.decode_request(canonical_request)
+        request = json.loads(frame.stdin.decode("utf-8"))
+        identity = json.loads(identity_json)
+        if request.get("kill") is True:
+            run_id = request.get("run_id")
+            await asyncio.to_thread(
+                self._post,
+                "/lifecycle/adopt",
+                {
+                    "identity": identity,
+                    "lease_token": lease_token,
+                    "run_id": run_id,
+                },
             )
-            sink = kwargs["output_sink"]
-            if result.get("ok") is True:
-                sink(
-                    "stdout",
-                    _terminal(
-                        {
-                            "cleanup_degraded": False,
-                            "error_code": None,
-                            "exit_code": 0,
-                            "ok": True,
-                            "run_id": RUN_ID,
-                        }
-                    ),
+            result = await asyncio.to_thread(
+                self._post,
+                "/lifecycle/stop",
+                {
+                    "identity": identity,
+                    "lease_token": lease_token,
+                    "run_id": run_id,
+                },
+            )
+        else:
+            if request.get("run_id") is None:
+                request["role"] = (
+                    "server" if request.get("mode") in {"server", "all"} else "offline"
                 )
-                return 0
-            degraded = bool(result.get("cleanup_degraded"))
-            sink(
+                request["mod"] = "@" + str(request.get("mod", ""))
+                request["label"] = str(request["mod"]) + " " + request["role"]
+                request["window_style"] = "normal"
+                request["cwd"] = str(self.fixture.game)
+                request["argv"] = list(self.fixture.request["argv"])
+                request["profiles"] = str(self.fixture.game / "profiles")
+                request["mission"] = str(self.fixture.mission)
+                request["auto_remediate_steam"] = False
+                # The worker seals the mod set before hashing the request.
+                request["storage_seal"] = self.fixture.request["storage_seal"]
+                request["new_run_id"] = RUN_ID
+                request["launch_operation_id"] = _OP_ID
+                request["launch_request_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        {
+                            key: value
+                            for key, value in request.items()
+                            if key != "launch_request_sha256"
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            result = await asyncio.to_thread(
+                self._post,
+                "/lifecycle/start",
+                {
+                    "identity": identity,
+                    "lease_token": lease_token,
+                    "request": request,
+                },
+            )
+        ok = result.get("ok") is True
+        raw_error = result.get("error")
+        if ok:
+            cleanup_degraded = False
+            error_code = None
+            terminal_run_id = result.get("run_id")
+        elif raw_error in {
+            "launch_cancelled",
+            "launch_cancel_pending",
+            "launch_cancel_degraded",
+        }:
+            cleanup_degraded = bool(result.get("cleanup_degraded"))
+            error_code = raw_error
+            terminal_run_id = (
+                result.get("run_id") if cleanup_degraded else None
+            )
+        else:
+            # The worker republishes only its declared codes; the daemon's
+            # manual_cleanup_required is the degraded cancel of this launch.
+            cleanup_degraded = True
+            error_code = "launch_cancel_degraded"
+            terminal_run_id = result.get("run_id")
+        if callable(output_sink):
+            output_sink(
                 "stdout",
                 _terminal(
                     {
-                        "cleanup_degraded": degraded,
-                        "error_code": result.get("error") or "worker_failed",
-                        "exit_code": 1,
-                        "ok": False,
-                        "run_id": RUN_ID if degraded else None,
+                        "cleanup_degraded": cleanup_degraded,
+                        "error_code": error_code,
+                        "exit_code": 0 if ok else 1,
+                        "ok": ok,
+                        "run_id": terminal_run_id,
                     }
                 ),
             )
-            return 1
+        return 0 if ok else 1
 
-        with patch.object(
-            dayz_test_tool, "open_approved_launcher", return_value=_Opened()
-        ), patch.object(
-            dayz_test_tool.secure_launcher,
-            "load_verified_bundle",
-            return_value=_Bundle(_sealed(policy)),
-        ), patch.object(
-            dayz_test_tool.secure_launcher,
-            "execute_secure_launcher_request",
-            side_effect=fake_execute,
-        ), patch.object(
-            dayz_test_tool, "preflight_bridge_contract_request", return_value=()
-        ), patch.object(
-            dayz_test_tool,
-            "preflight_vpp_request",
-            return_value=SimpleNamespace(error_code=None, missing=[], warnings=[]),
-        ):
-            run_task = asyncio.create_task(
-                dayz_test_tool.execute_dayz_test_run(
-                    runtime,
-                    project="StorageMod",
-                    mode="server",
-                )
+    def start(self) -> "_LoopbackSurface":
+        status, _ = self.fixture.coordinator.release(
+            IDENTITY_A, self.fixture.token
+        )
+        assert status == 200
+        stack = self._stack
+        stack.enter_context(
+            patch.object(
+                host_config,
+                "resolve_daemon_provenance",
+                return_value=self.provenance,
             )
-            await asyncio.to_thread(fixture.launcher.entered.wait, 2.0)
-            stop_task = asyncio.create_task(
-                dayz_test_tool.execute_dayz_test_stop(
-                    runtime, RUN_ID, direct_inflight=True
-                )
+        )
+        stack.enter_context(
+            patch.object(
+                host_config, "_local_launch_executable", return_value=self.launcher_path
             )
-            self.assertTrue(
-                await asyncio.to_thread(fixture.wait_for_cancel_request, 2.0)
+        )
+        stack.enter_context(
+            patch.object(
+                host_config, "_local_native_executable", return_value=self.launcher_path
             )
-            fixture.launcher.release.set()
-            stop = await asyncio.wait_for(stop_task, timeout=3.0)
-            run_result = await asyncio.wait_for(run_task, timeout=3.0)
+        )
+        stack.enter_context(
+            patch.object(
+                server.orphan_guard,
+                "verified_daemon_http_request",
+                side_effect=self._transport,
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                server, "_observe_caller_tool_registry_stale", new=self._not_stale
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                dayz_test_tool, "open_approved_launcher", return_value=_Opened()
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                dayz_test_tool.secure_launcher,
+                "load_verified_bundle",
+                return_value=_Bundle((self.sealed,)),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                dayz_test_tool, "preflight_bridge_contract_request", return_value=()
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                dayz_test_tool,
+                "preflight_vpp_request",
+                return_value=SimpleNamespace(error_code=None, missing=[], warnings=[]),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                native_launcher_backend,
+                "launch_registered_native",
+                side_effect=self._launch,
+            )
+        )
+        self.runtime = self._build_runtime()
+        with patch.object(server, "ClientRuntime", return_value=self.runtime):
+            self.app, _built = server.build_app(self.config)
+        return self
+
+    def close(self) -> None:
+        self._stack.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2.0)
+
+
+class ToolSurfaceStartingStopTest(unittest.IsolatedAsyncioTestCase):
+    """dayz_test_run -> dayz_test_stop through the real public surface."""
+
+    def _surface(self, *, confirmed_exit: bool = True) -> tuple[_Fixture, _LoopbackSurface]:
+        fixture = _Fixture(confirmed_exit=confirmed_exit)
+        self.addCleanup(fixture.close)
+        surface = _LoopbackSurface(fixture)
+        self.addCleanup(surface.close)
+        surface.start()
+        return fixture, surface
+
+    async def test_public_tool_cancels_a_fresh_launch_without_a_run_id(self) -> None:
+        fixture, surface = self._surface()
+        run_task = asyncio.create_task(
+            surface.app.call_tool(
+                "dayz_test_run", {"project": "StorageMod", "mode": "server"}
+            )
+        )
+        self.assertTrue(await asyncio.to_thread(fixture.launcher.entered.wait, 5.0))
+        # The caller never learned the worker-minted id: the public tool names
+        # the one STARTING row of this session and lease (B3).
+        stop_task = asyncio.create_task(
+            surface.app.call_tool("dayz_test_stop", {})
+        )
+        self.assertTrue(
+            await asyncio.to_thread(fixture.wait_for_cancel_request, 5.0)
+        )
+        fixture.launcher.release.set()
+        stop = _content_json(await asyncio.wait_for(stop_task, timeout=10.0))
+        run_result = _content_json(await asyncio.wait_for(run_task, timeout=10.0))
 
         self.assertEqual(stop["status"], "succeeded", stop)
         self.assertEqual(stop["run_id"], RUN_ID)
         self.assertEqual(stop["state"], "EXITED")
         self.assertEqual(stop["terminated"], 1)
+        self.assertEqual(stop["stop_method"], "cancelled_during_start")
         self.assertEqual(run_result["status"], "failed", run_result)
         self.assertEqual(run_result["error_code"], "launch_cancelled")
-        self.assertEqual(runtime.reconcile_calls, 0)
         stored = fixture.store.get(RUN_ID)
         self.assertIsNotNone(stored)
         assert stored is not None
@@ -802,6 +1097,117 @@ class ToolSurfaceStartingStopTest(unittest.IsolatedAsyncioTestCase):
             ("EXITED", None, None, []),
         )
         self.assertEqual(fixture.launcher.terminate_calls, 1)
+
+    async def test_public_tool_reports_launch_cancel_pending(self) -> None:
+        fixture, surface = self._surface()
+        fixture.lifecycle._starting_cancel_settle_s = 0.05
+        run_task = asyncio.create_task(
+            surface.app.call_tool(
+                "dayz_test_run", {"project": "StorageMod", "mode": "server"}
+            )
+        )
+        self.assertTrue(await asyncio.to_thread(fixture.launcher.entered.wait, 5.0))
+        stop = _content_json(
+            await asyncio.wait_for(
+                surface.app.call_tool("dayz_test_stop", {}), timeout=10.0
+            )
+        )
+        self.assertEqual(stop["status"], "failed", stop)
+        self.assertEqual(stop["error_code"], "launch_cancel_pending")
+        self.assertEqual(stop["state"], "STARTING")
+        self.assertEqual(fixture.launcher.terminate_calls, 0)
+        fixture.launcher.release.set()
+        run_result = _content_json(await asyncio.wait_for(run_task, timeout=10.0))
+        self.assertEqual(run_result["error_code"], "launch_cancelled")
+
+    async def test_public_tool_reports_launch_cancel_degraded(self) -> None:
+        fixture, surface = self._surface(confirmed_exit=False)
+        run_task = asyncio.create_task(
+            surface.app.call_tool(
+                "dayz_test_run", {"project": "StorageMod", "mode": "server"}
+            )
+        )
+        self.assertTrue(await asyncio.to_thread(fixture.launcher.entered.wait, 5.0))
+        stop_task = asyncio.create_task(
+            surface.app.call_tool("dayz_test_stop", {})
+        )
+        self.assertTrue(
+            await asyncio.to_thread(fixture.wait_for_cancel_request, 5.0)
+        )
+        fixture.launcher.release.set()
+        stop = _content_json(await asyncio.wait_for(stop_task, timeout=10.0))
+        await asyncio.wait_for(run_task, timeout=10.0)
+        self.assertEqual(stop["status"], "failed", stop)
+        self.assertEqual(stop["error_code"], "launch_cancel_degraded")
+        self.assertEqual(stop["state"], "UNRECONCILED")
+        stored = fixture.store.get(RUN_ID)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.state, "UNRECONCILED")
+        self.assertIsNone(stored.owner_session_id)
+        self.assertEqual([item.pid for item in stored.processes], [fixture.launcher.pid])
+
+    async def test_public_stop_refuses_a_held_session_lease(self) -> None:
+        # A session that acquired its own lease is busy: the public tool names
+        # the refusal instead of silently waiting for the run or the lock.
+        fixture, surface = self._surface()
+        acquired = await surface.runtime.session_acquire_wait("surface")
+        self.assertEqual(acquired["status"], "active", acquired)
+        record = process(7301, role="client")
+        run = RunRecord(
+            RUN_ID,
+            surface.runtime.identity.session_id,
+            acquired["lease_id"],
+            "RUNNING",
+            "same",
+            "@StorageMod",
+            str(Path(surface.policy.dev_root) / "_client" / "profiles"),
+            "mission",
+            [record],
+        )
+        fixture.store.add(run)
+        fixture.guard.snapshots[record.pid] = snapshot(record)
+        with self.assertRaises(Exception) as caught:
+            await asyncio.wait_for(
+                surface.app.call_tool("dayz_test_stop", {"run_id": RUN_ID}),
+                timeout=10.0,
+            )
+        self.assertIn(
+            "release your session lease first", str(caught.exception)
+        )
+
+    async def test_public_stop_of_a_running_idle_run_uses_the_locked_path(self) -> None:
+        fixture, surface = self._surface()
+        record = process(7300, role="client")
+        run = RunRecord(
+            RUN_ID,
+            None,
+            None,
+            "RUNNING_IDLE",
+            "same",
+            "@StorageMod",
+            str(Path(surface.policy.dev_root) / "_client" / "profiles"),
+            "mission",
+            [record],
+        )
+        fixture.store.add(run)
+        stamp_launcher(fixture.lifecycle, RUN_ID, surface.runtime.identity)
+        fixture.guard.snapshots[record.pid] = snapshot(record)
+        stop = _content_json(
+            await asyncio.wait_for(
+                surface.app.call_tool("dayz_test_stop", {"run_id": RUN_ID}),
+                timeout=10.0,
+            )
+        )
+        self.assertEqual(stop["status"], "succeeded", stop)
+        self.assertEqual(stop["run_id"], RUN_ID)
+        self.assertEqual(
+            [item.pid for item in fixture.guard.terminate_calls], [record.pid]
+        )
+        stored = fixture.store.get(RUN_ID)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual((stored.state, stored.processes), ("EXITED", []))
 
 
 if __name__ == "__main__":
