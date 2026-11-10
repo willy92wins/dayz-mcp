@@ -16,30 +16,7 @@ from dayz_mcp import (
     native_broker_protocol,
 )
 from tests._source_snapshot import source_of
-
-
-POLICY = dayz_test_request.RequestProjectPolicy(
-    mod="ExampleMod",
-    dev_root=r"P:\ExampleMod_Suite",
-    default_source=r"P:\ExampleMod",
-    default_base_mods=("@CF", "@Dabs Framework", "@VPPAdminTools"),
-    mission_roots=(r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions",),
-    mod_roots=(r"P:\Mods",),
-)
-RUNTIME = dayz_test_worker.WorkerRuntimePolicy(
-    dev_root=POLICY.dev_root,
-    mod="ExampleMod",
-    diag_executable=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ\DayZDiag_x64.exe",
-    game_directory=r"C:\Program Files (x86)\Steam\steamapps\common\DayZ",
-    mission_aliases=(
-        ("chernarus", r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\dayzOffline.chernarusplus"),
-        ("livonia", r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\dayzOffline.enoch"),
-        ("sakhal", r"C:\Program Files (x86)\Steam\steamapps\common\DayZServer\mpmissions\dayzOffline.sakhal"),
-    ),
-    mods_root=r"P:\Mods",
-    build_temp_root=r"P:\temp",
-    build_source_basename=None,
-)
+from tests.dayz_test_worker_helpers import POLICY, RUNTIME
 
 
 class _Broker:

@@ -466,6 +466,8 @@ def build_run_request(
     kill: bool = False,
     replace_if_not_polling_since: int | None = None,
     project_mod_override: bool = False,
+    connect_host: str | None = None,
+    mod_dir: str | None = None,
 ) -> tuple[bytes, dayz_test_request.RequestProjectPolicy]:
     selected = _selected_policy(sealed_policies, project)
     if mode not in _accepted_modes():
@@ -529,6 +531,12 @@ def build_run_request(
             document["server_mods"] = public_server
         if public_server_only is not None:
             document["server_only_mods"] = public_server_only
+        if connect_host:
+            document["connect_host"] = connect_host
+            document["version"] = 3 if public_server_only is not None else max(int(document["version"]), 3)
+        if mod_dir:
+            document["mod_dir"] = mod_dir
+            document["version"] = 3 if public_server_only is not None else max(int(document["version"]), 3)
         if replace_if_not_polling_since is not None:
             # 79e2. Present only on the call that supersedes a live client, and only
             # once the gate has actually read the bridge: the value is the instant
@@ -2437,6 +2445,8 @@ async def _execute_preflight(
     server_adminlog: bool,
     project_mod_override: bool,
     started_at: float,
+    connect_host: str | None = None,
+    mod_dir: str | None = None,
 ) -> dict[str, object]:
     """Validate without a lease, a queue slot, a repair, or a process start."""
     skipped = _preflight_skipped_checks(mode, run_id)
@@ -2485,6 +2495,8 @@ async def _execute_preflight(
                 player_name=player_name,
                 server_wait_s=server_wait_s,
                 project_mod_override=project_mod_override,
+                connect_host=connect_host,
+                mod_dir=mod_dir,
             )
             bridge_default = _bridge_default_report(extra_mods, raw_request)
             vpp = preflight_vpp_request(
@@ -2781,6 +2793,8 @@ async def execute_dayz_test_run(
     server_adminlog: bool = False,
     client_start_budget_s: float | None = None,
     project_mod_override: bool = False,
+    connect_host: str | None = None,
+    mod_dir: str | None = None,
 ) -> dict[str, object]:
     """Run or preflight a request, with explicit omissions in this adapter.
 
@@ -2824,6 +2838,8 @@ async def execute_dayz_test_run(
             server_adminlog=server_adminlog,
             project_mod_override=project_mod_override,
             started_at=started_at,
+            connect_host=connect_host,
+            mod_dir=mod_dir,
         )
     preflight_skipped_checks: list[str] = []
     await _require_idle_session(runtime, tool="dayz_test_run")
@@ -2848,6 +2864,8 @@ async def execute_dayz_test_run(
                 "navmesh_data_server": navmesh_data_server,
                 "server_adminlog": server_adminlog,
                 "auto_remediate_steam": auto_remediate_steam,
+                "connect_host": connect_host,
+                "mod_dir": mod_dir,
                 "port": port,
                 "width": width,
                 "height": height,
