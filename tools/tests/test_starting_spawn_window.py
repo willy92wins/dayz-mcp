@@ -14,7 +14,7 @@ ack came 0.7-1.1 s later, so:
 - run02 (real DayZDiag): the same row shape, so the same forced_kill.
 
 These tests drive ProcessLifecycle, the worker and the public stop route with
-the fixtures of tests.test_starting_cancel and require, at both points of the
+the fixtures of tests.starting_cancel_helpers and require, at both points of the
 window, stop_method=cancelled_during_start and a launcher answer of
 launch_cancelled, never forced_kill. A stop after the ack stays a stop.
 """
@@ -28,9 +28,8 @@ from unittest.mock import patch
 from dayz_mcp import dayz_test_tool, dayz_test_worker
 from tests.dayz_test_tool_helpers import RUN_ID, _Runtime
 from tests.process_lifecycle_helpers import IDENTITY_A
-from tests import test_dayz_test_worker as _worker_tests
-from tests.test_dayz_test_worker import _Broker, _raw
-from tests.test_starting_cancel import _OP_ID, _Fixture
+from tests.dayz_test_worker_helpers import _Broker, _raw, run_worker
+from tests.starting_cancel_helpers import _OP_ID, _Fixture
 
 
 class _SpawnWindowCase(unittest.TestCase):
@@ -262,9 +261,8 @@ class WorkerAckCancelledTest(unittest.TestCase):
                 return await super().invoke(frame)
 
         broker = _CancelledAckBroker()
-        runner = _worker_tests.DayzTestWorkerTests("test_failed_cleanup_retains_exact_new_run_and_marks_degraded")
         with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
-            runner._run(_raw(), broker)
+            run_worker(_raw(), broker)
         self.assertEqual(raised.exception.code, "launch_cancelled")
         self.assertEqual(
             [item.payload.get("command") for item in broker.requests],
@@ -282,9 +280,8 @@ class WorkerAckCancelledTest(unittest.TestCase):
                     return {"ok": False, "error": "launch_identity_conflict"}
                 return await super().invoke(frame)
 
-        runner = _worker_tests.DayzTestWorkerTests("test_failed_cleanup_retains_exact_new_run_and_marks_degraded")
         with self.assertRaises(dayz_test_worker.DayzTestWorkerError) as raised:
-            runner._run(_raw(), _ConflictAckBroker())
+            run_worker(_raw(), _ConflictAckBroker())
         self.assertEqual(raised.exception.code, "worker_failed")
 
 
