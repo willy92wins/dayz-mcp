@@ -26,6 +26,12 @@ _TESTS_DIR = Path(__file__).resolve().parent
 
 # Imports that pre-date the rule, by importer.
 KNOWN_CROSS_TEST_IMPORTS: frozenset[tuple[str, str, str]] = frozenset({
+    # A1 supervisor acceptance reuses the G7 public-surface fixture on purpose:
+    # it is the product loopback stack, not a fake, and the acceptance must run
+    # against the same surface G7 accredited.
+    ("test_supervisor_real_adapters.py", "tests.test_starting_cancel", "RUN_ID"),
+    ("test_supervisor_real_adapters.py", "tests.test_starting_cancel", "_Fixture"),
+    ("test_supervisor_real_adapters.py", "tests.test_starting_cancel", "_LoopbackSurface"),
     ("test_546d_dump.py", "tests.test_vehicle_trace", "_positive_trace"),
     ("test_546d_dump.py", "tests.test_vehicle_trace_contract", "_content_json"),
     ("test_546d_dump.py", "tests.test_vehicle_trace_contract", "_method_body"),
