@@ -661,7 +661,7 @@ def _start_core(
         argv = [
             runtime.diag_executable,
             "-mod=" + mod_string,
-            "-connect=127.0.0.1",
+            "-connect=" + str(payload.get("connect_host") or "127.0.0.1"),
             f"-port={port}",
             "-profiles=" + client_profiles,
             "-name=" + str(payload["player_name"]),

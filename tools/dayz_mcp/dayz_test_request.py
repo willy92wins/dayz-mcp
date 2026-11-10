@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import ntpath
 import re
@@ -47,7 +48,7 @@ _REQUEST_KEYS_V1 = frozenset(
 # Version 1 stays this set. Version 2 adds exactly one closed field.
 _REQUEST_KEYS = _REQUEST_KEYS_V1
 _REQUEST_KEYS_V2 = _REQUEST_KEYS_V1 | {"project_mod_override"}
-_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods"}
+_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods", "connect_host"}
 _BRIDGE_BASENAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 _INVALID_RUN_ID = "invalid_run_id"
@@ -99,6 +100,10 @@ _CANONICAL_KEYSETS = frozenset(
         (keys - omitted - extra - adminlog) | {"project_mod_override"},
         (keys - omitted - extra - adminlog) | {"server_only_mods"},
         (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods"},
+        (keys - omitted - extra - adminlog) | {"connect_host"},
+        (keys - omitted - extra - adminlog) | {"project_mod_override", "connect_host"},
+        (keys - omitted - extra - adminlog) | {"server_only_mods", "connect_host"},
+        (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods", "connect_host"},
     )
 )
 
@@ -141,6 +146,8 @@ REQUEST_REJECTION_REASONS = frozenset(
         "unknown_key",
         "version_unsupported",
         "window_size_out_of_range",
+        "connect_host_invalid",
+        "connect_host_requires_client",
     }
 )
 
@@ -240,6 +247,40 @@ def _request_mode_view() -> tuple[str, tuple[str, ...]]:
     except dayz_test_modes.ModeAuthorityError:
         _invalid("mode_authority_unreadable")
     return default.name, names
+
+
+def _is_loopback_connect_host(host: str) -> bool:
+    folded = host.strip().lower()
+    if folded in {"localhost", "localhost."}:
+        return True
+    candidate = folded[1:-1] if folded.startswith("[") and folded.endswith("]") else folded
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _valid_connect_host(raw: object) -> str | None:
+    """Accept IPv4, IPv6, or a short DNS name. Refuse shell metacharacters."""
+    if type(raw) is not str:
+        return None
+    if not _bounded_text(raw, 1, 253):
+        return None
+    if any(ch in raw for ch in (" ", "\t", "\n", "\r", ";", '"', "'")):
+        return None
+    candidate = raw[1:-1] if raw.startswith("[") and raw.endswith("]") else raw
+    try:
+        ipaddress.ip_address(candidate)
+        return raw
+    except ValueError:
+        pass
+    if re.fullmatch(
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*",
+        raw,
+    ):
+        return raw
+    return None
 
 
 def _bounded_int(value: object, minimum: int, maximum: int) -> bool:
@@ -489,6 +530,15 @@ def parse_dayz_test_request(
     else:
         project_mod_override = False
     run_id = value.get("run_id")
+    connect_host_raw = value.get("connect_host") if "connect_host" in value else None
+    connect_host = "127.0.0.1"
+    remote_connect = False
+    if connect_host_raw is not None and connect_host_raw != "":
+        validated = _valid_connect_host(connect_host_raw)
+        if validated is None:
+            _invalid("connect_host_invalid")
+        connect_host = validated
+        remote_connect = not _is_loopback_connect_host(connect_host)
     replace_witness = value.get("replace_if_not_polling_since")
     shared_lock_root = value.get("shared_lock_root") if "shared_lock_root" in value else None
     instance_token = value.get("instance_token") if "instance_token" in value else None
@@ -599,8 +649,13 @@ def parse_dayz_test_request(
         _invalid("kill_requires_offline_mode")
     if not kill and mode in {"server", "all"} and run_id is not None:
         raise ValueError(_SERVER_ALL_FORBID_RUN_ID)
+    if connect_host != "127.0.0.1" and mode != "client":
+        # Non-default -connect only belongs on a client-only launch.
+        # mode=all starts a local client that must keep loopback.
+        _invalid("connect_host_requires_client")
     if not kill and mode == "client" and run_id is None:
-        raise ValueError(_CLIENT_REQUIRES_RUN_ID)
+        if not remote_connect:
+            raise ValueError(_CLIENT_REQUIRES_RUN_ID)
     if project_mod_override:
         if effective_build:
             _invalid("project_mod_override_conflicts_with_build")
@@ -657,7 +712,7 @@ def parse_dayz_test_request(
         "server_mods": list(server_mods),
         "server_wait_s": server_wait_s,
         "source": policy.default_source if source is None else source,
-        "version": 3 if server_only_mods else (2 if project_mod_override else 1),
+        "version": 3 if (server_only_mods or ("connect_host" in value and connect_host_raw not in (None, ""))) else (2 if project_mod_override else 1),
         "width": width,
     }
     if not project_mod_override:
@@ -669,6 +724,8 @@ def parse_dayz_test_request(
         payload["shared_lock_root"] = shared_lock_root
     if "instance_token" in value:
         payload["instance_token"] = instance_token
+    if "connect_host" in value and connect_host_raw not in (None, ""):
+        payload["connect_host"] = connect_host
     if "build_lock_wait_s" in value:
         assert isinstance(build_lock_wait_s, (int, float))
         payload["build_lock_wait_s"] = (

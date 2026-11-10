@@ -6459,6 +6459,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         server_adminlog: StrictBool = False,
         takeover: StrictBool = False,
         project_mod_override: StrictBool = False,
+        connect_host: str | None = None,
         client_start_budget_s: StrictFloat | StrictInt | None = None,
         on_busy: StrictStr = "fail",
         ctx: Context | None = None,
@@ -6565,6 +6566,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         auto_remediate_steam=auto_remediate_steam,
                         client_start_budget_s=budget_s,
                         project_mod_override=project_mod_override,
+                        connect_host=connect_host,
                     )
             except dayz_test_tool.DayzTestToolError as error:
                 return error, None
