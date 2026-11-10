@@ -645,9 +645,23 @@ def _run_unknown_to_store(status: object, run_id: str) -> bool:
 # one layer above the lifecycle, so the only remaining route was a human
 # killing processes by hand. The worker adopts before it stops
 # (dayz_test_worker: adopt then stop on the kill path), and adopt now accepts
-# that state, so the call has somewhere to go. EXITED and the two transient
-# states stay closed.
-_STOPPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
+# that state, so the call has somewhere to go.
+#
+# ah-starting-cancel-20261109-1444: STARTING is the launch window. Refusing it
+# here answered run_not_active before the stop could reach the launch. The
+# stop now reaches the lifecycle: the daemon's stop_run signals the in-flight
+# launch (registered while its row is STARTING) and answers from the durable
+# settlement the launch publishes. A same-session caller goes further and uses
+# the lease the launch already holds (execute_dayz_test_stop direct_inflight),
+# so neither tool_lock nor a second session acquire is a wait for the launch to
+# finish. A STARTING row with no reachable launch is refused explicitly
+# (launch_cancel_pending, or run_not_adopted by the daemon), never a silent
+# success. STOPPING stays closed: that stop is already in flight and will
+# settle on its own. EXITED stays closed too, except the never-started row
+# handled by resolve_stop_run.
+_STOPPABLE_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "UNRECONCILED"}
+)
 
 
 def require_extension_run(
@@ -3336,13 +3350,258 @@ def _h14_owned_stop_kill(runtime: _Runtime) -> Iterator[None]:
         yield
 
 
+def _active_lease_id(runtime: _Runtime) -> str | None:
+    value = getattr(runtime, "active_lease_id", None)
+    if isinstance(value, str) and value:
+        return value
+    control = getattr(runtime, "_control", None)
+    value = getattr(control, "active_lease_id", None) if control is not None else None
+    return value if isinstance(value, str) and value else None
+
+
+def _row_owner(row: dict[str, object]) -> str | None:
+    owner = row.get("owner_session_id")
+    if not isinstance(owner, str) or not owner:
+        owner = row.get("owner_session")
+    return owner if isinstance(owner, str) and owner else None
+
+
+def _held_lease_matches(runtime: _Runtime, row: dict[str, object]) -> bool:
+    held = _active_lease_id(runtime)
+    row_lease = row.get("owner_lease_id")
+    if isinstance(held, str) and held and isinstance(row_lease, str) and row_lease:
+        return held == row_lease
+    return True
+
+
+def _owned_starting_row(
+    runtime: _Runtime, status: object
+) -> dict[str, object] | None:
+    """The one STARTING row this session owns with the lease it holds now.
+
+    ah-starting-cancel-20261109-1444 / B3: a fresh run_id is minted inside the
+    worker, so a same-session caller cannot always name it while the launch is
+    in STARTING. The in-flight launch of this session and lease is unique by
+    construction; naming it from the durable status resolves B3 without
+    waiting for RUNNING. More than one match is not guessed at.
+    """
+    caller = _h14_caller_session(runtime)
+    if not caller:
+        return None
+    matches = [
+        row
+        for row in _runs(status)
+        if row.get("state") == "STARTING"
+        and _row_owner(row) == caller
+        and _held_lease_matches(runtime, row)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _unique_locked_stop_row(
+    runtime: _Runtime, status: object
+) -> str | None:
+    """The one run this session may stop once the launch is no longer in flight.
+
+    Used only when the caller omitted run_id and the direct route did not apply.
+    Ownership is the same predicate the ordinary stop uses; an ambiguous set is
+    a named failure, never a guess.
+    """
+    matches: list[str] = []
+    for row in _runs(status):
+        run_id = row.get("run_id")
+        if not isinstance(run_id, str) or not _valid_uuid4(run_id):
+            continue
+        state = row.get("state")
+        never_started = (
+            state == "EXITED" and row.get("launch_acknowledged") is False
+        )
+        if not never_started and state not in _STOPPABLE_STATES:
+            continue
+        if _h14_owned_stop(runtime, status, run_id):
+            matches.append(run_id)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _direct_stop_envelope(
+    run_id: str,
+    result: dict[str, object],
+    row: dict[str, object],
+    started_at: float,
+) -> dict[str, object]:
+    """The stop envelope of a /lifecycle/stop answered during STARTING."""
+    ok = result.get("ok") is True
+    error_code = result.get("error")
+    if not isinstance(error_code, str) or not error_code:
+        error_code = None if ok else "dayz_test_stop_failed"
+    terminal = WorkerTerminal(
+        cleanup_degraded=bool(result.get("cleanup_degraded")),
+        error_code=error_code,
+        exit_code=0 if ok else 1,
+        ok=ok,
+        run_id=run_id,
+    )
+    project = row.get("mod")
+    if isinstance(project, str) and project.startswith("@"):
+        project = project[1:]
+    if not isinstance(project, str) or not project:
+        project = "unknown"
+    envelope = _compact_result(
+        terminal=terminal,
+        project=project,
+        mode="stop",
+        started_at=started_at,
+        artifacts_paths=[],
+        phase="completed" if ok else "stopping",
+    )
+    if ok:
+        stop_method = result.get("stop_method")
+        envelope["stop_method"] = (
+            stop_method if isinstance(stop_method, str) and stop_method else "forced_kill"
+        )
+        envelope["exit_metrics_valid"] = False
+    state = result.get("state")
+    if isinstance(state, str) and _STOP_ENVELOPE_STATE.fullmatch(state):
+        envelope["state"] = state
+    terminated = result.get("terminated")
+    if isinstance(terminated, int) and not isinstance(terminated, bool):
+        envelope["terminated"] = terminated
+    return envelope
+
+
+def _safe_failure_code(error: BaseException) -> str:
+    """The stable code of a failed stop, never a prose message.
+
+    The runtime's ToolError now carries the daemon code; older paths only carry
+    the code in the message (and sometimes a recipe after a colon). A token
+    that is not identifier-shaped falls back to the generic named failure.
+    """
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    token = str(error).split(":", 1)[0].strip()
+    if 3 <= len(token) <= 64 and token[0].isascii() and token[0].isalpha():
+        if all(
+            char.isascii() and (char.isalnum() or char == "_") for char in token
+        ):
+            return token
+    return "dayz_test_stop_failed"
+
+
+async def _stop_state_after_failure(
+    runtime: _Runtime, run_id: str, fallback: object
+) -> str:
+    """Read the durable row after a refused stop so the answer is not stale.
+
+    A degraded cancel leaves UNRECONCILED with a live PID record; reporting the
+    pre-stop STARTING is exactly the misattribution B2 names. A status that
+    cannot be read keeps the pre-stop state.
+    """
+    try:
+        status = await runtime.lifecycle_status()
+    except Exception:
+        status = None
+    row = _run_row(status, run_id)
+    state = row.get("state") if isinstance(row, dict) else None
+    if isinstance(state, str) and _STOP_ENVELOPE_STATE.fullmatch(state):
+        return state
+    if isinstance(fallback, str) and _STOP_ENVELOPE_STATE.fullmatch(fallback):
+        return fallback
+    return "STARTING"
+
+
+async def _direct_inflight_stop(
+    runtime: _Runtime,
+    run_id: str | None,
+    *,
+    started_at: float,
+    progress_cb: _ProgressCallback | None,
+) -> dict[str, object] | None:
+    """Stop a same-session STARTING launch with the lease it already holds.
+
+    None means the direct route does not apply and the caller must take the
+    ordinary lock/lease path. This route exists because a concurrent
+    dayz_test_run holds tool_lock and the runtime's active lease for the whole
+    launch: waiting for either is a kill after the launch, not a cancel. The
+    daemon's /lifecycle/stop cancel branch signals the in-flight launch, which
+    settles the row terminal before it can become RUNNING.
+
+    An omitted run_id is resolved from the durable status (B3): the one
+    STARTING row owned by this session and lease. The daemon still receives an
+    explicit id and enforces the same ownership.
+    """
+    token = getattr(runtime, "active_lease_token", None)
+    stop = getattr(runtime, "lifecycle_stop", None)
+    if not (isinstance(token, str) and token) or not callable(stop):
+        return None
+    try:
+        status = await runtime.lifecycle_status()
+    except Exception:
+        return None
+    if not isinstance(run_id, str) or not run_id:
+        row = _owned_starting_row(runtime, status)
+        if row is None:
+            return None
+        run_id = row.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return None
+    else:
+        row = _run_row(status, run_id)
+        if row is None or row.get("state") != "STARTING":
+            return None
+        if _row_owner(row) != _h14_caller_session(runtime):
+            return None
+        if not _held_lease_matches(runtime, row):
+            return None
+    if progress_cb is not None:
+        await progress_cb("stopping", None)
+    try:
+        result = await stop(run_id)
+    except Exception as error:
+        state = getattr(error, "state", None)
+        if not isinstance(state, str) or not _STOP_ENVELOPE_STATE.fullmatch(
+            state
+        ):
+            state = await _stop_state_after_failure(
+                runtime, run_id, row.get("state")
+            )
+        return _direct_stop_envelope(
+            run_id,
+            {"ok": False, "error": _safe_failure_code(error), "state": state},
+            row,
+            started_at,
+        )
+    if not isinstance(result, dict):
+        state = await _stop_state_after_failure(
+            runtime, run_id, row.get("state")
+        )
+        return _direct_stop_envelope(
+            run_id,
+            {"ok": False, "error": "dayz_test_stop_failed", "state": state},
+            row,
+            started_at,
+        )
+    return _direct_stop_envelope(run_id, result, row, started_at)
+
+
 async def execute_dayz_test_stop(
     runtime: _Runtime,
-    run_id: str,
+    run_id: str | None,
     *,
     progress_cb: _ProgressCallback | None = None,
-) -> dict[str, object]:
+    direct_inflight: bool = False,
+) -> dict[str, object] | None:
     started_at = time.monotonic()
+    if direct_inflight:
+        # None means the STARTING prelude does not apply. The caller must
+        # take tool_lock and call again without direct_inflight. Never fall
+        # through to the ordinary stop without that lock.
+        return await _direct_inflight_stop(
+            runtime,
+            run_id,
+            started_at=started_at,
+            progress_cb=progress_cb,
+        )
     if progress_cb is not None:
         await progress_cb("validating", None)
     await _require_idle_session(runtime, tool="dayz_test_stop")
@@ -3351,6 +3610,14 @@ async def execute_dayz_test_stop(
         with secure_launcher.load_verified_bundle(opened) as bundle:
             with _h14_stale_policy(runtime):
                 status_snapshot = await runtime.lifecycle_status()
+            if not isinstance(run_id, str) or not run_id:
+                # B3: no run_id was named. The launch is no longer in flight
+                # here (tool_lock was free), so the target is the unique run
+                # this session may stop. Zero or several is a named failure.
+                resolved = _unique_locked_stop_row(runtime, status_snapshot)
+                if resolved is None:
+                    _fail("run_not_found")
+                run_id = resolved
             try:
                 policy, run = resolve_stop_run(
                     status_snapshot, bundle.sealed_policies, run_id
