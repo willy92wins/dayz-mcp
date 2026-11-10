@@ -509,7 +509,7 @@ def _mod_path(value: object, runtime: WorkerRuntimePolicy) -> str:
 
 
 def _override(payload: dict[str, object]) -> bool:
-    return payload.get("project_mod_override") is True
+    return payload.get("project_mod_override") is True or bool(payload.get("mod_dir"))
 
 
 def _shared_project_mod(
@@ -536,6 +536,9 @@ def _mod_entries(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> li
     project_mod = _shared_project_mod(payload, runtime)
     if project_mod is not None:
         values.append(project_mod)
+    isolated = payload.get("mod_dir")
+    if isinstance(isolated, str) and isolated:
+        values.append(isolated)
     values.extend(list(payload.get("extra_mods", [])))
     return [_mod_path(value, runtime) for value in values]
 

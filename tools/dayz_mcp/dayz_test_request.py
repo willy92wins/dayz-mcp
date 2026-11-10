@@ -48,7 +48,7 @@ _REQUEST_KEYS_V1 = frozenset(
 # Version 1 stays this set. Version 2 adds exactly one closed field.
 _REQUEST_KEYS = _REQUEST_KEYS_V1
 _REQUEST_KEYS_V2 = _REQUEST_KEYS_V1 | {"project_mod_override"}
-_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods", "connect_host"}
+_REQUEST_KEYS_V3 = _REQUEST_KEYS_V2 | {"server_only_mods", "connect_host", "mod_dir"}
 _BRIDGE_BASENAMES = frozenset({"dayz_mcp", "@dayz_mcp"})
 _MISSION_ALIASES = frozenset({"chernarus", "livonia", "sakhal", "lfheli"})
 _INVALID_RUN_ID = "invalid_run_id"
@@ -95,7 +95,7 @@ _CANONICAL_KEYSETS = frozenset(
         frozenset(),
         frozenset({"server_adminlog"}),
     )
-    for variant in (
+    for base_variant in (
         keys - omitted - extra - adminlog,
         (keys - omitted - extra - adminlog) | {"project_mod_override"},
         (keys - omitted - extra - adminlog) | {"server_only_mods"},
@@ -104,6 +104,10 @@ _CANONICAL_KEYSETS = frozenset(
         (keys - omitted - extra - adminlog) | {"project_mod_override", "connect_host"},
         (keys - omitted - extra - adminlog) | {"server_only_mods", "connect_host"},
         (keys - omitted - extra - adminlog) | {"project_mod_override", "server_only_mods", "connect_host"},
+    )
+    for variant in (
+        base_variant,
+        base_variant | {"mod_dir"},
     )
 )
 
@@ -148,6 +152,11 @@ REQUEST_REJECTION_REASONS = frozenset(
         "window_size_out_of_range",
         "connect_host_invalid",
         "connect_host_requires_client",
+        "mod_dir_invalid",
+        "mod_dir_conflicts_with_build",
+        "mod_dir_in_default_source",
+        "mod_dir_in_workshop",
+        "mod_dir_is_original_project",
     }
 )
 
@@ -165,6 +174,26 @@ def _reject_json_constant(_value: str) -> object:
     _invalid("json_constant_rejected")
 
 
+
+def _path_has_workshop_component(path: str) -> bool:
+    """True when any path segment is the Steam Workshop folder."""
+    return any(part.casefold() == "!workshop" for part in ntpath.normpath(path).split("\\"))
+
+
+def _validate_mod_dir(raw: object, default_source: str) -> str:
+    """Absolute isolated @mod folder; never Workshop or default_source."""
+    if not _valid_local_absolute_path(raw):
+        _invalid("mod_dir_invalid")
+    path = ntpath.normpath(raw)
+    if ";" in path:
+        _invalid("mod_dir_invalid")
+    if _path_has_workshop_component(path):
+        _invalid("mod_dir_in_workshop")
+    if _path_is_within(path, (default_source,)):
+        _invalid("mod_dir_in_default_source")
+    return path
+
+
 def reject_original_project_directory(
     payload: dict[str, object], mods_root: str
 ) -> None:
@@ -173,8 +202,6 @@ def reject_original_project_directory(
     Comparison is the normalized runtime path, not the leaf name. The public
     token stays the closed request reason.
     """
-    if payload.get("project_mod_override") is not True:
-        return
     from dayz_mcp.dayz_test_storage import StorageError, normalize_mod_path
 
     mod = payload.get("mod")
@@ -184,18 +211,27 @@ def reject_original_project_directory(
         original = ntpath.normcase(normalize_mod_path("@" + mod, mods_root))
     except StorageError:
         return
-    listed: list[object] = []
-    for field in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
-        values = payload.get(field)
-        if isinstance(values, list):
-            listed.extend(values)
-    for value in listed:
+    if payload.get("project_mod_override") is True:
+        listed: list[object] = []
+        for field in ("base_mods", "extra_mods", "server_mods", "server_only_mods"):
+            values = payload.get(field)
+            if isinstance(values, list):
+                listed.extend(values)
+        for value in listed:
+            try:
+                resolved = ntpath.normcase(normalize_mod_path(value, mods_root))
+            except StorageError:
+                continue
+            if resolved == original:
+                _invalid("project_mod_override_includes_original")
+    mod_dir = payload.get("mod_dir")
+    if isinstance(mod_dir, str) and mod_dir:
         try:
-            resolved = ntpath.normcase(normalize_mod_path(value, mods_root))
+            resolved_dir = ntpath.normcase(normalize_mod_path(mod_dir, mods_root))
         except StorageError:
-            continue
-        if resolved == original:
-            _invalid("project_mod_override_includes_original")
+            resolved_dir = None
+        if resolved_dir == original:
+            _invalid("mod_dir_is_original_project")
 
 
 def validate_server_only_mods(
@@ -539,6 +575,13 @@ def parse_dayz_test_request(
             _invalid("connect_host_invalid")
         connect_host = validated
         remote_connect = not _is_loopback_connect_host(connect_host)
+    mod_dir_raw = value.get("mod_dir") if "mod_dir" in value else None
+    mod_dir: str | None = None
+    if mod_dir_raw is not None and mod_dir_raw != "":
+        # validated against policy.default_source after policy is known (already is).
+        mod_dir = _validate_mod_dir(mod_dir_raw, policy.default_source)
+    elif "mod_dir" in value and mod_dir_raw == "":
+        _invalid("mod_dir_invalid")
     replace_witness = value.get("replace_if_not_polling_since")
     shared_lock_root = value.get("shared_lock_root") if "shared_lock_root" in value else None
     instance_token = value.get("instance_token") if "instance_token" in value else None
@@ -634,6 +677,8 @@ def parse_dayz_test_request(
         _invalid("server_adminlog_requires_server")
     if pack_only and not effective_build:
         _invalid("pack_only_requires_build")
+    if mod_dir is not None and (effective_build or pack_only):
+        _invalid("mod_dir_conflicts_with_build")
     canonical_default_source = (
         set(value) in _CANONICAL_KEYSETS
         and source == policy.default_source
@@ -712,7 +757,7 @@ def parse_dayz_test_request(
         "server_mods": list(server_mods),
         "server_wait_s": server_wait_s,
         "source": policy.default_source if source is None else source,
-        "version": 3 if (server_only_mods or ("connect_host" in value and connect_host_raw not in (None, ""))) else (2 if project_mod_override else 1),
+        "version": 3 if (server_only_mods or ("connect_host" in value and connect_host_raw not in (None, "")) or mod_dir is not None) else (2 if project_mod_override else 1),
         "width": width,
     }
     if not project_mod_override:
@@ -726,6 +771,8 @@ def parse_dayz_test_request(
         payload["instance_token"] = instance_token
     if "connect_host" in value and connect_host_raw not in (None, ""):
         payload["connect_host"] = connect_host
+    if mod_dir is not None:
+        payload["mod_dir"] = mod_dir
     if "build_lock_wait_s" in value:
         assert isinstance(build_lock_wait_s, (int, float))
         payload["build_lock_wait_s"] = (
