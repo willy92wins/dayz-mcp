@@ -119,16 +119,30 @@ class ModDirWorkerArgvTests(unittest.TestCase):
         self.assertNotIn(POLICY.default_source, loaded)
         self.assertIs(parsed.payload["build"], False)
 
-    def test_mod_dir_equal_to_original_project_is_rejected(self) -> None:
-        original = ntpath.join(RUNTIME.mods_root, "@" + RUNTIME.mod)
+    def test_mod_dir_equal_to_original_project_is_rejected_at_parse(self) -> None:
+        original = ntpath.join(POLICY.mod_roots[0], "@" + POLICY.mod)
+        self.assertEqual(original, ntpath.join(RUNTIME.mods_root, "@" + RUNTIME.mod))
+        for path in (original, r"p:\mods\@examplemod"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"invalid_dayz_test_request:mod_dir_is_original_project$",
+                ):
+                    dayz_test_request.parse_dayz_test_request(
+                        _raw(mod_dir=path), policies=(POLICY,)
+                    )
+
+    def test_worker_still_rejects_mod_dir_equal_to_original_project(self) -> None:
         parsed = dayz_test_request.parse_dayz_test_request(
-            _raw(mod_dir=original), policies=(POLICY,)
+            _raw(), policies=(POLICY,)
         )
+        payload = dict(parsed.payload)
+        payload["mod_dir"] = ntpath.join(RUNTIME.mods_root, "@" + RUNTIME.mod)
         with self.assertRaisesRegex(
             ValueError, r"invalid_dayz_test_request:mod_dir_is_original_project$"
         ):
             dayz_test_worker._start_core(
-                parsed.payload, RUNTIME, role="server", run_id=None
+                payload, RUNTIME, role="server", run_id=None
             )
 
     def test_omitted_mod_dir_still_loads_implicit_project(self) -> None:

@@ -78,6 +78,17 @@ class ConnectHostRequestTests(unittest.TestCase):
                         policies=(POLICY,),
                     )
 
+    def test_loopback_connect_host_on_server_or_all_is_accepted(self) -> None:
+        for mode in ("server", "all"):
+            for host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+                with self.subTest(mode=mode, host=host):
+                    parsed = dayz_test_request.parse_dayz_test_request(
+                        _raw(mode=mode, connect_host=host),
+                        policies=(POLICY,),
+                    )
+                    self.assertEqual(parsed.payload["connect_host"], host)
+                    self.assertEqual(parsed.payload["mode"], mode)
+
     def test_v1_document_cannot_carry_connect_host(self) -> None:
         with self.assertRaisesRegex(ValueError, r":unknown_key$"):
             dayz_test_request.parse_dayz_test_request(

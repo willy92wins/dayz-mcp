@@ -194,6 +194,20 @@ def _validate_mod_dir(raw: object, default_source: str) -> str:
     return path
 
 
+def _same_windows_path(left: str, right: str) -> bool:
+    return ntpath.normcase(ntpath.normpath(left)) == ntpath.normcase(
+        ntpath.normpath(right)
+    )
+
+
+def _mod_dir_is_policy_project(path: str, policy: RequestProjectPolicy) -> bool:
+    """True when path is the implicit project folder under a sealed mod root."""
+    for root in policy.mod_roots:
+        if _same_windows_path(path, ntpath.join(root, "@" + policy.mod)):
+            return True
+    return False
+
+
 def reject_original_project_directory(
     payload: dict[str, object], mods_root: str
 ) -> None:
@@ -679,6 +693,11 @@ def parse_dayz_test_request(
         _invalid("pack_only_requires_build")
     if mod_dir is not None and (effective_build or pack_only):
         _invalid("mod_dir_conflicts_with_build")
+    if mod_dir is not None and _mod_dir_is_policy_project(mod_dir, policy):
+        # Same identity the worker also checks once mods_root is known.
+        # A shared basename under a root that is not in this policy is a
+        # different directory and is not rejected here.
+        _invalid("mod_dir_is_original_project")
     canonical_default_source = (
         set(value) in _CANONICAL_KEYSETS
         and source == policy.default_source
@@ -717,8 +736,9 @@ def parse_dayz_test_request(
         ]
         if not candidates:
             _invalid("project_mod_override_requires_candidate")
-    # Path identity of the original project folder is checked once the
-    # selected runtime mods root is known (reject_original_project_directory).
+    # Path identity of the original project folder for mod_dir is checked
+    # above against policy.mod_roots. The worker still calls
+    # reject_original_project_directory with the selected runtime mods root.
     # A shared basename under another root is a different directory.
     # fb-20260904-200816-79e2. The witness of the client-replacement gate: the
     # instant, in epoch milliseconds, at which the gate READ the bridge and
