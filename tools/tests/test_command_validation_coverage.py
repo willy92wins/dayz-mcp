@@ -199,6 +199,8 @@ def _minimal_args(cmd: str) -> dict:
         # Same shape as ui_click: a widget NAME. ui_focus rejects an empty
         # path and any extra key.
         return {"path": "p"}
+    if cmd == "ui_pause":
+        return {}
     if cmd == "ui_reload_layout":
         return {"mode": "close"}
     if cmd == "ui_dialog":
