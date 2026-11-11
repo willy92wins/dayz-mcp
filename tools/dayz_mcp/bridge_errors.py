@@ -56,6 +56,10 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 _REMOTE_ERROR_CODES = frozenset({
     "audit_failed",
     "arg_contract_mismatch",
+    # Adapter bridge codes (plan 3.1): the game-side refusal the caller must
+    # be able to tell apart from a generic failure. Without these the enqueue
+    # mapper collapsed them to remote_error.
+    "ai_limit_reached",
     "bad_args",
     "bad_binding_fence",
     "bad_release_builder",
@@ -77,6 +81,9 @@ _REMOTE_ERROR_CODES = frozenset({
     # registered client process is known dead. Process absence, not a crash.
     "client_process_gone",
     "exec_not_allowed",
+    # Broker admission refusal for every adapter verb (plan 2.2). Its detail
+    # travels beside it; see _EXPANSION_UNAVAILABLE_DETAILS.
+    "expansion_unavailable",
     "identity_mismatch",
     "invalid_identity",
     "lease_expired",
@@ -98,6 +105,9 @@ _REMOTE_ERROR_CODES = frozenset({
     "operation_conflict",
     "operation_tombstones_saturated",
     "session_releasing",
+    # Adapter/scene bridge codes, as ai_limit_reached above.
+    "scene_full",
+    "spawn_failed",
     "ticket_expired",
     "ticket_invalid",
     "unauthorized",
@@ -313,6 +323,25 @@ def _remote_error_code(payload: object) -> str:
         if published is not None:
             return published
     return "remote_error"
+
+
+# The only details the broker publishes with expansion_unavailable (plan
+# 2.2, loopback._expansion_refusal_payload). Anything else is dropped, not
+# echoed: detail is a closed token set, not prose.
+_EXPANSION_UNAVAILABLE_DETAILS = frozenset({
+    "adapter_not_loaded",
+    "adapter_contract_mismatch",
+    "lease_close_not_supported",
+})
+
+
+def _expansion_unavailable_detail(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    detail = payload.get("detail")
+    if isinstance(detail, str) and detail in _EXPANSION_UNAVAILABLE_DETAILS:
+        return detail
+    return None
 
 
 _UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
@@ -620,6 +649,80 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
     return "observed=" + " ".join(pairs)
 
 
+# Adapter verbs whose refusals fill the ai_group report before refusing
+# (MCPExpansionAI.c AISpawnRefuse and its siblings in the other adapter
+# branches). ai_emote is the server command behind actor_emote(object_id=..);
+# it shares this path when that branch lands, so it is named here, not as a
+# tool. Only the allowlisted report fields below cross, each token-checked.
+_AI_GROUP_COMMANDS = frozenset({
+    "ai_emote",
+    "ai_group_order",
+    "ai_group_release",
+    "ai_group_spawn",
+    "ai_group_state",
+})
+_AI_GROUP_TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+_AI_GROUP_FIELD_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+_AI_GROUP_ALLOWED_MAX = 64
+_AI_GROUP_WAYPOINT_NUMBERS_MAX = 96
+
+
+def _ai_group_detail(result: dict[str, Any]) -> str:
+    code = str(result.get("error") or "")
+    report = result.get("ai_group")
+    if not isinstance(report, dict):
+        return ""
+    parts: list[str] = []
+    if code == "bad_args":
+        field = report.get("field")
+        if isinstance(field, str) and _AI_GROUP_FIELD_RE.fullmatch(field):
+            parts.append(f"field={field}")
+        allowed = report.get("allowed")
+        if isinstance(allowed, list):
+            names = [
+                name
+                for name in allowed[:_AI_GROUP_ALLOWED_MAX]
+                if isinstance(name, str) and _AI_GROUP_TOKEN_RE.fullmatch(name)
+            ]
+            if names:
+                parts.append("allowed=" + ",".join(names))
+        args_read = report.get("args_read")
+        if isinstance(args_read, dict):
+            read: list[str] = []
+            faction = args_read.get("faction")
+            if isinstance(faction, str) and _AI_GROUP_TOKEN_RE.fullmatch(faction):
+                read.append(f"faction={faction}")
+            count = args_read.get("count")
+            if isinstance(count, int) and not isinstance(count, bool):
+                read.append(f"count={count}")
+            waypoints = args_read.get("waypoints")
+            if (
+                isinstance(waypoints, list)
+                and len(waypoints) <= _AI_GROUP_WAYPOINT_NUMBERS_MAX
+                and all(_is_finite_number(value) for value in waypoints)
+            ):
+                read.append(
+                    "waypoints=" + ",".join(repr(float(value)) for value in waypoints)
+                )
+            if read:
+                parts.append("args_read=" + " ".join(read))
+    if code == "ai_limit_reached":
+        for key in ("living", "limit"):
+            value = report.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                parts.append(f"{key}={value}")
+    created = report.get("created")
+    if code in {
+        "ai_limit_reached",
+        "bad_args",
+        "not_found",
+        "scene_full",
+        "spawn_failed",
+    } and isinstance(created, bool):
+        parts.append(f"created={'true' if created else 'false'}")
+    return "; ".join(parts)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -682,6 +785,13 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     it would replay caller input (possibly sensitive, unbounded) into an
     error message.
     """
+    if str(result.get("error") or "") == "expansion_unavailable":
+        # Broker delivery discards store this code with its detail in the
+        # result (loopback._mark_discarded); any verb can carry it.
+        expansion_detail = _expansion_unavailable_detail(result)
+        return f"detail={expansion_detail}" if expansion_detail is not None else ""
+    if cmd in _AI_GROUP_COMMANDS:
+        return _ai_group_detail(result)
     if cmd == "world_spawn" and str(result.get("error") or "") == "vehicle_eject_failed":
         object_id = result.get("object_id")
         if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
@@ -806,6 +916,9 @@ def _public_enqueue_error(
     next_step=session_acquire_wait: that grant adopts the ownerless run.
     A coordinator audit_failed carries its audit_stage and
     next_step=session_status (_audit_failed_message).
+    expansion_unavailable carries its broker detail as
+    "expansion_unavailable; detail=<token>" when the detail is one of
+    _EXPANSION_UNAVAILABLE_DETAILS; an unknown detail is dropped.
     """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
@@ -840,8 +953,12 @@ def _public_enqueue_error(
         return f"game_not_ready:reason={code}"
     hint = _carriable_hint(payload)
     message = code
+    if code == "expansion_unavailable":
+        expansion_detail = _expansion_unavailable_detail(payload)
+        if expansion_detail is not None:
+            message = f"{code}; detail={expansion_detail}"
     if code != "remote_error" and hint is not None:
-        message = f"{code}: {hint}"
+        message = f"{message}: {hint}"
     if code == "run_not_owned":
         # Named here, not only in the daemon's hint, so an older daemon's
         # prose still reaches the caller with the tool to call next.
