@@ -553,6 +553,81 @@ class ExpansionComparatorTest(unittest.TestCase):
                 )
                 self.assertEqual(verdict["state"], "match", verdict)
 
+    def _public_registry(self) -> frozenset[str]:
+        app, runtime = server.build_app(
+            server.ServerConfig(
+                key="test-key", port=0, log_sink=lambda _message: None
+            )
+        )
+        registered = frozenset(tool.name for tool in app._tool_manager.list_tools())
+        self.assertEqual(registered, runtime._registered_tool_names)
+        return registered
+
+    def test_o7_announced_adapter_verb_missing_from_public_registry_is_mismatch(
+        self,
+    ) -> None:
+        # Mutant killed: missing_tool excluding EXPANSION_AI_COMMANDS and
+        # hiding an announced adapter verb absent from the real public registry.
+        registered = self._public_registry()
+        self.assertIn(SPAWN, registered)
+
+        state = _bound_state()
+        status, polled = _poll(
+            state,
+            _adapter_census(),
+            server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            GOOD_XAI,
+        )
+        self.assertEqual(status, 200, polled)
+        announced = state.status_snapshot()["peers"]["server"]["capabilities"]
+
+        missing = _compare_bridge_capabilities(
+            "server", announced, registered - {SPAWN}
+        )
+        self.assertEqual(missing["state"], "mismatch", missing)
+        self.assertEqual(
+            missing["reason"], "census_disagrees_with_registered_tools", missing
+        )
+        self.assertEqual(
+            missing["announced_without_registered_tool"], [SPAWN], missing
+        )
+        self.assertEqual(
+            missing["registered_without_announced_command"], [], missing
+        )
+
+        with_adapter = _compare_bridge_capabilities(
+            "server", announced, registered
+        )
+        self.assertEqual(with_adapter["state"], "match", with_adapter)
+        self.assertEqual(
+            with_adapter["announced_without_registered_tool"], [], with_adapter
+        )
+        self.assertEqual(
+            with_adapter["registered_without_announced_command"], [], with_adapter
+        )
+
+        state_no_xai = _bound_state()
+        status, polled = _poll(
+            state_no_xai,
+            _base_commands(),
+            server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            None,
+        )
+        self.assertEqual(status, 200, polled)
+        no_xai = state_no_xai.status_snapshot()["peers"]["server"]["capabilities"]
+        without_adapter = _compare_bridge_capabilities(
+            "server", no_xai, registered
+        )
+        self.assertEqual(without_adapter["state"], "match", without_adapter)
+        self.assertEqual(
+            without_adapter["announced_without_registered_tool"], [], without_adapter
+        )
+        self.assertEqual(
+            without_adapter["registered_without_announced_command"],
+            [],
+            without_adapter,
+        )
+
 
 class ExpansionContractTest(unittest.TestCase):
     """O9: contract hash and field names across Python and Enforce."""
@@ -619,7 +694,7 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
 
     Mutants (plan §6): cleaning by timeout, keeping residue after it
     disappears, clearing server debt on client-only exit, creating OWED
-    for a v12 peer without close, and an unreachable adapter rejection.
+    for a census without the close, and an unreachable adapter rejection.
     """
 
     def setUp(self) -> None:
@@ -670,7 +745,7 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
                 names.append(close_name)
             version = f"{EXPECTED_BRIDGE_VERSION}~1.29"
         else:
-            # A-r4-H5: a real v12 census, from the authored fixture,
+            # A-r4-H5: a census without the close, from the authored fixture,
             # with no lease_close* name announced.
             import json
 
@@ -682,7 +757,7 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
                 n for n in fixture["peers"][peer]
                 if not n.startswith("lease_close") and n not in EXPANSION_AI_ARG_CONTRACT
             ]
-            version = "12~1.29"
+            version = f"{EXPECTED_BRIDGE_VERSION}~1.29"
         status, body = self.state.record_poll(
             peer,
             version,
@@ -1029,20 +1104,20 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
         self.assertNotIn("lease_end", grant_b)
 
     # -- O13 ----------------------------------------------------------------
-    def test_o13_close_publishing_with_v12_and_close_capable_census(self) -> None:
-        # Mutant killed: creating OWED/close work for a v12 census.
+    def test_o13_close_publishing_with_a_census_without_the_close(self) -> None:
+        # Mutant killed: creating OWED/close work for a census without the close.
         self.close_supported = False
         self._poll("server")
         self._poll("client")
-        lease, command_id = self._spawn_delivered_v12()
+        lease, command_id = self._delivered_on_a_census_without_the_close()
         self.state.store_result({"id": command_id, "ok": True}, instance=INST_SERVER)
         self._release(self.a, lease)
         self.assertEqual(self._queued("server"), [])
         self.assertEqual(self._queued("client"), [])
         self.assertEqual(self._photo().get("unconfirmed", []), [])
 
-    def _spawn_delivered_v12(self):
-        # With a v12 census the spawn gate itself refuses (see H10 tests);
+    def _delivered_on_a_census_without_the_close(self):
+        # With a census without the close the spawn gate itself refuses (see H10 tests);
         # deliver plain work instead so the lease has delivered work.
         status, lease = self.coordinator.acquire(self.a, "trace")
         self.assertEqual(status, 200, lease)
@@ -1076,12 +1151,12 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
 
 
 class ExpansionO13InertTest(unittest.TestCase):
-    """O13, the part that needs no close: v12 support stays inert."""
+    """O13, the part that needs no close: a census without the close stays inert."""
 
-    def test_o13_internal_release_stays_available_on_a_v12_census(self) -> None:
+    def test_o13_internal_release_stays_available_on_a_census_without_the_close(self) -> None:
         # Mutants killed: the lease-close gate blocking an internal release
         # (it is not a new mutation), ai_group_release joining the
-        # new-mutation gate, or creating close debt on v12.
+        # new-mutation gate, or creating close debt on a census without the close.
         state = _bound_state()
         _announce(
             state,
