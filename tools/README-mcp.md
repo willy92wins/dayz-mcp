@@ -130,8 +130,8 @@ Read it after `restore_gameplay`, whose automatic verification remains camera-on
 `camera_path_release(command_id)` requires a lease, aborts only that playing id,
 restores camera/gameplay and returns `matched`; lease-end internal cleanup uses
 the same bridge command. `camera_set_focus` takes `camera_set`'s camera arguments,
-required `focus_distance`/`focus_blur`, and optional `focus_length` (default 750),
-`focus_length_near` (default 500) and `focus_depth_offset` (default 10), with the
+required `focus_distance`/`focus_blur`, and optional `focus_length` (default 450),
+`focus_length_near` (default 100) and `focus_depth_offset` (default 10), with the
 same validation and lease: all five focus values are at most 1e9, with distance
 above zero and blur and the three optional values non-negative, including as the
 bridge's 32-bit floats. These controls are listed

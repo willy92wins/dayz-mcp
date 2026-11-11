@@ -9807,10 +9807,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "focus_distance (metres, above 0, also as the 32-bit float the bridge "
         "reads) and focus_blur (0, or above 0 also as that float), each at most "
         "1e9, go together or not at all; one without the other is bad_args. "
-        "Optional focus_length (default 750), focus_length_near (default 500) "
-        "and focus_depth_offset (default 10), from vanilla's NEW Close up "
+        "Optional focus_length (default 450), focus_length_near (default 100) "
+        "and focus_depth_offset (default 10), from vanilla's Close up "
         "preset, take the same 0-or-above bound as focus_blur and require "
         "focus_distance and focus_blur (otherwise bad_args). "
+        "Measured in game: focus_length sets how much what lies beyond "
+        "focus_distance blurs and focus_length_near how much what lies nearer "
+        "blurs (2000 also blurs a subject at focus_distance); "
+        "focus_depth_offset 0 draws no blur. "
         "Given, the bridge applies vanilla's global depth of field through "
         "CGame.OverrideDOF(true, focus_distance, focus_length, "
         "focus_length_near, focus_blur, focus_depth_offset) after activating "
@@ -9939,7 +9943,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "be 0, or above 0 also as a 32-bit float, and at most 1e9",
                     )
                 )
-            raw_length = 750.0 if focus_length is None else focus_length
+            raw_length = 450.0 if focus_length is None else focus_length
             length = camera_path_contract.focus_blur(raw_length)
             if length is None:
                 raise ToolError(
@@ -9949,7 +9953,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "be 0, or above 0 also as a 32-bit float, and at most 1e9",
                     )
                 )
-            raw_length_near = 500.0 if focus_length_near is None else focus_length_near
+            raw_length_near = 100.0 if focus_length_near is None else focus_length_near
             length_near = camera_path_contract.focus_blur(raw_length_near)
             if length_near is None:
                 raise ToolError(
@@ -10040,8 +10044,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         f"{LEASE_TOOL_LINE} Set the client camera and vanilla's depth of field "
         "(CGame.OverrideDOF). Same modes, pose, FOV, settle and result as "
         "camera_set, with required focus_distance and focus_blur and optional "
-        "focus_length (default 750), focus_length_near (default 500) and "
-        "focus_depth_offset (default 10). Distance is metres above 0; blur and "
+        "focus_length (default 450), focus_length_near (default 100) and "
+        "focus_depth_offset (default 10), from vanilla's Close up preset. "
+        "Measured in game: focus_length sets how much what lies beyond "
+        "focus_distance blurs and focus_length_near how much what lies nearer "
+        "blurs (2000 also blurs a subject at focus_distance); "
+        "focus_depth_offset 0 draws no blur. Distance is metres above 0; blur and "
         "the three optional values are 0 or above; all five must stay valid as "
         "32-bit floats and be at most 1e9. Uses camera_set_focus on the "
         "bridge. Any DOF the bridge set is turned off on camera release, on "
