@@ -132,7 +132,13 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
         # + 1 from 173a (ai_group_spawn timeout_s; count is untyped so 1.5/true
         # read bad_args, pos and waypoints are lists, the rest strings).
-        self.assertEqual(len(rows), 239)
+        # + 3 from 0205 (chat_read marker/max_lines/timeout_s).
+        # + 1 from 726c (ui_pause timeout_s).
+        self.assertEqual(len(rows), 243)
+        self.assertIn(("chat_read", "marker", "int"), rows)
+        self.assertIn(("chat_read", "max_lines", "int"), rows)
+        self.assertIn(("chat_read", "timeout_s", "float"), rows)
+        self.assertIn(("ui_pause", "timeout_s", "float"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)

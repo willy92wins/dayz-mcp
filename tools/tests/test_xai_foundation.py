@@ -809,11 +809,12 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
         }
         if peer == "client":
             census.update(entries=[{"name": "action", "state": "clean"}],
-                          move_floor=7, weapon_floor=4, net_low=10, net_high=20, conn_gen=1)
+                          move_floor=7, weapon_floor=4, look_floor=3, net_low=10, net_high=20,
+                          conn_gen=1)
         else:
             census.update(entries=[{"name": "bots", "state": "clean"}],
                           floors=[{"net_low": 10, "net_high": 20, "conn_gen": 1,
-                                   "move_id": 7, "weapon_id": 4}])
+                                   "move_id": 7, "weapon_id": 4, "look_id": 3}])
         census.update(fields)
         return census
 
@@ -1039,7 +1040,7 @@ class ExpansionLeaseCloseV13Test(unittest.TestCase):
 
     def test_o11_neg_low_floors(self) -> None:
         self._late_negative(floors=[{"net_low": 10, "net_high": 20, "conn_gen": 1,
-                                     "move_id": 0, "weapon_id": 0}])
+                                     "move_id": 0, "weapon_id": 0, "look_id": 0}])
 
     def test_o11_neg_other_round(self) -> None:
         # A clean census carried by the previous round's close id does
