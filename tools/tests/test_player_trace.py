@@ -1239,6 +1239,7 @@ class PlayerTraceMessagesTest(unittest.TestCase):
                 "hud",
                 "gameplay",
                 "chat_read",
+                "ui_pause",
             ),
         )
         self.assertNotIn(FIELD, result_prune.OWNED_SCALAR_FIELDS)

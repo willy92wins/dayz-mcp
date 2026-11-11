@@ -163,6 +163,7 @@ CLIENT_COMMANDS = {
     "ui_click",
     "ui_reload_layout",
     "ui_focus",
+    "ui_pause",
     "ui_dialog",
     "action_hold",
     "action_hold_cancel",
@@ -1444,6 +1445,7 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
+    "ui_pause": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
 # could not be sent camera_path_release is not handed a play (d026).
@@ -1479,6 +1481,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "gameplay_state": _command_schema(_schema_variant()),
+    "ui_pause": _command_schema(_schema_variant()),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
     "key_press": _command_schema(

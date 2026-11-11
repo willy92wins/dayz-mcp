@@ -1656,6 +1656,7 @@ class PlayerMovePayloadTest(unittest.TestCase):
                 "hud",
                 "gameplay",
                 "chat_read",
+                "ui_pause",
             ),
         )
         self.assertEqual(

@@ -234,7 +234,7 @@ seat-verification channel is needed to support live deletion safely.
    `condition_failed` (see "The exit reality"). Confirm the client exit via
    `vehicle_telemetry` (`seated=false`) before `object_delete` of the fixture.
    `vehicle_release` only aborts the trace and clears drive-control state
-   (`MCPClientBridge.c:3304-3310`); it is not a get-out. Stop the ladder on a
+   (`MCPClientBridge.c:3314-3320`); it is not a get-out. Stop the ladder on a
    refused exit, `vehicle_seat_unverified`, `vehicle_client_seated` or
    `vehicle_eject_failed`, retaining the fixture id
    for retry. After a successful deletion verify continued client polling,
@@ -319,7 +319,7 @@ server replica is.
    the server side follows the client-owned car.
 7. Tear down as the client ladder does: confirm the client exit before
    `object_delete` of the registered fixture id. `vehicle_release` only
-   clears trace/control (`MCPClientBridge.c:3304-3310`); server-visible
+   clears trace/control (`MCPClientBridge.c:3314-3320`); server-visible
    occupants still go through the bridge's eject guard. Verify via telemetry
    (`seated=false`) and continued
    client polling, then `restore_gameplay` and the session release. Stop the

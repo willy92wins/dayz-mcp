@@ -153,6 +153,11 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
+    "ui_pause": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+        ("extra_mode", {"mode": "close"}, (False, "bad_args")),
+    ),
     "restore_gameplay": (
         ("valid_empty", {}, (True, None)),
         ("extra_mode", {"mode": "restore"}, (False, "bad_args")),

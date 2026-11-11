@@ -427,6 +427,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "ui_click": "ui_click",
         "ui_dialog": "ui_dialog",
         "ui_focus": "ui_focus",
+        "ui_pause": "ui_pause",
         "ui_reload_layout": "ui_reload_layout",
         "ui_set_text": "ui_set_text",
         "ui_tree": "ui_tree",

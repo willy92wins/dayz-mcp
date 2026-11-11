@@ -131,10 +131,12 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from B3 (player_find timeout_s; name is a string).
         # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
         # + 3 from 0205 (chat_read marker/max_lines/timeout_s).
-        self.assertEqual(len(rows), 241)
+        # + 1 from 726c (ui_pause timeout_s).
+        self.assertEqual(len(rows), 242)
         self.assertIn(("chat_read", "marker", "int"), rows)
         self.assertIn(("chat_read", "max_lines", "int"), rows)
         self.assertIn(("chat_read", "timeout_s", "float"), rows)
+        self.assertIn(("ui_pause", "timeout_s", "float"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
