@@ -303,10 +303,13 @@ class MCPArgs
 	ref array<ref MCPPathKey> keys;
 	string easing;
 	string path_id;
-	// camera_set_focus (702f): camera_set plus Camera.SetFocus. The command
-	// name, not these fields, turns focus on; both always travel with it.
+	// camera_set_focus (702f): camera_set plus CGame.OverrideDOF. The command
+	// name, not these fields, turns focus on; all five always travel with it.
 	float focus_distance;
 	float focus_blur;
+	float focus_length;
+	float focus_length_near;
+	float focus_depth_offset;
 	// hud_set (f427). The tool always sends it; an absent key reads false.
 	bool visible;
 	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
@@ -1688,7 +1691,7 @@ class MCPJob
 	float emote_started_s;
 	float emote_finished_s;
 	float wait_s;
-	// camera_set_focus: the apply also sets the camera's focus (702f).
+	// camera_set_focus: the apply also sets CGame.OverrideDOF (702f).
 	bool camera_focus;
 	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
 	ref MCPUiPause ui_pause;
