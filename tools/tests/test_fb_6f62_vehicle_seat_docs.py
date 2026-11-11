@@ -97,6 +97,19 @@ class SeatDescriptionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read query_all_players (in_vehicle) before you retry", description)
         self.assertNotIn("at most", description)
 
+    async def test_vehicle_enter_names_already_in_vehicle_from_the_source(self) -> None:
+        # 9/11 round, seq 17, 21, 62 and 74: a player already seated is refused
+        # before any StartCommand_Vehicle, with the code the bridge answers.
+        body = method_body(
+            BRIDGE, "protected bool DispatchVehicleEnter(MCPCommand command, MCPResult result)"
+        )
+        self.assertIn('result.error = "already_in_vehicle";', body)
+        self.assertIn(
+            "A player the server already reads in a vehicle (a vehicle command or in "
+            "transport) answers already_in_vehicle and is not seated again.",
+            _squashed(self.tools["vehicle_enter"].description or ""),
+        )
+
     async def test_vehicle_get_in_client_says_which_step_reads_which_seat(self) -> None:
         description = _squashed(self.tools["vehicle_get_in_client"].description or "")
         self.assertIn(

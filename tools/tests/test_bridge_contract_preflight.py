@@ -321,5 +321,68 @@ class DayzTestRunContractGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "succeeded")
 
 
+
+class IsolatedModDirContractGateTest(unittest.TestCase):
+    """The contract preflight must read an isolated mod_dir, not Workshop.
+
+    The official isolated route sets mod_dir and the worker omits the implicit
+    @DayZ_MCP under policy.mod_roots. The preflight must resolve the same
+    entries. These tests use the real host reader and temp folders only: no
+    fake of read_bridge_pbos.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.workshop = root / "Workshop"
+        self.isolated = root / "profiles" / "f3" / "@DayZ_MCP_F3"
+        (self.workshop / "@DayZ_MCP" / "addons").mkdir(parents=True)
+        (self.isolated / "addons").mkdir(parents=True)
+        self.addCleanup(setattr, nlt, "read_bridge_pbos", nlt.read_bridge_pbos)
+        nlt.read_bridge_pbos = nlt._read_bridge_pbos
+        self.policy = dataclasses.replace(
+            fixtures._policy(), mod_roots=(str(self.workshop),)
+        )
+
+    def _write_pbo(self, mod_root: Path, contract: str) -> None:
+        (mod_root / "addons" / "DayZ_MCP.pbo").write_bytes(_bridge_pbo(contract))
+
+    def _isolated_payload(self, **overrides: object) -> dict[str, object]:
+        return _payload(
+            mode="server",
+            build=False,
+            mod="DayZ_MCP",
+            base_mods=[],
+            extra_mods=[],
+            server_only_mods=[],
+            project_mod_override=False,
+            mod_dir=str(self.isolated),
+            **overrides,
+        )
+
+    def test_mod_dir_with_the_expected_contract_is_used_not_workshop(self) -> None:
+        self._write_pbo(self.workshop / "@DayZ_MCP", OTHER)
+        self._write_pbo(self.isolated, EXPECTED)
+        payload = self._isolated_payload()
+        self.assertEqual(
+            nlt.bridge_contract_mismatch(payload, self.policy, expected=EXPECTED),
+            (),
+        )
+        entries = nlt.effective_mod_entries(payload)
+        self.assertIn(str(self.isolated), entries)
+        self.assertNotIn("@DayZ_MCP", entries)
+
+    def test_mod_dir_with_another_commit_contract_is_a_mismatch(self) -> None:
+        self._write_pbo(self.workshop / "@DayZ_MCP", EXPECTED)
+        self._write_pbo(self.isolated, OTHER)
+        self.assertEqual(
+            nlt.bridge_contract_mismatch(
+                self._isolated_payload(), self.policy, expected=EXPECTED
+            ),
+            (OTHER,),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

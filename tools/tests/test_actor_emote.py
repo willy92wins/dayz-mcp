@@ -128,8 +128,16 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
             "What the client sees after wait_s changes nothing.",
             "A call that times out or is cancelled after the client received it still runs: "
             "the emote is not stopped.",
+            # 36fa.
+            "reason=is_emote_playing, can_play_emote or can_play_emote_client_check, and adds "
+            "stance= to observed=",
+            "rps_r, rps_p and rps_s play standing only",
+            "dabbing does not exist in DayZ 1.30",
         ):
             self.assertIn(part, self.tool.description)
+        # dabbing stays on the list: a later DayZ may register it again.
+        self.assertIn("dabbing", loopback.ACTOR_EMOTES)
+        self.assertIn(", dabbing,", self.tool.description)
         for name in ("surrender", "vomit"):
             self.assertNotIn(f", {name},", self.tool.description)
 
@@ -218,6 +226,46 @@ class ActorEmoteToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             str(_bridge_error({"ok": 0, "error": "emote_rejected", "emote_state": "rejected"}, "ui_tree")),
             "emote_rejected",
+        )
+
+    def test_a_rejected_new_emote_carries_its_check_and_stance(self) -> None:
+        # 36fa: the check that refused it and the player's stance then. Only
+        # their known names cross, and only on emote_rejected.
+        wire = {"ok": 0, "error": "emote_rejected", "emote_state": "rejected"}
+        for fields, expected in (
+            (
+                {"reason": "can_play_emote", "stance": "crouch"},
+                "emote_rejected; reason=can_play_emote; observed=emote_state=rejected stance=crouch",
+            ),
+            (
+                {"reason": "is_emote_playing", "stance": "raised_erect"},
+                "emote_rejected; reason=is_emote_playing; observed=emote_state=rejected stance=raised_erect",
+            ),
+            (
+                {"reason": "can_play_emote_client_check", "stance": ""},
+                "emote_rejected; reason=can_play_emote_client_check; observed=emote_state=rejected",
+            ),
+            ({"reason": "x y", "stance": "squat"}, "emote_rejected; observed=emote_state=rejected"),
+            ({"reason": "", "stance": ""}, "emote_rejected; observed=emote_state=rejected"),
+        ):
+            with self.subTest(fields=fields):
+                self.assertEqual(str(_bridge_error({**wire, **fields}, COMMAND)), expected)
+        extra = {"reason": "can_play_emote", "stance": "crouch"}
+        self.assertEqual(
+            str(_bridge_error({"ok": 0, "error": "no_emote_playing", "emote_state": "rejected", **extra}, COMMAND)),
+            "no_emote_playing; observed=emote_state=rejected",
+        )
+        self.assertEqual(
+            str(_bridge_error({"ok": 0, "error": "emote_timed_out", "emote_state": "timed_out", **extra}, COMMAND)),
+            "emote_timed_out; observed=emote_state=timed_out",
+        )
+        # The two keys are actor_emote's (reason action_hold's too) and no one else's.
+        self.assertEqual(result_prune.OWNED_SCALAR_FIELDS["stance"], frozenset({COMMAND}))
+        self.assertEqual(result_prune.OWNED_SCALAR_FIELDS["reason"], frozenset({COMMAND, "action_hold"}))
+        kept = result_prune.prune_unfilled_fields(COMMAND, {"ok": 1, "reason": "", "stance": ""})
+        self.assertEqual(kept, {"ok": 1, "reason": "", "stance": ""})
+        self.assertEqual(
+            result_prune.prune_unfilled_fields("player_move", {"ok": 1, "reason": "", "stance": ""}), {"ok": 1}
         )
 
     def test_the_watch_scalars_are_owned_by_actor_emote(self) -> None:
@@ -343,7 +391,12 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
             "if (!emotes.m_bEmoteIsPlaying)",
             'result.error = "no_emote_playing";',
             "if (!emotes.MCP_RequestEmoteEnd())",
-            "if (emotes.IsEmotePlaying() || !emotes.CanPlayEmote(emoteId) || !emotes.CanPlayEmoteClientCheck(emoteId))",
+            "if (emotes.IsEmotePlaying())",
+            'result.reason = "is_emote_playing";',
+            "if (!emotes.CanPlayEmote(emoteId))",
+            'result.reason = "can_play_emote";',
+            "if (!emotes.CanPlayEmoteClientCheck(emoteId))",
+            'result.reason = "can_play_emote_client_check";',
             "emotes.CreateEmoteCBFromMenu(emoteId);",
             'job.kind = "actor_emote";',
             "job.emote_request_s = GetGame().GetTickTime();",
@@ -351,8 +404,28 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
             "job.deadline_s = m_JobRunner.GetElapsedS() + waitS;",
             "m_JobRunner.AddJob(job);",
         )
-        self.assertEqual(body.count('result.error = "emote_rejected";'), 3)
-        self.assertEqual(body.count('result.emote_state = "rejected";'), 4)
+        self.assertEqual(body.count('result.error = "emote_rejected";'), 5)
+        self.assertEqual(body.count('result.emote_state = "rejected";'), 6)
+        # 36fa: each of the three checks refuses on its own block, which names
+        # it and the stance; no other refusal writes either.
+        for condition, reason in (
+            ("emotes.IsEmotePlaying()", "is_emote_playing"),
+            ("!emotes.CanPlayEmote(emoteId)", "can_play_emote"),
+            ("!emotes.CanPlayEmoteClientCheck(emoteId)", "can_play_emote_client_check"),
+        ):
+            with self.subTest(condition=condition):
+                needle = f"if ({condition})\n"
+                self.assertEqual(body.count(needle), 1)
+                block = body[body.index(needle) :]
+                block = block[: block.index("}") + 1]
+                self.assertEqual(
+                    " ".join(block.split()),
+                    f'if ({condition}) {{ result.ok = false; result.error = "emote_rejected"; '
+                    f'result.emote_state = "rejected"; result.reason = "{reason}"; '
+                    "result.stance = ActorEmoteStance(player); return true; }",
+                )
+        self.assertEqual(body.count("result.reason = "), 3)
+        self.assertEqual(body.count("result.stance = ActorEmoteStance(player);"), 3)
         self.assertEqual(body.count("CreateEmoteCBFromMenu("), 1)
         self.assertNotIn("PlayEmote(", body.replace("CanPlayEmote(", ""))
 
@@ -443,6 +516,9 @@ class ActorEmoteEnforceContractTest(unittest.TestCase):
 
 DISPATCH = "protected bool DispatchActorEmote(MCPCommand command, MCPResult result)"
 CATALOG = "protected int ActorEmoteId(string emote)"
+STANCE = "protected string ActorEmoteStance(PlayerBase player)"
+# DayZPlayerConstants' stance indexes, by name (the values do not matter here).
+STANCES = ("ERECT", "CROUCH", "PRONE", "RAISEDERECT", "RAISEDCROUCH", "RAISEDPRONE")
 WATCH = "protected bool ProcessActorEmoteJob(MCPJob job)"
 ANSWER = "protected void PostActorEmoteJob(MCPJob job, bool finished)"
 END_HELPER = "bool MCP_RequestEmoteEnd()"
@@ -464,7 +540,11 @@ RUNNER_METHODS = (
     "protected void ProcessJobs(MCPJobRunnerOwner owner)",
 )
 # The translator has no `new`: these two become factory calls, nothing else changes.
-_NEW = (("new MCPJob()", "NewJob()"), ("new MCPResult()", "NewResult()"))
+_NEW = (
+    ("new MCPJob()", "NewJob()"),
+    ("new MCPResult()", "NewResult()"),
+    ("new HumanMovementState()", "HumanMovementState()"),
+)
 # Nor does it assign a bare member: the runner's two members and the client's
 # m_DialogJob become fields of R and B.
 _MEMBERS = (
@@ -613,8 +693,9 @@ class _ClientModel:
     results are MCPMessages.c's MCPJob and MCPResult as declared, and a job's
     answer must be exactly one PostResult, on either path."""
 
-    def __init__(self, source: str, emotes: _Emotes, *, watching: int = 0) -> None:
+    def __init__(self, source: str, emotes: _Emotes, *, watching: int = 0, stance: str = "ERECT") -> None:
         self.emotes = emotes
+        self.stance = stance
         self.now = 100.0
         self.posted: list[_Instance] = []
         self.answers: list[str] = []
@@ -636,7 +717,10 @@ class _ClientModel:
             placeholder.deadline_s = 1.0e9
             self.R.m_Jobs.Insert(placeholder.id, placeholder)
             self._placeholders.add(placeholder.id)
-        player = SimpleNamespace(GetEmoteManager=lambda: emotes)
+        def movement_state(state: SimpleNamespace) -> None:
+            state.m_iStanceIdx = STANCES.index(self.stance) if self.stance in STANCES else 99
+
+        player = SimpleNamespace(GetEmoteManager=lambda: emotes, GetMovementState=movement_state)
         game = SimpleNamespace(GetPlayer=lambda: player, GetTickTime=lambda: self.now)
         names = (*loopback.ACTOR_EMOTES, "surrender", "vomit", "suicide")
         self.namespace: dict[str, object] = {
@@ -654,8 +738,12 @@ class _ClientModel:
             "NewJob": lambda: _new("MCPJob"),
             "NewResult": lambda: _new("MCPResult"),
             "PostResult": self.posted.append,
+            "HumanMovementState": lambda: SimpleNamespace(m_iStanceIdx=-1),
+            "DayZPlayerConstants": SimpleNamespace(
+                **{f"STANCEIDX_{name}": index for index, name in enumerate(STANCES)}
+            ),
         }
-        for signature in (CATALOG, DISPATCH, WATCH, ANSWER, *OWNER_METHODS):
+        for signature in (CATALOG, STANCE, DISPATCH, WATCH, ANSWER, *OWNER_METHODS):
             body = method_body(source, signature)
             for old, new in _NEW:
                 body = body.replace(old, new)
@@ -672,6 +760,7 @@ class _ClientModel:
                     "MCPResult",
                     "HumanCommandVehicle",
                     "Transport",
+                    "HumanMovementState",
                 ),
             )
         # The runner's owner is the client bridge. The answer's path is noted
@@ -970,7 +1059,35 @@ class ActorEmoteWatchModelTest(unittest.TestCase):
                 result = model.dispatch("nod")
                 self.assertIsNotNone(result)
                 self.assertEqual(_state(result), (False, "emote_rejected", "rejected"))
-                self.assertEqual((emotes.sent, model.jobs), ([], []))
+                self.assertEqual((result.reason.text, result.stance.text), ("is_emote_playing", "erect"))
+                self.assertEqual((emotes.sent, emotes.asked, model.jobs), ([], [], []))
+
+    def test_each_refusing_check_names_itself_and_the_stance(self) -> None:
+        # 36fa: rps_r was emote_rejected with nothing to tell which check
+        # refused it. Each check now refuses alone and names itself; the ones
+        # after it are not asked.
+        for emotes, reason, asked in (
+            (_Emotes(can_play=False), "can_play_emote", ["CanPlayEmote"]),
+            (_Emotes(client_check=False), "can_play_emote_client_check", ["CanPlayEmote", "CanPlayEmoteClientCheck"]),
+            (_Emotes(can_play=False, client_check=False), "can_play_emote", ["CanPlayEmote"]),
+        ):
+            for stance, name in (("ERECT", "erect"), ("CROUCH", "crouch"), ("PRONE", "prone"),
+                                 ("RAISEDERECT", "raised_erect"), ("RAISEDCROUCH", "raised_crouch"),
+                                 ("RAISEDPRONE", "raised_prone"), ("OTHER", "")):
+                with self.subTest(reason=reason, stance=stance):
+                    emotes.asked.clear()
+                    model = _ClientModel(self.source, emotes, stance=stance)
+                    result = model.dispatch("rps_r")
+                    self.assertIsNotNone(result)
+                    self.assertEqual(_state(result), (False, "emote_rejected", "rejected"))
+                    self.assertEqual((result.reason.text, result.stance.text), (reason, name))
+                    self.assertEqual([check for check, _id in emotes.asked], asked)
+                    self.assertEqual((emotes.sent, model.jobs), ([], []))
+        # Both checks passing plays it, and the answer names no reason.
+        emotes = _Emotes()
+        model = _ClientModel(self.source, emotes, stance="CROUCH")
+        self.assertIsNone(model.dispatch("rps_r"))
+        self.assertEqual(len(emotes.sent), 1)
 
     def test_a_watch_in_progress_refuses_every_emote_end_included(self) -> None:
         for emote, emotes in (("nod", _Emotes()), ("end", _Emotes(playing=True))):

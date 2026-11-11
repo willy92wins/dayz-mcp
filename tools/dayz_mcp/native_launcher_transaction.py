@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ntpath
 import os
 import re
@@ -13,6 +14,7 @@ from typing import Protocol
 from dayz_mcp import (
     dayz_test_modes,
     dayz_test_request,
+    dayz_test_worker,
     lease_supervisor,
     request_path_authority,
 )
@@ -261,18 +263,28 @@ def mode_starts_server(mode: str) -> bool:
 def effective_mod_entries(payload: dict[str, object]) -> tuple[str, ...]:
     """The -mod= list the sealed worker will build, in the order it builds it.
 
-    Same composition as dayz_test_worker._mods (dayz_test_worker.py:205-211),
-    read off the CANONICAL payload, where no_base_mods and the policy defaults
-    are already resolved (dayz_test_request.py:364-387). There is exactly one
-    source of the effective list: the document the launcher itself receives,
-    which is the very payload this function is handed.
+    Same composition as dayz_test_worker._mod_entries: base_mods, then the
+    implicit @<mod> unless project_mod_override or mod_dir is set, then the
+    isolated mod_dir when present, then extra_mods. Read off the CANONICAL
+    payload, where no_base_mods and the policy defaults are already resolved
+    (dayz_test_request.py:364-387). There is exactly one source of the
+    effective list: the document the launcher itself receives, which is the
+    very payload this function is handed.
     """
     base = payload.get("base_mods") or []
     extra = payload.get("extra_mods") or []
-    project = () if payload.get("project_mod_override") is True else ("@" + str(payload["mod"]),)
+    isolated = payload.get("mod_dir")
+    has_isolated = isinstance(isolated, str) and isolated
+    project = (
+        ()
+        if payload.get("project_mod_override") is True or has_isolated
+        else ("@" + str(payload["mod"]),)
+    )
+    isolated_entries = (str(isolated),) if has_isolated else ()
     return (
         *(str(item) for item in base),
         *project,
+        *isolated_entries,
         *(str(item) for item in extra),
     )
 
@@ -754,17 +766,33 @@ def bridge_contract_mismatch(
     Empty when the run starts no server, builds the bridge itself, or when no
     PBO it can read declares a contract. A relative bridge entry is read under
     every declared root, and one root that announces the expected contract is
-    enough.
+    enough. An isolated mod_dir is the project the worker loads, so it is read
+    even if its basename is not @DayZ_MCP, and the implicit @<mod> under
+    policy.mod_roots is omitted, as in dayz_test_worker._mod_entries.
     """
     if not mode_starts_server(str(payload["mode"])):
         return ()
     if payload.get("build") is True and str(payload["mod"]).casefold() == "dayz_mcp":
         return ()
     announced: set[str] = set()
+    isolated = payload.get("mod_dir")
+    isolated_key = (
+        ntpath.normcase(ntpath.normpath(str(isolated)))
+        if isinstance(isolated, str) and isolated
+        else None
+    )
     for entry in (*effective_mod_entries(payload), *payload.get("server_only_mods", [])):
-        if ntpath.basename(str(entry)).casefold() not in dayz_test_request._BRIDGE_BASENAMES:
+        entry_s = str(entry)
+        is_isolated = (
+            isolated_key is not None
+            and ntpath.normcase(ntpath.normpath(entry_s)) == isolated_key
+        )
+        if (
+            ntpath.basename(entry_s).casefold() not in dayz_test_request._BRIDGE_BASENAMES
+            and not is_isolated
+        ):
             continue
-        for path in _bridge_mod_paths(str(entry), policy):
+        for path in _bridge_mod_paths(entry_s, policy):
             try:
                 blobs = read_bridge_pbos(path)
             except OSError:
@@ -797,12 +825,55 @@ def preflight_bridge_contract_request(
     )
 
 
+def _accredit_runtime_paths(
+    parsed: dayz_test_request.ParsedDayzTestRequest,
+    *,
+    sealed_policies: tuple[
+        request_path_authority.SealedRequestProjectPolicy, ...
+    ],
+    worker_runtime: Callable[[str, str], object],
+) -> contextlib.AbstractContextManager[object]:
+    """Accredit what the roles load, not only the declared lists.
+
+    accredit_request_paths covers base_mods, extra_mods, server_mods and
+    server_only_mods. The official mod_dir, the implicit project mod and the
+    mission alias are only known after the worker runtime resolves them, so
+    each resolved directory must also sit under one sealed policy.mod_roots
+    entry. This is the same pair of checks the MCP preflight runs
+    (dayz_test_tool._execute_preflight); here it runs on the launch, before
+    the lease, so a mod_dir outside every mod_root never reaches -mod=.
+    A kill request starts no role and loads nothing.
+    """
+    if parsed.payload.get("kill") is True:
+        return contextlib.nullcontext()
+    selected = tuple(
+        item
+        for item in sealed_policies
+        if item.policy.mod == parsed.payload.get("mod")
+        and item.policy.dev_root == parsed.payload.get("dev_root")
+    )
+    if len(selected) != 1:
+        raise ValueError("invalid_dayz_test_path_authority")
+    runtime = worker_runtime(selected[0].policy.mod, selected[0].policy.dev_root)
+    try:
+        mission = dayz_test_worker._mission(parsed.payload, runtime)
+        directories = dayz_test_worker._effective_directories(
+            parsed.payload, runtime
+        )
+    except dayz_test_worker.DayzTestWorkerError:
+        raise ValueError("invalid_dayz_test_path_authority") from None
+    return request_path_authority.accredit_runtime_resolved_paths(
+        selected[0], directories=directories, mission=mission
+    )
+
+
 async def execute_native_launcher_transaction(
     raw_request: bytes,
     *,
     sealed_policies: tuple[
         request_path_authority.SealedRequestProjectPolicy, ...
     ],
+    worker_runtime: Callable[[str, str], object],
     control_client: _ControlClient,
     consumer: Callable[..., Awaitable[int]],
     max_wait_s: float | None = None,
@@ -811,7 +882,11 @@ async def execute_native_launcher_transaction(
     ]
     | None = None,
 ) -> int:
-    if type(sealed_policies) is not tuple or not callable(consumer):
+    if (
+        type(sealed_policies) is not tuple
+        or not callable(consumer)
+        or not callable(worker_runtime)
+    ):
         raise ValueError("invalid_native_launcher_transaction")
     semantic_policies = tuple(item.policy for item in sealed_policies)
     parsed = dayz_test_request.parse_dayz_test_request(
@@ -825,9 +900,13 @@ async def execute_native_launcher_transaction(
     # requests none is warned.
     enforce_vpp_preflight(parsed.payload, semantic_policies)
 
+    # The runtime-resolved directories (mod_dir included) are accredited next
+    # to the declared lists and stay pinned for the whole transaction.
     with request_path_authority.accredit_request_paths(
         parsed, policies=sealed_policies
-    ) as accredited_paths:
+    ) as accredited_paths, _accredit_runtime_paths(
+        parsed, sealed_policies=sealed_policies, worker_runtime=worker_runtime
+    ):
         response = await control_client.session_acquire_wait(
             "dayz-test",
             max_wait_s=max_wait_s,

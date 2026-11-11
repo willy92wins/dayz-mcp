@@ -774,7 +774,16 @@ modded class CarScript
 						EngineStart();
 					}
 				}
-				engineReady = false;
+				// 3efe: never ready below idle was the rule of vanilla's
+				// DIAG_DEVELOPER autopilot, written for a manual gearbox; in
+				// the 9/11 round it kept an automatic in D at 616.5 rpm (idle
+				// 625) from ever getting throttle. Vanilla counts a stall as
+				// engine on with rpm < 1, so below idle an automatic is ready
+				// once its engine runs; a manual keeps the old rule.
+				if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)
+				{
+					engineReady = false;
+				}
 			}
 
 			// Brakes do not wait for the engine (3cc4).
