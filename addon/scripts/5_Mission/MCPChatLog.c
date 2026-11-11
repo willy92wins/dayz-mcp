@@ -21,7 +21,9 @@ class MCPChatLog
 	// MAX_BODY_BYTES = 1048576 (tools/dayz_mcp/loopback.py:474, checked at :9313),
 	// leaving 53248 bytes for the rest of the result. Vanilla's pieces of text
 	// are at most the engine's chat length (chat.c:105-120) and senders are
-	// names, so a vanilla line is never cut; any shortened entry sets cut = true.
+	// names, so the LINE_* caps never cut a vanilla piece. A piece that
+	// Chat.Add split in the middle of a multibyte character is sanitized
+	// here and then has cut = true; any other shortened entry also sets cut.
 	const int LINE_SENDER_MAX_CHARS = 1024;
 	const int LINE_TEXT_MAX_CHARS = 16384;
 	const int DROP_SENDER_MAX_CHARS = 64;
@@ -67,6 +69,121 @@ class MCPChatLog
 		return m_TotalLines;
 	}
 
+	// Keep only complete, valid UTF-8 sequences (1-4 bytes, no overlong
+	// forms, no surrogates U+D800-U+DFFF, nothing above U+10FFFF). Invalid
+	// bytes are dropped one at a time so a following valid sequence is still
+	// kept. Byte Length/Substring and ToAscii are used here on purpose: the
+	// Utf8 variants have no documented behaviour on the invalid byte pieces
+	// vanilla Chat.Add can hand us. removed is true when any byte was dropped.
+	protected string KeepValidUtf8Bytes(string value, out bool removed)
+	{
+		string cleaned;
+		string leadChar;
+		string contChar;
+		int total;
+		int index;
+		int lead;
+		int cont;
+		int seqLen;
+		int codePoint;
+		int contIndex;
+		bool seqValid;
+
+		cleaned = "";
+		removed = false;
+		total = value.Length();
+		index = 0;
+		while (index < total)
+		{
+			leadChar = value.Substring(index, 1);
+			lead = leadChar.ToAscii();
+			if (lead < 0)
+			{
+				lead = lead + 256;
+			}
+			if (lead >= 0 && lead < 128)
+			{
+				cleaned = cleaned + leadChar;
+				index = index + 1;
+			}
+			else
+			{
+				seqLen = 0;
+				codePoint = 0;
+				if (lead >= 194 && lead <= 223)
+				{
+					seqLen = 2;
+					codePoint = lead - 192;
+				}
+				else if (lead >= 224 && lead <= 239)
+				{
+					seqLen = 3;
+					codePoint = lead - 224;
+				}
+				else if (lead >= 240 && lead <= 244)
+				{
+					seqLen = 4;
+					codePoint = lead - 240;
+				}
+				seqValid = false;
+				if (seqLen > 0 && index + seqLen <= total)
+				{
+					seqValid = true;
+					contIndex = 1;
+					while (contIndex < seqLen && seqValid)
+					{
+						contChar = value.Substring(index + contIndex, 1);
+						cont = contChar.ToAscii();
+						if (cont < 0)
+						{
+							cont = cont + 256;
+						}
+						if (cont < 128 || cont > 191)
+						{
+							seqValid = false;
+						}
+						else
+						{
+							codePoint = codePoint * 64 + (cont - 128);
+						}
+						contIndex = contIndex + 1;
+					}
+					if (seqValid && seqLen == 2 && codePoint < 128)
+					{
+						seqValid = false;
+					}
+					if (seqValid && seqLen == 3 && codePoint < 2048)
+					{
+						seqValid = false;
+					}
+					if (seqValid && seqLen == 3 && codePoint >= 55296 && codePoint <= 57343)
+					{
+						seqValid = false;
+					}
+					if (seqValid && seqLen == 4 && codePoint < 65536)
+					{
+						seqValid = false;
+					}
+					if (seqValid && seqLen == 4 && codePoint > 1114111)
+					{
+						seqValid = false;
+					}
+				}
+				if (seqValid)
+				{
+					cleaned = cleaned + value.Substring(index, seqLen);
+					index = index + seqLen;
+				}
+				else
+				{
+					removed = true;
+					index = index + 1;
+				}
+			}
+		}
+		return cleaned;
+	}
+
 	void RecordLine(ChatMessageEventParams params)
 	{
 		MCPChatLine entry;
@@ -75,6 +192,7 @@ class MCPChatLog
 		string sender;
 		string text;
 		bool cut;
+		bool removed;
 		if (!params)
 		{
 			return;
@@ -93,12 +211,22 @@ class MCPChatLog
 
 		cut = false;
 		sender = params.param2;
+		sender = KeepValidUtf8Bytes(sender, removed);
+		if (removed)
+		{
+			cut = true;
+		}
 		if (sender.LengthUtf8() > LINE_SENDER_MAX_CHARS)
 		{
 			sender = sender.SubstringUtf8(0, LINE_SENDER_MAX_CHARS);
 			cut = true;
 		}
 		text = params.param3;
+		text = KeepValidUtf8Bytes(text, removed);
+		if (removed)
+		{
+			cut = true;
+		}
 		if (text.LengthUtf8() > LINE_TEXT_MAX_CHARS)
 		{
 			text = text.SubstringUtf8(0, LINE_TEXT_MAX_CHARS);
@@ -175,6 +303,7 @@ class MCPChatLog
 		string sender;
 		string text;
 		bool cut;
+		bool removed;
 		if (m_LastSeq >= MAX_SEQ)
 		{
 			return;
@@ -196,12 +325,22 @@ class MCPChatLog
 		if (params)
 		{
 			sender = params.param2;
+			sender = KeepValidUtf8Bytes(sender, removed);
+			if (removed)
+			{
+				cut = true;
+			}
 			if (sender.LengthUtf8() > DROP_SENDER_MAX_CHARS)
 			{
 				sender = sender.SubstringUtf8(0, DROP_SENDER_MAX_CHARS);
 				cut = true;
 			}
 			text = params.param3;
+			text = KeepValidUtf8Bytes(text, removed);
+			if (removed)
+			{
+				cut = true;
+			}
 			if (text.LengthUtf8() > DROP_TEXT_MAX_CHARS)
 			{
 				text = text.SubstringUtf8(0, DROP_TEXT_MAX_CHARS);

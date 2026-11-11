@@ -587,9 +587,112 @@ def verify_payload_bound_constants(source: str) -> None:
     verify_payload_byte_budget(source)
 
 
+def verify_keep_valid_utf8_bytes_helper(source: str) -> None:
+    """Verify KeepValidUtf8Bytes walks bytes, drops invalid bytes one by one, and reports removal via out bool."""
+    cleaned = _blank_strings(_strip_comments(source))
+    log_body = _class_body(cleaned, r"^\s*class\s+MCPChatLog\b")
+    helper_body = _method_body(
+        log_body, "string KeepValidUtf8Bytes(string value, out bool removed)"
+    )
+    _assert_all_control_headers_braced(helper_body)
+    if re.search(r"\bSubstringUtf8\s*\(|\bLengthUtf8\s*\(", helper_body):
+        raise AssertionError(
+            "KeepValidUtf8Bytes must use byte Length/Substring rather than LengthUtf8/SubstringUtf8"
+        )
+    if ".Length()" not in helper_body or ".Substring(" not in helper_body:
+        raise AssertionError(
+            "KeepValidUtf8Bytes must walk bytes with Length()/Substring()"
+        )
+    if ".ToAscii()" not in helper_body:
+        raise AssertionError("KeepValidUtf8Bytes must read byte values with ToAscii()")
+    for token in (
+        "removed = false",
+        "removed = true",
+        "194",
+        "223",
+        "224",
+        "239",
+        "240",
+        "244",
+        "128",
+        "191",
+        "2048",
+        "55296",
+        "57343",
+        "65536",
+        "1114111",
+    ):
+        if token not in helper_body:
+            raise AssertionError(
+                f"KeepValidUtf8Bytes must contain {token!r} (valid UTF-8 range check)"
+            )
+    if len(re.findall(r"\breturn\b", helper_body)) != 1:
+        raise AssertionError("KeepValidUtf8Bytes must return the cleaned string once")
+    if not re.search(r"\breturn\s+cleaned\s*;", helper_body):
+        raise AssertionError(
+            "KeepValidUtf8Bytes must return the sanitized local cleaned, not the original value"
+        )
+
+
+def _verify_sanitize_call(
+    body: str,
+    top_stmts: list[str],
+    local_var: str,
+    init_end: int,
+    cap_guard_start: int,
+    label: str,
+) -> None:
+    """Verify local = KeepValidUtf8Bytes(local, removed); if (removed) { cut = true; } before the cap guard."""
+    sanitize_re = re.compile(
+        rf"^\s*{re.escape(local_var)}\s*=\s*KeepValidUtf8Bytes\s*\(\s*"
+        rf"{re.escape(local_var)}\s*,\s*([A-Za-z_]\w*)\s*\)\s*;\s*$",
+        re.M,
+    )
+    sanitize_matches = list(sanitize_re.finditer(body))
+    if len(sanitize_matches) != 1:
+        raise AssertionError(
+            f"{label} must sanitize {local_var} with KeepValidUtf8Bytes({local_var}, <removed>) once"
+        )
+    sanitize = sanitize_matches[0]
+    removed_var = sanitize.group(1)
+    if sanitize.start() < init_end or sanitize.end() > cap_guard_start:
+        raise AssertionError(
+            f"{label} must call KeepValidUtf8Bytes for {local_var} after copying it and before its LengthUtf8 cap guard"
+        )
+    if (
+        f"{local_var} = KeepValidUtf8Bytes({local_var}, {removed_var})"
+        not in top_stmts
+    ):
+        raise AssertionError(
+            f"{label} KeepValidUtf8Bytes call for {local_var} must be unconditional"
+        )
+    removed_re = re.compile(rf"\bif\s*\(\s*{re.escape(removed_var)}\s*\)")
+    removed_matches = [
+        m
+        for m in removed_re.finditer(body)
+        if sanitize.end() <= m.start() < cap_guard_start
+    ]
+    if len(removed_matches) != 1:
+        raise AssertionError(
+            f"{label} must set cut = true when KeepValidUtf8Bytes removes bytes from {local_var}"
+        )
+    removed_block, removed_end = _block_after_strict(body, removed_matches[0].end())
+    if re.match(r"^\s*else\b", body[removed_end:]):
+        raise AssertionError(
+            f"{label} KeepValidUtf8Bytes removed guard for {local_var} must not have an else branch"
+        )
+    if "{" in removed_block or _top_level_simple_statements(removed_block) != [
+        "cut = true"
+    ]:
+        raise AssertionError(
+            f"{label} must only set cut = true inside the KeepValidUtf8Bytes removed guard for {local_var}"
+        )
+
+
 def verify_record_line_utf8_caps(source: str) -> None:
-    """Verify RecordLine caps sender and text with SubstringUtf8 when LengthUtf8 exceeds its cap and sets entry.cut."""
+    """Verify RecordLine sanitizes then caps sender and text with SubstringUtf8 when LengthUtf8 exceeds its cap and sets entry.cut."""
     verify_payload_bound_constants(source)
+    verify_keep_valid_utf8_bytes_helper(source)
     cleaned = _blank_strings(_strip_comments(source))
     log_body = _class_body(cleaned, r"^\s*class\s+MCPChatLog\b")
     line_body = _method_body(
@@ -685,6 +788,14 @@ def verify_record_line_utf8_caps(source: str) -> None:
             raise AssertionError(
                 f"RecordLine {cap_const} guard must execute unconditionally at top level"
             )
+        _verify_sanitize_call(
+            line_body,
+            line_top_stmts,
+            local_var,
+            init_matches[0].end(),
+            guard_matches[0].start(),
+            "RecordLine",
+        )
         cap_block, cap_end = _block_after_strict(line_body, guard_matches[0].end())
         max_cap_end = max(max_cap_end, cap_end)
         if re.match(r"^\s*else\b", line_body[cap_end:]):
@@ -704,9 +815,9 @@ def verify_record_line_utf8_caps(source: str) -> None:
             raise AssertionError(
                 f"RecordLine must cut {local_var} with SubstringUtf8(0, {cap_const}) and set cut = true inside the LengthUtf8() > {cap_const} guard"
             )
-        if len(re.findall(rf"(?<!\.)\b{re.escape(local_var)}\s*=(?!=)", line_body)) != 2:
+        if len(re.findall(rf"(?<!\.)\b{re.escape(local_var)}\s*=(?!=)", line_body)) != 3:
             raise AssertionError(
-                f"{local_var} must only be assigned from params.{param_field} and SubstringUtf8 ({cap_const})"
+                f"{local_var} must only be assigned from params.{param_field}, KeepValidUtf8Bytes and SubstringUtf8 ({cap_const})"
             )
         assign_re = re.compile(
             rf"^\s*entry\.{entry_field}\s*=\s*{re.escape(local_var)}\s*;\s*$",
@@ -731,9 +842,9 @@ def verify_record_line_utf8_caps(source: str) -> None:
                 f"entry.{entry_field} must be assigned once in RecordLine ({cap_const})"
             )
 
-    if len(re.findall(r"(?<!\.)\bcut\s*=(?!=)", line_body)) != 3:
+    if len(re.findall(r"(?<!\.)\bcut\s*=(?!=)", line_body)) != 5:
         raise AssertionError(
-            "RecordLine must assign cut only at cut = false and cut = true in the two cap guards"
+            "RecordLine must assign cut only at cut = false, cut = true in the two KeepValidUtf8Bytes removed guards, and cut = true in the two cap guards"
         )
     cut_assign_matches = list(
         re.finditer(r"^\s*entry\.cut\s*=\s*cut\s*;\s*$", line_body, re.M)
@@ -752,8 +863,9 @@ def verify_record_line_utf8_caps(source: str) -> None:
 
 
 def verify_record_drop_utf8_caps(source: str) -> None:
-    """Verify RecordDrop caps sender and text with SubstringUtf8 when LengthUtf8 exceeds its cap and sets entry.cut."""
+    """Verify RecordDrop sanitizes then caps sender and text with SubstringUtf8 when LengthUtf8 exceeds its cap and sets entry.cut."""
     verify_payload_bound_constants(source)
+    verify_keep_valid_utf8_bytes_helper(source)
     cleaned = _blank_strings(_strip_comments(source))
     log_body = _class_body(cleaned, r"^\s*class\s+MCPChatLog\b")
 
@@ -843,6 +955,14 @@ def verify_record_drop_utf8_caps(source: str) -> None:
             raise AssertionError(
                 f"RecordDrop {cap_const} guard must execute unconditionally inside if (params)"
             )
+        _verify_sanitize_call(
+            params_block,
+            params_top_stmts,
+            local_var,
+            init_matches[0].end(),
+            guard_matches[0].start(),
+            "RecordDrop",
+        )
         cap_block, cap_end = _block_after_strict(params_block, guard_matches[0].end())
         if re.match(r"^\s*else\b", params_block[cap_end:]):
             raise AssertionError(
@@ -861,9 +981,9 @@ def verify_record_drop_utf8_caps(source: str) -> None:
             raise AssertionError(
                 f"RecordDrop must cut {local_var} with SubstringUtf8(0, {cap_const}) and set cut = true inside the LengthUtf8() > {cap_const} guard"
             )
-        if len(re.findall(rf"(?<!\.)\b{re.escape(local_var)}\s*=(?!=)", drop_body)) != 2:
+        if len(re.findall(rf"(?<!\.)\b{re.escape(local_var)}\s*=(?!=)", drop_body)) != 3:
             raise AssertionError(
-                f"{local_var} must only be assigned from params.{param_field} and SubstringUtf8"
+                f"{local_var} must only be assigned from params.{param_field}, KeepValidUtf8Bytes and SubstringUtf8"
             )
         assign_re = re.compile(
             rf"^\s*entry\.{entry_field}\s*=\s*{re.escape(local_var)}\s*;\s*$",
@@ -886,9 +1006,9 @@ def verify_record_drop_utf8_caps(source: str) -> None:
                 f"entry.{entry_field} must only be defaulted and assigned once inside if (params)"
             )
 
-    if len(re.findall(r"(?<!\.)\bcut\s*=(?!=)", drop_body)) != 3:
+    if len(re.findall(r"(?<!\.)\bcut\s*=(?!=)", drop_body)) != 5:
         raise AssertionError(
-            "RecordDrop must assign cut only at cut = false and cut = true in the two cap guards"
+            "RecordDrop must assign cut only at cut = false, cut = true in the two KeepValidUtf8Bytes removed guards, and cut = true in the two cap guards"
         )
     cut_assign_matches = list(
         re.finditer(r"^\s*entry\.cut\s*=\s*cut\s*;\s*$", drop_body, re.M)
@@ -1431,11 +1551,11 @@ class ChatReadEnforceContractTest(unittest.TestCase):
         # Negative control (D5): guard placed after increment in RecordDrop.
         late_drop_guard = self._mutate_executable(
             self.chat_log_src,
-            "\t\tstring sender;\n\t\tstring text;\n\t\tbool cut;\n"
+            "\t\tstring sender;\n\t\tstring text;\n\t\tbool cut;\n\t\tbool removed;\n"
             "\t\tif (m_LastSeq >= MAX_SEQ)\n\t\t{\n\t\t\treturn;\n\t\t}\n"
             "\t\tnowMs = 0;\n\t\tif (GetGame())\n\t\t{\n\t\t\tnowMs = GetGame().GetTime();\n\t\t}\n"
             "\t\tm_LastSeq = m_LastSeq + 1;",
-            "\t\tstring sender;\n\t\tstring text;\n\t\tbool cut;\n"
+            "\t\tstring sender;\n\t\tstring text;\n\t\tbool cut;\n\t\tbool removed;\n"
             "\t\tnowMs = 0;\n\t\tif (GetGame())\n\t\t{\n\t\t\tnowMs = GetGame().GetTime();\n\t\t}\n"
             "\t\tm_LastSeq = m_LastSeq + 1;\n"
             "\t\tif (m_LastSeq >= MAX_SEQ)\n\t\t{\n\t\t\treturn;\n\t\t}",
@@ -1571,9 +1691,13 @@ class ChatReadEnforceContractTest(unittest.TestCase):
         record_line_fields_block = (
             "\t\tcut = false;\n"
             "\t\tsender = params.param2;\n"
+            "\t\tsender = KeepValidUtf8Bytes(sender, removed);\n"
+            "\t\tif (removed)\n\t\t{\n\t\t\tcut = true;\n\t\t}\n"
             "\t\tif (sender.LengthUtf8() > LINE_SENDER_MAX_CHARS)\n"
             "\t\t{\n\t\t\tsender = sender.SubstringUtf8(0, LINE_SENDER_MAX_CHARS);\n\t\t\tcut = true;\n\t\t}\n"
             "\t\ttext = params.param3;\n"
+            "\t\ttext = KeepValidUtf8Bytes(text, removed);\n"
+            "\t\tif (removed)\n\t\t{\n\t\t\tcut = true;\n\t\t}\n"
             "\t\tif (text.LengthUtf8() > LINE_TEXT_MAX_CHARS)\n"
             "\t\t{\n\t\t\ttext = text.SubstringUtf8(0, LINE_TEXT_MAX_CHARS);\n\t\t\tcut = true;\n\t\t}\n\n"
             "\t\tentry = new MCPChatLine();\n"
@@ -1608,6 +1732,8 @@ class ChatReadEnforceContractTest(unittest.TestCase):
             record_line_fields_block,
             "\t\tcut = false;\n"
             "\t\tsender = params.param2;\n"
+            "\t\tsender = KeepValidUtf8Bytes(sender, removed);\n"
+            "\t\tif (removed)\n\t\t{\n\t\t\tcut = true;\n\t\t}\n"
             "\t\tif (sender.LengthUtf8() > LINE_SENDER_MAX_CHARS)\n"
             "\t\t{\n\t\t\tsender = sender.SubstringUtf8(0, LINE_SENDER_MAX_CHARS);\n\t\t\tcut = true;\n\t\t}\n\n"
             "\t\tentry = new MCPChatLine();\n"
@@ -1768,6 +1894,69 @@ class ChatReadEnforceContractTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "DROP_TEXT_MAX_CHARS"):
             verify_record_drop_utf8_caps(unconditional_drop_cut)
 
+        # Negative controls (S1): sanitize call and removed->cut guard are required.
+        verify_keep_valid_utf8_bytes_helper(self.chat_log_src)
+
+        missing_line_sanitize = self._mutate_executable(
+            self.chat_log_src,
+            "\t\tsender = KeepValidUtf8Bytes(sender, removed);\n"
+            "\t\tif (removed)\n\t\t{\n\t\t\tcut = true;\n\t\t}\n",
+            "",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_record_line_utf8_caps(missing_line_sanitize)
+
+        line_sanitize_no_cut = self._mutate_executable(
+            self.chat_log_src,
+            "\t\ttext = KeepValidUtf8Bytes(text, removed);\n"
+            "\t\tif (removed)\n\t\t{\n\t\t\tcut = true;\n\t\t}\n",
+            "\t\ttext = KeepValidUtf8Bytes(text, removed);\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_record_line_utf8_caps(line_sanitize_no_cut)
+
+        missing_drop_sanitize = self._mutate_executable(
+            self.chat_log_src,
+            "\t\t\ttext = KeepValidUtf8Bytes(text, removed);\n"
+            "\t\t\tif (removed)\n\t\t\t{\n\t\t\t\tcut = true;\n\t\t\t}\n",
+            "",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_record_drop_utf8_caps(missing_drop_sanitize)
+
+        drop_sanitize_no_cut = self._mutate_executable(
+            self.chat_log_src,
+            "\t\t\tsender = KeepValidUtf8Bytes(sender, removed);\n"
+            "\t\t\tif (removed)\n\t\t\t{\n\t\t\t\tcut = true;\n\t\t\t}\n",
+            "\t\t\tsender = KeepValidUtf8Bytes(sender, removed);\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_record_drop_utf8_caps(drop_sanitize_no_cut)
+
+        helper_utf8_walk = self._mutate_executable(
+            self.chat_log_src,
+            "total = value.Length();",
+            "total = value.LengthUtf8();",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_keep_valid_utf8_bytes_helper(helper_utf8_walk)
+
+        helper_overlong_lead = self._mutate_executable(
+            self.chat_log_src,
+            "if (lead >= 194 && lead <= 223)",
+            "if (lead >= 192 && lead <= 223)",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_keep_valid_utf8_bytes_helper(helper_overlong_lead)
+
+        helper_return_value = self._mutate_executable(
+            self.chat_log_src,
+            "return cleaned;",
+            "return value;",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_keep_valid_utf8_bytes_helper(helper_return_value)
+
         # Negative controls (D13e): RecordDrop never sets cut or omits cut on shorten.
         record_drop_fields_block = (
             "\t\tcut = false;\n"
@@ -1780,9 +1969,13 @@ class ChatReadEnforceContractTest(unittest.TestCase):
             "\t\tif (params)\n"
             "\t\t{\n"
             "\t\t\tsender = params.param2;\n"
+            "\t\t\tsender = KeepValidUtf8Bytes(sender, removed);\n"
+            "\t\t\tif (removed)\n\t\t\t{\n\t\t\t\tcut = true;\n\t\t\t}\n"
             "\t\t\tif (sender.LengthUtf8() > DROP_SENDER_MAX_CHARS)\n"
             "\t\t\t{\n\t\t\t\tsender = sender.SubstringUtf8(0, DROP_SENDER_MAX_CHARS);\n\t\t\t\tcut = true;\n\t\t\t}\n"
             "\t\t\ttext = params.param3;\n"
+            "\t\t\ttext = KeepValidUtf8Bytes(text, removed);\n"
+            "\t\t\tif (removed)\n\t\t\t{\n\t\t\t\tcut = true;\n\t\t\t}\n"
             "\t\t\tif (text.LengthUtf8() > DROP_TEXT_MAX_CHARS)\n"
             "\t\t\t{\n\t\t\t\ttext = text.SubstringUtf8(0, DROP_TEXT_MAX_CHARS);\n\t\t\t\tcut = true;\n\t\t\t}\n"
             "\t\t\tentry.channel = params.param1;\n"
