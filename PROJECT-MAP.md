@@ -103,7 +103,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `GATES.md` - 4 KB, touched 2026-11-01 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-11-11 (UTC)
 - `QUICKSTART.md` - 6 KB, touched 2026-11-05 (UTC)
-- `README.md` - 37 KB, touched 2026-11-11 (UTC)
+- `README.md` - 39 KB, touched 2026-11-11 (UTC)
 
 ## Reparse points omitidos
 
