@@ -130,7 +130,8 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 1 from 035a (vehicle_telemetry pos; timeout_s was already counted).
         # + 1 from B3 (player_find timeout_s; name is a string).
         # + 12 from 263-T (gameplay_state, camera_path_release, camera_set_focus).
-        self.assertEqual(len(rows), 238)
+        # + 6 from 702f OverrideDOF (camera_set and camera_set_focus focus_length/focus_length_near/focus_depth_offset).
+        self.assertEqual(len(rows), 244)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)
@@ -160,8 +161,15 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("survivor_drive", "heading", "float"), rows)
         self.assertIn(("survivor_drive", "timeout_s", "float"), rows)
         self.assertIn(("camera_path_play", "timeout_s", "float"), rows)
-        self.assertIn(("camera_set", "focus_distance", "float"), rows)
-        self.assertIn(("camera_set", "focus_blur", "float"), rows)
+        for tool in ("camera_set", "camera_set_focus"):
+            for name in (
+                "focus_distance",
+                "focus_blur",
+                "focus_length",
+                "focus_length_near",
+                "focus_depth_offset",
+            ):
+                self.assertIn((tool, name, "float"), rows)
         self.assertIn(("hud_set", "timeout_s", "float"), rows)
         self.assertIn(("hands_attach", "object_id", "int"), rows)
         self.assertIn(("hands_attach", "timeout_s", "float"), rows)
