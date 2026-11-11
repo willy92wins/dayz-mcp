@@ -37,6 +37,7 @@ READ_ONLY_COMMANDS = frozenset(
         "telemetry_read",
         "query_get_in_condition",
         "camera_get",
+        "chat_read",
         "gameplay_state",
         "vehicle_telemetry",
         # F2.1: not a bridge command -- it reads host log files and never
