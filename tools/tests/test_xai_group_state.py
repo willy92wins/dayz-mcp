@@ -1,7 +1,9 @@
 """Expansion AI adapter ai_group_state (plan 3.4/4, ficha 90f9).
 
 Offline criteria O4 and E7, plus the O13 part that needs no v13
-lease-close activation: the read stays available on a v12 census.
+lease-close activation: the read stays available when the census
+announces no close support, while a real bridge v12 poll is stopped
+earlier by the version gate.
 
 Each test names the mutant it kills in its docstring; the commit message
 carries the criterion -> test -> mutant table.
@@ -9,10 +11,12 @@ carries the criterion -> test -> mutant table.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -22,7 +26,7 @@ if str(_TOOLS_DIR) not in sys.path:
 
 from mcp.server.fastmcp.exceptions import ToolError
 
-from dayz_mcp import loopback, server
+from dayz_mcp import daemon, loopback, server
 from dayz_mcp.bridge_readiness import (
     EXPANSION_AI_VERB_BITS,
     EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH,
@@ -30,8 +34,17 @@ from dayz_mcp.bridge_readiness import (
     parse_xai,
 )
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
+from dayz_mcp.process_lifecycle import (
+    ProcessLifecycle,
+    ProcessRecord,
+    RunManifestStore,
+    RunRecord,
+    _ADOPTABLE_STATES,
+)
+from dayz_mcp.runtime_state import RuntimePaths
 from dayz_mcp.session_coordination import (
     READ_ONLY_COMMANDS,
+    SessionCoordinator,
     command_requires_lease,
 )
 from tests._addon_paths import addon_root
@@ -43,13 +56,23 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
-from tests.fence_helpers import bound_queue
-from tests.lease_helpers import FakeClock, _coord, _identity
+from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
+from tests.lease_helpers import (
+    AuditSink,
+    FakeClock,
+    SequentialIds,
+    _coord,
+    _identity,
+)
+from tests.lifecycle_helpers import Guard, Launcher, Sequence, stamp_launcher
 from tests.mcp_helpers import _content_json
+from tests.steam_helpers import FakeSteamGate
 from tests.xai_helpers import (
     adapter_census,
     announce as _shared_announce,
     bound_state as _shared_bound_state,
+    wire_caps,
+    xai_wire,
 )
 
 STATE = "ai_group_state"
@@ -160,12 +183,16 @@ class AiGroupStateToolTest(unittest.TestCase):
 
 
 class AiGroupStateAuthorizeTest(unittest.TestCase):
-    """O4 (authorize part): the real coordinator, with and without a lease."""
+    """O4 (authorize + managed-run fence): coordinator authorize vs idle run."""
 
     def test_o4_authorize_without_token_and_after_release(self) -> None:
-        # Mutants killed: ai_group_state absent from READ_ONLY_COMMANDS
-        # (authorize would answer lease_required without a token), and a
-        # read that only works while its caller holds a lease.
+        """Coordinator authorize alone: ai_group_state passes without a token
+        and after session_release (a managed run's idle fence is covered below).
+
+        Mutants killed: ai_group_state absent from READ_ONLY_COMMANDS
+        (authorize would answer lease_required without a token), and a
+        coordinator read check that only works while its caller holds a lease.
+        """
         self.assertIn(STATE, READ_ONLY_COMMANDS)
         self.assertFalse(command_requires_lease(STATE))
         coordinator = _coord(FakeClock(), attached=True)
@@ -187,6 +214,164 @@ class AiGroupStateAuthorizeTest(unittest.TestCase):
         denied_after = coordinator.authorize(client, None, "ai_group_spawn")
         self.assertFalse(denied_after.allowed)
         self.assertEqual(denied_after.error, "lease_required")
+
+    def test_o4_managed_run_enqueues_before_release_and_fences_after_release(
+        self,
+    ) -> None:
+        """Managed-run idle fence: before session_release ai_group_state
+        enqueues without a lease token; after daemon cleanup_begin ->
+        begin_release_owner leaves the run RUNNING_IDLE, enqueue answers
+        run_not_owned with the standard hint, matching players_visibility.
+
+        Mutant killed: promising or admitting lease-free reads on an idle
+        managed run without updating the documented idle-run fence contract.
+        """
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        env = patch.dict(
+            os.environ, {"DAYZ_MCP_SHARED_ROOT": str(root / "shared-root")}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+        game = root / "DayZ"
+        game.mkdir()
+        for name in ("DayZDiag_x64.exe", "DayZ_BE.exe", "DayZ_x64.exe"):
+            (game / name).write_bytes(b"")
+        paths = RuntimePaths(
+            root / "runtime",
+            root / "runtime" / "audit",
+            root / "runtime" / "coordination.json",
+            root / "runtime" / "runs.json",
+        )
+        audit = AuditSink()
+        state = loopback.ServerState("test-key")
+        state.daemon_generation = "gen-xai"
+        state.retail_probe = lambda: {"known": True, "processes": []}
+        lifecycle_holder: dict[str, ProcessLifecycle] = {}
+        coordinator = SessionCoordinator(
+            token_fn=SequentialIds("token"),
+            id_fn=SequentialIds("lease"),
+            audit=audit,
+            cleanup=lambda *args: daemon.cleanup_begin(
+                state, lifecycle_holder.get("service"), *args
+            ),
+        )
+        manifest = RunManifestStore(paths)
+        lifecycle = ProcessLifecycle(
+            steam_gate=FakeSteamGate(),
+            coordinator=coordinator,
+            manifest=manifest,
+            audit=audit,
+            guard=Guard(),
+            retail_probe=lambda: {"known": True, "processes": []},
+            diag_probe=lambda: {"known": True, "processes": []},
+            game_path=game,
+            launcher=Launcher(),
+            id_fn=Sequence("run"),
+            bindings=state,
+            daemon_generation="gen-xai",
+        )
+        lifecycle_holder["service"] = lifecycle
+
+        owner = _identity("owner")
+        reader = _identity("reader")
+        status, grant = coordinator.acquire(owner, "owner")
+        self.assertEqual(status, 200, grant)
+
+        run_id = "xai-managed-run"
+        proc = ProcessRecord(
+            PID_SERVER,
+            "2026-08-18T00:00:00.000000Z",
+            "a" * 64,
+            "b" * 64,
+            "server",
+            identity_scheme="psutil-argv-v2",
+        )
+        manifest.add(
+            RunRecord(
+                run_id,
+                owner.session_id,
+                grant["lease_id"],
+                "RUNNING",
+                "red",
+                "@DayZ_MCP_ExpansionAI",
+                "profiles",
+                "mission",
+                [proc],
+            )
+        )
+        stamp_launcher(lifecycle, run_id, owner)
+        state.lifecycle = lifecycle
+        state.install_bound_peer(
+            instance=INST_SERVER,
+            role="server",
+            pid=PID_SERVER,
+            run_id=run_id,
+            creation_time_utc=proc.creation_time_utc,
+        )
+        state.coordination = coordinator
+        _announce(
+            state,
+            _good_commands(),
+            server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            GOOD_XAI,
+        )
+
+        # Positive: before session_release, a lease-free read on the owned
+        # RUNNING run is admitted and enqueued without a token.
+        pre_status, pre_body = state.enqueue_command(
+            STATE,
+            {"group_id": 7},
+            peer="server",
+            identity_payload=reader.to_payload(),
+        )
+        self.assertEqual(pre_status, 200, pre_body)
+        self.assertEqual(
+            [cmd["cmd"] for cmd in bound_queue(state, "server")], [STATE]
+        )
+
+        # Production release: SessionCoordinator.release -> daemon.cleanup_begin
+        # -> ProcessLifecycle.begin_release_owner -> RUNNING_IDLE + fence.
+        rel_status, released = coordinator.release(owner, grant["lease_token"])
+        self.assertEqual(rel_status, 200, released)
+        with coordinator._condition:
+            self.assertTrue(
+                coordinator._condition.wait_for(
+                    lambda: not coordinator._handoff_pending, timeout=30.0
+                )
+            )
+        after_run = manifest.get(run_id)
+        self.assertIsNotNone(after_run)
+        assert after_run is not None
+        self.assertEqual(after_run.state, "RUNNING_IDLE")
+        self.assertIn(after_run.state, _ADOPTABLE_STATES)
+        self.assertIsNone(after_run.owner_session_id)
+        self.assertNotIn(
+            STATE, [cmd.get("cmd") for cmd in bound_queue(state, "server")]
+        )
+
+        # Negative: coordinator authorize still passes the read, yet the idle
+        # managed run refuses enqueue with run_not_owned, like players_visibility.
+        self.assertTrue(coordinator.authorize(reader, None, STATE).allowed)
+        post_queue = list(bound_queue(state, "server"))
+        expected = {"error": "run_not_owned", "hint": loopback._RUN_NOT_OWNED_HINT}
+        state_status, state_body = state.enqueue_command(
+            STATE,
+            {"group_id": 7},
+            peer="server",
+            identity_payload=reader.to_payload(),
+        )
+        vis_status, vis_body = state.enqueue_command(
+            "players_visibility",
+            {"pos": [1.0, 2.0, 3.0], "radius": 10.0},
+            peer="server",
+            identity_payload=reader.to_payload(),
+        )
+        self.assertEqual((state_status, state_body), (409, expected))
+        self.assertEqual((vis_status, vis_body), (409, expected))
+        self.assertEqual(bound_queue(state, "server"), post_queue)
 
 
 class AiGroupStateAdmissionTest(unittest.TestCase):
@@ -239,10 +424,14 @@ class AiGroupStateAdmissionTest(unittest.TestCase):
             operation_timeout_s=30.0,
         )
 
-    def test_o13_state_reads_residues_on_a_v12_census_without_lease(self) -> None:
-        # Mutant killed: ai_group_state joining the new-mutation lease-close
-        # gate (a v12 census would refuse the residue read), or the read
-        # requiring a lease at enqueue.
+    def test_o13_state_reads_residues_without_lease_close_in_census(self) -> None:
+        """Census without lease_close: ai_group_state still enqueues without a
+        lease, while a new adapter mutation is refused by the lease-close gate.
+
+        Mutant killed: ai_group_state joining the new-mutation lease-close gate
+        (a census announcing no close support would refuse the residue read),
+        or the read requiring a lease at enqueue.
+        """
         state = _bound_state()
         _announce(
             state,
@@ -254,7 +443,8 @@ class AiGroupStateAdmissionTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(len(bound_queue(state, "server")), 1)
         self.assertNotIn(STATE, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
-        # Same v12 census: a new adapter mutation is refused, the read is not.
+        # Same census without lease_close: a new adapter mutation is refused,
+        # while the read is admitted.
         order_status, order_body = self._enqueue_order(state)
         self.assertEqual(order_status, 409)
         self.assertEqual(
@@ -262,6 +452,98 @@ class AiGroupStateAdmissionTest(unittest.TestCase):
             {"error": "expansion_unavailable", "detail": "lease_close_not_supported"},
         )
         self.assertEqual(len(bound_queue(state, "server")), 1)
+
+    def test_o13_real_bridge_v12_poll_is_version_blocked_under_production_validator(
+        self,
+    ) -> None:
+        """Real bridge v12 poll under daemon.build_server_state's production
+        version validator is refused with version_blocked before enqueue, while
+        a bridge v13 poll announcing no lease_close admits ai_group_state.
+
+        Mutant killed: wiring version_validator=None on the daemon broker path,
+        or claiming a real bridge v12 peer reaches residue reads past the
+        version gate.
+        """
+        state = daemon.build_server_state(
+            SimpleNamespace(live_profile=False, live_admin_enabled=False),
+            "test-key",
+            daemon_generation="gen-xai",
+        )
+        self.assertIsNotNone(state.version_validator)
+        state.install_bound_peer(
+            instance=INST_SERVER,
+            role="server",
+            pid=PID_SERVER,
+            run_id="xai-version-gate-run",
+        )
+        state.coordination = SessionCoordinator()
+        state.retail_probe = lambda: {"known": True, "processes": []}
+
+        no_close = _good_commands(lease_close=False)
+        caps = ",".join(wire_caps(no_close))
+        xai = xai_wire(no_close, GOOD_XAI)
+
+        # Negative: a real bridge v12 poll makes the production version gate
+        # refuse ai_group_state with version_blocked and queue nothing.
+        poll12_status, polled12 = state.record_poll(
+            "server",
+            "12~1.29",
+            instance=INST_SERVER,
+            source_pid=PID_SERVER,
+            caps=caps,
+            ach=server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            xai=xai,
+        )
+        self.assertEqual(poll12_status, 200, polled12)
+        self.assertEqual(polled12["commands"], [])
+        blocked_status, blocked_body = self._enqueue(state)
+        self.assertEqual(
+            (blocked_status, blocked_body),
+            (
+                409,
+                {
+                    "error": "version_blocked",
+                    "state": "version_mismatch",
+                    "expected": EXPECTED_BRIDGE_VERSION,
+                    "got": "12",
+                    "detail": f"bridge_version '12' != {EXPECTED_BRIDGE_VERSION!r}",
+                },
+            ),
+        )
+        self.assertEqual(bound_queue(state, "server"), [])
+
+        # Positive: once a bridge v13 peer polls with the same census omitting
+        # lease_close, the production-validator broker admits ai_group_state
+        # without a lease while still refusing ai_group_order.
+        poll13_status, polled13 = state.record_poll(
+            "server",
+            f"{EXPECTED_BRIDGE_VERSION}~1.29",
+            instance=INST_SERVER,
+            source_pid=PID_SERVER,
+            caps=caps,
+            ach=server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            xai=xai,
+        )
+        self.assertEqual(poll13_status, 200, polled13)
+        ok_status, ok_body = self._enqueue(state)
+        self.assertEqual(ok_status, 200, ok_body)
+        self.assertEqual(
+            [cmd["cmd"] for cmd in bound_queue(state, "server")], [STATE]
+        )
+        order_status, order_body = self._enqueue_order(state)
+        self.assertEqual(
+            (order_status, order_body),
+            (
+                409,
+                {
+                    "error": "expansion_unavailable",
+                    "detail": "lease_close_not_supported",
+                },
+            ),
+        )
+        self.assertEqual(
+            [cmd["cmd"] for cmd in bound_queue(state, "server")], [STATE]
+        )
 
     def test_state_is_admitted_under_the_live_profile(self) -> None:
         # As a server read the verb is in LIVE_ALLOWED_COMMANDS; the
