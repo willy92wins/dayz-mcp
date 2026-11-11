@@ -28,6 +28,11 @@ Watch below does what they say, so a layout change keeps these tests green and
 a change of what they do turns them red. The addon declares no other
 ActionStart, SetupAction, Start or PerformActionStart of the start path, and
 no Can or CanBeStarted, which the flows run as the Python Action's.
+
+DeployRefusalDispatchTest (inbox 204e, the 9/11 round's deploy) runs the same
+tail with the addon's ApplyDeployRefusal translated, on the Hologram fake of
+deploy_hologram_helpers: a deploy refused for its hologram says why and starts
+nothing, and every answer says whether the player is placing.
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ import unittest
 from types import SimpleNamespace
 
 from tests._addon_paths import addon_root
+from tests.deploy_hologram_helpers import Deploy, Hologram, checks_of, model
 from tests.enforce_subset_helpers import clean, method_body, translate
 
 BRIDGE_PATH = addon_root() / "scripts" / "5_Mission" / "MCPClientBridge.c"
@@ -352,6 +358,8 @@ class Manager:
 class Player:
     def __init__(self, item: object) -> None:
         self.item = item
+        # 204e: the tail reads IsPlacingLocal once the start ran.
+        self.placing = False
 
     def GetCurrentCommandID(self) -> int:
         return 0
@@ -359,17 +367,23 @@ class Player:
     def GetItemInHands(self) -> object:
         return self.item
 
+    def IsPlacingLocal(self) -> bool:
+        return self.placing
+
 
 class Result:
     def __init__(self) -> None:
         self.started = False
         self.ok = True
         self.error = None
+        self.placing = False
 
 
-def dispatch(source: str, watch: Watch, version: str):
+def dispatch(source: str, watch: Watch, version: str, extra: dict | None = None):
     """DispatchActionUse from its action_in_progress check to its end, without
-    the action_hold branch, as Python, as `version` builds it."""
+    the action_hold branch, as Python, as `version` builds it. A refused Can
+    calls ApplyDeployRefusal, which does nothing here unless `extra` gives it
+    (tests/test_204e_deploy_hologram.py runs the addon's)."""
     body = method_body(source, DISPATCH)
     checks = list(RUNNING_CHECK.finditer(body))
     branches = list(HOLD_BRANCH.finditer(body))
@@ -397,7 +411,9 @@ def dispatch(source: str, watch: Watch, version: str):
         "MCPActionUseWatch": watch,
         "NULL": None,
         "ScriptInputUserData": SimpleNamespace(CanStoreInputUserData=lambda: True),
+        "ApplyDeployRefusal": lambda action, player, result: None,
     }
+    namespace.update(extra or {})
     return translate(f"{TAIL}\n{{{region}}}\n", TAIL, namespace, class_types=("ItemBase",))
 
 
@@ -640,7 +656,10 @@ class InstantActionStartTest(unittest.TestCase):
         hold_start = "super.PerformActionStart(action, target, item, extra_data);"
         held = "ItemBase heldItem = player.GetItemInHands();"
         condition = "if (!action.Can(player, actionTarget, heldItem))"
-        refused = f'{condition} {{ result.ok = false; result.error = "condition_failed"; return true; }}'
+        refused = (
+            f'{condition} {{ result.ok = false; result.error = "condition_failed"; '
+            "ApplyDeployRefusal(action, player, result); return true; }"
+        )
         mutants = {
             "begin_after_the_start": (
                 verify_flows, BRIDGE_PATH, f"{begin} {start}", f"{start} {begin}"
@@ -820,6 +839,126 @@ class InstantActionStartTest(unittest.TestCase):
         verify_flows(spread(bridge), spread(hold))
         verify_condition(spread(bridge), spread(hold))
         verify_names({**self.sources, BRIDGE_PATH: spread(bridge), HOLD_PATH: spread(hold)})
+
+
+class DeployAction(Action, Deploy):
+    """A continuous ActionDeployObject whose Can wants the local player placing
+    with a hologram that does not collide, as vanilla's client condition."""
+
+    def __init__(self, watch: Watch, hold: str) -> None:
+        super().__init__(watch, hold, instant=False)
+
+    def Can(self, player: object, target: Target, item: object) -> bool:
+        self.asked.append(item)
+        hologram = player.GetHologramLocal() if player.IsPlacingLocal() else None
+        return hologram is not None and not hologram.IsColliding()
+
+
+class PlacingPlayer(Player):
+    def __init__(self, item: object, hologram: Hologram | None = None) -> None:
+        super().__init__(item)
+        self.hologram = hologram
+        self.placing = hologram is not None
+
+    def GetHologramLocal(self) -> Hologram | None:
+        return self.hologram
+
+
+def toggling(player: PlacingPlayer):
+    """ActionTogglePlaceObject's Start: super.Start, then the toggle."""
+
+    def wrap(inner: Link) -> Link:
+        def start(data: object) -> None:
+            inner.Start(data)
+            player.placing = not player.placing
+
+        return Link(start)
+
+    return wrap
+
+
+def run(tail, manager: Manager, action: Action, player: Player) -> Result:
+    result = Result()
+    if tail(action, Target(), manager, player, result) is not True:
+        raise AssertionError("the tail does not return true")
+    return result
+
+
+def tails(bridge: str, hold: str):
+    """The tail of DispatchActionUse with the addon's ApplyDeployRefusal, per version."""
+    for version in VERSIONS:
+        watch = Watch(hold)
+        namespace = model(bridge)
+        yield version, watch, dispatch(
+            bridge, watch, version, {"ApplyDeployRefusal": namespace["ApplyDeployRefusal"]}
+        )
+
+
+class DeployRefusalDispatchTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.bridge = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.hold = HOLD_PATH.read_text(encoding="utf-8")
+
+    def test_a_refused_deploy_names_its_hologram_and_starts_nothing(self) -> None:
+        for version, watch, tail in tails(self.bridge, self.hold):
+            cases = {
+                "not placing": (None, "no_hologram"),
+                "colliding": (Hologram(refusing=("is_floating",), radius=2.4), "hologram_colliding"),
+            }
+            for name, (hologram, error) in cases.items():
+                with self.subTest(version=version, case=name):
+                    manager = Manager(self.hold)
+                    result = run(tail, manager, DeployAction(watch, self.hold), PlacingPlayer(KIT, hologram))
+                    self.assertEqual((result.started, result.ok, result.error.text), (False, False, error))
+                    self.assertEqual(manager.performed, 0)
+            colliding = run(
+                tail,
+                Manager(self.hold),
+                DeployAction(watch, self.hold),
+                PlacingPlayer(KIT, Hologram(refusing=("is_floating",), radius=2.4)),
+            )
+            self.assertEqual(checks_of(colliding), ["is_floating"])
+            self.assertEqual((colliding.hologram.min_m, colliding.hologram.max_m), (2.4, 4.8))
+
+    def test_a_deploy_whose_hologram_fits_starts(self) -> None:
+        for version, watch, tail in tails(self.bridge, self.hold):
+            with self.subTest(version=version):
+                manager = Manager(self.hold)
+                player = PlacingPlayer(KIT, Hologram(colliding=False))
+                result = run(tail, manager, DeployAction(watch, self.hold), player)
+                self.assertEqual((result.started, result.ok), (True, True))
+                self.assertTrue(result.placing)
+                self.assertEqual(manager.performed, 1)
+
+    def test_another_refused_action_stays_condition_failed(self) -> None:
+        for version, watch, tail in tails(self.bridge, self.hold):
+            with self.subTest(version=version):
+                manager = Manager(self.hold)
+                needs_item = Action(watch, self.hold, needs_item=True)
+                result = run(tail, manager, needs_item, PlacingPlayer(None, Hologram()))
+                self.assertEqual(result.error.text, "condition_failed")
+                self.assertFalse(hasattr(result, "hologram"))
+
+    def test_the_toggle_says_which_way_it_went(self) -> None:
+        for version, watch, tail in tails(self.bridge, self.hold):
+            with self.subTest(version=version):
+                manager = Manager(self.hold)
+                player = PlacingPlayer(KIT)
+                toggle = Action(watch, self.hold, mods=(toggling(player), ADDON))
+                first = run(tail, manager, toggle, player)
+                self.assertEqual((first.started, first.ok, first.placing), (True, True, True))
+                second = run(tail, manager, toggle, player)
+                self.assertEqual((second.started, second.ok, second.placing), (True, True, False))
+
+    def test_placing_is_read_after_the_start_on_every_answer(self) -> None:
+        for version, watch, tail in tails(self.bridge, self.hold):
+            with self.subTest(version=version):
+                manager = Manager(self.hold)
+                player = PlacingPlayer(KIT, Hologram())
+                manager.perform = lambda a, t: manager.ActionStart(a, t, setup=False)
+                refused = run(tail, manager, Action(watch, self.hold), player)
+                self.assertEqual(refused.error.text, "setup_failed")
+                self.assertTrue(refused.placing)
 
 
 if __name__ == "__main__":

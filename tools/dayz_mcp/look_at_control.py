@@ -290,6 +290,26 @@ def _bridge_number(value: object) -> float:
     return number
 
 
+def _not_converged_detail(report: dict[str, Any]) -> str:
+    """The bridge's own error_final_deg, ticks and pulses of a look that did
+    not converge (c616, cc75), as observed= pairs after the termination. Only
+    a finite angle from 0 to 180 and non-negative ints cross; anything else is
+    left out, not leaked."""
+    pairs: list[str] = []
+    final = report.get("error_final_deg")
+    if isinstance(final, (int, float)) and not isinstance(final, bool):
+        number = float(final)
+        if math.isfinite(number) and 0.0 <= number <= 180.0:
+            pairs.append(f"error_final_deg={number!r}")
+    for key in ("ticks", "pulses"):
+        value = report.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            pairs.append(f"{key}={value}")
+    if not pairs:
+        return ""
+    return "observed=" + " ".join(pairs)
+
+
 def accept_bridge_look_at(report: object) -> dict[str, Any]:
     """Fail closed unless the bridge report shows measured convergence."""
     required = (
@@ -306,7 +326,9 @@ def accept_bridge_look_at(report: object) -> dict[str, Any]:
     if not isinstance(report, dict) or any(name not in report for name in required):
         raise ValueError("view_not_converged")
     if _bridge_bool(report.get("converged")) is not True or report.get("termination") != "converged":
-        raise ValueError(str(report.get("termination") or "view_not_converged"))
+        code = str(report.get("termination") or "view_not_converged")
+        detail = _not_converged_detail(report)
+        raise ValueError(f"{code}; {detail}" if detail else code)
     initial = _bridge_number(report.get("error_initial_deg"))
     final = _bridge_number(report.get("error_final_deg"))
     duration = _bridge_number(report.get("duration_s"))
