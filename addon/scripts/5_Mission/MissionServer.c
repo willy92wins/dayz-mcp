@@ -15,6 +15,9 @@ modded class MissionServer
 		// leaves players mortal and without the water/energy refill.
 		MCPGodmode.ResetMission();
 		MCPGodmode.SetDefaultOn(MCPBridge.ConfigIsTestProfile());
+		// player_look_at's server copy (MCP_LookAt.c) is accepted on the
+		// same harness profile=test server only: the default just read.
+		MCPLookAtControl.SetServerAllowed(MCPGodmode.DefaultOn());
 
 		MCPBridge bridge = MCPBridge.Get();
 		if (bridge)
