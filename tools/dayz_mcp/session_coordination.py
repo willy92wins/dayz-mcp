@@ -5009,12 +5009,14 @@ class SessionCoordinator:
                 reasons = [
                     "player_move_conn_gen_unapplied",
                     "weapon_conn_gen_unapplied",
+                    "look_conn_gen_unapplied",
                 ]
             else:
                 baseline = carried or {
                     "conn_gen": floor.get("conn_gen"),
                     "move_id": 0,
                     "weapon_id": 0,
+                    "look_id": 0,
                 }
                 if int(floor.get("move_id") or 0) > int(
                     baseline.get("move_id") or 0
@@ -5024,6 +5026,10 @@ class SessionCoordinator:
                     baseline.get("weapon_id") or 0
                 ):
                     reasons.append("weapon_floor_unapplied")
+                if int(floor.get("look_id") or 0) > int(
+                    baseline.get("look_id") or 0
+                ):
+                    reasons.append("look_floor_unapplied")
             if reasons or carried is None:
                 server_row.required_floors[floor_key] = dict(floor)
             if reasons:
@@ -5053,13 +5059,18 @@ class SessionCoordinator:
         required: dict[str, object], reported: dict[str, object] | None
     ) -> list[str]:
         if reported is None:
-            return ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+            return [
+                "player_move_floor_unapplied",
+                "weapon_floor_unapplied",
+                "look_floor_unapplied",
+            ]
         required_gen = required.get("conn_gen")
         reported_gen = reported.get("conn_gen")
         if required_gen is None or required_gen != reported_gen:
             return [
                 "player_move_conn_gen_unapplied",
                 "weapon_conn_gen_unapplied",
+                "look_conn_gen_unapplied",
             ]
         reasons: list[str] = []
         if int(reported.get("move_id") or 0) < int(required.get("move_id") or 0):
@@ -5068,6 +5079,8 @@ class SessionCoordinator:
             required.get("weapon_id") or 0
         ):
             reasons.append("weapon_floor_unapplied")
+        if int(reported.get("look_id") or 0) < int(required.get("look_id") or 0):
+            reasons.append("look_floor_unapplied")
         return reasons
 
     @staticmethod

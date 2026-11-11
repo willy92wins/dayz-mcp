@@ -140,6 +140,8 @@ class MCPBridge : Managed
 	protected ref array<DayZInfected> m_InfectedOverridden;
 	protected ref array<string> m_LeaseCloseRpcKinds;
 	protected ref array<int> m_LeaseCloseRpcIds;
+	protected ref array<Object> m_LeaseCloseRpcActors;
+	protected ref array<string> m_LeaseCloseRpcSenderIds;
 	protected ref array<Object> m_LeaseCloseDeletion;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref map<int, ref MCPJob> m_Jobs;
@@ -193,6 +195,8 @@ class MCPBridge : Managed
 		m_Jobs = new map<int, ref MCPJob>();
 		m_LeaseCloseRpcKinds = new array<string>();
 		m_LeaseCloseRpcIds = new array<int>();
+		m_LeaseCloseRpcActors = new array<Object>();
+		m_LeaseCloseRpcSenderIds = new array<string>();
 		m_LeaseCloseDeletion = new array<Object>();
 		m_InfectedOverridden = new array<DayZInfected>();
 		m_RuntimeObjects = new map<int, Object>();
@@ -1248,7 +1252,7 @@ class MCPBridge : Managed
 			// Dispatch or ProcessJobs posts the one result.
 			clientRpc = true;
 			m_Jobs.Insert(job.id, job);
-			RegisterLeaseCloseRpc(job.id, "inventory_move");
+			RegisterLeaseCloseRpcWithActor(job.id, "inventory_move", player);
 			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot, job.id);
 		}
 		if (performError != "")
@@ -1951,39 +1955,78 @@ class MCPBridge : Managed
 			return;
 		}
 		MCPJob job = m_Jobs.Get(jobId);
-		if (!job || job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+		if (job)
+		{
+			if (job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+			{
+				Print("[DayZ_MCP] inventory_move refusal ignored");
+				return;
+			}
+			if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+			{
+				Print("[DayZ_MCP] inventory_move refusal ignored");
+				return;
+			}
+			if (sender.GetId() != job.actor.GetIdentity().GetId())
+			{
+				Print("[DayZ_MCP] inventory_move refusal ignored");
+				return;
+			}
+			reason = MCPInventoryMoveClientReason(reason);
+			// This refusal passed every check above (job, actor, sender) and the
+			// client sends it only before emitting (§2.7 step 5): it liquidates
+			// the RPC register row. It does not answer the job by itself.
+			LiquidateLeaseCloseRpc(jobId, "inventory_move");
+			// Publishing here would be a write the census can reach from every
+			// command, because Event_OnRPC is not a command. The job pass posts it.
+			// phase 1: the server read already matches, so confirmation wins.
+			// phase 2: one refusal, and the deadline must not post a second result.
+			if (MCPInventoryMoveReady(job))
+			{
+				job.phase = 1;
+			}
+			else
+			{
+				job.phase = 2;
+				job.error = reason;
+			}
+			return;
+		}
+		// After job timeout or lease_close abort, validate against the RPC
+		// register row directly and liquidate without posting a job reply (§2.7 step 5).
+		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds || !m_LeaseCloseRpcActors || !m_LeaseCloseRpcSenderIds)
 		{
 			Print("[DayZ_MCP] inventory_move refusal ignored");
 			return;
 		}
-		if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+		int rowIndex = -1;
+		int scanIndex = 0;
+		while (scanIndex < m_LeaseCloseRpcIds.Count())
+		{
+			if (m_LeaseCloseRpcIds.Get(scanIndex) == jobId && m_LeaseCloseRpcKinds.Get(scanIndex) == "inventory_move")
+			{
+				rowIndex = scanIndex;
+			}
+			scanIndex = scanIndex + 1;
+		}
+		if (rowIndex < 0)
 		{
 			Print("[DayZ_MCP] inventory_move refusal ignored");
 			return;
 		}
-		if (sender.GetId() != job.actor.GetIdentity().GetId())
+		Object rowActor = m_LeaseCloseRpcActors.Get(rowIndex);
+		string rowSenderId = m_LeaseCloseRpcSenderIds.Get(rowIndex);
+		if (!rowActor || target != rowActor || !sender || rowSenderId == "")
 		{
 			Print("[DayZ_MCP] inventory_move refusal ignored");
 			return;
 		}
-		reason = MCPInventoryMoveClientReason(reason);
-		// This refusal passed every check above (job, actor, sender) and the
-		// client sends it only before emitting (§2.7 step 5): it liquidates
-		// the RPC register row. It does not answer the job by itself.
+		if (sender.GetId() != rowSenderId)
+		{
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
+		}
 		LiquidateLeaseCloseRpc(jobId, "inventory_move");
-		// Publishing here would be a write the census can reach from every
-		// command, because Event_OnRPC is not a command. The job pass posts it.
-		// phase 1: the server read already matches, so confirmation wins.
-		// phase 2: one refusal, and the deadline must not post a second result.
-		if (MCPInventoryMoveReady(job))
-		{
-			job.phase = 1;
-		}
-		else
-		{
-			job.phase = 2;
-			job.error = reason;
-		}
 	}
 
 	// 165a: scene_id is 1 to SCENE_ID_MAX_CHARS characters, each A-Z, a-z, 0-9, _
@@ -8362,6 +8405,14 @@ class MCPBridge : Managed
 			{
 				m_LeaseCloseRpcIds.Remove(index);
 				m_LeaseCloseRpcKinds.Remove(index);
+				if (m_LeaseCloseRpcActors && index < m_LeaseCloseRpcActors.Count())
+				{
+					m_LeaseCloseRpcActors.Remove(index);
+				}
+				if (m_LeaseCloseRpcSenderIds && index < m_LeaseCloseRpcSenderIds.Count())
+				{
+					m_LeaseCloseRpcSenderIds.Remove(index);
+				}
 				return;
 			}
 
@@ -8369,9 +8420,9 @@ class MCPBridge : Managed
 		}
 	}
 
-	protected void RegisterLeaseCloseRpc(int requestId, string kind)
+	protected void RegisterLeaseCloseRpcWithActor(int requestId, string kind, Human actor)
 	{
-		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds)
+		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds || !m_LeaseCloseRpcActors || !m_LeaseCloseRpcSenderIds)
 		{
 			return;
 		}
@@ -8381,8 +8432,21 @@ class MCPBridge : Managed
 			return;
 		}
 
+		string senderId = "";
+		if (actor && actor.GetIdentity())
+		{
+			senderId = actor.GetIdentity().GetId();
+		}
+
 		m_LeaseCloseRpcIds.Insert(requestId);
 		m_LeaseCloseRpcKinds.Insert(kind);
+		m_LeaseCloseRpcActors.Insert(actor);
+		m_LeaseCloseRpcSenderIds.Insert(senderId);
+	}
+
+	protected void RegisterLeaseCloseRpc(int requestId, string kind)
+	{
+		RegisterLeaseCloseRpcWithActor(requestId, kind, null);
 	}
 
 	protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)
@@ -8546,6 +8610,7 @@ class MCPBridge : Managed
 		AddCloseDebt(census, "infected_drive", m_InfectedDebt, "infected_drive");
 		bool moveActive = false;
 		bool weaponActive = false;
+		bool lookActive = false;
 		bool holdActive = false;
 		m_Players.Clear();
 		GetGame().GetPlayers(m_Players);
@@ -8564,6 +8629,7 @@ class MCPBridge : Managed
 				floorRow.conn_gen = player.MCPConnGenValue();
 				floorRow.move_id = player.MCPMoveServerFloor();
 				floorRow.weapon_id = player.MCPWeaponServerFloor();
+				floorRow.look_id = player.MCPLookServerFloor();
 				census.floors.Insert(floorRow);
 				if (player.MCPMoveActiveNow())
 				{
@@ -8573,6 +8639,11 @@ class MCPBridge : Managed
 				if (player.MCPWeaponPendingNow())
 				{
 					weaponActive = true;
+				}
+
+				if (player.MCPLookActiveNow())
+				{
+					lookActive = true;
 				}
 
 				// §2.7 step 3: census only, no new interrupt from the server.
@@ -8588,6 +8659,7 @@ class MCPBridge : Managed
 
 		AddCloseEntry(census, "survivor_drive", MCPSurvivorDrive.LeaseCloseBusy(), "survivor_drive");
 		AddCloseEntry(census, "move_copy", moveActive, "move_copy");
+		AddCloseEntry(census, "look_copy", lookActive, "look_copy");
 		AddCloseEntry(census, "weapon", weaponActive, "weapon");
 		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
 		bool jobsActive = false;
@@ -8726,6 +8798,7 @@ class MCPBridge : Managed
 						{
 							floorPlayer.MCPMoveCloseServer(carried.move_id, carried.conn_gen);
 							floorPlayer.MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen);
+							floorPlayer.MCPLookCloseServer(carried.look_id, carried.conn_gen);
 						}
 					}
 

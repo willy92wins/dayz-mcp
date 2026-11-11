@@ -4898,7 +4898,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 
 			MCPHoldControl.Begin(amc, player, action, command.args.hold_id, command.args.hold_timeout_s);
+			MCPHoldControl.ArmStart(amc, action);
 			amc.PerformActionStart(action, actionTarget, heldItem, NULL);
+			MCPHoldControl.DisarmStart();
 			if (!MCPHoldControl.HasData() && !MCPHoldControl.Ready())
 			{
 				MCPHoldControl.NoteSetupFailed();
@@ -4922,12 +4924,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		MCPHoldControl.ArmStart(amc, action);
 		MCPActionUseWatch.Begin(action, actionTarget);
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		int starts = MCPActionUseWatch.End();
 		// 204e: whether the local player is placing once the call ran, which
 		// after ActionTogglePlaceObject says which way the toggle went.
 		result.placing = player.IsPlacingLocal();
+		MCPHoldControl.DisarmStart();
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
@@ -9063,6 +9067,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		census.move_floor = MCPPlayerMoveControl.Generation();
 		census.weapon_floor = MCPWeaponControl.CloseRequestFloor();
+		census.look_floor = MCPLookAtControl.Generation();
 		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.s_Active, "vehicle_drive");
 		AddCloseEntry(census, "input_trigger", MCPInputTriggerControl.IsHeld(), "input_trigger");
 		bool moveActive = MCPPlayerMoveControl.IsActive();
@@ -9073,7 +9078,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		AddCloseEntry(census, "player_move", moveActive, "player_move");
 		AddCloseEntry(census, "weapon", MCPWeaponControl.IsBusy(), "weapon");
-		AddCloseEntry(census, "look_at", MCPLookAtControl.IsActive(), "look_at");
+		bool lookActive = MCPLookAtControl.IsActive();
+		if (MCPLookAtControl.ServerReleasePending())
+		{
+			lookActive = true;
+		}
+
+		AddCloseEntry(census, "look_at", lookActive, "look_at");
 		bool cameraActive = false;
 		if (m_ActiveCam || m_CameraHandoffPending)
 		{

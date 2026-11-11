@@ -108,6 +108,7 @@ class MCPLeaseCloseFloor
 	int conn_gen;
 	int move_id;
 	int weapon_id;
+	int look_id;
 };
 
 class MCPLeaseCloseCensus
@@ -119,6 +120,7 @@ class MCPLeaseCloseCensus
 	ref array<ref MCPLeaseCloseEntry> entries;
 	int move_floor;
 	int weapon_floor;
+	int look_floor;
 	int conn_gen;
 	int net_low;
 	int net_high;

@@ -7,7 +7,7 @@
 > **Base:** 2 workflows de investigación (≈2.5M tokens) + spot-check directo de Claude sobre
 > cada API load-bearing (leídas en el source vanilla bajo `<vanilla scripts root>`).
 > Generado 2026-06-06 como documento de diseño. **Implementado y en produccion desde
-> entonces**: el servidor expone hoy 107 tools y el puente va por `MCP_BRIDGE_VERSION = "12"`.
+> entonces**: el servidor expone hoy 107 tools y el puente va por `MCP_BRIDGE_VERSION = "13"`.
 > Esto queda como el diseño original — util para entender por que las piezas son como son,
 > no como descripcion del estado actual. Para eso, `README.md` (superficie de tools) y el
 > bloque LIVE-STATE de `HANDOFF.md`.
