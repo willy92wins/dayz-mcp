@@ -184,6 +184,92 @@ class AiEmoteToolTest(unittest.TestCase):
             result, {"ok": 1, "emote_state": "cancelled", "emote_pending": False}
         )
 
+    def test_ai_emote_bad_target_unknown_or_idle_reports_emote_pending_false(self) -> None:
+        # P2-2 negative: bad_target (and bad_args) when object_id names no
+        # existing member — or an existing member with no pending request —
+        # carries observed=emote_pending=false without inventing emote_state=,
+        # while emote_rejected and client actor_emote keep today's text.
+        namespace = _emote_namespace()
+        other = _FakeMember()
+        other.m_Expansion_EmoteID = _EMOTE_IDS["nod"]
+        _setup(namespace, other)
+        result = _new_result()
+        result.emote_pending = True
+        handled = namespace["DispatchAIEmote"](
+            SimpleNamespace(
+                id=1,
+                cmd=_S(EMOTE),
+                args=SimpleNamespace(
+                    object_id=999, emote=_S("nod"), wait_s=10.0
+                ),
+            ),
+            result,
+        )
+        self.assertEqual(handled, 1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.text, "bad_target")
+        self.assertFalse(result.emote_pending)
+        wire = _wire_from_result(result)
+        self.assertEqual(
+            str(_bridge_error(wire, EMOTE)),
+            "bad_target; observed=emote_pending=false",
+        )
+        self.assertEqual(str(_bridge_error(wire, "actor_emote")), "bad_target")
+
+        # Releasing group with gone (null) or idle member -> emote_pending=false.
+        for member in (None, _FakeMember()):
+            with self.subTest(releasing_member_present=member is not None):
+                namespace = _emote_namespace()
+                _setup(namespace, member, group_state="releasing")
+                handled, rel_result = _dispatch(
+                    namespace, emote="nod", object_id=11
+                )
+                self.assertEqual(handled, 1)
+                self.assertEqual(rel_result.error.text, "bad_target")
+                self.assertFalse(rel_result.emote_pending)
+                self.assertEqual(
+                    str(_bridge_error(_wire_from_result(rel_result), EMOTE)),
+                    "bad_target; observed=emote_pending=false",
+                )
+
+        # Missing args, bad_args with unknown member, and no_emote_playing
+        # actively write emote_pending=false even on a dirty result object.
+        namespace = _emote_namespace()
+        _setup(namespace, _FakeMember())
+        for args, expected_code in (
+            (None, "bad_args"),
+            (
+                SimpleNamespace(object_id=999, emote=_S("nope"), wait_s=10.0),
+                "bad_args",
+            ),
+            (
+                SimpleNamespace(object_id=999, emote=_S("nod"), wait_s=99.0),
+                "bad_args",
+            ),
+            (
+                SimpleNamespace(object_id=11, emote=_S("end"), wait_s=10.0),
+                "no_emote_playing",
+            ),
+        ):
+            with self.subTest(expected_code=expected_code, has_args=args is not None):
+                dirty = _new_result()
+                dirty.emote_pending = True
+                handled = namespace["DispatchAIEmote"](
+                    SimpleNamespace(id=2, cmd=_S(EMOTE), args=args), dirty
+                )
+                self.assertEqual(handled, 1)
+                self.assertEqual(dirty.error.text, expected_code)
+                self.assertFalse(dirty.emote_pending)
+
+        # emote_rejected preserves today's emote_state=rejected pair.
+        namespace = _emote_namespace()
+        _setup(namespace, _FakeMember(fighting=True))
+        _handled, rejected = _dispatch(namespace, emote="nod", object_id=11)
+        self.assertEqual(
+            str(_bridge_error(_wire_from_result(rejected), EMOTE)),
+            "emote_rejected; observed=emote_state=rejected emote_pending=false",
+        )
+
 
 class AiEmoteAdmissionTest(unittest.TestCase):
     """O8/2.2 at the broker: ai_emote is a new adapter mutation."""
@@ -286,6 +372,43 @@ _EMOTE_IDS = {
 }
 
 
+def _same_scheduled_fn(left, right) -> bool:
+    left_self = getattr(left, "__self__", None)
+    right_self = getattr(right, "__self__", None)
+    if left_self is not None or right_self is not None:
+        return (
+            left_self is right_self
+            and getattr(left, "__func__", None) is getattr(right, "__func__", None)
+        )
+    return left == right
+
+
+class _FakeCallQueue:
+    """ScriptCallQueue double (2_gamelib/tools.c:52-74): CallLater by time, Remove by fn and instance."""
+
+    def __init__(self, clock: SimpleNamespace) -> None:
+        self._clock = clock
+        self._entries: list[tuple[float, object]] = []
+
+    def CallLater(self, fn, delay: int = 0, repeat: bool = False, *_args) -> None:
+        if repeat:
+            raise AssertionError("ai_emote tests do not expect repeat=True")
+        self._entries.append((self._clock.now + (float(delay) / 1000.0), fn))
+
+    def Remove(self, fn) -> None:
+        self._entries = [
+            (due_s, entry_fn)
+            for due_s, entry_fn in self._entries
+            if not _same_scheduled_fn(entry_fn, fn)
+        ]
+
+    def advance_to(self, now_s: float) -> None:
+        due = [entry for entry in self._entries if entry[0] <= now_s]
+        self._entries = [entry for entry in self._entries if entry[0] > now_s]
+        for _due_s, fn in due:
+            fn()
+
+
 class _FakeEmoteManager:
     def __init__(self) -> None:
         self.m_bEmoteIsPlaying = False
@@ -301,6 +424,8 @@ class _FakeEmoteManager:
 
     def ServerRequestEmoteCancel(self) -> None:
         self.cancel_calls += 1
+        self.m_bEmoteIsPlaying = False
+        self.gesture = 0
 
 
 class _FakeGroup:
@@ -318,6 +443,8 @@ class _FakeMember:
         self.alive = True
         self.m_eAI_IsFightingFSM = fighting
         self.m_Expansion_EmoteID = 0
+        self.m_Expansion_EmoteAutoCancel = False
+        self.m_Expansion_EmoteAutoCancelDelay = 0
         self._threat = threat
         self.emotes = _FakeEmoteManager()
         self.set_emote_calls: list[tuple] = []
@@ -336,6 +463,8 @@ class _FakeMember:
     def Expansion_SetEmote(self, emote_id, auto_cancel=False, delay=0) -> None:
         self.set_emote_calls.append((emote_id, auto_cancel, delay))
         self.m_Expansion_EmoteID = emote_id
+        self.m_Expansion_EmoteAutoCancel = bool(auto_cancel)
+        self.m_Expansion_EmoteAutoCancelDelay = int(delay)
 
     def Expansion_PlayEmote(self) -> None:
         self.play_calls += 1
@@ -366,17 +495,34 @@ def _new_result() -> SimpleNamespace:
     )
 
 
+def _wire_from_result(result: SimpleNamespace) -> dict[str, object]:
+    return {
+        "id": result.id,
+        "ok": result.ok,
+        "error": result.error.text,
+        "emote_state": result.emote_state.text,
+        "started_after_s": result.started_after_s,
+        "finished_after_s": result.finished_after_s,
+        "emote_pending": result.emote_pending,
+    }
+
+
 def _emote_namespace() -> dict:
     adapter = ADAPTER.read_text(encoding="utf-8")
     bridge = BRIDGE.read_text(encoding="utf-8")
     clock = SimpleNamespace(now=100.0)
     posted: list = []
-    game = SimpleNamespace(GetTickTime=lambda: clock.now)
+    system_queue = _FakeCallQueue(clock)
+    game = SimpleNamespace(
+        GetTickTime=lambda: clock.now,
+        GetCallQueue=lambda category: system_queue if category == 0 else None,
+    )
     namespace: dict[str, object] = {
         "_S": EnforceString,
         "m_AIGroups": EnforceArray(),
         "m_Jobs": EnforceMap(),
         "m_ElapsedS": 100.0,
+        "CALL_CATEGORY_SYSTEM": 0,
         "GetGame": lambda: game,
         "PostResult": posted.append,
         "Math": SimpleNamespace(Floor=lambda value: float(math.floor(value))),
@@ -391,13 +537,22 @@ def _emote_namespace() -> dict:
         "MCPResult": _new_result,
         "_clock": clock,
         "_posted": posted,
+        "_system_queue": system_queue,
         "AI_EMOTE_WAIT_MIN_S": 0.5,
         "AI_EMOTE_WAIT_MAX_S": 30.0,
     }
     class_types = (
         "MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIBase",
-        "EmoteManager", "MCPJob", "MCPResult",
+        "EmoteManager", "ScriptCallQueue", "MCPJob", "MCPResult",
     )
+    if "protected void AIClearEmoteAutoCancel(EmoteManager emotes)" in adapter:
+        translate(
+            adapter,
+            "protected void AIClearEmoteAutoCancel(EmoteManager emotes)",
+            namespace,
+            members=(),
+            class_types=class_types,
+        )
     for signature, members in (
         ("protected void EnsureAIRegistry()", ("m_AIGroups",)),
         (
@@ -423,6 +578,14 @@ def _emote_namespace() -> dict:
         ("protected override void PostJobTimeout(MCPJob job)", ()),
     ):
         translate(adapter, signature, namespace, members=members, class_types=class_types)
+    if "protected bool AIEmotePendingByObjectId(int objectId)" in adapter:
+        translate(
+            adapter,
+            "protected bool AIEmotePendingByObjectId(int objectId)",
+            namespace,
+            members=("m_AIGroups",),
+            class_types=class_types,
+        )
     translate(
         bridge,
         "protected void ProcessJobs()",
@@ -458,9 +621,31 @@ def _dispatch(namespace, *, emote: str = "nod", object_id: int = 11, wait_s: flo
     return handled, result
 
 
-def _tick(namespace, at: float) -> None:
+def _set_clock(namespace, at: float) -> None:
     namespace["_clock"].now = at
     namespace["m_ElapsedS"] = at
+
+
+def _tick(namespace, at: float) -> None:
+    _set_clock(namespace, at)
+    namespace["_system_queue"].advance_to(at)
+    namespace["ProcessJobs"]()
+
+
+def _start_static_pose_in_fsm(namespace, member: _FakeMember, at: float) -> None:
+    """Run one FSM transition into a static pose and tick at `at` (eAIBase.c:10914)."""
+    _set_clock(namespace, at)
+    namespace["_system_queue"].advance_to(at)
+    emote_id = member.m_Expansion_EmoteID
+    assert emote_id > 0 and not member.emotes.IsEmotePlaying()
+    member.emotes.m_bEmoteIsPlaying = True
+    member.emotes.gesture = emote_id
+    if member.m_Expansion_EmoteAutoCancel:
+        delay_ms = member.m_Expansion_EmoteAutoCancelDelay or 2000
+        namespace["_system_queue"].CallLater(
+            member.emotes.ServerRequestEmoteCancel, delay_ms
+        )
+        member.m_Expansion_EmoteID = 0
     namespace["ProcessJobs"]()
 
 
@@ -836,6 +1021,201 @@ class AiEmoteEnforceTest(unittest.TestCase):
         for name in ("suicide", "vomit", "surrender", "debug", "nope", ""):
             with self.subTest(emote=name):
                 self.assertEqual(namespace["AIEmoteId"](_S(name)), 0)
+
+    def test_e8_autocancel_removed_before_end_and_before_new_emote(self) -> None:
+        # P1-1 positive: greeting (wait_s=10) started by FSM at t=9 queues a
+        # cancel at t=19 (eAIBase.c:10914); end at t=11 and sita (wait_s=30)
+        # at t=12 must not let greeting's t=19 expiry cut sita. Sub-checks
+        # also isolate the end removal and the step-5 removal independently.
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _set_clock(namespace, 0.0)
+        handled, _result = _dispatch(
+            namespace, emote="greeting", wait_s=10.0, cmd_id=1
+        )
+        self.assertEqual(handled, 2)
+        _start_static_pose_in_fsm(namespace, member, 9.0)
+        _tick(namespace, 10.5)
+        self.assertEqual(namespace["_posted"][-1].emote_state.text, "started")
+
+        _set_clock(namespace, 11.0)
+        handled, _result = _dispatch(
+            namespace, emote="end", wait_s=10.0, cmd_id=2
+        )
+        self.assertEqual(handled, 2)
+        _tick(namespace, 11.5)
+        self.assertEqual(namespace["_posted"][-1].emote_state.text, "finished")
+
+        _set_clock(namespace, 12.0)
+        handled, _result = _dispatch(
+            namespace, emote="sita", wait_s=30.0, cmd_id=3
+        )
+        self.assertEqual(handled, 2)
+        _start_static_pose_in_fsm(namespace, member, 12.5)
+
+        _tick(namespace, 19.0)
+        self.assertTrue(member.emotes.m_bEmoteIsPlaying)
+        self.assertEqual(member.emotes.gesture, _EMOTE_IDS["sita"])
+        self.assertEqual(member.emotes.cancel_calls, 1)
+        self.assertEqual(len(namespace["_posted"]), 2)
+
+        _tick(namespace, 42.1)
+        self.assertEqual(len(namespace["_posted"]), 3)
+        self.assertEqual(namespace["_posted"][-1].emote_state.text, "started")
+
+        # Mutant killed: Remove called only in step 5 and omitted in isEnd.
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _set_clock(namespace, 0.0)
+        _dispatch(namespace, emote="greeting", wait_s=10.0, cmd_id=1)
+        _start_static_pose_in_fsm(namespace, member, 9.0)
+        _tick(namespace, 10.5)
+        _set_clock(namespace, 11.0)
+        _dispatch(namespace, emote="end", wait_s=10.0, cmd_id=2)
+        _tick(namespace, 11.5)
+        _tick(namespace, 19.0)
+        self.assertEqual(member.emotes.cancel_calls, 1)
+
+        # Mutant killed: Remove called only in isEnd and omitted in step 5.
+        namespace = _emote_namespace()
+        member = _FakeMember()
+        _setup(namespace, member)
+        _set_clock(namespace, 0.0)
+        _dispatch(namespace, emote="greeting", wait_s=10.0, cmd_id=1)
+        _start_static_pose_in_fsm(namespace, member, 9.0)
+        member.emotes.m_bEmoteIsPlaying = False
+        member.emotes.gesture = 0
+        _tick(namespace, 9.5)
+        self.assertEqual(namespace["_posted"][-1].emote_state.text, "finished")
+        _set_clock(namespace, 12.0)
+        _dispatch(namespace, emote="sita", wait_s=30.0, cmd_id=2)
+        _start_static_pose_in_fsm(namespace, member, 12.5)
+        _tick(namespace, 19.0)
+        self.assertTrue(member.emotes.m_bEmoteIsPlaying)
+        self.assertEqual(member.emotes.gesture, _EMOTE_IDS["sita"])
+        self.assertEqual(member.emotes.cancel_calls, 0)
+
+    def test_e8_autocancel_remove_keeps_other_member_scheduled_cancel(self) -> None:
+        # P1-1 negative: clearing member 11's queued cancel (2_gamelib/tools.c:65)
+        # targets only member 11's EmoteManager instance; member 12's queued
+        # cancel stays in CALL_CATEGORY_SYSTEM and fires at t=19.
+        namespace = _emote_namespace()
+        member_a = _FakeMember()
+        member_b = _FakeMember()
+        namespace["m_AIGroups"] = EnforceArray(
+            [
+                SimpleNamespace(
+                    group_state=_S("active"),
+                    group=_FakeGroup(False),
+                    members=EnforceArray(
+                        [
+                            SimpleNamespace(object_id=11, member=member_a),
+                            SimpleNamespace(object_id=12, member=member_b),
+                        ]
+                    ),
+                )
+            ]
+        )
+        _set_clock(namespace, 0.0)
+        _dispatch(
+            namespace, emote="greeting", object_id=11, wait_s=10.0, cmd_id=1
+        )
+        _dispatch(
+            namespace, emote="greeting", object_id=12, wait_s=10.0, cmd_id=2
+        )
+        _start_static_pose_in_fsm(namespace, member_a, 9.0)
+        _start_static_pose_in_fsm(namespace, member_b, 9.0)
+        _tick(namespace, 10.5)
+
+        _set_clock(namespace, 11.0)
+        _dispatch(namespace, emote="end", object_id=11, wait_s=10.0, cmd_id=3)
+        _tick(namespace, 11.5)
+
+        _set_clock(namespace, 12.0)
+        _dispatch(
+            namespace, emote="sita", object_id=11, wait_s=30.0, cmd_id=4
+        )
+        _start_static_pose_in_fsm(namespace, member_a, 12.5)
+
+        _tick(namespace, 19.0)
+        self.assertFalse(member_b.emotes.m_bEmoteIsPlaying)
+        self.assertEqual(member_b.emotes.cancel_calls, 1)
+        self.assertTrue(member_a.emotes.m_bEmoteIsPlaying)
+        self.assertEqual(member_a.emotes.gesture, _EMOTE_IDS["sita"])
+        self.assertEqual(member_a.emotes.cancel_calls, 1)
+
+    def test_e8_releasing_or_dead_member_pending_reports_true_on_refusals(self) -> None:
+        # P2-2 positive: when object_id names a still-existing member of a
+        # releasing (or active) group whose request is pending in either layer,
+        # bad_target and bad_args read AIEmotePending on that member and carry
+        # observed=emote_pending=true across _bridge_error, while emote_rejected
+        # keeps today's text.
+        for layer in ("expansion", "vanilla"):
+            with self.subTest(group_state="releasing", layer=layer):
+                namespace = _emote_namespace()
+                member = _FakeMember()
+                if layer == "expansion":
+                    member.m_Expansion_EmoteID = _EMOTE_IDS["nod"]
+                else:
+                    member.emotes.m_bEmoteIsRequestPending = True
+                _setup(namespace, member, group_state="releasing")
+                handled, result = _dispatch(
+                    namespace, emote="sita", object_id=11
+                )
+                self.assertEqual(handled, 1)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error.text, "bad_target")
+                self.assertTrue(result.emote_pending)
+                self.assertEqual(
+                    str(_bridge_error(_wire_from_result(result), EMOTE)),
+                    "bad_target; observed=emote_pending=true",
+                )
+
+                for bad_emote, bad_wait in (("nope", 10.0), ("sita", 99.0)):
+                    with self.subTest(bad_emote=bad_emote, bad_wait=bad_wait):
+                        handled, bad = _dispatch(
+                            namespace,
+                            emote=bad_emote,
+                            object_id=11,
+                            wait_s=bad_wait,
+                        )
+                        self.assertEqual(handled, 1)
+                        self.assertEqual(bad.error.text, "bad_args")
+                        self.assertTrue(bad.emote_pending)
+                        self.assertEqual(
+                            str(_bridge_error(_wire_from_result(bad), EMOTE)),
+                            "bad_args; observed=emote_pending=true",
+                        )
+
+        # Dead but still-existing member in an active group also reports pending.
+        namespace = _emote_namespace()
+        dead = _FakeMember()
+        dead.alive = False
+        dead.emotes.m_bEmoteIsRequestPending = True
+        _setup(namespace, dead, group_state="active")
+        handled, dead_result = _dispatch(namespace, emote="sita", object_id=11)
+        self.assertEqual(handled, 1)
+        self.assertEqual(dead_result.error.text, "bad_target")
+        self.assertTrue(dead_result.emote_pending)
+        self.assertEqual(
+            str(_bridge_error(_wire_from_result(dead_result), EMOTE)),
+            "bad_target; observed=emote_pending=true",
+        )
+
+        # emote_rejected preserves today's text with emote_state=rejected.
+        namespace = _emote_namespace()
+        active_pending = _FakeMember()
+        active_pending.m_Expansion_EmoteID = _EMOTE_IDS["nod"]
+        _setup(namespace, active_pending, group_state="active")
+        handled, rejected = _dispatch(namespace, emote="sita", object_id=11)
+        self.assertEqual(handled, 1)
+        self.assertEqual(rejected.error.text, "emote_rejected")
+        self.assertEqual(
+            str(_bridge_error(_wire_from_result(rejected), EMOTE)),
+            "emote_rejected; observed=emote_state=rejected emote_pending=true",
+        )
 
 
 if __name__ == "__main__":

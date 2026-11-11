@@ -547,11 +547,8 @@ _ACTOR_EMOTE_STANCES = frozenset(
 
 
 def _ai_emote_detail(result: dict[str, Any]) -> str:
-    # ai_emote (plan 3.5): only this text crosses on ok=false, and the plan
-    # requires emote_pending on these answers.
-    code = str(result.get("error") or "")
-    if code not in _ACTOR_EMOTE_STATE_CODES and code != "emote_interrupted":
-        return ""
+    # ai_emote (plan 3.5; docs/expansion-ai-adapter.md:164-166): only this text
+    # crosses on ok=false, and every server answer carries emote_pending.
     pending = "true" if result.get("emote_pending") else "false"
     state = result.get("emote_state")
     if isinstance(state, str) and state in _ACTOR_EMOTE_ERROR_STATES:
@@ -674,7 +671,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     actor_emote is the ninth: emote_rejected, no_emote_playing and
     emote_timed_out carry observed=emote_state= (rejected or timed_out). An
     emote_rejected from a new emote's checks also carries reason= (the check
-    that refused it) and stance= in observed= (36fa).
+    that refused it) and stance= in observed= (36fa). ai_emote carries
+    observed=emote_pending= on every ok=false bridge answer, keeping
+    emote_state= when rejected or timed_out.
 
     action_use and action_hold are the tenth: a deploy's hologram_colliding
     carries observed= with hologram_checks, hologram_pos, hologram_min_m and
@@ -764,6 +763,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # after read-back,
     # actor_emote, whose refusals carry observed=emote_state= (and reason= and
     # stance= on a new emote's emote_rejected),
+    # ai_emote, whose ok=false bridge answers carry observed=emote_pending= (plus
+    # emote_state= when rejected or timed_out),
     # action_use and action_hold, whose deploy's hologram_colliding carries
     # observed= with the hologram the client read,
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.

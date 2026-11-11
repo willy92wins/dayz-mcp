@@ -186,6 +186,8 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
 - si solo queda la petición vanilla, que está en vuelo: `emote_rejected` con `emote_pending: true`, sin escribir nada; el `end` se puede repetir;
 - si no hay nada: `no_emote_playing` (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
 
+El dispatch retira el autocancel pendiente del miembro en la call queue de sistema (`ScriptCallQueue.Remove`, vanilla `2_gamelib/tools.c:65`; `eAIBase.c:10914`) antes de un `end` o de un emote nuevo.
+
 **Los ids de emote** son los de `EmoteConstants` (vanilla `3_game/constants.c:366`; `ID_EMOTE_NOD` en :404), con los mismos nombres que `ActorEmoteId` de #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
 
 ### 3.6 `ai_group_release` (interno)

@@ -1925,6 +1925,63 @@ modded class MCPBridge
 		return false;
 	}
 
+	protected bool AIEmotePendingByObjectId(int objectId)
+	{
+		int groupIndex = 0;
+		int memberIndex = 0;
+		MCPAIGroupRecord record;
+		MCPAIGroupMemberRecord memberRecord;
+
+		if (objectId <= 0)
+		{
+			return false;
+		}
+
+		EnsureAIRegistry();
+		while (groupIndex < m_AIGroups.Count())
+		{
+			record = m_AIGroups.Get(groupIndex);
+			if (record.group_state == "active" || record.group_state == "releasing")
+			{
+				memberIndex = 0;
+				while (memberIndex < record.members.Count())
+				{
+					memberRecord = record.members.Get(memberIndex);
+					if (memberRecord.object_id == objectId && memberRecord.member)
+					{
+						return AIEmotePending(memberRecord.member, memberRecord.member.GetEmoteManager());
+					}
+
+					memberIndex = memberIndex + 1;
+				}
+			}
+
+			groupIndex = groupIndex + 1;
+		}
+
+		return false;
+	}
+
+	// Static poses schedule m_EmoteManager.ServerRequestEmoteCancel on the
+	// system call queue (eAIBase.c:10914; 4_world/classes/emotemanager.c:1275).
+	// Remove that bound call (2_gamelib/tools.c:65) before ending or starting
+	// an emote so an earlier pose's expiry cannot cancel the next one.
+	protected void AIClearEmoteAutoCancel(EmoteManager emotes)
+	{
+		ScriptCallQueue queue;
+
+		if (!emotes || !GetGame())
+		{
+			return;
+		}
+
+		queue = GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM);
+		if (queue)
+		{
+			queue.Remove(emotes.ServerRequestEmoteCancel);
+		}
+	}
+
 	// ai_emote (plan 3.5): the dispatch, in its order, is the only place
 	// this verb writes. Its job (IsJobReady below) only reads.
 	protected int DispatchAIEmote(MCPCommand command, MCPResult result)
@@ -1941,6 +1998,7 @@ modded class MCPBridge
 		{
 			result.ok = false;
 			result.error = "bad_args";
+			result.emote_pending = false;
 			return 1;
 		}
 
@@ -1952,6 +2010,7 @@ modded class MCPBridge
 			{
 				result.ok = false;
 				result.error = "bad_args";
+				result.emote_pending = AIEmotePendingByObjectId(command.args.object_id);
 				return 1;
 			}
 		}
@@ -1960,6 +2019,7 @@ modded class MCPBridge
 		{
 			result.ok = false;
 			result.error = "bad_args";
+			result.emote_pending = AIEmotePendingByObjectId(command.args.object_id);
 			return 1;
 		}
 
@@ -1969,6 +2029,7 @@ modded class MCPBridge
 		{
 			result.ok = false;
 			result.error = "bad_target";
+			result.emote_pending = AIEmotePendingByObjectId(command.args.object_id);
 			return 1;
 		}
 
@@ -2003,6 +2064,7 @@ modded class MCPBridge
 					member.Expansion_SetEmote(0);
 				}
 
+				AIClearEmoteAutoCancel(emotes);
 				emotes.ServerRequestEmoteCancel();
 				job = new MCPJob();
 				job.id = command.id;
@@ -2042,6 +2104,7 @@ modded class MCPBridge
 			result.ok = false;
 			result.error = "no_emote_playing";
 			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
 			return 1;
 		}
 
@@ -2066,6 +2129,7 @@ modded class MCPBridge
 		}
 
 		// 5. The one write: autoCancel consumes it in Expansion's attempt.
+		AIClearEmoteAutoCancel(emotes);
 		member.Expansion_SetEmote(emoteId, true, Math.Floor(command.args.wait_s * 1000.0));
 		job = new MCPJob();
 		job.id = command.id;
