@@ -553,6 +553,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected Camera m_CameraHandoffCam;
 	protected bool m_CameraHandoffPending;
 	protected int m_CameraHandoffTicks;
+	//! 702f: true while camera_set_focus has CGame.OverrideDOF enabled.
+	protected bool m_CameraDOFActive;
 	//! camera_path_play (d026): the current or last path, idle until the first
 	//! play, and the staticcamera a playing path moves (not ref, an entity the
 	//! world owns; m_ActiveCam holds it as an owned camera).
@@ -620,6 +622,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCamOwned = false;
 		m_CameraHandoffPending = false;
 		m_CameraHandoffTicks = 0;
+		m_CameraDOFActive = false;
 		m_CameraPath = new MCPCameraPath();
 		m_CameraPathCommandId = 0;
 		m_CameraPathPlayTick = 0;
@@ -2146,10 +2149,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		// camera_set_focus is camera_set plus SetFocus on the camera it applies
-		// (702f). The command name turns focus on, so camera_set never reads the
-		// focus fields and an older bridge answers unknown_command instead of
-		// dropping them.
+		// camera_set_focus is camera_set plus CGame.OverrideDOF after the camera
+		// it applies is active (702f). The command name turns focus on, so
+		// camera_set never reads the five focus fields and an older bridge
+		// answers unknown_command instead of dropping them.
 		bool focus = command.cmd == "camera_set_focus";
 		if (focus && !IsValidCameraFocus(command.args))
 		{
@@ -2197,14 +2200,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
-	// 702f: focus_distance in metres, finite and above 0, and focus_blur finite
-	// and 0 or more, the two arguments of Camera.SetFocus (camera.c:70-74).
-	// NaN fails every comparison, so it is tested first; float.MAX stands for
-	// an infinity, as the server's IsFiniteFloat does.
+	// 702f: focus_distance in metres, finite and above 0, and focus_blur,
+	// focus_length, focus_length_near and focus_depth_offset finite and 0 or
+	// more, the five DOF values of CGame.OverrideDOF (game.c:1379). NaN fails
+	// every comparison, so it is tested first; float.MAX stands for an
+	// infinity, as the server's IsFiniteFloat does.
 	protected bool IsValidCameraFocus(MCPArgs args)
 	{
 		float distance;
 		float blur;
+		float length;
+		float lengthNear;
+		float depthOffset;
 		if (!args)
 		{
 			return false;
@@ -2212,7 +2219,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		distance = args.focus_distance;
 		blur = args.focus_blur;
-		if (distance != distance || blur != blur)
+		length = args.focus_length;
+		lengthNear = args.focus_length_near;
+		depthOffset = args.focus_depth_offset;
+		if (distance != distance || blur != blur || length != length || lengthNear != lengthNear || depthOffset != depthOffset)
 		{
 			return false;
 		}
@@ -2221,6 +2231,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 		if (blur < 0.0 || blur >= float.MAX)
+		{
+			return false;
+		}
+		if (length < 0.0 || length >= float.MAX)
+		{
+			return false;
+		}
+		if (lengthNear < 0.0 || lengthNear >= float.MAX)
+		{
+			return false;
+		}
+		if (depthOffset < 0.0 || depthOffset >= float.MAX)
 		{
 			return false;
 		}
@@ -2299,6 +2321,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				m_PlayerSimulationDisabled = false;
 			}
 			DeleteOwnedCamera();
+			ClearCameraDOF("camera_path_play");
 
 			candidate.Begin();
 			candidate.Apply(cam);
@@ -6635,6 +6658,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// simulation with this apply: finish it first (f47b). No-op otherwise.
 		FinishCameraHandoff();
 		SuppressGameplay();
+		// 702f: OverrideDOF is global, so every camera_set clears any previous
+		// DOF first; a failed apply leaves it off, and camera_set_focus sets
+		// the new one after SetActive(true).
+		ClearCameraDOF("camera_set");
 
 		if (validation.mode_id == CAMERA_MODE_FREE)
 		{
@@ -6680,13 +6707,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			cam.SetFOV(validation.fov);
 		}
-		// camera_set_focus only, with the arguments its dispatch checked (702f).
-		if (job.camera_focus)
-		{
-			cam.SetFocus(job.args.focus_distance, job.args.focus_blur);
-		}
 
 		cam.SetActive(true);
+		// camera_set_focus only, after the camera is active, with the five
+		// OverrideDOF arguments its dispatch checked (702f).
+		if (job.camera_focus)
+		{
+			ApplyCameraDOF(job.args);
+		}
 		m_ActiveCam = cam;
 		m_ActiveCamOwned = true;
 		return true;
@@ -6729,16 +6757,48 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			freeCam.SetFOV(validation.fov);
 		}
-		// The free camera is a singleton: the focus set here stays on it.
-		if (job.camera_focus)
-		{
-			freeCam.SetFocus(job.args.focus_distance, job.args.focus_blur);
-		}
 
 		freeCam.SetActive(true);
+		// camera_set_focus only, after the free camera is active (702f).
+		if (job.camera_focus)
+		{
+			ApplyCameraDOF(job.args);
+		}
 		m_ActiveCam = freeCam;
 		m_ActiveCamOwned = false;
 		return true;
+	}
+
+	// 702f: CGame.OverrideDOF parameter order from 3_game/global/game.c:1379.
+	protected void ApplyCameraDOF(MCPArgs args)
+	{
+		if (!args || !GetGame())
+		{
+			return;
+		}
+
+		g_Game.OverrideDOF(true, args.focus_distance, args.focus_length, args.focus_length_near, args.focus_blur, args.focus_depth_offset);
+		m_CameraDOFActive = true;
+		Log("camera dof on distance=" + args.focus_distance + " length=" + args.focus_length + " length_near=" + args.focus_length_near + " blur=" + args.focus_blur + " depth_offset=" + args.focus_depth_offset);
+	}
+
+	// 702f: turns off the DOF this bridge set, with vanilla's off arguments
+	// from 3_game/ppemanager/materials/matclasses/exceptions/ppedof.c:70.
+	protected void ClearCameraDOF(string reason)
+	{
+		if (!m_CameraDOFActive)
+		{
+			return;
+		}
+
+		m_CameraDOFActive = false;
+		if (!GetGame())
+		{
+			return;
+		}
+
+		g_Game.OverrideDOF(false, 0.0, 0.0, 0.0, 0.0, 1.0);
+		Log("camera dof off reason=" + reason);
 	}
 
 	override void MCP_PostJobSuccess(MCPJob job)
@@ -8900,6 +8960,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// tick, so it still tears down at once.
 	protected void ReleaseCamera()
 	{
+		ClearCameraDOF("release");
 		if (!m_Shutdown)
 		{
 			// A release already handing off owns the free camera until it finishes.
