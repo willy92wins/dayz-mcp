@@ -11301,7 +11301,19 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "tool returned earlier comes back as a lower returned marker, the client "
         "mission changed and reading should start again from 0. A requested "
         "marker above the newest seq also returns the newest seq, so a lower "
-        "returned marker alone proves nothing."
+        "returned marker alone proves nothing. "
+        "Each line also reports current widget state from its ChatLine text "
+        "widget at read time: visible_hierarchy (IsVisibleHierarchy), alpha "
+        "(product of GetAlpha across the text widget and its ancestors), "
+        "screen_x/screen_y/screen_w/screen_h (screen-space rect as in ui_tree), "
+        "replaced (true when that ChatLine already shows a newer seq or is gone, "
+        "zeroing alpha and screen_* with visible_hierarchy false), and "
+        "shown_at_ms (first client frame ms within 2000 ms of t_client_ms where "
+        "visible_hierarchy was true and alpha >= 0.9, or -1 if not seen on "
+        "screen within 2 s or replaced first); dropped entries do not carry "
+        "these fields. "
+        "chat_read.hud_shown reports IngameHud panel visibility "
+        "(GetHudPanelWidget().IsVisible(), false without a HUD)."
     ))
     async def chat_read(
         # Not `StrictInt | None`: FastMCP would publish anyOf[integer,null] and

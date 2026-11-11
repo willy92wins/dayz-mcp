@@ -61,7 +61,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCP_SurvivorDrive.c` - 6 KB
 - `scripts/5_Mission/MCPBridge.c` - 215 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
-- `scripts/5_Mission/MCPChatLog.c` - 8 KB
+- `scripts/5_Mission/MCPChatLog.c` - 12 KB
 - `scripts/5_Mission/MCPClientBridge.c` - 237 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 2 KB

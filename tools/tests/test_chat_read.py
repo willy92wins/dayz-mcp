@@ -540,7 +540,7 @@ def verify_payload_byte_budget(source: str) -> dict[str, int]:
                 f"MCPChatLog must declare positive const int {name}"
             )
     max_line_bytes = (
-        6 * (consts["LINE_SENDER_MAX_CHARS"] + consts["LINE_TEXT_MAX_CHARS"]) * 4 + 128
+        6 * (consts["LINE_SENDER_MAX_CHARS"] + consts["LINE_TEXT_MAX_CHARS"]) * 4 + 384
     )
     if max_line_bytes >= consts["LINE_BYTES_MAX"]:
         raise AssertionError(
@@ -933,6 +933,14 @@ def verify_chat_message_classes(messages_source: str) -> None:
         ("int", "channel"),
         ("string", "sender"),
         ("string", "text"),
+        ("bool", "visible_hierarchy"),
+        ("float", "alpha"),
+        ("float", "screen_x"),
+        ("float", "screen_y"),
+        ("float", "screen_w"),
+        ("float", "screen_h"),
+        ("bool", "replaced"),
+        ("int", "shown_at_ms"),
         ("bool", "cut"),
     ]
     if line_fields != expected_line:
@@ -1135,13 +1143,13 @@ def verify_read_line_byte_guard(source: str) -> None:
     est_re = re.compile(
         rf"^\s*([A-Za-z_]\w*)\s*=\s*6\s*\*\s*\(\s*"
         rf"{re.escape(item_var)}\.sender\.Length\s*\(\s*\)\s*\+\s*"
-        rf"{re.escape(item_var)}\.text\.Length\s*\(\s*\)\s*\)\s*\+\s*128\s*;\s*$",
+        rf"{re.escape(item_var)}\.text\.Length\s*\(\s*\)\s*\)\s*\+\s*384\s*;\s*$",
         re.M,
     )
     est_matches = list(est_re.finditer(elig_body))
     if len(est_matches) != 1:
         raise AssertionError(
-            "Read must compute per-line byte estimate 6 * (sender.Length() + text.Length()) + 128"
+            "Read must compute per-line byte estimate 6 * (sender.Length() + text.Length()) + 384"
         )
     item_bytes_var = est_matches[0].group(1)
 
@@ -1260,10 +1268,16 @@ class ChatReadEnforceContractTest(unittest.TestCase):
 
         swapped = self._mutate_executable(
             self.chat_log_src,
-            "\t\tsuper.Set(params);\n\t\tchatLog = MCPChatLog.Get();\n"
-            "\t\tif (chatLog)\n\t\t{\n\t\t\tchatLog.RecordLine(params);\n\t\t}",
-            "\t\tchatLog = MCPChatLog.Get();\n"
-            "\t\tif (chatLog)\n\t\t{\n\t\t\tchatLog.RecordLine(params);\n\t\t}\n"
+            "\t\tsuper.Set(params);\n\t\tm_MCPShownSeq = 0;\n\t\tchatLog = MCPChatLog.Get();\n"
+            "\t\tif (chatLog)\n\t\t{\n\t\t\tlinesBefore = chatLog.GetTotalLines();\n"
+            "\t\t\tchatLog.RecordLine(params);\n"
+            "\t\t\tif (chatLog.GetTotalLines() != linesBefore)\n"
+            "\t\t\t{\n\t\t\t\tm_MCPShownSeq = chatLog.GetLastSeq();\n\t\t\t}\n\t\t}",
+            "\t\tm_MCPShownSeq = 0;\n\t\tchatLog = MCPChatLog.Get();\n"
+            "\t\tif (chatLog)\n\t\t{\n\t\t\tlinesBefore = chatLog.GetTotalLines();\n"
+            "\t\t\tchatLog.RecordLine(params);\n"
+            "\t\t\tif (chatLog.GetTotalLines() != linesBefore)\n"
+            "\t\t\t{\n\t\t\t\tm_MCPShownSeq = chatLog.GetLastSeq();\n\t\t\t}\n\t\t}\n"
             "\t\tsuper.Set(params);",
         )
         with self.assertRaisesRegex(AssertionError, "before super.Set"):
@@ -1469,7 +1483,7 @@ class ChatReadEnforceContractTest(unittest.TestCase):
                 + parsed_consts["LINE_TEXT_MAX_CHARS"]
             )
             * 4
-            + 128
+            + 384
         )
         max_drops_bytes = parsed_consts["DROP_CAPACITY"] * (
             6
@@ -1480,7 +1494,7 @@ class ChatReadEnforceContractTest(unittest.TestCase):
             * 4
             + 192
         )
-        self.assertEqual(max_line_bytes, 417_920)
+        self.assertEqual(max_line_bytes, 418_176)
         self.assertEqual(budget["max_line_bytes"], max_line_bytes)
         self.assertLess(max_line_bytes, parsed_consts["LINE_BYTES_MAX"])
         self.assertEqual(max_drops_bytes, 503_808)
@@ -1888,8 +1902,8 @@ class ChatReadEnforceContractTest(unittest.TestCase):
 
         utf8_char_estimate = self._mutate_executable(
             self.chat_log_src,
-            "itemBytes = 6 * (lineItem.sender.Length() + lineItem.text.Length()) + 128;",
-            "itemBytes = 6 * (lineItem.sender.LengthUtf8() + lineItem.text.LengthUtf8()) + 128;",
+            "itemBytes = 6 * (lineItem.sender.Length() + lineItem.text.Length()) + 384;",
+            "itemBytes = 6 * (lineItem.sender.LengthUtf8() + lineItem.text.LengthUtf8()) + 384;",
         )
         with self.assertRaisesRegex(AssertionError, "byte estimate"):
             verify_read_line_byte_guard(utf8_char_estimate)
