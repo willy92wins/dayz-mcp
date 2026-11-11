@@ -11405,6 +11405,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Open the client pause menu like Esc "
+        "(MissionGameplay.Pause()) and return ui_pause {menu_id_before, "
+        "menu_id_after}; pause_not_opened when MENU_INGAME is not on top "
+        "afterwards. Close it with ui_click on continuebtn."
+    ))
+    async def ui_pause(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ui_pause", {}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
         "Blocks up to timeout_s for the local player's answer; "
         "cancelled and timed_out are valid."
