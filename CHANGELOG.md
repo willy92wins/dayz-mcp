@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Read-only client tool `chat_read(marker=0, max_lines=200)` returns `chat_read: {lines, dropped, marker, truncated}` from per-mission `MCPChatLog` rings (256 shown lines via `ChatLine.Set` after `super.Set`, 64 dropped `ChatMessageEventTypeID` events via `MissionGameplay.OnEvent` with reasons `not_alive`, `filtered_by_option`, `unknown_channel` or `not_shown`), without requiring a lease and in the initial read catalog; a line keeps up to 1024 characters of its sender and 16384 of its text, a drop up to 64 and 256, and `cut` is true on an entry that was shortened; lines stop like a `max_lines` cut when the answer would pass about 480 KiB. Needs a rebuilt PBO; not yet verified in game (fb-20261110-164723-0205).
+
 ## [1.5] - 2026-11-11
 
 Verified on DayZ 1.30.164289: `dayz_test_run` starts the server and the client with this release's PBO, the bridge (version 12) passes its handshake, and `dayz_test_close` closes both in order. 20 new public tools, 107 in all, and the eight addon defects of the in-game round of 2026-11-09 fixed. This release changes Python modules sealed in the native launcher: after updating, build the launcher again and register it (`build_native_launcher.py --offline --verify-reproducible`, then `python -m dayz_mcp.launcher_registry_update replace-dayz-test-v1`; `tools/README-mcp.md`).

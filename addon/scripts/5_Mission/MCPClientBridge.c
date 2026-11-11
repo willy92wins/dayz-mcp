@@ -493,7 +493,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1564,6 +1564,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "gameplay_state")
 		{
 			postNow = DispatchGameplayState(command, result);
+		}
+		else if (command.cmd == "chat_read")
+		{
+			postNow = DispatchChatRead(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -3761,6 +3765,41 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPUiSnapshot snap = new MCPUiSnapshot();
 		CollectUiNodes(root, snap, limit);
 		result.ui = snap;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchChatRead(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission;
+		MCPChatLog chatLog;
+		int marker;
+		int maxLines;
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		marker = 0;
+		maxLines = MCPChatLog.MAX_LINES_DEFAULT;
+		if (command.args)
+		{
+			if (command.args.marker < 0 || command.args.max_lines < 0 || command.args.max_lines > MCPChatLog.MAX_LINES_MAX)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			marker = command.args.marker;
+			if (command.args.max_lines > 0)
+			{
+				maxLines = command.args.max_lines;
+			}
+		}
+		chatLog = mission.GetMCPChatLog();
+		result.chat_read = chatLog.Read(marker, maxLines);
 		result.ok = true;
 		return true;
 	}
