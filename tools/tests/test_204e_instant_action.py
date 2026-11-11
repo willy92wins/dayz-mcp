@@ -141,7 +141,12 @@ def _mutant(source: str, old: str, new: str) -> str:
     """`source` with comments blanked and its one `old` replaced by `new`,
     whatever the whitespace between the tokens of `old`."""
     tokens = re.findall(r'"(?:\\.|[^"\\])*"|\w+|\S', old)
-    pattern = re.compile(r"\s*".join(map(re.escape, tokens)))
+    pattern = re.compile(
+        r"\s*".join(
+            rf"\b{re.escape(token)}\b" if re.fullmatch(r"\w+", token) else re.escape(token)
+            for token in tokens
+        )
+    )
     text = clean(source)
     found = pattern.findall(text)
     if len(found) != 1:
@@ -315,7 +320,11 @@ class Manager:
         namespace = {
             "super": SimpleNamespace(PerformActionStart=self._vanilla),
             "this": self,
-            "MCPHoldControl": SimpleNamespace(AfterStart=lambda manager: None),
+            "MCPHoldControl": SimpleNamespace(
+                BeforeStartCapture=lambda manager, action: None,
+                AfterStartCapture=lambda manager, action: None,
+                AfterStart=lambda manager: None,
+            ),
         }
         self.PerformActionStart = translate(
             f"{WRAPPER_RUN}\n{{{method_body(hold, WRAPPER)}}}\n", WRAPPER_RUN, namespace
@@ -409,6 +418,10 @@ def dispatch(source: str, watch: Watch, version: str, extra: dict | None = None)
         raise AssertionError("a directive this test does not build")
     namespace = {
         "MCPActionUseWatch": watch,
+        "MCPHoldControl": SimpleNamespace(
+            ArmStart=lambda manager, action: None,
+            DisarmStart=lambda: None,
+        ),
         "NULL": None,
         "ScriptInputUserData": SimpleNamespace(CanStoreInputUserData=lambda: True),
         "ApplyDeployRefusal": lambda action, player, result: None,
