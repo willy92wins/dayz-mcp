@@ -1335,6 +1335,14 @@ class MCPChatLine
 	int channel;
 	string sender;
 	string text;
+	bool visible_hierarchy;
+	float alpha;
+	float screen_x;
+	float screen_y;
+	float screen_w;
+	float screen_h;
+	bool replaced;
+	int shown_at_ms;
 	// True when RecordLine shortened sender or text to its cap.
 	bool cut;
 };
@@ -1357,6 +1365,7 @@ class MCPChatRead
 	ref array<ref MCPChatDrop> dropped;
 	int marker;
 	bool truncated;
+	bool hud_shown;
 
 	void MCPChatRead()
 	{
