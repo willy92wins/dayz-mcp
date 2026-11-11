@@ -410,6 +410,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "camera_path_release": "camera_path_release",
         "camera_set": "camera_set",
         "camera_set_focus": "camera_set_focus",
+        "chat_read": "chat_read",
         "engine_set": "engine_set",
         "gameplay_state": "gameplay_state",
         "hud_set": "hud_set",

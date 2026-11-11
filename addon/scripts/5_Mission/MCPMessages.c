@@ -309,6 +309,9 @@ class MCPArgs
 	float focus_blur;
 	// hud_set (f427). The tool always sends it; an absent key reads false.
 	bool visible;
+	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
+	// max_lines above is reused.
+	int marker;
 
 	void MCPArgs()
 	{
@@ -1341,6 +1344,43 @@ class MCPHologram
 	float max_m;
 };
 
+class MCPChatLine
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordLine shortened sender or text to its cap.
+	bool cut;
+};
+
+class MCPChatDrop
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordDrop shortened sender or text to its cap.
+	bool cut;
+	string reason;
+};
+
+class MCPChatRead
+{
+	ref array<ref MCPChatLine> lines;
+	ref array<ref MCPChatDrop> dropped;
+	int marker;
+	bool truncated;
+
+	void MCPChatRead()
+	{
+		lines = new array<ref MCPChatLine>();
+		dropped = new array<ref MCPChatDrop>();
+	}
+};
+
 // ui_pause reply (726c): top UIScriptedMenu IDs before and after
 // MissionGameplay.Pause() (read immediately on sync branches, or on the next
 // tick via MCPJob when Pause() defers m_PauseQueued onto OnUpdate), -1 when
@@ -1569,6 +1609,7 @@ class MCPResult
 	// hud_set read-back (f427). Unassigned on other commands.
 	ref MCPHudState hud;
 	ref MCPGameplayState gameplay;
+	ref MCPChatRead chat_read;
 	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
 	ref MCPUiPause ui_pause;
 };

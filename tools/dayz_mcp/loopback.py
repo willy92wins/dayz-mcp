@@ -140,6 +140,7 @@ CLIENT_COMMANDS = {
     "camera_set",
     "camera_set_focus",
     "camera_get",
+    "chat_read",
     "gameplay_state",
     "camera_path_play",
     "camera_path_release",
@@ -1440,6 +1441,7 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "camera_path_play": "bridge_capability_missing",
     "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
+    "chat_read": "bridge_capability_missing",
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
@@ -2028,6 +2030,15 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "path": _is_string,
                 "limit": _integer_in_range(minimum=1, maximum=512),
                 "root": _is_non_empty_string,
+            },
+        )
+    ),
+    "chat_read": _command_schema(
+        _schema_variant(
+            optional=("marker", "max_lines"),
+            validators={
+                "marker": _integer_in_range(minimum=0, maximum=2_147_483_647),
+                "max_lines": _integer_in_range(minimum=1, maximum=500),
             },
         )
     ),

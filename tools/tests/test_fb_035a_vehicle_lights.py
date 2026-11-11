@@ -299,6 +299,9 @@ class PopulateModel:
             "VectorToArray": lambda _vec, _arr: None,
             "CarFluid": SimpleNamespace(FUEL=1),
             "PopulateTelemetryInventory": lambda _entity, _telemetry: None,
+            # The c703 health guard (test_fb_c703_object_set_health.py): no
+            # health read on these fakes.
+            "HealthReadable": lambda _found: False,
         }
         self.populate = translate(
             source,

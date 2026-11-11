@@ -1003,6 +1003,10 @@ modded class PlayerBase
 		m_MCPMoveApplied = false;
 		m_MCPMoveConsumed = 0;
 		m_MCPMoveHandled = 0;
+		// L1 (#363 follow-up): an accepted move ends this player's look copy
+		// (MCP_LookAt.c), which would otherwise go on turning the heading
+		// under the move until its band or deadman.
+		MCPLookServerRelease("move_started");
 		MCPMoveVerdict(true, request.move_id, "");
 	}
 

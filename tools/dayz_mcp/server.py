@@ -690,6 +690,7 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     # play an emote on defaults: an unknown key is refused, not dropped.
     "survivor_drive",
     "actor_emote",
+    "chat_read",
 )
 
 
@@ -10634,7 +10635,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "bad_arrive_radius_m, bad_hold_s, bad_ttl_s, client_not_in_game, "
         "no_player, player_dead, player_unconscious, player_restrained, "
         "seated, no_input_controller, not_in_move_command, player_move_busy, "
-        "input_busy, not_held, aborted."
+        "busy (a player_look_at still turning the player), input_busy, "
+        "not_held, aborted."
     ))
     async def player_move(
         speed: StrictStr = "walk",
@@ -11207,6 +11209,49 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["root"] = root
         async with runtime.tool_lock:
             return await runtime.call_bridge("ui_tree", args, "client", _timeout(timeout_s))
+
+    @app.tool(description=(
+        "Read lines shown in the client chat since marker. "
+        "No lease; captures ChatLine.Set slices in a 256-line mission ring and "
+        "ChatMessageEventTypeID drops (not_alive, filtered_by_option, "
+        "unknown_channel, not_shown) in a 64-drop ring sharing one monotonic seq "
+        "from 1 up to 2147483647. Accepts any int marker >= 0 and sends "
+        "min(marker, 2147483647) for the bridge's 32-bit ingress maximum. "
+        "Returns chat_read with lines (seq > marker, up to max_lines), "
+        "dropped (every drop with seq > marker), marker (last returned line's "
+        "seq when max_lines cuts the lines, else the newest seq, so drops above "
+        "the returned marker come again on the next read, each with its seq) "
+        "and truncated (true if any line or drop with seq > marker already left "
+        "its ring). Errors: bad_args, client_not_in_game, "
+        "bridge_capability_missing. "
+        "A line keeps up to 1024 characters of its sender and 16384 of its text, "
+        "a drop up to 64 and 256, and cut is true on an entry that was "
+        "shortened; lines stop like a max_lines cut when the answer would pass "
+        "about 480 KiB. "
+        "The log restarts at seq 1 with each client mission; if a marker this "
+        "tool returned earlier comes back as a lower returned marker, the client "
+        "mission changed and reading should start again from 0. A requested "
+        "marker above the newest seq also returns the newest seq, so a lower "
+        "returned marker alone proves nothing."
+    ))
+    async def chat_read(
+        # Not `StrictInt | None`: FastMCP would publish anyOf[integer,null] and
+        # collapse explicit null; StrictInt publishes type:integer so Pydantic
+        # rejects null and booleans before enqueue.
+        marker: StrictInt = 0,
+        max_lines: StrictInt = 200,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(marker, int) or isinstance(marker, bool) or marker < 0:
+            raise ToolError(_bad_args("marker", marker, "be an int >= 0"))
+        if not isinstance(max_lines, int) or isinstance(max_lines, bool) or max_lines < 1 or max_lines > 500:
+            raise ToolError(_bad_args("max_lines", max_lines, "be an int from 1 to 500"))
+        args: dict[str, Any] = {
+            "marker": min(int(marker), 2_147_483_647),
+            "max_lines": int(max_lines),
+        }
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("chat_read", args, "client", _timeout(timeout_s))
 
     @app.tool(description=(
         f"{LEASE_TOOL_LINE} Write text on a client EditBox/MultilineEditBox/"

@@ -493,7 +493,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim," + "weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1570,6 +1570,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "gameplay_state")
 		{
 			postNow = DispatchGameplayState(command, result);
+		}
+		else if (command.cmd == "chat_read")
+		{
+			postNow = DispatchChatRead(command, result);
 		}
 		else if (command.cmd == "ui_pause")
 		{
@@ -2904,6 +2908,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.error = "aim_unreadable";
 			return true;
 		}
+		// L1b: a look still turning the player is not fought with an aim.
+		if (MCPLookAtControl.IsRunning())
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+		// L1 (#363 follow-up): a converged look's server copy stops before the aim.
+		MCPLookAtControl.ReleaseServerCopy();
 		generation = MCPWeaponControl.BeginAim(player, dx, dy);
 		job = QueueWeaponJob(command, result, "weapon_aim", generation);
 		job.weapon_action.aim_lr_before = hcw.GetBaseAimingAngleLR();
@@ -3501,6 +3514,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.error = "player_move_busy";
 			return true;
 		}
+		// L1b: a look still turning the player is not fought with a move,
+		// which would also end the look's server copy (move_started).
+		if (MCPLookAtControl.IsRunning())
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
 		player = PlayerBase.Cast(GetGame().GetPlayer());
 		refusal = MCPPlayerMoveControl.StartRefusal(player);
 		if (refusal != "")
@@ -3771,6 +3792,41 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPUiSnapshot snap = new MCPUiSnapshot();
 		CollectUiNodes(root, snap, limit);
 		result.ui = snap;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchChatRead(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission;
+		MCPChatLog chatLog;
+		int marker;
+		int maxLines;
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		marker = 0;
+		maxLines = MCPChatLog.MAX_LINES_DEFAULT;
+		if (command.args)
+		{
+			if (command.args.marker < 0 || command.args.max_lines < 0 || command.args.max_lines > MCPChatLog.MAX_LINES_MAX)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			marker = command.args.marker;
+			if (command.args.max_lines > 0)
+			{
+				maxLines = command.args.max_lines;
+			}
+		}
+		chatLog = mission.GetMCPChatLog();
+		result.chat_read = chatLog.Read(marker, maxLines);
 		result.ok = true;
 		return true;
 	}
@@ -7612,7 +7668,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			budget = 3.0;
 		}
-		// input_busy leaves both sides as they were (MCPLookAtControl.Begin).
+		// input_busy starts no look on either side (MCPLookAtControl.Begin);
+		// a previous look's pending release may still have left first.
 		refusal = MCPLookAtControl.Begin(player, target, budget, command.id);
 		if (refusal != "")
 		{
