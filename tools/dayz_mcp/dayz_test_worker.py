@@ -57,6 +57,12 @@ LIFECYCLE_REJECTION_CODES = frozenset(
     {
         "bridge_state_unreadable",
         "client_polling_since_decision",
+        # ah-starting-cancel-20261109-1444: a launch cancelled during its
+        # STARTING window is a named outcome, not worker_failed. The degraded
+        # and pending variants are the fail-closed answers of the same path.
+        "launch_cancel_degraded",
+        "launch_cancel_pending",
+        "launch_cancelled",
         "port_still_held",
         "replace_witness_missing",
         "replace_witness_stale",
@@ -503,7 +509,7 @@ def _mod_path(value: object, runtime: WorkerRuntimePolicy) -> str:
 
 
 def _override(payload: dict[str, object]) -> bool:
-    return payload.get("project_mod_override") is True
+    return payload.get("project_mod_override") is True or bool(payload.get("mod_dir"))
 
 
 def _shared_project_mod(
@@ -530,6 +536,9 @@ def _mod_entries(payload: dict[str, object], runtime: WorkerRuntimePolicy) -> li
     project_mod = _shared_project_mod(payload, runtime)
     if project_mod is not None:
         values.append(project_mod)
+    isolated = payload.get("mod_dir")
+    if isinstance(isolated, str) and isolated:
+        values.append(isolated)
     values.extend(list(payload.get("extra_mods", [])))
     return [_mod_path(value, runtime) for value in values]
 
@@ -655,7 +664,7 @@ def _start_core(
         argv = [
             runtime.diag_executable,
             "-mod=" + mod_string,
-            "-connect=127.0.0.1",
+            "-connect=" + str(payload.get("connect_host") or "127.0.0.1"),
             f"-port={port}",
             "-profiles=" + client_profiles,
             "-name=" + str(payload["player_name"]),
@@ -784,6 +793,30 @@ def _capture_role_boundary(
     )
 
 
+def _remote_client_without_run(payload: dict[str, object]) -> bool:
+    """A client-only launch with no local run that connects to a remote host.
+
+    The request parser (#365) admits mode=client without run_id only when
+    connect_host is not loopback. That launch creates its own client run.
+    """
+    if payload.get("mode") != "client" or payload.get("run_id") is not None:
+        return False
+    host = payload.get("connect_host")
+    if not isinstance(host, str) or not host:
+        return False
+    return not dayz_test_request._is_loopback_connect_host(host)
+
+
+def _client_needs_local_run(payload: dict[str, object]) -> bool:
+    """mode=client with no run_id and a loopback (or default) connect host."""
+    return (
+        payload.get("mode") == "client"
+        and payload.get("run_id") is None
+        and not payload.get("kill")
+        and not _remote_client_without_run(payload)
+    )
+
+
 def assess_preflight(
     payload: dict[str, object],
     runtime: WorkerRuntimePolicy,
@@ -798,6 +831,10 @@ def assess_preflight(
     """
     _mission(payload, runtime)
     _reject_override_alias(payload, runtime)
+    # Same verdict as the launch: a client with no local run may only create a
+    # client-only run when it connects to a remote server (#365 remote_connect).
+    if _client_needs_local_run(payload):
+        raise _failed()
     required = runtime.build_source_basename
     if payload.get("build") and required is not None:
         source = str(payload.get("source"))
@@ -1169,6 +1206,10 @@ async def _start(
             operation_id=operation_id,
         )
         if not _successful_run(ack, target_run_id, "RUNNING"):
+            # ah-starting-spawn-20261110: a same-session stop cancelled this
+            # launch after its process spawned and before this ack.
+            if _lifecycle_rejection(ack) == "launch_cancelled":
+                raise _failed("launch_cancelled")
             raise _failed()
     except BaseException as error:
         if pre_admission_rejection is not None:
@@ -1882,11 +1923,22 @@ async def execute_dayz_test_worker(
             created_run_id = attempt_run_id = run_id
         elif mode == "client":
             if run_id is None:
-                raise _failed()
-            capture("client")
-            run_id, _acknowledged, _operation = await _start(
-                broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
-            )
+                if not _remote_client_without_run(payload):
+                    raise _failed()
+                # Remote client-only launch (laptop -> remote server): no local
+                # run to adopt, so create a client run the same way the server
+                # branch does (new_run_id + launch_operation_id + ack) and keep
+                # it as created_run_id so stop and cleanup target it.
+                capture("client")
+                run_id, _acknowledged, attempt_operation_id = await _start(
+                    broker, payload, runtime, role="client", existing_run_id=None, id_fn=id_fn
+                )
+                created_run_id = attempt_run_id = run_id
+            else:
+                capture("client")
+                run_id, _acknowledged, _operation = await _start(
+                    broker, payload, runtime, role="client", existing_run_id=run_id, id_fn=id_fn
+                )
         elif mode == "offline":
             capture("offline")
             run_id, _acknowledged, operation = await _start(

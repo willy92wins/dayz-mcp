@@ -1040,6 +1040,12 @@ def _assert_hint_leads_with_absolute_workshop_form(
     test.assertLess(absolute_at, relative_at)
 
 
+def _runtime_unreached(_mod: str, _dev_root: str) -> object:
+    # The VPP gate refuses before any path is accredited, so the runtime the
+    # launch resolves mod_dir with is never asked for here.
+    raise AssertionError("runtime resolved before the VPP gate refused")
+
+
 class _CountingControlClient:
     def __init__(self) -> None:
         self.acquire_calls = 0
@@ -1080,6 +1086,7 @@ class VppPreflightChokepointTest(unittest.IsolatedAsyncioTestCase):
             await transaction.execute_native_launcher_transaction(
                 _raw(policy, **overrides),
                 sealed_policies=_sealed(policy),
+                worker_runtime=_runtime_unreached,
                 control_client=client,
                 consumer=consumer,
             )
