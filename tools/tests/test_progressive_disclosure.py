@@ -4,7 +4,8 @@ The initial client-mode catalog is the session and lifecycle core plus the
 reads that need no lease: about 17 KB since fb-20260925-233937-b753 added the
 reads (11 KB before) and about 20 KB since loadout_get, server_perf,
 nav_path_query, players_visibility and scene_entities joined them (fb99,
-2427, 0131, 33c5, 165a), against about 88 KB for the whole catalog. The
+2427, 0131, 33c5, 165a) and about 23 KB with chat_read and ai_group_state
+(0205, 90f9), against about 88 KB for the whole catalog. The
 mutating world_*/vehicle_*/ui_* tools appear only after a lease is held.
 """
 
@@ -54,7 +55,7 @@ LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
 # The three lease-free reads behind a reveal prefix (b753, and world_time_get);
 # every other world_*/vehicle_*/ui_* tool mutates and waits for the lease.
 PREFIXED_LEASE_FREE_READS = frozenset({"ui_tree", "vehicle_telemetry", "world_time_get"})
-INITIAL_CATALOG_MAX_BYTES = 23_000
+INITIAL_CATALOG_MAX_BYTES = 24_000
 INITIAL_CATALOG_TARGET_BYTES = 20_000
 
 
