@@ -589,8 +589,7 @@ def _compare_bridge_capabilities(
     missing_tool = sorted(
         item
         for item in announced_set
-        if item not in EXPANSION_AI_COMMANDS
-        and mapping.get(item) in intended_bridge_tools
+        if mapping.get(item) in intended_bridge_tools
         and mapping[item] not in registered_tools
     )
     announced_tools = {mapping[item] for item in announced_set if mapping.get(item)}
