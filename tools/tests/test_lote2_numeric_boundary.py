@@ -137,12 +137,18 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 2 from 90f9 (ai_group_state group_id/timeout_s; scene_id is a
         # string, not in this census).
         # + 1 from 36fa NPC (actor_emote object_id; no new tool).
-        self.assertEqual(len(rows), 244)
+        # + 3 from 0205 (chat_read marker/max_lines/timeout_s).
+        # + 1 from 726c (ui_pause timeout_s).
+        self.assertEqual(len(rows), 248)
         self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
         self.assertIn(("ai_group_state", "group_id", "int"), rows)
         self.assertIn(("ai_group_state", "timeout_s", "float"), rows)
+        self.assertIn(("chat_read", "marker", "int"), rows)
+        self.assertIn(("chat_read", "max_lines", "int"), rows)
+        self.assertIn(("chat_read", "timeout_s", "float"), rows)
+        self.assertIn(("ui_pause", "timeout_s", "float"), rows)
         self.assertIn(("player_find", "timeout_s", "float"), rows)
         self.assertIn(("object_set_health", "health01", "float"), rows)
         self.assertIn(("object_set_health", "object_id", "int"), rows)

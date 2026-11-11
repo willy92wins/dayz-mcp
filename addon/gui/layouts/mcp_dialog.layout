@@ -1,5 +1,4 @@
 FrameWidgetClass MCPDialogRoot {
-	name "MCPDialogRoot"
 	visible 0
 	ignorepointer 1
 	position 0 0
@@ -11,7 +10,6 @@ FrameWidgetClass MCPDialogRoot {
 	priority 2000
 	{
 		PanelWidgetClass MCPDialogPanel {
-			name "MCPDialogPanel"
 			color 0.1176 0.1176 0.1176 0.9608
 			position 0 0
 			size 0.38 0.70
@@ -24,7 +22,6 @@ FrameWidgetClass MCPDialogRoot {
 			style rover_sim_colorable
 			{
 				MultilineTextWidgetClass Title {
-					name "Title"
 					wrap 1
 					text_proportion 0.36
 					ignorepointer 1
@@ -42,7 +39,6 @@ FrameWidgetClass MCPDialogRoot {
 					"text valign" center
 				}
 				MultilineTextWidgetClass Message {
-					name "Message"
 					ignorepointer 1
 					color 1 1 1 1
 					position 0.04 0.10
@@ -59,7 +55,6 @@ FrameWidgetClass MCPDialogRoot {
 					wrap 1
 				}
 				FrameWidgetClass Row0 {
-					name "Row0"
 					visible 0
 					position 0.04 0.285
 					size 0.92 0.07
@@ -69,7 +64,6 @@ FrameWidgetClass MCPDialogRoot {
 					vexactsize 0
 					{
 						TextWidgetClass Label0 {
-							name "Label0"
 							ignorepointer 1
 							position 0 0
 							size 0.34 1
@@ -84,7 +78,6 @@ FrameWidgetClass MCPDialogRoot {
 							"text valign" center
 						}
 						EditBoxWidgetClass Edit0 {
-							name "Edit0"
 							position 0.36 0.1
 							size 0.64 0.8
 							hexactpos 0
@@ -97,7 +90,6 @@ FrameWidgetClass MCPDialogRoot {
 					}
 				}
 				FrameWidgetClass Row1 {
-					name "Row1"
 					visible 0
 					position 0.04 0.36
 					size 0.92 0.07
@@ -107,7 +99,6 @@ FrameWidgetClass MCPDialogRoot {
 					vexactsize 0
 					{
 						TextWidgetClass Label1 {
-							name "Label1"
 							ignorepointer 1
 							position 0 0
 							size 0.34 1
@@ -122,7 +113,6 @@ FrameWidgetClass MCPDialogRoot {
 							"text valign" center
 						}
 						EditBoxWidgetClass Edit1 {
-							name "Edit1"
 							position 0.36 0.1
 							size 0.64 0.8
 							hexactpos 0
@@ -135,7 +125,6 @@ FrameWidgetClass MCPDialogRoot {
 					}
 				}
 				FrameWidgetClass Row2 {
-					name "Row2"
 					visible 0
 					position 0.04 0.435
 					size 0.92 0.07
@@ -145,7 +134,6 @@ FrameWidgetClass MCPDialogRoot {
 					vexactsize 0
 					{
 						TextWidgetClass Label2 {
-							name "Label2"
 							ignorepointer 1
 							position 0 0
 							size 0.34 1
@@ -160,7 +148,6 @@ FrameWidgetClass MCPDialogRoot {
 							"text valign" center
 						}
 						EditBoxWidgetClass Edit2 {
-							name "Edit2"
 							position 0.36 0.1
 							size 0.64 0.8
 							hexactpos 0
@@ -173,7 +160,6 @@ FrameWidgetClass MCPDialogRoot {
 					}
 				}
 				FrameWidgetClass Row3 {
-					name "Row3"
 					visible 0
 					position 0.04 0.51
 					size 0.92 0.07
@@ -183,7 +169,6 @@ FrameWidgetClass MCPDialogRoot {
 					vexactsize 0
 					{
 						TextWidgetClass Label3 {
-							name "Label3"
 							ignorepointer 1
 							position 0 0
 							size 0.34 1
@@ -198,7 +183,6 @@ FrameWidgetClass MCPDialogRoot {
 							"text valign" center
 						}
 						EditBoxWidgetClass Edit3 {
-							name "Edit3"
 							position 0.36 0.1
 							size 0.64 0.8
 							hexactpos 0
@@ -211,7 +195,6 @@ FrameWidgetClass MCPDialogRoot {
 					}
 				}
 				FrameWidgetClass Row4 {
-					name "Row4"
 					visible 0
 					position 0.04 0.585
 					size 0.92 0.07
@@ -221,7 +204,6 @@ FrameWidgetClass MCPDialogRoot {
 					vexactsize 0
 					{
 						TextWidgetClass Label4 {
-							name "Label4"
 							ignorepointer 1
 							position 0 0
 							size 0.34 1
@@ -236,7 +218,6 @@ FrameWidgetClass MCPDialogRoot {
 							"text valign" center
 						}
 						EditBoxWidgetClass Edit4 {
-							name "Edit4"
 							position 0.36 0.1
 							size 0.64 0.8
 							hexactpos 0
@@ -249,7 +230,6 @@ FrameWidgetClass MCPDialogRoot {
 					}
 				}
 				FrameWidgetClass Row5 {
-					name "Row5"
 					visible 0
 					position 0.04 0.66
 					size 0.92 0.07
@@ -259,7 +239,6 @@ FrameWidgetClass MCPDialogRoot {
 					vexactsize 0
 					{
 						TextWidgetClass Label5 {
-							name "Label5"
 							ignorepointer 1
 							position 0 0
 							size 0.34 1
@@ -274,7 +253,6 @@ FrameWidgetClass MCPDialogRoot {
 							"text valign" center
 						}
 						EditBoxWidgetClass Edit5 {
-							name "Edit5"
 							position 0.36 0.1
 							size 0.64 0.8
 							hexactpos 0
@@ -287,7 +265,6 @@ FrameWidgetClass MCPDialogRoot {
 					}
 				}
 				TextWidgetClass Error {
-					name "Error"
 					visible 0
 					ignorepointer 1
 					color 0.90 0.20 0.20 1
@@ -304,7 +281,6 @@ FrameWidgetClass MCPDialogRoot {
 					"text valign" center
 				}
 				ButtonWidgetClass BtnOk {
-					name "BtnOk"
 					visible 0
 					position 0.35 0.86
 					size 0.30 0.08
@@ -320,7 +296,6 @@ FrameWidgetClass MCPDialogRoot {
 					font "gui/fonts/sdf_MetronBook24"
 				}
 				ButtonWidgetClass BtnYes {
-					name "BtnYes"
 					visible 0
 					position 0.06 0.86
 					size 0.26 0.08
@@ -336,7 +311,6 @@ FrameWidgetClass MCPDialogRoot {
 					font "gui/fonts/sdf_MetronBook24"
 				}
 				ButtonWidgetClass BtnNo {
-					name "BtnNo"
 					visible 0
 					position 0.37 0.86
 					size 0.26 0.08
@@ -352,7 +326,6 @@ FrameWidgetClass MCPDialogRoot {
 					font "gui/fonts/sdf_MetronBook24"
 				}
 				ButtonWidgetClass BtnSubmit {
-					name "BtnSubmit"
 					visible 0
 					position 0.37 0.86
 					size 0.26 0.08
@@ -368,7 +341,6 @@ FrameWidgetClass MCPDialogRoot {
 					font "gui/fonts/sdf_MetronBook24"
 				}
 				ButtonWidgetClass BtnCancel {
-					name "BtnCancel"
 					visible 0
 					position 0.68 0.86
 					size 0.26 0.08

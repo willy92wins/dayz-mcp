@@ -64,6 +64,7 @@ READ_ONLY = {
     "telemetry_read",
     "query_get_in_condition",
     "camera_get",
+    "chat_read",
     "gameplay_state",
     "vehicle_telemetry",
     "logs_since",

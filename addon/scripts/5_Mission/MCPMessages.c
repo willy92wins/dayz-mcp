@@ -108,6 +108,7 @@ class MCPLeaseCloseFloor
 	int conn_gen;
 	int move_id;
 	int weapon_id;
+	int look_id;
 };
 
 class MCPLeaseCloseCensus
@@ -119,6 +120,7 @@ class MCPLeaseCloseCensus
 	ref array<ref MCPLeaseCloseEntry> entries;
 	int move_floor;
 	int weapon_floor;
+	int look_floor;
 	int conn_gen;
 	int net_low;
 	int net_high;
@@ -348,6 +350,9 @@ class MCPArgs
 	float focus_blur;
 	// hud_set (f427). The tool always sends it; an absent key reads false.
 	bool visible;
+	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
+	// max_lines above is reused.
+	int marker;
 	// lease_close / lease_close_client (§2.16). close_floors travels only on
 	// the server close; an absent key leaves the array empty.
 	string close_generation;
@@ -1386,6 +1391,59 @@ class MCPHologram
 	float max_m;
 };
 
+class MCPChatLine
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordLine shortened sender or text to its cap.
+	bool cut;
+};
+
+class MCPChatDrop
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordDrop shortened sender or text to its cap.
+	bool cut;
+	string reason;
+};
+
+class MCPChatRead
+{
+	ref array<ref MCPChatLine> lines;
+	ref array<ref MCPChatDrop> dropped;
+	int marker;
+	bool truncated;
+
+	void MCPChatRead()
+	{
+		lines = new array<ref MCPChatLine>();
+		dropped = new array<ref MCPChatDrop>();
+	}
+};
+
+// ui_pause reply (726c): top UIScriptedMenu IDs before and after
+// MissionGameplay.Pause() (read immediately on sync branches, or on the next
+// tick via MCPJob when Pause() defers m_PauseQueued onto OnUpdate), -1 when
+// GetMenu() returns null.
+class MCPUiPause
+{
+	int menu_id_before;
+	int menu_id_after;
+
+	void MCPUiPause()
+	{
+		menu_id_before = -1;
+		menu_id_after = -1;
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1598,6 +1656,9 @@ class MCPResult
 	// hud_set read-back (f427). Unassigned on other commands.
 	ref MCPHudState hud;
 	ref MCPGameplayState gameplay;
+	ref MCPChatRead chat_read;
+	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
+	ref MCPUiPause ui_pause;
 	// lease_close / lease_close_client census (§2.16). Unassigned on other commands.
 	ref MCPLeaseCloseCensus lease_close;
 };
@@ -1678,6 +1739,8 @@ class MCPJob
 	float wait_s;
 	// camera_set_focus: the apply also sets the camera's focus (702f).
 	bool camera_focus;
+	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
+	ref MCPUiPause ui_pause;
 };
 
 class MCPSpawnValidation
