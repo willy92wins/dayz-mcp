@@ -68,6 +68,11 @@ class MCPClientResultCallback : RestCallback
 		m_Bridge = bridge;
 	}
 
+	void AttachBridge(MCPClientBridge bridge)
+	{
+		m_Bridge = bridge;
+	}
+
 	void DetachBridge()
 	{
 		m_Bridge = null;
@@ -79,6 +84,8 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultSuccess(data, dataSize);
+			// Back to the free list detached: an idle callback holds no bridge.
+			m_Bridge.RecycleResultCallback(this);
 			DetachBridge();
 		}
 	}
@@ -89,6 +96,7 @@ class MCPClientResultCallback : RestCallback
 		{
 			m_Bridge.ReleaseCallback(this);
 			m_Bridge.OnResultError(errorCode);
+			// OnError may repeat (restapi.c:53): never reuse this identity.
 			DetachBridge();
 		}
 	}
@@ -558,6 +566,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref array<ref RestCallback> m_CallbackRefs;
 	protected ref array<ref RestCallback> m_PollCallbackRefs;
 	protected ref MCPClientPollCallback m_PollCallback;
+	protected ref array<ref MCPClientResultCallback> m_ResultCallbackPool;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref MCPJobRunner m_JobRunner;
 	protected ref array<Object> m_ReadyObjects;
@@ -566,6 +575,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref MCPDialogSink m_DialogSink;
 	protected MCPJob m_DialogJob;
 	protected bool m_DialogHostTried;
+	//! ContinueStartPauseMenu (inbox 5880/1d31): it has closed the start pause
+	//! menu or its window has passed, and the job runner's time of the first
+	//! call that saw the local player, which opens the window (-1: not yet).
+	protected bool m_StartPauseDone;
+	protected float m_StartPauseFromS;
+	protected const float START_PAUSE_WINDOW_S = 60.0;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -610,11 +625,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_CameraPathPlayTick = 0;
 		m_CallbackRefs = new array<ref RestCallback>();
 		m_PollCallbackRefs = new array<ref RestCallback>();
+		m_ResultCallbackPool = new array<ref MCPClientResultCallback>();
 		m_Pending = new array<ref MCPCommand>();
 		m_JobRunner = new MCPJobRunner();
 		m_ReadyObjects = new array<Object>();
 		m_ReadyProxyCargos = new array<CargoBase>();
 		m_DialogHostTried = false;
+		m_StartPauseDone = false;
+		m_StartPauseFromS = -1.0;
 	}
 
 	void ~MCPClientBridge()
@@ -725,6 +743,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_DialogHostTried = true;
 			EnsureDialogHost();
 		}
+
+		ContinueStartPauseMenu();
 
 		DrainPending();
 
@@ -1198,6 +1218,84 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool IsClientInGame()
 	{
 		return GetGame() && GetGame().GetPlayer();
+	}
+
+	// Inbox 5880/1d31: the client started with the in-game pause menu open in
+	// 2 of 3 launches of the 9/11 round (P1b), which ui_click(continuebtn)
+	// closed and key_press(dik=1) did not. The reading, not measured: vanilla
+	// MissionGameplay queues a pause at its first update when the window is
+	// not active, and opens it on a later update once the local player is
+	// loaded (1.30 missiongameplay.c:294-299, :308-311, :1306-1331).
+	// OnTick calls this once the bridge is configured. The window opens on the
+	// first call that sees the local player and lasts START_PAUSE_WINDOW_S on
+	// the job runner's clock, so a slow load does not use it up. Within it, a
+	// pause menu (MENU_INGAME) on top is closed by the mission's Continue(),
+	// the call the pause menu's Continue button queues (ingamemenu.c:213-216).
+	// It runs once: after it closed one, or once the window has passed, it
+	// never runs again in this mission, so a pause menu opened after that stays
+	// open. One Log line says what it did: closed, or not open (none on top in
+	// the window), with the mission's elapsed_s and the window's from_s.
+	protected void ContinueStartPauseMenu()
+	{
+		float elapsedS;
+		UIManager ui;
+		UIScriptedMenu menu;
+		MissionGameplay missionGP;
+
+		if (m_StartPauseDone || !m_JobRunner)
+		{
+			return;
+		}
+
+		elapsedS = m_JobRunner.GetElapsedS();
+		if (m_StartPauseFromS < 0.0)
+		{
+			if (!IsClientInGame())
+			{
+				return;
+			}
+
+			m_StartPauseFromS = elapsedS;
+		}
+
+		if (elapsedS - m_StartPauseFromS > START_PAUSE_WINDOW_S)
+		{
+			m_StartPauseDone = true;
+			Log("start pause menu not open elapsed_s=" + elapsedS + " from_s=" + m_StartPauseFromS);
+			return;
+		}
+
+		if (!GetGame())
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		menu = ui.GetMenu();
+		if (!menu)
+		{
+			return;
+		}
+
+		if (menu.GetID() != MENU_INGAME)
+		{
+			return;
+		}
+
+		missionGP = MissionGameplay.Cast(GetGame().GetMission());
+		if (!missionGP)
+		{
+			return;
+		}
+
+		m_StartPauseDone = true;
+		missionGP.Continue();
+		Log("start pause menu closed elapsed_s=" + elapsedS + " from_s=" + m_StartPauseFromS);
 	}
 
 	protected bool HasExclusiveJob()
@@ -4393,6 +4491,102 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return true;
 	}
 
+	// 204e: a deploy whose Can was false says why when its hologram is the
+	// cause. ActionDeployObject's client condition wants the local player
+	// placing (IsPlacingLocal) with a hologram that does not collide
+	// (GetHologramLocal().IsColliding()). no_hologram: the player is not
+	// placing (ActionTogglePlaceObject starts it). hologram_colliding: the
+	// hologram collides, and hologram carries the checks of the five below
+	// that refuse it, the projection's position, and min_m and max_m: vanilla
+	// floats the hologram unless the camera ray's hit is farther from the
+	// player than the projection radius and nearer than twice it (1 m and 2 m
+	// under a 1 m radius, 6 m at most), as Hologram.GetProjectionEntityPosition
+	// does; that band is restated here, not read. Any other refusal of a
+	// deploy, and every refusal of another action, stays condition_failed.
+	protected void ApplyDeployRefusal(ActionBase action, PlayerBase player, MCPResult result)
+	{
+		Hologram hologram;
+		Object projection;
+		MCPHologram report;
+		float radius;
+
+		if (!ActionDeployObject.Cast(action))
+		{
+			return;
+		}
+
+		if (!player.IsPlacingLocal())
+		{
+			result.error = "no_hologram";
+			return;
+		}
+
+		hologram = player.GetHologramLocal();
+		if (!hologram)
+		{
+			result.error = "no_hologram";
+			return;
+		}
+
+		projection = hologram.GetProjectionEntity();
+		if (!projection)
+		{
+			result.error = "no_hologram";
+			return;
+		}
+
+		if (!hologram.IsColliding())
+		{
+			return;
+		}
+
+		report = new MCPHologram();
+		report.checks = new array<string>();
+		if (hologram.IsFloating())
+		{
+			report.checks.Insert("is_floating");
+		}
+
+		if (hologram.IsCollidingBBox())
+		{
+			report.checks.Insert("is_colliding_bbox");
+		}
+
+		if (hologram.IsClippingRoof())
+		{
+			report.checks.Insert("is_clipping_roof");
+		}
+
+		if (!hologram.IsBaseViable())
+		{
+			report.checks.Insert("is_base_viable");
+		}
+
+		if (!hologram.HeightPlacementCheck())
+		{
+			report.checks.Insert("height_placement_check");
+		}
+
+		report.pos = new array<float>();
+		VectorToArray(projection.GetPosition(), report.pos);
+		radius = hologram.GetProjectionRadius();
+		report.min_m = radius;
+		report.max_m = radius * 2.0;
+		if (radius < 1.0)
+		{
+			report.min_m = 1.0;
+			report.max_m = 2.0;
+		}
+
+		if (report.max_m > 6.0)
+		{
+			report.max_m = 6.0;
+		}
+
+		result.error = "hologram_colliding";
+		result.hologram = report;
+	}
+
 	// Starts a user action on the local player. Returns after PerformActionStart;
 	// UseAcknowledgment() is true (actionbase.c:1146-1148) so the server still
 	// re-evaluates. Waiting here would freeze the sim tick.
@@ -4655,6 +4849,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "condition_failed";
+			ApplyDeployRefusal(action, player, result);
 			return true;
 		}
 
@@ -4707,6 +4902,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPActionUseWatch.Begin(action, actionTarget);
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		int starts = MCPActionUseWatch.End();
+		// 204e: whether the local player is placing once the call ran, which
+		// after ActionTogglePlaceObject says which way the toggle went.
+		result.placing = player.IsPlacingLocal();
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
@@ -7414,7 +7612,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			budget = 3.0;
 		}
-		generation = MCPLookAtControl.Begin(player, target, budget, command.id);
+		// input_busy leaves both sides as they were (MCPLookAtControl.Begin).
+		refusal = MCPLookAtControl.Begin(player, target, budget, command.id);
+		if (refusal != "")
+		{
+			result.ok = false;
+			result.error = refusal;
+			return true;
+		}
+		generation = MCPLookAtControl.Generation();
 		job = new MCPJob();
 		job.id = command.id;
 		job.kind = "player_look_at";
@@ -7727,11 +7933,35 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		else
 		{
-			if (emotes.IsEmotePlaying() || !emotes.CanPlayEmote(emoteId) || !emotes.CanPlayEmoteClientCheck(emoteId))
+			// 36fa: each check refuses on its own, naming itself in reason,
+			// with the player's stance: rps_r, rps_p and rps_s are standing
+			// only in 1.30 (emoteclasses.c:528, emotemanager.c:262), and
+			// dabbing is not registered there (emoteconstructor.c:53).
+			if (emotes.IsEmotePlaying())
 			{
 				result.ok = false;
 				result.error = "emote_rejected";
 				result.emote_state = "rejected";
+				result.reason = "is_emote_playing";
+				result.stance = ActorEmoteStance(player);
+				return true;
+			}
+			if (!emotes.CanPlayEmote(emoteId))
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				result.reason = "can_play_emote";
+				result.stance = ActorEmoteStance(player);
+				return true;
+			}
+			if (!emotes.CanPlayEmoteClientCheck(emoteId))
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				result.reason = "can_play_emote_client_check";
+				result.stance = ActorEmoteStance(player);
 				return true;
 			}
 			emotes.CreateEmoteCBFromMenu(emoteId);
@@ -7748,6 +7978,41 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		job.tick_dispatch = result.tick_dispatch;
 		m_JobRunner.AddJob(job);
 		return false;
+	}
+
+	// The local player's stance for an actor_emote refusal (36fa): the
+	// DayZPlayerConstants name of HumanMovementState.m_iStanceIdx
+	// (human.c:1153-1157), "" for another index.
+	protected string ActorEmoteStance(PlayerBase player)
+	{
+		HumanMovementState state;
+		state = new HumanMovementState();
+		player.GetMovementState(state);
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_ERECT)
+		{
+			return "erect";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_CROUCH)
+		{
+			return "crouch";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_PRONE)
+		{
+			return "prone";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_RAISEDERECT)
+		{
+			return "raised_erect";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_RAISEDCROUCH)
+		{
+			return "raised_crouch";
+		}
+		if (state.m_iStanceIdx == DayZPlayerConstants.STANCEIDX_RAISEDPRONE)
+		{
+			return "raised_prone";
+		}
+		return "";
 	}
 
 	// actor_emote's closed catalog: each name is the EmoteConstants id of the
@@ -8763,7 +9028,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		MCPClientResultCallback cb = new MCPClientResultCallback(this);
+		MCPClientResultCallback cb = AcquireResultCallback();
 		m_CallbackRefs.Insert(cb);
 		string resultRequest = "result?key=" + m_Key;
 		if (m_PeerInstance != "")
@@ -8779,6 +9044,43 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			okStr = "1";
 		}
 		Log("client result posted id=" + result.id + " ok=" + okStr + " sent_tick=" + result.tick_poll_sent + " callback_tick=" + result.tick_poll_callback + " dispatch_tick=" + result.tick_dispatch);
+	}
+
+	// The server's free list (MCPBridge.c AcquireResultCallback), on the
+	// client too. The 9/11 round counted 138/138, 50 and 394/394
+	// MCPClientResultCallback instances alive on the client, one new per
+	// result, against 1-4 on the server. Not measured: native RestApi seems
+	// to keep every distinct callback until the mission is cleaned. Only
+	// successful requests enter the list; each in-flight POST owns a
+	// distinct callback in m_CallbackRefs, and the StartPoll reservation
+	// bounds active + idle callbacks to MAX_CALLBACK_REFS.
+	protected MCPClientResultCallback AcquireResultCallback()
+	{
+		MCPClientResultCallback cb;
+		int last = -1;
+		if (m_ResultCallbackPool)
+		{
+			last = m_ResultCallbackPool.Count() - 1;
+		}
+		if (last >= 0)
+		{
+			cb = m_ResultCallbackPool.Get(last);
+			m_ResultCallbackPool.Remove(last);
+			cb.AttachBridge(this);
+		}
+		else
+		{
+			cb = new MCPClientResultCallback(this);
+		}
+		return cb;
+	}
+
+	void RecycleResultCallback(MCPClientResultCallback cb)
+	{
+		if (m_ResultCallbackPool && m_ResultCallbackPool.Count() < MAX_CALLBACK_REFS)
+		{
+			m_ResultCallbackPool.Insert(cb);
+		}
 	}
 
 	void OnResultSuccess(string data, int dataSize)
@@ -8961,6 +9263,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				i = i + 1;
 			}
 		}
+
+		// After the terminal POSTs above, which take their callbacks from
+		// it. Idle callbacks were already detached in OnSuccess.
+		if (m_ResultCallbackPool)
+		{
+			m_ResultCallbackPool.Clear();
+		}
+		m_ResultCallbackPool = null;
 
 		bool pollDistinct = false;
 		if (m_PollCtx && m_PollCtx != m_Ctx)

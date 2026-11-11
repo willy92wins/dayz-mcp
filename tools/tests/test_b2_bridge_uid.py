@@ -3,6 +3,9 @@
 vehicle_enter seats the player its uid names and answers player_not_found
 for an empty or unknown uid; its seat job reads only that player, so a job
 whose player is gone ends at its deadline instead of reading the first human.
+A player already in a vehicle (a vehicle command, or IsInTransport) answers
+already_in_vehicle before any StartCommand_Vehicle (9/11 round, seq 17, 21,
+62 and 74; vanilla's get-in refuses it, actiongetintransport.c:42).
 A server inventory_move whose item or target hangs from a player answers
 uid_required without a uid instead of resolving the first human.
 
@@ -88,6 +91,7 @@ class _Human:
     def __init__(self, uid: str) -> None:
         self.identity = _Identity(uid)
         self.command: _VehicleCommand | None = None
+        self.in_transport = False
         self.started: list[object] = []
 
     def GetIdentity(self) -> _Identity:
@@ -95,6 +99,9 @@ class _Human:
 
     def GetCommand_Vehicle(self) -> _VehicleCommand | None:
         return self.command
+
+    def IsInTransport(self) -> bool:
+        return self.in_transport
 
     def StartCommand_Vehicle(self, vehicle: object, _crew: int, _anim: int) -> _VehicleCommand:
         self.started.append(vehicle)
@@ -206,6 +213,46 @@ class VehicleEnterUidTest(unittest.TestCase):
         self.assertIs(bridge.ns["IsSeatReady"](own), False)
         second.command.getting_in = False
         self.assertIs(bridge.ns["IsSeatReady"](own), True)
+
+
+class VehicleEnterAlreadySeatedTest(unittest.TestCase):
+    def _assert_refused(self, bridge: _Bridge, players: list[_Human], uid: str) -> None:
+        done, result = bridge.enter(uid)
+        self.assertIs(done, True)
+        self.assertEqual((result.ok, result.error.text), (False, "already_in_vehicle"))
+        self.assertEqual([player.started for player in players], [[], []])
+        self.assertEqual(bridge.jobs.Count(), 0)
+
+    def test_a_player_with_a_vehicle_command_is_already_in_vehicle(self) -> None:
+        players = [_Human(UID_A), _Human(UID_B)]
+        bridge = _Bridge(players)
+        players[1].command = _VehicleCommand(bridge.vehicle, getting_in=False)
+        self._assert_refused(bridge, players, UID_B)
+
+    def test_a_player_in_transport_is_already_in_vehicle(self) -> None:
+        players = [_Human(UID_A), _Human(UID_B)]
+        bridge = _Bridge(players)
+        players[0].in_transport = True
+        self._assert_refused(bridge, players, UID_A)
+
+    def test_another_seated_player_does_not_refuse_this_one(self) -> None:
+        players = [_Human(UID_A), _Human(UID_B)]
+        bridge = _Bridge(players)
+        players[0].in_transport = True
+        players[0].command = _VehicleCommand(bridge.vehicle, getting_in=False)
+        done, _result = bridge.enter(UID_B)
+        self.assertIs(done, False)
+        self.assertEqual(players[1].started, [bridge.vehicle])
+
+    def test_the_guard_precedes_start_command_vehicle_with_its_code(self) -> None:
+        body = method_body(BRIDGE, VEHICLE_ENTER)
+        guard = "if (human.GetCommand_Vehicle() || human.IsInTransport())"
+        self.assertEqual(body.count(guard), 1)
+        refusal = body[body.index(guard) : body.index("int crew = 0;")]
+        self.assertIn('result.error = "already_in_vehicle";', refusal)
+        self.assertIn("return true;", refusal)
+        self.assertLess(body.index(guard), body.index("human.StartCommand_Vehicle("))
+        self.assertLess(body.index("HasActiveJobFor(human, vehicle)"), body.index(guard))
 
 
 def _player_gate_source() -> str:

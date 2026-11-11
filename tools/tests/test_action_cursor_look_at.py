@@ -612,6 +612,68 @@ class LookAtModeTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "snapshot_invalidated")
 
 
+class LookAtNotConvergedDetailTests(unittest.TestCase):
+    """c616, cc75: a look that did not converge answers its termination with
+    the bridge's own error_final_deg, ticks and pulses as observed= pairs."""
+
+    @staticmethod
+    def _report(**fields) -> dict:
+        report = dict(_look_report(), converged=0, termination="deadline")
+        report.update(error_final_deg=93.5, ticks=61, pulses=58)
+        report.update(fields)
+        return report
+
+    def _refusal(self, report: dict) -> str:
+        with self.assertRaises(ValueError) as caught:
+            accept_bridge_look_at(report)
+        return str(caught.exception)
+
+    def test_the_termination_carries_the_bridge_numbers(self) -> None:
+        self.assertEqual(self._refusal(self._report()), "deadline; observed=error_final_deg=93.5 ticks=61 pulses=58")
+        # A pose code or converged=1 with another termination carries them too.
+        self.assertEqual(
+            self._refusal(self._report(termination="weapon_raised", error_final_deg=40)),
+            "weapon_raised; observed=error_final_deg=40.0 ticks=61 pulses=58",
+        )
+        self.assertEqual(
+            self._refusal(self._report(converged=1, termination="replaced")),
+            "replaced; observed=error_final_deg=93.5 ticks=61 pulses=58",
+        )
+
+    def test_only_finite_angles_and_counts_cross(self) -> None:
+        for fields, expected in (
+            ({"error_final_deg": float("nan")}, "deadline; observed=ticks=61 pulses=58"),
+            ({"error_final_deg": 180.5, "ticks": True, "pulses": -1}, "deadline"),
+            ({"error_final_deg": "93.5", "ticks": 1.5}, "deadline; observed=pulses=58"),
+            ({"pulses": None, "termination": ""}, "view_not_converged; observed=error_final_deg=93.5 ticks=61"),
+        ):
+            with self.subTest(fields=fields):
+                self.assertEqual(self._refusal(self._report(**fields)), expected)
+        # A report missing a field it must carry stays the bare code.
+        report = self._report()
+        del report["error_final_deg"]
+        self.assertEqual(self._refusal(report), "view_not_converged")
+
+    def test_the_tool_error_carries_them(self) -> None:
+        runtime = Runtime(ServerConfig())
+
+        async def status(timeout_s=None):
+            return _status()
+
+        async def call_bridge(command, args, peer, timeout_s, expected_fence=None):
+            return {"ok": True, "look_at": self._report()}
+
+        runtime.bridge_status_payload = status
+        runtime.call_bridge = call_bridge
+
+        async def run():
+            await execute_player_look_at(runtime, [0.0, 1.0, 10.0], 3.0)
+
+        with self.assertRaises(ToolError) as caught:
+            asyncio.run(run())
+        self.assertEqual(str(caught.exception), "deadline; observed=error_final_deg=93.5 ticks=61 pulses=58")
+
+
 def _bind_run(state: ServerState, client_id: str, client_pid: int) -> str:
     server_id = "33333333-3333-4333-8333-333333333333"
     created = "2026-08-18T00:00:00.000000Z"
