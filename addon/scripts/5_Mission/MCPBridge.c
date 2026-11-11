@@ -5758,6 +5758,58 @@ class MCPBridge : Managed
 
 	// object_set_health (inbox c703). One object's Health in one tick: SetHealth01
 	// then the same-tick read-back. Answers in the dispatch tick and queues no job.
+	// c703, #363 follow-up (C2, S1): whether the engine has health data to
+	// read for this object, before GetDamageZones, GetMaxHealth or
+	// GetHealth01, whose "No DamageSystemData or not initialized yet" is a
+	// Virtual Machine Exception. Its config needs a DamageSystem class
+	// (Object.ConfigIsExisting, object.c:929). An EntityAI must also be past
+	// its DeferredInit (IsInitialized, entityai.c:240, :277-285), which a
+	// freshly spawned item reaches 34 ms after it is created, and have a
+	// GlobalHealth class in that DamageSystem, asked by full path under the
+	// root vanilla's InitDamageZoneDisplayNameMapping picks for an EntityAI
+	// (entityai.c:398-413: weapons, magazines, else vehicles). A Land_
+	// building is an EntityAI (Building : EntityAI, 3_game/entities/
+	// building.c:17; House : BuildingBase : Building) and takes the full
+	// check. A tree or another plant is not (Plant : Object, gameplay.c:246;
+	// TreeHard/TreeSoft : PlantSuper, plant.c:17, :42): it has neither the
+	// flag nor that root, and keeps the DamageSystem test alone, as before
+	// #378 (S-2).
+	protected bool HealthReadable(Object target)
+	{
+		string cfgBase;
+		EntityAI entity;
+		if (!target.ConfigIsExisting("DamageSystem"))
+		{
+			return false;
+		}
+		entity = EntityAI.Cast(target);
+		if (!entity)
+		{
+			return true;
+		}
+		if (!entity.IsInitialized())
+		{
+			return false;
+		}
+		if (target.IsWeapon())
+		{
+			cfgBase = CFG_WEAPONSPATH;
+		}
+		else if (target.IsMagazine())
+		{
+			cfgBase = CFG_MAGAZINESPATH;
+		}
+		else
+		{
+			cfgBase = CFG_VEHICLESPATH;
+		}
+		if (!GetGame().ConfigIsExisting(cfgBase + " " + target.GetType() + " DamageSystem GlobalHealth"))
+		{
+			return false;
+		}
+		return true;
+	}
+
 	protected bool DispatchObjectSetHealth(MCPCommand command, MCPResult result)
 	{
 		string error;
@@ -5841,7 +5893,9 @@ class MCPBridge : Managed
 		// GetDamageZones lists (object.c:1153), the by-name lookup vanilla's
 		// TransferEntityHealth does (miscgameplayfunctions.c:398-410); an
 		// empty zone is the global health and skips the lookup.
-		if (!target.ConfigIsExisting("DamageSystem"))
+		// HealthReadable also asks for DamageSystem GlobalHealth and a
+		// finished EntityAI init (#363 follow-up, C2/S1).
+		if (!HealthReadable(target))
 		{
 			result.ok = false;
 			result.error = "no_health";
@@ -7095,10 +7149,10 @@ class MCPBridge : Managed
 		VectorToArray(found.GetDirection(), telemetry.direction);
 		VectorToArray(GetVelocity(found), telemetry.velocity);
 		string empty = "";
-		// c703: the same DamageSystem config guard as object_set_health,
-		// where a health read on an object with no damage system threw a VM
+		// c703: the same guard as object_set_health (HealthReadable), where
+		// a health read on an object with no damage system threw a VM
 		// exception in the 9/11 round. Without one, health01 stays 0.
-		if (found.ConfigIsExisting("DamageSystem"))
+		if (HealthReadable(found))
 		{
 			telemetry.health01 = found.GetHealth01(empty, empty);
 		}
