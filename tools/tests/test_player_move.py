@@ -69,7 +69,7 @@ BRIDGE_CODES = {
     "bad_arrive_radius_m", "bad_hold_s", "bad_ttl_s", "client_not_in_game",
     "no_player", "player_dead", "player_unconscious", "player_restrained",
     "seated", "no_input_controller", "not_in_move_command", "player_move_busy",
-    "input_busy", "not_held", "aborted",
+    "busy", "input_busy", "not_held", "aborted",
 }
 EXPECTED_REQUIRED = {
     frozenset({"mode"}),
@@ -348,8 +348,12 @@ class _ServerMoveModel:
             "MCPPlayerMoveControl": control,
             "IsFiniteValue": math.isfinite,
             "IsFiniteVector": lambda value: all(math.isfinite(axis) for axis in value),
+            # MCP_LookAt.c's release of the look copy, which an accepted move
+            # ends (#363 follow-up L1; test_player_look_mirror.py pins it).
+            "MCPLookServerRelease": lambda why: self.look_releases.append(why.text),
             **constants,
         }
+        self.look_releases: list[str] = []
         translate(source, SECONDS, namespace)
         control.RequestRefusal = translate(source, REFUSAL, namespace)
         for signature in SERVER_MODEL_METHODS:
@@ -1634,7 +1638,7 @@ class PlayerMovePayloadTest(unittest.TestCase):
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-20:],
+            result_prune.PRUNABLE_FIELDS[-21:],
             (
                 FIELD,
                 "player_trace",
@@ -1656,6 +1660,7 @@ class PlayerMovePayloadTest(unittest.TestCase):
                 "hud",
                 "gameplay",
                 "chat_read",
+                "ui_pause",
             ),
         )
         self.assertEqual(

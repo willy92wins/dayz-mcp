@@ -1390,6 +1390,22 @@ class MCPChatRead
 	}
 };
 
+// ui_pause reply (726c): top UIScriptedMenu IDs before and after
+// MissionGameplay.Pause() (read immediately on sync branches, or on the next
+// tick via MCPJob when Pause() defers m_PauseQueued onto OnUpdate), -1 when
+// GetMenu() returns null.
+class MCPUiPause
+{
+	int menu_id_before;
+	int menu_id_after;
+
+	void MCPUiPause()
+	{
+		menu_id_before = -1;
+		menu_id_after = -1;
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1603,6 +1619,8 @@ class MCPResult
 	ref MCPHudState hud;
 	ref MCPGameplayState gameplay;
 	ref MCPChatRead chat_read;
+	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
+	ref MCPUiPause ui_pause;
 };
 
 class MCPJob
@@ -1681,6 +1699,8 @@ class MCPJob
 	float wait_s;
 	// camera_set_focus: the apply also sets the camera's focus (702f).
 	bool camera_focus;
+	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
+	ref MCPUiPause ui_pause;
 };
 
 class MCPSpawnValidation

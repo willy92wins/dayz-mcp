@@ -10635,7 +10635,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "bad_arrive_radius_m, bad_hold_s, bad_ttl_s, client_not_in_game, "
         "no_player, player_dead, player_unconscious, player_restrained, "
         "seated, no_input_controller, not_in_move_command, player_move_busy, "
-        "input_busy, not_held, aborted."
+        "busy (a player_look_at still turning the player), input_busy, "
+        "not_held, aborted."
     ))
     async def player_move(
         speed: StrictStr = "walk",
@@ -11414,6 +11415,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         async with runtime.tool_lock:
             return await runtime.call_bridge(
                 "ui_focus", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Open the client pause menu like Esc "
+        "(MissionGameplay.Pause()) and return ui_pause {menu_id_before, "
+        "menu_id_after}; pause_not_opened when MENU_INGAME is not on top "
+        "afterwards. Close it with ui_click on continuebtn."
+    ))
+    async def ui_pause(
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ui_pause", {}, "client", _timeout(timeout_s)
             )
 
     @app.tool(description=(

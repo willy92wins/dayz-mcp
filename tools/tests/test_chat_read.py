@@ -2098,14 +2098,14 @@ class SampleMapGeneric
         for option in ("GAME_MESSAGES", "ADMIN_MESSAGES", "PLAYER_MESSAGES"):
             self.assertIn(f"EDayZProfilesOptions.{option}", self.chat_log_src)
 
-        # MCPArgs reuses max_lines once and adds marker once; MCPResult ends with chat_read.
+        # MCPArgs reuses max_lines once and adds marker once; MCPResult ends with chat_read, then ui_pause.
         cleaned_msgs = _strip_comments(self.messages_src)
         args_body = _class_body(cleaned_msgs, r"^\s*class\s+MCPArgs\b")
         self.assertEqual(len(re.findall(r"^\tint max_lines;$", args_body, re.M)), 1)
         self.assertEqual(len(re.findall(r"^\tint marker;$", args_body, re.M)), 1)
         result_body = _class_body(cleaned_msgs, r"^\s*class\s+MCPResult\b")
         ref_fields = re.findall(r"^\tref\s+(?:array<[^>]+>|\w+)\s+(\w+);$", result_body, re.M)
-        self.assertEqual(ref_fields[-1], "chat_read")
+        self.assertEqual(ref_fields[-2:], ["chat_read", "ui_pause"])
         self.assertEqual(tuple(ref_fields), result_prune.PRUNABLE_FIELDS)
 
 
