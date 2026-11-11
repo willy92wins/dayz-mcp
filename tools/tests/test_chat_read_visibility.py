@@ -466,6 +466,7 @@ class _ChatVisibilityModel:
                 "int GetLastSeq()",
                 "void RecordLine(ChatMessageEventParams params)",
                 "protected ChatLine FindChatLineBySeq(int seq)",
+                "protected float ComputeChatLineAlpha(ChatLine chatLine)",
                 "void FillReadVisibility(MCPChatRead outRead)",
                 "void SampleShownLines(int nowMs)",
             ):
@@ -489,6 +490,7 @@ class _ChatVisibilityModel:
                 GetLastSeq=log_ns["GetLastSeq"],
                 RecordLine=log_ns["RecordLine"],
                 FindChatLineBySeq=log_ns["FindChatLineBySeq"],
+                ComputeChatLineAlpha=log_ns["ComputeChatLineAlpha"],
                 FillReadVisibility=log_ns["FillReadVisibility"],
                 SampleShownLines=_logged_sample,
             )
@@ -905,11 +907,11 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
         chat_line.m_RootWidget.SetAlpha(1.0)
         self.assertAlmostEqual(model.read().lines.Get(0).alpha, 1.0, places=6)
 
-        # Multi-ancestor product: hud_root (0.5) * line_root (0.5) * text (0.8) = 0.2.
+        # Product stops at m_RootWidget: hud_root (0.5) is above it, so line_root (0.5) * text (0.8) = 0.4.
         model.hud_root.SetAlpha(0.5)
         chat_line.m_RootWidget.SetAlpha(0.5)
         chat_line.m_TextWidget.SetAlpha(0.8)
-        self.assertAlmostEqual(model.read().lines.Get(0).alpha, 0.2, places=6)
+        self.assertAlmostEqual(model.read().lines.Get(0).alpha, 0.4, places=6)
 
         # Text widget at 0.5 with every ancestor at 1.0 -> alpha 0.5, plus mutant
         # control starting the product at textWidget.GetParent().
@@ -933,7 +935,7 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
         check_text_widget_alpha_read(base_src)
         skip_text_alpha_read = _mutate_in_scope(
             base_src,
-            "void FillReadVisibility(MCPChatRead outRead)",
+            "protected float ComputeChatLineAlpha(ChatLine chatLine)",
             "currentWidget = textWidget;",
             "currentWidget = textWidget.GetParent();",
         )
@@ -941,6 +943,234 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
             AssertionError, "read alpha must include text widget"
         ):
             check_text_widget_alpha_read(skip_text_alpha_read)
+
+    def test_zero_alpha_above_line_root_keeps_read_alpha_one_and_sets_shown_at_ms(
+        self,
+    ) -> None:
+        def check_zero_ancestor_alpha_above_line_root(chat_log_src: str) -> None:
+            for ancestor_name in ("chat_frame", "hud_root"):
+                m = _ChatVisibilityModel(chat_log_src=chat_log_src)
+                ancestor = getattr(m, ancestor_name)
+                ancestor.SetAlpha(0.0)
+                slot = m.emit_line(
+                    f"Visible line under {ancestor_name}=0",
+                    t_ms=1000,
+                    alpha_after_set=1.0,
+                )
+                assert slot.m_TextWidget is not None
+                assert slot.m_RootWidget is not None
+                self.assertIs(slot.m_TextWidget.GetParent(), slot.m_RootWidget)
+                self.assertIs(slot.m_RootWidget.GetParent(), m.chat_frame)
+                self.assertIs(m.chat_frame.GetParent(), m.hud_root)
+                self.assertIsNone(m.hud_root.GetParent())
+                self.assertEqual(slot.m_TextWidget.GetAlpha(), 1.0)
+                self.assertEqual(slot.m_RootWidget.GetAlpha(), 1.0)
+                self.assertEqual(ancestor.GetAlpha(), 0.0)
+
+                before_sample = m.read().lines.Get(0)
+                self.assertTrue(before_sample.visible_hierarchy)
+                self.assertAlmostEqual(
+                    before_sample.alpha,
+                    1.0,
+                    places=6,
+                    msg=f"{ancestor_name} at alpha 0 must not zero line read alpha",
+                )
+                self.assertEqual(before_sample.shown_at_ms, -1)
+
+                m.tick_frame(1200)
+                after_sample = m.read().lines.Get(0)
+                self.assertAlmostEqual(
+                    after_sample.alpha,
+                    1.0,
+                    places=6,
+                    msg=f"{ancestor_name} at alpha 0 must keep line read alpha 1.0",
+                )
+                self.assertEqual(
+                    after_sample.shown_at_ms,
+                    1200,
+                    f"{ancestor_name} at alpha 0 must still set shown_at_ms",
+                )
+
+        base_src = CHAT_LOG_PATH.read_text(encoding="utf-8")
+        check_zero_ancestor_alpha_above_line_root(base_src)
+        r1_climb_to_null = _mutate_in_scope(
+            base_src,
+            "protected float ComputeChatLineAlpha(ChatLine chatLine)",
+            "if (currentWidget == rootWidget)\n"
+            "\t\t\t{\n"
+            "\t\t\t\treturn lineAlpha;\n"
+            "\t\t\t}\n"
+            "\t\t\tcurrentWidget = currentWidget.GetParent();\n"
+            "\t\t}\n"
+            "\t\treturn 0.0;",
+            "currentWidget = currentWidget.GetParent();\n"
+            "\t\t}\n"
+            "\t\treturn lineAlpha;",
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "chat_frame at alpha 0 must not zero line read alpha",
+        ):
+            check_zero_ancestor_alpha_above_line_root(r1_climb_to_null)
+
+    def test_line_root_and_text_widget_alpha_combinations_and_parent_start_mutant(
+        self,
+    ) -> None:
+        def check_line_widget_alpha_combinations(chat_log_src: str) -> None:
+            m = _ChatVisibilityModel(chat_log_src=chat_log_src)
+            slot = m.emit_line("Alpha combinations", t_ms=1000, alpha_after_set=1.0)
+            assert slot.m_RootWidget is not None
+            assert slot.m_TextWidget is not None
+
+            slot.m_RootWidget.SetAlpha(0.5)
+            slot.m_TextWidget.SetAlpha(1.0)
+            self.assertAlmostEqual(
+                m.read().lines.Get(0).alpha,
+                0.5,
+                places=6,
+                msg="m_RootWidget at 0.5 must give alpha 0.5",
+            )
+
+            slot.m_RootWidget.SetAlpha(1.0)
+            slot.m_TextWidget.SetAlpha(0.5)
+            self.assertAlmostEqual(
+                m.read().lines.Get(0).alpha,
+                0.5,
+                places=6,
+                msg="m_TextWidget at 0.5 must give alpha 0.5",
+            )
+
+            slot.m_RootWidget.SetAlpha(0.5)
+            slot.m_TextWidget.SetAlpha(0.5)
+            self.assertAlmostEqual(
+                m.read().lines.Get(0).alpha,
+                0.25,
+                places=6,
+                msg="m_RootWidget and m_TextWidget both at 0.5 must give alpha 0.25",
+            )
+
+            slot.m_RootWidget.SetAlpha(0.0)
+            slot.m_TextWidget.SetAlpha(1.0)
+            self.assertAlmostEqual(
+                m.read().lines.Get(0).alpha,
+                0.0,
+                places=6,
+                msg="m_RootWidget at 0 must give alpha 0.0",
+            )
+
+        base_src = CHAT_LOG_PATH.read_text(encoding="utf-8")
+        check_line_widget_alpha_combinations(base_src)
+        start_at_parent = _mutate_in_scope(
+            base_src,
+            "protected float ComputeChatLineAlpha(ChatLine chatLine)",
+            "currentWidget = textWidget;",
+            "currentWidget = textWidget.GetParent();",
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"m_TextWidget at 0\.5 must give alpha 0\.5",
+        ):
+            check_line_widget_alpha_combinations(start_at_parent)
+
+    def test_sampling_with_zero_chat_frame_and_root_fade_sets_shown_at_ms_at_t_plus_450(
+        self,
+    ) -> None:
+        model = _ChatVisibilityModel()
+        model.chat_frame.SetAlpha(0.0)
+        t0 = 1000
+        slot = model.emit_line("Fade-in under zero chat_frame", t_ms=t0)
+        assert slot.m_RootWidget is not None
+        assert slot.m_TextWidget is not None
+        self.assertEqual(model.chat_frame.GetAlpha(), 0.0)
+        self.assertEqual(slot.m_TextWidget.GetAlpha(), 1.0)
+        self.assertEqual(model.read().lines.Get(0).shown_at_ms, -1)
+
+        slot.m_RootWidget.SetAlpha(0.2)
+        model.tick_frame(t0 + 100)
+        at_100 = model.read().lines.Get(0)
+        self.assertAlmostEqual(at_100.alpha, 0.2, places=6)
+        self.assertEqual(at_100.shown_at_ms, -1)
+
+        slot.m_RootWidget.SetAlpha(0.9)
+        model.tick_frame(t0 + 450)
+        at_450 = model.read().lines.Get(0)
+        self.assertAlmostEqual(at_450.alpha, 0.9, places=6)
+        self.assertEqual(at_450.shown_at_ms, t0 + 450)
+
+    def test_detached_or_missing_root_widget_yields_zero_alpha_and_no_shown_at_ms(
+        self,
+    ) -> None:
+        def check_detached_text_widget(chat_log_src: str) -> None:
+            for case_name in (
+                "orphan",
+                "under_chat_frame",
+                "under_other_root",
+                "null_root",
+            ):
+                m = _ChatVisibilityModel(chat_log_src=chat_log_src)
+                assert m.chat is not None
+                slot = m.emit_line(
+                    f"Detached {case_name}", t_ms=1000, alpha_after_set=1.0
+                )
+                assert slot.m_TextWidget is not None
+                assert slot.m_RootWidget is not None
+                slot.m_TextWidget.Show(True)
+                slot.m_TextWidget.SetAlpha(1.0)
+                slot.m_RootWidget.Show(True)
+                slot.m_RootWidget.SetAlpha(1.0)
+
+                if case_name == "orphan":
+                    slot.m_TextWidget.parent = None
+                elif case_name == "under_chat_frame":
+                    slot.m_TextWidget.parent = m.chat_frame
+                elif case_name == "under_other_root":
+                    other_slot = m.chat.GetMCPChatLines().Get(
+                        (m.chat.m_LastLine + 1) % m.chat.LINE_COUNT
+                    )
+                    assert other_slot is not slot and other_slot.m_RootWidget is not None
+                    other_slot.m_RootWidget.Show(True)
+                    other_slot.m_RootWidget.SetAlpha(1.0)
+                    slot.m_TextWidget.parent = other_slot.m_RootWidget
+                else:
+                    self.assertEqual(case_name, "null_root")
+                    slot.m_RootWidget = None
+
+                m.tick_frame(1200)
+                entry = m.read().lines.Get(0)
+                self.assertEqual(
+                    entry.alpha,
+                    0.0,
+                    f"{case_name}: detached/missing root must yield alpha 0.0",
+                )
+                self.assertEqual(
+                    entry.shown_at_ms,
+                    -1,
+                    f"{case_name}: detached/missing root must not set shown_at_ms",
+                )
+
+        base_src = CHAT_LOG_PATH.read_text(encoding="utf-8")
+        check_detached_text_widget(base_src)
+
+        direct_model = _ChatVisibilityModel(chat_log_src=base_src)
+        direct_slot = direct_model.emit_line(
+            "Null checks", t_ms=1000, alpha_after_set=1.0
+        )
+        direct_log = direct_model.mission.GetMCPChatLog()
+        self.assertEqual(direct_log.ComputeChatLineAlpha(None), 0.0)
+        direct_slot.m_TextWidget = None
+        self.assertEqual(direct_log.ComputeChatLineAlpha(direct_slot), 0.0)
+
+        unanchored_fallthrough = _mutate_in_scope(
+            base_src,
+            "protected float ComputeChatLineAlpha(ChatLine chatLine)",
+            "currentWidget = currentWidget.GetParent();\n\t\t}\n\t\treturn 0.0;",
+            "currentWidget = currentWidget.GetParent();\n\t\t}\n\t\treturn lineAlpha;",
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"orphan: detached/missing root must yield alpha 0\.0",
+        ):
+            check_detached_text_widget(unanchored_fallthrough)
 
     def test_read_values_come_from_live_widget_between_set_and_read(self) -> None:
         model = _ChatVisibilityModel()
@@ -1237,12 +1467,12 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
 
             m.tick_frame(1100)
             low_read = m.read().lines.Get(0)
-            self.assertAlmostEqual(low_read.alpha, 0.2, places=6)
             self.assertEqual(
                 low_read.shown_at_ms,
                 -1,
                 "sampling must include text widget alpha",
             )
+            self.assertAlmostEqual(low_read.alpha, 0.2, places=6)
 
             slot.m_TextWidget.SetAlpha(0.95)
             m.tick_frame(1450)
@@ -1252,16 +1482,26 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
 
         base_src = CHAT_LOG_PATH.read_text(encoding="utf-8")
         check_text_widget_alpha_sampling(base_src)
-        skip_text_alpha_sample = _mutate_in_scope(
-            base_src,
-            "void SampleShownLines(int nowMs)",
-            "currentWidget = textWidget;",
-            "currentWidget = textWidget.GetParent();",
-        )
-        with self.assertRaisesRegex(
-            AssertionError, "sampling must include text widget alpha"
+        for scope, target, replacement in (
+            (
+                "protected float ComputeChatLineAlpha(ChatLine chatLine)",
+                "currentWidget = textWidget;",
+                "currentWidget = textWidget.GetParent();",
+            ),
+            (
+                "void SampleShownLines(int nowMs)",
+                "hierarchyAlpha = ComputeChatLineAlpha(chatLine);",
+                "hierarchyAlpha = chatLine.m_RootWidget.GetAlpha();",
+            ),
         ):
-            check_text_widget_alpha_sampling(skip_text_alpha_sample)
+            with self.subTest(scope=scope):
+                skip_text_alpha_sample = _mutate_in_scope(
+                    base_src, scope, target, replacement
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "sampling must include text widget alpha"
+                ):
+                    check_text_widget_alpha_sampling(skip_text_alpha_sample)
 
     def test_mission_on_update_never_creates_log_and_samples_between_super_and_bridge_tick(self) -> None:
         model = _ChatVisibilityModel()
@@ -1349,15 +1589,16 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
     def _run_chain_matrix(self, chat_log_src: str, *, use_subtest: bool) -> None:
         model = _ChatVisibilityModel(chat_log_src=chat_log_src)
         widget_names = ("m_TextWidget", "m_RootWidget", "chat_frame", "hud_root")
+        line_alpha_widgets = frozenset({"m_TextWidget", "m_RootWidget"})
         cases: list[tuple[str, str, tuple[str, ...]]] = []
         for widget_name in widget_names:
             cases.append((f"{widget_name}:alpha=0.5", "alpha_half", (widget_name,)))
             cases.append((f"{widget_name}:hidden", "hidden", (widget_name,)))
         cases.append(
             (
-                "m_RootWidget+chat_frame:alpha=0.9x0.9",
+                "m_TextWidget+m_RootWidget:alpha=0.9x0.9",
                 "alpha_pair_09",
-                ("m_RootWidget", "chat_frame"),
+                ("m_TextWidget", "m_RootWidget"),
             )
         )
 
@@ -1418,30 +1659,47 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
                         initial.visible_hierarchy,
                         f"{label}: expected visible_hierarchy True",
                     )
-                    self.assertAlmostEqual(
-                        initial.alpha,
-                        0.5,
-                        delta=1e-6,
-                        msg=f"{label}: expected read alpha 0.5",
-                    )
+                    if target_name in line_alpha_widgets:
+                        self.assertAlmostEqual(
+                            initial.alpha,
+                            0.5,
+                            delta=1e-6,
+                            msg=f"{label}: expected read alpha 0.5",
+                        )
 
-                    model.tick_frame(t0 + 450)
-                    after_low = model.read(marker=seq - 1).lines.Get(0)
-                    self.assertEqual(
-                        after_low.shown_at_ms,
-                        -1,
-                        f"{label}: expected shown_at_ms -1 while alpha=0.5",
-                    )
+                        model.tick_frame(t0 + 450)
+                        after_low = model.read(marker=seq - 1).lines.Get(0)
+                        self.assertEqual(
+                            after_low.shown_at_ms,
+                            -1,
+                            f"{label}: expected shown_at_ms -1 while alpha=0.5",
+                        )
 
-                    chain[target_name].SetAlpha(1.0)
-                    model.tick_frame(t0 + 900)
-                    after_restored = model.read(marker=seq - 1).lines.Get(0)
-                    self.assertAlmostEqual(after_restored.alpha, 1.0, delta=1e-6)
-                    self.assertEqual(
-                        after_restored.shown_at_ms,
-                        t0 + 900,
-                        f"{label}: expected shown_at_ms {t0 + 900} after restoring alpha",
-                    )
+                        chain[target_name].SetAlpha(1.0)
+                        model.tick_frame(t0 + 900)
+                        after_restored = model.read(marker=seq - 1).lines.Get(0)
+                        self.assertAlmostEqual(after_restored.alpha, 1.0, delta=1e-6)
+                        self.assertEqual(
+                            after_restored.shown_at_ms,
+                            t0 + 900,
+                            f"{label}: expected shown_at_ms {t0 + 900} after restoring alpha",
+                        )
+                    else:
+                        self.assertAlmostEqual(
+                            initial.alpha,
+                            1.0,
+                            delta=1e-6,
+                            msg=f"{label}: expected read alpha 1.0",
+                        )
+
+                        model.tick_frame(t0 + 450)
+                        after_tick = model.read(marker=seq - 1).lines.Get(0)
+                        self.assertAlmostEqual(after_tick.alpha, 1.0, delta=1e-6)
+                        self.assertEqual(
+                            after_tick.shown_at_ms,
+                            t0 + 450,
+                            f"{label}: expected shown_at_ms {t0 + 450} with ancestor alpha=0.5",
+                        )
                 elif mode == "hidden":
                     target_name = targets[0]
                     chain[target_name].Show(False)
@@ -1514,40 +1772,45 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
         base_src = CHAT_LOG_PATH.read_text(encoding="utf-8")
         self._run_chain_matrix(base_src, use_subtest=True)
 
+        alpha_scope = "protected float ComputeChatLineAlpha(ChatLine chatLine)"
         sample_scope = "void SampleShownLines(int nowMs)"
         fill_scope = "void FillReadVisibility(MCPChatRead outRead)"
-        stop_after_root_replacement = (
-            "if (currentWidget == textWidget) "
-            "{ currentWidget = currentWidget.GetParent(); } "
-            "else { currentWidget = null; }"
-        )
 
-        # D15(a): product stops after m_RootWidget (skips ChatFrameWidget and HudRootWidget).
-        sample_stops_after_root = _mutate_in_scope(
+        # D15(a): product stops at m_RootWidget (climbs from m_TextWidget to m_RootWidget,
+        # never above m_RootWidget into ChatFrameWidget or HudRootWidget).
+        climbs_past_root = _mutate_in_scope(
             base_src,
-            sample_scope,
-            "currentWidget = currentWidget.GetParent();",
-            stop_after_root_replacement,
+            alpha_scope,
+            "if (currentWidget == rootWidget)\n"
+            "\t\t\t{\n"
+            "\t\t\t\treturn lineAlpha;\n"
+            "\t\t\t}\n"
+            "\t\t\tcurrentWidget = currentWidget.GetParent();\n"
+            "\t\t}\n"
+            "\t\treturn 0.0;",
+            "currentWidget = currentWidget.GetParent();\n"
+            "\t\t}\n"
+            "\t\treturn lineAlpha;",
         )
-        self.assertNotEqual(clean(sample_stops_after_root), clean(base_src))
+        self.assertNotEqual(clean(climbs_past_root), clean(base_src))
         with self.assertRaisesRegex(
             AssertionError,
-            r"chat_frame:alpha=0\.5: expected shown_at_ms -1 while alpha=0\.5",
+            r"chat_frame:alpha=0\.5: expected read alpha 1\.0",
         ):
-            self._run_chain_matrix(sample_stops_after_root, use_subtest=False)
+            self._run_chain_matrix(climbs_past_root, use_subtest=False)
 
-        fill_stops_after_root = _mutate_in_scope(
+        stops_before_root = _mutate_in_scope(
             base_src,
-            fill_scope,
-            "currentWidget = currentWidget.GetParent();",
-            stop_after_root_replacement,
+            alpha_scope,
+            "if (currentWidget == rootWidget)",
+            "if (currentWidget == textWidget)",
         )
-        self.assertNotEqual(clean(fill_stops_after_root), clean(base_src))
+        self.assertNotEqual(clean(stops_before_root), clean(base_src))
         with self.assertRaisesRegex(
             AssertionError,
-            r"chat_frame:alpha=0\.5: expected read alpha 0\.5",
+            r"m_RootWidget:alpha=0\.5: expected read alpha 0\.5",
         ):
-            self._run_chain_matrix(fill_stops_after_root, use_subtest=False)
+            self._run_chain_matrix(stops_before_root, use_subtest=False)
 
         # D15(b): textWidget.IsVisibleHierarchy() -> textWidget.GetParent().IsVisibleHierarchy().
         sample_parent_visibility = _mutate_in_scope(
@@ -1636,7 +1899,7 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 second_entry.alpha,
-                0.3,
+                0.5,
                 delta=1e-6,
                 msg="second read must return updated alpha",
             )
@@ -1666,7 +1929,7 @@ class ChatReadVisibilityTranslatedEnforceTest(unittest.TestCase):
                 ),
                 third_rect,
             )
-            self.assertAlmostEqual(third_entry.alpha, 0.75, delta=1e-6)
+            self.assertAlmostEqual(third_entry.alpha, 1.0, delta=1e-6)
             self.assertTrue(third_entry.visible_hierarchy)
             self.assertEqual(slot.m_TextWidget.screen_pos_reads, 3)
             self.assertEqual(slot.m_TextWidget.screen_size_reads, 3)
@@ -2543,6 +2806,7 @@ class ChatReadVisibilityToolTest(unittest.IsolatedAsyncioTestCase):
         for token in (
             "visible_hierarchy",
             "alpha",
+            "root",
             "screen_x",
             "screen_y",
             "screen_w",
