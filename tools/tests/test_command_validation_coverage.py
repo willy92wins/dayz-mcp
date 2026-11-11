@@ -194,6 +194,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"pos": [0.0, 0.0, 0.0], "radius": 1.0}
     if cmd == "ui_tree":
         return {}
+    if cmd == "chat_read":
+        return {}
     if cmd == "ui_set_text":
         return {"path": "p", "text": "t"}
     if cmd == "ui_click":
@@ -202,6 +204,8 @@ def _minimal_args(cmd: str) -> dict:
         # Same shape as ui_click: a widget NAME. ui_focus rejects an empty
         # path and any extra key.
         return {"path": "p"}
+    if cmd == "ui_pause":
+        return {}
     if cmd == "ui_reload_layout":
         return {"mode": "close"}
     if cmd == "ui_dialog":
