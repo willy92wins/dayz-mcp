@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ntpath
 import os
 import re
@@ -13,6 +14,7 @@ from typing import Protocol
 from dayz_mcp import (
     dayz_test_modes,
     dayz_test_request,
+    dayz_test_worker,
     lease_supervisor,
     request_path_authority,
 )
@@ -823,12 +825,55 @@ def preflight_bridge_contract_request(
     )
 
 
+def _accredit_runtime_paths(
+    parsed: dayz_test_request.ParsedDayzTestRequest,
+    *,
+    sealed_policies: tuple[
+        request_path_authority.SealedRequestProjectPolicy, ...
+    ],
+    worker_runtime: Callable[[str, str], object],
+) -> contextlib.AbstractContextManager[object]:
+    """Accredit what the roles load, not only the declared lists.
+
+    accredit_request_paths covers base_mods, extra_mods, server_mods and
+    server_only_mods. The official mod_dir, the implicit project mod and the
+    mission alias are only known after the worker runtime resolves them, so
+    each resolved directory must also sit under one sealed policy.mod_roots
+    entry. This is the same pair of checks the MCP preflight runs
+    (dayz_test_tool._execute_preflight); here it runs on the launch, before
+    the lease, so a mod_dir outside every mod_root never reaches -mod=.
+    A kill request starts no role and loads nothing.
+    """
+    if parsed.payload.get("kill") is True:
+        return contextlib.nullcontext()
+    selected = tuple(
+        item
+        for item in sealed_policies
+        if item.policy.mod == parsed.payload.get("mod")
+        and item.policy.dev_root == parsed.payload.get("dev_root")
+    )
+    if len(selected) != 1:
+        raise ValueError("invalid_dayz_test_path_authority")
+    runtime = worker_runtime(selected[0].policy.mod, selected[0].policy.dev_root)
+    try:
+        mission = dayz_test_worker._mission(parsed.payload, runtime)
+        directories = dayz_test_worker._effective_directories(
+            parsed.payload, runtime
+        )
+    except dayz_test_worker.DayzTestWorkerError:
+        raise ValueError("invalid_dayz_test_path_authority") from None
+    return request_path_authority.accredit_runtime_resolved_paths(
+        selected[0], directories=directories, mission=mission
+    )
+
+
 async def execute_native_launcher_transaction(
     raw_request: bytes,
     *,
     sealed_policies: tuple[
         request_path_authority.SealedRequestProjectPolicy, ...
     ],
+    worker_runtime: Callable[[str, str], object],
     control_client: _ControlClient,
     consumer: Callable[..., Awaitable[int]],
     max_wait_s: float | None = None,
@@ -837,7 +882,11 @@ async def execute_native_launcher_transaction(
     ]
     | None = None,
 ) -> int:
-    if type(sealed_policies) is not tuple or not callable(consumer):
+    if (
+        type(sealed_policies) is not tuple
+        or not callable(consumer)
+        or not callable(worker_runtime)
+    ):
         raise ValueError("invalid_native_launcher_transaction")
     semantic_policies = tuple(item.policy for item in sealed_policies)
     parsed = dayz_test_request.parse_dayz_test_request(
@@ -851,9 +900,13 @@ async def execute_native_launcher_transaction(
     # requests none is warned.
     enforce_vpp_preflight(parsed.payload, semantic_policies)
 
+    # The runtime-resolved directories (mod_dir included) are accredited next
+    # to the declared lists and stay pinned for the whole transaction.
     with request_path_authority.accredit_request_paths(
         parsed, policies=sealed_policies
-    ) as accredited_paths:
+    ) as accredited_paths, _accredit_runtime_paths(
+        parsed, sealed_policies=sealed_policies, worker_runtime=worker_runtime
+    ):
         response = await control_client.session_acquire_wait(
             "dayz-test",
             max_wait_s=max_wait_s,

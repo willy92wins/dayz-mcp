@@ -731,7 +731,9 @@ class ExitedBindingInvariantTest(unittest.TestCase):
         "begin_release_owner.cleanup": "test_persist_failure_on_begin_release_retires_binding_and_rejects_late_result",
         "repair_recovery_fault": "test_persist_failure_on_repair_recovery_retires_binding_and_rejects_late_result",
         "repair_manifest_recovery": "test_persist_failure_on_manifest_recovery_retires_binding_and_rejects_late_result",
-        "stop_run": "test_persist_failure_on_stop_retires_binding_and_rejects_late_result",
+        # stop_run is a thin wrapper (#368): the literal EXITED assignment of
+        # a stop lives in _stop_run, reached only through stop_run.
+        "_stop_run": "test_persist_failure_on_stop_retires_binding_and_rejects_late_result",
         "admin_reconcile": "test_persist_failure_on_admin_reconcile_retires_binding_and_rejects_late_result",
         "_settle_failed_launch": None,
     }
