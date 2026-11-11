@@ -1415,17 +1415,22 @@ class GodmodeMissionHookTest(unittest.TestCase):
     def _run(self, signature: str, *args: Any) -> list[tuple[Any, ...]]:
         order: list[tuple[Any, ...]] = []
 
-        def recorder(owner: str):
+        def recorder(owner: str, answers: dict[str, Any] | None = None):
             class _Recorder:
                 def __getattr__(self, name: str):
-                    return lambda *values: order.append((owner, name) + values)
+                    def call(*values: Any) -> Any:
+                        order.append((owner, name) + values)
+                        return (answers or {}).get(name)
+
+                    return call
 
             return _Recorder()
 
         bridge = SimpleNamespace(OnTick=lambda value: order.append(("bridge", "OnTick", value)))
         namespace: dict[str, Any] = {
             "super": recorder("super"),
-            "MCPGodmode": recorder("MCPGodmode"),
+            "MCPGodmode": recorder("MCPGodmode", {"DefaultOn": False}),
+            "MCPLookAtControl": recorder("MCPLookAtControl"),
             "MCPBridge": SimpleNamespace(Get=lambda: bridge, ConfigIsTestProfile=lambda: False),
         }
         hook = translate(
@@ -1462,6 +1467,10 @@ class GodmodeMissionHookTest(unittest.TestCase):
                 ("super", "OnMissionStart"),
                 ("MCPGodmode", "ResetMission"),
                 ("MCPGodmode", "SetDefaultOn", False),
+                # player_look_at's server copy follows the same profile=test
+                # default, read once (#363 follow-up L2).
+                ("MCPGodmode", "DefaultOn"),
+                ("MCPLookAtControl", "SetServerAllowed", False),
                 ("bridge", "OnTick", 0.0),
             ],
         )

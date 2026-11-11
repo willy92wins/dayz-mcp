@@ -2931,6 +2931,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.error = "aim_unreadable";
 			return true;
 		}
+		// L1b: a look still turning the player is not fought with an aim.
+		if (MCPLookAtControl.IsRunning())
+		{
+			result.ok = false;
+			result.error = "busy";
+			return true;
+		}
+		// L1 (#363 follow-up): a converged look's server copy stops before the aim.
+		MCPLookAtControl.ReleaseServerCopy();
 		generation = MCPWeaponControl.BeginAim(player, dx, dy);
 		job = QueueWeaponJob(command, result, "weapon_aim", generation);
 		job.weapon_action.aim_lr_before = hcw.GetBaseAimingAngleLR();
@@ -3526,6 +3535,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "player_move_busy";
+			return true;
+		}
+		// L1b: a look still turning the player is not fought with a move,
+		// which would also end the look's server copy (move_started).
+		if (MCPLookAtControl.IsRunning())
+		{
+			result.ok = false;
+			result.error = "busy";
 			return true;
 		}
 		player = PlayerBase.Cast(GetGame().GetPlayer());
@@ -7711,7 +7728,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			budget = 3.0;
 		}
-		// input_busy leaves both sides as they were (MCPLookAtControl.Begin).
+		// input_busy starts no look on either side (MCPLookAtControl.Begin);
+		// a previous look's pending release may still have left first.
 		refusal = MCPLookAtControl.Begin(player, target, budget, command.id);
 		if (refusal != "")
 		{
