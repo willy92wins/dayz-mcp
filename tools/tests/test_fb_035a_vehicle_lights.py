@@ -138,6 +138,9 @@ class FakeTransport:
     def GetOrientation(self):
         return (0.0, 0.0, 0.0)
 
+    def ConfigIsExisting(self, entry: object) -> bool:
+        return getattr(entry, "text", entry) == "DamageSystem"
+
     def GetHealth01(self, _zone: object, _hit: object) -> float:
         return 1.0
 
