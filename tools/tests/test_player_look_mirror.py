@@ -47,6 +47,7 @@ UDT = "MCP_INPUT_UDT_PLAYER_LOOK"
 BEGIN = "static string Begin(PlayerBase player, vector target, float budgetS, int commandId)"
 RESET = "static void Reset()"
 RELEASE = "static void Release(string why)"
+RELEASE_OWNED = "static void ReleaseOwned(int commandId, string why)"
 FINISH = "static void Finish(string termination, bool converged)"
 END_SERVER = "static void EndServerLook(bool converged)"
 SEND_START = "static string SendServerStart(int lookId, vector target, float budgetS)"
@@ -70,6 +71,7 @@ SERVER_RECONNECT = "override void OnReconnect()"
 COMMAND_HANDLER = "override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)"
 CONSUME = "protected override event void ConsumeMove(PawnMove pMove)"
 DISPATCH = "protected bool DispatchPlayerLookAt(MCPCommand command, MCPResult result)"
+DISPATCH_RELEASE = "protected bool DispatchPlayerLookAtRelease(MCPCommand command, MCPResult result)"
 COMPASS = "static float CompassFromHeading(float headingRad)"
 BEARING = "static float BearingDeg(vector from, vector target)"
 WRAP = "static float WrapDeg180(float angle)"
@@ -85,7 +87,7 @@ SERVER_METHODS = (
     SERVER_VERDICT, SERVER_NOTE, SERVER_RELEASE, SERVER_FRESHNESS, SERVER_OWNER,
     SERVER_READ_RELEASE, SERVER_ACCEPT, SERVER_TICK, SERVER_RECONNECT,
 )
-OWNER_METHODS = (RESET, BEGIN, RELEASE, FINISH, END_SERVER, SEND_START, FLUSH)
+OWNER_METHODS = (RESET, BEGIN, RELEASE, RELEASE_OWNED, FINISH, END_SERVER, SEND_START, FLUSH)
 
 
 def _source(path) -> str:
@@ -143,8 +145,9 @@ class _Channel:
 
 
 class _OwnerModel:
-    """MCPLookAtControl's Begin, Release, Finish and the server messages, translated
-    over one namespace, the class statics read through S."""
+    """MCPLookAtControl's Begin, Release, ReleaseOwned, Finish and the server
+    messages, translated over one namespace, the class statics read through S,
+    and the bridge's cancel (DispatchPlayerLookAtRelease) calling them."""
 
     def __init__(self, source: str) -> None:
         self.channel = _Channel()
@@ -173,6 +176,8 @@ class _OwnerModel:
         for signature in OWNER_METHODS:
             free = _free_function(source, signature, r"s_\w+", "S")
             translate(free, signature, self.namespace, class_types={"PlayerBase", "ScriptInputUserData"})
+        self.namespace["MCPLookAtControl"] = SimpleNamespace(ReleaseOwned=self.namespace["ReleaseOwned"])
+        translate(_source(CLIENT_BRIDGE_PATH), DISPATCH_RELEASE, self.namespace)
         self.udt = _wire_type(source)
 
     def _disable(self, _player: object) -> None:
@@ -189,6 +194,14 @@ class _OwnerModel:
 
     def release(self, why: str) -> None:
         self.namespace["Release"](_LogString.of(why))
+
+    def cancel(self, command_id: int = 7) -> SimpleNamespace:
+        """The broker's player_look_at_release for `command_id`, through the
+        bridge's dispatch; the result it answers."""
+        result = SimpleNamespace(ok=False, error=None)
+        command = SimpleNamespace(args=SimpleNamespace(command_id=command_id))
+        self.answered = self.namespace["DispatchPlayerLookAtRelease"](command, result)
+        return result
 
     def flush(self) -> None:
         self.namespace["FlushServerRelease"]()
@@ -556,7 +569,7 @@ class LookMirrorWireTest(unittest.TestCase):
         type_names = set(re.findall(r"\bclass\s+(\w+)", every_script))
         type_names |= {"Math", "ParamsReadContext", "PawnMove", "ScriptInputUserData", "HumanInputController"}
         for signature in (
-            BEGIN, RELEASE, FINISH, END_SERVER, SEND_START, FLUSH, REQUEST_REFUSAL, WITHIN_BAND,
+            BEGIN, RELEASE, RELEASE_OWNED, FINISH, END_SERVER, SEND_START, FLUSH, REQUEST_REFUSAL, WITHIN_BAND,
             PULSE_X, ON_COMMAND, SERVER_INPUT, SERVER_READ, SERVER_READ_RELEASE, SERVER_ACCEPT,
             SERVER_FRESHNESS, SERVER_OWNER, SERVER_TICK, SERVER_RELEASE, SERVER_VERDICT,
             SERVER_NOTE, SERVER_RECONNECT, COMMAND_HANDLER, CONSUME,
@@ -606,12 +619,30 @@ class LookMirrorOwnerModelTest(unittest.TestCase):
         model.release("restore")
         self.assertEqual(len(model.channel.sent), 2)
 
+    def test_a_cancel_after_a_converged_look_releases_its_copy_once(self) -> None:
+        model = self.model
+        look = model.begin()
+        model.finish("converged", True)
+        # A cancel naming another command leaves the copy alone.
+        self.assertTrue(model.cancel(command_id=8).ok)
+        self.assertEqual(len(model.channel.sent), 1)
+        result = model.cancel()
+        self.assertEqual((model.answered, result.ok), (True, True))
+        self.assertEqual(model.channel.sent[-1], [model.udt, False, look])
+        self.assertEqual((model.state.s_ServerLookId, model.state.s_ServerReleasePending), (0, False))
+        # The look's report and generation stay as they were, so its job still
+        # answers converged.
+        self.assertEqual((model.state.s_Generation, model.state.s_Converged), (look, True))
+        self.assertEqual(model.state.s_Termination.text, "converged")
+        model.cancel()
+        self.assertEqual(len(model.channel.sent), 2)
+
     def test_a_running_look_cancelled_sends_its_release(self) -> None:
         model = self.model
         first = model.begin()
         second = model.begin()
         self.assertGreater(second, first)
-        model.release("cancelled")
+        self.assertTrue(model.cancel().ok)
         self.assertEqual(model.channel.sent[-1], [model.udt, False, second])
         self.assertEqual(len(model.channel.sent), 3)
         self.assertGreaterEqual(model.disabled, 3)
@@ -800,6 +831,18 @@ class LookMirrorRoundTripTest(unittest.TestCase):
         look = owner.begin()
         owner.finish("converged", True)
         owner.release("restore")
+        self._deliver(owner, server)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.log, [_verdict(1, look, ""), _released(look, "client")])
+        server.tick()
+        self.assertEqual(server.player.overrides, [])
+
+    def test_a_start_that_arrives_after_converged_and_a_cancel_is_released_there(self) -> None:
+        owner = _OwnerModel(self.source)
+        server = _ServerLookModel(self.source)
+        look = owner.begin()
+        owner.finish("converged", True)
+        self.assertTrue(owner.cancel().ok)
         self._deliver(owner, server)
         self.assertIsNone(server.active)
         self.assertEqual(server.log, [_verdict(1, look, ""), _released(look, "client")])

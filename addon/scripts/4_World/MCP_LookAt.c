@@ -203,10 +203,19 @@ class MCPLookAtControl
 		hic.OverrideAimChangeY(HumanInputControllerOverrideType.DISABLED, 0.0);
 	}
 
+	// The owner's cancel (player_look_at_release) of the look its command
+	// started. A look that already ended here can still keep its server copy
+	// (a converged one, EndServerLook): the cancel sends that copy its
+	// release and leaves the report and the generation as they are.
 	static void ReleaseOwned(int commandId, string why)
 	{
-		if (!s_Active || s_CommandId != commandId)
+		if (s_CommandId != commandId)
 		{
+			return;
+		}
+		if (!s_Active)
+		{
+			EndServerLook(false);
 			return;
 		}
 		Release(why);
@@ -242,8 +251,9 @@ class MCPLookAtControl
 
 	// The end of a look the server was sent. A converged look leaves the
 	// server's copy to reach its own band, both sides turning toward the same
-	// bearing, and keeps its id: a later Release (restore_gameplay) still
-	// sends that copy its release, and the next look's start supersedes it.
+	// bearing, and keeps its id: a later Release (restore_gameplay) or the
+	// owner's cancel (ReleaseOwned) still sends that copy its release, and
+	// the next look's start supersedes it.
 	// Any other end sends the copy its release, now or from a later command
 	// tick (FlushServerRelease). The release names its look, so it never ends
 	// a newer one; the server's deadman ends its copy in any case.
