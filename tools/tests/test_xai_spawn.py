@@ -120,6 +120,49 @@ class AIGroupSpawnToolTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(re.fullmatch(r"[0-9a-f]{32}", args["spawn_token"]))
                 self.assertEqual(args["waypoints"], [])
 
+    async def test_o3_waypoint_coordinates_reject_non_wire_numbers_and_forward_finite_floats(
+        self,
+    ) -> None:
+        # Mutants killed: waypoint coordinates coerced through float() without
+        # _is_wire_number (bool or numeric string accepted, None raising
+        # TypeError instead of bad_args), or finite ints/floats not flattened
+        # to wire floats.
+        bad_values = (
+            True,
+            False,
+            "2",
+            "-1.5",
+            None,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+        )
+        for bad in bad_values:
+            for axis in range(3):
+                point: list[object] = [1.0, 2.0, 3.0]
+                point[axis] = bad
+                with self.subTest(bad=bad, axis=axis):
+                    text = await self._refused({**TOOL_ARGS, "waypoints": [point]})
+                    self.assertIn("bad_args", text)
+                    self.assertIn("waypoints[0]", text)
+                    self.assertIn("be [x, y, z] finite numbers", text)
+        text = await self._refused(
+            {**TOOL_ARGS, "waypoints": [[0.0, 0.0, 0.0], [1.0, True, 3.0]]}
+        )
+        self.assertIn("bad_args", text)
+        self.assertIn("waypoints[1]", text)
+        self.assertIn("be [x, y, z] finite numbers", text)
+        cmd, args, peer, _timeout = await self._forwarded(
+            {
+                **TOOL_ARGS,
+                "behaviour": "ONCE",
+                "waypoints": [[1, 2.5, -3], [0, -0.25, 100.0]],
+            }
+        )
+        self.assertEqual((cmd, peer), (SPAWN, "server"))
+        self.assertEqual(args["waypoints"], [1.0, 2.5, -3.0, 0.0, -0.25, 100.0])
+        self.assertTrue(all(type(value) is float for value in args["waypoints"]))
+
 
 def _bound_state() -> loopback.ServerState:
     state = loopback.ServerState(key="k")
