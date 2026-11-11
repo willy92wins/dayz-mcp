@@ -5762,18 +5762,29 @@ class MCPBridge : Managed
 	// read for this object, before GetDamageZones, GetMaxHealth or
 	// GetHealth01, whose "No DamageSystemData or not initialized yet" is a
 	// Virtual Machine Exception. Its config needs a DamageSystem class
-	// (Object.ConfigIsExisting, object.c:929) with a GlobalHealth class in
-	// it, asked by full path under the root vanilla's
-	// InitDamageZoneDisplayNameMapping picks (entityai.c:398-413: weapons,
-	// magazines, else vehicles). An EntityAI must also be past its
-	// DeferredInit (IsInitialized, entityai.c:240, :277-285), which a
-	// freshly spawned item reaches 34 ms after it is created. A map object
-	// that is not an EntityAI has no such flag and passes on its config.
+	// (Object.ConfigIsExisting, object.c:929). An EntityAI must also be past
+	// its DeferredInit (IsInitialized, entityai.c:240, :277-285), which a
+	// freshly spawned item reaches 34 ms after it is created, and have a
+	// GlobalHealth class in that DamageSystem, asked by full path under the
+	// root vanilla's InitDamageZoneDisplayNameMapping picks for an EntityAI
+	// (entityai.c:398-413: weapons, magazines, else vehicles). A map object
+	// that is not an EntityAI (a tree, a Land_ building) has neither the
+	// flag nor that root: its config may live elsewhere (CfgNonAIVehicles),
+	// so it keeps the DamageSystem test alone, as before #378 (S-2).
 	protected bool HealthReadable(Object target)
 	{
 		string cfgBase;
 		EntityAI entity;
 		if (!target.ConfigIsExisting("DamageSystem"))
+		{
+			return false;
+		}
+		entity = EntityAI.Cast(target);
+		if (!entity)
+		{
+			return true;
+		}
+		if (!entity.IsInitialized())
 		{
 			return false;
 		}
@@ -5790,11 +5801,6 @@ class MCPBridge : Managed
 			cfgBase = CFG_VEHICLESPATH;
 		}
 		if (!GetGame().ConfigIsExisting(cfgBase + " " + target.GetType() + " DamageSystem GlobalHealth"))
-		{
-			return false;
-		}
-		entity = EntityAI.Cast(target);
-		if (entity && !entity.IsInitialized())
 		{
 			return false;
 		}

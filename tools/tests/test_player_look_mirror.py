@@ -50,7 +50,7 @@ RELEASE = "static void Release(string why)"
 RELEASE_OWNED = "static void ReleaseOwned(int commandId, string why)"
 FINISH = "static void Finish(string termination, bool converged)"
 END_SERVER = "static void EndServerLook(bool converged)"
-SEND_START = "static string SendServerStart(int lookId, vector target, float budgetS)"
+SEND_START = "static string SendServerStart(int lookId, vector target, float budgetS, int turnSign)"
 FLUSH = "static void FlushServerRelease()"
 REQUEST_REFUSAL = "static string ServerRequestRefusal(vector target, float budgetS)"
 WITHIN_BAND = "static bool WithinBand(float errorDeg)"
@@ -60,7 +60,7 @@ ON_COMMAND = "static void OnCommandHandler(PlayerBase player, float pDt)"
 SERVER_INPUT = "override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)"
 SERVER_READ = "protected void MCPLookReadRequest(ParamsReadContext ctx)"
 SERVER_READ_RELEASE = "protected void MCPLookReadRelease(int lookId)"
-SERVER_ACCEPT = "protected void MCPLookAccept(int lookId, vector target, float budgetS)"
+SERVER_ACCEPT = "protected void MCPLookAccept(int lookId, vector target, float budgetS, int turnSign)"
 SERVER_FRESHNESS = "protected string MCPLookFreshnessRefusal(int lookId)"
 SERVER_OWNER = "protected string MCPLookOwnerRefusal()"
 SERVER_TICK = "protected void MCPLookServerTick(bool fromConsume)"
@@ -76,6 +76,10 @@ COMPASS = "static float CompassFromHeading(float headingRad)"
 BEARING = "static float BearingDeg(vector from, vector target)"
 WRAP = "static float WrapDeg180(float angle)"
 TIE_BREAK = "static float TieBreakDeg(float errorDeg)"
+TURN_SIGN_FOR = "static int TurnSignFor(float yawDeg)"
+START_TURN = "protected static int StartTurnSign(PlayerBase player, vector target)"
+LATCH = "static float LatchDeg(float errorDeg, int turnSign)"
+TURN_REFUSAL = "static string TurnRefusal(int turnSign)"
 SERVER_ALLOWED = "static bool ServerAllowed()"
 SET_SERVER_ALLOWED = "static void SetServerAllowed(bool allowed)"
 RELEASE_SERVER_COPY = "static void ReleaseServerCopy()"
@@ -85,7 +89,7 @@ WEAPON_AIM = "protected bool DispatchWeaponAim(MCPCommand command, MCPResult res
 
 SERVER_MEMBERS = (
     "m_MCPLookId|m_MCPLookTarget|m_MCPLookDeadlineS|m_MCPLookPulsed|m_MCPLookConsumed|"
-    "m_MCPLookHandled|m_MCPLookLastId|m_MCPLookLastStartS|m_MCPLookLastRefusal|MCPLookVerdict|MCPLookNote|MCPLookServerRelease|"
+    "m_MCPLookHandled|m_MCPLookLastId|m_MCPLookLastStartS|m_MCPLookLastRefusal|m_MCPLookTurn|MCPLookVerdict|MCPLookNote|MCPLookServerRelease|"
     "MCPLookFreshnessRefusal|MCPLookOwnerRefusal|MCPLookReadRelease|MCPLookAccept|"
     "MCPLookServerTick|GetInstanceType|GetIdentity|IsPlayerDisconnected|GetInputController|"
     "PhysicsGetPositionWS"
@@ -161,6 +165,7 @@ class _OwnerModel:
         self.multiplayer = True
         self.local_player = True
         self.disabled = 0
+        self.turn = 1
         statics = {}
         defaults = {"bool": False, "int": 0, "float": 0.0, "vector": None, "PlayerBase": None}
         for kind, name in re.findall(r"protected static (\w+) (s_\w+);", source):
@@ -178,6 +183,9 @@ class _OwnerModel:
             "ScriptInputUserData": self.channel.InputUserData,
             UDT: _wire_type(source),
             "Disable": self._disable,
+            # S-1: the owner's camera read at Begin is a fake here: the way
+            # it answers (LookMirrorLatchTest runs the real TurnSignFor).
+            "StartTurnSign": lambda _player, _target: self.turn,
             **_constants(source),
         }
         for signature in OWNER_METHODS + ((RELEASE_SERVER_COPY,) if RELEASE_SERVER_COPY in source else ()):
@@ -231,6 +239,7 @@ class _ServerPlayer:
         self.m_MCPLookLastId = 0
         self.m_MCPLookLastStartS = -1.0
         self.m_MCPLookLastRefusal = _LogString.of("")
+        self.m_MCPLookTurn = 0
         self.identity: object | None = object()
         self.disconnected = False
         self.alive = True
@@ -310,8 +319,9 @@ class _ServerLookModel:
         # #363 follow-up: the 180-degree tie-break (S2) and the server's gate
         # (L2), a fake the test sets; the gate's real statics are pinned in
         # LookMirrorGateTest. Before the fix the source has neither.
-        if TIE_BREAK in source:
-            translate(source, TIE_BREAK, look)
+        for signature in (TIE_BREAK, TURN_SIGN_FOR, LATCH, TURN_REFUSAL):
+            if signature in source:
+                translate(source, signature, look)
         look["ServerAllowed"] = lambda: self.allowed
 
         class Statics:
@@ -336,11 +346,11 @@ class _ServerLookModel:
             setattr(self.player, name, translate(free, signature, namespace, class_types={"HumanInputController"}))
         self.look = look
 
-    def start(self, look_id: int, target=(10.0, 0.0, 0.0), budget: float = 3.0) -> None:
+    def start(self, look_id: int, target=(10.0, 0.0, 0.0), budget: float = 3.0, turn: int = 0) -> None:
         """One start, then the clock moves on by the server's minimum start
         interval, so successive starts in a test are never throttled unless
         the test sets the clock itself."""
-        self.player.MCPLookAccept(look_id, target, budget)
+        self.player.MCPLookAccept(look_id, target, budget, turn)
         self.now += 0.25
 
     def release(self, look_id: int) -> None:
@@ -402,6 +412,7 @@ class LookMirrorWireTest(unittest.TestCase):
             "message.Write(lookId);",
             "message.Write(target);",
             "message.Write(budgetS);",
+            "message.Write(turnSign);",
             "message.Send();",
             'return "sent";',
         )
@@ -420,9 +431,10 @@ class LookMirrorWireTest(unittest.TestCase):
             "MCPLookReadRelease(lookId);",
             "if (!ctx.Read(target))",
             "if (!ctx.Read(budgetS))",
-            "MCPLookAccept(lookId, target, budgetS);",
+            "if (!ctx.Read(turnSign))",
+            "MCPLookAccept(lookId, target, budgetS, turnSign);",
         )
-        for local in ("bool isStart;", "int lookId;", "vector target;", "float budgetS;"):
+        for local in ("bool isStart;", "int lookId;", "vector target;", "float budgetS;", "int turnSign;"):
             with self.subTest(local=local):
                 self.assertIn(f"\t\t{local}\n", read)
 
@@ -470,11 +482,13 @@ class LookMirrorWireTest(unittest.TestCase):
             "m_MCPLookLastStartS = nowS;",
             "refusal = MCPLookOwnerRefusal();",
             "refusal = MCPLookAtControl.ServerRequestRefusal(target, budgetS);",
+            "refusal = MCPLookAtControl.TurnRefusal(turnSign);",
             "refusal = MCPPlayerMoveControl.ActorRefusal(this);",
             'if (refusal != "")',
             'MCPLookServerRelease("superseded");',
             "m_MCPLookId = lookId;",
             "m_MCPLookTarget = target;",
+            "m_MCPLookTurn = turnSign;",
             "m_MCPLookDeadlineS = nowS + budgetS + MCPLookAtControl.SERVER_DEADMAN_MARGIN_S;",
             "m_MCPLookPulsed = false;",
             'MCPLookVerdict(true, lookId, "");',
@@ -483,7 +497,7 @@ class LookMirrorWireTest(unittest.TestCase):
         self.assertNotIn("MCPLookServerRelease(", gate)
         self.assertEqual(
             re.findall(r"(\w+) = [^=]", gate),
-            ["nowS", "refusal", "m_MCPLookLastId", "refusal", "m_MCPLookLastStartS"] + ["refusal"] * 3,
+            ["nowS", "refusal", "m_MCPLookLastId", "refusal", "m_MCPLookLastStartS"] + ["refusal"] * 4,
         )
         self.assertEqual(
             _flat(_if_body(accept, "!MCPLookAtControl.ServerAllowed()")),
@@ -505,7 +519,7 @@ class LookMirrorWireTest(unittest.TestCase):
             "hic = GetInputController();",
             "compass = MCPPlayerMoveControl.CompassFromHeading(hic.GetHeadingAngle());",
             "bearing = MCPPlayerMoveControl.BearingDeg(PhysicsGetPositionWS(), m_MCPLookTarget);",
-            "errorDeg = MCPLookAtControl.TieBreakDeg(MCPPlayerMoveControl.WrapDeg180(bearing - compass));",
+            "errorDeg = MCPLookAtControl.LatchDeg(MCPPlayerMoveControl.WrapDeg180(bearing - compass), m_MCPLookTurn);",
             "if (MCPLookAtControl.WithinBand(errorDeg))",
             'MCPLookServerRelease("converged");',
             "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ONE_FRAME, MCPLookAtControl.ServerPulseX(errorDeg));",
@@ -559,9 +573,11 @@ class LookMirrorWireTest(unittest.TestCase):
     def test_the_owner_sends_on_begin_and_ends_on_every_end(self) -> None:
         begin = _method_body(self.source, BEGIN)
         _in_order(self, begin, "lookId = s_Generation + 1;",
-                  "serverStart = SendServerStart(lookId, target, budget);",
+                  "turn = StartTurnSign(player, target);",
+                  "serverStart = SendServerStart(lookId, target, budget, turn);",
                   'if (serverStart == "input_busy")', 'Release("replaced");', "Reset();",
-                  "s_Active = true;", "s_CommandId = commandId;", "s_ServerLookId = lookId;", 'return "";')
+                  "s_Active = true;", "s_CommandId = commandId;", "s_TurnSign = turn;", "s_ServerLookId = lookId;",
+                  'return "";')
         self.assertEqual(_flat(_if_body(begin, 'serverStart == "input_busy"')), "return serverStart;")
         # The start goes first: nothing of the look changes before it is sent
         # or known to be unavailable.
@@ -605,7 +621,7 @@ class LookMirrorWireTest(unittest.TestCase):
             PULSE_X, ON_COMMAND, SERVER_INPUT, SERVER_READ, SERVER_READ_RELEASE, SERVER_ACCEPT,
             SERVER_FRESHNESS, SERVER_OWNER, SERVER_TICK, SERVER_RELEASE, SERVER_VERDICT,
             SERVER_NOTE, SERVER_RECONNECT, COMMAND_HANDLER, CONSUME, TIE_BREAK, SERVER_ALLOWED,
-            SET_SERVER_ALLOWED, RELEASE_SERVER_COPY,
+            SET_SERVER_ALLOWED, RELEASE_SERVER_COPY, TURN_SIGN_FOR, START_TURN, LATCH, TURN_REFUSAL,
         ):
             with self.subTest(method=signature):
                 body = _method_body(self.source, signature)
@@ -625,7 +641,7 @@ class LookMirrorOwnerModelTest(unittest.TestCase):
     def test_a_converged_look_is_left_to_the_server_and_the_next_start_supersedes_it(self) -> None:
         model = self.model
         first = model.begin(target=(10.0, 1.5, 0.0), budget=3.0)
-        self.assertEqual(model.channel.sent, [[model.udt, True, first, (10.0, 1.5, 0.0), 3.0]])
+        self.assertEqual(model.channel.sent, [[model.udt, True, first, (10.0, 1.5, 0.0), 3.0, 1]])
         self.assertEqual(model.state.s_ServerLookId, first)
         model.finish("converged", True)
         # The server's copy reaches its own band: no release, nothing pending,
@@ -635,7 +651,7 @@ class LookMirrorOwnerModelTest(unittest.TestCase):
         second = model.begin()
         self.assertGreater(second, first)
         # The new start replaces the copy there (MCPLookAccept): no release first.
-        self.assertEqual(model.channel.sent[1:], [[model.udt, True, second, (10.0, 0.0, 0.0), 3.0]])
+        self.assertEqual(model.channel.sent[1:], [[model.udt, True, second, (10.0, 0.0, 0.0), 3.0, 1]])
         model.finish("deadline", False)
         self.assertEqual(model.channel.sent[-1], [model.udt, False, second])
         # A later release finds nothing left to send.
@@ -691,7 +707,7 @@ class LookMirrorOwnerModelTest(unittest.TestCase):
         model.channel.free = True
         look = model.begin()
         self.assertEqual((look, model.refusal), (1, ""))
-        self.assertEqual(model.channel.sent, [[model.udt, True, 1, (10.0, 0.0, 0.0), 3.0]])
+        self.assertEqual(model.channel.sent, [[model.udt, True, 1, (10.0, 0.0, 0.0), 3.0, 1]])
         self.assertEqual((model.state.s_Active, model.state.s_ServerLookId), (True, 1))
 
     def test_offline_the_look_runs_on_this_side_only(self) -> None:
@@ -862,7 +878,7 @@ class LookMirrorRoundTripTest(unittest.TestCase):
         for message in owner.channel.sent:
             self.assertEqual(message[0], owner.udt)
             if message[1]:
-                server.start(message[2], target=message[3], budget=message[4])
+                server.start(message[2], target=message[3], budget=message[4], turn=message[5])
             else:
                 server.release(message[2])
         owner.channel.sent = []
@@ -966,10 +982,87 @@ class LookMirrorTieBreakTest(unittest.TestCase):
         _in_order(
             self,
             handler,
-            "yawErrorDeg = TieBreakDeg(WrapPi(desiredBearing - currentBearing) * Math.RAD2DEG);",
+            "yawErrorDeg = LatchDeg(WrapPi(desiredBearing - currentBearing) * Math.RAD2DEG, s_TurnSign);",
             "pulseX = ClampPulse(GAIN * yawErrorDeg * Math.DEG2RAD);",
         )
         self.assertNotIn("ClampPulse(GAIN * WrapPi(desiredBearing - currentBearing))", handler)
+
+
+class LookMirrorLatchTest(unittest.TestCase):
+    """S-1 (Auditor on #378): the way to turn is picked once, by the owner at
+    Begin, and sent in the start; both sides hold it while the target is
+    more than LATCH_FROM_DEG off. A fixed band alone only moved the
+    disagreement: owner -177.9 (left) against server -178.1 (right)."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+        self.look: dict[str, object] = {"_S": _LogString, "Math": _EnforceMath, **_constants(self.source)}
+        for signature in (CLAMP, TIE_BREAK, TURN_SIGN_FOR, LATCH):
+            translate(self.source, signature, self.look)
+
+    def _owner_pulse(self, owner_error: float) -> tuple[int, float]:
+        turn = self.look["TurnSignFor"](owner_error)
+        error = self.look["LatchDeg"](owner_error, turn)
+        return turn, self.look["ClampPulse"](self.look["GAIN"] * error * _EnforceMath.DEG2RAD)
+
+    def _server_pulse(self, server_error: float, turn: int) -> float:
+        model = _ServerLookModel(self.source)
+        model.start(3, target=_target_at(server_error), turn=turn)
+        model.tick()
+        return model.player.overrides[0][1]
+
+    def test_owner_and_server_turn_the_same_way_when_they_read_a_little_apart(self) -> None:
+        for owner_error, server_error in (
+            (-177.9, -178.1), (-178.1, -177.9), (-179.9, 179.9), (179.9, -179.9),
+            (177.9, -179.0), (-176.0, 179.0), (178.5, 177.0), (-177.0, -178.5),
+        ):
+            with self.subTest(owner=owner_error, server=server_error):
+                turn, owner = self._owner_pulse(owner_error)
+                server = self._server_pulse(server_error, turn)
+                self.assertGreater(owner * server, 0.0, (turn, owner, server))
+
+    def test_the_latch_holds_for_the_whole_turn_and_still_converges(self) -> None:
+        for turn, bearing in ((1, -178.1), (-1, 178.1), (-1, -177.9), (1, 177.9)):
+            with self.subTest(turn=turn, bearing=bearing):
+                model = _ServerLookModel(self.source)
+                model.start(3, target=_target_at(bearing), turn=turn)
+                ticks = 0
+                while model.active is not None and ticks < 300:
+                    model.tick()
+                    ticks += 1
+                self.assertRegex(model.log[-1], r"reason=converged")
+                pulses = [value for kind, value in model.player.overrides if kind == "ONE_FRAME"]
+                self.assertTrue(pulses and all(value * turn > 0.0 for value in pulses), pulses[:5])
+
+    def test_latch_values_and_the_short_way_near_the_target(self) -> None:
+        latch = self.look["LatchDeg"]
+        for error, turn, expected in (
+            (-178.1, 1, 181.9), (-178.1, -1, -178.1), (179.0, -1, -181.0), (179.0, 1, 179.0),
+            (-91.0, 1, 269.0), (-89.0, 1, -89.0), (89.0, -1, 89.0), (-180.0, 0, 180.0), (-177.0, 0, -177.0),
+        ):
+            with self.subTest(error=error, turn=turn):
+                self.assertAlmostEqual(latch(error, turn), expected)
+        self.assertEqual([self.look["TurnSignFor"](v) for v in (-177.9, -178.1, 0.0, 90.0, -90.0, -180.0)],
+                         [-1, 1, 1, 1, -1, 1])
+
+    def test_a_turn_outside_minus_one_to_one_is_refused(self) -> None:
+        model = _ServerLookModel(self.source)
+        model.start(3, turn=2)
+        self.assertEqual((model.active, model.log[-1]), (None, _verdict(0, 3, "bad_turn")))
+        model.start(4, turn=-1)
+        self.assertEqual(model.active, 4)
+
+    def test_the_owner_picks_the_turn_from_its_camera_and_latches_it(self) -> None:
+        start = _without_comments(_method_body(self.source, START_TURN))
+        _in_order(self, start, "if (!ReadCamera(player, camPos, camDir))", "return 0;",
+                  "desired = target - camPos;",
+                  "yawDeg = WrapPi(Math.Atan2(desired[0], desired[2]) - Math.Atan2(camDir[0], camDir[2])) * Math.RAD2DEG;",
+                  "return TurnSignFor(yawDeg);")
+        model = _OwnerModel(self.source)
+        model.turn = -1
+        look = model.begin()
+        self.assertEqual(model.channel.sent[-1], [model.udt, True, look, (10.0, 0.0, 0.0), 3.0, -1])
+        self.assertEqual(model.state.s_TurnSign, -1)
 
 
 class LookMirrorGateTest(unittest.TestCase):

@@ -1107,7 +1107,7 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
         # answers no_health before GetDamageZones or any health call.
         for zone in ("", "Engine"):
             with self.subTest(zone=zone):
-                target = _HealthTarget(zones=["Engine"], global_health=False)
+                target = _HealthTarget(zones=["Engine"], global_health=False, entity_ready=True)
                 target._health_call = _refuse_health  # type: ignore[method-assign]
                 target.GetDamageZones = _refuse_zones  # type: ignore[method-assign]
                 result = self._run(target, zone)
@@ -1139,6 +1139,22 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
                     target.config_paths, [f"{CFG_ROOTS[kind]} Barrel_Blue DamageSystem GlobalHealth"]
                 )
                 self.assertEqual(result.object_health.health01_after, 0.5)
+
+    def test_g10_a_map_object_that_is_not_an_entity_keeps_the_damage_system_test(self) -> None:
+        # S-2 (Auditor on #378): a tree or a Land_ building is no EntityAI;
+        # its config need not sit under CfgVehicles, so the GlobalHealth path
+        # is not asked and it is set as before #378.
+        for zone in ("", "Engine"):
+            with self.subTest(zone=zone):
+                target = _HealthTarget(zones=["Engine"], global_health=False)
+                result = self._run(target, zone)
+                self.assertIs(result.ok, True)
+                self.assertEqual(target.config_paths, [])
+                self.assertNotIn("IsInitialized", target.calls)
+                self.assertEqual(result.object_health.health01_after, 0.5)
+        # Without a DamageSystem class it is still no_health.
+        target = _HealthTarget(zones=None, global_health=False)
+        self._assert_no_health(self._run(target, ""))
 
     def test_g9_both_consumers_call_the_one_guard(self) -> None:
         source = BRIDGE_PATH.read_text(encoding="utf-8")
@@ -1212,7 +1228,7 @@ class TelemetryHealthGuardTest(unittest.TestCase):
 
     def test_t3_no_global_health_or_an_entity_not_initialized_skips_the_read(self) -> None:
         for found in (
-            _HealthTarget(zones=[], health01=0.25, global_health=False),
+            _HealthTarget(zones=[], health01=0.25, global_health=False, entity_ready=True),
             _HealthTarget(zones=[], health01=0.25, entity_ready=False),
         ):
             with self.subTest(global_health=found.global_health, entity_ready=found.entity_ready):
@@ -1220,6 +1236,15 @@ class TelemetryHealthGuardTest(unittest.TestCase):
                 telemetry = self._run(found)
                 self.assertEqual(telemetry.health01, 0.0)
                 self.assertNotIn("GetHealth01()", found.calls)
+
+
+    def test_t4_a_map_object_that_is_not_an_entity_reads_its_health(self) -> None:
+        # S-2: telemetry_read on a tree or a Land_ building keeps reading
+        # health01 as before #378.
+        found = _HealthTarget(zones=[], health01=0.25, global_health=False)
+        telemetry = self._run(found)
+        self.assertEqual(telemetry.health01, 0.25)
+        self.assertEqual(found.config_paths, [])
 
 
 class ObjectSetHealthDescriptionTest(unittest.IsolatedAsyncioTestCase):
