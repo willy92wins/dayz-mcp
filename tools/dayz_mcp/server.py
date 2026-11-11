@@ -9808,14 +9808,23 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "focus_distance (metres, above 0, also as the 32-bit float the bridge "
         "reads) and focus_blur (0, or above 0 also as that float), each at most "
         "1e9, go together or not at all; one without the other is bad_args. "
-        "Given, the applied camera also gets Camera.SetFocus(focus_distance, "
-        "focus_blur), its depth of field, and a successful apply echoes them as "
-        "top-level focus_applied {distance, blur}; omitted, the focus is left "
-        "as it is and focus_applied is null. focus_applied is an echo of the "
-        "values sent, not a read-back: Camera has no focus getter. Whether the "
-        "blur shows may depend on the client's depth-of-field video option, "
-        "which is not measured. The free camera is a singleton and keeps the "
-        "last focus set on it. A call with focus is refused as "
+        "Optional focus_length (default 750), focus_length_near (default 500) "
+        "and focus_depth_offset (default 10), from vanilla's NEW Close up "
+        "preset, take the same 0-or-above bound as focus_blur and require "
+        "focus_distance and focus_blur (otherwise bad_args). "
+        "Given, the bridge applies vanilla's global depth of field through "
+        "CGame.OverrideDOF(true, focus_distance, focus_length, "
+        "focus_length_near, focus_blur, focus_depth_offset) after activating "
+        "the camera, and a successful apply echoes all five as top-level "
+        "focus_applied {distance, blur, length, length_near, depth_offset}; "
+        "omitted, focus_applied is null. Any DOF the bridge set is turned off "
+        "on camera release (including restore_gameplay, camera_path_release, "
+        "a path's natural end and shutdown), on every camera_set (before a "
+        "new focus, if any, is applied; a failed apply leaves it off), and on "
+        "camera_path_play. focus_applied is an echo of the values sent, not a "
+        "read-back: there is no DOF getter. Whether the blur shows may depend "
+        "on the client's post-processing video option, which is not measured. "
+        "A call with focus is refused as "
         "bridge_capability_missing, with nothing sent, while the client bridge "
         "bound to the run does not announce camera_set_focus, as one older than "
         "this release does not; with no client bound, the loopback's binding "
@@ -9840,6 +9849,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
         focus_distance: StrictFloat | None = None,
         focus_blur: StrictFloat | None = None,
+        focus_length: StrictFloat | None = None,
+        focus_length_near: StrictFloat | None = None,
+        focus_depth_offset: StrictFloat | None = None,
     ) -> dict[str, Any]:
         # The wire value is `lookat`, but the vector argument sitting
         # right beside it is `look_at`, so a caller naturally spells the mode
@@ -9888,7 +9900,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "(0 keeps the default of three ticks; each tick is 0.05 s)"
             )
         args["settle_ticks"] = settle_ticks
-        # 702f: the two Camera.SetFocus arguments travel together, on the
+        # 702f: the five CGame.OverrideDOF values travel together, on the
         # camera_set_focus command, so a bridge that does not know them answers
         # for the command instead of dropping them; camera_set never carries them.
         command = "camera_set"
@@ -9896,6 +9908,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if (focus_distance is None) != (focus_blur is None):
             raise ToolError(
                 "bad_args: focus_distance and focus_blur go together; give both or neither"
+            )
+        if focus_distance is None and (
+            focus_length is not None
+            or focus_length_near is not None
+            or focus_depth_offset is not None
+        ):
+            raise ToolError(
+                "bad_args: focus_length, focus_length_near and focus_depth_offset "
+                "require focus_distance and focus_blur"
             )
         if focus_distance is not None and focus_blur is not None:
             # The ingress makes the same check (camera_path.py): a finite
@@ -9919,10 +9940,49 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "be 0, or above 0 also as a 32-bit float, and at most 1e9",
                     )
                 )
+            raw_length = 750.0 if focus_length is None else focus_length
+            length = camera_path_contract.focus_blur(raw_length)
+            if length is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_length",
+                        focus_length,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
+            raw_length_near = 500.0 if focus_length_near is None else focus_length_near
+            length_near = camera_path_contract.focus_blur(raw_length_near)
+            if length_near is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_length_near",
+                        focus_length_near,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
+            raw_depth_offset = 10.0 if focus_depth_offset is None else focus_depth_offset
+            depth_offset = camera_path_contract.focus_blur(raw_depth_offset)
+            if depth_offset is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_depth_offset",
+                        focus_depth_offset,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
             args["focus_distance"] = distance
             args["focus_blur"] = blur
+            args["focus_length"] = length
+            args["focus_length_near"] = length_near
+            args["focus_depth_offset"] = depth_offset
             command = "camera_set_focus"
-            focus_applied = {"distance": distance, "blur": blur}
+            focus_applied = {
+                "distance": distance,
+                "blur": blur,
+                "length": length,
+                "length_near": length_near,
+                "depth_offset": depth_offset,
+            }
         async with runtime.tool_lock:
             result: dict[str, Any] | None = None
             failed = False
@@ -9973,19 +10033,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         camera_observation = result.get("camera")
         if result.get("ok") and isinstance(camera_observation, dict) and camera_observation.get("ok"):
             result["fov_applied"] = fov_value if fov_value > 0.0 else None
-            # 702f: the same rule; omitted focus sent no SetFocus, an explicit null.
+            # 702f: the same rule; omitted focus sent no OverrideDOF, an explicit null.
             result["focus_applied"] = focus_applied
         return result
 
     @app.tool(description=(
-        f"{LEASE_TOOL_LINE} Set the client camera and its depth of field. "
-        "Same modes, pose, FOV, settle and result as camera_set, with required "
-        "focus_distance and focus_blur. Distance is metres above 0; blur is "
-        "non-negative; both must remain valid as 32-bit floats and be at most "
-        "1e9. Uses camera_set_focus on the bridge. focus_applied echoes the "
-        "values sent to Camera.SetFocus, not a native readback. Visibility "
-        "of blur depends on the client's video options. Use restore_gameplay "
-        "to release the camera."
+        f"{LEASE_TOOL_LINE} Set the client camera and vanilla's depth of field "
+        "(CGame.OverrideDOF). Same modes, pose, FOV, settle and result as "
+        "camera_set, with required focus_distance and focus_blur and optional "
+        "focus_length (default 750), focus_length_near (default 500) and "
+        "focus_depth_offset (default 10). Distance is metres above 0; blur and "
+        "the three optional values are 0 or above; all five must stay valid as "
+        "32-bit floats and be at most 1e9. Uses camera_set_focus on the "
+        "bridge. Any DOF the bridge set is turned off on camera release, on "
+        "every camera_set and on camera_path_play. focus_applied {distance, "
+        "blur, length, length_near, depth_offset} is an echo of the values "
+        "sent, not a read-back. Visibility of blur may depend on the client's "
+        "post-processing video option, which is not measured. Use "
+        "restore_gameplay to release the camera."
     ))
     async def camera_set_focus(
         cam_mode: StrictStr,
@@ -9998,12 +10063,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fov: StrictFloat = 0.0,
         settle_ticks: StrictInt = 3,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+        focus_length: StrictFloat | None = None,
+        focus_length_near: StrictFloat | None = None,
+        focus_depth_offset: StrictFloat | None = None,
     ) -> dict[str, Any]:
         return await camera_set(
             cam_mode=cam_mode, cam_pos=cam_pos, cam_orientation=cam_orientation,
             look_at=look_at, cam_matrix=cam_matrix, fov=fov,
             settle_ticks=settle_ticks, timeout_s=timeout_s,
             focus_distance=focus_distance, focus_blur=focus_blur,
+            focus_length=focus_length, focus_length_near=focus_length_near,
+            focus_depth_offset=focus_depth_offset,
         )
 
     @app.tool(description=(
@@ -11923,6 +11993,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
+    _patch_optional_focus_bool_bad_args(app, "camera_set")
+    _patch_optional_focus_bool_bad_args(app, "camera_set_focus")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 
@@ -11968,6 +12040,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     app.list_tools = list_tools_progressive  # type: ignore[method-assign]
     app._mcp_server.list_tools()(list_tools_progressive)
     return app, runtime
+
+
+_OPTIONAL_FOCUS_FIELDS: tuple[str, ...] = (
+    "focus_length",
+    "focus_length_near",
+    "focus_depth_offset",
+)
+_OPTIONAL_FOCUS_REQUIREMENT = (
+    "be 0, or above 0 also as a 32-bit float, and at most 1e9"
+)
+
+
+def _patch_optional_focus_bool_bad_args(app: FastMCP, tool_name: str) -> None:
+    # 702f: keep StrictFloat | None in the schema while normalizing bools on
+    # the three optional DOF values to bad_args before Pydantic validation.
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        if isinstance(arguments_to_validate, dict):
+            for field in _OPTIONAL_FOCUS_FIELDS:
+                value = arguments_to_validate.get(field)
+                if isinstance(value, bool) and camera_path_contract.focus_blur(value) is None:
+                    raise ToolError(_bad_args(field, value, _OPTIONAL_FOCUS_REQUIREMENT))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
 def parse_args(argv: list[str] | None = None) -> ServerConfig:
