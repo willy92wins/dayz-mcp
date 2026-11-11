@@ -475,6 +475,17 @@ GENERIC_SCALAR_OWNERS = {
     "emote_state": ({"actor_emote"}, ""),
     "started_after_s": ({"actor_emote"}, 0.0),
     "finished_after_s": ({"actor_emote"}, 0.0),
+    # 204e: whether the local player is placing once action_use ran.
+    "placing": (
+        {
+            "action_use",
+            "action_use_door",
+            "action_use_target",
+            "action_use_component",
+            "action_hold",
+        },
+        False,
+    ),
 }
 
 # Deliberately not owned. A stale 0 here is still not dropped.

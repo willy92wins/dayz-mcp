@@ -36,7 +36,23 @@ _H14_STALE_POLICY_PATHS = frozenset({"/lifecycle/status"})
 # documents are the only ones whose lease_id is proof of a renewal
 # (fb-20260928-021456-3272).
 _LIFECYCLE_RESULT_PATHS = frozenset(
-    {"/lifecycle/close", "/lifecycle/foreground", "/lifecycle/reap"}
+    {
+        "/lifecycle/close",
+        "/lifecycle/foreground",
+        "/lifecycle/reap",
+        # ah-starting-cancel-20261109-1444: the STARTING cancel answers carry
+        # the durable row state with the named error. Keeping the verified
+        # body lets the caller report UNRECONCILED, not a hard-coded STARTING.
+        "/lifecycle/stop",
+    }
+)
+# The daemon waits up to process_lifecycle._STARTING_CANCEL_SETTLE_S for the
+# in-flight launch to settle before answering launch_cancel_pending. The
+# client deadline must outlast that wait, or the named answer never arrives:
+# with the generic 5.0s control timeout the stop expired first.
+LIFECYCLE_STOP_TIMEOUT_S = 20.0
+_WIRE_RUN_STATES = frozenset(
+    {"STARTING", "RUNNING", "RUNNING_IDLE", "STOPPING", "EXITED", "UNRECONCILED"}
 )
 _H14_OWNED_STOP_LEASE_PATHS = frozenset(
     {
@@ -53,14 +69,17 @@ _H14_OWNED_STOP_LEASE_PATHS = frozenset(
 
 @dataclass(frozen=True)
 class VerifiedErrorBody:
-    """Fields kept from a decoded lifecycle close/reap error.
+    """Fields kept from a decoded lifecycle close/reap/stop error.
 
     ``code`` is the string ``_remote_error_code`` already accepted. ``lease_id``
-    is set only when that field was a non-empty str. No other keys are kept.
+    is set only when that field was a non-empty str. ``state`` is set only when
+    it is one of the closed run states, so a degraded cancel can be reported as
+    UNRECONCILED instead of the pre-stop STARTING. No other keys are kept.
     """
 
     code: str
     lease_id: str | None = None
+    state: str | None = None
 
 
 class ControlClientError(RuntimeError):
@@ -185,7 +204,12 @@ def _verified_error_body(payload: dict[str, object]) -> VerifiedErrorBody:
     lease_id = payload.get("lease_id")
     if not isinstance(lease_id, str) or not lease_id:
         lease_id = None
-    return VerifiedErrorBody(code=_remote_error_code(payload), lease_id=lease_id)
+    state = payload.get("state")
+    if not isinstance(state, str) or state not in _WIRE_RUN_STATES:
+        state = None
+    return VerifiedErrorBody(
+        code=_remote_error_code(payload), lease_id=lease_id, state=state
+    )
 
 
 class ControlClient:
@@ -450,6 +474,25 @@ class ControlClient:
 
     async def lifecycle_status(self) -> dict[str, object]:
         return await self._session_call("/lifecycle/status")
+
+    async def lifecycle_stop(self, run_id: str) -> dict[str, object]:
+        """Stop one run with the lease this runtime already holds.
+
+        ah-starting-cancel-20261109-1444: the in-flight launch's transaction
+        sets active_lease_token on this same runtime. A same-session stop
+        during STARTING sends this command with that exact lease, so the
+        daemon's cancel branch can signal the launch without a second
+        acquire, reconcile or tool_lock wait.
+        """
+        payload: dict[str, object] = {"run_id": run_id}
+        token = self.active_lease_token
+        if isinstance(token, str) and token:
+            payload["lease_token"] = token
+        # The daemon may wait for the in-flight launch to settle before it
+        # answers; the generic control timeout is shorter than that wait.
+        return await self._session_call(
+            "/lifecycle/stop", payload, timeout_s=LIFECYCLE_STOP_TIMEOUT_S
+        )
 
     async def lifecycle_close(self, run_id: str) -> dict[str, object]:
         payload: dict[str, object] = {"run_id": run_id}

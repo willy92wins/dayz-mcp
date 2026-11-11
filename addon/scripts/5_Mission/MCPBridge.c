@@ -3260,6 +3260,17 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		// 9/11 round, seq 17, 21, 62 and 74: a player already seated was
+		// handed a second StartCommand_Vehicle. Vanilla's get-in refuses a
+		// player with a vehicle command (actiongetintransport.c:42), and
+		// query_get_in_condition names it already_in_vehicle.
+		if (human.GetCommand_Vehicle() || human.IsInTransport())
+		{
+			result.ok = false;
+			result.error = "already_in_vehicle";
+			return true;
+		}
+
 		int crew = 0;
 		int seatAnim = vehicle.GetSeatAnimationType(crew);
 		HumanCommandVehicle vehicleCommand = human.StartCommand_Vehicle(vehicle, crew, seatAnim);
@@ -5802,6 +5813,58 @@ class MCPBridge : Managed
 
 	// object_set_health (inbox c703). One object's Health in one tick: SetHealth01
 	// then the same-tick read-back. Answers in the dispatch tick and queues no job.
+	// c703, #363 follow-up (C2, S1): whether the engine has health data to
+	// read for this object, before GetDamageZones, GetMaxHealth or
+	// GetHealth01, whose "No DamageSystemData or not initialized yet" is a
+	// Virtual Machine Exception. Its config needs a DamageSystem class
+	// (Object.ConfigIsExisting, object.c:929). An EntityAI must also be past
+	// its DeferredInit (IsInitialized, entityai.c:240, :277-285), which a
+	// freshly spawned item reaches 34 ms after it is created, and have a
+	// GlobalHealth class in that DamageSystem, asked by full path under the
+	// root vanilla's InitDamageZoneDisplayNameMapping picks for an EntityAI
+	// (entityai.c:398-413: weapons, magazines, else vehicles). A Land_
+	// building is an EntityAI (Building : EntityAI, 3_game/entities/
+	// building.c:17; House : BuildingBase : Building) and takes the full
+	// check. A tree or another plant is not (Plant : Object, gameplay.c:246;
+	// TreeHard/TreeSoft : PlantSuper, plant.c:17, :42): it has neither the
+	// flag nor that root, and keeps the DamageSystem test alone, as before
+	// #378 (S-2).
+	protected bool HealthReadable(Object target)
+	{
+		string cfgBase;
+		EntityAI entity;
+		if (!target.ConfigIsExisting("DamageSystem"))
+		{
+			return false;
+		}
+		entity = EntityAI.Cast(target);
+		if (!entity)
+		{
+			return true;
+		}
+		if (!entity.IsInitialized())
+		{
+			return false;
+		}
+		if (target.IsWeapon())
+		{
+			cfgBase = CFG_WEAPONSPATH;
+		}
+		else if (target.IsMagazine())
+		{
+			cfgBase = CFG_MAGAZINESPATH;
+		}
+		else
+		{
+			cfgBase = CFG_VEHICLESPATH;
+		}
+		if (!GetGame().ConfigIsExisting(cfgBase + " " + target.GetType() + " DamageSystem GlobalHealth"))
+		{
+			return false;
+		}
+		return true;
+	}
+
 	protected bool DispatchObjectSetHealth(MCPCommand command, MCPResult result)
 	{
 		string error;
@@ -5813,7 +5876,10 @@ class MCPBridge : Managed
 		EntityAI host;
 		EntityAI attached;
 		int slotId;
+		int zoneScan;
+		bool zoneFound;
 		MCPObjectHealth report;
+		TStringArray zones;
 
 		if (!command.args || !IsFiniteFloat(command.args.health01) || command.args.health01 < 0.0 || command.args.health01 > 1.0)
 		{
@@ -5865,6 +5931,54 @@ class MCPBridge : Managed
 			result.ok = false;
 			result.error = "target_is_player";
 			return true;
+		}
+
+		// c703: in the 9/11 round GetMaxHealth threw a Virtual Machine
+		// Exception for an object with no damage system
+		// (StaticObj_Misc_SupplyBox1_DE: "No DamageSystemData or not
+		// initialized yet") and for a zone the object does not have
+		// ("Bogus" on Barrel_Blue: "Could not find zone"). Both answer
+		// no_health before it. The object must have a DamageSystem class in
+		// its config (Object.ConfigIsExisting, vanilla object.c:929), where
+		// that data comes from. HasDamageSystem is not the test: its comment
+		// (object.c:972-976) says it does not tell whether the object is
+		// configured with one, and on the 1.30 server it read false for
+		// barrels, wheels and other items whose health GetMaxHealth reads
+		// (10/11 round). A named zone must be one of the names
+		// GetDamageZones lists (object.c:1153), the by-name lookup vanilla's
+		// TransferEntityHealth does (miscgameplayfunctions.c:398-410); an
+		// empty zone is the global health and skips the lookup.
+		// HealthReadable also asks for DamageSystem GlobalHealth and a
+		// finished EntityAI init (#363 follow-up, C2/S1).
+		if (!HealthReadable(target))
+		{
+			result.ok = false;
+			result.error = "no_health";
+			result.type = target.GetType();
+			return true;
+		}
+
+		if (zone != "")
+		{
+			zones = new TStringArray();
+			target.GetDamageZones(zones);
+			zoneFound = false;
+			zoneScan = 0;
+			while (zoneScan < zones.Count())
+			{
+				if (zones.Get(zoneScan) == zone)
+				{
+					zoneFound = true;
+				}
+				zoneScan = zoneScan + 1;
+			}
+			if (!zoneFound)
+			{
+				result.ok = false;
+				result.error = "no_health";
+				result.type = target.GetType();
+				return true;
+			}
 		}
 
 		if (target.GetMaxHealth(zone, "Health") <= 0)
@@ -6189,6 +6303,8 @@ class MCPBridge : Managed
 		PlayerBase player;
 		PlayerIdentity identity;
 		MCPPlayerVisibility row;
+		HumanInputController hic;
+		float headingRad;
 		int i;
 
 		if (!command.args || !IsFiniteVec3(command.args.pos))
@@ -6230,6 +6346,14 @@ class MCPBridge : Managed
 				row.in_fov = IsInApproxFov(player, head, target, radius);
 				row.line_of_sight = HasLineOfSight(player, head, target, radius);
 				row.visible = row.in_fov && row.line_of_sight;
+				// 33c5: the heading in_fov is measured against, as compass
+				// degrees the way IsInApproxFov turns it, for diagnosis.
+				hic = player.GetInputController();
+				if (hic)
+				{
+					headingRad = hic.GetHeadingAngle();
+					row.heading_deg = -headingRad * Math.RAD2DEG;
+				}
 				result.players_visibility.Insert(row);
 			}
 
@@ -7080,7 +7204,13 @@ class MCPBridge : Managed
 		VectorToArray(found.GetDirection(), telemetry.direction);
 		VectorToArray(GetVelocity(found), telemetry.velocity);
 		string empty = "";
-		telemetry.health01 = found.GetHealth01(empty, empty);
+		// c703: the same guard as object_set_health (HealthReadable), where
+		// a health read on an object with no damage system threw a VM
+		// exception in the 9/11 round. Without one, health01 stays 0.
+		if (HealthReadable(found))
+		{
+			telemetry.health01 = found.GetHealth01(empty, empty);
+		}
 
 		EntityAI entity = EntityAI.Cast(found);
 		if (entity)

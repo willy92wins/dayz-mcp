@@ -25,8 +25,8 @@
       "location": "project_relative",
       "path": "tools/dayz_mcp/secure_launcher.py",
       "role": "productive_launcher_source",
-      "sha256": "3BDF14502F02C5F8FBCDF5DD0EE8F6F1E4193E86CC6C7FF0A29DF0F2D516E492",
-      "size": 11581
+      "sha256": "1F066158FFBEAC7BFD18C90C9C55793EFA330A74AD3635653637EF2B38CB2F9E",
+      "size": 11646
     }
   },
   "format_version": 1,

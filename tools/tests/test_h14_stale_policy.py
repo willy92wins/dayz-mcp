@@ -152,6 +152,64 @@ def _h14_build_app_mcp_tool(tree: ast.AST, name: str) -> ast.AsyncFunctionDef | 
     return None
 
 
+def _h14_is_execute_dayz_test_stop(call: ast.AST) -> bool:
+    return (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "execute_dayz_test_stop"
+    )
+
+
+def _h14_direct_inflight_true(call: ast.Call) -> bool:
+    return any(
+        kw.arg == "direct_inflight"
+        and isinstance(kw.value, ast.Constant)
+        and kw.value.value is True
+        for kw in call.keywords
+    )
+
+
+def _h14_lock_with_nodes(fn: ast.AsyncFunctionDef) -> list[ast.AsyncWith]:
+    return [
+        node
+        for node in _h14_iter_excluding_nested_defs(fn)
+        if isinstance(node, ast.AsyncWith)
+        and any(_h14_is_client_tool_lock(item.context_expr) for item in node.items)
+    ]
+
+
+def _h14_dayz_test_stop_ordinary_path_holds_tool_lock(
+    fn: ast.AsyncFunctionDef,
+) -> bool:
+    # Ordinary execute_dayz_test_stop must await inside client.tool_lock.
+    # The only exemption is the STARTING prelude: execute_dayz_test_stop
+    # with direct_inflight=True may run while the lock is already held by
+    # the same-session launch. An ordinary stop (no direct_inflight)
+    # outside the lock fails this check, as does a tool with no locked
+    # ordinary path.
+    lock_nodes = _h14_lock_with_nodes(fn)
+    if not lock_nodes:
+        return False
+    locked = {
+        id(node)
+        for lock in lock_nodes
+        for node in _h14_iter_excluding_nested_defs(lock)
+    }
+    ordinary_in_lock = False
+    for node in _h14_iter_excluding_nested_defs(fn):
+        if not isinstance(node, ast.Await):
+            continue
+        call = node.value
+        if not _h14_is_execute_dayz_test_stop(call):
+            continue
+        if _h14_direct_inflight_true(call):
+            continue
+        if id(node) not in locked and id(call) not in locked:
+            return False
+        ordinary_in_lock = True
+    return ordinary_in_lock
+
+
 def _h14_nested_mcp_tool_holds_tool_lock(
     name: str, source: str | None = None
 ) -> bool:
@@ -163,6 +221,8 @@ def _h14_nested_mcp_tool_holds_tool_lock(
     fn = _h14_build_app_mcp_tool(tree, name)
     if fn is None:
         return False
+    if name == "dayz_test_stop":
+        return _h14_dayz_test_stop_ordinary_path_holds_tool_lock(fn)
     return _h14_awaited_body_inside_client_tool_lock(fn)
 
 
@@ -813,6 +873,59 @@ class H14NestedToolLockAstTests(unittest.TestCase):
         )
         self.assertFalse(
             _h14_nested_mcp_tool_holds_tool_lock("session_acquire_wait", m4)
+        )
+
+    def test_dayz_test_stop_h14_exemption_is_starting_prelude_only(self) -> None:
+        canonical = textwrap.dedent(
+            '''
+            def build_app():
+                async def dayz_test_stop(run_id=None):
+                    if client.tool_lock.locked():
+                        direct = await dayz_test_tool.execute_dayz_test_stop(
+                            client, run_id, direct_inflight=True
+                        )
+                        if direct is not None:
+                            return direct
+                    async with client.tool_lock:
+                        return await dayz_test_tool.execute_dayz_test_stop(
+                            client, run_id
+                        )
+            '''
+        )
+        ordinary_unlocked = textwrap.dedent(
+            '''
+            def build_app():
+                async def dayz_test_stop(run_id=None):
+                    if client.tool_lock.locked():
+                        direct = await dayz_test_tool.execute_dayz_test_stop(
+                            client, run_id, direct_inflight=True
+                        )
+                        if direct is not None:
+                            return direct
+                    return await dayz_test_tool.execute_dayz_test_stop(
+                        client, run_id
+                    )
+            '''
+        )
+        prelude_only = textwrap.dedent(
+            '''
+            def build_app():
+                async def dayz_test_stop(run_id=None):
+                    async with client.tool_lock:
+                        pass
+                    return await dayz_test_tool.execute_dayz_test_stop(
+                        client, run_id, direct_inflight=True
+                    )
+            '''
+        )
+        self.assertTrue(
+            _h14_nested_mcp_tool_holds_tool_lock("dayz_test_stop", canonical)
+        )
+        self.assertFalse(
+            _h14_nested_mcp_tool_holds_tool_lock("dayz_test_stop", ordinary_unlocked)
+        )
+        self.assertFalse(
+            _h14_nested_mcp_tool_holds_tool_lock("dayz_test_stop", prelude_only)
         )
 
 
