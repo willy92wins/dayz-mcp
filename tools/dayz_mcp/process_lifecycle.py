@@ -24,7 +24,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
-from dayz_mcp import dayz_test_storage, window_close, window_foreground
+from dayz_mcp import box_holder, dayz_test_storage, window_close, window_foreground
 from dayz_mcp.box_admission import box_admission
 from dayz_mcp.child_environment import whitelisted_child_environment
 from dayz_mcp.input_activity import InputAttributor, InputSample
@@ -74,6 +74,19 @@ _ACTIVE_STATES = RUN_STATES - {"EXITED"}
 # lifecycle operation. STARTING/STOPPING (operation in progress under the lock) are
 # left to recover_after_restart; EXITED is terminal.
 _REAPABLE_STATES = frozenset({"RUNNING", "RUNNING_IDLE", "UNRECONCILED"})
+# ah-starting-cancel-20261109-1444: the bound a stop waits for an in-flight
+# launch to notice its cancellation and settle. The launch itself is a Popen
+# that returns immediately; the bound only covers a slow host call, never a
+# deadlock. Instance state so a test can shorten it.
+#
+# B2: this bound must be STRICTLY LONGER than the kill confirmation the launch
+# performs after it notices the cancel (_STARTING_CANCEL_KILL_WAIT_S), or a
+# process that refuses to die makes the stop expire as launch_cancel_pending
+# before the durable UNRECONCILED/launch_cancel_degraded answer can exist.
+_STARTING_CANCEL_KILL_WAIT_S = 5.0
+_STARTING_CANCEL_SETTLE_S = _STARTING_CANCEL_KILL_WAIT_S + 7.0
+# ah-starting-spawn-20261110: how many spawn-window cancels ack_run remembers.
+_SPAWN_WINDOW_CANCEL_CAP = 64
 _HEX = frozenset("0123456789abcdef")
 _IDENTITY_SCHEMES = frozenset({"legacy-wmi-v1", "psutil-argv-v2"})
 _BOX_MOD_CAP = 12
@@ -652,6 +665,22 @@ def _launch_rpt(profiles: str, launched_at: float) -> tuple[str, int, float] | N
 
 
 @dataclass
+class _LaunchCancel:
+    """One in-flight launch a concurrent same-session stop may cancel.
+
+    ``requested`` is set by stop_run without taking ``_operation_lock``; the
+    launching thread checks it at every boundary before the row settles.
+    ``settled`` is set once that thread has persisted a terminal row, so the
+    stop can answer from the durable state instead of waiting on the lock.
+    """
+
+    requested: threading.Event = field(default_factory=threading.Event)
+    settled: threading.Event = field(default_factory=threading.Event)
+    outcome: dict[str, object] | None = None
+    terminated: int = 0
+
+
+@dataclass
 class _ServerStartWatch:
     """What the daemon saw of the RPT of one server launch while it started."""
 
@@ -793,6 +822,8 @@ class _BoxProbes:
     foreign_ports_dayz_related: tuple[int, ...] = ()
     # 250f: registered pids the diag scan saw alive; None when it did not run.
     live_pids: frozenset[int] | None = None
+    # fb-6330: another instance's run that holds every foreign pid, or None.
+    foreign_holder: Mapping[str, str] | None = None
 
 
 def _activity_from_snapshot(
@@ -1295,7 +1326,7 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
         runs.append(row)
     scans_known = probes.scan_known and probes.port_scan_known
     occupied = True if not scans_known else bool(runs or probes.foreign)
-    return {
+    box: dict[str, object] = {
         "occupied": occupied,
         "runs": runs,
         "foreign": [dict(item) for item in probes.foreign],
@@ -1316,6 +1347,11 @@ def _derive_box(snapshot: _BoxSnapshot, probes: _BoxProbes) -> dict[str, object]
             "kind": "os_socket_table_ignored_for_occupancy",
         },
     }
+    if probes.foreign_holder is not None:
+        # fb-6330: only when another instance's record names the foreign
+        # DayZ; without one the box reads exactly as before.
+        box["foreign_holder"] = dict(probes.foreign_holder)
+    return box
 
 
 def _wait_hint(box: object) -> str:
@@ -2163,9 +2199,6 @@ class ProcessLifecycle:
         bridge_probe: object | None = None,
         daemon_generation: str | None = None,
         steam_gate: object | None = None,
-        # fade, 75e7: the foreground lock a normal launch takes
-        # (foreground_lock.py). None takes none.
-        foreground_lock: object | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.manifest = manifest
@@ -2186,7 +2219,6 @@ class ProcessLifecycle:
         self.image_path_of = image_path_of
         self.bindings = bindings
         self.bridge_probe = bridge_probe
-        self.foreground_lock = foreground_lock
         self.daemon_generation = (
             daemon_generation if isinstance(daemon_generation, str) else ""
         )
@@ -2194,6 +2226,24 @@ class ProcessLifecycle:
         self._box_cache: tuple[float, int, _BoxProbes] | None = None
         self._box_revision = 0
         self._operation_lock = threading.RLock()
+        # ah-starting-cancel-20261109-1444: one cancellable launch per run_id
+        # while its row is STARTING. The lock is a leaf; stop_run never takes
+        # _operation_lock to set the request, so a launch that holds the
+        # operation lock cannot keep the stop from reaching this table.
+        self._launch_cancel_lock = threading.Lock()
+        self._launch_cancels: dict[str, _LaunchCancel] = {}
+        # ah-starting-spawn-20261110: launches stopped in their spawn window
+        # (RUNNING, launch not yet acknowledged), run_id -> (launch_operation_id,
+        # session_id, lease_id) of the stopping owner. ack_run answers
+        # launch_cancelled for exactly that operation and owner, once.
+        # Guarded by _launch_cancel_lock; bounded, oldest dropped first.
+        self._spawn_window_cancels: dict[str, tuple[str, str, str]] = {}
+        # Same-owner stops in flight against a STARTING or spawn-window row,
+        # run_id -> (launch_operation_id, count). While one is pending, the
+        # launch's ack loses to it (review 5dff34ab SHOULD-1).
+        self._pending_start_stops: dict[str, tuple[str, int]] = {}
+        self._starting_cancel_settle_s = _STARTING_CANCEL_SETTLE_S
+        self._starting_cancel_kill_s = _STARTING_CANCEL_KILL_WAIT_S
         self._command_id = -1
         self._last_start_error: str | None = None
         # The storage refusal behind the public code, when one was decided.
@@ -2357,6 +2407,170 @@ class ProcessLifecycle:
             return
         bindings.retire_run(run_id, reason)
 
+    def _register_launch_cancel(self, run_id: str) -> _LaunchCancel:
+        """Make a STARTING row cancellable before its durable write lands."""
+        cancel = _LaunchCancel()
+        with self._launch_cancel_lock:
+            self._launch_cancels[run_id] = cancel
+        return cancel
+
+    def _launch_cancel_for(self, run_id: str) -> _LaunchCancel | None:
+        with self._launch_cancel_lock:
+            return self._launch_cancels.get(run_id)
+
+    @staticmethod
+    def _in_spawn_window(run: RunRecord) -> bool:
+        """The launch spawned its process but the launcher has not acknowledged it.
+
+        ah-starting-spawn-20261110: the row leaves STARTING right after Popen
+        and the identity snapshot (about 40 ms on Willy), while the launcher
+        only acknowledges the start later (0.7-1.1 s). Between the two the
+        start is still in flight, so a same-session stop is a cancel of that
+        start, not a stop of a started run.
+        """
+        return (
+            run.state == "RUNNING"
+            and run.launch_acknowledged is False
+            and isinstance(run.launch_operation_id, str)
+            and bool(run.launch_operation_id)
+        )
+
+    def _note_spawn_window_cancel(
+        self, run_id: str, operation_id: str, session_id: str, lease_id: str
+    ) -> None:
+        with self._launch_cancel_lock:
+            self._spawn_window_cancels.pop(run_id, None)
+            self._spawn_window_cancels[run_id] = (operation_id, session_id, lease_id)
+            while len(self._spawn_window_cancels) > _SPAWN_WINDOW_CANCEL_CAP:
+                oldest = next(iter(self._spawn_window_cancels))
+                del self._spawn_window_cancels[oldest]
+
+    def _spawn_window_cancel_matches(
+        self,
+        run_id: str,
+        operation_id: object,
+        session_id: str,
+        lease_id: str,
+        *,
+        consume: bool,
+    ) -> bool:
+        with self._launch_cancel_lock:
+            noted = self._spawn_window_cancels.get(run_id)
+            if noted is None or noted != (operation_id, session_id, lease_id):
+                return False
+            if consume:
+                del self._spawn_window_cancels[run_id]
+            return True
+
+    def _begin_start_stop(
+        self,
+        client: ClientIdentity,
+        authority: tuple[str, str, str],
+        run_id: object,
+    ) -> str | None:
+        """Register an authorized same-owner stop aimed at an unacknowledged launch.
+
+        Called only after _authorize, with the stop's own lease (review
+        028c3425 SHOULD-1). Read without _operation_lock, like the cancel
+        branch of stop_run. The entry only makes that launch's own ack lose;
+        it never kills or changes a row by itself.
+        """
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        row = self.manifest.get(run_id)
+        if (
+            row is None
+            or row.owner_session_id != client.session_id
+            or row.owner_lease_id != authority[1]
+            or not isinstance(row.launch_operation_id, str)
+            or not row.launch_operation_id
+            or not (row.state == "STARTING" or self._in_spawn_window(row))
+        ):
+            return None
+        operation = row.launch_operation_id
+        with self._launch_cancel_lock:
+            current = self._pending_start_stops.get(run_id)
+            count = current[1] if current is not None and current[0] == operation else 0
+            self._pending_start_stops[run_id] = (operation, count + 1)
+        return operation
+
+    def _end_start_stop(self, run_id: str, operation: str) -> None:
+        with self._launch_cancel_lock:
+            current = self._pending_start_stops.get(run_id)
+            if current is None or current[0] != operation:
+                return
+            if current[1] <= 1:
+                del self._pending_start_stops[run_id]
+            else:
+                self._pending_start_stops[run_id] = (operation, current[1] - 1)
+
+    def _start_stop_pending(self, run_id: str, operation: object) -> bool:
+        with self._launch_cancel_lock:
+            current = self._pending_start_stops.get(run_id)
+            return current is not None and current[0] == operation
+
+    def _settle_launch_cancel(
+        self,
+        run_id: str,
+        cancel: _LaunchCancel,
+        outcome: dict[str, object] | None,
+        terminated: int,
+    ) -> None:
+        """Publish the launch settlement and stop accepting new requests."""
+        cancel.outcome = outcome
+        cancel.terminated = terminated
+        cancel.settled.set()
+        with self._launch_cancel_lock:
+            if self._launch_cancels.get(run_id) is cancel:
+                del self._launch_cancels[run_id]
+
+    def _settle_cancelled_launch(
+        self,
+        *,
+        client: ClientIdentity,
+        previous: RunRecord | None,
+        provisional: RunRecord,
+        launched: object | None,
+        record: ProcessRecord | None,
+        minted: str | None,
+        launch_role: str,
+        attempt_started_at: float | None,
+        cancel: _LaunchCancel,
+    ) -> dict[str, object]:
+        """Cancel an in-flight launch before it can become RUNNING.
+
+        Reuses the failed-launch settlement so the row, bindings, launch intent
+        and crash-reporter anchors are left exactly as a failed Popen leaves
+        them: EXITED with no owner when the process is confirmed gone, or
+        UNRECONCILED with the record when the kill could not be confirmed.
+        """
+        if previous is None:
+            # A cancelled fresh launch was never acknowledged. The row must
+            # read as the never-started EXITED a stop can close idempotently.
+            provisional.launch_acknowledged = False
+        self._retire_minted(
+            provisional.run_id, launch_role, minted, "launch_cancelled"
+        )
+        result = self._settle_failed_launch(
+            client=client,
+            previous=previous,
+            provisional=provisional,
+            launched=launched,
+            record=record,
+            confirmed_error="launch_cancelled",
+            attempt_started_at=attempt_started_at,
+            # S5: the degraded row is persisted ownerless inside the failed-launch
+            # compensation, before the audit outcome; no second write afterwards.
+            release_owner_on_unreconciled=True,
+        )
+        self._settle_launch_cancel(
+            provisional.run_id,
+            cancel,
+            result,
+            1 if launched is not None else 0,
+        )
+        return result
+
     def _adopt_dispatchable(self, run_id: str) -> bool:
         # Caller holds _operation_lock. ServerState.run_has_bound_binding
         # takes ServerState._lock; never the inverse.
@@ -2435,6 +2649,42 @@ class ProcessLifecycle:
                 self._unfence_runs([run.run_id])
             except Exception:
                 pass
+        # fb-6330: the run has ended; nothing may name it any more.
+        box_holder.clear(run.run_id)
+
+    def _publish_box_holder(self, run: RunRecord, client: ClientIdentity) -> None:
+        """fb-6330: name this run for another instance on the box. Best effort.
+
+        The holder is the session that launched it, as session_status shows a
+        client (platform and the 12-character session prefix). The purpose is
+        its task label, else the purpose of the lease that started the run.
+        """
+        try:
+            purpose = client.task_label
+            owner, lease = run.owner_session_id, run.owner_lease_id
+            if not purpose and owner and lease:
+                try:
+                    purpose = self.coordinator.lease_purpose(owner, lease) or ""
+                except Exception:
+                    purpose = ""
+            box_holder.publish(
+                run_id=run.run_id,
+                holder=f"{client.platform}/{client.session_id[:12]}",
+                purpose=purpose,
+                processes={
+                    record.pid: _utc_epoch(record.creation_time_utc)
+                    for record in run.processes
+                },
+            )
+        except Exception:
+            pass
+
+    def _sync_box_holder(self, run: RunRecord, client: ClientIdentity) -> None:
+        """fb-6330: after a failed launch the record follows what the run still holds."""
+        if run.state == "EXITED" or not run.processes:
+            box_holder.clear(run.run_id)
+        else:
+            self._publish_box_holder(run, client)
 
     def _note_post_persist_fault(self, run_id: str, reason: str) -> None:
         try:
@@ -3637,13 +3887,10 @@ class ProcessLifecycle:
         run_id: str,
         state: str,
         terminated: int | None = None,
-        foreground_lock: str | None = None,
     ) -> dict[str, object]:
         fields: dict[str, object] = {"run_id": run_id, "state": state}
         if terminated is not None:
             fields["terminated"] = terminated
-        if foreground_lock is not None:
-            fields["foreground_lock"] = foreground_lock
         if not self._audit(event, client, reason, decision, **fields):
             self._add_degradation(result, "audit_failed")
         return result
@@ -3765,9 +4012,17 @@ class ProcessLifecycle:
         confirmed_error: str,
         manifest_failure: bool = False,
         attempt_started_at: float | None = None,
-        foreground_lock: str | None = None,
+        release_owner_on_unreconciled: bool = False,
     ) -> dict[str, object]:
-        """Leave every failed Popen attempt in a durable, reconcilable state."""
+        """Leave every failed Popen attempt in a durable, reconcilable state.
+
+        ``release_owner_on_unreconciled`` is the cancel contract's addition
+        (S5): the UNRECONCILED row is written ownerless inside the failed-launch
+        compensation, before the audit outcome is written, instead of being
+        cleared afterwards, so the durable row the audit describes already has
+        no owner. The durable row and the audit record cannot disagree on who
+        owns a degraded cancel.
+        """
 
         self._last_start_error = confirmed_error
         confirmed_closed = launched is None or self._terminate_open_handle(launched)
@@ -3797,6 +4052,13 @@ class ProcessLifecycle:
             else:
                 target = RunRecord.from_payload(dataclasses.asdict(provisional))
                 target.state = "UNRECONCILED"
+                if release_owner_on_unreconciled:
+                    # S5: the row the audit outcome will describe is already
+                    # ownerless. The ordinary stop releases the owner of an
+                    # unclassifiable process for the same reason: the session
+                    # can adopt it later instead of blocking on a dead owner.
+                    target.owner_session_id = None
+                    target.owner_lease_id = None
                 if record is not None and record not in target.processes:
                     target.processes.append(record)
                 persistence_failed = self._persist_failed_launch_target(
@@ -3806,6 +4068,7 @@ class ProcessLifecycle:
                 state = durable.state if durable is not None else "STARTING"
                 result = self._error("manual_cleanup_required", 409)
 
+        self._sync_box_holder(target, client)
         result["run_id"] = provisional.run_id
         result["state"] = state
         if manifest_failure or persistence_failed:
@@ -3818,7 +4081,6 @@ class ProcessLifecycle:
             decision=str(result["error"]),
             run_id=provisional.run_id,
             state=state,
-            foreground_lock=foreground_lock,
         )
 
     def start_run(self, client: ClientIdentity, token: str | None, request: object) -> dict[str, object]:
@@ -4151,6 +4413,9 @@ class ProcessLifecycle:
                 )
             )
             provisional.state = "STARTING"
+            # The row is cancellable from the instant it can be read. A stop
+            # that sees STARTING must find this entry, not race the write.
+            cancel = self._register_launch_cancel(run_id)
             try:
                 if existing is None:
                     self.manifest.add(provisional)
@@ -4159,6 +4424,7 @@ class ProcessLifecycle:
             except Exception:
                 self._finish_committed(authority, command_id)
                 result = self._error("manifest_failed", 503)
+                self._settle_launch_cancel(run_id, cancel, result, 0)
                 return self._terminal_outcome(
                     result,
                     "lifecycle_start_outcome",
@@ -4177,6 +4443,18 @@ class ProcessLifecycle:
             launch_role = str(parsed["role"])
             attempt_started_at = time.time()
             try:
+                if cancel.requested.is_set():
+                    return self._settle_cancelled_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        minted=None,
+                        launch_role=launch_role,
+                        attempt_started_at=attempt_started_at,
+                        cancel=cancel,
+                    )
                 if self._quarantined():
                     return self._settle_failed_launch(
                         client=client,
@@ -4381,22 +4659,18 @@ class ProcessLifecycle:
                             confirmed_error="launch_intent_failed",
                             attempt_started_at=attempt_started_at,
                         )
-                lock_decision: str | None = None
-                if (
-                    self.foreground_lock is not None
-                    and parsed["window_style"] == "normal"
-                ):
-                    # The launch goes on whatever the lock does, and its
-                    # outcome row says what Windows answered (fade, 75e7).
-                    try:
-                        locked = self.foreground_lock.hold()
-                        lock_decision = (
-                            None
-                            if locked is None
-                            else "locked" if locked else "refused"
-                        )
-                    except Exception:
-                        lock_decision = "failed"
+                if cancel.requested.is_set():
+                    return self._settle_cancelled_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=None,
+                        record=None,
+                        minted=minted,
+                        launch_role=launch_role,
+                        attempt_started_at=attempt_started_at,
+                        cancel=cancel,
+                    )
                 launched_at = self._server_start_clock()
                 try:
                     launched = self.launcher(
@@ -4417,7 +4691,6 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="lifecycle_start_failed",
                         attempt_started_at=attempt_started_at,
-                        foreground_lock=lock_decision,
                     )
 
                 try:
@@ -4435,13 +4708,30 @@ class ProcessLifecycle:
                         record=None,
                         confirmed_error="identity_unavailable",
                         attempt_started_at=attempt_started_at,
-                        foreground_lock=lock_decision,
+                    )
+                if cancel.requested.is_set():
+                    # The process exists and its identity is known, so the
+                    # cancel path can terminate exactly the owned PID and
+                    # settle with its record if the kill is not confirmed.
+                    return self._settle_cancelled_launch(
+                        client=client,
+                        previous=previous,
+                        provisional=provisional,
+                        launched=launched,
+                        record=record,
+                        minted=minted,
+                        launch_role=launch_role,
+                        attempt_started_at=attempt_started_at,
+                        cancel=cancel,
                     )
                 self._confirm_instance(minted, record)
 
                 completed = RunRecord.from_payload(dataclasses.asdict(provisional))
                 completed.processes.append(record)
                 completed.state = "RUNNING"
+                # fb-6330: the other instance can name this run from now on; a
+                # failed persist settles below and the settle clears it.
+                self._publish_box_holder(completed, client)
                 try:
                     self.manifest.replace(completed)
                 except Exception:
@@ -4455,7 +4745,6 @@ class ProcessLifecycle:
                         confirmed_error="lifecycle_start_failed",
                         manifest_failure=True,
                         attempt_started_at=attempt_started_at,
-                        foreground_lock=lock_decision,
                     )
                 self._anchor_parents_locked(completed)
                 if intent is not None:
@@ -4505,12 +4794,16 @@ class ProcessLifecycle:
                     decision="started",
                     run_id=run_id,
                     state="RUNNING",
-                    foreground_lock=lock_decision,
                 )
             finally:
                 self._finish_committed(authority, command_id)
                 if intent is not None:
                     self._settle_launch_intent(run_id)
+                # A stop may be waiting on this launch. Publish the settlement
+                # even when the launch won the race: the stop then reads the
+                # durable RUNNING row and takes the ordinary stop path.
+                if not cancel.settled.is_set():
+                    self._settle_launch_cancel(run_id, cancel, None, 0)
 
     def _launch_intent_path(self) -> Path | None:
         paths = getattr(self.manifest, "paths", None)
@@ -4851,9 +5144,33 @@ class ProcessLifecycle:
                 or run.owner_lease_id != authority[1]
                 or run.launch_operation_id != launch_operation_id
             ):
+                # ah-starting-spawn-20261110: this exact launch was cancelled
+                # in its spawn window by a stop of the same owner. Name it, so
+                # the launcher reports launch_cancelled, not worker_failed.
+                if (
+                    run is not None
+                    and run.state == "EXITED"
+                    and run.launch_operation_id == launch_operation_id
+                    and self._spawn_window_cancel_matches(
+                        run_id,
+                        launch_operation_id,
+                        client.session_id,
+                        authority[1],
+                        consume=True,
+                    )
+                ):
+                    return self._reject_reserved(
+                        authority, command, "launch_cancelled"
+                    )
                 return self._reject_reserved(
                     authority, command, "launch_identity_conflict"
                 )
+            if self._start_stop_pending(run_id, launch_operation_id):
+                # ah-starting-spawn-20261110 (review 5dff34ab SHOULD-1): a stop
+                # of the same session is already on its way to this launch.
+                # The ack loses: the row stays RUNNING and unacknowledged, and
+                # that stop cancels it in the spawn window.
+                return self._reject_reserved(authority, command, "launch_cancelled")
             if not self._audit(
                 "lifecycle_ack",
                 client,
@@ -4879,8 +5196,7 @@ class ProcessLifecycle:
             finally:
                 self._finish_committed(authority, command_id)
 
-    @staticmethod
-    def _terminate_open_handle(launched: object) -> bool:
+    def _terminate_open_handle(self, launched: object) -> bool:
         try:
             launched.terminate()
         except Exception:
@@ -4892,7 +5208,7 @@ class ProcessLifecycle:
                     return False
             return False
         try:
-            launched.wait(timeout=5.0)
+            launched.wait(timeout=self._starting_cancel_kill_s)
             return True
         except Exception:
             poll = getattr(launched, "poll", None)
@@ -5689,7 +6005,97 @@ class ProcessLifecycle:
         finally:
             self._finish_committed(authority, command_id)
 
+    def _cancelled_stop_outcome(
+        self,
+        client: ClientIdentity,
+        authority: tuple[str, str, str],
+        command: str,
+        run_id: str,
+        cancel: _LaunchCancel,
+    ) -> dict[str, object]:
+        """The stop answer after a launch cancelled itself in STARTING.
+
+        The durable row is the authority: EXITED is the effective cancel,
+        UNRECONCILED is the named fail-closed degradation, and any other
+        state is an explicit pending refusal. No kill happens here; the
+        launching thread already terminated exactly its owned handle.
+        """
+        current = self.manifest.get(run_id)
+        terminated = cancel.terminated
+        if current is None or current.state == "EXITED":
+            result: dict[str, object] = {
+                "ok": True,
+                "run_id": run_id,
+                "state": "EXITED",
+                "terminated": terminated,
+                "stop_method": "cancelled_during_start",
+                "exit_metrics_valid": False,
+            }
+            state = "EXITED"
+            decision = "cancelled"
+        elif current.state == "UNRECONCILED":
+            result = {
+                "ok": False,
+                "error": "launch_cancel_degraded",
+                "run_id": run_id,
+                "state": "UNRECONCILED",
+                "terminated": terminated,
+                "_http_status": 409,
+            }
+            if current.processes:
+                result["cleanup_degraded"] = ["launch_cancel_degraded"]
+            state = "UNRECONCILED"
+            decision = "manual_cleanup_required"
+        else:
+            result = {
+                "ok": False,
+                "error": "launch_cancel_pending",
+                "run_id": run_id,
+                "state": current.state,
+                "terminated": terminated,
+                "_http_status": 409,
+            }
+            state = current.state
+            decision = "pending"
+        command_id = self._commit_reserved(authority, command)
+        if command_id is None:
+            return self._error("lease_invalid", 409)
+        try:
+            return self._terminal_outcome(
+                result,
+                "lifecycle_stop_outcome",
+                client,
+                reason=str(result.get("error") or "cancelled_during_start"),
+                decision=decision,
+                run_id=run_id,
+                state=state,
+                terminated=terminated,
+            )
+        finally:
+            self._finish_committed(authority, command_id)
+
     def stop_run(self, client: ClientIdentity, token: str | None, run_id: object) -> dict[str, object]:
+        """Stop the run; see _stop_run.
+
+        ah-starting-spawn-20261110 (review 5dff34ab SHOULD-1): a same-session
+        stop aimed at a launch that is not acknowledged yet is registered for
+        its whole duration, so the launch's ack cannot take _operation_lock
+        ahead of it and turn the cancel into a stop of an acknowledged run.
+        """
+        pending: list[str] = []
+        try:
+            return self._stop_run(client, token, run_id, pending)
+        finally:
+            if pending and isinstance(run_id, str):
+                self._end_start_stop(run_id, pending[0])
+
+    def _stop_run(
+        self,
+        client: ClientIdentity,
+        token: str | None,
+        run_id: object,
+        pending: list[str],
+    ) -> dict[str, object]:
         """Stop the run. Ordinary callers are unchanged.
 
         Warden path, residual contract:
@@ -5709,6 +6115,61 @@ class ProcessLifecycle:
         authority = self._authority(decision)
         if authority is None:
             return self._error("lease_required", 403)
+        # ah-starting-spawn-20261110: authorized, same owner and lease; the
+        # wrapper stop_run releases the registration on every return.
+        operation = self._begin_start_stop(client, authority, run_id)
+        if operation is not None:
+            pending.append(operation)
+        # ah-starting-cancel-20261109-1444: the launch window is the one state
+        # in which the launch itself holds _operation_lock for its whole
+        # duration. A stop that waits for that lock is a kill after the launch,
+        # not a cancel. Signal the in-flight launch first, without the lock,
+        # and answer from the durable settlement it publishes. The lock is
+        # only taken below when the launch won the race and left RUNNING.
+        #
+        # S4: this branch deliberately skips the guards the locked path runs
+        # (_quarantined, _refuse_unconfirmed_owner, the warden). It is limited
+        # to a row owned by the same session with the same lease, and the
+        # launch already passed those gates before it registered the cancel
+        # entry; re-running them without the lock would read state that the
+        # launch is about to change. The ordinary path below keeps them.
+        #
+        # S3: a cancel that arrives after the launch's last pre-Popen check
+        # still lets storage rotation, the Steam final check and the intent
+        # write run before the next check. That is the existing failed-launch
+        # behaviour, and the settlement above is still clean: the cancel path
+        # reuses it, so the row/bindings/intent end terminal, not half-written.
+        cancel: _LaunchCancel | None = None
+        if isinstance(run_id, str) and run_id:
+            starting = self.manifest.get(run_id)
+            cancel = self._launch_cancel_for(run_id)
+            if (
+                starting is not None
+                and starting.state == "STARTING"
+                and cancel is not None
+            ):
+                if not self._reservation_active(authority, command):
+                    return self._error("lease_invalid", 409)
+                if (
+                    starting.owner_session_id != client.session_id
+                    or starting.owner_lease_id != authority[1]
+                ):
+                    return self._reject_reserved(
+                        authority, command, "run_not_adopted"
+                    )
+                cancel.requested.set()
+                if not cancel.settled.wait(self._starting_cancel_settle_s):
+                    refused = self._reject_reserved(
+                        authority, command, "launch_cancel_pending"
+                    )
+                    refused["run_id"] = run_id
+                    refused["state"] = "STARTING"
+                    return refused
+                settled_run = self.manifest.get(run_id)
+                if settled_run is None or settled_run.state != "RUNNING":
+                    return self._cancelled_stop_outcome(
+                        client, authority, command, run_id, cancel
+                    )
         with self._operation_lock:
             if not self._reservation_active(authority, command):
                 return self._error("lease_invalid", 409)
@@ -5744,6 +6205,18 @@ class ProcessLifecycle:
                 or run.state != "RUNNING"
             ):
                 return self._reject_reserved(authority, command, "run_not_adopted")
+            # ah-starting-spawn-20261110: the same owner and lease, and the
+            # launcher has not acknowledged the start yet. This covers both
+            # races of the STARTING window: the stop that reached the daemon
+            # just after the row became RUNNING (run01 attempt 3, 19 ms late),
+            # and the cancel request the launch saw too late (after its last
+            # boundary check), which the cancel branch above hands over here.
+            # The kill below is the same; the answer and the ack say cancel.
+            spawn_window_operation = (
+                run.launch_operation_id
+                if not never_started and self._in_spawn_window(run)
+                else None
+            )
             # The warden authorizes the whole set. A foreign, gone, or unknown
             # process refuses the stop before any skip-and-continue.
             stop_guard = self._warden_idle_guard(client, "stop", run_id)
@@ -6311,22 +6784,49 @@ class ProcessLifecycle:
                 # guard.kill, not orderly mission teardown. Callers that read
                 # RPT Leaked/Destroying-game lines after a "succeeded" stop
                 # were reading an unexecuted check as zero. Say so on the wire.
+                stop_method = "forced_kill" if terminated > 0 else "no_live_owned"
+                outcome_reason = retire_reason
+                outcome_decision = retire_decision
+                if spawn_window_operation is not None and not idle_decision:
+                    # ah-starting-spawn-20261110: a cancel of the start, not
+                    # a stop of a started run. Same kill, same terminal row;
+                    # the in-flight launcher's ack answers launch_cancelled.
+                    self._note_spawn_window_cancel(
+                        run_id, spawn_window_operation, client.session_id, authority[1]
+                    )
+                    stop_method = "cancelled_during_start"
+                    outcome_reason = "cancelled_during_start"
+                    outcome_decision = "cancelled"
+                elif (
+                    never_started
+                    and terminated == 0
+                    and self._spawn_window_cancel_matches(
+                        run_id,
+                        run.launch_operation_id,
+                        client.session_id,
+                        authority[1],
+                        consume=False,
+                    )
+                ):
+                    # The launcher's own cleanup stop got the lock first and
+                    # cancelled this start; this stop finds it already done.
+                    stop_method = "cancelled_during_start"
+                    outcome_reason = "cancelled_during_start"
+                    outcome_decision = "cancelled"
                 result = {
                     "ok": True,
                     "run_id": run_id,
                     "state": "EXITED",
                     "terminated": terminated,
-                    "stop_method": (
-                        "forced_kill" if terminated > 0 else "no_live_owned"
-                    ),
+                    "stop_method": stop_method,
                     "exit_metrics_valid": False,
                 }
                 return self._terminal_outcome(
                     result,
                     retire_event,
                     client,
-                    reason=retire_reason,
-                    decision=retire_decision,
+                    reason=outcome_reason,
+                    decision=outcome_decision,
                     run_id=run_id,
                     state="EXITED",
                     terminated=terminated,
@@ -6560,11 +7060,10 @@ class ProcessLifecycle:
         Authorizes like close_run: the caller holds the lease and owns the
         RUNNING run. The window is the largest visible DayZ window of the
         run's client process. Right before the one SetForegroundWindow the
-        process identity and the window's pid are read again, and this
-        daemon's foreground lock is let go. Nothing restores, raises or
-        attaches input, and a minimized window is not asked for. The
-        foreground is then read for ``hold_s`` seconds, outside the
-        operation lock.
+        process identity and the window's pid are read again. Nothing
+        restores, raises or attaches input, and a minimized window is not
+        asked for. The foreground is then read for ``hold_s`` seconds,
+        outside the operation lock.
         """
         if (
             isinstance(hold_s, bool)
@@ -6670,8 +7169,6 @@ class ProcessLifecycle:
                             "granted": None,
                             "held_s": 0.0,
                         }
-                    if self.foreground_lock is not None:
-                        self.foreground_lock.release()
                     granted = window_foreground.set_foreground(
                         hwnd, player.pid, windows=windows, fns=fns
                     )
@@ -9060,7 +9557,44 @@ class ProcessLifecycle:
                 sorted(foreign_ports_dayz_related)
             ),
             live_pids=live_pids,
+            foreign_holder=self._foreign_holder(
+                observed, diag_foreign_pids, rows_by_pid
+            ),
         )
+
+    def _foreign_holder(
+        self,
+        observed: list[dict[str, object]],
+        diag_pids: set[int],
+        port_pids: Mapping[int, object],
+    ) -> dict[str, str] | None:
+        """fb-6330: the other instance's run that holds every foreign pid, or None.
+
+        Only a fully known scan gets here. A creation time the diag scan does
+        not give is read from the guard, and only for pids a record claims.
+        """
+        seen: dict[int, float | None] = {
+            int(process["pid"]): _utc_epoch(process.get("creation_time_utc"))
+            for process in observed
+            if int(process["pid"]) in diag_pids
+        }
+        for pid in port_pids:
+            seen.setdefault(int(pid), None)
+        if not seen:
+            return None
+        try:
+            return box_holder.attribute(seen, created_of=self._process_created)
+        except Exception:
+            return None
+
+    def _process_created(self, pid: int) -> float | None:
+        try:
+            actual = self.guard.snapshot(pid)
+        except Exception:
+            return None
+        if not isinstance(actual, dict) or actual.get("pid") != pid:
+            return None
+        return _utc_epoch(actual.get("creation_time_utc"))
 
     def _probes_for_snapshot(
         self, snapshot: _BoxSnapshot, *, use_cache: bool

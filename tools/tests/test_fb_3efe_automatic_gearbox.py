@@ -9,6 +9,14 @@ interval as the manual upshift, and the car is asked for no throttle until
 the mode reads D, R included. That ShiftUp walks the modes in the enum's
 order is native: the in-game round checks it.
 
+The 9/11 round then found an automatic in D at 616.5 rpm against an idle of
+625 that never moved: below idle OnInput never gave throttle, a rule copied
+from vanilla's DIAG_DEVELOPER autopilot, which drives a manual gearbox.
+Vanilla counts a stall as engine on with rpm < 1. Below idle an automatic is
+now ready once its engine runs; a manual keeps the old rule.
+BelowIdleOnInputTest runs the real OnInput body on a fake car
+(tests.enforce_subset_helpers).
+
 File-only: reads the Enforce sources; does not import the server stack.
 """
 
@@ -16,8 +24,10 @@ from __future__ import annotations
 
 import re
 import unittest
+from types import SimpleNamespace
 
 from tests._addon_paths import addon_root
+from tests.enforce_subset_helpers import translate
 
 
 CAR_SCRIPT = addon_root() / "scripts" / "4_World" / "MCP_CarScript.c"
@@ -250,6 +260,161 @@ class Fb3efeAutomaticGearboxTest(unittest.TestCase):
             shipped = mutant(old, new)
             with self.subTest(label), self.assertRaises(AssertionError):
                 self._assert_automatic_shifts_to_drive(_on_input(shipped))
+
+
+AUTOMATIC_GEARBOX = 1
+MANUAL_GEARBOX = 2
+MODE_N = 2
+MODE_D = 3
+
+
+class _Car:
+    """A CarScript as OnInput reads and drives it, recording what it is told."""
+
+    def __init__(self, *, gearbox: int, rpm: float, engine_on: bool, mode: int = MODE_D) -> None:
+        self.gearbox = gearbox
+        self.rpm = rpm
+        self.engine_on = engine_on
+        self.mode = mode
+        self.calls: list[str] = []
+        self.throttle: float | None = None
+
+    def bind(self, namespace: dict) -> None:
+        for name in (
+            "EngineGetRPM", "GetSpeedometerAbsolute", "EngineGetRPMIdle", "EngineIsOn",
+            "EngineStop", "EngineStart", "SetBrake", "SetHandbrake", "GearboxGetType",
+            "EngineGetRPMRedline", "GetGear", "ShiftUp", "ShiftTo", "GearboxGetMode",
+            "SetThrottle", "SetSteering", "SetBrakesActivateWithoutDriver",
+        ):
+            namespace[name] = getattr(self, name)
+
+    def EngineGetRPM(self) -> float:
+        return self.rpm
+
+    def GetSpeedometerAbsolute(self) -> float:
+        return 0.0
+
+    def EngineGetRPMIdle(self) -> float:
+        return 625.0
+
+    def EngineIsOn(self) -> bool:
+        return self.engine_on
+
+    def EngineStop(self) -> None:
+        self.calls.append("EngineStop")
+        self.engine_on = False
+
+    def EngineStart(self) -> None:
+        self.calls.append("EngineStart")
+
+    def SetBrake(self, _value: float) -> None:
+        self.calls.append("SetBrake")
+
+    def SetHandbrake(self, _value: float) -> None:
+        self.calls.append("SetHandbrake")
+
+    def GearboxGetType(self) -> int:
+        return self.gearbox
+
+    def EngineGetRPMRedline(self) -> float:
+        return 6000.0
+
+    def GetGear(self) -> int:
+        return 2
+
+    def ShiftUp(self) -> None:
+        self.calls.append("ShiftUp")
+
+    def ShiftTo(self, gear: int) -> None:
+        self.calls.append(f"ShiftTo({gear})")
+
+    def GearboxGetMode(self) -> int:
+        return self.mode
+
+    def SetThrottle(self, value: float) -> None:
+        self.calls.append("SetThrottle")
+        self.throttle = value
+
+    def SetSteering(self, _value: float) -> None:
+        self.calls.append("SetSteering")
+
+    def SetBrakesActivateWithoutDriver(self, _value: bool) -> None:
+        self.calls.append("SetBrakesActivateWithoutDriver")
+
+
+class BelowIdleOnInputTest(unittest.TestCase):
+    """3efe in the 9/11 round: the real OnInput body, one tick, below idle."""
+
+    def _tick(self, car: _Car, throttle: float = 0.6, source: str | None = None) -> SimpleNamespace:
+        if source is None:
+            source = CAR_SCRIPT.read_text(encoding="utf-8")
+        drive = SimpleNamespace(
+            s_Active=True, s_Car=car, s_DeadlineS=100.0, s_Throttle=throttle, s_Steer=0.0,
+            s_Brake=0.0, s_Handbrake=0.0, s_LastAutoShiftS=-1.0, AUTO_SHIFT_SETTLE_S=0.3,
+            s_TickEngineReady=None, s_TickThrottleSet=None, Clear=lambda: None,
+        )
+        namespace: dict = {
+            "super": SimpleNamespace(OnInput=lambda _dt: None),
+            "this": car,
+            "MCPCarDrive": drive,
+            "MCPVehicleTrace": SimpleNamespace(Capture=lambda _car, _dt: None),
+            "GetGame": lambda: SimpleNamespace(GetTickTime=lambda: 10.0),
+            "CarGearboxType": SimpleNamespace(AUTOMATIC=AUTOMATIC_GEARBOX, MANUAL=MANUAL_GEARBOX),
+            "CarAutomaticGearboxMode": SimpleNamespace(P=0, R=1, N=MODE_N, D=MODE_D),
+            "CarGear": SimpleNamespace(FIRST=2),
+        }
+        car.bind(namespace)
+        on_input = translate(source, "override void OnInput(float dt)", namespace)
+        on_input(0.05)
+        return drive
+
+    def test_an_automatic_in_d_below_idle_with_its_engine_on_gets_throttle(self) -> None:
+        car = _Car(gearbox=AUTOMATIC_GEARBOX, rpm=616.5, engine_on=True)
+        drive = self._tick(car)
+        self.assertIs(drive.s_TickEngineReady, True)
+        self.assertIs(drive.s_TickThrottleSet, True)
+        self.assertEqual(car.throttle, 0.6)
+        self.assertNotIn("EngineStop", car.calls)
+        self.assertNotIn("EngineStart", car.calls)
+
+    def test_a_manual_below_idle_keeps_the_old_rule(self) -> None:
+        car = _Car(gearbox=MANUAL_GEARBOX, rpm=616.5, engine_on=True)
+        drive = self._tick(car)
+        self.assertIs(drive.s_TickEngineReady, False)
+        self.assertIs(drive.s_TickThrottleSet, False)
+        self.assertIsNone(car.throttle)
+
+    def test_a_stalled_automatic_is_stopped_and_not_ready(self) -> None:
+        car = _Car(gearbox=AUTOMATIC_GEARBOX, rpm=0.5, engine_on=True)
+        drive = self._tick(car)
+        self.assertEqual([call for call in car.calls if call.startswith("Engine")], ["EngineStop"])
+        self.assertIs(drive.s_TickEngineReady, False)
+        self.assertIsNone(car.throttle)
+
+    def test_an_automatic_with_its_engine_off_is_started_and_not_ready(self) -> None:
+        car = _Car(gearbox=AUTOMATIC_GEARBOX, rpm=0.0, engine_on=False)
+        drive = self._tick(car)
+        self.assertEqual([call for call in car.calls if call.startswith("Engine")], ["EngineStart"])
+        self.assertIs(drive.s_TickEngineReady, False)
+        self.assertIsNone(car.throttle)
+
+    def test_brakes_apply_and_a_brake_only_command_starts_nothing(self) -> None:
+        car = _Car(gearbox=AUTOMATIC_GEARBOX, rpm=0.0, engine_on=False)
+        drive = self._tick(car, throttle=0.0)
+        self.assertIn("SetBrake", car.calls)
+        self.assertIn("SetHandbrake", car.calls)
+        self.assertNotIn("EngineStart", car.calls)
+        self.assertIs(drive.s_TickEngineReady, False)
+
+    def test_the_never_ready_below_idle_shape_fails_the_automatic_case(self) -> None:
+        source = CAR_SCRIPT.read_text(encoding="utf-8")
+        guard = "if (GearboxGetType() == CarGearboxType.MANUAL || !EngineIsOn() || rpm < 1.0)"
+        self.assertEqual(source.count(guard), 1)
+        before = source.replace(guard, "if (true)")
+        car = _Car(gearbox=AUTOMATIC_GEARBOX, rpm=616.5, engine_on=True)
+        drive = self._tick(car, source=before)
+        self.assertIs(drive.s_TickEngineReady, False)
+        self.assertIsNone(car.throttle)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,20 @@
 // per pulse, positive X turns right (compass increases), positive Y pitches up.
 // Success is the measured camera direction, not the commanded pulse.
 // The report type lives in World: Mission's MCPLookAt is a later module.
+//
+// 33c5, c616, cc75: in multiplayer the owner's aim pulses never reach the
+// server, whose reconciliation then pulls the camera back to a heading that
+// never turned (the round's client RPT: every look that ended in deadline had
+// NwkMovement corrections inside its window). The server is sent a copy of
+// the look, as player_move sends its move (MCP_PlayerMove.c): it pulses its
+// own aim the same way until its heading is within BAND_DEG of the target's
+// bearing, the owner's release or its deadman. Yaw only.
+
+// ScriptInputUserData type of the look's server copy and of its release.
+// Vanilla INPUT_UDT_* are 1..16 (_constants.c:2-19); the next id free after
+// MCP_INPUT_UDT_PLAYER_MOVE (MCP_PlayerMove.c), 78541067 being
+// MCP_RPC_HANDS_ATTACH (MCP_Weapon.c).
+const int MCP_INPUT_UDT_PLAYER_LOOK = 78541068;
 
 class MCPLookAtReport
 {
@@ -37,6 +51,12 @@ class MCPLookAtControl
 	protected static string s_Termination;
 	protected static string s_Pose;
 	protected static int s_CommandId;
+	// The look the server was sent a copy of and no release for (0: none; a
+	// converged look keeps it, EndServerLook), and a release of a sent look
+	// that has not left yet, with its id.
+	protected static int s_ServerLookId;
+	protected static bool s_ServerReleasePending;
+	protected static int s_ServerReleaseId;
 
 	protected static const float MAX_CONTROL_S = 3.0;
 	protected static const float BAND_DEG = 1.0;
@@ -46,6 +66,43 @@ class MCPLookAtControl
 	// The camera shows an aim pulse a frame or more after it is sent; a fraction of the
 	// remaining error per frame converges where a full-error pulse overshoots and oscillates.
 	protected static const float GAIN = 0.2;
+	// The server's deadman: the look's budget plus this, counted from the
+	// start's arrival there. Its band or the owner's release normally ends it
+	// first.
+	static const float SERVER_DEADMAN_MARGIN_S = 0.5;
+	// A yaw error this close to 180 degrees, either way, is a target behind:
+	// both turns are about as short, and the owner (camera) and the server
+	// (heading) read it a little apart. Both turn right then (TieBreakDeg),
+	// so neither side picks a way the other does not.
+	protected static const float TIE_BAND_DEG = 2.0;
+	// S-1: the way the owner picked at the look's start (TurnSignFor: 1
+	// right, -1 left, 0 none) holds while the target is more than this
+	// far off on either side, on both the owner and the server (LatchDeg),
+	// so readings a little apart near 180 degrees, either side of any
+	// band, never turn the two sides opposite ways. Nearer, the short way
+	// is the only way and each side takes it.
+	protected static const float LATCH_FROM_DEG = 90.0;
+	// The turn the running look latched at its Begin.
+	protected static int s_TurnSign;
+	// The server copy accepts at most one start per sender in this many
+	// seconds (MCPLookAccept); a faster start is refused as throttled.
+	static const float SERVER_MIN_START_INTERVAL_S = 0.1;
+	// The owner sends no start sooner than this after its last one (Begin
+	// answers input_busy and turns neither side), five times the server's
+	// interval, so a start the owner sent is throttled there only when two
+	// starts arrive compressed by more than 0.4 s of network delay (the
+	// start would then turn the owner only until its deadline: there is no
+	// verdict back to the owner).
+	static const float OWNER_MIN_START_INTERVAL_S = 0.5;
+	// The owner's tick time of its last sent start, once there is one.
+	protected static bool s_StartSent;
+	protected static float s_StartSentS;
+	// Whether this server's copy accepts looks at all: set at mission start
+	// from the harness's profile=test config (MissionServer.OnMissionStart),
+	// the same test that turns the godmode default on. Off on any other
+	// server, so a client cannot turn its own server heading with this
+	// message there.
+	protected static bool s_ServerAllowed;
 
 	static void Reset()
 	{
@@ -64,24 +121,75 @@ class MCPLookAtControl
 		s_Termination = "";
 		s_Pose = "";
 		s_CommandId = 0;
+		s_TurnSign = 0;
 	}
 
-	static int Begin(PlayerBase player, vector target, float budgetS, int commandId)
+	// "" once the look runs (Generation() names it), else input_busy. The
+	// server's copy is sent first, as player_move's start (DispatchPlayerMove):
+	// a start the input channel cannot take now (taken or full, or a release
+	// still waiting for it) is input_busy and neither starts nor replaces a
+	// look on either side, where a look on this side only would be pulled
+	// back by the server's reconciliation. It is not a no-op: SendServerStart
+	// first flushes a previous look's pending release (FlushServerRelease),
+	// and that release may leave before the channel refuses the start.
+	// Offline the local pulses are the whole look (SendServerStart).
+	static string Begin(PlayerBase player, vector target, float budgetS, int commandId)
 	{
+		int lookId;
+		float budget;
+		string serverStart;
+		int turn;
+		float nowS;
+		budget = budgetS;
+		if (budget > MAX_CONTROL_S)
+		{
+			budget = MAX_CONTROL_S;
+		}
+		// Release below advances the generation to this id.
+		lookId = s_Generation + 1;
+		// A start the server's throttle would refuse is not sent: it would
+		// turn this side only (#378 review).
+		nowS = GetGame().GetTickTime();
+		// A tick clock that went back (a new game in this process) does not
+		// hold the next start until it catches up.
+		if (s_StartSent && nowS < s_StartSentS)
+		{
+			s_StartSent = false;
+		}
+		if (s_StartSent && nowS - s_StartSentS < OWNER_MIN_START_INTERVAL_S)
+		{
+			return "input_busy";
+		}
+		// S-1: the way to turn is picked once, here, and the server's copy
+		// gets it in the start.
+		turn = StartTurnSign(player, target);
+		serverStart = SendServerStart(lookId, target, budget, turn);
+		if (serverStart == "input_busy")
+		{
+			return serverStart;
+		}
+		// The start supersedes there the copy of a converged look still kept
+		// (MCPLookAccept), so Release below sends that one no release.
+		if (serverStart == "sent")
+		{
+			s_ServerLookId = 0;
+			s_StartSent = true;
+			s_StartSentS = nowS;
+		}
 		Release("replaced");
-		s_Generation = s_Generation + 1;
 		Reset();
 		s_Active = true;
 		s_Player = player;
 		s_Target = target;
-		s_BudgetS = budgetS;
-		if (s_BudgetS > MAX_CONTROL_S)
-		{
-			s_BudgetS = MAX_CONTROL_S;
-		}
+		s_BudgetS = budget;
 		s_Pose = "first_idle";
 		s_CommandId = commandId;
-		return s_Generation;
+		s_TurnSign = turn;
+		if (serverStart == "sent")
+		{
+			s_ServerLookId = lookId;
+		}
+		return "";
 	}
 
 	static int Generation()
@@ -92,6 +200,14 @@ class MCPLookAtControl
 	static bool IsActive()
 	{
 		return s_Active;
+	}
+
+	// L1b: a look is still turning this player (begun, not finished), so
+	// player_move and weapon_aim answer busy (DispatchPlayerMove,
+	// DispatchWeaponAim) instead of fighting its pulses.
+	static bool IsRunning()
+	{
+		return s_Active && !s_Finished;
 	}
 
 	static bool IsFinished()
@@ -107,6 +223,7 @@ class MCPLookAtControl
 	static void Release(string why)
 	{
 		Disable(s_Player);
+		EndServerLook(false);
 		if (s_Active && !s_Finished)
 		{
 			s_Finished = true;
@@ -152,10 +269,19 @@ class MCPLookAtControl
 		hic.OverrideAimChangeY(HumanInputControllerOverrideType.DISABLED, 0.0);
 	}
 
+	// The owner's cancel (player_look_at_release) of the look its command
+	// started. A look that already ended here can still keep its server copy
+	// (a converged one, EndServerLook): the cancel sends that copy its
+	// release and leaves the report and the generation as they are.
 	static void ReleaseOwned(int commandId, string why)
 	{
-		if (!s_Active || s_CommandId != commandId)
+		if (s_CommandId != commandId)
 		{
+			return;
+		}
+		if (!s_Active)
+		{
+			EndServerLook(false);
 			return;
 		}
 		Release(why);
@@ -182,10 +308,257 @@ class MCPLookAtControl
 	static void Finish(string termination, bool converged)
 	{
 		Disable(s_Player);
+		EndServerLook(converged);
 		s_Finished = true;
 		s_Converged = converged;
 		s_Termination = termination;
 		s_Active = false;
+	}
+
+	// The end of a look the server was sent. A converged look leaves the
+	// server's copy to reach its own band, both sides turning toward the same
+	// bearing, and keeps its id: a later Release (restore_gameplay) or the
+	// owner's cancel (ReleaseOwned) still sends that copy its release, and
+	// the next look's start supersedes it.
+	// Any other end sends the copy its release, now or from a later command
+	// tick (FlushServerRelease). The release names its look, so it never ends
+	// a newer one; the server's deadman ends its copy in any case.
+	static void EndServerLook(bool converged)
+	{
+		if (s_ServerLookId <= 0)
+		{
+			return;
+		}
+		if (converged)
+		{
+			return;
+		}
+		s_ServerReleasePending = true;
+		s_ServerReleaseId = s_ServerLookId;
+		s_ServerLookId = 0;
+		FlushServerRelease();
+	}
+
+	// sent, unavailable (not a multiplayer client: offline this one process
+	// is the server and the local pulses are the whole look) or input_busy
+	// (the input channel is taken or full, gameplay.c:130-131), as
+	// MCPPlayerMoveControl.SendStart answers. The release of the previous
+	// look goes out first, and while it cannot the start is input_busy too;
+	// a release that leaves stays sent when the start itself is then refused.
+	static string SendServerStart(int lookId, vector target, float budgetS, int turnSign)
+	{
+		ScriptInputUserData message;
+		if (!GetGame())
+		{
+			return "unavailable";
+		}
+		if (!GetGame().IsMultiplayer())
+		{
+			return "unavailable";
+		}
+		if (!GetGame().IsClient())
+		{
+			return "unavailable";
+		}
+		FlushServerRelease();
+		if (s_ServerReleasePending)
+		{
+			return "input_busy";
+		}
+		if (!ScriptInputUserData.CanStoreInputUserData())
+		{
+			return "input_busy";
+		}
+		message = new ScriptInputUserData();
+		message.Write(MCP_INPUT_UDT_PLAYER_LOOK);
+		message.Write(true);
+		message.Write(lookId);
+		message.Write(target);
+		message.Write(budgetS);
+		message.Write(turnSign);
+		message.Send();
+		return "sent";
+	}
+
+	// The release of a sent look goes out as soon as there is a local player
+	// and the input channel takes it; until then every command tick retries
+	// (OnCommandHandler), and so does the next look's SendServerStart, whose
+	// input_busy then does not undo a release already sent.
+	static void FlushServerRelease()
+	{
+		ScriptInputUserData message;
+		if (!s_ServerReleasePending)
+		{
+			return;
+		}
+		if (!GetGame())
+		{
+			s_ServerReleasePending = false;
+			return;
+		}
+		if (!GetGame().IsMultiplayer() || !GetGame().IsClient())
+		{
+			s_ServerReleasePending = false;
+			return;
+		}
+		if (!GetGame().GetPlayer())
+		{
+			return;
+		}
+		if (!ScriptInputUserData.CanStoreInputUserData())
+		{
+			return;
+		}
+		message = new ScriptInputUserData();
+		message.Write(MCP_INPUT_UDT_PLAYER_LOOK);
+		message.Write(false);
+		message.Write(s_ServerReleaseId);
+		message.Send();
+		s_ServerReleasePending = false;
+	}
+
+	// The server copy's values: a finite target and a budget in
+	// (0, MAX_CONTROL_S], the bounds DispatchPlayerLookAt and Begin keep.
+	static string ServerRequestRefusal(vector target, float budgetS)
+	{
+		if (!MCPPlayerMoveControl.IsFiniteVector(target))
+		{
+			return "bad_pos";
+		}
+		if (!MCPPlayerMoveControl.IsFiniteValue(budgetS))
+		{
+			return "bad_timeout";
+		}
+		if (budgetS <= 0.0)
+		{
+			return "bad_timeout";
+		}
+		if (budgetS > MAX_CONTROL_S)
+		{
+			return "bad_timeout";
+		}
+		return "";
+	}
+
+	static bool WithinBand(float errorDeg)
+	{
+		if (errorDeg > BAND_DEG)
+		{
+			return false;
+		}
+		if (errorDeg < -BAND_DEG)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	// The server copy's pulse for a yaw error in degrees, positive to the
+	// right: the owner's gain and clamp (OnCommandHandler), in radians.
+	static float ServerPulseX(float errorDeg)
+	{
+		return ClampPulse(GAIN * errorDeg * Math.DEG2RAD);
+	}
+
+	// A yaw error in degrees in [-180, 180], with a target behind (within
+	// TIE_BAND_DEG of 180, either side) always to the right: -179 is turned
+	// as 181. Elsewhere the error is as given. Both the owner's pulse
+	// (OnCommandHandler) and the server copy's (MCPLookServerTick) go through
+	// it, so a look at 180 degrees turns both the same way.
+	static float TieBreakDeg(float errorDeg)
+	{
+		if (errorDeg < TIE_BAND_DEG - 180.0)
+		{
+			return errorDeg + 360.0;
+		}
+		return errorDeg;
+	}
+
+	// S-1: 1 (right) or -1 (left) for the owner's yaw error at the start in
+	// degrees, the tie at 180 degrees broken right (TieBreakDeg).
+	static int TurnSignFor(float yawDeg)
+	{
+		if (TieBreakDeg(yawDeg) < 0.0)
+		{
+			return -1;
+		}
+		return 1;
+	}
+
+	// The owner's yaw error to the target at Begin, from its camera, as
+	// OnCommandHandler reads it; 0 when the camera cannot be read, and the
+	// look then breaks the tie on every tick (LatchDeg).
+	protected static int StartTurnSign(PlayerBase player, vector target)
+	{
+		vector camPos;
+		vector camDir;
+		vector desired;
+		float yawDeg;
+		if (!ReadCamera(player, camPos, camDir))
+		{
+			return 0;
+		}
+		desired = target - camPos;
+		yawDeg = WrapPi(Math.Atan2(desired[0], desired[2]) - Math.Atan2(camDir[0], camDir[2])) * Math.RAD2DEG;
+		return TurnSignFor(yawDeg);
+	}
+
+	// A yaw error in degrees, positive to the right, turned the latched way
+	// (turnSign) while the target is more than LATCH_FROM_DEG off: -178 is
+	// turned as 182 for a look latched right, 179 as -181 for one latched
+	// left. Without a latch (0) the tie at 180 degrees is broken right.
+	static float LatchDeg(float errorDeg, int turnSign)
+	{
+		if (turnSign == 0)
+		{
+			return TieBreakDeg(errorDeg);
+		}
+		if (turnSign > 0 && errorDeg < -LATCH_FROM_DEG)
+		{
+			return errorDeg + 360.0;
+		}
+		if (turnSign < 0 && errorDeg > LATCH_FROM_DEG)
+		{
+			return errorDeg - 360.0;
+		}
+		return errorDeg;
+	}
+
+	// "" for a turn the server copy can latch (-1, 0 or 1), else bad_turn.
+	static string TurnRefusal(int turnSign)
+	{
+		if (turnSign < -1)
+		{
+			return "bad_turn";
+		}
+		if (turnSign > 1)
+		{
+			return "bad_turn";
+		}
+		return "";
+	}
+
+	static void SetServerAllowed(bool allowed)
+	{
+		s_ServerAllowed = allowed;
+	}
+
+	static bool ServerAllowed()
+	{
+		return s_ServerAllowed;
+	}
+
+	// The owner's weapon_aim (DispatchWeaponAim) ends a converged look's
+	// server copy first, so the server stops turning the heading under the
+	// aim instead of running on to its band or deadman. A look still running
+	// here is left alone: its own end sends the release.
+	static void ReleaseServerCopy()
+	{
+		if (s_Active && !s_Finished)
+		{
+			return;
+		}
+		EndServerLook(false);
 	}
 
 	protected static float WrapPi(float angle)
@@ -327,12 +700,14 @@ class MCPLookAtControl
 		float currentPitch;
 		float desiredPitch;
 		float errorDeg;
+		float yawErrorDeg;
 		float dot;
 		float pulseX;
 		float pulseY;
 		string poseError;
 		HumanInputController hic;
 		PlayerBase live;
+		FlushServerRelease();
 		if (!s_Active || s_Finished)
 		{
 			return;
@@ -421,7 +796,8 @@ class MCPLookAtControl
 		}
 		s_StableTicks = 0;
 		s_HoldTicks = 0;
-		pulseX = ClampPulse(GAIN * WrapPi(desiredBearing - currentBearing));
+		yawErrorDeg = LatchDeg(WrapPi(desiredBearing - currentBearing) * Math.RAD2DEG, s_TurnSign);
+		pulseX = ClampPulse(GAIN * yawErrorDeg * Math.DEG2RAD);
 		pulseY = ClampPulse(GAIN * WrapPi(desiredPitch - currentPitch));
 		hic = player.GetInputController();
 		if (!hic)
@@ -434,3 +810,367 @@ class MCPLookAtControl
 		s_Pulses = s_Pulses + 1;
 	}
 }
+
+modded class PlayerBase
+{
+	// Server copy of the owner's player_look_at, per player: the look's id
+	// (0: none), its target and deadman, and whether this copy pulsed the aim
+	// override. Only the server instance accepts a look, so elsewhere these
+	// stay unset and the hooks below cost one test per tick. No ref on
+	// entities.
+	protected int m_MCPLookId;
+	protected vector m_MCPLookTarget;
+	protected float m_MCPLookDeadlineS;
+	protected bool m_MCPLookPulsed;
+	// Pulses from ConsumeMove and from CommandHandler, logged at the end.
+	protected int m_MCPLookConsumed;
+	protected int m_MCPLookHandled;
+	// The highest look id this copy has seen in a start or a release; a start
+	// must carry a greater one, as m_MCPMoveLastId keeps for player_move. The
+	// owner's ids only grow within its process (MCPLookAtControl.s_Generation
+	// is static); a reconnect into this body resets it (OnReconnect).
+	protected int m_MCPLookLastId;
+	// The tick time of this sender's last start that passed the throttle
+	// (MCPLookAccept), -1 before the first, and the last refusal this copy
+	// logged: a refusal repeated in a row is logged once (MCPLookVerdict).
+	protected float m_MCPLookLastStartS = -1.0;
+	protected string m_MCPLookLastRefusal;
+	protected string m_MCPLookLastNote;
+	// The way the owner latched at the look's start (MCPLookAtControl.LatchDeg).
+	protected int m_MCPLookTurn;
+
+	// playerbase.c:6250. Ours stops here, as player_move's does.
+	override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)
+	{
+		if (userDataType == MCP_INPUT_UDT_PLAYER_LOOK)
+		{
+			// L2b: outside a profile=test server the message, start or
+			// release, is consumed unread and logs nothing.
+			if (MCPLookAtControl.ServerAllowed())
+			{
+				MCPLookReadRequest(ctx);
+			}
+			return true;
+		}
+		return super.OnInputUserDataProcess(userDataType, ctx);
+	}
+
+	// A start (true, its id, its target, its budget) or a release (false, its
+	// id), in the order SendServerStart and FlushServerRelease write them.
+	protected void MCPLookReadRequest(ParamsReadContext ctx)
+	{
+		bool isStart;
+		int lookId;
+		vector target;
+		float budgetS;
+		int turnSign;
+		isStart = false;
+		lookId = 0;
+		target = vector.Zero;
+		budgetS = 0.0;
+		turnSign = 0;
+		if (!ctx.Read(isStart))
+		{
+			MCPLookVerdict(false, 0, "read_failed");
+			return;
+		}
+		if (!ctx.Read(lookId))
+		{
+			MCPLookVerdict(false, 0, "read_failed");
+			return;
+		}
+		if (!isStart)
+		{
+			MCPLookReadRelease(lookId);
+			return;
+		}
+		if (!ctx.Read(target))
+		{
+			MCPLookVerdict(false, lookId, "read_failed");
+			return;
+		}
+		if (!ctx.Read(budgetS))
+		{
+			MCPLookVerdict(false, lookId, "read_failed");
+			return;
+		}
+		if (!ctx.Read(turnSign))
+		{
+			MCPLookVerdict(false, lookId, "read_failed");
+			return;
+		}
+		MCPLookAccept(lookId, target, budgetS, turnSign);
+	}
+
+	// The owner's release ends the look it names, never a newer one. Its id
+	// counts as seen, so a start of that look arriving after it is refused.
+	protected void MCPLookReadRelease(int lookId)
+	{
+		if (lookId > m_MCPLookLastId)
+		{
+			m_MCPLookLastId = lookId;
+		}
+		if (m_MCPLookId <= 0)
+		{
+			MCPLookNote(lookId, "release_without_look");
+			return;
+		}
+		if (m_MCPLookId != lookId)
+		{
+			MCPLookNote(lookId, "release_of_another_look");
+			return;
+		}
+		MCPLookServerRelease("client");
+	}
+
+	// Every check runs before anything changes, as MCPMoveAccept does: the
+	// instance, the server's gate, the id's freshness, the sender's throttle,
+	// the owner still being there, the values and the actor. Only an accepted
+	// start replaces a look still running.
+	// The sender is this player: the engine hands a client's input user data
+	// to the server copy of the player that client controls
+	// (OnInputUserDataProcess, playerbase.c:6250), and the message turns that
+	// player only, toward a position. There is no admin path to another body.
+	protected void MCPLookAccept(int lookId, vector target, float budgetS, int turnSign)
+	{
+		string refusal;
+		float nowS;
+		// The server instance of this player only (dayzplayer.c:1070-1072, :1171).
+		if (GetInstanceType() != DayZPlayerInstanceType.INSTANCETYPE_SERVER)
+		{
+			MCPLookVerdict(false, lookId, "not_server");
+			return;
+		}
+		if (!GetGame())
+		{
+			MCPLookVerdict(false, lookId, "no_game");
+			return;
+		}
+		// A test server only (profile=test, MCPLookAtControl.ServerAllowed).
+		if (!MCPLookAtControl.ServerAllowed())
+		{
+			MCPLookVerdict(false, lookId, "not_allowed");
+			return;
+		}
+		nowS = GetGame().GetTickTime();
+		refusal = MCPLookFreshnessRefusal(lookId);
+		if (refusal == "")
+		{
+			// The id is used up now, accepted or not.
+			m_MCPLookLastId = lookId;
+			if (m_MCPLookLastStartS >= 0.0 && nowS - m_MCPLookLastStartS < MCPLookAtControl.SERVER_MIN_START_INTERVAL_S)
+			{
+				refusal = "throttled";
+			}
+		}
+		if (refusal == "")
+		{
+			m_MCPLookLastStartS = nowS;
+			refusal = MCPLookOwnerRefusal();
+		}
+		if (refusal == "")
+		{
+			refusal = MCPLookAtControl.ServerRequestRefusal(target, budgetS);
+		}
+		if (refusal == "")
+		{
+			refusal = MCPLookAtControl.TurnRefusal(turnSign);
+		}
+		if (refusal == "")
+		{
+			refusal = MCPPlayerMoveControl.ActorRefusal(this);
+		}
+		if (refusal != "")
+		{
+			MCPLookVerdict(false, lookId, refusal);
+			return;
+		}
+		MCPLookServerRelease("superseded");
+		m_MCPLookId = lookId;
+		m_MCPLookTarget = target;
+		m_MCPLookTurn = turnSign;
+		m_MCPLookDeadlineS = nowS + budgetS + MCPLookAtControl.SERVER_DEADMAN_MARGIN_S;
+		m_MCPLookPulsed = false;
+		m_MCPLookConsumed = 0;
+		m_MCPLookHandled = 0;
+		MCPLookVerdict(true, lookId, "");
+	}
+
+	// "" for an id greater than any this copy has seen, else why not.
+	protected string MCPLookFreshnessRefusal(int lookId)
+	{
+		if (lookId <= 0)
+		{
+			return "bad_look_id";
+		}
+		if (lookId <= m_MCPLookLastId)
+		{
+			return "stale_look_id";
+		}
+		return "";
+	}
+
+	// Man.GetIdentity (man.c:21) and vanilla's disconnect flag
+	// (playerbase.c:2453-2461), as MCPMoveOwnerRefusal reads them.
+	protected string MCPLookOwnerRefusal()
+	{
+		if (!GetIdentity())
+		{
+			return "no_identity";
+		}
+		if (IsPlayerDisconnected())
+		{
+			return "disconnected";
+		}
+		return "";
+	}
+
+	// Every tick of the server's look, from ConsumeMove after super and from
+	// CommandHandler: the end checks first (the owner, the actor, its own
+	// deadman), then the yaw error from this copy's own position and heading
+	// (GetHeadingAngle, the heading players_visibility reads). Within the band
+	// the look ends; otherwise one ONE_FRAME pulse.
+	protected void MCPLookServerTick(bool fromConsume)
+	{
+		string refusal;
+		HumanInputController hic;
+		float compass;
+		float bearing;
+		float errorDeg;
+		if (m_MCPLookId <= 0)
+		{
+			return;
+		}
+		if (!GetGame())
+		{
+			MCPLookServerRelease("no_game");
+			return;
+		}
+		refusal = MCPLookOwnerRefusal();
+		if (refusal == "")
+		{
+			refusal = MCPPlayerMoveControl.ActorRefusal(this);
+		}
+		if (refusal != "")
+		{
+			MCPLookServerRelease(refusal);
+			return;
+		}
+		if (GetGame().GetTickTime() > m_MCPLookDeadlineS)
+		{
+			MCPLookServerRelease("expired");
+			return;
+		}
+		hic = GetInputController();
+		compass = MCPPlayerMoveControl.CompassFromHeading(hic.GetHeadingAngle());
+		bearing = MCPPlayerMoveControl.BearingDeg(PhysicsGetPositionWS(), m_MCPLookTarget);
+		errorDeg = MCPLookAtControl.LatchDeg(MCPPlayerMoveControl.WrapDeg180(bearing - compass), m_MCPLookTurn);
+		if (MCPLookAtControl.WithinBand(errorDeg))
+		{
+			MCPLookServerRelease("converged");
+			return;
+		}
+		hic.OverrideAimChangeX(HumanInputControllerOverrideType.ONE_FRAME, MCPLookAtControl.ServerPulseX(errorDeg));
+		m_MCPLookPulsed = true;
+		if (fromConsume)
+		{
+			m_MCPLookConsumed = m_MCPLookConsumed + 1;
+		}
+		else
+		{
+			m_MCPLookHandled = m_MCPLookHandled + 1;
+		}
+	}
+
+	// DISABLED only when this copy pulsed (human.c:7-12), then one
+	// script-log line with the pulses counted.
+	protected void MCPLookServerRelease(string why)
+	{
+		HumanInputController hic;
+		int lookId;
+		string line;
+		if (m_MCPLookId <= 0)
+		{
+			return;
+		}
+		lookId = m_MCPLookId;
+		m_MCPLookId = 0;
+		if (m_MCPLookPulsed)
+		{
+			hic = GetInputController();
+			if (hic)
+			{
+				hic.OverrideAimChangeX(HumanInputControllerOverrideType.DISABLED, 0.0);
+			}
+		}
+		m_MCPLookPulsed = false;
+		line = "[DayZ_MCP] player_look_at server released look=" + lookId.ToString() + " reason=" + why;
+		line = line + " consumed=" + m_MCPLookConsumed.ToString() + " handled=" + m_MCPLookHandled.ToString();
+		Print(line);
+	}
+
+	// The server's verdict on a start. An accepted start logs nothing (its
+	// release line names it); a refusal logs one line, except the same
+	// refusal again in a row, so a client repeating a refused start cannot
+	// fill the script log.
+	protected void MCPLookVerdict(bool accepted, int lookId, string reason)
+	{
+		if (accepted)
+		{
+			m_MCPLookLastRefusal = "";
+			return;
+		}
+		if (reason == m_MCPLookLastRefusal)
+		{
+			return;
+		}
+		m_MCPLookLastRefusal = reason;
+		Print("[DayZ_MCP] player_look_at server accepted=0 look=" + lookId.ToString() + " reason=" + reason);
+	}
+
+	// An ignored release: one line, except the same reason again in a row
+	// (L2b, as MCPLookVerdict).
+	protected void MCPLookNote(int lookId, string reason)
+	{
+		if (reason == m_MCPLookLastNote)
+		{
+			return;
+		}
+		m_MCPLookLastNote = reason;
+		Print("[DayZ_MCP] player_look_at server ignored look=" + lookId.ToString() + " reason=" + reason);
+	}
+
+	// A client reconnecting into this body (missionserver.c:620-626) may be a
+	// new process whose look ids start at 1 again.
+	override void OnReconnect()
+	{
+		super.OnReconnect();
+		MCPLookServerRelease("reconnect");
+		m_MCPLookLastId = 0;
+	}
+
+	// super first. Only the server's copy runs here: the local player's own
+	// look runs from MCP_Weapon.c's CommandHandler
+	// (MCPLookAtControl.OnCommandHandler).
+	override void CommandHandler(float pDt, int pCurrentCommandID, bool pCurrentCommandFinished)
+	{
+		super.CommandHandler(pDt, pCurrentCommandID, pCurrentCommandFinished);
+		if (m_MCPLookId > 0)
+		{
+			MCPLookServerTick(false);
+		}
+	}
+
+#ifdef FEATURE_NETWORK_RECONCILIATION
+	// Authority (pawn.c:270-276), after super as player_move's ConsumeMove,
+	// so the consumed move's own inputs come first.
+	protected override event void ConsumeMove(PawnMove pMove)
+	{
+		super.ConsumeMove(pMove);
+		if (m_MCPLookId > 0)
+		{
+			MCPLookServerTick(true);
+		}
+	}
+#endif
+};

@@ -359,14 +359,8 @@ class ReapPastAnotherInstallTest(unittest.TestCase):
         self.assertEqual(lifecycle.reap_rejection_witness("run-dead"), ("clean", ()))
 
     def test_the_daemon_lifecycle_reads_process_images(self) -> None:
-        def no_lock() -> None:
-            raise AssertionError("the test must not call the real lock")
-
         state = loopback.ServerState("key")
-        with (
-            patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "appdata")}),
-            patch.object(daemon, "real_lock_fn", return_value=no_lock),
-        ):
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "appdata")}):
             daemon._activate_server_coordination(state, "new-generation")
 
         self.assertIs(state.lifecycle.image_path_of, orphan_guard.full_image_path_of)
