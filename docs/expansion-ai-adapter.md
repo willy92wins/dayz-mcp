@@ -57,9 +57,10 @@ enqueue and again at delivery. On bridge v13 both peers announce
 the adapter takes part in the lease close: its groups are stopped by
 `LeaseCloseExtensionStop` and reported as `ai_group:<spawn_token>`
 `residue` entries by `LeaseCloseExtensionCensus` until they disappear.
-A peer still on v12 announces no close, so the spawn is refused with
+When a bound peer's census announces no close, the spawn is refused with
 `expansion_unavailable` / `lease_close_not_supported` before anything is
-created. Without the adapter at all, the refusal is
+created (a real bridge v12 peer is already stopped earlier by the version
+gate). Without the adapter at all, the refusal is
 `expansion_unavailable` / `adapter_not_loaded`; with a stale adapter
 contract hash, `adapter_contract_mismatch`.
 

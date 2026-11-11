@@ -8703,9 +8703,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("waypoints", waypoints, f"be a list of at most {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points"))
         waypoints_wire: list[float] = []
         for index, point in enumerate(waypoint_items):
-            if not isinstance(point, list) or len(point) != 3:
+            if not isinstance(point, list) or len(point) != 3 or not all(_is_wire_number(item) for item in point):
                 raise ToolError(_bad_args(f"waypoints[{index}]", point, "be [x, y, z] finite numbers"))
-            waypoints_wire.extend(_require_vec3(point, f"waypoints[{index}]"))
+            waypoints_wire.extend(float(item) for item in point)
         if scene_id != "" and not is_scene_id(scene_id):
             raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
         args: dict[str, Any] = {
