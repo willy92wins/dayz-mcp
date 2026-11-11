@@ -84,14 +84,24 @@ only one-key variants, and the bridge dispatch refuses again). It takes
 no lease: `ai_group_state` is in `READ_ONLY_COMMANDS`, so the real
 `authorize` passes it without a token, including after
 `session_release`, while a mutating command in the same state answers
-`lease_required`.
+`lease_required`. In a run launched by `dayz_test_run`, after
+`session_release` leaves the run idle (`RUNNING_IDLE`), `ai_group_state`
+answers `run_not_owned` like any command until a lease adopts the run
+(then it reads again without a token: `loopback.py`
+`_enqueue_run_rejection` lets a `RUNNING` run through); `session_status`
+(`lease_end.unconfirmed`) only says the close owes the release of some
+group (`ai_group_release_unconfirmed`), not which ones nor in what
+state; the groups' state is read before the release. Outside a managed
+run, the read still needs no lease.
 
 The broker admits the server verb by census, base `ach`, verb and `xai`
 only (`expansion_unavailable` with `adapter_not_loaded` or
 `adapter_contract_mismatch`); it is not a new mutation, so the
-lease-close gate never applies and residues stay readable on a v12
-census. The adapter announces the verb as bit3 of its `xai` bitmask
-(see "How the adapter announces itself"); it adds no name to `caps=`.
+lease-close gate never applies and residues stay readable on a census
+that announces no close support
+(a real bridge v12 peer is stopped earlier by the version gate). The
+adapter announces the verb as bit3 of its `xai` bitmask (see "How the
+adapter announces itself"); it adds no name to `caps=`.
 
 The dispatch answers at once, with no job and no setter call. It never
 reads through `eAITarget.GetThreat` or `GetPosition(false)`, which would
@@ -137,9 +147,10 @@ The state-only fields of the shared `MCPAIGroup` reply (`group_present`,
 filled by `ai_group_state`; a spawn/order/release reply leaves them at
 their defaults.
 
-Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, and the
-O13 part that reads residues on a v12 census). In-game validation is
-pending; this section describes the offline contract only.
+Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, the O13
+part that reads residues when the census announces no close support, and
+the real bridge v12 poll stopped by the version gate). In-game
+validation is pending; this section describes the offline contract only.
 
 As a server read it is also admitted under the live profile:
 `LIVE_ALLOWED_COMMANDS` derives from `READ_ONLY_COMMANDS & SERVER_COMMANDS`
