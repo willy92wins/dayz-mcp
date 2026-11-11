@@ -348,8 +348,12 @@ class _ServerMoveModel:
             "MCPPlayerMoveControl": control,
             "IsFiniteValue": math.isfinite,
             "IsFiniteVector": lambda value: all(math.isfinite(axis) for axis in value),
+            # MCP_LookAt.c's release of the look copy, which an accepted move
+            # ends (#363 follow-up L1; test_player_look_mirror.py pins it).
+            "MCPLookServerRelease": lambda why: self.look_releases.append(why.text),
             **constants,
         }
+        self.look_releases: list[str] = []
         translate(source, SECONDS, namespace)
         control.RequestRefusal = translate(source, REFUSAL, namespace)
         for signature in SERVER_MODEL_METHODS:

@@ -75,10 +75,17 @@ DISPATCH_RELEASE = "protected bool DispatchPlayerLookAtRelease(MCPCommand comman
 COMPASS = "static float CompassFromHeading(float headingRad)"
 BEARING = "static float BearingDeg(vector from, vector target)"
 WRAP = "static float WrapDeg180(float angle)"
+TIE_BREAK = "static float TieBreakDeg(float errorDeg)"
+SERVER_ALLOWED = "static bool ServerAllowed()"
+SET_SERVER_ALLOWED = "static void SetServerAllowed(bool allowed)"
+RELEASE_SERVER_COPY = "static void ReleaseServerCopy()"
+MISSION_SERVER_PATH = SCRIPTS / "5_Mission" / "MissionServer.c"
+MOVE_ACCEPT = "protected void MCPMoveAccept(MCPPlayerMoveRequest request)"
+WEAPON_AIM = "protected bool DispatchWeaponAim(MCPCommand command, MCPResult result)"
 
 SERVER_MEMBERS = (
     "m_MCPLookId|m_MCPLookTarget|m_MCPLookDeadlineS|m_MCPLookPulsed|m_MCPLookConsumed|"
-    "m_MCPLookHandled|m_MCPLookLastId|MCPLookVerdict|MCPLookNote|MCPLookServerRelease|"
+    "m_MCPLookHandled|m_MCPLookLastId|m_MCPLookLastStartS|m_MCPLookLastRefusal|MCPLookVerdict|MCPLookNote|MCPLookServerRelease|"
     "MCPLookFreshnessRefusal|MCPLookOwnerRefusal|MCPLookReadRelease|MCPLookAccept|"
     "MCPLookServerTick|GetInstanceType|GetIdentity|IsPlayerDisconnected|GetInputController|"
     "PhysicsGetPositionWS"
@@ -173,7 +180,7 @@ class _OwnerModel:
             "Disable": self._disable,
             **_constants(source),
         }
-        for signature in OWNER_METHODS:
+        for signature in OWNER_METHODS + ((RELEASE_SERVER_COPY,) if RELEASE_SERVER_COPY in source else ()):
             free = _free_function(source, signature, r"s_\w+", "S")
             translate(free, signature, self.namespace, class_types={"PlayerBase", "ScriptInputUserData"})
         self.namespace["MCPLookAtControl"] = SimpleNamespace(ReleaseOwned=self.namespace["ReleaseOwned"])
@@ -222,6 +229,8 @@ class _ServerPlayer:
         self.m_MCPLookConsumed = 0
         self.m_MCPLookHandled = 0
         self.m_MCPLookLastId = 0
+        self.m_MCPLookLastStartS = -1.0
+        self.m_MCPLookLastRefusal = _LogString.of("")
         self.identity: object | None = object()
         self.disconnected = False
         self.alive = True
@@ -276,6 +285,7 @@ class _ServerLookModel:
         self.now = 100.0
         self.log: list[str] = []
         self.supers: list[str] = []
+        self.allowed = True
         self.player = _ServerPlayer()
         helpers: dict[str, object] = {"Math": _EnforceMath}
         for signature in (COMPASS, WRAP):
@@ -297,6 +307,12 @@ class _ServerLookModel:
         }
         for signature in (CLAMP, REQUEST_REFUSAL, WITHIN_BAND, PULSE_X):
             translate(source, signature, look)
+        # #363 follow-up: the 180-degree tie-break (S2) and the server's gate
+        # (L2), a fake the test sets; the gate's real statics are pinned in
+        # LookMirrorGateTest. Before the fix the source has neither.
+        if TIE_BREAK in source:
+            translate(source, TIE_BREAK, look)
+        look["ServerAllowed"] = lambda: self.allowed
 
         class Statics:
             def __getattr__(self, name: str) -> object:
@@ -321,7 +337,11 @@ class _ServerLookModel:
         self.look = look
 
     def start(self, look_id: int, target=(10.0, 0.0, 0.0), budget: float = 3.0) -> None:
+        """One start, then the clock moves on by the server's minimum start
+        interval, so successive starts in a test are never throttled unless
+        the test sets the clock itself."""
         self.player.MCPLookAccept(look_id, target, budget)
+        self.now += 0.25
 
     def release(self, look_id: int) -> None:
         self.player.MCPLookReadRelease(look_id)
@@ -441,8 +461,13 @@ class LookMirrorWireTest(unittest.TestCase):
             accept,
             "if (GetInstanceType() != DayZPlayerInstanceType.INSTANCETYPE_SERVER)",
             "if (!GetGame())",
+            "if (!MCPLookAtControl.ServerAllowed())",
+            "nowS = GetGame().GetTickTime();",
             "refusal = MCPLookFreshnessRefusal(lookId);",
             "m_MCPLookLastId = lookId;",
+            "if (m_MCPLookLastStartS >= 0.0 && nowS - m_MCPLookLastStartS < MCPLookAtControl.SERVER_MIN_START_INTERVAL_S)",
+            'refusal = "throttled";',
+            "m_MCPLookLastStartS = nowS;",
             "refusal = MCPLookOwnerRefusal();",
             "refusal = MCPLookAtControl.ServerRequestRefusal(target, budgetS);",
             "refusal = MCPPlayerMoveControl.ActorRefusal(this);",
@@ -450,13 +475,20 @@ class LookMirrorWireTest(unittest.TestCase):
             'MCPLookServerRelease("superseded");',
             "m_MCPLookId = lookId;",
             "m_MCPLookTarget = target;",
-            "m_MCPLookDeadlineS = GetGame().GetTickTime() + budgetS + MCPLookAtControl.SERVER_DEADMAN_MARGIN_S;",
+            "m_MCPLookDeadlineS = nowS + budgetS + MCPLookAtControl.SERVER_DEADMAN_MARGIN_S;",
             "m_MCPLookPulsed = false;",
             'MCPLookVerdict(true, lookId, "");',
         )
         gate = _without_comments(accept[: accept.index('if (refusal != "")')])
         self.assertNotIn("MCPLookServerRelease(", gate)
-        self.assertEqual(re.findall(r"(\w+) = [^=]", gate), ["refusal", "m_MCPLookLastId"] + ["refusal"] * 3)
+        self.assertEqual(
+            re.findall(r"(\w+) = [^=]", gate),
+            ["nowS", "refusal", "m_MCPLookLastId", "refusal", "m_MCPLookLastStartS"] + ["refusal"] * 3,
+        )
+        self.assertEqual(
+            _flat(_if_body(accept, "!MCPLookAtControl.ServerAllowed()")),
+            'MCPLookVerdict(false, lookId, "not_allowed"); return;',
+        )
         # Accepting pulses nothing: the ticks do.
         self.assertNotIn("OverrideAim", accept)
 
@@ -473,7 +505,7 @@ class LookMirrorWireTest(unittest.TestCase):
             "hic = GetInputController();",
             "compass = MCPPlayerMoveControl.CompassFromHeading(hic.GetHeadingAngle());",
             "bearing = MCPPlayerMoveControl.BearingDeg(PhysicsGetPositionWS(), m_MCPLookTarget);",
-            "errorDeg = MCPPlayerMoveControl.WrapDeg180(bearing - compass);",
+            "errorDeg = MCPLookAtControl.TieBreakDeg(MCPPlayerMoveControl.WrapDeg180(bearing - compass));",
             "if (MCPLookAtControl.WithinBand(errorDeg))",
             'MCPLookServerRelease("converged");',
             "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ONE_FRAME, MCPLookAtControl.ServerPulseX(errorDeg));",
@@ -572,7 +604,8 @@ class LookMirrorWireTest(unittest.TestCase):
             BEGIN, RELEASE, RELEASE_OWNED, FINISH, END_SERVER, SEND_START, FLUSH, REQUEST_REFUSAL, WITHIN_BAND,
             PULSE_X, ON_COMMAND, SERVER_INPUT, SERVER_READ, SERVER_READ_RELEASE, SERVER_ACCEPT,
             SERVER_FRESHNESS, SERVER_OWNER, SERVER_TICK, SERVER_RELEASE, SERVER_VERDICT,
-            SERVER_NOTE, SERVER_RECONNECT, COMMAND_HANDLER, CONSUME,
+            SERVER_NOTE, SERVER_RECONNECT, COMMAND_HANDLER, CONSUME, TIE_BREAK, SERVER_ALLOWED,
+            SET_SERVER_ALLOWED, RELEASE_SERVER_COPY,
         ):
             with self.subTest(method=signature):
                 body = _method_body(self.source, signature)
@@ -711,7 +744,7 @@ class LookMirrorServerModelTest(unittest.TestCase):
                 rad = math.radians(bearing)
                 target = (10.0 * math.sin(rad), 0.0, 10.0 * math.cos(rad))
                 model.start(3, target=target)
-                self.assertEqual(model.log[-1], _verdict(1, 3, ""))
+                self.assertEqual((model.active, model.log), (3, []))
                 model.tick()
                 first = model.player.overrides[0]
                 self.assertEqual(first[0], "ONE_FRAME")
@@ -733,6 +766,7 @@ class LookMirrorServerModelTest(unittest.TestCase):
         model = self.model
         model.player.turns = False
         model.start(5, budget=2.0)
+        model.now = 100.0
         model.tick()
         model.now = 102.5
         model.tick(from_consume=False)
@@ -746,10 +780,15 @@ class LookMirrorServerModelTest(unittest.TestCase):
         model.start(7)
         model.release(7)
         self.assertEqual((model.active, model.log[-1]), (None, _released(7, "client")))
-        for look_id, reason in ((7, "stale_look_id"), (6, "stale_look_id"), (0, "bad_look_id")):
+        for look_id, reason in ((7, "stale_look_id"), (0, "bad_look_id")):
             with self.subTest(look_id=look_id):
                 model.start(look_id)
                 self.assertEqual((model.active, model.log[-1]), (None, _verdict(0, look_id, reason)))
+        # The same refusal again in a row is not logged again.
+        logged = len(model.log)
+        model.start(0)
+        model.start(-3)
+        self.assertEqual((model.active, len(model.log)), (None, logged))
         model.release(9)
         self.assertEqual(model.log[-1], "[DayZ_MCP] player_look_at server ignored look=9 reason=release_without_look")
         model.start(9)
@@ -768,10 +807,13 @@ class LookMirrorServerModelTest(unittest.TestCase):
         model.tick()
         armed = (model.player.m_MCPLookDeadlineS, list(model.player.overrides))
         for look_id, target, budget, reason in (
+            # Alternated: the same refusal twice in a row is logged once.
             (5, (float("nan"), 0.0, 0.0), 3.0, "bad_pos"),
             (6, (10.0, 0.0, 0.0), 0.0, "bad_timeout"),
-            (7, (10.0, 0.0, 0.0), 3.5, "bad_timeout"),
-            (8, (10.0, 0.0, 0.0), float("inf"), "bad_timeout"),
+            (7, (float("inf"), 0.0, 0.0), 3.0, "bad_pos"),
+            (8, (10.0, 0.0, 0.0), 3.5, "bad_timeout"),
+            (10, (10.0, float("nan"), 0.0), 3.0, "bad_pos"),
+            (11, (10.0, 0.0, 0.0), float("inf"), "bad_timeout"),
         ):
             with self.subTest(reason=reason, look_id=look_id):
                 model.start(look_id, target=target, budget=budget)
@@ -779,9 +821,9 @@ class LookMirrorServerModelTest(unittest.TestCase):
                 self.assertEqual(model.active, 4)
                 self.assertEqual((model.player.m_MCPLookDeadlineS, model.player.overrides), armed)
         # An accepted start replaces it, disabling once what the old one pulsed.
-        model.start(9, target=(-10.0, 0.0, 0.0))
-        self.assertEqual(model.active, 9)
-        self.assertEqual(model.log[-2:], [_released(4, "superseded", consumed=1), _verdict(1, 9, "")])
+        model.start(12, target=(-10.0, 0.0, 0.0))
+        self.assertEqual(model.active, 12)
+        self.assertEqual(model.log[-1], _released(4, "superseded", consumed=1))
         self.assertEqual(model.player.overrides[-1], ("DISABLED", 0.0))
 
     def test_the_server_copy_stops_when_its_owner_is_gone_or_dead(self) -> None:
@@ -807,7 +849,7 @@ class LookMirrorServerModelTest(unittest.TestCase):
         self.assertEqual(model.supers, ["OnReconnect"])
         self.assertEqual((model.active, model.log[-1]), (None, _released(12, "reconnect")))
         model.start(1)
-        self.assertEqual((model.active, model.log[-1]), (1, _verdict(1, 1, "")))
+        self.assertEqual((model.active, model.log[-1]), (1, _released(12, "reconnect")))
 
 
 class LookMirrorRoundTripTest(unittest.TestCase):
@@ -833,7 +875,7 @@ class LookMirrorRoundTripTest(unittest.TestCase):
         owner.release("restore")
         self._deliver(owner, server)
         self.assertIsNone(server.active)
-        self.assertEqual(server.log, [_verdict(1, look, ""), _released(look, "client")])
+        self.assertEqual(server.log, [_released(look, "client")])
         server.tick()
         self.assertEqual(server.player.overrides, [])
 
@@ -845,7 +887,7 @@ class LookMirrorRoundTripTest(unittest.TestCase):
         self.assertTrue(owner.cancel().ok)
         self._deliver(owner, server)
         self.assertIsNone(server.active)
-        self.assertEqual(server.log, [_verdict(1, look, ""), _released(look, "client")])
+        self.assertEqual(server.log, [_released(look, "client")])
         server.tick()
         self.assertEqual(server.player.overrides, [])
 
@@ -860,7 +902,178 @@ class LookMirrorRoundTripTest(unittest.TestCase):
         second = owner.begin(target=(-10.0, 0.0, 0.0))
         self._deliver(owner, server)
         self.assertEqual(server.active, second)
-        self.assertEqual(server.log[-2:], [_released(first, "superseded", consumed=1), _verdict(1, second, "")])
+        self.assertEqual(server.log[-1], _released(first, "superseded", consumed=1))
+
+
+def _target_at(bearing_deg: float, distance: float = 10.0) -> tuple[float, float, float]:
+    rad = math.radians(bearing_deg)
+    return (distance * math.sin(rad), 0.0, distance * math.cos(rad))
+
+
+class LookMirrorTieBreakTest(unittest.TestCase):
+    """S2 (#363 follow-up): a target behind turns both sides the same way."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+
+    def _first_server_pulse(self, bearing: float, heading_deg: float = 0.0) -> float:
+        model = _ServerLookModel(self.source)
+        model.player.heading_rad = -math.radians(heading_deg)
+        model.start(3, target=_target_at(bearing))
+        model.tick()
+        self.assertEqual(model.player.overrides[0][0], "ONE_FRAME")
+        return model.player.overrides[0][1]
+
+    def test_a_target_behind_turns_the_server_right_either_side_of_180(self) -> None:
+        # -180 exactly: atan2 of a target a hair left of straight behind; the
+        # wrapped error is then -180, and without the tie-break the server
+        # turned left where +180 turned it right.
+        for bearing, heading in ((180.0, 0.0), (-180.0, 0.0), (179.5, 0.0), (-179.5, 0.0), (-178.5, 0.0),
+                                 (90.0, -90.5), (90.0, 269.5)):
+            with self.subTest(bearing=bearing, heading=heading):
+                self.assertGreater(self._first_server_pulse(bearing, heading), 0.0)
+
+    def test_outside_the_tie_band_the_short_way_is_kept(self) -> None:
+        self.assertLess(self._first_server_pulse(-177.0), 0.0)
+        self.assertGreater(self._first_server_pulse(177.0), 0.0)
+        self.assertLess(self._first_server_pulse(-90.0), 0.0)
+
+    def test_a_look_behind_still_converges_in_the_band(self) -> None:
+        for bearing in (-180.0, -179.5, 180.0):
+            with self.subTest(bearing=bearing):
+                model = _ServerLookModel(self.source)
+                model.start(3, target=_target_at(bearing))
+                ticks = 0
+                while model.active is not None and ticks < 200:
+                    model.tick()
+                    ticks += 1
+                self.assertIsNone(model.active)
+                self.assertRegex(model.log[-1], r"reason=converged")
+                # Every pulse of the turn went right.
+                pulses = [value for kind, value in model.player.overrides if kind == "ONE_FRAME"]
+                self.assertTrue(pulses and all(value > 0.0 for value in pulses), pulses)
+
+    def test_the_owner_and_the_server_share_the_tie_break(self) -> None:
+        look: dict[str, object] = {"_S": _LogString, "Math": _EnforceMath, **_constants(self.source)}
+        translate(self.source, TIE_BREAK, look)
+        translate(self.source, CLAMP, look)
+        tie = look["TieBreakDeg"]
+        for given, expected in ((-180.0, 180.0), (-179.5, 180.5), (-178.5, 181.5), (-177.0, -177.0),
+                                (179.5, 179.5), (180.0, 180.0), (90.0, 90.0), (-90.0, -90.0), (0.0, 0.0)):
+            with self.subTest(given=given):
+                self.assertAlmostEqual(tie(given), expected)
+        handler = _without_comments(_method_body(self.source, ON_COMMAND))
+        _in_order(
+            self,
+            handler,
+            "yawErrorDeg = TieBreakDeg(WrapPi(desiredBearing - currentBearing) * Math.RAD2DEG);",
+            "pulseX = ClampPulse(GAIN * yawErrorDeg * Math.DEG2RAD);",
+        )
+        self.assertNotIn("ClampPulse(GAIN * WrapPi(desiredBearing - currentBearing))", handler)
+
+
+class LookMirrorGateTest(unittest.TestCase):
+    """L2 (#363 follow-up): the server copy runs on a profile=test server only,
+    at most one start per sender per SERVER_MIN_START_INTERVAL_S, and an
+    accepted start logs nothing."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+        self.model = _ServerLookModel(self.source)
+
+    def test_a_server_without_the_test_profile_refuses_every_start(self) -> None:
+        model = self.model
+        model.allowed = False
+        model.start(1)
+        self.assertEqual((model.active, model.log), (None, [_verdict(0, 1, "not_allowed")]))
+        model.start(2)
+        model.tick()
+        self.assertEqual((model.active, len(model.log), model.player.overrides), (None, 1, []))
+        # The gate comes before the id is used up.
+        self.assertEqual(model.player.m_MCPLookLastId, 0)
+        model.allowed = True
+        model.start(1)
+        self.assertEqual(model.active, 1)
+
+    def test_a_start_faster_than_the_interval_is_throttled(self) -> None:
+        model = self.model
+        self.assertEqual(_constants(self.source)["SERVER_MIN_START_INTERVAL_S"], 0.25)
+        model.start(1)
+        model.now = 100.1
+        model.start(2)
+        self.assertEqual((model.active, model.log[-1]), (1, _verdict(0, 2, "throttled")))
+        model.now = 100.2
+        model.start(3)
+        self.assertEqual((model.active, model.log.count(_verdict(0, 2, "throttled"))), (1, 1))
+        model.now = 100.25
+        model.start(4)
+        self.assertEqual(model.active, 4)
+        self.assertEqual(model.log[-1], _released(1, "superseded"))
+
+    def test_an_accepted_start_prints_nothing(self) -> None:
+        model = self.model
+        for look_id in (1, 2, 3):
+            model.start(look_id)
+        self.assertEqual(model.active, 3)
+        self.assertFalse([line for line in model.log if "accepted=1" in line], model.log)
+
+    def test_the_gate_is_set_from_the_test_profile_at_mission_start(self) -> None:
+        self.assertIn("protected static bool s_ServerAllowed;", self.source)
+        self.assertEqual(_flat(_method_body(self.source, SERVER_ALLOWED)), "return s_ServerAllowed;")
+        self.assertEqual(_flat(_method_body(self.source, SET_SERVER_ALLOWED)), "s_ServerAllowed = allowed;")
+        mission = _source(MISSION_SERVER_PATH)
+        _in_order(
+            self,
+            mission,
+            "MCPGodmode.ResetMission();",
+            "MCPGodmode.SetDefaultOn(MCPBridge.ConfigIsTestProfile());",
+            "MCPLookAtControl.SetServerAllowed(MCPGodmode.DefaultOn());",
+            "MCPBridge bridge = MCPBridge.Get();",
+        )
+        # No Print of an accepted start is left in the verdict.
+        verdict = _method_body(self.source, SERVER_VERDICT)
+        self.assertNotIn("accepted=1", verdict)
+        self.assertEqual(_without_comments(verdict).count("Print("), 1)
+
+
+class LookMirrorMoveAndAimReleaseTest(unittest.TestCase):
+    """L1 (#363 follow-up): a move or an aim after a converged look ends the
+    server copy, which otherwise kept turning the heading up to its band or
+    its deadman (budget + 0.5 s)."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+
+    def test_an_accepted_move_releases_the_look_copy_on_the_server(self) -> None:
+        accept = _method_body(_source(MOVE_PATH), MOVE_ACCEPT)
+        _in_order(self, accept, "m_MCPMoveActive = request;", 'MCPLookServerRelease("move_started");',
+                  'MCPMoveVerdict(true, request.move_id, "");')
+        model = _ServerLookModel(self.source)
+        model.player.turns = False
+        model.start(3, target=_target_at(170.0))
+        model.tick()
+        model.player.MCPLookServerRelease(_LogString.of("move_started"))
+        self.assertEqual((model.active, model.log[-1]), (None, _released(3, "move_started", consumed=1)))
+        self.assertEqual(model.player.overrides[-1], ("DISABLED", 0.0))
+        pulses = len(model.player.overrides)
+        model.tick()
+        self.assertEqual(len(model.player.overrides), pulses)
+
+    def test_weapon_aim_ends_a_converged_look_copy_and_leaves_a_running_look(self) -> None:
+        dispatch = _method_body(_source(CLIENT_BRIDGE_PATH), WEAPON_AIM)
+        _in_order(self, dispatch, "MCPLookAtControl.ReleaseServerCopy();",
+                  "generation = MCPWeaponControl.BeginAim(player, dx, dy);")
+        model = _OwnerModel(self.source)
+        look = model.begin()
+        # A look still running is left to its own end.
+        model.namespace["ReleaseServerCopy"]()
+        self.assertEqual(len(model.channel.sent), 1)
+        model.finish("converged", True)
+        model.namespace["ReleaseServerCopy"]()
+        self.assertEqual(model.channel.sent[-1], [model.udt, False, look])
+        self.assertEqual((model.state.s_ServerLookId, model.state.s_ServerReleasePending), (0, False))
+        model.namespace["ReleaseServerCopy"]()
+        self.assertEqual(len(model.channel.sent), 2)
 
 
 class LookMirrorDescriptionTest(unittest.TestCase):

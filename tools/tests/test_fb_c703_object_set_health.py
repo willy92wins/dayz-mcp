@@ -77,6 +77,7 @@ from tests._addon_paths import addon_root
 from tests.enforce_subset_helpers import EnforceArray, EnforceString, fake_class, translate
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bind_both_peers, bound_queue
 from tests.mcp_helpers import _content_json
+from tests.player_move_helpers import _LogString
 
 
 COMMAND = "object_set_health"
@@ -889,11 +890,21 @@ class _HealthTarget:
         zones: list[str] | None,
         health01: float = 1.0,
         initialized: bool = False,
+        global_health: bool = True,
+        entity_ready: bool | None = None,
+        kind: str = "vehicle",
     ) -> None:
         self.zones = zones
         self.health01 = health01
         self.initialized = initialized
+        # S1/C2 (#363 follow-up): whether the config class has a
+        # DamageSystem GlobalHealth class, and, for an EntityAI, what
+        # IsInitialized answers (None: not an EntityAI, a map object).
+        self.global_health = global_health
+        self.entity_ready = entity_ready
+        self.kind = kind
         self.calls: list[str] = []
+        self.config_paths: list[str] = []
 
     def _health_call(self, name: str, zone: EnforceString) -> None:
         self.calls.append(f"{name}({zone.text})")
@@ -904,6 +915,16 @@ class _HealthTarget:
 
     def IsMan(self) -> bool:
         return False
+
+    def IsWeapon(self) -> bool:
+        return self.kind == "weapon"
+
+    def IsMagazine(self) -> bool:
+        return self.kind == "magazine"
+
+    def IsInitialized(self) -> bool:
+        self.calls.append("IsInitialized")
+        return bool(self.entity_ready)
 
     def GetType(self) -> EnforceString:
         return EnforceString.of("Barrel_Blue")
@@ -954,6 +975,45 @@ class _HealthTarget:
         self.health01 = value
 
 
+HEALTH_READABLE_SIGNATURE = "protected bool HealthReadable(Object target)"
+CFG_ROOTS = {"vehicle": "CfgVehicles", "weapon": "CfgWeapons", "magazine": "CfgMagazines"}
+
+
+def _health_readable_into(source: str, namespace: dict[str, object]) -> None:
+    """Translate the bridge's HealthReadable (#363 follow-up, C2/S1) into its
+    own namespace, with GetGame().ConfigIsExisting answering from the target
+    the test runs, and put it in `namespace` for the handler that calls it.
+    Before the fix the bridge has no HealthReadable and nothing is added."""
+    if HEALTH_READABLE_SIGNATURE not in source:
+        return
+    current: dict[str, _HealthTarget] = {}
+
+    def config_is_existing(path: EnforceString) -> bool:
+        target = current["target"]
+        target.config_paths.append(path.text)
+        expected = f"{CFG_ROOTS[target.kind]} {target.GetType().text} DamageSystem GlobalHealth"
+        return target.zones is not None and target.global_health and path.text == expected
+
+    helper: dict[str, object] = {
+        # Enforce strings with +, for the config path the guard builds.
+        "_S": _LogString,
+        "GetGame": lambda: SimpleNamespace(ConfigIsExisting=config_is_existing),
+        "CFG_VEHICLESPATH": _LogString.of("CfgVehicles"),
+        "CFG_WEAPONSPATH": _LogString.of("CfgWeapons"),
+        "CFG_MAGAZINESPATH": _LogString.of("CfgMagazines"),
+        "EntityAI": SimpleNamespace(
+            Cast=lambda value: value if getattr(value, "entity_ready", None) is not None else None
+        ),
+    }
+    readable = translate(source, HEALTH_READABLE_SIGNATURE, helper, class_types={"EntityAI", "string"})
+
+    def bound(target: _HealthTarget) -> bool:
+        current["target"] = target
+        return readable(target)
+
+    namespace["HealthReadable"] = bound
+
+
 class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
     """c703 after the 9/11 round: the real DispatchObjectSetHealth body runs on
     fakes, so these fail if either guard before GetMaxHealth is dropped."""
@@ -966,6 +1026,7 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
             "RuntimeObjectId": lambda _target: 7,
             "TStringArray": EnforceArray,
         }
+        _health_readable_into(source, self.namespace)
         fake_class(messages, "MCPObjectHealth", self.namespace)
         self.result_class = fake_class(messages, "MCPResult", self.namespace)
         self.dispatch = translate(
@@ -1040,6 +1101,66 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
         self.assertEqual(result.object_health.health01_after, 0.5)
 
 
+    def test_g6_a_damage_system_without_global_health_is_no_health_before_zones(self) -> None:
+        # C2 (#363 follow-up): a DamageSystem class with no GlobalHealth
+        # class has no global health data for GetMaxHealth to read; it
+        # answers no_health before GetDamageZones or any health call.
+        for zone in ("", "Engine"):
+            with self.subTest(zone=zone):
+                target = _HealthTarget(zones=["Engine"], global_health=False)
+                target._health_call = _refuse_health  # type: ignore[method-assign]
+                target.GetDamageZones = _refuse_zones  # type: ignore[method-assign]
+                result = self._run(target, zone)
+                self._assert_no_health(result)
+                self.assertEqual(
+                    target.config_paths, ["CfgVehicles Barrel_Blue DamageSystem GlobalHealth"]
+                )
+
+    def test_g7_an_entity_not_yet_initialized_is_no_health_before_any_health_call(self) -> None:
+        # S1 (#363 follow-up): a freshly spawned EntityAI before its
+        # DeferredInit (vanilla entityai.c:240, :277-285) answers no_health
+        # before GetDamageZones or GetMaxHealth.
+        for zone in ("", "Engine"):
+            with self.subTest(zone=zone):
+                target = _HealthTarget(zones=["Engine"], entity_ready=False)
+                target._health_call = _refuse_health  # type: ignore[method-assign]
+                target.GetDamageZones = _refuse_zones  # type: ignore[method-assign]
+                result = self._run(target, zone)
+                self._assert_no_health(result)
+                self.assertIn("IsInitialized", target.calls)
+
+    def test_g8_an_initialized_entity_weapon_or_magazine_reads_its_own_config_root(self) -> None:
+        for kind in ("vehicle", "weapon", "magazine"):
+            with self.subTest(kind=kind):
+                target = _HealthTarget(zones=["Engine"], entity_ready=True, kind=kind)
+                result = self._run(target, "Engine")
+                self.assertIs(result.ok, True)
+                self.assertEqual(
+                    target.config_paths, [f"{CFG_ROOTS[kind]} Barrel_Blue DamageSystem GlobalHealth"]
+                )
+                self.assertEqual(result.object_health.health01_after, 0.5)
+
+    def test_g9_both_consumers_call_the_one_guard(self) -> None:
+        source = BRIDGE_PATH.read_text(encoding="utf-8")
+        self.assertIn(HEALTH_READABLE_SIGNATURE, source)
+        dispatch = _method_views(source, DISPATCHER)[0]
+        populate = _without_comments(source[source.index(POPULATE_SIGNATURE):])
+        populate = populate[: populate.index("EntityAI entity = EntityAI.Cast(found);")]
+        self.assertIn("if (!HealthReadable(target))", dispatch)
+        self.assertNotIn('target.ConfigIsExisting("DamageSystem")', dispatch)
+        self.assertIn("if (HealthReadable(found))", populate)
+        self.assertNotIn('found.ConfigIsExisting("DamageSystem")', populate)
+        self.assertLess(dispatch.index("HealthReadable(target)"), dispatch.index("GetDamageZones("))
+
+
+def _refuse_health(name: str, zone: EnforceString) -> None:
+    raise AssertionError(f"{name}({zone.text}) reached past the guard")
+
+
+def _refuse_zones(_names: EnforceArray) -> None:
+    raise AssertionError("GetDamageZones reached past the guard")
+
+
 class TelemetryHealthGuardTest(unittest.TestCase):
     """telemetry_read object_at reads GetHealth01 only on an object with a
     damage system (c703); without one, health01 keeps its default 0."""
@@ -1053,6 +1174,7 @@ class TelemetryHealthGuardTest(unittest.TestCase):
             "GetVelocity": lambda _found: (0.0, 0.0, 0.0),
             "VectorToArray": lambda _vec, _arr: None,
         }
+        _health_readable_into(source, self.namespace)
         self.populate = translate(
             source,
             POPULATE_SIGNATURE,
@@ -1086,6 +1208,18 @@ class TelemetryHealthGuardTest(unittest.TestCase):
         telemetry = self._run(found)
         self.assertEqual(telemetry.health01, 0.25)
         self.assertEqual(found.calls, ["ConfigIsExisting(DamageSystem)", "GetHealth01()"])
+
+
+    def test_t3_no_global_health_or_an_entity_not_initialized_skips_the_read(self) -> None:
+        for found in (
+            _HealthTarget(zones=[], health01=0.25, global_health=False),
+            _HealthTarget(zones=[], health01=0.25, entity_ready=False),
+        ):
+            with self.subTest(global_health=found.global_health, entity_ready=found.entity_ready):
+                found._health_call = _refuse_health  # type: ignore[method-assign]
+                telemetry = self._run(found)
+                self.assertEqual(telemetry.health01, 0.0)
+                self.assertNotIn("GetHealth01()", found.calls)
 
 
 class ObjectSetHealthDescriptionTest(unittest.IsolatedAsyncioTestCase):
