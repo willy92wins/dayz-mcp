@@ -50,6 +50,22 @@ class MCPHoldControl
 	protected static bool s_InterruptPending;
 	protected static bool s_InterruptSent;
 	protected static bool s_InterruptDebt;
+	protected static bool s_StartDebt;
+	protected static bool s_EndDebt;
+	protected static ref array<ActionManagerClient> s_AckManagers;
+	protected static ref array<int> s_AckIds;
+	protected static ref array<ActionManagerClient> s_StartedManagers;
+	protected static ref array<ActionData> s_StartedData;
+	protected static bool s_MCPStartArmed;
+	protected static ActionManagerClient s_MCPStartManager;
+	protected static ActionBase s_MCPStartAction;
+	protected static bool s_StartCaptureArmed;
+	protected static ActionManagerClient s_StartCaptureManager;
+	protected static ActionBase s_StartCaptureAction;
+	protected static ActionData s_StartCapturePrevCurrent;
+	protected static bool s_StartCaptureCanSend;
+	protected static int s_StartCapturePrevAckId;
+	protected static bool s_StartCaptureEnded;
 	protected static ref MCPHoldObservation s_Observation;
 
 	static bool IsActive()
@@ -57,9 +73,43 @@ class MCPHoldControl
 		return s_Active;
 	}
 
-	// §2.7/§2.9: an interrupt (or a start still in flight) is causal debt
-	// until this client process exits; there is no later terminal in
-	// vanilla, so nothing in-process clears this.
+	// §2.7/§2.9: causal action-input debt on this client process, by wire send type,
+	// strictly for MCP-originated sends and actions (ScriptInputUserData.Send is void
+	// with no wire ack, gameplay.c:120-131):
+	// - MCP ownership: ArmStart/DisarmStart bracket only the two MCP PerformActionStart
+	//   call sites (MCPClientBridge.c:4902 for action_hold, :4929 for action_use).
+	//   Manual PerformActionStart calls (e.g. radialquickbarmenu.c:763, 767, 775, 779,
+	//   793) and direct ActionStart paths leave s_MCPStartArmed false and never create
+	//   ack rows, s_StartedData entries, or debt.
+	// - START with UseAcknowledgment() true (actionbase.c:1255-1258): ActionStart writes
+	//   INPUT_UDT_STANDARD_ACTION_START and ++m_LastAcknowledgmentID into
+	//   m_PendingActionAcknowledgmentID before ctx.Send() (actionmanagerclient.c:689-708).
+	//   Server reads that id (actionmanagerserver.c:63-70) and replies with
+	//   SJ_ACTION_ACK_ACCEPT or SJ_ACTION_ACK_REJECT (dayzplayersyncjunctures.c:12-13,
+	//   280-288; actionmanagerserver.c:124-126, 183-188, 203-207, 250, 277-280).
+	//   Liquidated per (manager, ackId) only when OnSyncJuncture transitions that
+	//   pending ActionData to UA_AM_ACCEPTED or UA_AM_REJECTED (playerbase.c:8502-8506;
+	//   actionmanagerbase.c:156-182); otherwise kept until client process exit.
+	// - START with UseAcknowledgment() false: ctx.Send() then local Start
+	//   (actionmanagerclient.c:708-715), no server ack -> client process exit.
+	//   Pre-send rejections (!CanStoreInputUserData at :659-672, !SetupAction at
+	//   :674-679, local/offline at :717-722 and :806-815) never reach ctx.Send().
+	// - END: EndActionInput (:286-298, armed on manual release at :318) and
+	//   RequestEndAction (:278-284) only arm local flags; ProcessActionInputEnd
+	//   (:379-402) and ProcessActionRequestEnd (:347-370) send
+	//   INPUT_UDT_STANDARD_ACTION_INPUT_END / INPUT_UDT_STANDARD_ACTION_END_REQUEST
+	//   with no server ack (actionmanagerserver.c:76-110). Ownership is sampled before
+	//   super because EndInput (:400) / EndRequest (:368) can run OnActionEnd() ->
+	//   client process exit only when MCP started the action.
+	// - Interrupt: RequestInterruptAction (:1341-1350; server :76-98) and
+	//   ActionBaseCB.Interrupt (animatedactionbase.c:1, 85-111, reached on !CanContinue
+	//   at :426 as well as :407, 445, 451, 500 before OnFinish -> End at :27-54, 488)
+	//   send INPUT_UDT_STANDARD_ACTION_END_REQUEST with CMD_ACTIONINT_INTERRUPT and no
+	//   server ack -> client process exit when sent on client for an MCP action (from
+	//   hold drain/shutdown/force-close, Update at :77-96, ActionManagerBase.Interrupt
+	//   at actionmanagerbase.c:302-315, or ActionBaseCB.Interrupt). MCP_HoldLocalEnd
+	//   (:827-842) calls OnActionEnd (:830-847; base :329-336) or ActionBase.Interrupt
+	//   (actionbase.c:821-830; animatedactionbase.c:377-387 -> Cancel/End), sending nothing.
 	static bool InputInFlight()
 	{
 		if (s_InterruptDebt || s_InterruptSent || s_InterruptPending)
@@ -67,7 +117,373 @@ class MCPHoldControl
 			return true;
 		}
 
+		if (s_StartDebt || s_EndDebt)
+		{
+			return true;
+		}
+
+		if (s_AckIds && s_AckIds.Count() > 0)
+		{
+			return true;
+		}
+
 		return false;
+	}
+
+	protected static void ClearStartCapture()
+	{
+		s_StartCaptureArmed = false;
+		s_StartCaptureManager = null;
+		s_StartCaptureAction = null;
+		s_StartCapturePrevCurrent = null;
+		s_StartCaptureCanSend = false;
+		s_StartCapturePrevAckId = -1;
+		s_StartCaptureEnded = false;
+	}
+
+	protected static void RecordStartedAction(ActionManagerClient manager, ActionData data)
+	{
+		if (!manager || !data)
+		{
+			return;
+		}
+
+		if (!s_StartedManagers)
+		{
+			s_StartedManagers = new array<ActionManagerClient>();
+			s_StartedData = new array<ActionData>();
+		}
+
+		int i = s_StartedData.Count() - 1;
+		while (i >= 0)
+		{
+			if (s_StartedManagers.Get(i) == manager)
+			{
+				s_StartedManagers.Remove(i);
+				s_StartedData.Remove(i);
+			}
+
+			i = i - 1;
+		}
+
+		s_StartedManagers.Insert(manager);
+		s_StartedData.Insert(data);
+	}
+
+	static bool IsStartedAction(ActionManagerClient manager, ActionData data)
+	{
+		if (!manager || !data)
+		{
+			return false;
+		}
+
+		if (s_Active && manager == s_Manager && data == s_Data)
+		{
+			return true;
+		}
+
+		if (s_StartCaptureArmed && manager == s_StartCaptureManager && data != s_StartCapturePrevCurrent && data.m_Action == s_StartCaptureAction)
+		{
+			return true;
+		}
+
+		if (!s_StartedManagers || !s_StartedData)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < s_StartedData.Count())
+		{
+			if (s_StartedManagers.Get(i) == manager && s_StartedData.Get(i) == data)
+			{
+				return true;
+			}
+
+			i = i + 1;
+		}
+
+		return false;
+	}
+
+	static bool IsStartedActionData(ActionData data)
+	{
+		if (!data)
+		{
+			return false;
+		}
+
+		if (s_Active && data == s_Data)
+		{
+			return true;
+		}
+
+		if (s_StartCaptureArmed && data != s_StartCapturePrevCurrent && data.m_Action == s_StartCaptureAction)
+		{
+			return true;
+		}
+
+		if (!s_StartedData)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < s_StartedData.Count())
+		{
+			if (s_StartedData.Get(i) == data)
+			{
+				return true;
+			}
+
+			i = i + 1;
+		}
+
+		return false;
+	}
+
+	protected static void RecordStartAck(ActionManagerClient manager, int ackId)
+	{
+		if (!manager || ackId <= 0)
+		{
+			s_StartDebt = true;
+			return;
+		}
+
+		if (!s_AckManagers)
+		{
+			s_AckManagers = new array<ActionManagerClient>();
+			s_AckIds = new array<int>();
+		}
+
+		int i = 0;
+		while (i < s_AckIds.Count())
+		{
+			if (s_AckManagers.Get(i) == manager && s_AckIds.Get(i) == ackId)
+			{
+				return;
+			}
+
+			i = i + 1;
+		}
+
+		s_AckManagers.Insert(manager);
+		s_AckIds.Insert(ackId);
+	}
+
+	static void ArmStart(ActionManagerClient manager, ActionBase action)
+	{
+		s_MCPStartArmed = false;
+		s_MCPStartManager = null;
+		s_MCPStartAction = null;
+		ClearStartCapture();
+		if (!manager || !action)
+		{
+			return;
+		}
+
+		s_MCPStartArmed = true;
+		s_MCPStartManager = manager;
+		s_MCPStartAction = action;
+	}
+
+	static void DisarmStart()
+	{
+		s_MCPStartArmed = false;
+		s_MCPStartManager = null;
+		s_MCPStartAction = null;
+	}
+
+	static void BeforeStartCapture(ActionManagerClient manager, ActionBase action)
+	{
+		if (!s_MCPStartArmed || manager != s_MCPStartManager || action != s_MCPStartAction)
+		{
+			return;
+		}
+
+		DisarmStart();
+		ClearStartCapture();
+		if (!manager || !action)
+		{
+			return;
+		}
+
+		s_StartCaptureArmed = true;
+		s_StartCaptureManager = manager;
+		s_StartCaptureAction = action;
+		s_StartCapturePrevCurrent = manager.MCP_HoldCurrent();
+		s_StartCapturePrevAckId = manager.MCP_PendingAckId();
+		if (GetGame() && GetGame().IsMultiplayer() && !action.IsLocal() && s_StartCapturePrevCurrent == null && ScriptInputUserData.CanStoreInputUserData())
+		{
+			s_StartCaptureCanSend = true;
+		}
+	}
+
+	static void AfterStartCapture(ActionManagerClient manager, ActionBase action)
+	{
+		if (!s_StartCaptureArmed || manager != s_StartCaptureManager || action != s_StartCaptureAction)
+		{
+			return;
+		}
+
+		bool canSend = s_StartCaptureCanSend;
+		ActionData prevCurrent = s_StartCapturePrevCurrent;
+		int prevAckId = s_StartCapturePrevAckId;
+		bool endedDuringStart = s_StartCaptureEnded;
+		ClearStartCapture();
+		if (!manager || !action)
+		{
+			return;
+		}
+
+		ActionData afterCurrent = manager.MCP_HoldCurrent();
+		bool startedThis = false;
+		if (afterCurrent && afterCurrent != prevCurrent && afterCurrent.m_Action == action)
+		{
+			startedThis = true;
+		}
+
+		if (GetGame() && GetGame().IsMultiplayer() && startedThis)
+		{
+			RecordStartedAction(manager, afterCurrent);
+		}
+
+		if (!canSend)
+		{
+			return;
+		}
+
+		int afterAckId = manager.MCP_PendingAckId();
+		if (action.UseAcknowledgment())
+		{
+			if (afterAckId > 0 && afterAckId != prevAckId)
+			{
+				RecordStartAck(manager, afterAckId);
+				return;
+			}
+
+			if (endedDuringStart || startedThis)
+			{
+				s_StartDebt = true;
+			}
+
+			return;
+		}
+
+		if (endedDuringStart || startedThis)
+		{
+			s_StartDebt = true;
+		}
+	}
+
+	static void AfterSyncJuncture(ActionManagerClient manager, int junctureId, ActionData beforeData, int beforeState, int beforeAckId, ActionData afterData)
+	{
+		if (!manager || !beforeData || afterData != beforeData || beforeAckId <= 0)
+		{
+			return;
+		}
+
+		if (beforeState != UA_AM_PENDING)
+		{
+			return;
+		}
+
+		bool matched = false;
+		if (junctureId == DayZPlayerSyncJunctures.SJ_ACTION_ACK_ACCEPT && afterData.m_State == UA_AM_ACCEPTED)
+		{
+			matched = true;
+		}
+		else if (junctureId == DayZPlayerSyncJunctures.SJ_ACTION_ACK_REJECT && afterData.m_State == UA_AM_REJECTED)
+		{
+			matched = true;
+		}
+
+		if (!matched || !s_AckIds || !s_AckManagers)
+		{
+			return;
+		}
+
+		int i = s_AckIds.Count() - 1;
+		while (i >= 0)
+		{
+			if (s_AckManagers.Get(i) == manager && s_AckIds.Get(i) == beforeAckId)
+			{
+				s_AckManagers.Remove(i);
+				s_AckIds.Remove(i);
+			}
+
+			i = i - 1;
+		}
+	}
+
+	static void AfterProcessInputEnd(bool mcpOwned, ActionData beforeData, bool sentBefore, bool sentAfter)
+	{
+		if (!mcpOwned || sentBefore || !sentAfter)
+		{
+			return;
+		}
+
+		if (!GetGame() || !GetGame().IsMultiplayer())
+		{
+			return;
+		}
+
+		if (!beforeData || !beforeData.m_Action || beforeData.m_Action.IsLocal())
+		{
+			return;
+		}
+
+		s_EndDebt = true;
+	}
+
+	static void AfterProcessRequestEnd(bool mcpOwned, ActionData beforeData, bool sentBefore, bool sentAfter)
+	{
+		if (!mcpOwned || sentBefore || !sentAfter)
+		{
+			return;
+		}
+
+		if (!GetGame() || !GetGame().IsMultiplayer())
+		{
+			return;
+		}
+
+		if (!beforeData || !beforeData.m_Action || beforeData.m_Action.IsLocal())
+		{
+			return;
+		}
+
+		s_EndDebt = true;
+	}
+
+	static void AfterRequestInterrupt(ActionManagerClient manager, ActionData beforeData, bool canStore)
+	{
+		if (!canStore || !manager)
+		{
+			return;
+		}
+
+		if (!GetGame() || !GetGame().IsMultiplayer())
+		{
+			return;
+		}
+
+		if (!IsStartedAction(manager, beforeData))
+		{
+			return;
+		}
+
+		s_InterruptDebt = true;
+	}
+
+	static void AfterCallbackInterrupt(bool mcpOwned, bool canSend)
+	{
+		if (!mcpOwned || !canSend)
+		{
+			return;
+		}
+
+		s_InterruptDebt = true;
 	}
 
 	protected static float NowS()
@@ -277,6 +693,15 @@ class MCPHoldControl
 
 	static void BeforeActionEnd(ActionManagerClient manager)
 	{
+		if (s_StartCaptureArmed && manager == s_StartCaptureManager)
+		{
+			ActionData ending = manager.MCP_HoldCurrent();
+			if (ending && ending.m_Action == s_StartCaptureAction)
+			{
+				s_StartCaptureEnded = true;
+			}
+		}
+
 		if (!s_Active || manager != s_Manager)
 		{
 			return;
@@ -294,6 +719,22 @@ class MCPHoldControl
 
 	static void AfterActionEnd(ActionManagerClient manager)
 	{
+		if (manager && s_StartedManagers && s_StartedData)
+		{
+			ActionData remaining = manager.MCP_HoldCurrent();
+			int i = s_StartedData.Count() - 1;
+			while (i >= 0)
+			{
+				if (s_StartedManagers.Get(i) == manager && s_StartedData.Get(i) != remaining)
+				{
+					s_StartedManagers.Remove(i);
+					s_StartedData.Remove(i);
+				}
+
+				i = i - 1;
+			}
+		}
+
 		if (!s_Active || manager != s_Manager)
 		{
 			return;
@@ -520,6 +961,37 @@ class MCPHoldControl
 
 	static void OnManagerDestroyed(ActionManagerClient manager)
 	{
+		if (manager && s_AckManagers && s_AckIds)
+		{
+			int i = s_AckIds.Count() - 1;
+			while (i >= 0)
+			{
+				if (s_AckManagers.Get(i) == manager)
+				{
+					s_StartDebt = true;
+					s_AckManagers.Remove(i);
+					s_AckIds.Remove(i);
+				}
+
+				i = i - 1;
+			}
+		}
+
+		if (manager && s_StartedManagers && s_StartedData)
+		{
+			int j = s_StartedData.Count() - 1;
+			while (j >= 0)
+			{
+				if (s_StartedManagers.Get(j) == manager)
+				{
+					s_StartedManagers.Remove(j);
+					s_StartedData.Remove(j);
+				}
+
+				j = j - 1;
+			}
+		}
+
 		if (!s_Active || manager != s_Manager)
 		{
 			return;
@@ -556,6 +1028,8 @@ class MCPHoldControl
 			if (GetGame() && ScriptInputUserData.CanStoreInputUserData())
 			{
 				s_Manager.RequestInterruptAction();
+				s_InterruptSent = true;
+				s_InterruptDebt = true;
 			}
 
 			s_Manager.MCP_HoldLocalEnd(s_Data);
@@ -822,6 +1296,11 @@ modded class ActionManagerClient
 		return m_IgnoreAutoInputEnd;
 	}
 
+	int MCP_PendingAckId()
+	{
+		return m_PendingActionAcknowledgmentID;
+	}
+
 	void MCP_HoldLocalEnd(ActionData data)
 	{
 		if (!data || m_CurrentActionData != data)
@@ -841,8 +1320,55 @@ modded class ActionManagerClient
 
 	override void PerformActionStart(ActionBase action, ActionTarget target, ItemBase item, Param extra_data = NULL)
 	{
+		MCPHoldControl.BeforeStartCapture(this, action);
 		super.PerformActionStart(action, target, item, extra_data);
+		MCPHoldControl.AfterStartCapture(this, action);
 		MCPHoldControl.AfterStart(this);
+	}
+
+	override void OnSyncJuncture(int pJunctureID, ParamsReadContext pCtx)
+	{
+		ActionData beforeData = m_CurrentActionData;
+		int beforeState = 0;
+		if (beforeData)
+		{
+			beforeState = beforeData.m_State;
+		}
+
+		int beforeAckId = m_PendingActionAcknowledgmentID;
+		super.OnSyncJuncture(pJunctureID, pCtx);
+		MCPHoldControl.AfterSyncJuncture(this, pJunctureID, beforeData, beforeState, beforeAckId, m_CurrentActionData);
+	}
+
+	override void ProcessActionInputEnd()
+	{
+		ActionData beforeData = m_CurrentActionData;
+		bool mcpOwned = MCPHoldControl.IsStartedAction(this, beforeData);
+		bool sentBefore = m_ActionInputWantEnd_Send;
+		super.ProcessActionInputEnd();
+		MCPHoldControl.AfterProcessInputEnd(mcpOwned, beforeData, sentBefore, m_ActionInputWantEnd_Send);
+	}
+
+	override void ProcessActionRequestEnd()
+	{
+		ActionData beforeData = m_CurrentActionData;
+		bool mcpOwned = MCPHoldControl.IsStartedAction(this, beforeData);
+		bool sentBefore = m_ActionWantEndRequest_Send;
+		super.ProcessActionRequestEnd();
+		MCPHoldControl.AfterProcessRequestEnd(mcpOwned, beforeData, sentBefore, m_ActionWantEndRequest_Send);
+	}
+
+	override void RequestInterruptAction()
+	{
+		bool canStore = false;
+		if (GetGame() && ScriptInputUserData.CanStoreInputUserData())
+		{
+			canStore = true;
+		}
+
+		ActionData beforeData = m_CurrentActionData;
+		super.RequestInterruptAction();
+		MCPHoldControl.AfterRequestInterrupt(this, beforeData, canStore);
 	}
 
 	override void OnActionEnd()
@@ -885,5 +1411,34 @@ modded class CAContinuousBase
 	{
 		MCPHoldControl.OnProgress(action_data, this);
 		super.OnCompletePogress(action_data);
+	}
+};
+
+modded class ActionBaseCB
+{
+	protected bool m_MCPOwned;
+
+	override void SetActionData(ActionData action_data)
+	{
+		super.SetActionData(action_data);
+		m_MCPOwned = MCPHoldControl.IsStartedActionData(action_data);
+	}
+
+	override void Interrupt()
+	{
+		bool canSend = false;
+		if (GetGame() && !GetGame().IsServer() && GetGame().IsMultiplayer() && ScriptInputUserData.CanStoreInputUserData())
+		{
+			canSend = true;
+		}
+
+		bool mcpOwned = m_MCPOwned;
+		if (!mcpOwned && MCPHoldControl.IsStartedActionData(m_ActionData))
+		{
+			mcpOwned = true;
+		}
+
+		super.Interrupt();
+		MCPHoldControl.AfterCallbackInterrupt(mcpOwned, canSend);
 	}
 };

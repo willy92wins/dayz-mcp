@@ -229,6 +229,11 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
     ),
+    "ui_pause": (
+        ("valid_empty", {}, (True, None)),
+        ("extra_key", {"extra": None}, (False, "bad_args")),
+        ("extra_mode", {"mode": "close"}, (False, "bad_args")),
+    ),
     "restore_gameplay": (
         ("valid_empty", {}, (True, None)),
         ("extra_mode", {"mode": "restore"}, (False, "bad_args")),
@@ -1292,6 +1297,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("root_wrong_type", {"root": 5}, (False, "bad_args")),
         ("mode_leaks", {"mode": "direct"}, (False, "bad_args")),
         ("bubble_leaks", {"bubble": True}, (False, "bad_args")),
+    ),
+    "chat_read": (
+        ("valid_empty", {}, (True, None)),
+        ("valid_defaults", {"marker": 0, "max_lines": 200}, (True, None)),
+        ("valid_bounds", {"marker": 2_147_483_647, "max_lines": 500}, (True, None)),
+        ("valid_min_max_lines", {"max_lines": 1}, (True, None)),
+        ("marker_negative", {"marker": -1}, (False, "bad_args")),
+        ("marker_above_int32", {"marker": 2_147_483_648}, (False, "bad_args")),
+        ("marker_bool", {"marker": True}, (False, "bad_args")),
+        ("marker_str", {"marker": "0"}, (False, "bad_args")),
+        ("max_lines_zero", {"max_lines": 0}, (False, "bad_args")),
+        ("max_lines_above_500", {"max_lines": 501}, (False, "bad_args")),
+        ("max_lines_bool", {"max_lines": False}, (False, "bad_args")),
+        ("extra_key", {"marker": 0, "extra": None}, (False, "bad_args")),
     ),
     "ui_set_text": (
         ("valid", {"path": "Root.Label", "text": "Ready"}, (True, None)),

@@ -52,6 +52,7 @@ _INITIAL_READ_TOOL_NAMES = frozenset(
         "action_cursor",
         "ai_group_state",
         "camera_get",
+        "chat_read",
         "gameplay_state",
         "entities_query",
         "input_describe",

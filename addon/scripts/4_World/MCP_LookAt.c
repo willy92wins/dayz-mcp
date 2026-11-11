@@ -192,9 +192,18 @@ class MCPLookAtControl
 		return "";
 	}
 
+	// Lease-close floor: SendServerStart is called only in Begin with
+	// s_Generation + 1, and Begin calls Release("replaced") whenever the
+	// start is not refused as input_busy, so s_Generation is at least every
+	// look id ever written to the input channel.
 	static int Generation()
 	{
 		return s_Generation;
+	}
+
+	static bool ServerReleasePending()
+	{
+		return s_ServerReleasePending;
 	}
 
 	static bool IsActive()
@@ -1138,6 +1147,40 @@ modded class PlayerBase
 		}
 		m_MCPLookLastNote = reason;
 		Print("[DayZ_MCP] player_look_at server ignored look=" + lookId.ToString() + " reason=" + reason);
+	}
+
+	int MCPLookServerFloor()
+	{
+		return m_MCPLookLastId;
+	}
+
+	bool MCPLookActiveNow()
+	{
+		if (m_MCPLookId > 0)
+		{
+			return true;
+		}
+		return false;
+	}
+
+	// Lease close (§2.7): raises the floor to floorId and releases a copy at
+	// or below it, only when connGen is this body's generation. A mismatch
+	// changes nothing and the caller reports it as residue.
+	bool MCPLookCloseServer(int floorId, int connGen)
+	{
+		if (connGen == 0 || connGen != m_MCPConnGen)
+		{
+			return false;
+		}
+		if (floorId > m_MCPLookLastId)
+		{
+			m_MCPLookLastId = floorId;
+		}
+		if (m_MCPLookId > 0 && m_MCPLookId <= floorId)
+		{
+			MCPLookServerRelease("lease_close");
+		}
+		return true;
 	}
 
 	// A client reconnecting into this body (missionserver.c:620-626) may be a

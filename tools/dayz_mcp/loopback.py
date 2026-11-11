@@ -146,6 +146,7 @@ CLIENT_COMMANDS = {
     "camera_set",
     "camera_set_focus",
     "camera_get",
+    "chat_read",
     "gameplay_state",
     "camera_path_play",
     "camera_path_release",
@@ -168,6 +169,7 @@ CLIENT_COMMANDS = {
     "ui_click",
     "ui_reload_layout",
     "ui_focus",
+    "ui_pause",
     "ui_dialog",
     "action_hold",
     "action_hold_cancel",
@@ -1514,9 +1516,11 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "camera_path_play": "bridge_capability_missing",
     "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
+    "chat_read": "bridge_capability_missing",
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
+    "ui_pause": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
 # could not be sent camera_path_release is not handed a play (d026).
@@ -1565,6 +1569,7 @@ _AI_ORDER_VALIDATORS: dict[str, _FieldValidator] = {
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "gameplay_state": _command_schema(_schema_variant()),
+    "ui_pause": _command_schema(_schema_variant()),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
     "key_press": _command_schema(
@@ -2113,6 +2118,15 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                 "path": _is_string,
                 "limit": _integer_in_range(minimum=1, maximum=512),
                 "root": _is_non_empty_string,
+            },
+        )
+    ),
+    "chat_read": _command_schema(
+        _schema_variant(
+            optional=("marker", "max_lines"),
+            validators={
+                "marker": _integer_in_range(minimum=0, maximum=2_147_483_647),
+                "max_lines": _integer_in_range(minimum=1, maximum=500),
             },
         )
     ),
@@ -6748,6 +6762,7 @@ class ServerState:
             "conn_gen": conn_gen,
             "move_id": census.get("move_floor"),
             "weapon_id": census.get("weapon_floor"),
+            "look_id": census.get("look_floor"),
         }
 
     @staticmethod
@@ -6779,7 +6794,13 @@ class ServerState:
             ):
                 return False
         if peer == "client":
-            for key in ("move_floor", "weapon_floor", "net_low", "net_high"):
+            for key in (
+                "move_floor",
+                "weapon_floor",
+                "look_floor",
+                "net_low",
+                "net_high",
+            ):
                 if not self._is_plain_int(census.get(key)):
                     return False
             conn_gen = census.get("conn_gen")
@@ -6792,7 +6813,14 @@ class ServerState:
         for item in floors:
             if not isinstance(item, dict):
                 return False
-            for key in ("net_low", "net_high", "conn_gen", "move_id", "weapon_id"):
+            for key in (
+                "net_low",
+                "net_high",
+                "conn_gen",
+                "move_id",
+                "weapon_id",
+                "look_id",
+            ):
                 if not self._is_plain_int(item.get(key)):
                     return False
         return True
@@ -6811,7 +6839,15 @@ class ServerState:
                 row, "residue", reasons=["binding_epoch_changed"]
             )
             return
-        if body.get("ok") is not True:
+        ok_value = body.get("ok")
+        if not (
+            ok_value is True
+            or (
+                isinstance(ok_value, int)
+                and not isinstance(ok_value, bool)
+                and ok_value == 1
+            )
+        ):
             error = body.get("error")
             if not isinstance(error, str) or not error:
                 error = "close_failed"

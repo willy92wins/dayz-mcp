@@ -45,13 +45,14 @@ def _identity_payload(client: ClientIdentity) -> dict[str, object]:
     }
 
 
-def _floor(net_low, net_high, *, conn_gen, move_id, weapon_id):
+def _floor(net_low, net_high, *, conn_gen, move_id, weapon_id, look_id=3):
     return {
         "net_low": net_low,
         "net_high": net_high,
         "conn_gen": conn_gen,
         "move_id": move_id,
         "weapon_id": weapon_id,
+        "look_id": look_id,
     }
 
 
@@ -146,6 +147,7 @@ class _WiringBase(unittest.TestCase):
                 entries=[{"name": "action", "state": "clean"}],
                 move_floor=7,
                 weapon_floor=4,
+                look_floor=3,
                 net_low=10,
                 net_high=20,
                 conn_gen=1,
@@ -153,7 +155,11 @@ class _WiringBase(unittest.TestCase):
         else:
             census.update(
                 entries=[{"name": "bots", "state": "clean"}],
-                floors=[_floor(10, 20, conn_gen=1, move_id=7, weapon_id=4)],
+                floors=[
+                    _floor(
+                        10, 20, conn_gen=1, move_id=7, weapon_id=4, look_id=3
+                    )
+                ],
             )
         return census
 
