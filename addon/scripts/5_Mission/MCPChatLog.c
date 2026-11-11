@@ -21,7 +21,9 @@ class MCPChatLog
 	// MAX_BODY_BYTES = 1048576 (tools/dayz_mcp/loopback.py:474, checked at :9313),
 	// leaving 53248 bytes for the rest of the result. Vanilla's pieces of text
 	// are at most the engine's chat length (chat.c:105-120) and senders are
-	// names, so a vanilla line is never cut; any shortened entry sets cut = true.
+	// names, so the LINE_* caps never cut a vanilla piece. A piece that
+	// Chat.Add split in the middle of a multibyte character is sanitized
+	// here and then has cut = true; any other shortened entry also sets cut.
 	const int LINE_SENDER_MAX_CHARS = 1024;
 	const int LINE_TEXT_MAX_CHARS = 16384;
 	const int DROP_SENDER_MAX_CHARS = 64;

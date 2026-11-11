@@ -628,6 +628,10 @@ def verify_keep_valid_utf8_bytes_helper(source: str) -> None:
             )
     if len(re.findall(r"\breturn\b", helper_body)) != 1:
         raise AssertionError("KeepValidUtf8Bytes must return the cleaned string once")
+    if not re.search(r"\breturn\s+cleaned\s*;", helper_body):
+        raise AssertionError(
+            "KeepValidUtf8Bytes must return the sanitized local cleaned, not the original value"
+        )
 
 
 def _verify_sanitize_call(
@@ -1944,6 +1948,14 @@ class ChatReadEnforceContractTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
             verify_keep_valid_utf8_bytes_helper(helper_overlong_lead)
+
+        helper_return_value = self._mutate_executable(
+            self.chat_log_src,
+            "return cleaned;",
+            "return value;",
+        )
+        with self.assertRaisesRegex(AssertionError, "KeepValidUtf8Bytes"):
+            verify_keep_valid_utf8_bytes_helper(helper_return_value)
 
         # Negative controls (D13e): RecordDrop never sets cut or omits cut on shorten.
         record_drop_fields_block = (
