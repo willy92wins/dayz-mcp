@@ -87,6 +87,15 @@ class MCPLookAtControl
 	// The server copy accepts at most one start per sender in this many
 	// seconds (MCPLookAccept); a faster start is refused as throttled.
 	static const float SERVER_MIN_START_INTERVAL_S = 0.25;
+	// The owner sends no start sooner than this after its last one (Begin
+	// answers input_busy and turns neither side), twice the server's
+	// interval, so a start the owner sent is never throttled there by a
+	// delay of up to SERVER_MIN_START_INTERVAL_S between the two
+	// (the start would otherwise turn the owner only).
+	static const float OWNER_MIN_START_INTERVAL_S = 0.5;
+	// The owner's tick time of its last sent start, once there is one.
+	protected static bool s_StartSent;
+	protected static float s_StartSentS;
 	// Whether this server's copy accepts looks at all: set at mission start
 	// from the harness's profile=test config (MissionServer.OnMissionStart),
 	// the same test that turns the godmode default on. Off on any other
@@ -129,6 +138,7 @@ class MCPLookAtControl
 		float budget;
 		string serverStart;
 		int turn;
+		float nowS;
 		budget = budgetS;
 		if (budget > MAX_CONTROL_S)
 		{
@@ -136,6 +146,13 @@ class MCPLookAtControl
 		}
 		// Release below advances the generation to this id.
 		lookId = s_Generation + 1;
+		// A start the server's throttle would refuse is not sent: it would
+		// turn this side only (#378 review).
+		nowS = GetGame().GetTickTime();
+		if (s_StartSent && nowS - s_StartSentS < OWNER_MIN_START_INTERVAL_S)
+		{
+			return "input_busy";
+		}
 		// S-1: the way to turn is picked once, here, and the server's copy
 		// gets it in the start.
 		turn = StartTurnSign(player, target);
@@ -149,6 +166,8 @@ class MCPLookAtControl
 		if (serverStart == "sent")
 		{
 			s_ServerLookId = 0;
+			s_StartSent = true;
+			s_StartSentS = nowS;
 		}
 		Release("replaced");
 		Reset();

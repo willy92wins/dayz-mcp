@@ -166,6 +166,7 @@ class _OwnerModel:
         self.local_player = True
         self.disabled = 0
         self.turn = 1
+        self.now = 10.0
         statics = {}
         defaults = {"bool": False, "int": 0, "float": 0.0, "vector": None, "PlayerBase": None}
         for kind, name in re.findall(r"protected static (\w+) (s_\w+);", source):
@@ -175,6 +176,7 @@ class _OwnerModel:
             IsMultiplayer=lambda: self.multiplayer,
             IsClient=lambda: True,
             GetPlayer=lambda: object() if self.local_player else None,
+            GetTickTime=lambda: self.now,
         )
         self.namespace: dict[str, object] = {
             "_S": _LogString,
@@ -202,7 +204,12 @@ class _OwnerModel:
         """The look's id, which the dispatch reads from Generation() once Begin
         answers ""; 0 when Begin refuses, its code then in self.refusal."""
         self.refusal = self.namespace["Begin"](object(), target, budget, 7).text
-        return 0 if self.refusal else self.state.s_Generation
+        look = 0 if self.refusal else self.state.s_Generation
+        # The clock moves on by the owner's minimum start interval, so the
+        # tests' successive looks are not refused; LookMirrorStartIntervalTest
+        # sets the clock itself.
+        self.now += 0.5
+        return look
 
     def finish(self, termination: str, converged: bool) -> None:
         self.namespace["Finish"](_LogString.of(termination), converged)
@@ -573,6 +580,8 @@ class LookMirrorWireTest(unittest.TestCase):
     def test_the_owner_sends_on_begin_and_ends_on_every_end(self) -> None:
         begin = _method_body(self.source, BEGIN)
         _in_order(self, begin, "lookId = s_Generation + 1;",
+                  "nowS = GetGame().GetTickTime();",
+                  "if (s_StartSent && nowS - s_StartSentS < OWNER_MIN_START_INTERVAL_S)",
                   "turn = StartTurnSign(player, target);",
                   "serverStart = SendServerStart(lookId, target, budget, turn);",
                   'if (serverStart == "input_busy")', 'Release("replaced");', "Reset();",
@@ -1063,6 +1072,68 @@ class LookMirrorLatchTest(unittest.TestCase):
         look = model.begin()
         self.assertEqual(model.channel.sent[-1], [model.udt, True, look, (10.0, 0.0, 0.0), 3.0, -1])
         self.assertEqual(model.state.s_TurnSign, -1)
+
+
+class LookMirrorStartIntervalTest(unittest.TestCase):
+    """Sol on #378 @ 3df2d865: a start the server throttles turned the owner
+    only. The owner now sends no start sooner than OWNER_MIN_START_INTERVAL_S
+    (twice the server's) after its last one; Begin answers input_busy and
+    neither side turns. The clock is set by hand here, never advanced by the
+    helpers between the two looks under test."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+        constants = _constants(self.source)
+        self.assertEqual(constants["OWNER_MIN_START_INTERVAL_S"], 2 * constants["SERVER_MIN_START_INTERVAL_S"])
+
+    def _begin_at(self, owner: _OwnerModel, now: float, target=(10.0, 0.0, 0.0)) -> int:
+        owner.now = now
+        refusal = owner.namespace["Begin"](object(), target, 3.0, 7).text
+        owner.refusal = refusal
+        return 0 if refusal else owner.state.s_Generation
+
+    def _deliver_at(self, owner: _OwnerModel, server: _ServerLookModel, now: float) -> None:
+        for message in owner.channel.sent:
+            server.now = now
+            if message[1]:
+                server.player.MCPLookAccept(message[2], message[3], message[4], message[5])
+            else:
+                server.player.MCPLookReadRelease(message[2])
+        owner.channel.sent = []
+
+    def test_a_second_look_sooner_than_the_interval_turns_neither_side(self) -> None:
+        owner = _OwnerModel(self.source)
+        server = _ServerLookModel(self.source)
+        first = self._begin_at(owner, 10.0)
+        owner.finish("converged", True)
+        self._deliver_at(owner, server, 100.0)
+        self.assertEqual(server.active, first)
+        second = self._begin_at(owner, 10.1, target=(-10.0, 0.0, 0.0))
+        self.assertEqual((second, owner.refusal), (0, "input_busy"))
+        self.assertEqual(owner.channel.sent, [])
+        # No local look either: nothing turns on this side alone.
+        self.assertFalse(owner.state.s_Active and not owner.state.s_Finished)
+        self.assertEqual(owner.state.s_Generation, first)
+
+    def test_a_start_the_owner_sends_is_not_throttled_by_a_late_first_start(self) -> None:
+        # The first start reaches the server late, the second early: up to
+        # SERVER_MIN_START_INTERVAL_S of delay between the two arrivals.
+        owner = _OwnerModel(self.source)
+        server = _ServerLookModel(self.source)
+        first = self._begin_at(owner, 10.0)
+        owner.finish("converged", True)
+        self._deliver_at(owner, server, 100.24)
+        second = self._begin_at(owner, 10.5, target=(-10.0, 0.0, 0.0))
+        self.assertGreater(second, first)
+        self._deliver_at(owner, server, 100.49)
+        self.assertEqual(server.active, second)
+        self.assertNotIn("throttled", " ".join(server.log))
+
+    def test_offline_looks_are_not_held(self) -> None:
+        owner = _OwnerModel(self.source)
+        owner.multiplayer = False
+        self.assertGreater(self._begin_at(owner, 10.0), 0)
+        self.assertGreater(self._begin_at(owner, 10.1), 0)
 
 
 class LookMirrorGateTest(unittest.TestCase):
