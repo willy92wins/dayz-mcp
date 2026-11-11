@@ -181,6 +181,9 @@ class _LookAt:
             DayZPlayerConstants=SimpleNamespace(STANCEIDX_ERECT=ERECT, STANCEIDX_CROUCH=CROUCH),
             HumanInputControllerOverrideType=SimpleNamespace(DISABLED="DISABLED"),
             MCPWeaponControl=SimpleNamespace(IsBusy=lambda: False),
+            # Release tells the server's copy of the look (33c5, c616, cc75);
+            # test_player_look_mirror.py runs that part.
+            EndServerLook=lambda converged: None,
             s_Active=False,
             s_Finished=False,
             s_Converged=False,
