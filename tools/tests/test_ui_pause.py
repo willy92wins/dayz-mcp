@@ -45,7 +45,7 @@ from tests.fence_helpers import (
 
 
 COMMAND = "ui_pause"
-MENU_INGAME_ID = 24
+MENU_INGAME_ID = 9  # vanilla MENU_INGAME on 1.30.164289
 DAYZ_GAME_STATE_IN_GAME = 5
 SCRIPTS = addon_root() / "scripts"
 CLIENT_PATH = SCRIPTS / "5_Mission" / "MCPClientBridge.c"
@@ -973,7 +973,7 @@ class UiPauseEnforceRunTest(unittest.TestCase):
     def test_synchronous_branches_reply_immediately_without_queuing_job_or_losing_esc_race(
         self,
     ) -> None:
-        # From gameplay (-1 -> 24), from another non-pause menu (15 -> 24), and idempotent (24 -> 24):
+        # From gameplay (-1 -> 9), from another non-pause menu (15 -> 9), and idempotent (9 -> 9):
         # Pause() completes in the same call, so DispatchUiPause reads menu_id_after immediately,
         # posts the reply synchronously without queuing an MCPJob, and survives an Esc close right after.
         for before_menu, expected_before in (
@@ -995,7 +995,7 @@ class UiPauseEnforceRunTest(unittest.TestCase):
                     [f"ui_pause before={expected_before} after={MENU_INGAME_ID} ok=1"],
                 )
                 # Player presses Esc (closing MENU_INGAME) before the next runner tick:
-                # the immediate reply already recorded (expected_before, 24), ok=true.
+                # the immediate reply already recorded (expected_before, 9), ok=true.
                 model.ui.CloseAll()
                 model.on_update(0.05)
                 self.assertEqual(
@@ -1029,7 +1029,7 @@ class UiPauseEnforceRunTest(unittest.TestCase):
 
         # Negative control (review-r2): unconditionally deferring onto m_JobRunner when
         # MENU_INGAME is already open loses the race if the player closes the menu via Esc
-        # before the runner reads menu_id_after, wrongly answering pause_not_opened (24, -1).
+        # before the runner reads menu_id_after, wrongly answering pause_not_opened (9, -1).
         always_deferred_src = _mutate(
             _source(CLIENT_PATH),
             DISPATCH_UI_PAUSE,

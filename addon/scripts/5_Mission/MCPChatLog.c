@@ -347,6 +347,42 @@ class MCPChatLog
 		return null;
 	}
 
+	// Multiplies GetAlpha() from m_TextWidget up through GetParent() to m_RootWidget
+	// inclusive, stopping there: m_RootWidget is the only line widget vanilla fades
+	// (chatline.c:109-110), and above it an ancestor reports GetAlpha() 0 while the
+	// line is drawn (GA79 and GA84, 11/11). Whether the engine applies the root's
+	// alpha to the text is unverified, as the line layout has no inheritalpha key
+	// (day_z_chat_item.layout:1-12 and :28-41).
+	protected float ComputeChatLineAlpha(ChatLine chatLine)
+	{
+		Widget textWidget;
+		Widget rootWidget;
+		Widget currentWidget;
+		float lineAlpha;
+		if (!chatLine)
+		{
+			return 0.0;
+		}
+		textWidget = chatLine.m_TextWidget;
+		rootWidget = chatLine.m_RootWidget;
+		if (!textWidget || !rootWidget)
+		{
+			return 0.0;
+		}
+		lineAlpha = 1.0;
+		currentWidget = textWidget;
+		while (currentWidget)
+		{
+			lineAlpha = lineAlpha * currentWidget.GetAlpha();
+			if (currentWidget == rootWidget)
+			{
+				return lineAlpha;
+			}
+			currentWidget = currentWidget.GetParent();
+		}
+		return 0.0;
+	}
+
 	void FillReadVisibility(MCPChatRead outRead)
 	{
 		MissionGameplay mission;
@@ -355,7 +391,6 @@ class MCPChatLog
 		MCPChatLine lineItem;
 		ChatLine chatLine;
 		Widget textWidget;
-		Widget currentWidget;
 		float hierarchyAlpha;
 		float sx;
 		float sy;
@@ -401,13 +436,7 @@ class MCPChatLog
 				}
 				if (textWidget)
 				{
-					hierarchyAlpha = 1.0;
-					currentWidget = textWidget;
-					while (currentWidget)
-					{
-						hierarchyAlpha = hierarchyAlpha * currentWidget.GetAlpha();
-						currentWidget = currentWidget.GetParent();
-					}
+					hierarchyAlpha = ComputeChatLineAlpha(chatLine);
 					sx = 0.0;
 					sy = 0.0;
 					sw = 0.0;
@@ -442,7 +471,6 @@ class MCPChatLog
 		MCPChatLine lineItem;
 		ChatLine chatLine;
 		Widget textWidget;
-		Widget currentWidget;
 		float hierarchyAlpha;
 		int idx;
 		if (!m_Lines)
@@ -469,13 +497,7 @@ class MCPChatLog
 					}
 					if (textWidget && textWidget.IsVisibleHierarchy())
 					{
-						hierarchyAlpha = 1.0;
-						currentWidget = textWidget;
-						while (currentWidget)
-						{
-							hierarchyAlpha = hierarchyAlpha * currentWidget.GetAlpha();
-							currentWidget = currentWidget.GetParent();
-						}
+						hierarchyAlpha = ComputeChatLineAlpha(chatLine);
 						if (hierarchyAlpha >= 0.9)
 						{
 							lineItem.shown_at_ms = nowMs;

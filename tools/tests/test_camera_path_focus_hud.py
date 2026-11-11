@@ -1189,8 +1189,8 @@ class CameraSetFocusTest(_ToolCase):
         default_echo = {
             "distance": 2.0,
             "blur": 0.0,
-            "length": 750.0,
-            "length_near": 500.0,
+            "length": 450.0,
+            "length_near": 100.0,
             "depth_offset": 10.0,
         }
         for tool in ("camera_set", "camera_set_focus"):
@@ -1209,8 +1209,8 @@ class CameraSetFocusTest(_ToolCase):
                     self.assertEqual(args[0], "camera_set_focus")
                     self.assertEqual(args[1]["focus_distance"], 2.0)
                     self.assertEqual(args[1]["focus_blur"], 0.0)
-                    self.assertEqual(args[1]["focus_length"], 750.0)
-                    self.assertEqual(args[1]["focus_length_near"], 500.0)
+                    self.assertEqual(args[1]["focus_length"], 450.0)
+                    self.assertEqual(args[1]["focus_length_near"], 100.0)
                     self.assertEqual(args[1]["focus_depth_offset"], 10.0)
                     self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
                     self.assertEqual(result["focus_applied"], default_echo)
@@ -1246,11 +1246,11 @@ class CameraSetFocusTest(_ToolCase):
         )
         self.assertEqual(
             (args[1]["focus_length"], args[1]["focus_length_near"], args[1]["focus_depth_offset"]),
-            (400.0, 500.0, 10.0),
+            (400.0, 100.0, 10.0),
         )
         self.assertEqual(
             result["focus_applied"],
-            {"distance": 2.5, "blur": 0.75, "length": 400.0, "length_near": 500.0, "depth_offset": 10.0},
+            {"distance": 2.5, "blur": 0.75, "length": 400.0, "length_near": 100.0, "depth_offset": 10.0},
         )
 
     async def test_omitted_focus_stays_camera_set_and_echoes_null(self) -> None:
@@ -1477,8 +1477,11 @@ class CameraSetFocusTest(_ToolCase):
         for phrase in (
             "focus_distance (metres, above 0, also as the 32-bit float the bridge reads) and focus_blur "
             "(0, or above 0 also as that float), each at most 1e9, go together",
-            "Optional focus_length (default 750), focus_length_near (default 500) and focus_depth_offset "
-            "(default 10), from vanilla's NEW Close up preset",
+            "Optional focus_length (default 450), focus_length_near (default 100) and focus_depth_offset "
+            "(default 10), from vanilla's Close up preset",
+            "Measured in game: focus_length sets how much what lies beyond focus_distance blurs and "
+            "focus_length_near how much what lies nearer blurs (2000 also blurs a subject at focus_distance); "
+            "focus_depth_offset 0 draws no blur.",
             "A timeout does not prove the camera was not applied: the bridge applies it when the command "
             "arrives, before the settle.",
             "CGame.OverrideDOF(true, focus_distance, focus_length, focus_length_near, focus_blur, focus_depth_offset)",
@@ -1498,9 +1501,12 @@ class CameraSetFocusTest(_ToolCase):
         focus_description = self.tools["camera_set_focus"].description or ""
         for phrase in (
             "CGame.OverrideDOF",
-            "focus_length (default 750)",
-            "focus_length_near (default 500)",
-            "focus_depth_offset (default 10)",
+            "focus_length (default 450)",
+            "focus_length_near (default 100)",
+            "focus_depth_offset (default 10), from vanilla's Close up preset",
+            "Measured in game: focus_length sets how much what lies beyond focus_distance blurs and "
+            "focus_length_near how much what lies nearer blurs (2000 also blurs a subject at focus_distance); "
+            "focus_depth_offset 0 draws no blur.",
             "turned off on camera release, on every camera_set and on camera_path_play",
             "focus_applied {distance, blur, length, length_near, depth_offset}",
             "an echo of the values sent, not a read-back",

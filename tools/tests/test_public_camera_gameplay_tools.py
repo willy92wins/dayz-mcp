@@ -114,8 +114,8 @@ class PublicCameraFocusToolTest(_ToolCase):
                     pose,
                     focus_distance=1e9,
                     focus_blur=0.0,
-                    focus_length=750.0,
-                    focus_length_near=500.0,
+                    focus_length=450.0,
+                    focus_length_near=100.0,
                     focus_depth_offset=10.0,
                     fov=1.0,
                     settle_ticks=4,
@@ -126,7 +126,7 @@ class PublicCameraFocusToolTest(_ToolCase):
                 self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
                 self.assertEqual(
                     result["focus_applied"],
-                    {"distance": 1e9, "blur": 0.0, "length": 750.0, "length_near": 500.0, "depth_offset": 10.0},
+                    {"distance": 1e9, "blur": 0.0, "length": 450.0, "length_near": 100.0, "depth_offset": 10.0},
                 )
         args, result = await self._forwarded(
             "camera_set_focus",
