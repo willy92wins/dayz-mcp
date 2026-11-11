@@ -1212,7 +1212,9 @@ class MCPServerPerfCounts
 
 // players_visibility row, one per PlayerBase with a PlayerIdentity. uid is
 // GetPlainId, as query_all_players names it. distance is head to pos. visible
-// is in_fov and line_of_sight both. Primitives only: no entity reference.
+// is in_fov and line_of_sight both. heading_deg is the compass heading in_fov
+// is measured against (33c5), 0 when it cannot be read. Primitives only: no
+// entity reference.
 class MCPPlayerVisibility
 {
 	string uid;
@@ -1220,6 +1222,7 @@ class MCPPlayerVisibility
 	bool in_fov;
 	bool line_of_sight;
 	bool visible;
+	float heading_deg;
 };
 
 // world_spawn_batch row (7f5d), one per item in input order: object_id when the
@@ -1325,6 +1328,19 @@ class MCPGameplayState
 	bool player_simulation_disabled;
 };
 
+// action_use / action_hold (204e): the local hologram of a deploy refused with
+// hologram_colliding. checks names those of is_floating, is_colliding_bbox,
+// is_clipping_roof, is_base_viable and height_placement_check that refuse it,
+// pos is the projection's position, and the hologram floats unless the camera
+// ray's hit is farther than min_m and nearer than max_m from the player.
+class MCPHologram
+{
+	ref array<string> checks;
+	ref array<float> pos;
+	float min_m;
+	float max_m;
+};
+
 class MCPResult
 {
 	int id;
@@ -1404,6 +1420,13 @@ class MCPResult
 	string target;
 	float distance;
 	bool started;
+	// action_use (204e): whether the local player is placing once the call
+	// ran, which after ActionTogglePlaceObject says which way it went.
+	// Unassigned on its refusals before the start and on other commands.
+	bool placing;
+	// action_use / action_hold (204e): the hologram of a deploy refused with
+	// hologram_colliding. Unassigned otherwise.
+	ref MCPHologram hologram;
 	// action_use_door / action_use_component. Same default-0 rule as
 	// MCPArgs.door_index: 0 is a valid door and a valid component, so
 	// the command name, not these fields, is what turns the mode on.
@@ -1467,6 +1490,7 @@ class MCPResult
 	int hold_protocol;
 	string hold_id;
 	string end_state;
+	// Also actor_emote's: the check that refused a new emote (36fa).
 	string reason;
 	int action_state;
 	bool action_state_known;
@@ -1520,6 +1544,10 @@ class MCPResult
 	string emote_state;
 	float started_after_s;
 	float finished_after_s;
+	// actor_emote's emote_rejected from a new emote's three checks (36fa):
+	// reason names the check, and stance is the local player's then. ""
+	// otherwise, and unassigned on other commands.
+	string stance;
 	// camera_path_play state (d026). Unassigned on other commands.
 	ref MCPCameraPathState camera_path;
 	// hud_set read-back (f427). Unassigned on other commands.
