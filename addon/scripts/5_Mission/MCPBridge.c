@@ -5767,10 +5767,13 @@ class MCPBridge : Managed
 	// freshly spawned item reaches 34 ms after it is created, and have a
 	// GlobalHealth class in that DamageSystem, asked by full path under the
 	// root vanilla's InitDamageZoneDisplayNameMapping picks for an EntityAI
-	// (entityai.c:398-413: weapons, magazines, else vehicles). A map object
-	// that is not an EntityAI (a tree, a Land_ building) has neither the
-	// flag nor that root: its config may live elsewhere (CfgNonAIVehicles),
-	// so it keeps the DamageSystem test alone, as before #378 (S-2).
+	// (entityai.c:398-413: weapons, magazines, else vehicles). A Land_
+	// building is an EntityAI (Building : EntityAI, 3_game/entities/
+	// building.c:17; House : BuildingBase : Building) and takes the full
+	// check. A tree or another plant is not (Plant : Object, gameplay.c:246;
+	// TreeHard/TreeSoft : PlantSuper, plant.c:17, :42): it has neither the
+	// flag nor that root, and keeps the DamageSystem test alone, as before
+	// #378 (S-2).
 	protected bool HealthReadable(Object target)
 	{
 		string cfgBase;

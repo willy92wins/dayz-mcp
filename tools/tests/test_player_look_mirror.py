@@ -89,7 +89,7 @@ WEAPON_AIM = "protected bool DispatchWeaponAim(MCPCommand command, MCPResult res
 
 SERVER_MEMBERS = (
     "m_MCPLookId|m_MCPLookTarget|m_MCPLookDeadlineS|m_MCPLookPulsed|m_MCPLookConsumed|"
-    "m_MCPLookHandled|m_MCPLookLastId|m_MCPLookLastStartS|m_MCPLookLastRefusal|m_MCPLookTurn|MCPLookVerdict|MCPLookNote|MCPLookServerRelease|"
+    "m_MCPLookHandled|m_MCPLookLastId|m_MCPLookLastStartS|m_MCPLookLastRefusal|m_MCPLookLastNote|m_MCPLookTurn|MCPLookVerdict|MCPLookNote|MCPLookServerRelease|"
     "MCPLookFreshnessRefusal|MCPLookOwnerRefusal|MCPLookReadRelease|MCPLookAccept|"
     "MCPLookServerTick|GetInstanceType|GetIdentity|IsPlayerDisconnected|GetInputController|"
     "PhysicsGetPositionWS"
@@ -247,6 +247,7 @@ class _ServerPlayer:
         self.m_MCPLookLastStartS = -1.0
         self.m_MCPLookLastRefusal = _LogString.of("")
         self.m_MCPLookTurn = 0
+        self.m_MCPLookLastNote = _LogString.of("")
         self.identity: object | None = object()
         self.disconnected = False
         self.alive = True
@@ -470,7 +471,10 @@ class LookMirrorWireTest(unittest.TestCase):
 
     def test_the_server_consumes_its_type_and_stops_there(self) -> None:
         process = _method_body(self.source, SERVER_INPUT)
-        self.assertEqual(_flat(_if_body(process, f"userDataType == {UDT}")), "MCPLookReadRequest(ctx); return true;")
+        self.assertEqual(
+            _flat(_without_comments(_if_body(process, f"userDataType == {UDT}"))),
+            "if (MCPLookAtControl.ServerAllowed()) { MCPLookReadRequest(ctx); } return true;",
+        )
         self.assertTrue(process.rstrip().endswith("return super.OnInputUserDataProcess(userDataType, ctx);"))
 
     def test_the_server_rechecks_on_its_own_copy_before_it_accepts(self) -> None:
@@ -591,7 +595,9 @@ class LookMirrorWireTest(unittest.TestCase):
         # The start goes first: nothing of the look changes before it is sent
         # or known to be unavailable.
         head = _without_comments(begin[: begin.index('if (serverStart == "input_busy")')])
-        self.assertIsNone(re.search(r"\bs_\w+ = ", head), head)
+        # Only a tick clock that went back forgets the last start's time.
+        self.assertEqual(head.count("s_StartSent = false;"), 1)
+        self.assertIsNone(re.search(r"\bs_\w+ = ", head.replace("s_StartSent = false;", "")), head)
         self.assertNotIn("Release(", head)
         end = _method_body(self.source, END_SERVER)
         _in_order(self, end, "if (s_ServerLookId <= 0)", "if (converged)", "s_ServerReleasePending = true;",
@@ -1077,14 +1083,14 @@ class LookMirrorLatchTest(unittest.TestCase):
 class LookMirrorStartIntervalTest(unittest.TestCase):
     """Sol on #378 @ 3df2d865: a start the server throttles turned the owner
     only. The owner now sends no start sooner than OWNER_MIN_START_INTERVAL_S
-    (twice the server's) after its last one; Begin answers input_busy and
+    (five times the server's) after its last one; Begin answers input_busy and
     neither side turns. The clock is set by hand here, never advanced by the
     helpers between the two looks under test."""
 
     def setUp(self) -> None:
         self.source = _source(LOOK_PATH)
         constants = _constants(self.source)
-        self.assertEqual(constants["OWNER_MIN_START_INTERVAL_S"], 2 * constants["SERVER_MIN_START_INTERVAL_S"])
+        self.assertEqual((constants["SERVER_MIN_START_INTERVAL_S"], constants["OWNER_MIN_START_INTERVAL_S"]), (0.1, 0.5))
 
     def _begin_at(self, owner: _OwnerModel, now: float, target=(10.0, 0.0, 0.0)) -> int:
         owner.now = now
@@ -1117,7 +1123,7 @@ class LookMirrorStartIntervalTest(unittest.TestCase):
 
     def test_a_start_the_owner_sends_is_not_throttled_by_a_late_first_start(self) -> None:
         # The first start reaches the server late, the second early: up to
-        # SERVER_MIN_START_INTERVAL_S of delay between the two arrivals.
+        # OWNER_MIN_START_INTERVAL_S - SERVER_MIN_START_INTERVAL_S (0.4 s) of compression between the arrivals.
         owner = _OwnerModel(self.source)
         server = _ServerLookModel(self.source)
         first = self._begin_at(owner, 10.0)
@@ -1129,11 +1135,113 @@ class LookMirrorStartIntervalTest(unittest.TestCase):
         self.assertEqual(server.active, second)
         self.assertNotIn("throttled", " ".join(server.log))
 
+    def test_arrivals_compressed_by_the_network_are_still_accepted(self) -> None:
+        # Sol on #378 @ 7856e30e: sends 0.5 s apart, arrivals 0.2 s apart
+        # (100.30 / 100.50) were throttled with the 0.25 s server interval.
+        owner = _OwnerModel(self.source)
+        server = _ServerLookModel(self.source)
+        self._begin_at(owner, 10.0)
+        owner.finish("converged", True)
+        self._deliver_at(owner, server, 100.30)
+        second = self._begin_at(owner, 10.5, target=(-10.0, 0.0, 0.0))
+        self._deliver_at(owner, server, 100.50)
+        self.assertEqual(server.active, second)
+        self.assertNotIn("throttled", " ".join(server.log))
+
+    def test_a_tick_clock_that_went_back_does_not_hold_the_next_start(self) -> None:
+        owner = _OwnerModel(self.source)
+        first = self._begin_at(owner, 50.0)
+        owner.finish("converged", True)
+        # A new game in this process: the tick time starts again near 0.
+        self.assertGreater(self._begin_at(owner, 1.0), first)
+
     def test_offline_looks_are_not_held(self) -> None:
         owner = _OwnerModel(self.source)
         owner.multiplayer = False
         self.assertGreater(self._begin_at(owner, 10.0), 0)
         self.assertGreater(self._begin_at(owner, 10.1), 0)
+
+
+class LookMirrorInputGateTest(unittest.TestCase):
+    """L2b (Enfusion on #378): outside a profile=test server the look's
+    message, start or release, is consumed unread and logs nothing; an
+    ignored release repeated in a row is logged once."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+        self.model = _ServerLookModel(self.source)
+        self.reads: list[object] = []
+        self.supers: list[int] = []
+        model = self.model
+        namespace: dict[str, object] = {
+            "_S": _LogString,
+            "this": model.player,
+            "super": SimpleNamespace(OnInputUserDataProcess=lambda kind, ctx: self.supers.append(kind) or False),
+            "MCP_INPUT_UDT_PLAYER_LOOK": _wire_type(self.source),
+            "MCPLookAtControl": SimpleNamespace(ServerAllowed=lambda: model.allowed),
+        }
+        free = _free_function(self.source, SERVER_INPUT, "MCPLookReadRequest", "this")
+        model.player.MCPLookReadRequest = lambda ctx: self.reads.append(ctx)
+        self.process = translate(free, SERVER_INPUT, namespace, class_types={"ParamsReadContext"})
+
+    def test_a_server_without_the_test_profile_consumes_the_message_unread(self) -> None:
+        self.model.allowed = False
+        udt = _wire_type(self.source)
+        for _ in range(3):
+            self.assertIs(self.process(udt, "ctx"), True)
+        self.assertEqual((self.reads, self.supers, self.model.log), ([], [], []))
+        self.model.allowed = True
+        self.assertIs(self.process(udt, "ctx"), True)
+        self.assertEqual(self.reads, ["ctx"])
+        # Other input types still go to vanilla.
+        self.process(udt + 1, "ctx")
+        self.assertEqual(self.supers, [udt + 1])
+
+    def test_an_ignored_release_repeated_in_a_row_is_logged_once(self) -> None:
+        model = self.model
+        for look_id in (9, 10, 11):
+            model.release(look_id)
+        self.assertEqual(model.log, ["[DayZ_MCP] player_look_at server ignored look=9 reason=release_without_look"])
+        model.start(20)
+        model.release(21)
+        self.assertEqual(
+            model.log[-1], "[DayZ_MCP] player_look_at server ignored look=21 reason=release_of_another_look"
+        )
+
+
+class LookMirrorBusyTest(unittest.TestCase):
+    """L1b (Enfusion on #378): while a look still turns the player,
+    player_move and weapon_aim answer busy before anything starts."""
+
+    def setUp(self) -> None:
+        self.source = _source(LOOK_PATH)
+        self.client = _source(CLIENT_BRIDGE_PATH)
+
+    def test_is_running_is_begun_and_not_finished(self) -> None:
+        self.assertEqual(_flat(_method_body(self.source, "static bool IsRunning()")), "return s_Active && !s_Finished;")
+        owner = _OwnerModel(self.source)
+        translate(_free_function(self.source, "static bool IsRunning()", r"s_\w+", "S"), "static bool IsRunning()",
+                  owner.namespace)
+        running = owner.namespace["IsRunning"]
+        self.assertFalse(running())
+        owner.begin()
+        self.assertTrue(running())
+        owner.finish("converged", True)
+        self.assertFalse(running())
+
+    def test_move_and_aim_answer_busy_while_a_look_runs(self) -> None:
+        for signature, before in (
+            (WEAPON_AIM, "MCPLookAtControl.ReleaseServerCopy();"),
+            ("protected bool DispatchPlayerMove(MCPCommand command, MCPResult result)",
+             "serverRequest = MCPPlayerMoveControl.SendStart(request);"),
+        ):
+            with self.subTest(signature=signature):
+                body = _method_body(self.client, signature)
+                _in_order(self, body, "if (MCPLookAtControl.IsRunning())", 'result.error = "busy";', before)
+                self.assertEqual(
+                    _flat(_if_body(body, "MCPLookAtControl.IsRunning()")),
+                    'result.ok = false; result.error = "busy"; return true;',
+                )
 
 
 class LookMirrorGateTest(unittest.TestCase):
@@ -1161,15 +1269,15 @@ class LookMirrorGateTest(unittest.TestCase):
 
     def test_a_start_faster_than_the_interval_is_throttled(self) -> None:
         model = self.model
-        self.assertEqual(_constants(self.source)["SERVER_MIN_START_INTERVAL_S"], 0.25)
+        self.assertEqual(_constants(self.source)["SERVER_MIN_START_INTERVAL_S"], 0.1)
         model.start(1)
-        model.now = 100.1
+        model.now = 100.05
         model.start(2)
         self.assertEqual((model.active, model.log[-1]), (1, _verdict(0, 2, "throttled")))
-        model.now = 100.2
+        model.now = 100.08
         model.start(3)
         self.assertEqual((model.active, model.log.count(_verdict(0, 2, "throttled"))), (1, 1))
-        model.now = 100.25
+        model.now = 100.11
         model.start(4)
         self.assertEqual(model.active, 4)
         self.assertEqual(model.log[-1], _released(1, "superseded"))

@@ -69,7 +69,7 @@ BRIDGE_CODES = {
     "bad_arrive_radius_m", "bad_hold_s", "bad_ttl_s", "client_not_in_game",
     "no_player", "player_dead", "player_unconscious", "player_restrained",
     "seated", "no_input_controller", "not_in_move_command", "player_move_busy",
-    "input_busy", "not_held", "aborted",
+    "busy", "input_busy", "not_held", "aborted",
 }
 EXPECTED_REQUIRED = {
     frozenset({"mode"}),

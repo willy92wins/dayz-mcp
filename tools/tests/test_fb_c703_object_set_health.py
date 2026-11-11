@@ -1141,9 +1141,9 @@ class ObjectSetHealthDamageSystemGuardTest(unittest.TestCase):
                 self.assertEqual(result.object_health.health01_after, 0.5)
 
     def test_g10_a_map_object_that_is_not_an_entity_keeps_the_damage_system_test(self) -> None:
-        # S-2 (Auditor on #378): a tree or a Land_ building is no EntityAI;
-        # its config need not sit under CfgVehicles, so the GlobalHealth path
-        # is not asked and it is set as before #378.
+        # S-2 (Auditor on #378): a tree (Plant : Object) is no EntityAI, so
+        # the GlobalHealth path is not asked and it is set as before #378. A
+        # Land_ building is an EntityAI (Building : EntityAI) and takes g8.
         for zone in ("", "Engine"):
             with self.subTest(zone=zone):
                 target = _HealthTarget(zones=["Engine"], global_health=False)
@@ -1239,8 +1239,8 @@ class TelemetryHealthGuardTest(unittest.TestCase):
 
 
     def test_t4_a_map_object_that_is_not_an_entity_reads_its_health(self) -> None:
-        # S-2: telemetry_read on a tree or a Land_ building keeps reading
-        # health01 as before #378.
+        # S-2: telemetry_read on a tree (no EntityAI) keeps reading health01
+        # as before #378.
         found = _HealthTarget(zones=[], health01=0.25, global_health=False)
         telemetry = self._run(found)
         self.assertEqual(telemetry.health01, 0.25)

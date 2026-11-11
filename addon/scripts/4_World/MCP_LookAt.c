@@ -86,12 +86,13 @@ class MCPLookAtControl
 	protected static int s_TurnSign;
 	// The server copy accepts at most one start per sender in this many
 	// seconds (MCPLookAccept); a faster start is refused as throttled.
-	static const float SERVER_MIN_START_INTERVAL_S = 0.25;
+	static const float SERVER_MIN_START_INTERVAL_S = 0.1;
 	// The owner sends no start sooner than this after its last one (Begin
-	// answers input_busy and turns neither side), twice the server's
-	// interval, so a start the owner sent is never throttled there by a
-	// delay of up to SERVER_MIN_START_INTERVAL_S between the two
-	// (the start would otherwise turn the owner only).
+	// answers input_busy and turns neither side), five times the server's
+	// interval, so a start the owner sent is throttled there only when two
+	// starts arrive compressed by more than 0.4 s of network delay (the
+	// start would then turn the owner only until its deadline: there is no
+	// verdict back to the owner).
 	static const float OWNER_MIN_START_INTERVAL_S = 0.5;
 	// The owner's tick time of its last sent start, once there is one.
 	protected static bool s_StartSent;
@@ -149,6 +150,12 @@ class MCPLookAtControl
 		// A start the server's throttle would refuse is not sent: it would
 		// turn this side only (#378 review).
 		nowS = GetGame().GetTickTime();
+		// A tick clock that went back (a new game in this process) does not
+		// hold the next start until it catches up.
+		if (s_StartSent && nowS < s_StartSentS)
+		{
+			s_StartSent = false;
+		}
 		if (s_StartSent && nowS - s_StartSentS < OWNER_MIN_START_INTERVAL_S)
 		{
 			return "input_busy";
@@ -193,6 +200,14 @@ class MCPLookAtControl
 	static bool IsActive()
 	{
 		return s_Active;
+	}
+
+	// L1b: a look is still turning this player (begun, not finished), so
+	// player_move and weapon_aim answer busy (DispatchPlayerMove,
+	// DispatchWeaponAim) instead of fighting its pulses.
+	static bool IsRunning()
+	{
+		return s_Active && !s_Finished;
 	}
 
 	static bool IsFinished()
@@ -820,6 +835,7 @@ modded class PlayerBase
 	// logged: a refusal repeated in a row is logged once (MCPLookVerdict).
 	protected float m_MCPLookLastStartS = -1.0;
 	protected string m_MCPLookLastRefusal;
+	protected string m_MCPLookLastNote;
 	// The way the owner latched at the look's start (MCPLookAtControl.LatchDeg).
 	protected int m_MCPLookTurn;
 
@@ -828,7 +844,12 @@ modded class PlayerBase
 	{
 		if (userDataType == MCP_INPUT_UDT_PLAYER_LOOK)
 		{
-			MCPLookReadRequest(ctx);
+			// L2b: outside a profile=test server the message, start or
+			// release, is consumed unread and logs nothing.
+			if (MCPLookAtControl.ServerAllowed())
+			{
+				MCPLookReadRequest(ctx);
+			}
 			return true;
 		}
 		return super.OnInputUserDataProcess(userDataType, ctx);
@@ -1107,8 +1128,15 @@ modded class PlayerBase
 		Print("[DayZ_MCP] player_look_at server accepted=0 look=" + lookId.ToString() + " reason=" + reason);
 	}
 
+	// An ignored release: one line, except the same reason again in a row
+	// (L2b, as MCPLookVerdict).
 	protected void MCPLookNote(int lookId, string reason)
 	{
+		if (reason == m_MCPLookLastNote)
+		{
+			return;
+		}
+		m_MCPLookLastNote = reason;
 		Print("[DayZ_MCP] player_look_at server ignored look=" + lookId.ToString() + " reason=" + reason);
 	}
 
