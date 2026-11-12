@@ -8775,7 +8775,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "one member row per registered member with object_id, alive, "
             "speed_limit and speed_limit_threat (limits are 0 when the "
             "entity is gone). Errors: bad_args, "
-            "not_found, expansion_unavailable."
+            "not_found, expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
         )
     )
     async def ai_group_order(
