@@ -4159,6 +4159,9 @@ class ServerState:
             f"{runs_path.name}.bak-preprune.{index}"
             for index in range(2, _PREPRUNE_SLOT_COUNT + 1)
         ]
+        # A full set of slots is compacted into this file before the slots are
+        # freed (process_lifecycle RunManifestStore._compact_preprune_backups).
+        names.append(runs_path.name + ".bak-preprune.targets")
         found: list[dict[str, object]] = []
         for name in names:
             backup = runs_path.with_name(name)
