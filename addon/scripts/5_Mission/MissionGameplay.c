@@ -81,4 +81,20 @@ modded class MissionGameplay
 			super.OnEvent(eventTypeId, params);
 		}
 	}
+
+	// §2.6 C14 (lease close): the pause ui_pause queued, for the client
+	// bridge. Vanilla keeps it in the protected m_PauseQueued
+	// (missiongameplay.c:45): Pause() sets it before its loading and
+	// respawning guards (:1306, :1308-1317), OnUpdate retries it (:308-311),
+	// only opening the menu clears it (:1331), and Continue() leaves it
+	// (:1334-1348).
+	bool MCP_IsPauseQueued()
+	{
+		return m_PauseQueued;
+	}
+
+	void MCP_CancelQueuedPause()
+	{
+		m_PauseQueued = false;
+	}
 };
