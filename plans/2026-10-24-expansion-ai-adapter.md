@@ -210,6 +210,7 @@ El dispatch retira el autocancel pendiente del miembro en la call queue de siste
 **Además:**
 - Con un token desconocido, ok con `released: 0`: el spawn abandonado pudo no llegar a crear nada.
 - Tras un `scene_clear` de #262, el helper sigue pidiendo el borrado del grupo si estaba `active`; la prueba conserva tanto los miembros cuyo borrado aún esté pendiente como el grupo. Solo cuando los miembros han desaparecido queda por censar el grupo.
+- Lo que un miembro suelta al morir queda fuera: vanilla deja en el suelo lo que lleva en las manos, casi siempre el arma del loadout (`DeathDropHandEntity`, llamado desde `OnSimulationEnd`; vanilla `4_world/entities/dayzplayerimplement.c:17` y :635), como un objeto aparte, con el lifetime de cadáver (:646). El adaptador no puede atribuírselo, así que ni el release ni el cierre lo borran ni lo cuentan como residuo; la prueba del cierre solo mira miembros y grupo.
 - La respuesta va en `ai_group`.
 
 ## 4. Tools (Python)

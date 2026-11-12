@@ -107,6 +107,19 @@ class AiGroupOrderToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.tool.description.startswith(server.LEASE_TOOL_LINE))
         self.assertIn("combat_may_override", self.tool.description)
 
+    def test_description_lists_the_three_expansion_details(self) -> None:
+        # PX8 b H2: the agent gets expansion_unavailable with its detail
+        # (f743f20), and the order is a new mutation behind the
+        # close-support gate, so all three details can reach it. Mutant
+        # killed: the details dropped from the description's error list.
+        self.assertIn(ORDER, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
+        self.assertIn(
+            "Errors: bad_args, not_found, expansion_unavailable; "
+            "detail=adapter_not_loaded|adapter_contract_mismatch|"
+            "lease_close_not_supported.",
+            self.tool.description,
+        )
+
     async def test_o4_order_without_fields_is_bad_args_and_sends_nothing(self) -> None:
         # Mutant killed: an empty order travelling to the bridge, where the
         # absent keys would read as 0 and change nothing silently.
