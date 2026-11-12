@@ -57,6 +57,11 @@ class MCPLookAtControl
 	protected static int s_ServerLookId;
 	protected static bool s_ServerReleasePending;
 	protected static int s_ServerReleaseId;
+	// The last look id actually written to the input channel (0: none).
+	// SendServerStart sets it only on "sent". FlushServerRelease writes
+	// no new floor: it only carries s_ServerReleaseId, which comes from
+	// s_ServerLookId, an id already set by a sent start.
+	protected static int s_LastSentLookId;
 
 	protected static const float MAX_CONTROL_S = 3.0;
 	protected static const float BAND_DEG = 1.0;
@@ -192,13 +197,23 @@ class MCPLookAtControl
 		return "";
 	}
 
-	// Lease-close floor: SendServerStart is called only in Begin with
-	// s_Generation + 1, and Begin calls Release("replaced") whenever the
-	// start is not refused as input_busy, so s_Generation is at least every
-	// look id ever written to the input channel.
+	// Job identity only: Release() advances s_Generation on every release,
+	// including the close's own Release("restore"), which writes no id to
+	// the input channel. It is therefore NOT the lease-close floor: the
+	// server can only reach ids it received, so the floor is the last id
+	// actually sent (CloseFloor).
 	static int Generation()
 	{
 		return s_Generation;
+	}
+
+	// Lease-close floor: the last look id written to the input channel.
+	// The server counts a start on receipt (MCPLookAccept) and a release
+	// id likewise (MCPLookReadRelease), and releases only carry ids of
+	// starts already sent, so this is exactly what it can reach.
+	static int CloseFloor()
+	{
+		return s_LastSentLookId;
 	}
 
 	static bool ServerReleasePending()
@@ -386,6 +401,7 @@ class MCPLookAtControl
 		message.Write(budgetS);
 		message.Write(turnSign);
 		message.Send();
+		s_LastSentLookId = lookId;
 		return "sent";
 	}
 
