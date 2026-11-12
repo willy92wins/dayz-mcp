@@ -130,7 +130,7 @@ censo anunciado), `action_hold_cancel` (`tools/dayz_mcp/loopback.py:8173-8200`)
 y `player_look_at_release` (`tools/dayz_mcp/loopback.py:6189-6202`, solo para
 comandos ya entregados) no llegan a encolarse, y `camera_path_release` ya no se
 encola por lease: con bridge v13 la trayectoria la para el cierre del cliente
-(`addon/scripts/5_Mission/MCPClientBridge.c:9448-9456`), que sin censo tampoco
+(`addon/scripts/5_Mission/MCPClientBridge.c:9762-9767`), que sin censo tampoco
 se publica. Si sin `--require-version` el lease admitió
 `vehicle_trace(mode="start")` o un `vehicle_control` no nulo para un cliente
 `BOUND` (`vehicle_active` en

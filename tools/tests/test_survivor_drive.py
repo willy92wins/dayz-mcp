@@ -269,15 +269,17 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
     def test_the_drive_release_is_no_tool_and_the_description_says_the_lease_end_stops_a_drive(self) -> None:
         self.assertIsNone(self.app._tool_manager.get_tool(DRIVE_RELEASE))
         for part in (
-            "The end of the lease that sent the drive ends it too: the broker queues its release "
-            "(survivor_drive_release), which stops the drive only while that call's drive is the one set.",
+            "The end of the lease that sent the drive ends it too: the server's lease close stops every "
+            "drive, and a server the close does not reach leaves that close owed (lease_end.unconfirmed).",
             "A call that times out or is cancelled after the server received it still runs, and its "
-            "release is queued only if its result is not stored yet and the queue admits the release: "
+            "release (survivor_drive_release, which stops the drive only while that call's drive is the "
+            "one set) is queued only if its result is not stored yet and the queue admits the release: "
             "once the result is stored, nothing is queued and the drive keeps going until a "
             "mode='release' or the end of the lease.",
         ):
             self.assertIn(part, self.tool.description)
         self.assertNotIn("still runs, and its release is queued.", self.tool.description)
+        self.assertNotIn("the broker queues its release", self.tool.description)
 
     async def test_each_gait_and_release_reach_the_server_as_the_ingress_takes_them(self) -> None:
         for arguments, wire in (

@@ -1447,8 +1447,8 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
 # the plain case), so these codes mean a bound client whose census does not
 # name the verb, is stale or comes from another instance. action_hold
 # keeps the hold_not_supported its tool publishes; any other verb is refused
-# with the server census code, bridge_capability_missing. Internal uses of
-# camera_path_release skip the live lease at owner cleanup, not this check.
+# with the server census code, bridge_capability_missing. The internal
+# camera_path_release of an abandoned play skips the live lease, not this check.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
     "actor_emote": "bridge_capability_missing",

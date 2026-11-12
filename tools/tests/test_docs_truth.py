@@ -1005,17 +1005,41 @@ def _servermod_release_paragraphs(text: str) -> list[str]:
     ]
 
 
+# PX9 b P2: naming both cases is not enough; each clause that names a case
+# must tie it to its result. One naming the round case may not enqueue the
+# release, one naming the case without a round may not deny it, and no clause
+# may name both ("con y sin ronda").
+_SERVERMOD_ENQUEUES = re.compile(r"(?<!\bno )(?<!\bno lo )(?<!\bno se )\bencola\b")
+_SERVERMOD_SKIPS = re.compile(r"\bno (?:lo |se )?encola\b")
+_SERVERMOD_ONLY_WITHOUT = re.compile(r"(?<!\bno )\bsolo se encola sin ronda\b")
+
+
 def _servermod_release_claim_ok(paragraph: str) -> bool:
-    """The paragraph says what a close round does and what happens without
-    one, instead of an enqueue at every lease end."""
+    """The paragraph ties each case to its result: with a lease-end round the
+    release is not enqueued, without one it is."""
     flat = " ".join(paragraph.split()).lower()
-    return "con ronda" in flat and "sin ronda" in flat
+    skips = enqueues = bool(_SERVERMOD_ONLY_WITHOUT.search(flat))
+    for clause in re.split(r"[.;:]\s+", flat):
+        with_round = "con ronda" in clause or "con y sin ronda" in clause
+        without_round = "sin ronda" in clause
+        if with_round and without_round:
+            return False
+        if with_round:
+            if _SERVERMOD_ENQUEUES.search(clause):
+                return False
+            skips = skips or bool(_SERVERMOD_SKIPS.search(clause))
+        if without_round:
+            if _SERVERMOD_SKIPS.search(clause):
+                return False
+            enqueues = enqueues or bool(_SERVERMOD_ENQUEUES.search(clause))
+    return skips and enqueues
 
 
 class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
     """docs/SERVERMOD.md's two paragraphs on the internal vehicle_release (an
     explicit session_release and an expired lease) must say it is enqueued only
-    without a lease-end round, as cleanup_owner does since v13 (PX9 P2). The
+    without a lease-end round, as cleanup_owner does since v13 (PX9 P2), in
+    clauses that tie each case to its result (PX9 b P2). The
     behaviour itself is pinned by test_session_e2e
     test_lease_close_cleanup_is_enqueued_exactly_once (a round: 0 enqueued) and
     test_session_http_contract
@@ -1027,11 +1051,40 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
             _module_text("dayz_mcp/loopback.py").count(_SERVERMOD_ROUND_GATE), 1
         )
 
-    def test_both_paragraphs_name_both_cases(self) -> None:
+    def _release_paragraphs(self) -> list[str]:
         paragraphs = _servermod_release_paragraphs(_doc(_SERVERMOD_DOC))
         self.assertEqual(len(paragraphs), 2, [p[:80] for p in paragraphs])
-        for paragraph in paragraphs:
+        return paragraphs
+
+    def test_both_paragraphs_tie_each_case_to_its_result(self) -> None:
+        for paragraph in self._release_paragraphs():
             self.assertTrue(_servermod_release_claim_ok(paragraph), paragraph[:300])
+
+    def test_neg_a_case_tied_to_the_wrong_result_fails(self) -> None:
+        explicit, expiry = self._release_paragraphs()
+        mutants = (
+            # PX9 b: the round case enqueues the release.
+            (explicit, "`cleanup_owner` no lo encola", "`cleanup_owner` lo encola"),
+            # PX9 b: enqueued with and without a round.
+            (
+                expiry,
+                "interno solo se encola sin ronda de cierre",
+                "interno se encola con y sin ronda de cierre",
+            ),
+            # The case without a round denies the release.
+            (
+                explicit,
+                "Sin ronda, `cleanup_owner` encola",
+                "Sin ronda, `cleanup_owner` no encola",
+            ),
+            # "no solo" no longer limits the release to the case without one.
+            (expiry, "interno solo se encola", "interno no solo se encola"),
+        )
+        for paragraph, old, new in mutants:
+            with self.subTest(new=new):
+                flat = " ".join(paragraph.split())
+                self.assertEqual(flat.count(old), 1, old)
+                self.assertFalse(_servermod_release_claim_ok(flat.replace(old, new)))
 
     def test_neg_an_enqueue_at_every_lease_end_fails(self) -> None:
         old = (
