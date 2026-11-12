@@ -56,9 +56,10 @@ server. It ships in `addon_expansion_ai/` and packs as
   formation a newer build adds is accepted and `RANDOM` is not),
   `waypoints` (flat triples, 1 to 32 points) and `speed` (1 to 3, only
   beside `speed_set`). A bad formation changes nothing, not even the
-  other fields of the call. A `bad_args` from the adapter names the
+  other fields of the call. A `bad_args` for one field names that
   `field` in its message and, for `behaviour` and `formation`, the
-  `allowed` names.
+  `allowed` names; an order that reaches the adapter with no field to
+  apply is a bare `bad_args`.
 - The tool and the broker refuse an explicit empty `waypoints` list. The
   adapter reads an empty one as no waypoints, the form an absent key
   reaches it in (in-game round B), so a behaviour sent alone keeps the

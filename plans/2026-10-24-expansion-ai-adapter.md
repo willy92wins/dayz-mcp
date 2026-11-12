@@ -231,7 +231,7 @@ El dispatch retira el autocancel pendiente del miembro en la call queue de siste
 
 **`ai_group_order(group_id, behaviour=None, waypoints=None, formation=None, speed=None, timeout_s)`**
 - Con lease. Sin ningún campo, da `bad_args`. `speed` es `walk`, `jog` o `sprint`, y viaja como 1, 2 o 3 con `speed_set` (§3.3).
-- `waypoints` lleva de 1 a 32 puntos: la lista vacía explícita da `bad_args` en la tool y en el broker. Un `bad_args` del bridge llega con `field` y, para `behaviour` y `formation`, `allowed` en el mensaje del error (`bridge_errors._ai_group_order_detail`, ronda B).
+- `waypoints` lleva de 1 a 32 puntos: la lista vacía explícita da `bad_args` en la tool y en el broker. Un `bad_args` del bridge por un campo llega con ese `field` y, para `behaviour` y `formation`, `allowed` en el mensaje del error (`bridge_errors._ai_group_order_detail`, ronda B); una orden que llega al bridge sin ningún campo que aplicar da `bad_args` sin más.
 
 **`ai_group_state(group_id=None, scene_id=None, timeout_s)`**
 - Uno de los dos y no los dos. Sin lease: `ai_group_state` entra en `READ_ONLY_COMMANDS` (main @de12fd6b, `session_coordination.py`). Todo comando que no esté ahí pide lease (`session_coordination.py::command_requires_lease` y `authorize`, main @de12fd6b), y sin token da `lease_required`. #262 ya integró `scene_entities` en esa lista de main @de12fd6b.
