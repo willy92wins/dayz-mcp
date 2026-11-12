@@ -159,6 +159,32 @@ class AiEmoteToolTest(unittest.TestCase):
         self.assertEqual(str(_bridge_error(nothing, EMOTE)),
                          "no_emote_playing; observed=emote_state=rejected emote_pending=false")
 
+    def test_npc_dormant_published_as_own_code_via_app_call_tool(self) -> None:
+        # Mutant killed: npc_dormant collapsed to remote_error/bad_args, or
+        # dropped by _ai_emote_detail on the ai_emote bridge path.
+        wire = {"ok": False, "error": "npc_dormant", "emote_pending": False}
+        self.assertEqual(
+            str(_bridge_error(wire, EMOTE)),
+            "npc_dormant; observed=emote_pending=false",
+        )
+        call = AsyncMock(side_effect=_bridge_error(wire, EMOTE))
+        with patch.object(self.runtime, "call_bridge", new=call):
+            with self.assertRaises(ToolError) as raised:
+                _run(
+                    self.app.call_tool(
+                        "actor_emote",
+                        {"emote": "nod", "wait_s": 2.0, "object_id": 11},
+                    )
+                )
+        self.assertTrue(
+            str(raised.exception).endswith(
+                "npc_dormant; observed=emote_pending=false"
+            ),
+            str(raised.exception),
+        )
+        self.assertNotIn("remote_error", str(raised.exception))
+        self.assertNotIn("bad_args", str(raised.exception))
+
     def test_o8_server_states_keep_times_only_where_reached(self) -> None:
         # Mutant killed: a cancelled/timed_out answer keeping a start time
         # the watch never reached.
@@ -442,6 +468,25 @@ class _FakeEmoteManager:
         self.gesture = 0
 
 
+class _FakeFSMState:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def GetName(self):
+        return _S(self._name)
+
+    def GetSubFSM(self):
+        return None
+
+
+class _FakeFSM:
+    def __init__(self, state_name: str) -> None:
+        self._state_name = state_name
+
+    def GetState(self):
+        return _FakeFSMState(self._state_name)
+
+
 class _FakeGroup:
     def __init__(self, in_combat: bool = False) -> None:
         self._in_combat = in_combat
@@ -453,8 +498,17 @@ class _FakeGroup:
 class _FakeMember:
     """An eAIBase double with both emote layers; every write is counted."""
 
-    def __init__(self, *, threat: float = 0.0, fighting: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        threat: float = 0.0,
+        fighting: bool = False,
+        simulation_disabled: bool = False,
+        fsm_state: str = "Idle",
+    ) -> None:
         self.alive = True
+        self._simulation_disabled = simulation_disabled
+        self._fsm_state = fsm_state
         self.m_eAI_IsFightingFSM = fighting
         self.m_Expansion_EmoteID = 0
         self.m_Expansion_EmoteAutoCancel = False
@@ -473,6 +527,14 @@ class _FakeMember:
 
     def GetThreatToSelf(self, ignore_los: bool = False) -> float:
         return self._threat
+
+    def GetIsSimulationDisabled(self) -> bool:
+        return self._simulation_disabled
+
+    def GetFSM(self):
+        if self._fsm_state is None:
+            return None
+        return _FakeFSM(self._fsm_state)
 
     def Expansion_SetEmote(self, emote_id, auto_cancel=False, delay=0) -> None:
         self.set_emote_calls.append((emote_id, auto_cancel, delay))
@@ -558,6 +620,7 @@ def _emote_namespace() -> dict:
     class_types = (
         "MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIBase",
         "EmoteManager", "ScriptCallQueue", "MCPJob", "MCPResult",
+        "eAIFSM", "ExpansionState",
     )
     if "protected void AIClearEmoteAutoCancel(EmoteManager emotes)" in adapter:
         translate(
@@ -722,6 +785,47 @@ class AiEmoteEnforceTest(unittest.TestCase):
                 self.assertEqual(result.emote_pending, expected_pending)
                 self.assertEqual(member.set_emote_calls, [])
                 self.assertEqual(namespace["m_Jobs"].Count(), 0)
+
+    def test_e8_dormant_or_simulation_disabled_refuses_npc_dormant(self) -> None:
+        # POS, round B. Mutant killed: removing the 4b guard (the dispatch
+        # would call SetEmote, queue a job and later time out with a
+        # pending request). Each trigger alone must refuse.
+        for member in (
+            _FakeMember(fsm_state="Dormant"),
+            _FakeMember(simulation_disabled=True),
+            _FakeMember(fsm_state="Dormant", simulation_disabled=True),
+        ):
+            with self.subTest(
+                fsm=member._fsm_state, sim_disabled=member._simulation_disabled
+            ):
+                namespace = _emote_namespace()
+                _setup(namespace, member)
+                handled, result = _dispatch(namespace)
+                self.assertEqual(handled, 1)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error.text, "npc_dormant")
+                self.assertFalse(result.emote_pending)
+                self.assertEqual(member.set_emote_calls, [])
+                self.assertEqual(namespace["m_Jobs"].Count(), 0)
+                self.assertEqual(
+                    str(_bridge_error(_wire_from_result(result), EMOTE)),
+                    "npc_dormant; observed=emote_pending=false",
+                )
+
+    def test_e8_awake_member_takes_the_normal_path(self) -> None:
+        # NEG: simulation enabled and FSM not Dormant -> the guard must
+        # not fire; the one SetEmote write and the job still happen.
+        for fsm_state in ("Idle", None):
+            with self.subTest(fsm_state=fsm_state):
+                namespace = _emote_namespace()
+                member = _FakeMember(fsm_state=fsm_state)
+                _setup(namespace, member)
+                handled, _result = _dispatch(namespace)
+                self.assertEqual(handled, 2)
+                self.assertEqual(
+                    member.set_emote_calls, [(_EMOTE_IDS["nod"], True, 10000.0)]
+                )
+                self.assertEqual(namespace["m_Jobs"].Count(), 1)
 
     def test_e8_at_rest_one_set_emote_call_in_the_dispatch(self) -> None:
         # Mutants killed: the job (not the dispatch) calling

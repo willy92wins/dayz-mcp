@@ -571,6 +571,10 @@ _ACTOR_EMOTE_STANCES = frozenset(
 def _ai_emote_detail(result: dict[str, Any]) -> str:
     # ai_emote (plan 3.5; docs/expansion-ai-adapter.md:164-166): only this text
     # crosses on ok=false, and every server answer carries emote_pending.
+    # npc_dormant (round B) reaches this same path: _bridge_error keeps it
+    # as the message head (not remote_error/bad_args) and this detail adds
+    # observed=emote_pending=false, since the dispatch refused before any
+    # SetEmote write and left no request pending.
     pending = "true" if result.get("emote_pending") else "false"
     state = result.get("emote_state")
     if isinstance(state, str) and state in _ACTOR_EMOTE_ERROR_STATES:

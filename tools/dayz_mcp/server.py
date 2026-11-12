@@ -10596,7 +10596,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "object_id (an ai_group_spawn member), the same call goes to the "
             "server as ai_emote with a lease instead (plan 3.5): it is "
             "refused with bad_target when the id is not a living member of "
-            "an active group, and its states gain cancelled (end with only "
+            "an active group, with npc_dormant when the member's simulation "
+            "is disabled or its FSM state is Dormant (refused before any "
+            "emote request is written, so no request stays pending), and "
+            "its states gain cancelled (end with only "
             "an Expansion request pending) and every answer carries "
             "emote_pending, true while a request in either emote layer is "
             "still pending (on an error answer it travels in the message "
@@ -10653,7 +10656,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "there. Errors: bad_args "
             "(it lists the allowed names), client_not_in_game, no_player, "
             "no_emote_manager, emote_rejected, no_emote_playing, "
-            "emote_timed_out, and bridge_capability_missing from a PBO "
+            "emote_timed_out, npc_dormant (with object_id only), and "
+            "bridge_capability_missing from a PBO "
             "without the verb, which is never handed it."
         )
     )
