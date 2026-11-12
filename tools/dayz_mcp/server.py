@@ -9873,7 +9873,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "fence refuses it first (legacy_unbound in the plain case). "
         "It is refused as arg_contract_mismatch, with nothing sent, when the "
         "client bridge announces camera_set_focus without this release's "
-        "client contract (poll ach=), as one that still calls Camera.SetFocus "
+        "client contract (poll ach=), as a bridge on the older focus setter "
         "does. "
         "cam_mode look_at is accepted as an alias of lookat and is sent as lookat. "
         "Settle is wall-time only (no Camera.IsInterpolationComplete / GetCurrentFOV): "

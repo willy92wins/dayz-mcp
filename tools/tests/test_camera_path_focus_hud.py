@@ -1495,6 +1495,8 @@ class CameraSetFocusTest(_ToolCase):
             "bridge_capability_missing",
             "the client bridge bound to the run does not announce camera_set_focus",
             "with no client bound, the loopback's binding fence refuses it first (legacy_unbound",
+            "It is refused as arg_contract_mismatch, with nothing sent, when the client bridge "
+            "announces camera_set_focus without this release's client contract (poll ach=)",
         ):
             with self.subTest(tool="camera_set", phrase=phrase):
                 self.assertIn(phrase, description)
