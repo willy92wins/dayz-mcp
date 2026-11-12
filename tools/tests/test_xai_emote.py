@@ -470,8 +470,8 @@ class AdapterBridgeErrorMatrixTest(unittest.TestCase):
 
     The same ok=false result reaches _bridge_error under each verb: the
     spawn keeps field, allowed, args_read and created, the order only
-    field and allowed, the emote observed=emote_pending=, and
-    ai_group_state stays bare. The comment above _AI_GROUP_SPAWN_FIELDS
+    field and allowed (and nothing without a report), the emote
+    observed=emote_pending=, and ai_group_state stays bare. The comment above _AI_GROUP_SPAWN_FIELDS
     says the same. Mutants killed: the comment calling the emote path
     bare again, and a verb's branch lost or given to ai_group_state.
     """
@@ -494,6 +494,10 @@ class AdapterBridgeErrorMatrixTest(unittest.TestCase):
             self.assertIn(part, spawn)
         order = str(_bridge_error(dict(self.RESULT), "ai_group_order"))
         self.assertEqual(order, "bad_args; field=formation; allowed=Vee,Wall")
+        # PX8 d: an order with no field to apply posts no ai_group, so
+        # its bad_args stays bare like the state's.
+        bare = str(_bridge_error({"ok": 0, "error": "bad_args"}, "ai_group_order"))
+        self.assertEqual(bare, "bad_args")
         state = str(_bridge_error(dict(self.RESULT), "ai_group_state"))
         self.assertEqual(state, "bad_args")
         rejected = dict(self.RESULT, error="emote_rejected")
