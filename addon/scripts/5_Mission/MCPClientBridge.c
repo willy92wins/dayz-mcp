@@ -584,6 +584,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_StartPauseDone;
 	protected float m_StartPauseFromS;
 	protected const float START_PAUSE_WINDOW_S = 60.0;
+	//! §2.6 C14 (PX3 a): ui_pause left a queued pause (vanilla m_PauseQueued)
+	//! that was not queued before its call, or opened the pause menu
+	//! (MENU_INGAME) that is still open. MaintainMCPPause keeps each mark as
+	//! long as the pause it names; the lease close cancels the queued one
+	//! and closes the open one (StopLeaseClosePause), and its census counts both.
+	protected bool m_MCPPauseQueued;
+	protected bool m_MCPPauseOpened;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -636,6 +643,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogHostTried = false;
 		m_StartPauseDone = false;
 		m_StartPauseFromS = -1.0;
+		m_MCPPauseQueued = false;
+		m_MCPPauseOpened = false;
 	}
 
 	void ~MCPClientBridge()
@@ -727,6 +736,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// §4 #266: the MCP-started mark falls as soon as its emote stops,
 		// even after its job ended. Before the job runner.
 		MaintainMCPEmoteStarted();
+		// §2.6 C14: the ui_pause marks fall as soon as their pause does,
+		// even after the job answered. Before the job runner.
+		MaintainMCPPause();
 
 		if (m_JobRunner)
 		{
@@ -8431,6 +8443,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int beforeId;
 		int afterId;
 		bool deferred;
+		bool queuedBefore;
+		bool pausedBefore;
 		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
 		{
 			result.ok = false;
@@ -8456,6 +8470,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				beforeId = menuBefore.GetID();
 			}
 		}
+		queuedBefore = mission.MCP_IsPauseQueued();
+		pausedBefore = mission.IsPaused();
 		mission.Pause();
 		afterId = -1;
 		ui = GetGame().GetUIManager();
@@ -8466,6 +8482,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			{
 				afterId = menuAfter.GetID();
 			}
+		}
+		// §2.6 C14: mark only what this call left for the lease close. A
+		// pause already queued, or a menu already open, is someone else's.
+		if (!queuedBefore && mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = true;
+		}
+		if (!pausedBefore && afterId == MENU_INGAME)
+		{
+			m_MCPPauseOpened = true;
 		}
 		reply = new MCPUiPause();
 		reply.menu_id_before = beforeId;
@@ -9404,6 +9430,29 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
+		// §2.6 C14: after StopLeaseClosePause, the pause ui_pause queued and
+		// still queued, or the pause menu it opened and still open, is
+		// residue the 25 s observer re-reads. A pause MCP neither queued nor
+		// opened is not counted.
+		bool pauseActive = false;
+		if (m_MCPPauseQueued || m_MCPPauseOpened)
+		{
+			MissionGameplay closeMission = MissionGameplay.Cast(GetGame().GetMission());
+			if (closeMission)
+			{
+				if (m_MCPPauseQueued && closeMission.MCP_IsPauseQueued())
+				{
+					pauseActive = true;
+				}
+
+				if (m_MCPPauseOpened && closeMission.IsPaused())
+				{
+					pauseActive = true;
+				}
+			}
+		}
+
+		AddCloseEntry(census, "ui_pause", pauseActive, "ui_pause");
 		// §2.9: the client half reads the action manager, not the job, so a
 		// Take that cleared the hold control cannot make this row clean.
 		bool holdActive = MCPHoldControl.IsActive();
@@ -9535,6 +9584,99 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		emotes.MCP_RequestEmoteEnd();
 	}
 
+	// §2.6 C14: each ui_pause mark lives as long as the pause it names, as
+	// m_MCPEmoteStarted does (MaintainMCPEmoteStarted). A queued pause that
+	// vanilla then opened (missiongameplay.c:308-311, :1331) is MCP's open
+	// menu; that menu closed by anyone drops its mark, so a pause menu
+	// opened later, by Esc, is not MCP's. No mission, no pause: both fall.
+	protected void MaintainMCPPause()
+	{
+		MissionGameplay mission;
+		if (!m_MCPPauseQueued && !m_MCPPauseOpened)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+		}
+
+		if (!mission)
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseOpened = false;
+			return;
+		}
+
+		if (m_MCPPauseQueued && !mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = false;
+			if (mission.IsPaused())
+			{
+				m_MCPPauseOpened = true;
+			}
+		}
+
+		if (m_MCPPauseOpened && !mission.IsPaused())
+		{
+			m_MCPPauseOpened = false;
+		}
+	}
+
+	// §2.6 C14 (PX3 a): the close cancels the pause ui_pause queued, which
+	// vanilla would otherwise open under the next lease once loading or the
+	// respawn ends (missiongameplay.c:308-311; Continue() leaves the queue,
+	// :1334-1348), and closes the pause menu ui_pause opened with the
+	// mission's Continue(), as ContinueStartPauseMenu does, only while it is
+	// on top: a submenu above it means someone is in it. A pause MCP neither
+	// queued nor opened is neither touched nor counted.
+	protected void StopLeaseClosePause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		UIScriptedMenu menu;
+		if (!m_MCPPauseQueued && !m_MCPPauseOpened)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+		}
+
+		if (!mission)
+		{
+			return;
+		}
+
+		if (m_MCPPauseQueued)
+		{
+			mission.MCP_CancelQueuedPause();
+			m_MCPPauseQueued = false;
+		}
+
+		if (!m_MCPPauseOpened)
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		menu = ui.GetMenu();
+		if (!menu || menu.GetID() != MENU_INGAME)
+		{
+			return;
+		}
+
+		mission.Continue();
+	}
+
 	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
 	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
 	{
@@ -9568,6 +9710,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_JobRunner.AbortAll(this);
 		}
 
+		// §2.6 C14: after AbortAll, so an open ui_pause job answers once,
+		// and before the census.
+		StopLeaseClosePause();
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
 		if (LeaseCloseCensusSettled(census))
 		{

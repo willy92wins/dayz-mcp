@@ -638,7 +638,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         })()
         return manager, state
 
-    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3):
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3, pause_queued_mark=None, pause_opened_mark=False, pause_queued=None, paused=False):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
@@ -659,7 +659,16 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "GetActionManager": lambda self: manager,
             "GetEmoteManager": lambda self: emote_mgr,
         })()
-        game = type("G", (), {"GetPlayer": lambda self: player})()
+        # §2.6 C14: "ui_pause" in active is MCP's queued pause still queued.
+        if pause_queued_mark is None:
+            pause_queued_mark = "ui_pause" in active
+        if pause_queued is None:
+            pause_queued = "ui_pause" in active
+        mission = type("MG", (), {
+            "MCP_IsPauseQueued": lambda self: pause_queued,
+            "IsPaused": lambda self: paused,
+        })()
+        game = type("G", (), {"GetPlayer": lambda self: player, "GetMission": lambda self: mission})()
         runner = type("R", (), {
             "CountExcluding": lambda self, kind: 1 if "jobs" in active else 0,
             "GetElapsedS": lambda self: 0.0,
@@ -668,6 +677,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "GetGame": lambda: game,
             "PlayerBase": type("PB", (), {"Cast": staticmethod(lambda x: x)}),
             "ActionManagerClient": type("AMC", (), {"Cast": staticmethod(lambda x: x)}),
+            "MissionGameplay": type("MGC", (), {"Cast": staticmethod(lambda x: x)}),
             "MCPCarDrive": type("C", (), {"s_Active": flags["vehicle_drive"], "Clear": staticmethod(lambda: None)}),
             "MCPInputTriggerControl": type("I", (), {"IsHeld": staticmethod(lambda: flags["input_trigger"]), "ReleaseAll": staticmethod(lambda cause: None)}),
             "MCPPlayerMoveControl": type("M", (), {
@@ -697,6 +707,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "m_UiPreviewRoot": object() if "ui_preview" in active else None,
             "m_JobRunner": runner,
             "m_MCPEmoteStarted": emote_mcp,
+            "m_MCPPauseQueued": pause_queued_mark,
+            "m_MCPPauseOpened": pause_opened_mark,
         }
         for sig, name in (
             ("protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)", "AddCloseEntry"),
@@ -714,9 +726,10 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 body = body.replace('if (m_MCPEmoteStarted)', 'if (true)', 1)
             if mutant_emote == "no_manager_clean" and name == "BuildLeaseCloseCensus":
                 body = body.replace('if (!closeEmotes || closeEmotes.MCP_IsEmoteLive())', 'if (closeEmotes && closeEmotes.MCP_IsEmoteLive())', 1)
-            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient", "EmoteManager"),
+            translate(_wrap(sig, body), sig, ns, class_types=("MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "PlayerBase", "ActionManagerClient", "EmoteManager", "MissionGameplay"),
                       members=("m_CameraPath", "m_ActiveCam", "m_CameraHandoffPending", "m_PlayerSimulationDisabled",
-                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner", "m_MCPEmoteStarted"))
+                               "m_ControlsSuppressed", "m_Dialog", "m_UiPreviewRoot", "m_JobRunner", "m_MCPEmoteStarted",
+                               "m_MCPPauseQueued", "m_MCPPauseOpened"))
         args = type("Args", (), {"close_generation": "g1", "close_lease_id": "l1"})()
         self._last_client_ns = ns
         return ns["BuildLeaseCloseCensus"](args)
@@ -742,6 +755,17 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census_path))
         self.assertEqual(census2.state.text, "residue")
         self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census2))
+        # §2.6 C14 NEG: MCP's queued pause still queued names exactly ui_pause,
+        # and so does the pause menu MCP opened while it is still open.
+        census_pause = self._client_census(source, active=("ui_pause",))
+        self.assertEqual([e.name.text for e in census_pause.entries if e.state.text != "clean"], ["ui_pause"])
+        self.assertEqual(census_pause.state.text, "residue")
+        self.assertFalse(self._last_client_ns["LeaseCloseCensusSettled"](census_pause))
+        census_menu = self._client_census(source, pause_opened_mark=True, paused=True)
+        self.assertEqual([e.name.text for e in census_menu.entries if e.state.text != "clean"], ["ui_pause"])
+        # A pause MCP neither queued nor opened is not counted.
+        census_foreign = self._client_census(source, pause_queued_mark=False, pause_queued=True, paused=True)
+        self.assertEqual(census_foreign.state.text, "clean")
         # H3: process-lifetime input debt is unverified: census residue,
         # but the observer is settled and does not wait 25 s for it.
         census3 = self._client_census(source, active=("action_input_in_flight",))
@@ -954,7 +978,8 @@ class LeaseCloseCensusTests(unittest.TestCase):
         steps = ["FinishLeaseClosed()", "m_UiPreviewRoot.Unlink()", "MCPCarDrive.Clear()",
                  'MCPInputTriggerControl.ReleaseAll("shutdown")', 'MCPPlayerMoveControl.ReleaseAll("shutdown")',
                  "StopCameraPath()", "RestoreGameplay()", "ReleaseCamera()", 'MCPHoldControl.Shutdown("shutdown")',
-                 'MCPVehicleTrace.Abort("shutdown")', "StopLeaseCloseEmote()", "AbortAll(this)", "BuildLeaseCloseCensus(command.args)"]
+                 'MCPVehicleTrace.Abort("shutdown")', "StopLeaseCloseEmote()", "AbortAll(this)", "StopLeaseClosePause()",
+                 "BuildLeaseCloseCensus(command.args)"]
         pos = -1
         for step in steps:
             nxt = body.find(step, pos + 1)
@@ -3073,6 +3098,8 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
                 "m_UiPreviewRoot": None,
                 "m_JobRunner": _NS(CountExcluding=lambda _k: 0, GetElapsedS=lambda: 0.0),
                 "m_MCPEmoteStarted": False,
+                "m_MCPPauseQueued": False,
+                "m_MCPPauseOpened": False,
             }
             for sig in (
                 "protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)",
@@ -3091,6 +3118,7 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
                         "PlayerBase",
                         "ActionManagerClient",
                         "EmoteManager",
+                        "MissionGameplay",
                     ),
                     members=(
                         "m_CameraPath",
@@ -3102,6 +3130,8 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
                         "m_UiPreviewRoot",
                         "m_JobRunner",
                         "m_MCPEmoteStarted",
+                        "m_MCPPauseQueued",
+                        "m_MCPPauseOpened",
                     ),
                 )
             args = _NS(close_generation=EnforceString.of("g1"), close_lease_id=EnforceString.of("l1"))
