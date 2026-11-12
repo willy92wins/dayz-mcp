@@ -349,6 +349,20 @@ class AiEmoteAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(bound_queue(state, "server"), [])
 
+    def test_ai_emote_stays_out_of_the_live_profile_and_its_doc_section(self) -> None:
+        # PX3 c: the LIVE_ALLOWED_COMMANDS paragraph is about ai_group_state.
+        # Under the ai_emote heading it read as if the mutation were a live
+        # read. Mutants killed: ai_emote joining LIVE_ALLOWED_COMMANDS, and
+        # the paragraph back in the ai_emote section.
+        self.assertNotIn(EMOTE, loopback.LIVE_ALLOWED_COMMANDS)
+        doc = (addon_root().parent / "docs" / "expansion-ai-adapter.md").read_text(encoding="utf-8")
+        paragraph = "As a server read it is also admitted under the live profile:"
+        self.assertEqual(doc.count(paragraph), 1)
+        reading = doc.index("## Reading a group (`ai_group_state`")
+        emote = doc.index("## Playing an emote on a member (`ai_emote`")
+        self.assertLess(reading, doc.index(paragraph))
+        self.assertLess(doc.index(paragraph), emote)
+
     def test_mask_bit4_is_ai_emote_append_only(self) -> None:
         # Mutant killed: ai_emote reusing an earlier bit (an old adapter
         # would announce a different verb under the same mask).

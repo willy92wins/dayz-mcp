@@ -154,6 +154,10 @@ part that reads residues when the census announces no close support, and
 the real bridge v12 poll stopped by the version gate). In-game
 validation is pending; this section describes the offline contract only.
 
+As a server read it is also admitted under the live profile:
+`LIVE_ALLOWED_COMMANDS` derives from `READ_ONLY_COMMANDS & SERVER_COMMANDS`
+(`loopback.py`), and the adapter mutations stay outside it.
+
 ## Playing an emote on a member (`ai_emote`, 36fa NPC half)
 
 `actor_emote(emote, wait_s=10.0, object_id=None, timeout_s)` is the one
@@ -220,10 +224,6 @@ support on every bound peer the broker answers
 Offline coverage: `tools/tests/test_xai_emote.py` (O8, E8; mutants: the
 job calling `Expansion_SetEmote`, and a `started` accepting the gesture
 already sounding with the same id). In-game validation is pending.
-
-As a server read it is also admitted under the live profile:
-`LIVE_ALLOWED_COMMANDS` derives from `READ_ONLY_COMMANDS & SERVER_COMMANDS`
-(`loopback.py`), and the adapter mutations stay outside it.
 
 ## How the adapter announces itself (deviation from plan 2.2)
 

@@ -349,6 +349,10 @@ modded class MCPBridge
 				memberRecord = record.members.Get(index);
 				if (memberRecord.member)
 				{
+					// A static pose's queued cancel (eAIBase.c:10914) would
+					// outlive the member and reach ServerRequestEmoteCancel
+					// (4_world/classes/emotemanager.c:1280) after the despawn.
+					AIClearEmoteAutoCancel(memberRecord.member.GetEmoteManager());
 					memberRecord.member.eAI_Despawn();
 				}
 
