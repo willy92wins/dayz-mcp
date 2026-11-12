@@ -1787,6 +1787,30 @@ class LeaseCloseCensusTests(unittest.TestCase):
         self.assertEqual(c_flushed.look_floor, 1)
         self.assertEqual(c_flushed.state.text, "clean")
 
+        # A start the channel refuses (input_busy) writes no id: floor stays.
+        channel["can_store"] = False
+        self.assertEqual(owner_ns["SendServerStart"](2, (10.0, 0.0, 0.0), 2.0, 1).text, "input_busy")
+        self.assertEqual(owner_ns["CloseFloor"](), 1)
+        # Same while a release is still pending (refused before CanStore).
+        owner_ns["s_ServerReleasePending"] = True
+        owner_ns["s_ServerReleaseId"] = 1
+        self.assertEqual(owner_ns["SendServerStart"](2, (10.0, 0.0, 0.0), 2.0, 1).text, "input_busy")
+        self.assertEqual(owner_ns["CloseFloor"](), 1)
+        channel["can_store"] = True
+        owner_ns["FlushServerRelease"]()
+        # Offline (not multiplayer) a Begin runs locally and sends nothing.
+        owner_ns["GetGame"] = lambda: _NS(
+            IsMultiplayer=lambda: False,
+            IsClient=lambda: True,
+            GetPlayer=lambda: object(),
+            GetTickTime=lambda: 9.0,
+        )
+        sent_before = len(channel["sent"])
+        err = owner_ns["Begin"](object(), (10.0, 0.0, 0.0), 2.0, 42)
+        self.assertEqual(err.text, "")
+        self.assertEqual(len(channel["sent"]), sent_before)
+        self.assertEqual(owner_ns["CloseFloor"](), 1)
+
         # POS/NEG server census: live server copy reports look_copy residue and
         # floors row carries look_id; cleared copy is clean.
         s_live = self._server_census(server_src, flags={"look": True}, look_floor=6)
