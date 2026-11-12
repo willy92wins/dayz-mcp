@@ -190,7 +190,7 @@ class SettingsReaderTest(unittest.TestCase):
         with TemporaryDirectory() as raw:
             root = Path(raw)
             missing = root / "missing.json"
-            self.assertFalse(read_idle_warden_enabled(missing))
+            self.assertTrue(read_idle_warden_enabled(missing))
             directory = root / "nested"
             directory.mkdir()
             self.assertFalse(read_idle_warden_enabled(directory))
@@ -200,6 +200,13 @@ class SettingsReaderTest(unittest.TestCase):
             bom = root / "bom.json"
             bom.write_bytes(b'\xef\xbb\xbf{"enabled": true}\n')
             self.assertFalse(read_idle_warden_enabled(bom))
+            invalid_utf8 = root / "invalid-utf8.json"
+            invalid_utf8.write_bytes(b'{"enabled": true}\xff\n')
+            self.assertFalse(read_idle_warden_enabled(invalid_utf8))
+            # Deeper than the decoder recurses: RecursionError, not ValueError.
+            deep = root / "deep.json"
+            deep.write_text("[" * 100000 + "0" + "]" * 100000, encoding="utf-8")
+            self.assertFalse(read_idle_warden_enabled(deep))
             for text in (
                 '{"enabled": "true"}',
                 '{"enabled": 1}',
@@ -409,6 +416,10 @@ class IdleWardenTest(unittest.TestCase):
         self.settings.parent.mkdir(parents=True, exist_ok=True)
         self.settings.write_text('{"enabled": true}\n', encoding="utf-8")
 
+    def disable(self) -> None:
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text('{"enabled": false}\n', encoding="utf-8")
+
     def advance(self, seconds: float) -> None:
         self.mono += float(seconds)
 
@@ -557,6 +568,7 @@ class IdleWardenTest(unittest.TestCase):
         # enqueue itself expires due leases. Advance only after the ticket is
         # in, so a disabled pass is the only thing that could drop either one.
         self.clock[0] = SESSION_TTL_S + 5
+        self.disable()
         warden = self.make_warden()
         self.assertEqual(warden.run_once(), "disabled")
         self.assertIsNotNone(self.coordinator._active)
@@ -1743,6 +1755,7 @@ class IdleWardenTest(unittest.TestCase):
     def test_exit_does_not_leave_the_adoption_marker(self) -> None:
         # This cycle did not adopt. A pre-existing marker stays for startup recovery.
         self.abandon()
+        self.disable()
         warden = self.make_warden()
         marker = self.lifecycle._adoption_marker_path()
         self.assertIsNotNone(marker)
@@ -1764,7 +1777,7 @@ class IdleWardenTest(unittest.TestCase):
         settled = self.lifecycle._adoption_settled_path()
         self.assertIsNotNone(settled)
         self.assertFalse(settled.exists())
-        self.assertFalse(self.settings.exists())
+        self.assertFalse(read_idle_warden_enabled(self.settings))
         stored = self.store.get("run-x")
         self.assertEqual(stored.state, "RUNNING_IDLE")
         self.assertIsNone(stored.owner_session_id)

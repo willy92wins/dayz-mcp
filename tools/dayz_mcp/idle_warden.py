@@ -1,10 +1,11 @@
-"""Idle warden (250f plan v2.1 §3.6). Ships disabled.
+"""Idle warden (250f plan v2.1 §3.6). Ships enabled.
 
-One daemon thread. Each cycle re-reads ``idle-warden.json``. Absent, unreadable
-or anything other than ``{"enabled": true}`` is off: no lease, no adopt, no
-bridge command, no use_state change, no lease expiry pass, and no touch of
-``adoption-unconfirmed.json``. A cycle that was already on and sees the file
-go off releases what it holds and closes nothing.
+One daemon thread. Each cycle re-reads ``idle-warden.json``. Absent or
+``{"enabled": true}`` is on; ``{"enabled": false}``, unreadable or any other
+shape is off: no lease, no adopt, no bridge command, no use_state change, no
+lease expiry pass, and no touch of ``adoption-unconfirmed.json``. A cycle that
+was already on and sees the file go off releases what it holds and closes
+nothing.
 
 When on, an ``abandoned`` run is warned and closed 60 s later unless someone
 reacts. A confirmed-dead client skips the warning. After a successful close
@@ -92,18 +93,22 @@ class _Stopped(Exception):
 
 
 def read_idle_warden_enabled(path: Path) -> bool:
-    """True only for a JSON object whose sole field is ``enabled: true``.
+    """True when ``path`` is absent or the JSON object ``{"enabled": true}``.
 
-    Missing, unreadable, invalid, or any other shape is off.
+    ``{"enabled": false}``, any other read error (invalid UTF-8 included),
+    invalid JSON (nesting too deep to decode included), or any other shape is
+    off.
     """
 
     try:
         text = Path(path).read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeDecodeError):
         return False
     try:
         payload = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     if not isinstance(payload, dict) or set(payload) != {"enabled"}:
         return False
