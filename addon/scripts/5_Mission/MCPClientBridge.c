@@ -494,6 +494,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
 	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	//! Client contract hash, announced on every poll as `ach=`: 16-hex sha256
+	//! prefix of CLIENT_CONTRACT in tools/dayz_mcp/bridge_readiness.py, the five
+	//! OverrideDOF fields of camera_set_focus and chat_read's visibility fields.
+	//! The census alone cannot tell this bridge from one that names the same
+	//! verbs with Camera.SetFocus and no visibility, so the tools refuse those
+	//! two verbs with arg_contract_mismatch unless it matches. Hex, sent as is.
+	protected const string CLIENT_CONTRACT_HASH = "e30d71ca0049af42";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -960,6 +967,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			request = request + "&inst=" + EncodeQueryValue(m_PeerInstance);
 		}
 		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&ach=" + CLIENT_CONTRACT_HASH;
 		request = request + LoadCounterQuery();
 		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
 		request = request + "&wait_ms=800";

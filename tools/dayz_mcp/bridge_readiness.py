@@ -277,7 +277,8 @@ def _has_ready_snapshot_shape(status: object) -> bool:
 # tool's mode=/radius= shape. Both sides ship the same 16-hex SHA-256 prefix of
 # the canonical form below; the PBO announces it as poll `ach=` and
 # `_compare_bridge_capabilities` fails closed on absent/wrong values for the
-# server peer. Client peer has no ach gate yet.
+# server peer. The client's ach (CLIENT_CONTRACT below) gates admission of
+# its verbs in loopback, not readiness.
 SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
@@ -332,6 +333,58 @@ def server_arg_contract_hash() -> str:
 
 
 EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
+
+
+# Client contract (#377, #380). A client bridge built before these revisions
+# announces the same verbs at the same MCP_BRIDGE_VERSION, but runs
+# camera_set_focus through Camera.SetFocus with two values and answers
+# chat_read without the visibility fields. The client announces the hash of
+# this table as poll `ach=` (MCPClientBridge.c CLIENT_CONTRACT_HASH), and
+# loopback refuses these verbs with arg_contract_mismatch when it is absent or
+# different. camera_set_focus lists the args it reads; chat_read lists the
+# fields its reply carries (per line, plus hud_shown). A bump here needs the
+# PBO's constant rebuilt with it. Tools older than this table never read the
+# client's ach, so a newer client still serves them.
+CLIENT_CONTRACT: dict[str, tuple[str, ...]] = {
+    "camera_set_focus": (
+        "focus_blur",
+        "focus_depth_offset",
+        "focus_distance",
+        "focus_length",
+        "focus_length_near",
+    ),
+    "chat_read": (
+        "alpha",
+        "hud_shown",
+        "replaced",
+        "screen_h",
+        "screen_w",
+        "screen_x",
+        "screen_y",
+        "shown_at_ms",
+        "visible_hierarchy",
+    ),
+}
+
+
+def client_contract_canonical() -> str:
+    """Same form as server_arg_contract_canonical, over CLIENT_CONTRACT."""
+
+    return "\n".join(
+        f"{cmd}={','.join(keys)}"
+        for cmd, keys in sorted(CLIENT_CONTRACT.items())
+    )
+
+
+def client_contract_hash() -> str:
+    """First 16 hex chars of sha256(canonical). Must match MCPClientBridge.c."""
+
+    import hashlib
+
+    return hashlib.sha256(client_contract_canonical().encode("utf-8")).hexdigest()[:16]
+
+
+EXPECTED_CLIENT_CONTRACT_HASH = client_contract_hash()
 
 
 # peer + command -> the public tool that fronts it, or None when the command is

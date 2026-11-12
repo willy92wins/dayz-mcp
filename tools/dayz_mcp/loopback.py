@@ -1462,6 +1462,11 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
 _CLIENT_ANNOUNCED_WITH: dict[str, str] = {
     "camera_path_play": "camera_path_release",
 }
+# Client verbs whose contract changed under the same name and the same bridge
+# version (#377 OverrideDOF focus, #380 chat_read visibility): the census must
+# also carry ach= equal to EXPECTED_CLIENT_CONTRACT_HASH, or the verb is
+# refused with arg_contract_mismatch.
+_CLIENT_CONTRACT_COMMANDS = frozenset({"camera_set_focus", "chat_read"})
 
 
 def _requires_capability_admission(cmd: str, args: object) -> bool:
@@ -5307,9 +5312,11 @@ class ServerState:
         does not name the command (or the command _CLIENT_ANNOUNCED_WITH
         pairs it with), refuses it with the command's code in
         _CLIENT_ANNOUNCED_COMMANDS (hold_not_supported for action_hold and
-        bridge_capability_missing for the other verbs). Internal commands are
-        checked too. Re-checked at delivery so a destination change after
-        enqueue cannot hand the verb to an older PBO.
+        bridge_capability_missing for the other verbs). A verb in
+        _CLIENT_CONTRACT_COMMANDS announced without the current client ach is
+        arg_contract_mismatch. Internal commands are checked too. Re-checked at
+        delivery so a destination change after enqueue cannot hand the verb to
+        an older PBO.
         """
 
         if cmd not in _CLIENT_ANNOUNCED_COMMANDS or peer != "client":
@@ -5336,6 +5343,11 @@ class ServerState:
         paired = _CLIENT_ANNOUNCED_WITH.get(cmd)
         if paired is not None and paired not in announced:
             return refusal
+        if cmd in _CLIENT_CONTRACT_COMMANDS:
+            from dayz_mcp.bridge_readiness import EXPECTED_CLIENT_CONTRACT_HASH
+
+            if view.get("announced_arg_contract_hash") != EXPECTED_CLIENT_CONTRACT_HASH:
+                return "arg_contract_mismatch"
         return None
 
     def _invalidate_caps_for_instance_locked(self, instance: str) -> None:

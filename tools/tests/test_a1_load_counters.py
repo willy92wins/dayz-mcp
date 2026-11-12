@@ -11,7 +11,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from dayz_mcp import core, loopback, server as server_module
+from dayz_mcp import bridge_readiness, core, loopback, server as server_module
 from dayz_mcp.instance_fence import BINDING_BOUND
 from tests.enforce_subset_helpers import EnforceString
 from tests.poll_harness_helpers import _MISSION, _bridge_harness, _dispatch_branches
@@ -282,6 +282,8 @@ class LoadCountersTest(unittest.TestCase):
             + inst_enc
             + b"&caps="
             + caps_enc
+            + b"&ach="
+            + bridge_readiness.EXPECTED_CLIENT_CONTRACT_HASH.encode("ascii")
             + load_enc
             + _WAIT_MS
         )

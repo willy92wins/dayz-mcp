@@ -1495,6 +1495,8 @@ class CameraSetFocusTest(_ToolCase):
             "bridge_capability_missing",
             "the client bridge bound to the run does not announce camera_set_focus",
             "with no client bound, the loopback's binding fence refuses it first (legacy_unbound",
+            "It is refused as arg_contract_mismatch, with nothing sent, when the client bridge "
+            "announces camera_set_focus without this release's client contract (poll ach=)",
         ):
             with self.subTest(tool="camera_set", phrase=phrase):
                 self.assertIn(phrase, description)
@@ -1597,7 +1599,10 @@ class OlderBridgeAdmissionTest(unittest.TestCase):
         self.state = loopback.ServerState("test-key")
         bind_both_peers(self.state)
         self.full = sorted(server._BRIDGE_COMMAND_TOOLS["client"])
-        self.older = [name for name in self.full if name not in NEW_COMMANDS]
+        # The client bridge of 9810aafd, before OverrideDOF: these same verbs,
+        # camera_set_focus among them, at bridge version 12, with no ach=.
+        self.older = list(self.full)
+        self.without_new_verbs = [name for name in self.full if name not in NEW_COMMANDS]
 
     def test_with_no_client_bound_the_binding_fence_answers_first(self) -> None:
         # bridge_capability_missing is for a bound client whose census lacks the
@@ -1614,9 +1619,11 @@ class OlderBridgeAdmissionTest(unittest.TestCase):
         self.assertEqual(unbound._legacy_queues["client"], [])
         self.assertEqual(bound_queue(unbound, "client"), [])
 
-    def _announce(self, names: list[str]) -> tuple[int, dict]:
+    def _announce(
+        self, names: list[str], ach: str | None = bridge_readiness.EXPECTED_CLIENT_CONTRACT_HASH
+    ) -> tuple[int, dict]:
         return self.state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=",".join(names)
+            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=",".join(names), ach=ach
         )
 
     def _enqueue(self, command: str) -> tuple[int, dict]:
@@ -1624,8 +1631,36 @@ class OlderBridgeAdmissionTest(unittest.TestCase):
             command, dict(VALID_WIRE_ARGS[command]), peer="client", operation_timeout_s=30.0
         )
 
-    def test_an_older_census_refuses_each_verb_before_anything_is_queued(self) -> None:
-        self._announce(self.older)
+    def test_the_older_bridge_is_refused_the_override_dof_focus(self) -> None:
+        # Same verbs, same version, no client contract: camera_set_focus would
+        # run Camera.SetFocus there, so it is refused before anything is
+        # queued. The verbs whose contract did not change still go.
+        for ach in (None, "", "deadbeefdeadbeef"):
+            with self.subTest(ach=ach):
+                self.setUp()
+                self._announce(self.older, ach=ach)
+                self.assertEqual(self._enqueue("camera_set_focus"), (409, {"error": "arg_contract_mismatch"}))
+                for command in ("camera_path_play", "hud_set"):
+                    status, body = self._enqueue(command)
+                    self.assertEqual(status, 200, body)
+                self.assertEqual(
+                    [row["cmd"] for row in bound_queue(self.state, "client")], ["camera_path_play", "hud_set"]
+                )
+        self.assertEqual(_public_enqueue_error({"error": "arg_contract_mismatch"}), "arg_contract_mismatch")
+
+    def test_delivery_refuses_the_focus_to_the_older_bridge(self) -> None:
+        self._announce(self.full)
+        status, body = self._enqueue("camera_set_focus")
+        self.assertEqual(status, 200, body)
+        status, poll = self._announce(self.older, ach=None)
+        self.assertEqual((status, poll["commands"]), (200, []))
+        self.assertEqual(
+            self.state._results[body["id"]],
+            {"id": body["id"], "ok": False, "error": "arg_contract_mismatch"},
+        )
+
+    def test_a_census_without_the_verbs_refuses_each_verb_before_anything_is_queued(self) -> None:
+        self._announce(self.without_new_verbs)
         for command in NEW_COMMANDS:
             with self.subTest(command=command):
                 self.assertEqual(self._enqueue(command), (409, {"error": "bridge_capability_missing"}))
@@ -1644,15 +1679,15 @@ class OlderBridgeAdmissionTest(unittest.TestCase):
         self.assertEqual([row["cmd"] for row in bound_queue(self.state, "client")], list(NEW_COMMANDS))
 
     def test_delivery_checks_the_census_again(self) -> None:
-        # Each verb is queued for the full census, then the client polls with an
-        # older one: none of them is handed over.
+        # Each verb is queued for the full census, then the client polls with
+        # one that lacks the verbs: none of them is handed over.
         for command in NEW_COMMANDS:
             with self.subTest(command=command):
                 self.setUp()
                 self._announce(self.full)
                 status, body = self._enqueue(command)
                 self.assertEqual(status, 200, body)
-                status, poll = self._announce(self.older)
+                status, poll = self._announce(self.without_new_verbs)
                 self.assertEqual(status, 200)
                 self.assertEqual(poll["commands"], [])
                 self.assertEqual(
@@ -3219,6 +3254,92 @@ class ExecutedApplyTest(unittest.TestCase):
                 with self.subTest(field=field, bad=bad):
                     args = SimpleNamespace(**dict(valid, **{field: bad}))
                     self.assertFalse(bridge.IsValidCameraFocus(args))  # type: ignore[attr-defined]
+
+
+_FOCUS_FIELDS = ("focus_distance", "focus_blur", "focus_length", "focus_length_near", "focus_depth_offset")
+
+
+def _wire_focus_args(messages: str, payload: dict[str, float]) -> SimpleNamespace:
+    """MCPArgs as JsonSerializer leaves it: MCPArgs()'s focus values, then the keys sent."""
+    values = {name: 0.0 for name in _FOCUS_FIELDS}
+    constructor = _code(_method_body(messages, "void MCPArgs()"))
+    for name, value in re.findall(r"\b(focus_\w+)\s*=\s*([^;]+);", constructor):
+        values[name] = float(value)
+    values.update(payload)
+    return SimpleNamespace(**{name: _F32(value) for name, value in values.items()})
+
+
+class OlderPayloadDofDefaultsTest(unittest.TestCase):
+    """camera_set_focus from the tools of the Camera.SetFocus bridge carries
+    focus_distance and focus_blur only. The newer bridge gives the other three
+    the tools' defaults 450, 100 and 10, never 0, before OverrideDOF."""
+
+    OLD_PAYLOAD = {"focus_distance": 2.0, "focus_blur": 1.0}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.bridge_source = _source(BRIDGE)
+        cls.messages = _source(MESSAGES)
+
+    def _dof_calls(self, messages: str, payload: dict[str, float]) -> list[tuple[Any, ...]]:
+        bridge = _ApplyBridge(self.bridge_source)
+        args = _wire_focus_args(messages, payload)
+        self.assertTrue(bridge.IsValidCameraFocus(args))  # type: ignore[attr-defined]
+        bridge.ApplyCameraDOF(args)  # type: ignore[attr-defined]
+        return [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")]
+
+    def _assert_old_payload_defaults(self, messages: str) -> None:
+        self.assertEqual(
+            self._dof_calls(messages, self.OLD_PAYLOAD),
+            [("engine", "OverrideDOF", True, 2.0, 450.0, 100.0, 1.0, 10.0)],
+        )
+
+    def test_an_old_payload_gets_the_tool_defaults(self) -> None:
+        self._assert_old_payload_defaults(self.messages)
+
+    def test_each_missing_value_alone_gets_its_default(self) -> None:
+        sent = dict(self.OLD_PAYLOAD, focus_length=750.0, focus_length_near=500.0, focus_depth_offset=12.0)
+        defaults = {"focus_length": 450.0, "focus_length_near": 100.0, "focus_depth_offset": 10.0}
+        for missing, default in defaults.items():
+            with self.subTest(missing=missing):
+                payload = {name: value for name, value in sent.items() if name != missing}
+                expected = dict(sent, **{missing: default})
+                self.assertEqual(
+                    self._dof_calls(self.messages, payload),
+                    [
+                        (
+                            "engine",
+                            "OverrideDOF",
+                            True,
+                            expected["focus_distance"],
+                            expected["focus_length"],
+                            expected["focus_length_near"],
+                            expected["focus_blur"],
+                            expected["focus_depth_offset"],
+                        )
+                    ],
+                )
+
+    def test_values_sent_win_over_the_defaults_zero_included(self) -> None:
+        payload = dict(self.OLD_PAYLOAD, focus_length=0.0, focus_length_near=0.0, focus_depth_offset=0.0)
+        self.assertEqual(
+            self._dof_calls(self.messages, payload),
+            [("engine", "OverrideDOF", True, 2.0, 0.0, 0.0, 1.0, 0.0)],
+        )
+
+    def test_negative_without_the_defaults_an_old_payload_turns_them_to_zero(self) -> None:
+        constructor = _method_body(self.messages, "void MCPArgs()")
+        stripped = constructor
+        for line in ("\t\tfocus_length = 450.0;\n", "\t\tfocus_length_near = 100.0;\n", "\t\tfocus_depth_offset = 10.0;\n"):
+            self.assertEqual(stripped.count(line), 1, line)
+            stripped = stripped.replace(line, "", 1)
+        mutant = self.messages.replace(constructor, stripped, 1)
+        self.assertEqual(
+            self._dof_calls(mutant, self.OLD_PAYLOAD),
+            [("engine", "OverrideDOF", True, 2.0, 0.0, 0.0, 1.0, 0.0)],
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_old_payload_defaults(mutant)
 
 
 class ExecutedHudSetTest(unittest.TestCase):
