@@ -381,8 +381,9 @@ class AIGroupSpawnBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("rm -rf", text)
         self.assertIn("allowed=West", text)
         self.assertIn("created=false", text)
-        # Scope: the same report under another verb stays bare.
-        other = server._bridge_error(result, "ai_group_order")
+        # Scope: the same report under a verb without a branch stays
+        # bare (ai_group_order has its own field/allowed branch, #340).
+        other = server._bridge_error(result, "ai_group_state")
         self.assertEqual(str(other), "bad_args")
 
     async def test_neg_bad_args_without_ai_group_stays_bare(self) -> None:
