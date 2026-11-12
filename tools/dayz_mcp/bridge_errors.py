@@ -644,8 +644,9 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
 
 # ai_group_spawn refusals fill the ai_group report before refusing
 # (MCPExpansionAI.c AISpawnRefuse :688-695, args_read :727 and :735-745).
-# Only this verb of this PR crosses here; ai_group_order, ai_group_state
-# and the emote path publish different shapes and stay bare. The field is
+# Only this verb crosses here; ai_group_state and the emote path
+# publish different shapes and stay bare (ai_group_order has its own
+# field/allowed branch below). The field is
 # an allowlist, not an echo: the adapter only ever writes the names in
 # _AI_GROUP_SPAWN_FIELDS for a spawn refusal (DispatchAIGroupSpawn).
 _AI_GROUP_SPAWN_FIELDS = frozenset(
@@ -728,6 +729,38 @@ def _ai_group_spawn_detail(result: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+# ai_group_order refusals fill the same ai_group report before refusing
+# (MCPExpansionAI.c DispatchAIGroupOrder). Only field and allowed cross:
+# created is a spawn fact (an order's always-false default would read as
+# "nothing was created") and args_read is a spawn-only read-back, so
+# neither is read here. The field is an allowlist, not an echo.
+_AI_GROUP_ORDER_FIELDS = frozenset(
+    {"behaviour", "formation", "group_id", "speed", "waypoints"}
+)
+
+
+def _ai_group_order_detail(result: dict[str, Any]) -> str:
+    if str(result.get("error") or "") != "bad_args":
+        return ""
+    report = result.get("ai_group")
+    if not isinstance(report, dict):
+        return ""
+    parts: list[str] = []
+    field = report.get("field")
+    if isinstance(field, str) and field in _AI_GROUP_ORDER_FIELDS:
+        parts.append(f"field={field}")
+    allowed = report.get("allowed")
+    if isinstance(allowed, list):
+        names = [
+            name
+            for name in allowed[:_AI_GROUP_ALLOWED_MAX]
+            if isinstance(name, str) and _AI_GROUP_TOKEN_RE.fullmatch(name)
+        ]
+        if names:
+            parts.append("allowed=" + ",".join(names))
+    return "; ".join(parts)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -783,6 +816,10 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     ai_limit_reached also carries living and limit (plan 3.1). Only the
     allowlisted field names and token-checked values cross, capped.
 
+    ai_group_order is the twelfth: a bad_args refusal carries only field
+    and allowed from its ai_group report. No created (a spawn fact whose
+    always-false order default would confuse) and no args_read.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -802,6 +839,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return f"detail={expansion_detail}" if expansion_detail is not None else ""
     if cmd == "ai_group_spawn":
         return _ai_group_spawn_detail(result)
+    if cmd == "ai_group_order":
+        return _ai_group_order_detail(result)
     if cmd == "world_spawn" and str(result.get("error") or "") == "vehicle_eject_failed":
         object_id = result.get("object_id")
         if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
@@ -873,6 +912,7 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # observed= with the hologram the client read,
     # ai_group_spawn, whose refusals carry field, allowed, args_read and
     # created from the ai_group report (living/limit on ai_limit_reached),
+    # ai_group_order, whose bad_args carries only field and allowed,
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)

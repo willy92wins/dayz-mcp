@@ -698,6 +698,8 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "chat_read",
     # A mistyped key must not spawn a group on defaults: refused, not dropped.
     "ai_group_spawn",
+    # A mistyped order key must not order a group on defaults.
+    "ai_group_order",
 )
 
 
@@ -8768,6 +8770,102 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["scene_id"] = scene_id
         async with runtime.tool_lock:
             return await runtime.call_bridge("ai_group_spawn", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Order one ai_group_spawn group on the server "
+            "through the Expansion AI adapter (ai_group_order). At least one "
+            "of behaviour, waypoints, formation or speed must be given; with "
+            "none the answer is bad_args and nothing is sent. behaviour is "
+            "HOLD, ONCE, LOOP or ROAM (anything else, lower case included, is "
+            "bad_args naming the four); HOLD stops the group on its mark, and "
+            "ROAM roams to Expansion locations, not only to waypoints. "
+            "waypoints is a list of 1 to 32 [x, y, z] finite triples, sent "
+            "as flat triples. formation is a formation name the server "
+            "validates against its Expansion build. speed is walk, jog or "
+            "sprint and travels as 1, 2 or 3 with speed_set. A group that is "
+            "unknown or releasing answers not_found and changes nothing. "
+            "Every field is validated before any is applied, so a bad "
+            "formation changes nothing, not even the other fields of the same "
+            "call. The reply's ai_group is read after the change: group_id, "
+            "behaviour and behaviour_expansion, formation, formation_state, "
+            "waypoint_count, waypoint_index, in_combat and, when in combat, "
+            "combat_may_override (the combat FSM may ignore the order), plus "
+            "one member row per registered member with object_id, alive, "
+            "speed_limit and speed_limit_threat (limits are 0 when the "
+            "entity is gone). Errors: bad_args (from the server with field= "
+            "and, for behaviour and formation, allowed=), "
+            "not_found, expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
+        )
+    )
+    async def ai_group_order(
+        group_id: StrictInt,
+        behaviour: StrictStr | None = None,
+        waypoints: list[Any] | None = None,
+        formation: StrictStr | None = None,
+        speed: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+            raise ToolError(_bad_args("group_id", group_id, "be a positive int"))
+        if behaviour is None and waypoints is None and formation is None and speed is None:
+            raise ToolError(
+                "bad_args: ai_group_order requires at least one of "
+                "behaviour, waypoints, formation, speed"
+            )
+        args: dict[str, Any] = {"group_id": group_id}
+        if behaviour is not None:
+            if behaviour not in AI_BEHAVIOURS:
+                raise ToolError(
+                    _bad_args(
+                        "behaviour",
+                        behaviour,
+                        "be one of " + ", ".join(sorted(AI_BEHAVIOURS)),
+                    )
+                )
+            args["behaviour"] = behaviour
+        if waypoints is not None:
+            if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= AI_GROUP_WAYPOINTS_MAX:
+                raise ToolError(
+                    _bad_args(
+                        "waypoints",
+                        waypoints,
+                        f"be a list of 1 to {AI_GROUP_WAYPOINTS_MAX} [x, y, z] triples",
+                    )
+                )
+            flat: list[float] = []
+            for point in waypoints:
+                if (
+                    not isinstance(point, list)
+                    or len(point) != 3
+                    or not all(_is_wire_number(item) for item in point)
+                ):
+                    raise ToolError(
+                        _bad_args(
+                            "waypoints",
+                            waypoints,
+                            "be a list of [x, y, z] finite number triples",
+                        )
+                    )
+                flat.extend(float(item) for item in point)
+            args["waypoints"] = flat
+        if formation is not None:
+            if not isinstance(formation, str) or not 1 <= len(formation) <= 64:
+                raise ToolError(_bad_args("formation", formation, "be a non-empty string of at most 64 characters"))
+            args["formation"] = formation
+        if speed is not None:
+            speed_values = {"walk": 1, "jog": 2, "sprint": 3}
+            if speed not in speed_values:
+                raise ToolError(
+                    _bad_args("speed", speed, "be one of walk, jog, sprint")
+                )
+            args["speed"] = speed_values[speed]
+            args["speed_set"] = True
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ai_group_order", args, "server", _timeout(timeout_s)
+            )
 
     # Spawn into a player's inventory.
     @app.tool(

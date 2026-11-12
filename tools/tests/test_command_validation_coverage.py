@@ -267,6 +267,8 @@ def _minimal_args(cmd: str) -> dict:
         }
     if cmd == "ai_group_release":
         return {"spawn_token": "0" * 32}
+    if cmd == "ai_group_order":
+        return {"group_id": 1, "behaviour": "HOLD"}
     if cmd == "action_cursor_ids":
         return {"net_low": [1], "net_high": [2], "run_token": "run"}
     if cmd == "server_perf":

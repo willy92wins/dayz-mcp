@@ -11,7 +11,7 @@ ni OCR**. Control + datos son **engine-native** (CreateObjectEx, StartCommand_Ve
 Car setters, RestApi async, RaycastRVProxy, SetTimeMultiplier). La captura visual es la
 única pieza no-native: `MakeScreenshot` no escribe sin `-autotest` (T165276) y dayz-mcp aún no arranca el cliente así → se hace por **window-grab**
 externo del cliente renderizado (pasivo, solo lee píxeles). Arquitectura cerrada y **en
-producción**: 110 tools registradas (lista en `README.md:108`, contada el 2026-11-11) y puente en `MCP_BRIDGE_VERSION = "13"`
+producción**: 111 tools registradas (lista en `README.md:108`, contada el 2026-11-11) y puente en `MCP_BRIDGE_VERSION = "13"`
 (`addon/scripts/5_Mission/MCPMessages.c:1`). Las 5 fases del plan original están cerradas.
 
 ## Definición de Producto Final
