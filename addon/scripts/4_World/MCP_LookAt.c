@@ -847,6 +847,13 @@ modded class PlayerBase
 	protected string m_MCPLookLastNote;
 	// The way the owner latched at the look's start (MCPLookAtControl.LatchDeg).
 	protected int m_MCPLookTurn;
+	// Connection generation of this body (plan §2.5), set by the conn-gen
+	// RPC in MCP_PlayerMove.c (MCPSetConnGen) and read there, in
+	// MCP_Weapon.c (via MCPConnGenValue) and by MCPLookCloseServer below.
+	// Declared here, not in MCP_PlayerMove.c: this file compiles before
+	// MCP_PlayerMove.c, and a modded class only sees members declared by
+	// earlier files of the chain (in-game boot failure, 2026-11-12).
+	protected int m_MCPConnGen;
 
 	// playerbase.c:6250. Ours stops here, as player_move's does.
 	override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)

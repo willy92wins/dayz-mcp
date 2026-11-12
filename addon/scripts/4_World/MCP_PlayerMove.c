@@ -921,9 +921,11 @@ modded class PlayerBase
 	// into this same body resets it (OnReconnect), as that client may be a new
 	// process counting from 1 again.
 	protected int m_MCPMoveLastId;
-	// Connection generation of this body (plan §2.5). 0 until the conn-gen
-	// RPC names one; a close naming another generation must not touch the copy.
-	protected int m_MCPConnGen;
+	// m_MCPConnGen (this body's connection generation, plan §2.5) is
+	// declared in MCP_LookAt.c, which compiles before this file: a modded
+	// class only sees members declared by earlier files of the chain.
+	// 0 until the conn-gen RPC names one; a close naming another
+	// generation must not touch the copy.
 
 	// playerbase.c:6250. Ours stops here, as the weapon requests do
 	// (MCP_Weapon.c OnInputUserDataProcess).

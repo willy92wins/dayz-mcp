@@ -77,6 +77,9 @@ _REMOTE_ERROR_CODES = frozenset({
     # registered client process is known dead. Process absence, not a crash.
     "client_process_gone",
     "exec_not_allowed",
+    # Broker admission refusal for every adapter verb (plan 2.2). Its detail
+    # travels beside it; see _EXPANSION_UNAVAILABLE_DETAILS.
+    "expansion_unavailable",
     "identity_mismatch",
     "invalid_identity",
     "lease_expired",
@@ -313,6 +316,25 @@ def _remote_error_code(payload: object) -> str:
         if published is not None:
             return published
     return "remote_error"
+
+
+# The only details the broker publishes with expansion_unavailable (plan
+# 2.2, loopback._expansion_refusal_payload). Anything else is dropped, not
+# echoed: detail is a closed token set, not prose.
+_EXPANSION_UNAVAILABLE_DETAILS = frozenset({
+    "adapter_not_loaded",
+    "adapter_contract_mismatch",
+    "lease_close_not_supported",
+})
+
+
+def _expansion_unavailable_detail(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    detail = payload.get("detail")
+    if isinstance(detail, str) and detail in _EXPANSION_UNAVAILABLE_DETAILS:
+        return detail
+    return None
 
 
 _UI_ECHO_VERBS = frozenset({"ui_click", "ui_focus", "ui_set_text", "ui_tree"})
@@ -682,6 +704,11 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     it would replay caller input (possibly sensitive, unbounded) into an
     error message.
     """
+    if str(result.get("error") or "") == "expansion_unavailable":
+        # Broker delivery discards store this code with its detail in the
+        # result (loopback._mark_discarded); any verb can carry it.
+        expansion_detail = _expansion_unavailable_detail(result)
+        return f"detail={expansion_detail}" if expansion_detail is not None else ""
     if cmd == "world_spawn" and str(result.get("error") or "") == "vehicle_eject_failed":
         object_id = result.get("object_id")
         if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
@@ -806,6 +833,9 @@ def _public_enqueue_error(
     next_step=session_acquire_wait: that grant adopts the ownerless run.
     A coordinator audit_failed carries its audit_stage and
     next_step=session_status (_audit_failed_message).
+    expansion_unavailable carries its broker detail as
+    "expansion_unavailable; detail=<token>" when the detail is one of
+    _EXPANSION_UNAVAILABLE_DETAILS; an unknown detail is dropped.
     """
     code = _remote_error_code(payload)
     if code == "retail_quarantine":
@@ -840,8 +870,12 @@ def _public_enqueue_error(
         return f"game_not_ready:reason={code}"
     hint = _carriable_hint(payload)
     message = code
+    if code == "expansion_unavailable":
+        expansion_detail = _expansion_unavailable_detail(payload)
+        if expansion_detail is not None:
+            message = f"{code}; detail={expansion_detail}"
     if code != "remote_error" and hint is not None:
-        message = f"{code}: {hint}"
+        message = f"{message}: {hint}"
     if code == "run_not_owned":
         # Named here, not only in the daemon's hint, so an older daemon's
         # prose still reaches the caller with the tool to call next.
