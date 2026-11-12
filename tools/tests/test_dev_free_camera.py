@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from dayz_mcp import loopback, server
+from dayz_mcp import core, loopback, server
 from dayz_mcp.result_prune import PRUNABLE_FIELDS, prune_unfilled_fields
 from dayz_mcp.server import (
     DEFAULT_TOOL_TIMEOUT_S,
@@ -942,7 +942,13 @@ class DevFreeCameraToolTest(unittest.IsolatedAsyncioTestCase):
         state = loopback.ServerState("test-key")
         bind_both_peers(state)
         caps = poll_census_query("client")["caps"]
-        state.record_poll("client", "12~1.30", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps)
+        state.record_poll(
+            "client",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.30",
+            instance=INST_CLIENT,
+            source_pid=PID_CLIENT,
+            caps=caps,
+        )
         self.runtime.loopback = SimpleNamespace(state=state)
         original_enqueue = state.enqueue_command
         wire: dict[str, Any] = {}
@@ -951,7 +957,11 @@ class DevFreeCameraToolTest(unittest.IsolatedAsyncioTestCase):
             status, body = original_enqueue(*args, **kwargs)
             if status == 200:
                 poll_status, poll_body = state.record_poll(
-                    "client", "12~1.30", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
+                    "client",
+                    f"{core.EXPECTED_BRIDGE_VERSION}~1.30",
+                    instance=INST_CLIENT,
+                    source_pid=PID_CLIENT,
+                    caps=caps,
                 )
                 self.assertEqual(poll_status, 200, poll_body)
                 self.assertEqual(poll_body["commands"], [{"id": body["id"], "cmd": COMMAND, "args": {"active": True}}])

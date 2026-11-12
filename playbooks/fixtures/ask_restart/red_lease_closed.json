@@ -1,0 +1,14 @@
+{
+  "name": "red_lease_closed",
+  "params": {},
+  "responses": {
+    "S1": {
+      "ok": 1,
+      "state": "lease_closed",
+      "elapsed_s": 6.5
+    }
+  },
+  "expect_overall": "FAIL",
+  "expect_stopped_at": "S1",
+  "expect_reason": "restart_not_confirmed"
+}

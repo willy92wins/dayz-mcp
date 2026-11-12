@@ -584,7 +584,7 @@ class PlayerTraceCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)
@@ -1218,7 +1218,7 @@ class PlayerTraceMessagesTest(unittest.TestCase):
     def test_the_reply_is_prunable_and_kept_for_its_verb(self) -> None:
         # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-21:],
+            result_prune.PRUNABLE_FIELDS[-22:],
             (
                 FIELD,
                 "direction",
@@ -1240,6 +1240,7 @@ class PlayerTraceMessagesTest(unittest.TestCase):
                 "gameplay",
                 "chat_read",
                 "ui_pause",
+                "lease_close",
                 "dev_free_camera",
             ),
         )

@@ -16,7 +16,7 @@ from tests._addon_paths import addon_root
 
 
 MESSAGES_PATH = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
-EXPECTED_VERSION = "12"
+EXPECTED_VERSION = "13"
 
 
 def _without_comments(source: str) -> str:
@@ -135,7 +135,7 @@ EXPECTED_RESULT_ANCHORS = [
 
 def _known_good_source() -> str:
     return '''
-const string MCP_BRIDGE_VERSION = "12";
+const string MCP_BRIDGE_VERSION = "13";
 class MCPEntityHit { string type; string classname; bool has_cargo; ref array<float> pos; float distance; };
 class MCPArgs { string mode; string path; string root; bool bubble; void MCPArgs() { path = ""; } };
 class MCPUiRequestEcho { string requested_path; string requested_root; string requested_text; string matched_path; };
@@ -191,12 +191,51 @@ class MessagesContractTest(unittest.TestCase):
             "telemetry_seated_mutated": source.replace("bool found; bool seated", "bool found; string seated"),
             "telemetry_seat_mutated": source.replace("bool seated; string seat", "bool seated; int seat"),
             "telemetry_classname_mutated": source.replace("string seat; string classname", "string seat; bool classname"),
-            "version_bumped": source.replace('MCP_BRIDGE_VERSION = "12"', 'MCP_BRIDGE_VERSION = "13"'),
+            "version_bumped": source.replace('MCP_BRIDGE_VERSION = "13"', 'MCP_BRIDGE_VERSION = "14"'),
         }
         for name, mutant in mutants.items():
             with self.subTest(mutant=name):
                 with self.assertRaises((AssertionError, IndexError)):
                     _assert_contract(self, mutant)
+
+    def test_k32_version_and_close_names(self) -> None:
+        # K32 POS: v13 on both sides, close names internal (plan §2.16).
+        import json
+        import sys
+        from pathlib import Path as _P
+
+        tools = _P(__file__).resolve().parents[1]
+        if str(tools) not in sys.path:
+            sys.path.insert(0, str(tools))
+        from dayz_mcp import bridge_readiness, core, loopback
+
+        self.assertEqual(core.EXPECTED_BRIDGE_VERSION, "13")
+        source = MESSAGES_PATH.read_text(encoding="utf-8")
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', source)
+        # Census types exist with no scalar constructor defaults.
+        for cls in ("MCPLeaseCloseEntry", "MCPLeaseCloseFloor", "MCPLeaseCloseCensus"):
+            self.assertIn(f"class {cls}", source)
+        args = _members(source, "MCPArgs")
+        for name in ("close_generation", "close_lease_id", "close_floors"):
+            self.assertEqual([n for _t, n in args if n == name].__len__(), 1, name)
+        result = _members(source, "MCPResult")
+        self.assertIn(("ref MCPLeaseCloseCensus", "lease_close"), result)
+        # Names announced, mapped to None, absent from public sets.
+        self.assertIsNone(bridge_readiness._BRIDGE_COMMAND_TOOLS["server"]["lease_close"])
+        self.assertIsNone(bridge_readiness._BRIDGE_COMMAND_TOOLS["client"]["lease_close_client"])
+        self.assertNotIn("lease_close", loopback.SERVER_COMMANDS)
+        self.assertNotIn("lease_close_client", loopback.CLIENT_COMMANDS)
+        self.assertEqual(loopback.peer_for_command("lease_close"), "server")
+        self.assertEqual(loopback.peer_for_command("lease_close_client"), "client")
+        fixture = json.loads(
+            (_P(__file__).resolve().parent / "fixtures" / "bridge_capabilities_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertIsNone(fixture["peers"]["server"]["lease_close"])
+        self.assertIsNone(fixture["peers"]["client"]["lease_close_client"])
+        # K32 NEG: a v12 peer classifies as a version mismatch; adding the
+        # client close name to CLIENT_COMMANDS (mutant) breaks the pin above.
+        state, _detail = core.version_state_for("12~1.29.0", require_version=True, expected_game_version=None)
+        self.assertEqual(state, "version_mismatch")
 
     def test_new_scalar_fields_have_no_constructor_defaults(self) -> None:
         source = MESSAGES_PATH.read_text(encoding="utf-8")

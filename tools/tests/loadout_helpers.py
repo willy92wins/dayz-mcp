@@ -63,6 +63,8 @@ PROCESS_JOBS_FN = "protected void ProcessJobs()"
 JOB_READY_FN = "protected bool IsJobReady(MCPJob job)"
 JOB_SUCCESS_FN = "protected void PostJobSuccess(MCPJob job)"
 JOB_TIMEOUT_FN = "protected void PostJobTimeout(MCPJob job)"
+# §2.7 step 6: the dispatch and the terminal paths call it; run it as it is.
+REGISTER_DELETION_FN = "protected void RegisterDeletionRefs(MCPJob job)"
 # main's player resolvers, run as they are by _Bridge(real_players=True).
 RESOLVE_PLAYER_FN = "protected PlayerBase ResolvePlayer(MCPArgs args, out string error)"
 FIRST_HUMAN_FN = "protected Human GetFirstHuman()"
@@ -218,6 +220,7 @@ class _Job:
         self.subject: Any = None
         self.actor: Any = None
         self.loadout_cleared: Any = None
+        self.scene_pending: Any = None
         self.loadout_uid = _s("")
         self.deadline_s = 0.0
         self.error = _s("")
@@ -523,6 +526,7 @@ _BRIDGE_TYPES = (
     "MCPLoadout",
     "MCPLoadoutItem",
     "MCPLoadoutApplied",
+    "MCPSceneEntry",
     "EntityArray",
     "IntArray",
     "RowArray",
@@ -540,6 +544,7 @@ _RUN_FUNCTIONS: tuple[tuple[str, str], ...] = tuple(
     (JOB_READY_FN, JOB_READY_FN),
     (JOB_SUCCESS_FN, JOB_SUCCESS_FN),
     (JOB_TIMEOUT_FN, JOB_TIMEOUT_FN),
+    (REGISTER_DELETION_FN, REGISTER_DELETION_FN),
 )
 
 
@@ -617,6 +622,7 @@ class _Bridge:
             "MCPVehicleEject": EjectGuardFake,
             "_S": _Str,
             "m_Jobs": self.jobs,
+            "m_LeaseCloseDeletion": _Array(),
             "m_ElapsedS": 0.0,
             "m_Tick": 0,
             "JOB_TIMEOUT_S": self.job_timeout_s,

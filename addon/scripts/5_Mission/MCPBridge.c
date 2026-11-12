@@ -78,12 +78,32 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
 	protected const string SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c";
+
+	// Extension hooks (expansion-ai-adapter plan 2.1): no Expansion types and
+	// no ifdef here, so the base PBO compiles and polls byte-identically
+	// without the adapter. A modded MCPBridge in the adapter overrides them.
+	protected string ServerCapabilities()
+	{
+		return SERVER_CAPABILITIES;
+	}
+
+	protected string ExtensionPollParams()
+	{
+		return "";
+	}
+
+	// 0 = not handled (Dispatch answers unknown_command), 1 = publish now,
+	// 2 = a job will publish. Called just before unknown_command.
+	protected int DispatchExtension(MCPCommand command, MCPResult result)
+	{
+		return 0;
+	}
 
 	protected static ref MCPBridge m_Instance;
 
@@ -93,6 +113,8 @@ class MCPBridge : Managed
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
 	// Built once from SERVER_CAPABILITIES (as is) and SERVER_ARG_CONTRACT_HASH (encoded); key and inst are not cached.
+	// The poll sends ServerCapabilities(), which returns the same constant; this cached copy is
+	// never reassigned after construction and is what the capability tests audit.
 	protected string m_PollCapabilities;
 	protected string m_PollArgContractHash;
 	protected float m_PollHz;
@@ -137,6 +159,13 @@ class MCPBridge : Managed
 	protected ref MCPPollCallback m_PollCallback;
 	protected ref array<ref MCPResultCallback> m_ResultCallbackPool;
 	protected ref array<Man> m_Players;
+	protected bool m_InfectedDebt;
+	protected ref array<DayZInfected> m_InfectedOverridden;
+	protected ref array<string> m_LeaseCloseRpcKinds;
+	protected ref array<int> m_LeaseCloseRpcIds;
+	protected ref array<Object> m_LeaseCloseRpcActors;
+	protected ref array<string> m_LeaseCloseRpcSenderIds;
+	protected ref array<Object> m_LeaseCloseDeletion;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref map<int, ref MCPJob> m_Jobs;
 	protected ref map<int, Object> m_RuntimeObjects;
@@ -191,6 +220,12 @@ class MCPBridge : Managed
 		m_Players = new array<Man>();
 		m_Pending = new array<ref MCPCommand>();
 		m_Jobs = new map<int, ref MCPJob>();
+		m_LeaseCloseRpcKinds = new array<string>();
+		m_LeaseCloseRpcIds = new array<int>();
+		m_LeaseCloseRpcActors = new array<Object>();
+		m_LeaseCloseRpcSenderIds = new array<string>();
+		m_LeaseCloseDeletion = new array<Object>();
+		m_InfectedOverridden = new array<DayZInfected>();
 		m_RuntimeObjects = new map<int, Object>();
 		m_Scenes = new map<string, ref array<ref MCPSceneEntry>>();
 		m_NextBatchObjectId = BATCH_OBJECT_ID_BASE;
@@ -420,7 +455,7 @@ class MCPBridge : Managed
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + m_PollCapabilities;
+		request = request + "&caps=" + ServerCapabilities();
 		request = request + "&ach=" + m_PollArgContractHash;
 		request = request + LoadCounterQuery();
 		if (m_PeerInstance != "")
@@ -429,6 +464,7 @@ class MCPBridge : Managed
 		}
 		// 800 ms is the daemon poll cap. The script cannot change the 10 s read timeout.
 		request = request + "&wait_ms=800";
+		request = request + ExtensionPollParams();
 		m_Ctx.GET(cb, request);
 	}
 
@@ -694,7 +730,11 @@ class MCPBridge : Managed
 		result.tick_dispatch = m_Tick;
 		bool postNow = true;
 
-		if (command.cmd == "query_player_state")
+		if (command.cmd == "lease_close")
+		{
+			postNow = DispatchLeaseClose(command, result);
+		}
+		else if (command.cmd == "query_player_state")
 		{
 			MCPPlayerState state = BuildPlayerState();
 			if (state && state.pos && state.pos.Count() == 3)
@@ -795,6 +835,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "infected_drive")
 		{
 			postNow = DispatchInfectedDrive(command, result);
+			if (result.ok)
+			{
+				m_InfectedDebt = true;
+			}
 		}
 		else if (command.cmd == "survivor_drive")
 		{
@@ -910,8 +954,20 @@ class MCPBridge : Managed
 		}
 		else
 		{
-			result.ok = false;
-			result.error = "unknown_command";
+			int extensionHandled = DispatchExtension(command, result);
+			if (extensionHandled == 1)
+			{
+				postNow = true;
+			}
+			else if (extensionHandled == 2)
+			{
+				postNow = false;
+			}
+			else
+			{
+				result.ok = false;
+				result.error = "unknown_command";
+			}
 		}
 
 		if (postNow)
@@ -1237,6 +1293,7 @@ class MCPBridge : Managed
 			// Dispatch or ProcessJobs posts the one result.
 			clientRpc = true;
 			m_Jobs.Insert(job.id, job);
+			RegisterLeaseCloseRpcWithActor(job.id, "inventory_move", player);
 			performError = MCPSendInventoryMove(player, item, target, op, command.args.slot, job.id);
 		}
 		if (performError != "")
@@ -1244,6 +1301,14 @@ class MCPBridge : Managed
 			if (clientRpc && m_Jobs.Contains(job.id))
 			{
 				m_Jobs.Remove(job.id);
+			}
+			if (clientRpc)
+			{
+				// Every error path of MCPSendInventoryMove returns before
+				// rpc.Send (MCP_InventoryMove.c MCPRequestInventoryMove):
+				// the RPC was never sent, so its row is not debt. A row
+				// after a Send is never removed here (§2.7 step 5).
+				LiquidateLeaseCloseRpc(job.id, "inventory_move");
 			}
 			result.ok = false;
 			result.error = performError;
@@ -1931,35 +1996,78 @@ class MCPBridge : Managed
 			return;
 		}
 		MCPJob job = m_Jobs.Get(jobId);
-		if (!job || job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+		if (job)
+		{
+			if (job.kind != "inventory_move" || !job.args || job.args.authority != "client")
+			{
+				Print("[DayZ_MCP] inventory_move refusal ignored");
+				return;
+			}
+			if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+			{
+				Print("[DayZ_MCP] inventory_move refusal ignored");
+				return;
+			}
+			if (sender.GetId() != job.actor.GetIdentity().GetId())
+			{
+				Print("[DayZ_MCP] inventory_move refusal ignored");
+				return;
+			}
+			reason = MCPInventoryMoveClientReason(reason);
+			// This refusal passed every check above (job, actor, sender) and the
+			// client sends it only before emitting (§2.7 step 5): it liquidates
+			// the RPC register row. It does not answer the job by itself.
+			LiquidateLeaseCloseRpc(jobId, "inventory_move");
+			// Publishing here would be a write the census can reach from every
+			// command, because Event_OnRPC is not a command. The job pass posts it.
+			// phase 1: the server read already matches, so confirmation wins.
+			// phase 2: one refusal, and the deadline must not post a second result.
+			if (MCPInventoryMoveReady(job))
+			{
+				job.phase = 1;
+			}
+			else
+			{
+				job.phase = 2;
+				job.error = reason;
+			}
+			return;
+		}
+		// After job timeout or lease_close abort, validate against the RPC
+		// register row directly and liquidate without posting a job reply (§2.7 step 5).
+		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds || !m_LeaseCloseRpcActors || !m_LeaseCloseRpcSenderIds)
 		{
 			Print("[DayZ_MCP] inventory_move refusal ignored");
 			return;
 		}
-		if (!job.actor || target != job.actor || !sender || !job.actor.GetIdentity())
+		int rowIndex = -1;
+		int scanIndex = 0;
+		while (scanIndex < m_LeaseCloseRpcIds.Count())
+		{
+			if (m_LeaseCloseRpcIds.Get(scanIndex) == jobId && m_LeaseCloseRpcKinds.Get(scanIndex) == "inventory_move")
+			{
+				rowIndex = scanIndex;
+			}
+			scanIndex = scanIndex + 1;
+		}
+		if (rowIndex < 0)
 		{
 			Print("[DayZ_MCP] inventory_move refusal ignored");
 			return;
 		}
-		if (sender.GetId() != job.actor.GetIdentity().GetId())
+		Object rowActor = m_LeaseCloseRpcActors.Get(rowIndex);
+		string rowSenderId = m_LeaseCloseRpcSenderIds.Get(rowIndex);
+		if (!rowActor || target != rowActor || !sender || rowSenderId == "")
 		{
 			Print("[DayZ_MCP] inventory_move refusal ignored");
 			return;
 		}
-		reason = MCPInventoryMoveClientReason(reason);
-		// Publishing here would be a write the census can reach from every
-		// command, because Event_OnRPC is not a command. The job pass posts it.
-		// phase 1: the server read already matches, so confirmation wins.
-		// phase 2: one refusal, and the deadline must not post a second result.
-		if (MCPInventoryMoveReady(job))
+		if (sender.GetId() != rowSenderId)
 		{
-			job.phase = 1;
+			Print("[DayZ_MCP] inventory_move refusal ignored");
+			return;
 		}
-		else
-		{
-			job.phase = 2;
-			job.error = reason;
-		}
+		LiquidateLeaseCloseRpc(jobId, "inventory_move");
 	}
 
 	// 165a: scene_id is 1 to SCENE_ID_MAX_CHARS characters, each A-Z, a-z, 0-9, _
@@ -2460,6 +2568,9 @@ class MCPBridge : Managed
 			DeleteSceneObjects(job);
 		}
 		m_Jobs.Insert(job.id, job);
+		// §2.7 step 6: deletion refs enter the bridge register at dispatch,
+		// so a later timeout or close still finds them.
+		RegisterDeletionRefs(job);
 
 		Log("job queued id=" + job.id + " kind=scene_clear pending=" + job.scene_pending.Count() + " delete=" + deleteNow.Count());
 		return false;
@@ -2847,8 +2958,12 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		RegisterLeaseCloseRpc(command.id, "hands_take");
 		if (!player.MCPRequestTakeToHands(item, result.type))
 		{
+			// MCPRequestTakeToHands returns false only before rpc.Send
+			// (MCP_Weapon.c): the RPC was never sent, so no debt.
+			LiquidateLeaseCloseRpc(command.id, "hands_take");
 			result.ok = false;
 			result.error = "rpc_failed";
 			return true;
@@ -2982,8 +3097,12 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		RegisterLeaseCloseRpc(command.id, "hands_attach");
 		if (!player.MCPRequestAttachFromHands(target, target.GetType(), held, result.type, command.args.slot))
 		{
+			// MCPRequestAttachFromHands returns false only before
+			// rpc.Send (MCP_Weapon.c): the RPC was never sent, so no debt.
+			LiquidateLeaseCloseRpc(command.id, "hands_attach");
 			result.ok = false;
 			result.error = "rpc_failed";
 			return true;
@@ -3184,6 +3303,7 @@ class MCPBridge : Managed
 			}
 		}
 
+		RegisterLeaseCloseRpc(command.id, "notify_players");
 		NotificationSystem.SendNotificationToPlayerIdentityExtended(targetIdentity, command.args.show_time, command.args.title, command.args.detail, command.args.icon);
 		result.ok = true;
 		result.sent = true;
@@ -4310,12 +4430,23 @@ class MCPBridge : Managed
 			controller.OverrideMovementSpeed(false, 0.0);
 			controller.OverrideHeading(false, 0.0);
 			controller.OverrideTurnSpeed(false, 0.0);
+			// §2.7 step 2: a release forgets this infected; the close
+			// releases every one still recorded below.
+			if (m_InfectedOverridden && m_InfectedOverridden.Find(infected) >= 0)
+			{
+				m_InfectedOverridden.RemoveItem(infected);
+			}
 		}
 		else
 		{
 			controller.OverrideTurnSpeed(true, Math.PI2);
 			controller.OverrideMovementSpeed(true, command.args.speed);
 			controller.OverrideHeading(true, command.args.heading * Math.DEG2RAD);
+			// Record each infected this bridge overrides (§2.7 step 2).
+			if (m_InfectedOverridden && m_InfectedOverridden.Find(infected) < 0)
+			{
+				m_InfectedOverridden.Insert(infected);
+			}
 		}
 
 		vector current = infected.GetPosition();
@@ -4878,6 +5009,8 @@ class MCPBridge : Managed
 		job.tick_poll_callback = result.tick_poll_callback;
 		job.tick_dispatch = result.tick_dispatch;
 		m_Jobs.Insert(job.id, job);
+		// §2.7 step 6: deletion refs enter the bridge register at dispatch.
+		RegisterDeletionRefs(job);
 		Log("job queued id=" + job.id + " kind=loadout_clear deleted=" + cleared.Count() + " deadline_s=" + job.deadline_s);
 		return false;
 	}
@@ -7817,7 +7950,11 @@ class MCPBridge : Managed
 
 	protected bool IsJobReady(MCPJob job)
 	{
-		if (job.kind == "object_delete")
+		if (job.kind == "lease_close")
+		{
+			return LeaseCloseCensusSettled(BuildLeaseCloseCensus(job.args));
+		}
+		else if (job.kind == "object_delete")
 		{
 			return IsObjectDeleteReady(job);
 		}
@@ -7999,6 +8136,11 @@ class MCPBridge : Managed
 			PostSeatSuccess(job);
 			return;
 		}
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, false);
+			return;
+		}
 		if (job.kind == "object_delete")
 		{
 			PostObjectDelete(job);
@@ -8006,6 +8148,7 @@ class MCPBridge : Managed
 		}
 		if (job.kind == "loadout_clear")
 		{
+			RegisterDeletionRefs(job);
 			PostLoadoutClearJob(job, true);
 			return;
 		}
@@ -8028,6 +8171,7 @@ class MCPBridge : Managed
 
 		if (job.kind == "scene_clear")
 		{
+			RegisterDeletionRefs(job);
 			PostSceneClear(job);
 			return;
 		}
@@ -8206,6 +8350,11 @@ class MCPBridge : Managed
 
 	protected void PostJobTimeout(MCPJob job)
 	{
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, true);
+			return;
+		}
 		if (job.kind == "object_delete")
 		{
 			job.error = "vehicle_eject_failed";
@@ -8216,6 +8365,8 @@ class MCPBridge : Managed
 		// there is one of its errors, not a timeout of the whole call.
 		if (job.kind == "scene_clear")
 		{
+			// Terminal path: remaining refs move to the register first.
+			RegisterDeletionRefs(job);
 			PostSceneClear(job);
 			return;
 		}
@@ -8234,6 +8385,7 @@ class MCPBridge : Managed
 		// A loadout_clear job at its deadline reports, with cleanup_complete false.
 		if (job.kind == "loadout_clear")
 		{
+			RegisterDeletionRefs(job);
 			PostLoadoutClearJob(job, false);
 			return;
 		}
@@ -8276,6 +8428,484 @@ class MCPBridge : Managed
 		result.tick_poll_callback = m_TickPollCallback;
 		result.tick_dispatch = m_Tick;
 		PostResult(result);
+	}
+
+	// Extension contract for #267 (§4): empty in the base bridge.
+	protected void LeaseCloseExtensionStop()
+	{
+	}
+
+	protected void LeaseCloseExtensionCensus(MCPLeaseCloseCensus census)
+	{
+	}
+
+	// A validated refuse naming this request id, sent before the client
+	// emitted any vanilla manipulation, is the only in-process liquidation
+	// (§2.7 step 5). A job-ready readback never calls this.
+	protected void LiquidateLeaseCloseRpc(int requestId, string kind)
+	{
+		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds)
+		{
+			return;
+		}
+
+		int index = 0;
+		while (index < m_LeaseCloseRpcIds.Count())
+		{
+			if (m_LeaseCloseRpcIds.Get(index) == requestId && m_LeaseCloseRpcKinds.Get(index) == kind)
+			{
+				m_LeaseCloseRpcIds.Remove(index);
+				m_LeaseCloseRpcKinds.Remove(index);
+				if (m_LeaseCloseRpcActors && index < m_LeaseCloseRpcActors.Count())
+				{
+					m_LeaseCloseRpcActors.Remove(index);
+				}
+				if (m_LeaseCloseRpcSenderIds && index < m_LeaseCloseRpcSenderIds.Count())
+				{
+					m_LeaseCloseRpcSenderIds.Remove(index);
+				}
+				return;
+			}
+
+			index = index + 1;
+		}
+	}
+
+	protected void RegisterLeaseCloseRpcWithActor(int requestId, string kind, Human actor)
+	{
+		if (!m_LeaseCloseRpcIds || !m_LeaseCloseRpcKinds || !m_LeaseCloseRpcActors || !m_LeaseCloseRpcSenderIds)
+		{
+			return;
+		}
+
+		if (m_LeaseCloseRpcIds.Find(requestId) >= 0)
+		{
+			return;
+		}
+
+		string senderId = "";
+		if (actor && actor.GetIdentity())
+		{
+			senderId = actor.GetIdentity().GetId();
+		}
+
+		m_LeaseCloseRpcIds.Insert(requestId);
+		m_LeaseCloseRpcKinds.Insert(kind);
+		m_LeaseCloseRpcActors.Insert(actor);
+		m_LeaseCloseRpcSenderIds.Insert(senderId);
+	}
+
+	protected void RegisterLeaseCloseRpc(int requestId, string kind)
+	{
+		RegisterLeaseCloseRpcWithActor(requestId, kind, null);
+	}
+
+	protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		if (active)
+		{
+			entry.state = "residue";
+			entry.reason = reason;
+		}
+		else
+		{
+			entry.state = "clean";
+			entry.reason = "";
+		}
+
+		census.entries.Insert(entry);
+	}
+
+	protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		if (!active)
+		{
+			AddCloseEntry(census, name, false, "");
+			return;
+		}
+
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		entry.state = "unverified";
+		entry.reason = reason;
+		census.entries.Insert(entry);
+	}
+
+	protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state == "residue")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state != "clean")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected void RegisterDeletionRefs(MCPJob job)
+	{
+		if (!job || !m_LeaseCloseDeletion)
+		{
+			return;
+		}
+
+		if (job.loadout_cleared)
+		{
+			int i = 0;
+			while (i < job.loadout_cleared.Count())
+			{
+				EntityAI refObj = job.loadout_cleared.Get(i);
+				if (refObj)
+				{
+					m_LeaseCloseDeletion.Insert(refObj);
+				}
+
+				i = i + 1;
+			}
+		}
+
+		if (job.scene_pending)
+		{
+			int j = 0;
+			while (j < job.scene_pending.Count())
+			{
+				MCPSceneEntry entry = job.scene_pending.Get(j);
+				if (entry && entry.obj)
+				{
+					m_LeaseCloseDeletion.Insert(entry.obj);
+				}
+
+				j = j + 1;
+			}
+		}
+	}
+
+	protected bool DeletionPendingActive()
+	{
+		if (!m_LeaseCloseDeletion)
+		{
+			return false;
+		}
+
+		bool pending = false;
+		int i = 0;
+		while (i < m_LeaseCloseDeletion.Count())
+		{
+			if (m_LeaseCloseDeletion.Get(i))
+			{
+				pending = true;
+				i = i + 1;
+			}
+			else
+			{
+				m_LeaseCloseDeletion.Remove(i);
+			}
+		}
+
+		return pending;
+	}
+
+	protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)
+	{
+		MCPLeaseCloseCensus census = new MCPLeaseCloseCensus();
+		census.peer = "server";
+		if (closeArgs)
+		{
+			census.generation = closeArgs.close_generation;
+			census.lease_id = closeArgs.close_lease_id;
+		}
+
+		bool botsBusy = MCPBotControl.LeaseCloseBusy(this);
+		string botsReason = MCPBotControl.LeaseCloseResidueReason(this);
+		if (botsBusy && botsReason == "bot_state_unverified")
+		{
+			AddCloseDebt(census, "bots", true, botsReason);
+		}
+		else
+		{
+			AddCloseEntry(census, "bots", botsBusy, botsReason);
+		}
+		AddCloseDebt(census, "infected_drive", m_InfectedDebt, "infected_drive");
+		bool moveActive = false;
+		bool weaponActive = false;
+		bool lookActive = false;
+		bool holdActive = false;
+		m_Players.Clear();
+		GetGame().GetPlayers(m_Players);
+		int i = 0;
+		while (i < m_Players.Count())
+		{
+			PlayerBase player = PlayerBase.Cast(m_Players.Get(i));
+			if (player)
+			{
+				MCPLeaseCloseFloor floorRow = new MCPLeaseCloseFloor();
+				int floorNetLow = 0;
+				int floorNetHigh = 0;
+				player.GetNetworkID(floorNetLow, floorNetHigh);
+				floorRow.net_low = floorNetLow;
+				floorRow.net_high = floorNetHigh;
+				floorRow.conn_gen = player.MCPConnGenValue();
+				floorRow.move_id = player.MCPMoveServerFloor();
+				floorRow.weapon_id = player.MCPWeaponServerFloor();
+				floorRow.look_id = player.MCPLookServerFloor();
+				census.floors.Insert(floorRow);
+				if (player.MCPMoveActiveNow())
+				{
+					moveActive = true;
+				}
+
+				if (player.MCPWeaponPendingNow())
+				{
+					weaponActive = true;
+				}
+
+				if (player.MCPLookActiveNow())
+				{
+					lookActive = true;
+				}
+
+				// §2.7 step 3: census only, no new interrupt from the server.
+				ActionManagerServer holdManager = ActionManagerServer.Cast(player.GetActionManager());
+				if (holdManager && holdManager.MCP_HoldServerBusy())
+				{
+					holdActive = true;
+				}
+			}
+
+			i = i + 1;
+		}
+
+		AddCloseEntry(census, "survivor_drive", MCPSurvivorDrive.LeaseCloseBusy(), "survivor_drive");
+		AddCloseEntry(census, "move_copy", moveActive, "move_copy");
+		AddCloseEntry(census, "look_copy", lookActive, "look_copy");
+		AddCloseEntry(census, "weapon", weaponActive, "weapon");
+		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
+		bool jobsActive = false;
+		if (m_Jobs)
+		{
+			int j = 0;
+			while (j < m_Jobs.Count())
+			{
+				MCPJob other = m_Jobs.GetElement(j);
+				if (other && other.kind != "lease_close" && other.kind != "server_perf")
+				{
+					jobsActive = true;
+				}
+
+				j = j + 1;
+			}
+		}
+
+		AddCloseEntry(census, "jobs", jobsActive, "jobs");
+		bool rpcActive = false;
+		if (m_LeaseCloseRpcKinds && m_LeaseCloseRpcKinds.Count() > 0)
+		{
+			rpcActive = true;
+		}
+
+		if (!rpcActive)
+		{
+			AddCloseEntry(census, "rpc_in_flight", false, "");
+		}
+		else
+		{
+			int rpcKindIndex = 0;
+			while (rpcKindIndex < m_LeaseCloseRpcKinds.Count())
+			{
+				string rpcKind = m_LeaseCloseRpcKinds.Get(rpcKindIndex);
+				bool rpcKindSeen = false;
+				int rpcSeenIndex = 0;
+				while (rpcSeenIndex < rpcKindIndex)
+				{
+					if (m_LeaseCloseRpcKinds.Get(rpcSeenIndex) == rpcKind)
+					{
+						rpcKindSeen = true;
+					}
+
+					rpcSeenIndex = rpcSeenIndex + 1;
+				}
+
+				if (!rpcKindSeen)
+				{
+					AddCloseDebt(census, "rpc_in_flight", true, "rpc_in_flight:" + rpcKind);
+				}
+
+				rpcKindIndex = rpcKindIndex + 1;
+			}
+		}
+		AddCloseEntry(census, "deletion_pending", DeletionPendingActive(), "deletion_pending");
+		LeaseCloseExtensionCensus(census);
+		if (LeaseCloseCensusClean(census))
+		{
+			census.state = "clean";
+		}
+		else
+		{
+			census.state = "residue";
+		}
+
+		return census;
+	}
+
+	protected void PostLeaseCloseJob(MCPJob job, bool timedOut)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.ok = true;
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(job.args);
+		if (timedOut && !LeaseCloseCensusSettled(census))
+		{
+			AddCloseEntry(census, "observer", true, "observer_timeout");
+			census.state = "residue";
+		}
+
+		result.lease_close = census;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		PostResult(result);
+	}
+
+	// §2.7 stop steps. Jobs post through their timeout path; server_perf is
+	// kept (it only reads). RPC and infected debt are never recalled.
+	protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)
+	{
+		MCPBotControl.ShutdownAll(this);
+		// §4 #266: every driven survivor stops with the lease. The census
+		// below reads s_Driven itself, so a drive that survives this is
+		// residue, never a silent clean.
+		MCPSurvivorDrive.ShutdownAll(this);
+		// §2.7 step 2: release every recorded infected with the same three
+		// calls. The registry and the debt stay: the native lifetime cannot
+		// be read back, so this is unverified until the process exits.
+		if (m_InfectedOverridden)
+		{
+			int infIndex = 0;
+			while (infIndex < m_InfectedOverridden.Count())
+			{
+				DayZInfected recorded = m_InfectedOverridden.Get(infIndex);
+				if (recorded && recorded.GetInputController())
+				{
+					DayZInfectedInputController infController = recorded.GetInputController();
+					infController.OverrideMovementSpeed(false, 0.0);
+					infController.OverrideHeading(false, 0.0);
+					infController.OverrideTurnSpeed(false, 0.0);
+				}
+
+				infIndex = infIndex + 1;
+			}
+		}
+		if (command.args && command.args.close_floors)
+		{
+			m_Players.Clear();
+			GetGame().GetPlayers(m_Players);
+			int f = 0;
+			while (f < command.args.close_floors.Count())
+			{
+				MCPLeaseCloseFloor carried = command.args.close_floors.Get(f);
+				int p = 0;
+				while (p < m_Players.Count())
+				{
+					PlayerBase floorPlayer = PlayerBase.Cast(m_Players.Get(p));
+					if (floorPlayer)
+					{
+						int low = 0;
+						int high = 0;
+						floorPlayer.GetNetworkID(low, high);
+						if (low == carried.net_low && high == carried.net_high)
+						{
+							floorPlayer.MCPMoveCloseServer(carried.move_id, carried.conn_gen);
+							floorPlayer.MCPWeaponCloseServer(carried.weapon_id, carried.conn_gen);
+							floorPlayer.MCPLookCloseServer(carried.look_id, carried.conn_gen);
+						}
+					}
+
+					p = p + 1;
+				}
+
+				f = f + 1;
+			}
+		}
+
+		if (m_Jobs)
+		{
+			array<int> jobIds = new array<int>();
+			int i = 0;
+			while (i < m_Jobs.Count())
+			{
+				jobIds.Insert(m_Jobs.GetKey(i));
+				i = i + 1;
+			}
+
+			i = 0;
+			while (i < jobIds.Count())
+			{
+				MCPJob job = m_Jobs.Get(jobIds.Get(i));
+				if (job && job.kind != "server_perf" && job.kind != "lease_close")
+				{
+					RegisterDeletionRefs(job);
+					PostJobTimeout(job);
+					job.actor = null;
+					job.subject = null;
+					m_Jobs.Remove(jobIds.Get(i));
+				}
+
+				i = i + 1;
+			}
+		}
+
+		LeaseCloseExtensionStop();
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
+		if (LeaseCloseCensusSettled(census))
+		{
+			result.ok = true;
+			result.lease_close = census;
+			return true;
+		}
+
+		MCPJob closeJob = new MCPJob();
+		closeJob.id = command.id;
+		closeJob.kind = "lease_close";
+		closeJob.args = command.args;
+		closeJob.tick_poll_sent = result.tick_poll_sent;
+		closeJob.tick_poll_callback = result.tick_poll_callback;
+		closeJob.tick_dispatch = result.tick_dispatch;
+		closeJob.deadline_s = m_ElapsedS + 25.0;
+		m_Jobs.Insert(closeJob.id, closeJob);
+		return false;
 	}
 
 	protected array<ref MCPAllPlayer> BuildAllPlayers()

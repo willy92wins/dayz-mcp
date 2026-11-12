@@ -112,6 +112,9 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    AI_BEHAVIOURS,
+    AI_GROUP_COUNT_MAX,
+    AI_GROUP_WAYPOINTS_MAX,
     ACTOR_EMOTE_END,
     ACTOR_EMOTE_WAIT_MAX_S,
     ACTOR_EMOTE_WAIT_MIN_S,
@@ -283,6 +286,7 @@ from dayz_mcp.tool_args import (
     _patch_closed_tool_schema,
     _patch_mode_enum_from_authority,
     _patch_public_argument_alias,
+    _is_wire_number,
     _require_float_list,
     _require_range,
     _require_vec3,
@@ -692,6 +696,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "survivor_drive",
     "actor_emote",
     "chat_read",
+    # A mistyped key must not spawn a group on defaults: refused, not dropped.
+    "ai_group_spawn",
+    # A mistyped order key must not order a group on defaults.
+    "ai_group_order",
 )
 
 
@@ -8611,16 +8619,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "1899 average fps. "
             "A drive needs both; a new drive on a driven survivor replaces its "
             "heading and speed. mode='release', with neither heading nor speed, "
-            "sets the overrides DISABLED and ends the drive; on a survivor that "
-            "is not driven it changes nothing. The end of the lease that sent "
-            "the drive ends it too: the broker queues its release "
-            "(survivor_drive_release), which stops the drive only while that "
-            "call's drive is the one set. A call that times out or is "
-            "cancelled after the server received it still runs, and its "
-            "release is queued only if its result is not stored yet and the "
-            "queue admits the release: once the result is stored, nothing is "
-            "queued and the drive keeps going until a mode='release' or the "
-            "end of the lease. Nothing else ends a drive but the survivor's "
+            "sets the overrides DISABLED and ends the drive; on a survivor that is not driven it "
+            "changes nothing. The end of the lease that sent the drive ends it too: the server's "
+            "lease close stops every drive. A reachable server whose fresh census lacks the close "
+            "gets none and owes nothing (close_not_supported), so its drives keep going; any other "
+            "server the close does not reach leaves it owed (lease_end.unconfirmed). A call that "
+            "times out or is cancelled after the server received it still runs, and its release "
+            "(survivor_drive_release, which stops the drive only while that call's drive is the one "
+            "set) is queued only if its result is not stored yet and the queue admits the release: "
+            "once the result is stored, nothing is queued and the drive keeps going until a "
+            "mode='release' or the end of the lease. Nothing else ends a drive but the survivor's "
             "death, its object_delete and the bridge shutting down: until one "
             "of those the survivor keeps walking. A probe like "
             "infected_drive: if the survivor does not move, that is the "
@@ -8687,6 +8695,237 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["speed_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("survivor_drive", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Create a group of Expansion AI survivors with "
+            "the optional DayZ_MCP_ExpansionAI adapter. faction and formation "
+            "are Expansion names the server validates against its registered "
+            "types (an unknown one is bad_args naming the field, with the "
+            "allowed names); loadout is a loadout name under "
+            "$profile:ExpansionMod/Loadouts (empty takes the faction's "
+            "default; a trailing .json is stripped). behaviour is HOLD, ONCE, "
+            "LOOP or ROAM: HOLD sets formation state NONE and waypoint "
+            "behaviour HALT with STATIC speed, the others follow the "
+            "waypoints (ROAM also roams Expansion locations). waypoints are "
+            f"up to {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points. The reply's "
+            "ai_group is read back from the server: group_id, created, the "
+            "faction and formation the group reports, behaviour in tool and "
+            "Expansion names, and members with object_id, type, pos, "
+            "loadout_applied and attachment types. A refusal before creation "
+            "carries created false and args_read. At most "
+            f"{AI_GROUP_COUNT_MAX} members per group and 24 living adapter "
+            "members in total (ai_limit_reached). Without the adapter the "
+            "call is expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported "
+            "and creates nothing. scene_id "
+            f"registers the members under that scene. {SCENE_CAP_LINE}"
+        )
+    )
+    async def ai_group_spawn(
+        faction: StrictStr,
+        count: Any,
+        pos: list[Any],
+        loadout: StrictStr,
+        formation: StrictStr,
+        behaviour: StrictStr,
+        waypoints: list[Any] | None = None,
+        scene_id: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= AI_GROUP_COUNT_MAX:
+            raise ToolError(_bad_args("count", count, f"be an int from 1 to {AI_GROUP_COUNT_MAX}"))
+        if not isinstance(faction, str) or faction == "" or len(faction) > 64:
+            raise ToolError(_bad_args("faction", faction, "be a non-empty string of at most 64 characters"))
+        if not isinstance(formation, str) or formation == "" or len(formation) > 64:
+            raise ToolError(_bad_args("formation", formation, "be a non-empty string of at most 64 characters"))
+        if not isinstance(loadout, str) or len(loadout) > 64 or re.fullmatch(r"[A-Za-z0-9_.-]*", loadout) is None:
+            raise ToolError(_bad_args("loadout", loadout, "use only A-Z a-z 0-9 _ . - and at most 64 characters"))
+        if behaviour not in AI_BEHAVIOURS:
+            raise ToolError(_bad_args("behaviour", behaviour, "be one of HOLD, ONCE, LOOP, ROAM"))
+        if not isinstance(pos, list) or len(pos) != 3 or not all(_is_wire_number(item) for item in pos):
+            raise ToolError(_bad_args("pos", pos, "be [x, y, z] finite numbers"))
+        pos_wire = [float(item) for item in pos]
+        waypoint_items = [] if waypoints is None else waypoints
+        if not isinstance(waypoint_items, list) or len(waypoint_items) > AI_GROUP_WAYPOINTS_MAX:
+            raise ToolError(_bad_args("waypoints", waypoints, f"be a list of at most {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points"))
+        waypoints_wire: list[float] = []
+        for index, point in enumerate(waypoint_items):
+            if not isinstance(point, list) or len(point) != 3 or not all(_is_wire_number(item) for item in point):
+                raise ToolError(_bad_args(f"waypoints[{index}]", point, "be [x, y, z] finite numbers"))
+            waypoints_wire.extend(float(item) for item in point)
+        if scene_id != "" and not is_scene_id(scene_id):
+            raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+        args: dict[str, Any] = {
+            "faction": faction,
+            "count": count,
+            "pos": pos_wire,
+            "loadout": loadout,
+            "formation": formation,
+            "behaviour": behaviour,
+            "waypoints": waypoints_wire,
+            "spawn_token": uuid.uuid4().hex,
+        }
+        if scene_id != "":
+            args["scene_id"] = scene_id
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("ai_group_spawn", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Order one ai_group_spawn group on the server "
+            "through the Expansion AI adapter (ai_group_order). At least one "
+            "of behaviour, waypoints, formation or speed must be given; with "
+            "none the answer is bad_args and nothing is sent. behaviour is "
+            "HOLD, ONCE, LOOP or ROAM (anything else, lower case included, is "
+            "bad_args naming the four); HOLD stops the group on its mark, and "
+            "ROAM roams to Expansion locations, not only to waypoints. "
+            "waypoints is a list of 1 to 32 [x, y, z] finite triples, sent "
+            "as flat triples. formation is a formation name the server "
+            "validates against its Expansion build. speed is walk, jog or "
+            "sprint and travels as 1, 2 or 3 with speed_set. A group that is "
+            "unknown or releasing answers not_found and changes nothing. "
+            "Every field is validated before any is applied, so a bad "
+            "formation changes nothing, not even the other fields of the same "
+            "call. The reply's ai_group is read after the change: group_id, "
+            "behaviour and behaviour_expansion, formation, formation_state, "
+            "waypoint_count, waypoint_index, in_combat and, when in combat, "
+            "combat_may_override (the combat FSM may ignore the order), plus "
+            "one member row per registered member with object_id, alive, "
+            "speed_limit and speed_limit_threat (limits are 0 when the "
+            "entity is gone). Errors: bad_args (from the server with field= "
+            "and, for behaviour and formation, allowed=), "
+            "not_found, expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
+        )
+    )
+    async def ai_group_order(
+        group_id: StrictInt,
+        behaviour: StrictStr | None = None,
+        waypoints: list[Any] | None = None,
+        formation: StrictStr | None = None,
+        speed: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+            raise ToolError(_bad_args("group_id", group_id, "be a positive int"))
+        if behaviour is None and waypoints is None and formation is None and speed is None:
+            raise ToolError(
+                "bad_args: ai_group_order requires at least one of "
+                "behaviour, waypoints, formation, speed"
+            )
+        args: dict[str, Any] = {"group_id": group_id}
+        if behaviour is not None:
+            if behaviour not in AI_BEHAVIOURS:
+                raise ToolError(
+                    _bad_args(
+                        "behaviour",
+                        behaviour,
+                        "be one of " + ", ".join(sorted(AI_BEHAVIOURS)),
+                    )
+                )
+            args["behaviour"] = behaviour
+        if waypoints is not None:
+            if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= AI_GROUP_WAYPOINTS_MAX:
+                raise ToolError(
+                    _bad_args(
+                        "waypoints",
+                        waypoints,
+                        f"be a list of 1 to {AI_GROUP_WAYPOINTS_MAX} [x, y, z] triples",
+                    )
+                )
+            flat: list[float] = []
+            for point in waypoints:
+                if (
+                    not isinstance(point, list)
+                    or len(point) != 3
+                    or not all(_is_wire_number(item) for item in point)
+                ):
+                    raise ToolError(
+                        _bad_args(
+                            "waypoints",
+                            waypoints,
+                            "be a list of [x, y, z] finite number triples",
+                        )
+                    )
+                flat.extend(float(item) for item in point)
+            args["waypoints"] = flat
+        if formation is not None:
+            if not isinstance(formation, str) or not 1 <= len(formation) <= 64:
+                raise ToolError(_bad_args("formation", formation, "be a non-empty string of at most 64 characters"))
+            args["formation"] = formation
+        if speed is not None:
+            speed_values = {"walk": 1, "jog": 2, "sprint": 3}
+            if speed not in speed_values:
+                raise ToolError(
+                    _bad_args("speed", speed, "be one of walk, jog, sprint")
+                )
+            args["speed"] = speed_values[speed]
+            args["speed_set"] = True
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ai_group_order", args, "server", _timeout(timeout_s)
+            )
+
+    @app.tool(
+        description=(
+            "Read the state of one Expansion AI group, or of every group "
+            "registered under a scene. No lease: this is a read-only read of "
+            "the optional Expansion AI adapter, answered by the server in "
+            "its dispatch with no job and no world change. Exactly one of "
+            "group_id and scene_id must be given; both or neither is "
+            "bad_args, as is a scene_id that is not 1 to "
+            f"{SCENE_ID_MAX_CHARS} characters from A-Z a-z 0-9 _ -. Without "
+            "the adapter PBO, or with one whose arg contract differs, the "
+            "broker answers expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch. With "
+            "group_id the reply's ai_group holds group_id, scene_id, "
+            "faction, formation, formation_state, behaviour and "
+            "behaviour_expansion, waypoint_index, waypoint_count, "
+            "current_waypoint, in_combat, alive (members alive now), "
+            "members_total, group_present and members; with scene_id the "
+            "same rows are in ai_groups, in registration order. Each member "
+            "holds object_id, alive, pos, health, fsm_state, fsm_substate, "
+            "threat, fighting, speed_limit, speed_limit_threat, "
+            "emote_playing and emote_pending; a member whose entity is gone "
+            "answers gone true with its last observation (pos, health, "
+            "alive) marked last_observation true, and a member seen dead "
+            "stays alive false. A releasing group that still has anything "
+            "left carries release pending, the pending member ids in "
+            "remaining_ids and group_present; group fields a disappeared "
+            "group can no longer answer stay empty with waypoint_index -1. "
+            "An unknown group_id, or a releasing group already gone, is "
+            "not_found; a group with no living members answers ok with "
+            "alive 0. A scene nothing was registered under answers "
+            "ai_groups []."
+        )
+    )
+    async def ai_group_state(
+        group_id: StrictInt | None = None,
+        scene_id: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if (group_id is None) == (scene_id is None):
+            raise ToolError(
+                _bad_args(
+                    "group_id/scene_id",
+                    (group_id, scene_id),
+                    "name exactly one of group_id and scene_id",
+                )
+            )
+        args: dict[str, Any] = {}
+        if group_id is not None:
+            if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+                raise ToolError(_bad_args("group_id", group_id, "be a positive int"))
+            args["group_id"] = int(group_id)
+        else:
+            if not is_scene_id(scene_id):
+                raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+            args["scene_id"] = scene_id
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ai_group_state", args, "server", _timeout(timeout_s)
+            )
 
     # Spawn into a player's inventory.
     @app.tool(
@@ -8952,7 +9191,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "verdict in the script "
             "log as [DayZ_MCP] weapon_raise server accepted=0|1 raised=0|1 "
             "reason=...; a full input channel is error input_busy and changes "
-            "neither side. The result is the client's read-back after one "
+            "neither side, and before the connection generation is known it "
+            "is error conn_gen_unknown and changes neither side. The result "
+            "is the client's read-back after one "
             "simulation tick: raised is PlayerBase.IsRaised(), input_raised is "
             "HumanInputController.IsWeaponRaised(), plus expires_at and "
             "hold_ttl_s. Nothing stays ENABLED without an expiry."
@@ -9019,7 +9260,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "first), fires from its CommandHandler and prints its verdict in "
             "the script log as [DayZ_MCP] weapon_fire server accepted=0|1 "
             "reason=...; a full input channel is the completed refusal "
-            "input_busy, and then the client does not fire either. "
+            "input_busy, and then the client does not fire either; before "
+            "the connection generation is known it is the completed refusal "
+            "conn_gen_unknown and the client does not fire either. "
             "accepted=true means the client called Fire, not that the server "
             "counted a shot; confirm the shot with "
             "weapon_state. A completed refusal is ok=true, accepted=false, "
@@ -10194,12 +10437,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "during a path ends it aborted, and so do stop, the engine reporting "
             "the path's camera inactive and vanilla's developer free camera "
             "turned on; another camera turned on from outside the bridge ends it "
-            "only if the engine then reports the path's camera inactive. When the "
-            "lease that played it ends, the daemon queues an internal "
-            "camera_path_release for the client, which ends the path aborted when "
-            "the client runs it; nothing confirms that stop, and the daemon can "
-            "miss a play the client ran out of order or one that followed many "
-            "unanswered plays. path_id is an optional label of up to "
+            "only if the engine then reports the path's camera inactive. When the lease that played "
+            "it ends, the daemon sends no camera_path_release: the client's lease close stops the "
+            "path before it restores gameplay and the camera. A reachable client whose fresh census "
+            "lacks the close gets none and owes nothing (close_not_supported), so its path plays "
+            "on; any other client the close does not reach leaves it owed (lease_end.unconfirmed). "
+            "path_id is an optional label of up to "
             f"{camera_path_contract.PATH_ID_MAX_CHARS} characters from A-Z a-z "
             "0-9 _ -; given to state or stop it must name the current or last "
             "path. Read the pose with camera_get. Errors: bad_args (refused "
@@ -10236,8 +10479,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "command_id (camera_path.command_id returned by camera_path_play). "
         "A positive integer is required. matched=true means it stopped that "
         "play and released its camera and gameplay; false changes nothing "
-        "(already finished or another play is current). The daemon also uses "
-        "this bridge command internally when the owning lease ends."
+        "(already finished or another play is current). The daemon sends it internally "
+        "only to abandon a delivered play; at lease end the client's lease close stops the path."
     ))
     async def camera_path_release(
         command_id: StrictInt,
@@ -10368,8 +10611,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the managed client through EmoteManager.CreateEmoteCBFromMenu, the "
             "call the gestures menu makes: the client asks the server, which "
             "checks it and plays it on every peer as it does a person's "
-            "gesture. Only the local player, by this tool's scope: there is no "
-            "object_id. emote "
+            "gesture. Without object_id, only the local player. With "
+            "object_id (an ai_group_spawn member), the same call goes to the "
+            "server as ai_emote with a lease instead (plan 3.5): it is "
+            "refused with bad_target when the id is not a living member of "
+            "an active group, with npc_dormant when the member's simulation "
+            "is disabled or its FSM state is Dormant (refused before any "
+            "emote request is written, so no request stays pending), and "
+            "its states gain cancelled (end with only "
+            "an Expansion request pending) and every answer carries "
+            "emote_pending, true while a request in either emote layer is "
+            "still pending (on an error answer it travels in the message "
+            "text as emote_pending=true or emote_pending=false); a member "
+            "that dies or vanishes mid-wait answers emote_interrupted, and "
+            "a lease close answers the open job as at wait_s (started or "
+            "emote_timed_out), and that answer never proves the close. emote "
             f"is one of {', '.join(ACTOR_EMOTES)}, or {ACTOR_EMOTE_END}, which "
             "asks the server to end the emote that is playing (a looping one, "
             "such as sita), as the client does to end one. wait_s (default 10, "
@@ -10386,7 +10642,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "request, each absent when not reached (end has no "
             "started_after_s). What the client sees after wait_s changes "
             "nothing. A looping emote (greeting, sita, salute...) "
-            "answers started and plays until emote='end'; a one-time one (nod, "
+            "answers started and plays until emote='end'; on a member a "
+            "static pose also ends by itself about wait_s after it starts "
+            "(Expansion's autoCancel); temporary gestures are not cancelled; "
+            "a one-time one (nod, "
             "clap, shrug...) answers finished when it ends within wait_s. "
             "emote_timed_out, "
             "observed=emote_state=timed_out, also at the first client tick "
@@ -10416,15 +10675,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "there. Errors: bad_args "
             "(it lists the allowed names), client_not_in_game, no_player, "
             "no_emote_manager, emote_rejected, no_emote_playing, "
-            "emote_timed_out, and bridge_capability_missing from a PBO "
-            "without the verb, which is never handed it."
+            "emote_timed_out, bridge_capability_missing from a PBO "
+            "without the verb, which is never handed it, and, with "
+            "object_id only, bad_target, npc_dormant, emote_interrupted and "
+            "expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
         )
     )
     async def actor_emote(
         emote: StrictStr,
         wait_s: StrictFloat = 10.0,
+        object_id: StrictInt | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        if object_id is not None and (
+            isinstance(object_id, bool)
+            or not isinstance(object_id, int)
+            or object_id <= 0
+        ):
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if emote not in ACTOR_EMOTES and emote != ACTOR_EMOTE_END:
             raise ToolError(
                 _bad_args(
@@ -10446,6 +10715,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # transport waits wait_s plus the slack, as player_move does for
         # hold_s.
         timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
+        if object_id is not None:
+            # With object_id the same catalog and bounds go to the server as
+            # ai_emote, with a lease; the states gain cancelled and every
+            # answer carries emote_pending (plan 3.5/4).
+            args = {"object_id": int(object_id), "emote": emote, "wait_s": wait}
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "ai_emote", args, "server", timeout
+                )
+            state = result.get("emote_state")
+            if state not in ("started", "finished") or emote == ACTOR_EMOTE_END:
+                result.pop("started_after_s", None)
+            if state != "finished":
+                result.pop("finished_after_s", None)
+            return result
         args = {"emote": emote, "wait_s": wait}
         async with runtime.tool_lock:
             result = await runtime.call_bridge("actor_emote", args, "client", timeout)
@@ -10767,7 +11051,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "no_player, player_dead, player_unconscious, player_restrained, "
         "seated, no_input_controller, not_in_move_command, player_move_busy, "
         "busy (a player_look_at still turning the player), input_busy, "
-        "not_held, aborted."
+        "conn_gen_unknown, not_held, aborted."
     ))
     async def player_move(
         speed: StrictStr = "walk",

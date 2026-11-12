@@ -1,7 +1,7 @@
 # DayZ-MCP
 
 **An MCP server that puts an agent's hands on a running DayZ: build a mod, launch the
-game, put the world into a state, act, and read back what the engine did — 110 typed
+game, put the world into a state, act, and read back what the engine did — 113 typed
 tools, server-authoritative, no keyboard, no OCR.**
 
 Two things fall out of that, and both are new for this game:
@@ -105,9 +105,9 @@ read back in `MissionServer`. No synthesised keystrokes, no OCR. The one excepti
 visual capture — `MakeScreenshot` writes nothing unless the client starts with `-autotest` (T165276),
 and dayz-mcp does not start it that way yet, so frames come from an external window grab of the rendered client, which only reads pixels.
 
-**110 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
+**113 tools (+ `exec_enforce` when an allowlist is configured)** across world, player,
 vehicle, camera, telemetry, lifecycle, knowledge and session coordination:
-`action_cursor`, `action_hold`, `action_use`, `actor_emote`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
+`action_cursor`, `action_hold`, `action_use`, `actor_emote`, `ai_group_order`, `ai_group_spawn`, `ai_group_state`, `anim_timeline`, `bridge_status`, `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `capture_screenshot`, `chat_read`, `gameplay_state`,
 `dayz_knowledge_find`, `dayz_knowledge_prepare`, `dayz_knowledge_show`, `dayz_knowledge_status`, `dayz_test_close`, `dayz_test_foreground`, `dayz_test_run`, `dayz_test_stop`, `dev_free_camera_set`, `engine_set`, `entities_query`, `hands_attach`, `hands_take`, `hud_set`, `infected_drive`, `input_describe`, `input_trigger`, `inventory_attach`, `inventory_give`, `inventory_move`, `key_press`,
 `lease_acquire`, `list_projects`, `loadout_apply`, `loadout_get`, `logs_since`, `nav_path_query`, `notify_players`, `object_anim`,
 `object_delete`, `object_doors`, `object_inspect`, `object_resolve`, `object_set_health`, `pipeline_feedback`, `pipeline_inbox`,
@@ -138,7 +138,9 @@ its id as `camera_path.replaced_command_id`; `busy` still rejects an exclusive
 job. The daemon settles lease tracking on the client's terminal `finished`
 report. Explicit mode=stop keeps its existing last-pose behavior.
 `camera_path_release(command_id)` is public and requires the same lease as play;
-the daemon also uses it internally for lease cleanup. A matching command_id
+the daemon also sends it internally when it abandons a delivered play (a
+cancelled or timed-out call), but not at lease end, where the client's lease
+close stops the path. A matching command_id
 aborts the path and releases camera/gameplay (`matched=true`); a stale id cannot
 stop its successor (`matched=false`). The LIVE tool pack still excludes it.
 `camera_set_focus` exposes the existing camera setter with required focus
