@@ -9420,7 +9420,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		census.move_floor = MCPPlayerMoveControl.Generation();
 		census.weapon_floor = MCPWeaponControl.CloseRequestFloor();
-		census.look_floor = MCPLookAtControl.Generation();
+		census.look_floor = MCPLookAtControl.CloseFloor();
 		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.s_Active, "vehicle_drive");
 		AddCloseEntry(census, "input_trigger", MCPInputTriggerControl.IsHeld(), "input_trigger");
 		bool moveActive = MCPPlayerMoveControl.IsActive();

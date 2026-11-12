@@ -715,8 +715,17 @@ def _ai_group_spawn_detail(result: dict[str, Any]) -> str:
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 parts.append(f"{key}={value}")
     created = report.get("created")
-    if code in _AI_GROUP_SPAWN_CREATED_CODES and isinstance(created, bool):
-        parts.append(f"created={'true' if created else 'false'}")
+    # Enforce sends its bool created (MCPExpansionAI.c:37) as the int 0
+    # or 1 through JsonSerializer, as at :459-461 above; a Python bool
+    # from a hand-built result crosses too. Anything else is omitted.
+    if isinstance(created, bool):
+        created_value = created
+    elif type(created) is int and created in (0, 1):
+        created_value = bool(created)
+    else:
+        created_value = None
+    if code in _AI_GROUP_SPAWN_CREATED_CODES and created_value is not None:
+        parts.append(f"created={'true' if created_value else 'false'}")
     return "; ".join(parts)
 
 
