@@ -642,6 +642,83 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
     return "observed=" + " ".join(pairs)
 
 
+# ai_group_spawn refusals fill the ai_group report before refusing
+# (MCPExpansionAI.c AISpawnRefuse :688-695, args_read :727 and :735-745).
+# Only this verb of this PR crosses here; ai_group_order, ai_group_state
+# and the emote path publish different shapes and stay bare. The field is
+# an allowlist, not an echo: the adapter only ever writes the names in
+# _AI_GROUP_SPAWN_FIELDS for a spawn refusal (DispatchAIGroupSpawn).
+_AI_GROUP_SPAWN_FIELDS = frozenset(
+    {
+        "behaviour",
+        "count",
+        "faction",
+        "formation",
+        "loadout",
+        "pos",
+        "scene_id",
+        "spawn_token",
+        "waypoints",
+    }
+)
+_AI_GROUP_SPAWN_CREATED_CODES = frozenset(
+    {"ai_limit_reached", "bad_args", "scene_full", "spawn_failed"}
+)
+_AI_GROUP_TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+_AI_GROUP_ALLOWED_MAX = 64
+_AI_GROUP_WAYPOINT_NUMBERS_MAX = 96
+
+
+def _ai_group_spawn_detail(result: dict[str, Any]) -> str:
+    code = str(result.get("error") or "")
+    report = result.get("ai_group")
+    if not isinstance(report, dict):
+        return ""
+    parts: list[str] = []
+    if code == "bad_args":
+        field = report.get("field")
+        if isinstance(field, str) and field in _AI_GROUP_SPAWN_FIELDS:
+            parts.append(f"field={field}")
+        allowed = report.get("allowed")
+        if isinstance(allowed, list):
+            names = [
+                name
+                for name in allowed[:_AI_GROUP_ALLOWED_MAX]
+                if isinstance(name, str) and _AI_GROUP_TOKEN_RE.fullmatch(name)
+            ]
+            if names:
+                parts.append("allowed=" + ",".join(names))
+        args_read = report.get("args_read")
+        if isinstance(args_read, dict):
+            read: list[str] = []
+            faction = args_read.get("faction")
+            if isinstance(faction, str) and _AI_GROUP_TOKEN_RE.fullmatch(faction):
+                read.append(f"faction={faction}")
+            count = args_read.get("count")
+            if isinstance(count, int) and not isinstance(count, bool):
+                read.append(f"count={count}")
+            waypoints = args_read.get("waypoints")
+            if (
+                isinstance(waypoints, list)
+                and len(waypoints) <= _AI_GROUP_WAYPOINT_NUMBERS_MAX
+                and all(_is_finite_number(value) for value in waypoints)
+            ):
+                read.append(
+                    "waypoints=" + ",".join(repr(float(value)) for value in waypoints)
+                )
+            if read:
+                parts.append("args_read=" + " ".join(read))
+    if code == "ai_limit_reached":
+        for key in ("living", "limit"):
+            value = report.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                parts.append(f"{key}={value}")
+    created = report.get("created")
+    if code in _AI_GROUP_SPAWN_CREATED_CODES and isinstance(created, bool):
+        parts.append(f"created={'true' if created else 'false'}")
+    return "; ".join(parts)
+
+
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -692,6 +769,11 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     world_spawn's vehicle_eject_failed carries the retained object_id so an
     MCP caller can retry cleanup after its unsupported-lifetime rollback.
 
+    ai_group_spawn is the eleventh: a refusal before creation carries
+    field, allowed, args_read and created from its ai_group report, and
+    ai_limit_reached also carries living and limit (plan 3.1). Only the
+    allowlisted field names and token-checked values cross, capped.
+
     The decision is by VERB, never by key presence: MCPResult is one flat class
     (MCPMessages.c:423-479), so every result carries handler="", user_id=0 and
     clicked=false, and a world_spawn timeout has to stay "timeout". The click
@@ -709,6 +791,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         # result (loopback._mark_discarded); any verb can carry it.
         expansion_detail = _expansion_unavailable_detail(result)
         return f"detail={expansion_detail}" if expansion_detail is not None else ""
+    if cmd == "ai_group_spawn":
+        return _ai_group_spawn_detail(result)
     if cmd == "world_spawn" and str(result.get("error") or "") == "vehicle_eject_failed":
         object_id = result.get("object_id")
         if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
@@ -778,6 +862,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # stance= on a new emote's emote_rejected),
     # action_use and action_hold, whose deploy's hologram_colliding carries
     # observed= with the hologram the client read,
+    # ai_group_spawn, whose refusals carry field, allowed, args_read and
+    # created from the ai_group report (living/limit on ai_limit_reached),
     # and world_spawn/vehicle_eject_failed, which carries the retained object_id.
     code = str(result.get("error") or "bridge_error")
     detail = _bridge_error_detail(result, cmd)
