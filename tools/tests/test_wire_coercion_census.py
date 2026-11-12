@@ -245,6 +245,10 @@ _ENUM_LIKE_STR = (
 COERCIBLE_ALLOWLIST: dict[tuple[str, str], str] = {}
 COERCIBLE_ALLOWLIST.update(
     {
+        ("ai_group_spawn", "count"): (
+            "untyped so 1.5/true reach the handler and read bad_args; "
+            "the handler accepts only an int from 1 to 8"
+        ),
         ("action_use", "action"): "free text Enforce action class name",
         ("action_hold", "action"): "free text Enforce action class name",
         ("action_hold", "classname"): "free text target GetType()",

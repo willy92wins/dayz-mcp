@@ -47,9 +47,9 @@ MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 PREVIOUS_ARG_CONTRACT_HASH = "4f90284258023d98"
 DRIVE_WIRE = {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": True}
 RELEASE_WIRE = {"object_id": 7, "mode": "release"}
-# The broker's release of one drive: internal, sent by cleanup_owner and
-# RELEASE_REGISTRY with the id of the drive command and its survivor's
-# object_id.
+# The broker's release of one drive: internal, sent only by the mid-lease
+# abandon (RELEASE_REGISTRY) with the id of the drive command and its
+# survivor's object_id. A lease end sends the aggregated close instead.
 DRIVE_RELEASE = "survivor_drive_release"
 HEADING_RULE = "be a finite number of compass degrees within [-360, 360]"
 
@@ -182,6 +182,19 @@ def _delivered(state: loopback.ServerState, commands: list[str] | None = None) -
     return list(polled["commands"])
 
 
+def _lease_close(state: loopback.ServerState) -> dict:
+    """The one command a lease end now sends the server for its drives:
+    the aggregated close whose dispatch stops every drive (\u00a74 #266)."""
+    [close] = _delivered(state)
+    if close["cmd"] != "lease_close":
+        raise AssertionError(close)
+    if close["args"].get("close_lease_id") != "drive-lease-1":
+        raise AssertionError(close)
+    if close["args"].get("close_generation") != "gen-drive":
+        raise AssertionError(close)
+    return close
+
+
 def _answered(state: loopback.ServerState, command_id: int, answer: dict | None = None) -> dict | None:
     """The bridge's answer to a delivered command, stored and then taken as
     the tool takes it."""
@@ -257,15 +270,21 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
     def test_the_drive_release_is_no_tool_and_the_description_says_the_lease_end_stops_a_drive(self) -> None:
         self.assertIsNone(self.app._tool_manager.get_tool(DRIVE_RELEASE))
         for part in (
-            "The end of the lease that sent the drive ends it too: the broker queues its release "
-            "(survivor_drive_release), which stops the drive only while that call's drive is the one set.",
+            "The end of the lease that sent the drive ends it too: the server's lease close stops every "
+            "drive. A reachable server whose fresh census lacks the close gets none and owes nothing "
+            "(close_not_supported), so its drives keep going; any other server the close does not reach "
+            "leaves it owed (lease_end.unconfirmed).",
             "A call that times out or is cancelled after the server received it still runs, and its "
-            "release is queued only if its result is not stored yet and the queue admits the release: "
+            "release (survivor_drive_release, which stops the drive only while that call's drive is the "
+            "one set) is queued only if its result is not stored yet and the queue admits the release: "
             "once the result is stored, nothing is queued and the drive keeps going until a "
             "mode='release' or the end of the lease.",
         ):
             self.assertIn(part, self.tool.description)
         self.assertNotIn("still runs, and its release is queued.", self.tool.description)
+        self.assertNotIn("the broker queues its release", self.tool.description)
+        # PX9 c: no close or debt for every server (close_not_supported).
+        self.assertNotIn("and a server the close does not reach leaves that close owed", self.tool.description)
 
     def test_the_description_says_the_survivor_turns_its_body_toward_heading(self) -> None:
         for part in (
@@ -551,7 +570,8 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
     def test_a_drive_abandoned_after_its_result_is_stored_goes_on_until_the_lease_ends(self) -> None:
         # The result is stored before the caller takes it: the abandon of a
         # timeout or a cancel, in process or over HTTP, finds nothing running
-        # and queues nothing; the end of the lease still releases the drive.
+        # and queues nothing; the end of the lease still stops the drive,
+        # now through the close, not a per-lease release.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
@@ -571,11 +591,10 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(_delivered(state), [])
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
-        )
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
     def test_a_running_drive_abandoned_under_quarantine_queues_no_release(self) -> None:
         # Still running, but the queue does not admit the release: nothing is
@@ -591,53 +610,53 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(bound_queue(state, "server"), [])
 
-    def test_the_end_of_a_lease_queues_the_release_of_its_latest_drive_of_each_survivor(self) -> None:
+    def test_the_end_of_a_lease_queues_one_close_and_no_drive_release(self) -> None:
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         first = _send(state, OWNER_A, token, DRIVE_WIRE)
         other = _send(state, OWNER_A, token, {**DRIVE_WIRE, "object_id": 9})
         latest = _send(state, OWNER_A, token, {**DRIVE_WIRE, "heading": 180.0, "speed": 3.0})
-        # A mode release names no drive: the broker keeps 9's drive id.
+        # A mode release names no drive and stops 9's drive itself.
         stop = _send(state, OWNER_A, token, {"object_id": 9, "mode": "release"})
         self.assertEqual([command["id"] for command in _delivered(state)], [first, other, latest, stop])
         for command_id in (first, other, latest, stop):
             self.assertEqual(_answered(state, command_id)["ok"], 1)
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 2)
+        # \u00a74 #266: no per-survivor release at the lease end. The one
+        # close stops every driven survivor in the bridge (ShutdownAll),
+        # and its census reads s_Driven itself.
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(
             [value for value in released["cleanup_degraded"] if value.startswith("survivor_drive")], []
         )
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [
-                (DRIVE_RELEASE, {"command_id": latest, "object_id": 7}),
-                (DRIVE_RELEASE, {"command_id": other, "object_id": 9}),
-            ],
-        )
-        self.assertEqual(state._drive_by_lease, {})
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
+        self.assertEqual(bound_queue(state, "server"), [])
 
-    def test_a_clean_lease_end_reports_the_release_count_and_no_drive_degradation(self) -> None:
-        # As bot_stop and camera_path_release: a release that went out is
-        # counted and degrades nothing, so a control client sees no conflict;
-        # survivor_drive_release_unconfirmed is for one that was not queued.
+    def test_a_clean_lease_end_reports_the_close_count_and_no_drive_degradation(self) -> None:
+        # A close that went out is counted and degrades nothing;
+        # survivor_drive_release_unconfirmed belonged to the per-lease
+        # release and is never reported at a lease end any more.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
         self.assertEqual([command["id"] for command in _delivered(state)], [drive])
         _answered(state, drive)
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup"].get("cleanup_degraded", []), [])
         self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
-        )
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
     def test_a_lease_end_after_the_run_ended_queues_and_degrades_nothing(self) -> None:
         # Round of 2026-11-09: session_release after dayz_test_close answered
         # survivor_drive_release_unconfirmed. The close retired the server's
-        # binding, and the survivor and its drive went with that server.
+        # binding, and the survivor and its drive went with that server, so
+        # under v13 there is no per-lease release to queue and nothing
+        # degrades; the drive bookkeeping is cleared with the lease.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
@@ -647,12 +666,14 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         released = _release(coordinator, OWNER_A, token)
         self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(state._drive_by_lease, {})
+        # v13 has no per-lease drive registry: nothing is queued for the
+        # retired server and no fire-and-forget release is outstanding.
+        self.assertEqual(bound_queue(state, "server"), [])
         self.assertEqual(state._fire_and_forget_ids, set())
 
-    def test_a_drive_the_queue_drops_at_the_lease_end_leaves_the_delivered_one_named(self) -> None:
-        # The id is taken at delivery: the queued drive is discarded by the
-        # release and never runs, so the release names the one before it.
+    def test_a_drive_the_queue_drops_at_the_lease_end_is_cancelled_not_released(self) -> None:
+        # The queued drive is discarded by the release and never runs.
+        # The delivered one is stopped by the close, which names no drive.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         delivered = _send(state, OWNER_A, token, DRIVE_WIRE)
@@ -661,13 +682,12 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         _send(state, OWNER_A, token, {**DRIVE_WIRE, "heading": 180.0})
         released = _release(coordinator, OWNER_A, token)
         self.assertEqual(released["cleanup"]["cancelled"], 1)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": delivered, "object_id": 7})],
-        )
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
-    def test_a_release_the_bridge_is_not_handed_is_reported(self) -> None:
+    def test_a_close_the_bridge_is_not_handed_and_quarantine_are_reported(self) -> None:
         for name in ("missing_release", "retail_quarantine"):
             with self.subTest(name=name):
                 state, coordinator = _leased_state()
@@ -684,16 +704,20 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
                 else:
                     state.retail_probe = lambda: {"known": False}
                 released = _release(coordinator, OWNER_A, token)
-                self.assertEqual(bound_queue(state, "server"), [])
+                self.assertNotIn(
+                    DRIVE_RELEASE, [row["cmd"] for row in bound_queue(state, "server")]
+                )
+                self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+                self.assertNotIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
                 if name == "missing_release":
-                    # Not queued: unconfirmed, as camera_path_release says it.
-                    self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 0)
-                    self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
-                    self.assertNotIn("survivor_drive_release_failed", released["cleanup_degraded"])
+                    # The close does not need survivor_drive_release
+                    # announced: it goes out, and nothing is unconfirmed.
+                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+                    _lease_close(state)
                 else:
-                    self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 0)
                     self.assertIn("retail_quarantine", released["cleanup_degraded"])
-                    self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
+                    self.assertEqual(_delivered(state), [])
 
     def test_delivery_drops_it_when_the_bound_peer_no_longer_advertises_it(self) -> None:
         state = _bound_state()
@@ -1768,7 +1792,8 @@ class SurvivorDriveModelTest(unittest.TestCase):
     def test_after_the_lease_ends_the_next_owner_inherits_no_drive(self) -> None:
         # Codex's probe, with the real coordinator, cleanup_owner and acquire
         # in memory and the translated bridge: A's drive is delivered and
-        # answered, A releases, B acquires, and the bridge runs what it polls.
+        # answered, A releases, the close stops it, B acquires, and the
+        # bridge runs what it polls.
         model = _HandlerModel()
         survivor = model.spawn(7, (11.0, 2.0, 33.0))
         state, coordinator = _leased_state()
@@ -1785,22 +1810,41 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(bound_queue(state, "server"), [])
         self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
-        _acquire(coordinator, OWNER_B)
-        [command] = _delivered(state)
-        self.assertEqual(
-            (command["cmd"], command["args"]), (DRIVE_RELEASE, {"command_id": drive, "object_id": 7})
-        )
-        result, _post_now = model.dispatch(command["id"], command["cmd"], command["args"])
-        self.assertEqual((result.ok, result.matched), (True, True))
+        # The next server poll hands the bridge the close, not a release.
+        # Its dispatch runs MCPSurvivorDrive.ShutdownAll(this) (pinned in
+        # test_lease_close_bridge); run that stop on the model and answer
+        # the close with the census it then reads: s_Driven empty.
+        close = _lease_close(state)
+        model.call("ShutdownAll", model.bridge)
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(model.registry(), [])
+        status, stored = state.store_result(
+            {
+                "id": close["id"],
+                "ok": True,
+                "lease_close": {
+                    "generation": close["args"]["close_generation"],
+                    "lease_id": close["args"]["close_lease_id"],
+                    "peer": "server",
+                    "state": "clean",
+                    "entries": [{"name": "survivor_drive", "state": "clean"}],
+                    "floors": [],
+                },
+            },
+            instance=INST_SERVER,
+        )
+        self.assertEqual(status, 200, stored)
+        self.assertNotIn("discarded", stored)
+        _acquire(coordinator, OWNER_B)
+        self.assertEqual(_delivered(state), [])
         writes = model.writes()
         for _tick in range(3):
             model.call("Tick", model.bridge)
         self.assertEqual(model.writes(), writes)
         self.assertEqual(model.registry(), [])
-        self.assertEqual(_delivered(state), [])
 
     def test_with_nothing_driven_the_hooks_change_nothing(self) -> None:
         idle = self.model.spawn(7)

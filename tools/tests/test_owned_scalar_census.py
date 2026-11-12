@@ -81,6 +81,18 @@ BRIDGES = ("MCPBridge.c", "MCPClientBridge.c")
 MESSAGES = "MCPMessages.c"
 RESULT_CLASS = "MCPResult"
 WATCHED = frozenset(OWNED_SCALAR_FIELDS) | NEVER_FILLED_SCALAR_FIELDS
+# The optional adapter's own command: the census walks only the base bridges,
+# so its writes are listed here and pinned against its source by
+# test_adapter_owned_fields_are_written_by_the_adapter.
+ADAPTER_SOURCE = (
+    addon_root().parent / "addon_expansion_ai" / "scripts" / "5_Mission" / "MCPExpansionAI.c"
+)
+ADAPTER_OWNERS: dict[str, frozenset[str]] = {
+    "emote_state": frozenset({"ai_emote"}),
+    "started_after_s": frozenset({"ai_emote"}),
+    "finished_after_s": frozenset({"ai_emote"}),
+    "emote_pending": frozenset({"ai_emote"}),
+}
 
 # "Any command": a method reachable from outside its class, before narrowing.
 TOP = None
@@ -932,7 +944,7 @@ def _owner_problems(observed: dict[str, frozenset[str]]) -> list[str]:
     problems: list[str] = []
     for name, owners in sorted(OWNED_SCALAR_FIELDS.items()):
         unlisted = sorted(observed[name] - owners)
-        stale = sorted(owners - observed[name])
+        stale = sorted(owners - observed[name] - ADAPTER_OWNERS.get(name, frozenset()))
         if unlisted:
             problems.append(
                 f"{name}: {unlisted} write it, but OWNED_SCALAR_FIELDS drops it from their result"
@@ -1004,6 +1016,13 @@ class OwnedScalarCensusTest(unittest.TestCase):
     def test_owner_sets_are_exactly_the_commands_that_write_each_field(self) -> None:
         self.assertEqual(_owner_problems(census(_census_sources())), [])
 
+    def test_adapter_owned_fields_are_written_by_the_adapter(self) -> None:
+        adapter = ADAPTER_SOURCE.read_text(encoding="utf-8")
+        for name, owners in sorted(ADAPTER_OWNERS.items()):
+            with self.subTest(field=name):
+                self.assertLessEqual(owners, OWNED_SCALAR_FIELDS[name])
+                self.assertRegex(adapter, rf"\bresult\.{name}\s*=")
+
     def test_never_filled_fields_have_no_write(self) -> None:
         self.assertEqual(_never_filled_problems(census(_census_sources())), [])
 
@@ -1016,6 +1035,13 @@ class OwnedScalarCensusTest(unittest.TestCase):
     def test_owned_and_never_filled_fields_are_scalar_members_of_mcp_result(self) -> None:
         messages = (MISSION / MESSAGES).read_text(encoding="utf-8")
         members = _mcp_result_members(messages)
+        adapter = ADAPTER_SOURCE.read_text(encoding="utf-8")
+        modded = re.search(r"modded class MCPResult\s*\{(.*?)\};", adapter, re.S)
+        self.assertIsNotNone(modded)
+        for statement in modded.group(1).split(";"):
+            words = statement.split()
+            if len(words) >= 2:
+                members[words[-1]] = " ".join(words[:-1])
         # An initializer fills the field for every command, which an owner set
         # cannot express.
         initialized = _mcp_result_initializers(messages)

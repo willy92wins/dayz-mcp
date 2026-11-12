@@ -493,7 +493,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move,player_respawn,player_trace," + "player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -571,6 +571,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected ref array<ref MCPClientResultCallback> m_ResultCallbackPool;
 	protected ref array<ref MCPCommand> m_Pending;
 	protected ref MCPJobRunner m_JobRunner;
+	// §4 #266: actor_emote started an emote that may outlive its job; the
+	// lease close stops and censuses only an emote this flag marks.
+	protected bool m_MCPEmoteStarted;
 	protected ref array<Object> m_ReadyObjects;
 	protected ref array<CargoBase> m_ReadyProxyCargos;
 	protected ref MCPDialogController m_Dialog;
@@ -583,6 +586,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_StartPauseDone;
 	protected float m_StartPauseFromS;
 	protected const float START_PAUSE_WINDOW_S = 60.0;
+	//! §2.6 C14 (PX3 a, PX6 a): ui_pause left a queued pause (vanilla
+	//! m_PauseQueued) that was not queued before its call, or opened this
+	//! pause menu (MENU_INGAME). Not ref: the UI manager owns the menu. The
+	//! mark is the instance, so a pause menu the person opens after MCP's
+	//! closed is another menu, not MCP's. MaintainMCPPause keeps each mark as
+	//! long as the pause it names; the lease close cancels the queued one
+	//! and closes MCP's menu (StopLeaseClosePause), and its census counts both.
+	protected bool m_MCPPauseQueued;
+	protected UIScriptedMenu m_MCPPauseMenu;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -636,6 +648,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogHostTried = false;
 		m_StartPauseDone = false;
 		m_StartPauseFromS = -1.0;
+		m_MCPPauseQueued = false;
+		m_MCPPauseMenu = null;
 	}
 
 	void ~MCPClientBridge()
@@ -724,6 +738,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// camera_path_play moves its camera here on every frame, never from a
 		// job, by this frame's timeslice. Returns at once while no path plays.
 		TickCameraPath(timeslice);
+		// §4 #266: the MCP-started mark falls as soon as its emote stops,
+		// even after its job ended. Before the job runner.
+		MaintainMCPEmoteStarted();
+		// §2.6 C14: the ui_pause marks fall as soon as their pause does,
+		// even after the job answered. Before the job runner.
+		MaintainMCPPause();
 
 		if (m_JobRunner)
 		{
@@ -1402,7 +1422,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
-		if (command.cmd == "camera_set")
+		if (command.cmd == "lease_close_client")
+		{
+			postNow = DispatchLeaseCloseClient(command, result);
+		}
+		else if (command.cmd == "camera_set")
 		{
 			postNow = DispatchCameraSet(command, result);
 		}
@@ -3565,6 +3589,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// (MCP_PlayerMove.c). Sent first: input_busy leaves both sides as they were.
 		request.move_id = MCPPlayerMoveControl.NextMoveId();
 		serverRequest = MCPPlayerMoveControl.SendStart(request);
+		if (serverRequest == "conn_gen_unknown")
+		{
+			result.ok = false;
+			result.error = "conn_gen_unknown";
+			return true;
+		}
 		if (serverRequest == "input_busy")
 		{
 			result.ok = false;
@@ -4954,7 +4984,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			}
 
 			MCPHoldControl.Begin(amc, player, action, command.args.hold_id, command.args.hold_timeout_s);
+			MCPHoldControl.ArmStart(amc, action);
 			amc.PerformActionStart(action, actionTarget, heldItem, NULL);
+			MCPHoldControl.DisarmStart();
 			if (!MCPHoldControl.HasData() && !MCPHoldControl.Ready())
 			{
 				MCPHoldControl.NoteSetupFailed();
@@ -4978,12 +5010,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 
+		MCPHoldControl.ArmStart(amc, action);
 		MCPActionUseWatch.Begin(action, actionTarget);
 		amc.PerformActionStart(action, actionTarget, heldItem, NULL);
 		int starts = MCPActionUseWatch.End();
 		// 204e: whether the local player is placing once the call ran, which
 		// after ActionTogglePlaceObject says which way the toggle went.
 		result.placing = player.IsPlacingLocal();
+		MCPHoldControl.DisarmStart();
 		// PerformActionStart is void. ActionStart can fail in SetupAction
 		// (typically inventory reservation) and return without ctx.Send
 		// (actionmanagerclient.c:638-643). GetRunningAction() is null then.
@@ -5754,6 +5788,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (!job)
 		{
 			return false;
+		}
+
+		if (job.kind == "lease_close")
+		{
+			return LeaseCloseCensusSettled(BuildLeaseCloseCensus(job.args));
 		}
 
 		if (job.kind == "camera_set")
@@ -6808,6 +6847,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return;
 		}
 
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, false);
+			return;
+		}
+
 		if (job.kind == "camera_set")
 		{
 			MCPResult result = new MCPResult();
@@ -7007,6 +7052,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		if (!job)
 		{
+			return;
+		}
+
+		if (job.kind == "lease_close")
+		{
+			PostLeaseCloseJob(job, true);
 			return;
 		}
 
@@ -8082,6 +8133,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return true;
 			}
 			emotes.CreateEmoteCBFromMenu(emoteId);
+			m_MCPEmoteStarted = true;
 		}
 		job = new MCPJob();
 		job.id = command.id;
@@ -8346,6 +8398,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				return false;
 			}
 			job.emote_finished_s = nowS;
+			m_MCPEmoteStarted = false;
 			return true;
 		}
 		if (playing)
@@ -8362,6 +8415,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 		job.emote_finished_s = nowS;
+		m_MCPEmoteStarted = false;
 		return true;
 	}
 
@@ -8451,6 +8505,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int beforeId;
 		int afterId;
 		bool deferred;
+		bool queuedBefore;
+		bool pausedBefore;
 		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
 		{
 			result.ok = false;
@@ -8476,6 +8532,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				beforeId = menuBefore.GetID();
 			}
 		}
+		queuedBefore = mission.MCP_IsPauseQueued();
+		pausedBefore = mission.IsPaused();
 		mission.Pause();
 		afterId = -1;
 		ui = GetGame().GetUIManager();
@@ -8486,6 +8544,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			{
 				afterId = menuAfter.GetID();
 			}
+		}
+		// §2.6 C14: mark only what this call left for the lease close. A
+		// pause already queued, or a menu already open, is someone else's.
+		if (!queuedBefore && mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = true;
+		}
+		if (!pausedBefore && afterId == MENU_INGAME)
+		{
+			m_MCPPauseMenu = menuAfter;
 		}
 		reply = new MCPUiPause();
 		reply.menu_id_before = beforeId;
@@ -9250,6 +9318,484 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 			i = i + 1;
 		}
+	}
+
+	// Lease close census (§2.6): state, not jobs. A controller still active
+	// after its stop step is residue naming that controller.
+	protected void AddCloseEntry(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		if (active)
+		{
+			entry.state = "residue";
+			entry.reason = reason;
+		}
+		else
+		{
+			entry.state = "clean";
+			entry.reason = "";
+		}
+
+		census.entries.Insert(entry);
+	}
+
+	protected void AddCloseDebt(MCPLeaseCloseCensus census, string name, bool active, string reason)
+	{
+		if (!active)
+		{
+			AddCloseEntry(census, name, false, "");
+			return;
+		}
+
+		MCPLeaseCloseEntry entry = new MCPLeaseCloseEntry();
+		entry.name = name;
+		entry.state = "unverified";
+		entry.reason = reason;
+		census.entries.Insert(entry);
+	}
+
+	protected bool LeaseCloseCensusSettled(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state == "residue")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected bool LeaseCloseCensusClean(MCPLeaseCloseCensus census)
+	{
+		if (!census)
+		{
+			return false;
+		}
+
+		int i = 0;
+		while (i < census.entries.Count())
+		{
+			if (census.entries.Get(i).state != "clean")
+			{
+				return false;
+			}
+
+			i = i + 1;
+		}
+
+		return true;
+	}
+
+	protected MCPLeaseCloseCensus BuildLeaseCloseCensus(MCPArgs closeArgs)
+	{
+		MCPLeaseCloseCensus census = new MCPLeaseCloseCensus();
+		census.peer = "client";
+		if (closeArgs)
+		{
+			census.generation = closeArgs.close_generation;
+			census.lease_id = closeArgs.close_lease_id;
+		}
+
+		PlayerBase player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			int closeNetLow = 0;
+			int closeNetHigh = 0;
+			player.GetNetworkID(closeNetLow, closeNetHigh);
+			census.net_low = closeNetLow;
+			census.net_high = closeNetHigh;
+			census.conn_gen = player.MCPConnGenValue();
+		}
+
+		census.move_floor = MCPPlayerMoveControl.Generation();
+		census.weapon_floor = MCPWeaponControl.CloseRequestFloor();
+		census.look_floor = MCPLookAtControl.CloseFloor();
+		AddCloseEntry(census, "vehicle_drive", MCPCarDrive.s_Active, "vehicle_drive");
+		AddCloseEntry(census, "input_trigger", MCPInputTriggerControl.IsHeld(), "input_trigger");
+		bool moveActive = MCPPlayerMoveControl.IsActive();
+		if (MCPPlayerMoveControl.ServerReleasePending())
+		{
+			moveActive = true;
+		}
+
+		AddCloseEntry(census, "player_move", moveActive, "player_move");
+		AddCloseEntry(census, "weapon", MCPWeaponControl.IsBusy(), "weapon");
+		bool lookActive = MCPLookAtControl.IsActive();
+		if (MCPLookAtControl.ServerReleasePending())
+		{
+			lookActive = true;
+		}
+
+		AddCloseEntry(census, "look_at", lookActive, "look_at");
+		bool cameraActive = false;
+		if (m_ActiveCam || m_CameraHandoffPending)
+		{
+			cameraActive = true;
+		}
+
+		AddCloseEntry(census, "camera", cameraActive, "camera");
+		// §4 #263: the path itself, after the stop above. A path that is
+		// still playing is residue the observer re-reads.
+		bool cameraPathPlaying = false;
+		if (m_CameraPath && m_CameraPath.IsPlaying())
+		{
+			cameraPathPlaying = true;
+		}
+
+		AddCloseEntry(census, "camera_path", cameraPathPlaying, "camera_path");
+		// §4 #266: only the emote actor_emote started counts, read through
+		// MCP_IsEmoteLive (playing, pending, surrender or queued launcher),
+		// not m_bEmoteIsPlaying alone.
+		bool emoteActive = false;
+		if (m_MCPEmoteStarted)
+		{
+			EmoteManager closeEmotes;
+			if (player)
+			{
+				closeEmotes = player.GetEmoteManager();
+			}
+
+			if (!closeEmotes || closeEmotes.MCP_IsEmoteLive())
+			{
+				emoteActive = true;
+			}
+			else
+			{
+				m_MCPEmoteStarted = false;
+			}
+		}
+
+		AddCloseEntry(census, "emote", emoteActive, "emote");
+		AddCloseEntry(census, "player_simulation", m_PlayerSimulationDisabled, "player_simulation");
+		AddCloseEntry(census, "controls_hud", m_ControlsSuppressed, "controls_hud");
+		bool dialogOpen = false;
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			dialogOpen = true;
+		}
+
+		AddCloseEntry(census, "dialog", dialogOpen, "dialog");
+		bool previewSet = false;
+		if (m_UiPreviewRoot)
+		{
+			previewSet = true;
+		}
+
+		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
+		// §2.6 C14: after StopLeaseClosePause, the pause ui_pause queued and
+		// still queued, or the pause menu it opened and still open (under a
+		// submenu too, uimanager.c:160), is residue the 25 s observer
+		// re-reads. A pause MCP neither queued nor opened is not counted.
+		bool pauseActive = false;
+		if (m_MCPPauseQueued || m_MCPPauseMenu)
+		{
+			MissionGameplay closeMission = MissionGameplay.Cast(GetGame().GetMission());
+			if (closeMission)
+			{
+				if (m_MCPPauseQueued && closeMission.MCP_IsPauseQueued())
+				{
+					pauseActive = true;
+				}
+
+				UIManager closeUi = GetGame().GetUIManager();
+				if (m_MCPPauseMenu && closeUi && closeUi.FindMenu(MENU_INGAME) == m_MCPPauseMenu)
+				{
+					pauseActive = true;
+				}
+			}
+		}
+
+		AddCloseEntry(census, "ui_pause", pauseActive, "ui_pause");
+		// §2.9: the client half reads the action manager, not the job, so a
+		// Take that cleared the hold control cannot make this row clean.
+		bool holdActive = MCPHoldControl.IsActive();
+		if (player)
+		{
+			ActionManagerClient holdManager = ActionManagerClient.Cast(player.GetActionManager());
+			if (holdManager && holdManager.MCP_HoldBusy())
+			{
+				holdActive = true;
+			}
+		}
+
+		AddCloseEntry(census, "action_hold", holdActive, "action_hold");
+		// §2.9: interrupt/START debt of this client process, per §2.7 types.
+		AddCloseDebt(census, "action_input_in_flight", MCPHoldControl.InputInFlight(), "action_input_in_flight");
+		bool jobsActive = false;
+		if (m_JobRunner && m_JobRunner.CountExcluding("lease_close") > 0)
+		{
+			jobsActive = true;
+		}
+
+		AddCloseEntry(census, "jobs", jobsActive, "jobs");
+		bool samplerActive = false;
+		if (MCPVehicleTrace.IsActive() || MCPAnimTimeline.IsActive() || MCPPlayerTrace.IsActive())
+		{
+			samplerActive = true;
+		}
+
+		AddCloseEntry(census, "samplers", samplerActive, "samplers");
+		if (census.conn_gen == 0)
+		{
+			AddCloseEntry(census, "conn_gen", true, "conn_gen_unknown");
+		}
+
+		if (LeaseCloseCensusClean(census))
+		{
+			census.state = "clean";
+		}
+		else
+		{
+			census.state = "residue";
+		}
+
+		return census;
+	}
+
+	protected void PostLeaseCloseJob(MCPJob job, bool timedOut)
+	{
+		MCPResult result = new MCPResult();
+		result.id = job.id;
+		result.ok = true;
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(job.args);
+		if (timedOut && !LeaseCloseCensusSettled(census))
+		{
+			AddCloseEntry(census, "observer", true, "observer_timeout");
+			census.state = "residue";
+		}
+
+		result.lease_close = census;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		PostResult(result);
+	}
+
+	// §4 #266: the mark lives exactly as long as the emote it names.
+	// Without this, an emote that ended after its job (by wait_s, or a
+	// request the server refused) leaves the mark on, and a later foreign
+	// emote would be ended and counted by the close. No player or no
+	// manager keeps the mark: nothing can be read either way.
+	protected void MaintainMCPEmoteStarted()
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		if (!m_MCPEmoteStarted)
+		{
+			return;
+		}
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (player)
+		{
+			emotes = player.GetEmoteManager();
+		}
+
+		if (!emotes)
+		{
+			return;
+		}
+
+		if (!emotes.MCP_IsEmoteLive())
+		{
+			m_MCPEmoteStarted = false;
+		}
+	}
+
+	// §4 #266: end the emote actor_emote started if it still plays. An
+	// emote MCP did not start is neither ended nor counted. The end is
+	// async: the census below and the 25 s observer read MCP_IsEmoteLive
+	// until it stops.
+	protected void StopLeaseCloseEmote()
+	{
+		PlayerBase player;
+		EmoteManager emotes;
+		if (!m_MCPEmoteStarted)
+		{
+			return;
+		}
+
+		player = PlayerBase.Cast(GetGame().GetPlayer());
+		if (!player)
+		{
+			return;
+		}
+
+		emotes = player.GetEmoteManager();
+		if (!emotes)
+		{
+			return;
+		}
+
+		emotes.MCP_CancelQueuedEmote();
+		if (!emotes.MCP_IsEmoteLive())
+		{
+			m_MCPEmoteStarted = false;
+			return;
+		}
+
+		emotes.MCP_RequestEmoteEnd();
+	}
+
+	// §2.6 C14: each ui_pause mark lives as long as the pause it names, as
+	// m_MCPEmoteStarted does (MaintainMCPEmoteStarted). A queued pause that
+	// vanilla then opened (missiongameplay.c:308-311, :1331) makes the open
+	// pause menu MCP's. MCP's menu stops being MCP's once it is not the open
+	// MENU_INGAME, even when the person's Continue and Esc replace it
+	// between two ticks (PX6 a). No mission or UI manager: both fall.
+	protected void MaintainMCPPause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+			ui = GetGame().GetUIManager();
+		}
+
+		if (!mission || !ui)
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseMenu = null;
+			return;
+		}
+
+		if (m_MCPPauseQueued && !mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseMenu = ui.FindMenu(MENU_INGAME);
+		}
+
+		if (m_MCPPauseMenu && ui.FindMenu(MENU_INGAME) != m_MCPPauseMenu)
+		{
+			m_MCPPauseMenu = null;
+		}
+	}
+
+	// §2.6 C14 (PX3 a, PX6 a): the close cancels the pause ui_pause queued,
+	// which vanilla would otherwise open under the next lease once loading
+	// or the respawn ends (missiongameplay.c:308-311; Continue() leaves the
+	// queue, :1334-1348), and closes the pause menu ui_pause opened with the
+	// mission's Continue(), as ContinueStartPauseMenu does, only while that
+	// same menu is on top: a submenu above it means someone is in it, and a
+	// pause menu the person opened after it is another instance. A pause MCP
+	// neither queued nor opened is neither touched nor counted.
+	protected void StopLeaseClosePause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		UIScriptedMenu menu;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+		}
+
+		if (!mission)
+		{
+			return;
+		}
+
+		if (m_MCPPauseQueued)
+		{
+			mission.MCP_CancelQueuedPause();
+			m_MCPPauseQueued = false;
+		}
+
+		if (!m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		menu = ui.GetMenu();
+		if (!menu || menu != m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		mission.Continue();
+	}
+
+	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
+	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
+	{
+		if (m_Dialog && m_Dialog.IsOpen())
+		{
+			m_Dialog.FinishLeaseClosed();
+		}
+
+		if (m_UiPreviewRoot)
+		{
+			m_UiPreviewRoot.Unlink();
+			m_UiPreviewRoot = null;
+		}
+
+		MCPCarDrive.Clear();
+		MCPInputTriggerControl.ReleaseAll("shutdown");
+		MCPPlayerMoveControl.ReleaseAll("shutdown");
+		// §4 #263: stop the playing camera path before gameplay and the
+		// camera are restored, as restore_gameplay does. The census below
+		// then reads the path itself, not a job.
+		StopCameraPath();
+		RestoreGameplay();
+		ReleaseCamera();
+		MCPHoldControl.Shutdown("shutdown");
+		MCPVehicleTrace.Abort("shutdown");
+		MCPAnimTimeline.Abort("shutdown");
+		MCPPlayerTrace.Abort("shutdown");
+		StopLeaseCloseEmote();
+		if (m_JobRunner)
+		{
+			m_JobRunner.AbortAll(this);
+		}
+
+		// §2.6 C14: after AbortAll, so an open ui_pause job answers once,
+		// and before the census.
+		StopLeaseClosePause();
+		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
+		if (LeaseCloseCensusSettled(census))
+		{
+			result.ok = true;
+			result.lease_close = census;
+			return true;
+		}
+
+		MCPJob job = new MCPJob();
+		job.id = command.id;
+		job.kind = "lease_close";
+		job.args = command.args;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		job.deadline_s = m_JobRunner.GetElapsedS() + 25.0;
+		m_JobRunner.AddJob(job);
+		return false;
 	}
 
 	void Shutdown()

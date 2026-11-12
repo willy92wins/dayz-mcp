@@ -69,6 +69,8 @@ READ_ONLY_COMMANDS = frozenset(
         "players_visibility",
         # Server read of one scene's registry and its objects (165a).
         "scene_entities",
+        # Server read of one Expansion AI adapter group or scene (90f9).
+        "ai_group_state",
     }
 )
 MAX_OPERATION_PIN_S = 300.0
@@ -1717,6 +1719,12 @@ class SessionCoordinator:
             self._expire_rows_locked()
             self._peer_registry[(run_id, peer)] = instance
             self._condition.notify_all()
+
+    def peer_registered(self, run_id: str, peer: str, instance: str) -> bool:
+        # Memory-only read: safe under the broker lock (§2.15), never
+        # reaches _expire_due or any expiry path.
+        with self._condition:
+            return self._peer_registry.get((run_id, peer)) == instance
 
     def note_processes_gone(self, run_id: str, role: str | None) -> None:
         run_id = self._require_lease_end_id(run_id, "run_id")
@@ -5010,12 +5018,14 @@ class SessionCoordinator:
                 reasons = [
                     "player_move_conn_gen_unapplied",
                     "weapon_conn_gen_unapplied",
+                    "look_conn_gen_unapplied",
                 ]
             else:
                 baseline = carried or {
                     "conn_gen": floor.get("conn_gen"),
                     "move_id": 0,
                     "weapon_id": 0,
+                    "look_id": 0,
                 }
                 if int(floor.get("move_id") or 0) > int(
                     baseline.get("move_id") or 0
@@ -5025,6 +5035,10 @@ class SessionCoordinator:
                     baseline.get("weapon_id") or 0
                 ):
                     reasons.append("weapon_floor_unapplied")
+                if int(floor.get("look_id") or 0) > int(
+                    baseline.get("look_id") or 0
+                ):
+                    reasons.append("look_floor_unapplied")
             if reasons or carried is None:
                 server_row.required_floors[floor_key] = dict(floor)
             if reasons:
@@ -5054,13 +5068,18 @@ class SessionCoordinator:
         required: dict[str, object], reported: dict[str, object] | None
     ) -> list[str]:
         if reported is None:
-            return ["player_move_floor_unapplied", "weapon_floor_unapplied"]
+            return [
+                "player_move_floor_unapplied",
+                "weapon_floor_unapplied",
+                "look_floor_unapplied",
+            ]
         required_gen = required.get("conn_gen")
         reported_gen = reported.get("conn_gen")
         if required_gen is None or required_gen != reported_gen:
             return [
                 "player_move_conn_gen_unapplied",
                 "weapon_conn_gen_unapplied",
+                "look_conn_gen_unapplied",
             ]
         reasons: list[str] = []
         if int(reported.get("move_id") or 0) < int(required.get("move_id") or 0):
@@ -5069,6 +5088,8 @@ class SessionCoordinator:
             required.get("weapon_id") or 0
         ):
             reasons.append("weapon_floor_unapplied")
+        if int(reported.get("look_id") or 0) < int(required.get("look_id") or 0):
+            reasons.append("look_floor_unapplied")
         return reasons
 
     @staticmethod
