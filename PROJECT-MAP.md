@@ -36,7 +36,7 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (27 files, 825 KB)
+## Enforce scripts (27 files, 837 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
@@ -65,8 +65,8 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCP_SurvivorDrive.c` - 7 KB
 - `scripts/5_Mission/MCPBridge.c` - 233 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
-- `scripts/5_Mission/MCPChatLog.c` - 8 KB
-- `scripts/5_Mission/MCPClientBridge.c` - 245 KB
+- `scripts/5_Mission/MCPChatLog.c` - 12 KB
+- `scripts/5_Mission/MCPClientBridge.c` - 251 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
 - `scripts/5_Mission/MCPJobRunner.c` - 3 KB
 - `scripts/5_Mission/MCPMessages.c` - 49 KB
@@ -100,14 +100,14 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 222 KB, touched 2026-11-12 (UTC)
+- `CHANGELOG.md` - 224 KB, touched 2026-11-12 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-11 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-10 (UTC)
 - `GATES.md` - 4 KB, touched 2026-11-01 (UTC)
 - `product-spec.md` - 73 KB, touched 2026-11-11 (UTC)
 - `QUICKSTART.md` - 6 KB, touched 2026-11-05 (UTC)
-- `README.md` - 37 KB, touched 2026-11-11 (UTC)
+- `README.md` - 39 KB, touched 2026-11-11 (UTC)
 
 ## Reparse points omitidos
 

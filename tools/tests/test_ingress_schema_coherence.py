@@ -110,7 +110,7 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ),
     ("camera_get", {}, "camera_get"),
     ("camera_get", {"cam_mode": ""}, "camera_get"),
-    # 702f: focus goes out on camera_set_focus, both arguments together.
+    # 702f: focus goes out on camera_set_focus, all five OverrideDOF arguments together.
     (
         "camera_set",
         {
@@ -131,12 +131,29 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
             "fov": 0.9,
             "focus_distance": 50,
             "focus_blur": 4.5,
+            "focus_length": 700,
+            "focus_length_near": 450.0,
+            "focus_depth_offset": 12.0,
         },
         "camera_set_focus",
     ),
     (
         "camera_set",
         {"cam_mode": "matrix", "cam_matrix": [0.0] * 12, "focus_distance": 0.01, "focus_blur": 100.0},
+        "camera_set_focus",
+    ),
+    (
+        "camera_set_focus",
+        {
+            "cam_mode": "lookat",
+            "cam_pos": [0.0, 2.0, 0.0],
+            "look_at": [5.0, 1.0, 5.0],
+            "focus_distance": 2.0,
+            "focus_blur": 4.0,
+            "focus_length": 0.0,
+            "focus_length_near": 0.0,
+            "focus_depth_offset": 0.0,
+        },
         "camera_set_focus",
     ),
     # d026: every mode, both kinds of key and the bounds.

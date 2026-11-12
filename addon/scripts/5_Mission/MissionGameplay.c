@@ -35,6 +35,10 @@ modded class MissionGameplay
 		// update and a later action_cursor read share one tick.
 		MCPFrame.Advance();
 		super.OnUpdate(timeslice);
+		if (m_MCPChatLog && GetGame())
+		{
+			m_MCPChatLog.SampleShownLines(GetGame().GetTime());
+		}
 
 		MCPClientBridge bridge = MCPClientBridge.Get();
 		if (bridge)

@@ -12,12 +12,12 @@ class MCPChatLog
 	// RecordLine and RecordDrop record nothing more for the rest of the mission.
 	const int MAX_SEQ = 2147483647;
 	// Bound on /result JSON bytes: one line's estimate is at most
-	// 6 * (1024 + 16384) * 4 + 128 = 417920 bytes, below LINE_BYTES_MAX = 491520,
+	// 6 * (1024 + 16384) * 4 + 384 = 418176 bytes, below LINE_BYTES_MAX = 491520,
 	// so the lines of an answer stay at most 491520 bytes even with the first
-	// line always returned (a line's keys, numbers and "cut":false take about
-	// 101 bytes, inside the 128); 64 drops stay at most
-	// 64 * (6 * (64 + 256) * 4 + 192) = 503808 bytes (192 covers a drop's keys,
-	// numbers, reason and cut, about 131 bytes); together 995328 bytes, under
+	// line always returned (384 covers a line's keys, int/bool fields, five floats
+	// at <= 24 characters each and "cut":false, about 346 bytes); 64 drops stay at
+	// most 64 * (6 * (64 + 256) * 4 + 192) = 503808 bytes (192 covers a drop's
+	// keys, numbers, reason and cut, about 131 bytes); together 995328 bytes, under
 	// MAX_BODY_BYTES = 1048576 (tools/dayz_mcp/loopback.py:474, checked at :9313),
 	// leaving 53248 bytes for the rest of the result. Vanilla's pieces of text
 	// are at most the engine's chat length (chat.c:105-120) and senders are
@@ -67,6 +67,11 @@ class MCPChatLog
 		return m_TotalLines;
 	}
 
+	int GetLastSeq()
+	{
+		return m_LastSeq;
+	}
+
 	void RecordLine(ChatMessageEventParams params)
 	{
 		MCPChatLine entry;
@@ -112,6 +117,7 @@ class MCPChatLog
 		entry.sender = sender;
 		entry.text = text;
 		entry.cut = cut;
+		entry.shown_at_ms = -1;
 
 		if (m_Lines.Count() >= LINE_CAPACITY)
 		{
@@ -261,7 +267,7 @@ class MCPChatLog
 					linesCut = true;
 					break;
 				}
-				itemBytes = 6 * (lineItem.sender.Length() + lineItem.text.Length()) + 128;
+				itemBytes = 6 * (lineItem.sender.Length() + lineItem.text.Length()) + 384;
 				if (outRead.lines.Count() > 0 && lineBytes + itemBytes > LINE_BYTES_MAX)
 				{
 					linesCut = true;
@@ -294,20 +300,243 @@ class MCPChatLog
 			dropIndex = dropIndex + 1;
 		}
 
+		FillReadVisibility(outRead);
 		return outRead;
+	}
+
+	protected ChatLine FindChatLineBySeq(int seq)
+	{
+		MissionGameplay mission;
+		Chat chat;
+		array<ref ChatLine> chatLines;
+		ChatLine chatLine;
+		int idx;
+		if (seq <= 0)
+		{
+			return null;
+		}
+		if (!GetGame())
+		{
+			return null;
+		}
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			return null;
+		}
+		chat = mission.m_Chat;
+		if (!chat)
+		{
+			return null;
+		}
+		chatLines = chat.GetMCPChatLines();
+		if (!chatLines)
+		{
+			return null;
+		}
+		idx = 0;
+		while (idx < chatLines.Count())
+		{
+			chatLine = chatLines.Get(idx);
+			if (chatLine && chatLine.m_MCPShownSeq == seq)
+			{
+				return chatLine;
+			}
+			idx = idx + 1;
+		}
+		return null;
+	}
+
+	// Multiplies GetAlpha() from m_TextWidget up through GetParent() to m_RootWidget
+	// inclusive, stopping there: m_RootWidget is the only line widget vanilla fades
+	// (chatline.c:109-110), and above it an ancestor reports GetAlpha() 0 while the
+	// line is drawn (GA79 and GA84, 11/11). Whether the engine applies the root's
+	// alpha to the text is unverified, as the line layout has no inheritalpha key
+	// (day_z_chat_item.layout:1-12 and :28-41).
+	protected float ComputeChatLineAlpha(ChatLine chatLine)
+	{
+		Widget textWidget;
+		Widget rootWidget;
+		Widget currentWidget;
+		float lineAlpha;
+		if (!chatLine)
+		{
+			return 0.0;
+		}
+		textWidget = chatLine.m_TextWidget;
+		rootWidget = chatLine.m_RootWidget;
+		if (!textWidget || !rootWidget)
+		{
+			return 0.0;
+		}
+		lineAlpha = 1.0;
+		currentWidget = textWidget;
+		while (currentWidget)
+		{
+			lineAlpha = lineAlpha * currentWidget.GetAlpha();
+			if (currentWidget == rootWidget)
+			{
+				return lineAlpha;
+			}
+			currentWidget = currentWidget.GetParent();
+		}
+		return 0.0;
+	}
+
+	void FillReadVisibility(MCPChatRead outRead)
+	{
+		MissionGameplay mission;
+		IngameHud hud;
+		Widget hudPanel;
+		MCPChatLine lineItem;
+		ChatLine chatLine;
+		Widget textWidget;
+		float hierarchyAlpha;
+		float sx;
+		float sy;
+		float sw;
+		float sh;
+		int lineIdx;
+		if (!outRead)
+		{
+			return;
+		}
+		outRead.hud_shown = false;
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+			if (mission)
+			{
+				hud = IngameHud.Cast(mission.GetHud());
+				if (hud)
+				{
+					hudPanel = hud.GetHudPanelWidget();
+					if (hudPanel)
+					{
+						outRead.hud_shown = hudPanel.IsVisible();
+					}
+				}
+			}
+		}
+		if (!outRead.lines)
+		{
+			return;
+		}
+		lineIdx = 0;
+		while (lineIdx < outRead.lines.Count())
+		{
+			lineItem = outRead.lines.Get(lineIdx);
+			if (lineItem)
+			{
+				chatLine = FindChatLineBySeq(lineItem.seq);
+				textWidget = null;
+				if (chatLine)
+				{
+					textWidget = chatLine.m_TextWidget;
+				}
+				if (textWidget)
+				{
+					hierarchyAlpha = ComputeChatLineAlpha(chatLine);
+					sx = 0.0;
+					sy = 0.0;
+					sw = 0.0;
+					sh = 0.0;
+					textWidget.GetScreenPos(sx, sy);
+					textWidget.GetScreenSize(sw, sh);
+					lineItem.replaced = false;
+					lineItem.visible_hierarchy = textWidget.IsVisibleHierarchy();
+					lineItem.alpha = hierarchyAlpha;
+					lineItem.screen_x = sx;
+					lineItem.screen_y = sy;
+					lineItem.screen_w = sw;
+					lineItem.screen_h = sh;
+				}
+				else
+				{
+					lineItem.replaced = true;
+					lineItem.visible_hierarchy = false;
+					lineItem.alpha = 0.0;
+					lineItem.screen_x = 0.0;
+					lineItem.screen_y = 0.0;
+					lineItem.screen_w = 0.0;
+					lineItem.screen_h = 0.0;
+				}
+			}
+			lineIdx = lineIdx + 1;
+		}
+	}
+
+	void SampleShownLines(int nowMs)
+	{
+		MCPChatLine lineItem;
+		ChatLine chatLine;
+		Widget textWidget;
+		float hierarchyAlpha;
+		int idx;
+		if (!m_Lines)
+		{
+			return;
+		}
+		idx = m_Lines.Count() - 1;
+		while (idx >= 0)
+		{
+			lineItem = m_Lines.Get(idx);
+			if (lineItem)
+			{
+				if (nowMs - lineItem.t_client_ms > 2000)
+				{
+					return;
+				}
+				if (lineItem.shown_at_ms == -1)
+				{
+					chatLine = FindChatLineBySeq(lineItem.seq);
+					textWidget = null;
+					if (chatLine)
+					{
+						textWidget = chatLine.m_TextWidget;
+					}
+					if (textWidget && textWidget.IsVisibleHierarchy())
+					{
+						hierarchyAlpha = ComputeChatLineAlpha(chatLine);
+						if (hierarchyAlpha >= 0.9)
+						{
+							lineItem.shown_at_ms = nowMs;
+						}
+					}
+				}
+			}
+			idx = idx - 1;
+		}
+	}
+};
+
+modded class Chat
+{
+	array<ref ChatLine> GetMCPChatLines()
+	{
+		return m_Lines;
 	}
 };
 
 modded class ChatLine
 {
+	int m_MCPShownSeq;
+
 	override void Set(ChatMessageEventParams params)
 	{
 		MCPChatLog chatLog;
+		int linesBefore;
 		super.Set(params);
+		m_MCPShownSeq = 0;
 		chatLog = MCPChatLog.Get();
 		if (chatLog)
 		{
+			linesBefore = chatLog.GetTotalLines();
 			chatLog.RecordLine(params);
+			if (chatLog.GetTotalLines() != linesBefore)
+			{
+				m_MCPShownSeq = chatLog.GetLastSeq();
+			}
 		}
 	}
 };
