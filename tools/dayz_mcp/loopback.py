@@ -140,6 +140,7 @@ CLIENT_COMMANDS = {
     "camera_set",
     "camera_set_focus",
     "camera_get",
+    "chat_read",
     "gameplay_state",
     "camera_path_play",
     "camera_path_release",
@@ -162,6 +163,7 @@ CLIENT_COMMANDS = {
     "ui_click",
     "ui_reload_layout",
     "ui_focus",
+    "ui_pause",
     "ui_dialog",
     "action_hold",
     "action_hold_cancel",
@@ -1194,7 +1196,7 @@ def _is_focus_blur(value: object) -> bool:
 def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVariant:
     # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
     # travel with every one of them. focus is the camera_set_focus shape
-    # (702f): the same plus both Camera.SetFocus arguments, always together.
+    # (702f): the same plus the five CGame.OverrideDOF values, always together.
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
@@ -1207,9 +1209,19 @@ def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVar
     if focus:
         # The tool's check, camera_path.focus_distance and focus_blur: at most
         # 1e9 and kept by the bridge's 32-bit float, not just finite here.
-        required = (*required, "focus_distance", "focus_blur")
+        required = (
+            *required,
+            "focus_distance",
+            "focus_blur",
+            "focus_length",
+            "focus_length_near",
+            "focus_depth_offset",
+        )
         validators["focus_distance"] = _is_focus_distance
         validators["focus_blur"] = _is_focus_blur
+        validators["focus_length"] = _is_focus_blur
+        validators["focus_length_near"] = _is_focus_blur
+        validators["focus_depth_offset"] = _is_focus_blur
     return _schema_variant(required=required, validators=validators)
 
 
@@ -1439,9 +1451,11 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "camera_path_play": "bridge_capability_missing",
     "camera_path_release": "bridge_capability_missing",
     "camera_set_focus": "bridge_capability_missing",
+    "chat_read": "bridge_capability_missing",
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
+    "ui_pause": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
 # could not be sent camera_path_release is not handed a play (d026).
@@ -1477,6 +1491,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
 # preserve alternate payload shapes without duplicating command dispatch logic.
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "gameplay_state": _command_schema(_schema_variant()),
+    "ui_pause": _command_schema(_schema_variant()),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
     "key_press": _command_schema(
@@ -2028,6 +2043,15 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             },
         )
     ),
+    "chat_read": _command_schema(
+        _schema_variant(
+            optional=("marker", "max_lines"),
+            validators={
+                "marker": _integer_in_range(minimum=0, maximum=2_147_483_647),
+                "max_lines": _integer_in_range(minimum=1, maximum=500),
+            },
+        )
+    ),
     "ui_set_text": _command_schema(
         _schema_variant(
             required=("path", "text"),
@@ -2392,8 +2416,8 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _camera_variant("free", "cam_pos", "look_at"),
         _camera_variant("free", "cam_pos", "cam_orientation"),
     ),
-    # camera_set with focus_distance and focus_blur (702f): the same five
-    # shapes, each with both focus arguments.
+    # camera_set with CGame.OverrideDOF (702f): the same five shapes, each
+    # with all five focus values.
     "camera_set_focus": _command_schema(
         _camera_variant("orient", "cam_pos", "cam_orientation", focus=True),
         _camera_variant("lookat", "cam_pos", "look_at", focus=True),

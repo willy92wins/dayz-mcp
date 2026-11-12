@@ -303,12 +303,18 @@ class MCPArgs
 	ref array<ref MCPPathKey> keys;
 	string easing;
 	string path_id;
-	// camera_set_focus (702f): camera_set plus Camera.SetFocus. The command
-	// name, not these fields, turns focus on; both always travel with it.
+	// camera_set_focus (702f): camera_set plus CGame.OverrideDOF. The command
+	// name, not these fields, turns focus on; all five always travel with it.
 	float focus_distance;
 	float focus_blur;
+	float focus_length;
+	float focus_length_near;
+	float focus_depth_offset;
 	// hud_set (f427). The tool always sends it; an absent key reads false.
 	bool visible;
+	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
+	// max_lines above is reused.
+	int marker;
 
 	void MCPArgs()
 	{
@@ -1341,6 +1347,68 @@ class MCPHologram
 	float max_m;
 };
 
+class MCPChatLine
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	bool visible_hierarchy;
+	float alpha;
+	float screen_x;
+	float screen_y;
+	float screen_w;
+	float screen_h;
+	bool replaced;
+	int shown_at_ms;
+	// True when RecordLine shortened sender or text to its cap.
+	bool cut;
+};
+
+class MCPChatDrop
+{
+	int seq;
+	int t_client_ms;
+	int channel;
+	string sender;
+	string text;
+	// True when RecordDrop shortened sender or text to its cap.
+	bool cut;
+	string reason;
+};
+
+class MCPChatRead
+{
+	ref array<ref MCPChatLine> lines;
+	ref array<ref MCPChatDrop> dropped;
+	int marker;
+	bool truncated;
+	bool hud_shown;
+
+	void MCPChatRead()
+	{
+		lines = new array<ref MCPChatLine>();
+		dropped = new array<ref MCPChatDrop>();
+	}
+};
+
+// ui_pause reply (726c): top UIScriptedMenu IDs before and after
+// MissionGameplay.Pause() (read immediately on sync branches, or on the next
+// tick via MCPJob when Pause() defers m_PauseQueued onto OnUpdate), -1 when
+// GetMenu() returns null.
+class MCPUiPause
+{
+	int menu_id_before;
+	int menu_id_after;
+
+	void MCPUiPause()
+	{
+		menu_id_before = -1;
+		menu_id_after = -1;
+	}
+};
+
 class MCPResult
 {
 	int id;
@@ -1553,6 +1621,9 @@ class MCPResult
 	// hud_set read-back (f427). Unassigned on other commands.
 	ref MCPHudState hud;
 	ref MCPGameplayState gameplay;
+	ref MCPChatRead chat_read;
+	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
+	ref MCPUiPause ui_pause;
 };
 
 class MCPJob
@@ -1629,8 +1700,10 @@ class MCPJob
 	float emote_started_s;
 	float emote_finished_s;
 	float wait_s;
-	// camera_set_focus: the apply also sets the camera's focus (702f).
+	// camera_set_focus: the apply also sets CGame.OverrideDOF (702f).
 	bool camera_focus;
+	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
+	ref MCPUiPause ui_pause;
 };
 
 class MCPSpawnValidation

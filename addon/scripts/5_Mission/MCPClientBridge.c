@@ -493,7 +493,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,player_look_at,player_look_at_release,player_move,player_respawn,player_trace,player_view_set," + "restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire," + "weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -553,6 +553,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected Camera m_CameraHandoffCam;
 	protected bool m_CameraHandoffPending;
 	protected int m_CameraHandoffTicks;
+	//! 702f: true while camera_set_focus has CGame.OverrideDOF enabled.
+	protected bool m_CameraDOFActive;
 	//! camera_path_play (d026): the current or last path, idle until the first
 	//! play, and the staticcamera a playing path moves (not ref, an entity the
 	//! world owns; m_ActiveCam holds it as an owned camera).
@@ -620,6 +622,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCamOwned = false;
 		m_CameraHandoffPending = false;
 		m_CameraHandoffTicks = 0;
+		m_CameraDOFActive = false;
 		m_CameraPath = new MCPCameraPath();
 		m_CameraPathCommandId = 0;
 		m_CameraPathPlayTick = 0;
@@ -1369,10 +1372,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	protected void Dispatch(MCPCommand command)
 	{
+		string cmd;
 		if (!command)
 		{
 			return;
 		}
+		cmd = command.cmd;
 
 		MCPResult result = new MCPResult();
 		result.id = command.id;
@@ -1389,6 +1394,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			result.ok = false;
 			result.error = "client_not_in_game";
+			if (cmd == "ui_pause")
+			{
+				Log("ui_pause before=-1 after=-1 ok=0 error=client_not_in_game");
+			}
 			PostResult(result);
 			return;
 		}
@@ -1564,6 +1573,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "gameplay_state")
 		{
 			postNow = DispatchGameplayState(command, result);
+		}
+		else if (command.cmd == "chat_read")
+		{
+			postNow = DispatchChatRead(command, result);
+		}
+		else if (command.cmd == "ui_pause")
+		{
+			postNow = DispatchUiPause(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -2132,10 +2149,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		// camera_set_focus is camera_set plus SetFocus on the camera it applies
-		// (702f). The command name turns focus on, so camera_set never reads the
-		// focus fields and an older bridge answers unknown_command instead of
-		// dropping them.
+		// camera_set_focus is camera_set plus CGame.OverrideDOF after the camera
+		// it applies is active (702f). The command name turns focus on, so
+		// camera_set never reads the five focus fields and an older bridge
+		// answers unknown_command instead of dropping them.
 		bool focus = command.cmd == "camera_set_focus";
 		if (focus && !IsValidCameraFocus(command.args))
 		{
@@ -2183,14 +2200,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
-	// 702f: focus_distance in metres, finite and above 0, and focus_blur finite
-	// and 0 or more, the two arguments of Camera.SetFocus (camera.c:70-74).
-	// NaN fails every comparison, so it is tested first; float.MAX stands for
-	// an infinity, as the server's IsFiniteFloat does.
+	// 702f: focus_distance in metres, finite and above 0, and focus_blur,
+	// focus_length, focus_length_near and focus_depth_offset finite and 0 or
+	// more, the five DOF values of CGame.OverrideDOF (game.c:1379). NaN fails
+	// every comparison, so it is tested first; float.MAX stands for an
+	// infinity, as the server's IsFiniteFloat does.
 	protected bool IsValidCameraFocus(MCPArgs args)
 	{
 		float distance;
 		float blur;
+		float length;
+		float lengthNear;
+		float depthOffset;
 		if (!args)
 		{
 			return false;
@@ -2198,7 +2219,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		distance = args.focus_distance;
 		blur = args.focus_blur;
-		if (distance != distance || blur != blur)
+		length = args.focus_length;
+		lengthNear = args.focus_length_near;
+		depthOffset = args.focus_depth_offset;
+		if (distance != distance || blur != blur || length != length || lengthNear != lengthNear || depthOffset != depthOffset)
 		{
 			return false;
 		}
@@ -2207,6 +2231,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 		if (blur < 0.0 || blur >= float.MAX)
+		{
+			return false;
+		}
+		if (length < 0.0 || length >= float.MAX)
+		{
+			return false;
+		}
+		if (lengthNear < 0.0 || lengthNear >= float.MAX)
+		{
+			return false;
+		}
+		if (depthOffset < 0.0 || depthOffset >= float.MAX)
 		{
 			return false;
 		}
@@ -2285,6 +2321,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				m_PlayerSimulationDisabled = false;
 			}
 			DeleteOwnedCamera();
+			ClearCameraDOF("camera_path_play");
 
 			candidate.Begin();
 			candidate.Apply(cam);
@@ -3778,6 +3815,41 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPUiSnapshot snap = new MCPUiSnapshot();
 		CollectUiNodes(root, snap, limit);
 		result.ui = snap;
+		result.ok = true;
+		return true;
+	}
+
+	protected bool DispatchChatRead(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission;
+		MCPChatLog chatLog;
+		int marker;
+		int maxLines;
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			return true;
+		}
+		marker = 0;
+		maxLines = MCPChatLog.MAX_LINES_DEFAULT;
+		if (command.args)
+		{
+			if (command.args.marker < 0 || command.args.max_lines < 0 || command.args.max_lines > MCPChatLog.MAX_LINES_MAX)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				return true;
+			}
+			marker = command.args.marker;
+			if (command.args.max_lines > 0)
+			{
+				maxLines = command.args.max_lines;
+			}
+		}
+		chatLog = mission.GetMCPChatLog();
+		result.chat_read = chatLog.Read(marker, maxLines);
 		result.ok = true;
 		return true;
 	}
@@ -5731,6 +5803,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessPlayerViewSetJob(job);
 		}
+		else if (job.kind == "ui_pause")
+		{
+			return ProcessUiPauseJob(job);
+		}
 		else if (job.kind == "actor_emote")
 		{
 			return ProcessActorEmoteJob(job);
@@ -6582,6 +6658,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// simulation with this apply: finish it first (f47b). No-op otherwise.
 		FinishCameraHandoff();
 		SuppressGameplay();
+		// 702f: OverrideDOF is global, so every camera_set clears any previous
+		// DOF first; a failed apply leaves it off, and camera_set_focus sets
+		// the new one after SetActive(true).
+		ClearCameraDOF("camera_set");
 
 		if (validation.mode_id == CAMERA_MODE_FREE)
 		{
@@ -6627,13 +6707,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			cam.SetFOV(validation.fov);
 		}
-		// camera_set_focus only, with the arguments its dispatch checked (702f).
-		if (job.camera_focus)
-		{
-			cam.SetFocus(job.args.focus_distance, job.args.focus_blur);
-		}
 
 		cam.SetActive(true);
+		// camera_set_focus only, after the camera is active, with the five
+		// OverrideDOF arguments its dispatch checked (702f).
+		if (job.camera_focus)
+		{
+			ApplyCameraDOF(job.args);
+		}
 		m_ActiveCam = cam;
 		m_ActiveCamOwned = true;
 		return true;
@@ -6676,16 +6757,48 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			freeCam.SetFOV(validation.fov);
 		}
-		// The free camera is a singleton: the focus set here stays on it.
-		if (job.camera_focus)
-		{
-			freeCam.SetFocus(job.args.focus_distance, job.args.focus_blur);
-		}
 
 		freeCam.SetActive(true);
+		// camera_set_focus only, after the free camera is active (702f).
+		if (job.camera_focus)
+		{
+			ApplyCameraDOF(job.args);
+		}
 		m_ActiveCam = freeCam;
 		m_ActiveCamOwned = false;
 		return true;
+	}
+
+	// 702f: CGame.OverrideDOF parameter order from 3_game/global/game.c:1379.
+	protected void ApplyCameraDOF(MCPArgs args)
+	{
+		if (!args || !GetGame())
+		{
+			return;
+		}
+
+		g_Game.OverrideDOF(true, args.focus_distance, args.focus_length, args.focus_length_near, args.focus_blur, args.focus_depth_offset);
+		m_CameraDOFActive = true;
+		Log("camera dof on distance=" + args.focus_distance + " length=" + args.focus_length + " length_near=" + args.focus_length_near + " blur=" + args.focus_blur + " depth_offset=" + args.focus_depth_offset);
+	}
+
+	// 702f: turns off the DOF this bridge set, with vanilla's off arguments
+	// from 3_game/ppemanager/materials/matclasses/exceptions/ppedof.c:70.
+	protected void ClearCameraDOF(string reason)
+	{
+		if (!m_CameraDOFActive)
+		{
+			return;
+		}
+
+		m_CameraDOFActive = false;
+		if (!GetGame())
+		{
+			return;
+		}
+
+		g_Game.OverrideDOF(false, 0.0, 0.0, 0.0, 0.0, 1.0);
+		Log("camera dof off reason=" + reason);
 	}
 
 	override void MCP_PostJobSuccess(MCPJob job)
@@ -6815,6 +6928,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostPlayerViewSetJob(job);
 		}
 
+		if (job.kind == "ui_pause")
+		{
+			PostUiPauseJob(job);
+		}
+
 		// ProcessActorEmoteJob is done only when it saw the end.
 		if (job.kind == "actor_emote")
 		{
@@ -6850,6 +6968,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job && job.kind == "player_look_at")
 		{
 			PostPlayerLookAtJob(job);
+			return;
+		}
+
+		if (job && job.kind == "ui_pause")
+		{
+			PostUiPauseJob(job);
 			return;
 		}
 
@@ -6935,6 +7059,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "action_hold")
 		{
 			PostActionHoldJob(job);
+			return;
+		}
+
+		if (job.kind == "ui_pause")
+		{
+			PostUiPauseJob(job);
 			return;
 		}
 
@@ -8280,6 +8410,200 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
+	// ui_pause (fb-20261110-170149-726c): open the client pause menu like Esc
+	// (UAUIMenu -> Pause(), 1.30.164289 missiongameplay.c:700-704).
+	// Vanilla 1.30.164289 reading:
+	// - Synchronous when MENU_INGAME is already open on top or as a parent of a
+	//   submenu: Pause() returns in the same call (missiongameplay.c:1294-1297,
+	//   :1301-1304; uimanager.c:154-175). Top MENU_INGAME stays MENU_INGAME
+	//   (ok=true); a child submenu stays on top (menu_id_after != MENU_INGAME,
+	//   pause_not_opened).
+	// - Synchronous when the client is in DayZGameState.IN_GAME and the local
+	//   player is loaded and not respawning: Pause() calls CloseAllMenus()
+	//   (:1319; uimanager.c:78-95) and EnterScriptedMenu(MENU_INGAME,
+	//   g_Game.GetUIManager().GetMenu()) (:1322; uimanager.c:4), whose
+	//   InGameMenu.Init() re-entrantly hits the MENU_INGAME guard
+	//   (ingamemenu.c:73-75; missiongameplay.c:1301-1304) and clears
+	//   m_PauseQueued (:1331), leaving MENU_INGAME on top before Pause() returns.
+	// - Deferred while connecting/loading or respawning (when !IsPaused()):
+	//   Pause() sets m_PauseQueued = true (:1306) and returns before opening the
+	//   menu when g_Game.IsClient() && g_Game.GetGameState() !=
+	//   DayZGameState.IN_GAME (:1308-1311) or when (player &&
+	//   !player.IsPlayerLoaded()) || IsPlayerRespawning() (:1313-1317);
+	//   MissionGameplay.OnUpdate drains m_PauseQueued via Pause() on a later
+	//   update (:308-311, ahead of bridge.OnTick in modded MissionGameplay.c:25-30).
+	// Synchronous branches read menu_id_after immediately and return postNow=true;
+	// only when Pause() returned under one of its deferral guards does
+	// DispatchUiPause queue an MCPJob on m_JobRunner for ProcessUiPauseJob /
+	// PostUiPauseJob to read menu_id_after on the next tick (after
+	// MissionGameplay.OnUpdate runs :308-311 ahead of bridge.OnTick), answering
+	// ok=true if that next update opened MENU_INGAME or pause_not_opened if
+	// loading/respawning kept m_PauseQueued deferred.
+	protected bool DispatchUiPause(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission;
+		PlayerBase player;
+		UIManager ui;
+		UIScriptedMenu menuBefore;
+		UIScriptedMenu menuAfter;
+		MCPUiPause reply;
+		MCPJob job;
+		int beforeId;
+		int afterId;
+		bool deferred;
+		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			Log("ui_pause before=-1 after=-1 ok=0 error=client_not_in_game");
+			return true;
+		}
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "no_mission";
+			Log("ui_pause before=-1 after=-1 ok=0 error=no_mission");
+			return true;
+		}
+		beforeId = -1;
+		ui = GetGame().GetUIManager();
+		if (ui)
+		{
+			menuBefore = ui.GetMenu();
+			if (menuBefore)
+			{
+				beforeId = menuBefore.GetID();
+			}
+		}
+		mission.Pause();
+		afterId = -1;
+		ui = GetGame().GetUIManager();
+		if (ui)
+		{
+			menuAfter = ui.GetMenu();
+			if (menuAfter)
+			{
+				afterId = menuAfter.GetID();
+			}
+		}
+		reply = new MCPUiPause();
+		reply.menu_id_before = beforeId;
+		reply.menu_id_after = afterId;
+		deferred = false;
+		if (!mission.IsPaused() && afterId != MENU_INGAME)
+		{
+			if (g_Game && g_Game.IsClient() && g_Game.GetGameState() != DayZGameState.IN_GAME)
+			{
+				deferred = true;
+			}
+			player = PlayerBase.Cast(GetGame().GetPlayer());
+			if ((player && !player.IsPlayerLoaded()) || mission.IsPlayerRespawning())
+			{
+				deferred = true;
+			}
+		}
+		if (deferred)
+		{
+			job = new MCPJob();
+			job.id = command.id;
+			job.kind = "ui_pause";
+			job.ui_pause = reply;
+			job.sample_start_s = m_JobRunner.GetElapsedS();
+			job.deadline_s = job.sample_start_s + CAMERA_JOB_TIMEOUT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_JobRunner.AddJob(job);
+			return false;
+		}
+		result.ui_pause = reply;
+		if (afterId == MENU_INGAME)
+		{
+			result.ok = true;
+			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=1");
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "pause_not_opened";
+			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
+		}
+		return true;
+	}
+
+	protected bool ProcessUiPauseJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return false;
+		}
+		return m_JobRunner.GetElapsedS() > job.sample_start_s;
+	}
+
+	protected void PostUiPauseJob(MCPJob job)
+	{
+		MCPResult result;
+		MCPUiPause reply;
+		UIManager ui;
+		UIScriptedMenu menuAfter;
+		int beforeId;
+		int afterId;
+		if (!job)
+		{
+			return;
+		}
+		beforeId = -1;
+		reply = job.ui_pause;
+		if (!reply)
+		{
+			reply = new MCPUiPause();
+		}
+		else
+		{
+			beforeId = reply.menu_id_before;
+		}
+		afterId = -1;
+		if (GetGame())
+		{
+			ui = GetGame().GetUIManager();
+			if (ui)
+			{
+				menuAfter = ui.GetMenu();
+				if (menuAfter)
+				{
+					afterId = menuAfter.GetID();
+				}
+			}
+		}
+		reply.menu_id_before = beforeId;
+		reply.menu_id_after = afterId;
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.ui_pause = reply;
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=" + job.error);
+		}
+		else if (afterId == MENU_INGAME)
+		{
+			result.ok = true;
+			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=1");
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "pause_not_opened";
+			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
+		}
+		PostResult(result);
+	}
+
 	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
 	// the form the daemon and both installers write. It is the RestContext base
 	// that "poll?..." and "result?..." are appended to, so the final "/" belongs
@@ -8636,6 +8960,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// tick, so it still tears down at once.
 	protected void ReleaseCamera()
 	{
+		ClearCameraDOF("release");
 		if (!m_Shutdown)
 		{
 			// A release already handing off owns the free camera until it finishes.

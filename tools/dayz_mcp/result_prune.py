@@ -139,6 +139,9 @@ PRUNABLE_FIELDS = (
     # hud_set and gameplay_state fill it with the HUD flags they read (f427).
     "hud",
     "gameplay",
+    "chat_read",
+    # ui_pause fills it with menu_id_before and menu_id_after, also on pause_not_opened (726c).
+    "ui_pause",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
