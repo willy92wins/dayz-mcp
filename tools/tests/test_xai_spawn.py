@@ -31,6 +31,7 @@ from tests.enforce_subset_helpers import (
     method_body,
     translate,
 )
+from tests.client_helpers import _fixture_client_runtime
 from tests.fence_helpers import INST_SERVER, PID_SERVER, bound_queue
 from tests.xai_helpers import GOOD_XAI, _WireString, _base_commands, wire_caps, xai_wire
 
@@ -162,6 +163,123 @@ class AIGroupSpawnToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((cmd, peer), (SPAWN, "server"))
         self.assertEqual(args["waypoints"], [1.0, 2.5, -3.0, 0.0, -0.25, 100.0])
         self.assertTrue(all(type(value) is float for value in args["waypoints"]))
+
+
+def _real_broker_refusal(detail: str) -> dict:
+    """The broker's own 409 for ai_group_spawn, from a real ServerState.
+
+    No hand-written payload: the state is bound and announced, the spawn is
+    enqueued under a real lease, and the body below is what enqueue_command
+    returns (and what its audit records) for each plan 2.2 detail.
+    """
+    state = _bound_state()
+    if detail == "adapter_not_loaded":
+        state._peer_caps["server"] = {
+            "generation": state.daemon_generation,
+            "commands": list(_base_commands()),
+            "reason": "ok",
+            "arg_contract_hash": server.EXPECTED_SERVER_ARG_CONTRACT_HASH,
+            "expansion_arg_contract_hash": GOOD_XAI,
+            "announced_at": state._now(),
+            "instance": INST_SERVER,
+        }
+    elif detail == "adapter_contract_mismatch":
+        _announce(state)
+        state._peer_caps["server"]["expansion_arg_contract_hash"] = "0" * 16
+    elif detail == "lease_close_not_supported":
+        _announce(state)
+        state._peer_caps["server"]["commands"] = [
+            name for name in _commands() if name != "lease_close"
+        ]
+    else:  # pragma: no cover - guard against a typo'd detail in this file
+        raise AssertionError(detail)
+    status, body = _enqueue_spawn(state)
+    if status != 409 or body != {"error": "expansion_unavailable", "detail": detail}:
+        raise AssertionError((status, body))
+    if bound_queue(state, "server"):
+        raise AssertionError("a refused spawn was queued")
+    return body
+
+
+class AIGroupSpawnExpansionUnavailableToolTest(unittest.IsolatedAsyncioTestCase):
+    """In-game round 7: without the adapter the agent saw remote_error.
+
+    Mutant killed: expansion_unavailable removed from _REMOTE_ERROR_CODES
+    (the enqueue mapper collapses the broker's code to remote_error and
+    drops its detail, so every assertion on the code/detail below fails).
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.app, self.runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+
+    async def test_broker_expansion_unavailable_reaches_the_agent_with_its_detail(self) -> None:
+        for detail in (
+            "adapter_not_loaded",
+            "adapter_contract_mismatch",
+            "lease_close_not_supported",
+        ):
+            with self.subTest(detail=detail):
+                payload = _real_broker_refusal(detail)
+                client = _fixture_client_runtime(
+                    server.ServerConfig(
+                        mode="client", key="k", port=12345, log_sink=lambda _m: None
+                    )
+                )
+                client._call = lambda *_a, **_k: (409, payload)
+                with patch.object(self.runtime, "call_bridge", client.call_bridge):
+                    with self.assertRaises(Exception) as caught:
+                        await self.app.call_tool(SPAWN, dict(TOOL_ARGS))
+                text = _tool_error_text(caught.exception)
+                self.assertIn("expansion_unavailable", text)
+                self.assertIn(f"detail={detail}", text)
+                self.assertNotIn("remote_error", text)
+
+    async def test_unknown_code_and_unknown_detail_at_the_tool(self) -> None:
+        cases = (
+            ({"error": "arbitrary_remote_text", "detail": "adapter_not_loaded"}, "remote_error"),
+            ({"error": "expansion_unavailable", "detail": "C:\\host\\secret"}, "expansion_unavailable"),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                client = _fixture_client_runtime(
+                    server.ServerConfig(mode="client", key="k", port=12345, log_sink=lambda _m: None)
+                )
+                client._call = lambda *_a, _p=payload, **_k: (409, _p)
+                with patch.object(self.runtime, "call_bridge", client.call_bridge):
+                    with self.assertRaises(Exception) as caught:
+                        await self.app.call_tool(SPAWN, dict(TOOL_ARGS))
+                text = _tool_error_text(caught.exception)
+                self.assertTrue(text.endswith(": " + expected), text)
+                self.assertNotIn("detail=", text)
+                self.assertNotIn("secret", text)
+
+
+class AIGroupAdapterErrorSurfaceTest(unittest.TestCase):
+    """expansion_unavailable keeps its detail and drops unknown details."""
+
+    def test_an_unknown_expansion_detail_is_dropped_not_echoed(self) -> None:
+        payload = {"error": "expansion_unavailable", "detail": "C:\\host\\secret"}
+        self.assertEqual(server._public_enqueue_error(payload), "expansion_unavailable")
+        error = server._bridge_error({**payload, "ok": 0}, SPAWN)
+        self.assertEqual(str(error), "expansion_unavailable")
+
+    def test_a_delivery_discard_keeps_the_expansion_detail(self) -> None:
+        # loopback stores a delivery discard as this result; _bridge_error
+        # is what the waiting tool raises from it.
+        error = server._bridge_error(
+            {
+                "id": 7,
+                "ok": 0,
+                "error": "expansion_unavailable",
+                "detail": "lease_close_not_supported",
+            },
+            SPAWN,
+        )
+        self.assertEqual(
+            str(error), "expansion_unavailable; detail=lease_close_not_supported"
+        )
 
 
 def _bound_state() -> loopback.ServerState:
@@ -299,6 +417,10 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         stored = state.take_result(spawn["id"])
         self.assertEqual((stored["error"], stored["detail"]),
                          ("expansion_unavailable", "lease_close_not_supported"))
+        self.assertEqual(
+            str(server._bridge_error(stored, SPAWN)),
+            "expansion_unavailable; detail=lease_close_not_supported",
+        )
 
     def test_spawn_without_close_support_is_inert(self) -> None:
         # Mutant killed: ai_group_spawn admitted while no peer announces
