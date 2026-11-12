@@ -12,6 +12,7 @@ mutating world_*/vehicle_*/ui_* tools appear only after a lease is held.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -75,23 +76,48 @@ def _names(tools: list[object]) -> set[str]:
     return {tool.name for tool in tools}
 
 
-def _schema_titles(schema: object, path: str = "") -> list[str]:
+# Every keyword whose value holds subschemas, in JSON Schema 2020-12 and
+# draft-07, listed apart from tool_catalog's walk (PX6 c).
+_MAP_POSITIONS = (
+    "properties", "patternProperties", "$defs", "definitions",
+    "dependentSchemas", "dependencies",
+)
+_LIST_POSITIONS = ("anyOf", "oneOf", "allOf", "prefixItems", "items")
+_ONE_POSITIONS = (
+    "items", "additionalItems", "additionalProperties", "not", "if", "then",
+    "else", "propertyNames", "contains", "unevaluatedItems",
+    "unevaluatedProperties", "contentSchema",
+)
+
+
+def _schema_titles(schema: object, path: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
     """Paths of the string "title" annotations in a schema's own positions."""
-    found: list[str] = []
+    found: list[tuple[object, ...]] = []
     if not isinstance(schema, dict):
         return found
     for key, value in schema.items():
         if key == "title" and isinstance(value, str):
-            found.append(path or "/")
-        elif key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(value, dict):
+            found.append(path)
+        elif key in _MAP_POSITIONS and isinstance(value, dict):
             for name, sub in value.items():
-                found.extend(_schema_titles(sub, f"{path}/{key}/{name}"))
-        elif key in ("anyOf", "oneOf", "allOf", "prefixItems", "items") and isinstance(value, list):
+                found.extend(_schema_titles(sub, (*path, key, name)))
+        elif key in _LIST_POSITIONS and isinstance(value, list):
             for index, sub in enumerate(value):
-                found.extend(_schema_titles(sub, f"{path}/{key}/{index}"))
-        elif key in ("items", "additionalProperties", "not"):
-            found.extend(_schema_titles(value, f"{path}/{key}"))
+                found.extend(_schema_titles(sub, (*path, key, index)))
+        elif key in _ONE_POSITIONS:
+            found.extend(_schema_titles(value, (*path, key)))
     return found
+
+
+def _without_titles_at(schema: object, paths: list[tuple[object, ...]]) -> object:
+    """A copy of schema without the "title" at each of those paths."""
+    copied = copy.deepcopy(schema)
+    for path in paths:
+        node = copied
+        for step in path:
+            node = node[step]
+        del node["title"]
+    return copied
 
 
 async def _protocol_list_tools(app) -> list[object]:
@@ -159,10 +185,14 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(feedback["title"], {"maxLength": 120, "minLength": 1, "type": "string"})
         runtime.active_lease_token = "lease-token-after-acquire"
         full = {tool.name: tool for tool in await app.list_tools()}
-        self.assertIn("/properties/group_id", _schema_titles(full["ai_group_state"].inputSchema))
+        self.assertIn(("properties", "group_id"), _schema_titles(full["ai_group_state"].inputSchema))
+        # PX6 c: the expected schema is the full one less the titles found,
+        # not _drop_generated_titles again, so a walk that drops more than
+        # those titles fails here.
         for name, tool in compact.items():
             with self.subTest(tool=name):
-                self.assertEqual(tool.inputSchema, _drop_generated_titles(full[name].inputSchema))
+                source = full[name].inputSchema
+                self.assertEqual(tool.inputSchema, _without_titles_at(source, _schema_titles(source)))
 
     def test_drop_generated_titles_walks_only_schema_positions(self) -> None:
         schema = {
@@ -190,6 +220,65 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(schema["properties"]["title"], {"title": "Title", "type": "string"})
+
+    def test_drop_generated_titles_walks_every_schema_position(self) -> None:
+        # PX6 c: the positions Pydantic does not write today. Each title
+        # there goes; the constraints beside it, a list of property names
+        # under "dependencies", and a "title" in an examples or const value
+        # stay.
+        schema = {
+            "type": "object",
+            "propertyNames": {"type": "string", "title": "Key"},
+            "contains": {"title": "Hit", "type": "integer"},
+            "dependentSchemas": {"mode": {"title": "ModeDeps", "required": ["speed"]}},
+            "dependencies": {
+                "speed": {"title": "SpeedDeps", "required": ["mode"]},
+                "pair": ["mode"],
+            },
+            "if": {"title": "If", "properties": {"mode": {"const": "fast"}}},
+            "then": {"title": "Then", "required": ["speed"]},
+            "else": {"title": "Else", "maxProperties": 2},
+            "additionalItems": {"title": "Extra", "type": "string"},
+            "unevaluatedItems": {"title": "Rest", "type": "boolean"},
+            "unevaluatedProperties": {"title": "Others", "type": "string"},
+            "contentSchema": {"title": "Payload", "type": "object"},
+            "examples": [{"title": "kept"}],
+            "const": {"title": "kept"},
+        }
+        expected = {
+            "type": "object",
+            "propertyNames": {"type": "string"},
+            "contains": {"type": "integer"},
+            "dependentSchemas": {"mode": {"required": ["speed"]}},
+            "dependencies": {"speed": {"required": ["mode"]}, "pair": ["mode"]},
+            "if": {"properties": {"mode": {"const": "fast"}}},
+            "then": {"required": ["speed"]},
+            "else": {"maxProperties": 2},
+            "additionalItems": {"type": "string"},
+            "unevaluatedItems": {"type": "boolean"},
+            "unevaluatedProperties": {"type": "string"},
+            "contentSchema": {"type": "object"},
+            "examples": [{"title": "kept"}],
+            "const": {"title": "kept"},
+        }
+        self.assertEqual(_drop_generated_titles(schema), expected)
+        self.assertEqual(
+            _schema_titles(schema),
+            [
+                ("propertyNames",),
+                ("contains",),
+                ("dependentSchemas", "mode"),
+                ("dependencies", "speed"),
+                ("if",),
+                ("then",),
+                ("else",),
+                ("additionalItems",),
+                ("unevaluatedItems",),
+                ("unevaluatedProperties",),
+                ("contentSchema",),
+            ],
+        )
+        self.assertEqual(_without_titles_at(schema, _schema_titles(schema)), expected)
 
     async def test_client_catalog_reveals_world_vehicle_ui_after_lease(self) -> None:
         app, runtime = self._client_app()
