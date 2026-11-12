@@ -33,42 +33,43 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (26 files, 762 KB)
+## Enforce scripts (27 files, 839 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
 
 **4_World/**
 
-- `scripts/4_World/MCP_ActionHold.c` - 15 KB
+- `scripts/4_World/MCP_ActionHold.c` - 29 KB
 - `scripts/4_World/MCP_AnimTimeline.c` - 14 KB
+- `scripts/4_World/MCP_BotState.c` - 472 B
 - `scripts/4_World/MCP_CarDoor.c` - 4 KB
 - `scripts/4_World/MCP_CarScript.c` - 20 KB
 - `scripts/4_World/MCP_DiagPlugins.c` - 3 KB
 - `scripts/4_World/MCP_Emote.c` - 2 KB
 - `scripts/4_World/MCP_InventoryMove.c` - 7 KB
-- `scripts/4_World/MCP_LookAt.c` - 24 KB
+- `scripts/4_World/MCP_LookAt.c` - 34 KB
 - `scripts/4_World/MCP_PlayerCare.c` - 15 KB
-- `scripts/4_World/MCP_PlayerMove.c` - 31 KB
+- `scripts/4_World/MCP_PlayerMove.c` - 34 KB
 - `scripts/4_World/MCP_PlayerTrace.c` - 17 KB
-- `scripts/4_World/MCP_Weapon.c` - 34 KB
+- `scripts/4_World/MCP_Weapon.c` - 37 KB
 
 **5_Mission/**
 
 - `scripts/5_Mission/MCP_ActionCursor.c` - 7 KB
-- `scripts/5_Mission/MCP_BotControl.c` - 8 KB
+- `scripts/5_Mission/MCP_BotControl.c` - 10 KB
 - `scripts/5_Mission/MCP_CameraPath.c` - 11 KB
-- `scripts/5_Mission/MCP_SurvivorDrive.c` - 6 KB
-- `scripts/5_Mission/MCPBridge.c` - 215 KB
+- `scripts/5_Mission/MCP_SurvivorDrive.c` - 8 KB
+- `scripts/5_Mission/MCPBridge.c` - 233 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
 - `scripts/5_Mission/MCPChatLog.c` - 12 KB
-- `scripts/5_Mission/MCPClientBridge.c` - 237 KB
+- `scripts/5_Mission/MCPClientBridge.c` - 252 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
-- `scripts/5_Mission/MCPJobRunner.c` - 2 KB
-- `scripts/5_Mission/MCPMessages.c` - 48 KB
+- `scripts/5_Mission/MCPJobRunner.c` - 3 KB
+- `scripts/5_Mission/MCPMessages.c` - 49 KB
 - `scripts/5_Mission/MCPVehicleEject.c` - 12 KB
 - `scripts/5_Mission/MissionGameplay.c` - 2 KB
-- `scripts/5_Mission/MissionServer.c` - 2 KB
+- `scripts/5_Mission/MissionServer.c` - 3 KB
 
 - **config.cpp** -> `addon\config.cpp` (536 B)
 
@@ -96,7 +97,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 210 KB, touched 2026-11-12 (UTC)
+- `CHANGELOG.md` - 216 KB, touched 2026-11-12 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-11 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-10 (UTC)

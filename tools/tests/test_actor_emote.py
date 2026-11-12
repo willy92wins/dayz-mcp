@@ -15,6 +15,7 @@ _TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import loopback, result_prune, server
 from dayz_mcp.bridge_errors import _bridge_error
 from dayz_mcp.session_coordination import READ_ONLY_COMMANDS, command_requires_lease
@@ -64,7 +65,7 @@ def _client_state(caps: str | None) -> loopback.ServerState:
     bind_both_peers(state)
     if caps is not None:
         state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
         )
     return state
 
@@ -303,7 +304,7 @@ class ActorEmoteAdmissionTest(unittest.TestCase):
         status, body = state.enqueue_command(COMMAND, dict(WIRE), peer="client")
         self.assertEqual(status, 200, body)
         status, poll = state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=caps
         )
         self.assertEqual(status, 200)
         self.assertEqual(poll["commands"], [{"id": body["id"], "cmd": COMMAND, "args": WIRE}])
@@ -313,7 +314,7 @@ class ActorEmoteAdmissionTest(unittest.TestCase):
         status, body = state.enqueue_command(COMMAND, dict(WIRE), peer="client")
         self.assertEqual(status, 200, body)
         status, poll = state.record_poll(
-            "client", "12~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=OLDER_CLIENT_CAPS
+            "client", f"{EXPECTED_BRIDGE_VERSION}~1.29", instance=INST_CLIENT, source_pid=PID_CLIENT, caps=OLDER_CLIENT_CAPS
         )
         self.assertEqual(status, 200)
         self.assertEqual(poll["commands"], [])
@@ -549,6 +550,7 @@ _NEW = (
 _MEMBERS = (
     (re.compile(r"(?<![\w.])(m_Jobs|m_ElapsedS)\b"), r"R.\1"),
     (re.compile(r"(?<![\w.])m_DialogJob\b"), "B.m_DialogJob"),
+    (re.compile(r"(?<![\w.])m_MCPEmoteStarted\b"), "B.m_MCPEmoteStarted"),
 )
 _TICK_S = 0.1
 # The id the end helper asks both checks about and sends. Its value does not
@@ -728,7 +730,7 @@ class _ClientModel:
                 **{f"ID_EMOTE_{name.upper()}": index + 1 for index, name in enumerate(names)}
             ),
             "m_JobRunner": self.runner,
-            "B": SimpleNamespace(m_DialogJob=None),
+            "B": SimpleNamespace(m_DialogJob=None, m_MCPEmoteStarted=False),
             "m_Dialog": None,
             "IsStrictFinite": math.isfinite,
             "ACTOR_EMOTE_WAIT_MIN_S": loopback.ACTOR_EMOTE_WAIT_MIN_S,

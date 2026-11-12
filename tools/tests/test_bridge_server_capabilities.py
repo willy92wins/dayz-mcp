@@ -88,6 +88,7 @@ EXPECTED_SERVER_CAPABILITIES = (
     "inventory_attach",
     "inventory_give",
     "inventory_move",
+    "lease_close",
     "loadout_apply",
     "loadout_clear",
     "loadout_get",

@@ -721,7 +721,7 @@ class LoadCountersTest(unittest.TestCase):
 
     def test_status_load_is_null_until_a_complete_poll(self) -> None:
         state = loopback.ServerState("k")
-        code, _payload = state.record_poll("server", "12~1.30")
+        code, _payload = state.record_poll("server", f"{core.EXPECTED_BRIDGE_VERSION}~1.30")
         self.assertEqual(code, 200)
         load = state.status_snapshot()["peers"]["server"]["load"]
         self.assertEqual(load["init_attempts"], None)
@@ -732,7 +732,7 @@ class LoadCountersTest(unittest.TestCase):
         state = loopback.ServerState("k")
         code, _payload = state.record_poll(
             "server",
-            "12~1.30",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.30",
             load=loopback._load_from_poll_query(
                 {"ia": ["7"], "pc": ["2"], "lpims": ["250"]}
             ),
@@ -798,7 +798,7 @@ class LoadCountersTest(unittest.TestCase):
                 )
                 code, payload = state.record_poll(
                     peer,
-                    "12~1.30",
+                    f"{core.EXPECTED_BRIDGE_VERSION}~1.30",
                     instance=_INST_A,
                     source_pid=_PID_A,
                     source_creation_time=_CTIME,
@@ -826,7 +826,7 @@ class LoadCountersTest(unittest.TestCase):
         )
         code, payload = state.record_poll(
             "server",
-            "12~1.30",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.30",
             instance=_INST_A,
             source_pid=_PID_A,
             source_creation_time=_CTIME,
@@ -846,7 +846,7 @@ class LoadCountersTest(unittest.TestCase):
         )
         code, payload = state.record_poll(
             "server",
-            "12~1.30",
+            f"{core.EXPECTED_BRIDGE_VERSION}~1.30",
             instance=_INST_B,
             source_pid=_PID_B,
             source_creation_time=_CTIME,

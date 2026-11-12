@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
 from dayz_mcp import bridge_errors, loopback, result_prune, server
 from dayz_mcp.result_prune import PRUNABLE_FIELDS, prune_unfilled_fields
 from dayz_mcp.server import (
@@ -769,7 +770,7 @@ class PlayerViewSetAdmissionTest(unittest.TestCase):
     def _poll(self, caps: list[str]) -> dict:
         status, body = self.state.record_poll(
             "client",
-            "12~1.29",
+            f"{EXPECTED_BRIDGE_VERSION}~1.29",
             instance=INST_CLIENT,
             source_pid=PID_CLIENT,
             caps=",".join(caps),
@@ -862,7 +863,7 @@ class PlayerViewSetCensusTest(unittest.TestCase):
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
         self.assertEqual(server.server_arg_contract_hash(), "3b800b7c7ee0674c")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
         registered = frozenset(tool for tool in _BRIDGE_COMMAND_TOOLS["client"].values() if tool)

@@ -128,8 +128,9 @@ No lease (read-only): `action_cursor`, `player_find`, `query_all_players`, `quer
 neither flag is active. The obsolete `IngameHud.IsHudVisible()` stub is not used.
 Read it after `restore_gameplay`, whose automatic verification remains camera-only.
 `camera_path_release(command_id)` requires a lease, aborts only that playing id,
-restores camera/gameplay and returns `matched`; lease-end internal cleanup uses
-the same bridge command. `camera_set_focus` takes `camera_set`'s camera arguments,
+restores camera/gameplay and returns `matched`; the daemon sends the same bridge
+command when it abandons a delivered play, while at lease end the client's lease
+close stops the path. `camera_set_focus` takes `camera_set`'s camera arguments,
 required `focus_distance`/`focus_blur`, and optional `focus_length` (default 450),
 `focus_length_near` (default 100) and `focus_depth_offset` (default 10), with the
 same validation and lease: all five focus values are at most 1e9, with distance

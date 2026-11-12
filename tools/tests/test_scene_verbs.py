@@ -764,7 +764,7 @@ class SceneBridgeSourceTest(unittest.TestCase):
         return " ".join(method_body(self.bridge, signature).split())
 
     def test_bridge_version_and_constants_match_the_python_mirrors(self) -> None:
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', self.messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', self.messages)
         for name, value in (
             ("SCENE_ID_MAX_CHARS", loopback.SCENE_ID_MAX_CHARS),
             ("SCENE_ENTRIES_MAX", server.SCENE_ENTRIES_MAX),
@@ -872,7 +872,8 @@ class SceneBridgeSourceTest(unittest.TestCase):
             post,
         )
         timeout = self._body("protected void PostJobTimeout(MCPJob job)")
-        self.assertIn('if (job.kind == "scene_clear") { PostSceneClear(job); return; }', timeout)
+        # §2.7 step 6: remaining refs transfer before the deadline post.
+        self.assertIn('if (job.kind == "scene_clear") { RegisterDeletionRefs(job); PostSceneClear(job); return; }', timeout)
         ready = self._body("protected bool IsJobReady(MCPJob job)")
         self.assertIn('else if (job.kind == "scene_clear") { return IsSceneClearDone(job); }', ready)
         # One level up: the inventory parent of an EntityAI, else the entity-tree
