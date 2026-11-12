@@ -121,6 +121,7 @@ from dayz_mcp.loopback import (
     AWAIT_LONG_POLL_MAX_IN_FLIGHT,
     AWAIT_LONG_POLL_MAX_S,
     BOT_START_ACTIONS,
+    BOT_START_INVENTORY_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
     INPUT_TRIGGER_DIK_MAX,
@@ -5309,6 +5310,7 @@ def _failed_active_run_result(
                 "cleanup_degraded": False,
                 "server_alive": None,
                 "client_alive": None,
+                "server_boot": None,
                 **extra,
             },
             box,
@@ -6381,6 +6383,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "active_run_exists without that reason or a queue_offer. A failed "
             "launch whose run_id the run store does not list (dayz_test_stop "
             "would answer run_not_found) returns run_id null. "
+            "server_boot reports what this launch's server compiled per module "
+            "according to its script log, where missing_files > 0 is a hint "
+            "that a module .c file from a mod's PBOs was not loaded; with "
+            "mode=server the call waits for the Mission line up to "
+            "server_wait_s (capped at 60 s), and server_boot is null when the "
+            "mode starts no server or the logs could not be read. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -6802,6 +6810,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         isinstance(stop_result, dict)
                         and stop_result.get("status") == "failed"
                     ):
+                        # The stop envelope answers this launch, so it carries
+                        # the server_boot key of every dayz_test_run answer.
+                        stop_result.setdefault("server_boot", None)
                         return annotated(stop_result)
                     evicted_run_id = target
                 execute_error, result = await execute(
@@ -8294,12 +8305,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "id. The dummy must be a living PlayerBase with no connected "
             "identity. action is one of the 1.30 debug transitions "
             "(PLAYER_BOT_RANDOMIZE_STANCE, PLAYER_BOT_RANDOMIZE_MOVEMENT, "
-            "PLAYER_BOT_SPAM_USER_ACTIONS, "
-            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
+            "PLAYER_BOT_SPAM_USER_ACTIONS, PLAYER_BOT_TEST_SPAWN_OPEN, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT). The four vanilla inventory "
+            "actions (PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
             "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH, "
-            "PLAYER_BOT_TEST_SPAWN_OPEN, PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
-            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT, PLAYER_BOT_TEST_SWAP_G2H, "
-            "PLAYER_BOT_TEST_SWAP_INTERNAL). ttl_s is how long the server keeps "
+            "PLAYER_BOT_TEST_SWAP_G2H, PLAYER_BOT_TEST_SWAP_INTERNAL) are "
+            "omitted and refused with bad_args because they raise vanilla "
+            "script exceptions on a server dummy. "
+            "ttl_s is how long the server keeps "
             "it running, from just above 0 to 30 seconds, default 5. A second "
             "start while one is active is bot_busy. A survivor that "
             "survivor_drive walks is drive_busy and nothing changes: release "
@@ -8308,15 +8322,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "bot_unavailable and nothing is initialized. The answer is bot: "
             "object_id, action, started, ttl_s. started means the bot FSM "
             "accepted the transition, not that the action's effect happened. "
-            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: all "
-            "ten actions start and bot_stop stops them, but "
-            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE and "
-            "PLAYER_BOT_TEST_SWAP_INTERNAL fill the server script log with "
-            "vanilla Virtual Machine Exceptions, about 30 a second while they "
-            "run (a NULL player in vanilla's "
-            "DayZPlayerInventory.HandleTakeToDst and HandleForceSwapEntities), "
-            "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH and "
-            "PLAYER_BOT_TEST_SWAP_G2H raise one each, and "
+            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: the "
+            "six actions start and bot_stop stops them, and "
             "PLAYER_BOT_RANDOMIZE_MOVEMENT only moves forward (inbox 6b52). "
             "Errors: bad_args, bot_unavailable, drive_busy, object_not_found, "
             "not_dummy_player, player_dead, bot_busy, bot_action_rejected."
@@ -8331,6 +8338,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if not isinstance(action, str) or action not in BOT_START_ACTIONS:
+            if isinstance(action, str) and action in BOT_START_INVENTORY_ACTIONS:
+                raise ToolError(
+                    _bad_args(
+                        "action",
+                        action,
+                        "not be one of the vanilla bot inventory actions: "
+                        "they raise vanilla script exceptions on a server dummy",
+                    )
+                )
             raise ToolError(
                 _bad_args("action", action, "be one of the debug-bot action names")
             )
