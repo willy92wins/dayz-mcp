@@ -162,9 +162,11 @@ def _compact_description(description: str) -> str:
 def _compact_initial_catalog(tools: list[Any]) -> list[Any]:
     """The pre-lease tools/list for 8B clients: the core plus lease-free reads.
 
-    About 17 KB with the reads (b753), most of it input schemas, which stay
-    whole. Descriptions go through _compact_description; outputSchema is
-    dropped. A world_*/vehicle_*/ui_* tool is listed only when it is a read.
+    About 17 KB with the reads (b753), most of it input schemas, which keep
+    every field, type, default, bound and description; only the titles
+    Pydantic generates go (_drop_generated_titles). Descriptions go through
+    _compact_description; outputSchema is dropped. A world_*/vehicle_*/ui_*
+    tool is listed only when it is a read.
     """
     compacted: list[Any] = []
     for tool in tools:
@@ -180,8 +182,43 @@ def _compact_initial_catalog(tools: list[Any]) -> list[Any]:
             updates["description"] = compact_description
         if getattr(tool, "outputSchema", None) is not None:
             updates["outputSchema"] = None
+        input_schema = getattr(tool, "inputSchema", None)
+        if isinstance(input_schema, dict):
+            updates["inputSchema"] = _drop_generated_titles(input_schema)
         compacted.append(tool.model_copy(update=updates) if updates else tool)
     return compacted
+
+
+_SCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "definitions")
+_SCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
+_SCHEMA_ONE_KEYS = ("items", "additionalProperties", "not")
+
+
+def _drop_generated_titles(schema: Any) -> Any:
+    """A copy of an input schema without its "title" annotations.
+
+    Pydantic writes one per field from its name ("group_id" gives "Group Id")
+    and one per arguments model, so they repeat the names (PX3 c: about 4 KB
+    of the 23 KB catalog). Only schema positions are walked: a property named
+    "title", or a "title" inside a default, enum or const value, is kept.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    copied: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
+            copied[key] = {name: _drop_generated_titles(sub) for name, sub in value.items()}
+        elif key in _SCHEMA_LIST_KEYS and isinstance(value, list):
+            copied[key] = [_drop_generated_titles(sub) for sub in value]
+        elif key in _SCHEMA_ONE_KEYS and isinstance(value, list):
+            copied[key] = [_drop_generated_titles(sub) for sub in value]
+        elif key in _SCHEMA_ONE_KEYS:
+            copied[key] = _drop_generated_titles(value)
+        else:
+            copied[key] = value
+    return copied
 
 
 # One-sentence descriptions for the admin pack (ticket C2,
