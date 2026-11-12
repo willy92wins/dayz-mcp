@@ -418,6 +418,25 @@ class AIGroupSpawnBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("created=", text)
 
 
+class AIGroupSpawnDetailDocsTest(unittest.TestCase):
+    """PX8 c: the guide and the 173a entry say what a refusal's message carries."""
+
+    def test_guide_and_changelog_name_the_refusal_detail(self) -> None:
+        root = _TOOLS_DIR.parent
+        guide = (root / "docs" / "expansion-ai-adapter.md").read_text(encoding="utf-8")
+        start = guide.index("- `ai_group_spawn` (tool, lease required)")
+        bullet = guide[start : guide.index("\n- ", start)]
+        entries = [
+            line
+            for line in (root / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("- Expansion AI adapter foundation and `ai_group_spawn`")
+        ]
+        self.assertEqual(len(entries), 1)
+        for text in (bullet, entries[0]):
+            for name in ("`field`", "`allowed`", "`args_read`", "`living`", "`limit`", "`created`"):
+                self.assertIn(name, text)
+
+
 def _bound_state() -> loopback.ServerState:
     state = loopback.ServerState(key="k")
     state.daemon_generation = "gen-xai-spawn"

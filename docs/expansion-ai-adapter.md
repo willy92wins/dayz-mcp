@@ -24,6 +24,12 @@ server. It ships in `addon_expansion_ai/` and packs as
   `eAISurvivor` members under a tool-generated `spawn_token`, applies the
   faction loadout, formation and one of HOLD / ONCE / LOOP / ROAM, and
   answers with what the server reads back (faction, formation, members).
+  A refusal's message carries what the server filled before refusing:
+  `field`, `allowed` (for an unknown faction or formation, the names the
+  server knows) and `args_read` with `bad_args`, `living` and `limit`
+  with `ai_limit_reached`, and `created`. Only names from a fixed list
+  and checked names and numbers cross, so nothing else the caller sent
+  is echoed.
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
   when a delivered spawn is abandoned (timeout or cancel). It is not a
   public tool and never runs from lease-end cleanup.
