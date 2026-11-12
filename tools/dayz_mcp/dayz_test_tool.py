@@ -1068,14 +1068,6 @@ def _probe_server_boot_rpt(
     return True, max(qualifying, key=lambda pair: pair[0])[1]
 
 
-def _server_boot_rpt(profiles_dir: Path, floor_s: float) -> Path | None:
-    """Newest server RPT in ``profiles_dir`` with ``st_ctime >= floor_s - 2.0``."""
-    _retryable, rpt = _probe_server_boot_rpt(
-        profiles_dir, str(profiles_dir.parent), floor_s
-    )
-    return rpt
-
-
 _RPT_LAUNCH_STAMP_RE = re.compile(
     r"(?<![0-9])([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})(?![0-9])"
 )
