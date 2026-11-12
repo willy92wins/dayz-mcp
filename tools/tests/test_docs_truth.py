@@ -48,6 +48,7 @@ Out of scope, on purpose (an honest watchdog beats a pretend-complete one):
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import os
 import re
@@ -1005,53 +1006,37 @@ def _servermod_release_paragraphs(text: str) -> list[str]:
     ]
 
 
-# PX9 b P2: naming both cases is not enough; each clause that names a case
-# must tie it to its result. One naming the round case may not enqueue the
-# release, one naming the case without a round may not deny it, and no clause
-# may name both ("con y sin ronda"). PX9 c P2: an "encola" is negated when one
-# of the Spanish negators (no, nunca, jamás, tampoco, ni) comes at most two
-# words before it ("no lo encola", "nunca encola", "no siempre encola").
-_SERVERMOD_NEGATED = re.compile(r"\b(?:no|nunca|jamás|tampoco|ni)(?: \S+){0,2} $")
-_SERVERMOD_ONLY_WITHOUT = re.compile(r"\bsolo se encola sin ronda\b")
+# PX9 b, c and d: three readers of Spanish negation in turn let a wrong
+# wording through or turned a true one away ("lo encola", "nunca encola", "no
+# siempre lo encola", "no obstante"), so the check no longer reads the prose.
+# It pins each paragraph as reviewed in PX9 to PX9 d, with whitespace folded
+# and the line numbers of its path:line citations taken out (#386's citations move
+# with every change to the files they cite; the paths stay pinned). A change of
+# wording, true or false, fails here and goes back to review; the code side is
+# pinned by test_code_gates_the_release_on_no_round.
+_SERVERMOD_LINE_CITE = re.compile(r"(`[\w./-]+\.(?:py|c|md|toml)):\d+(?:-\d+)?(?=`)")
+_SERVERMOD_RELEASE_SHA256 = (
+    # The explicit session_release paragraph.
+    "13b17111ae95e9898537ba04d6849c7cfc78d05c0aa6702e3269c0bab13a7feb",
+    # The expired-lease paragraph.
+    "43fd5ac04738e021cc85f7e02efe16edccdc9a9d1e9416ad3e09bdbefa52d8ad",
+)
 
 
-def _servermod_encola(clause: str, *, negated: bool) -> bool:
-    """Whether the clause has an "encola" that is (or is not) negated."""
-    return any(
-        bool(_SERVERMOD_NEGATED.search(clause[: m.start()])) == negated
-        for m in re.finditer(r"\bencola\b", clause)
-    )
+def _servermod_release_text(paragraph: str) -> str:
+    """The paragraph as pinned: whitespace folded, citation line numbers out."""
+    return _SERVERMOD_LINE_CITE.sub(r"\1", " ".join(paragraph.split()))
 
 
-def _servermod_release_claim_ok(paragraph: str) -> bool:
-    """The paragraph ties each case to its result: with a lease-end round the
-    release is not enqueued, without one it is."""
-    flat = " ".join(paragraph.split()).lower()
-    skips = enqueues = any(
-        not _SERVERMOD_NEGATED.search(flat[: m.start()])
-        for m in _SERVERMOD_ONLY_WITHOUT.finditer(flat)
-    )
-    for clause in re.split(r"[.;:]\s+", flat):
-        with_round = "con ronda" in clause or "con y sin ronda" in clause
-        without_round = "sin ronda" in clause
-        if with_round and without_round:
-            return False
-        if with_round:
-            if _servermod_encola(clause, negated=False):
-                return False
-            skips = skips or _servermod_encola(clause, negated=True)
-        if without_round:
-            if _servermod_encola(clause, negated=True):
-                return False
-            enqueues = enqueues or _servermod_encola(clause, negated=False)
-    return skips and enqueues
+def _servermod_release_digest(paragraph: str) -> str:
+    return hashlib.sha256(_servermod_release_text(paragraph).encode("utf-8")).hexdigest()
 
 
 class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
     """docs/SERVERMOD.md's two paragraphs on the internal vehicle_release (an
     explicit session_release and an expired lease) must say it is enqueued only
     without a lease-end round, as cleanup_owner does since v13 (PX9 P2), in
-    clauses that tie each case to its result (PX9 b P2). The
+    the wording _SERVERMOD_RELEASE_SHA256 pins (PX9 d). The
     behaviour itself is pinned by test_session_e2e
     test_lease_close_cleanup_is_enqueued_exactly_once (a round: 0 enqueued) and
     test_session_http_contract
@@ -1068,47 +1053,57 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
         self.assertEqual(len(paragraphs), 2, [p[:80] for p in paragraphs])
         return paragraphs
 
-    def test_both_paragraphs_tie_each_case_to_its_result(self) -> None:
-        for paragraph in self._release_paragraphs():
-            self.assertTrue(_servermod_release_claim_ok(paragraph), paragraph[:300])
+    def test_both_paragraphs_read_as_reviewed(self) -> None:
+        for paragraph, digest in zip(self._release_paragraphs(), _SERVERMOD_RELEASE_SHA256):
+            with self.subTest(digest=digest[:12]):
+                self.assertEqual(
+                    _servermod_release_digest(paragraph),
+                    digest,
+                    "a paragraph of docs/SERVERMOD.md on the internal vehicle_release "
+                    "changed: check that it still says the release is enqueued only "
+                    f"without a lease-end round ({_SERVERMOD_ROUND_GATE!r} in loopback.py), "
+                    "then pin the digest of: " + _servermod_release_text(paragraph),
+                )
 
-    def test_neg_a_case_tied_to_the_wrong_result_fails(self) -> None:
-        explicit, expiry = self._release_paragraphs()
+    def test_a_moved_line_number_keeps_the_pin(self) -> None:
+        explicit = self._release_paragraphs()[0]
+        moved = explicit.replace("loopback.py:8378-8387", "loopback.py:9378-9390")
+        self.assertNotEqual(moved, explicit)
+        self.assertEqual(_servermod_release_digest(moved), _SERVERMOD_RELEASE_SHA256[0])
+
+    def test_neg_a_changed_wording_fails(self) -> None:
+        paragraphs = [" ".join(p.split()) for p in self._release_paragraphs()]
+        without = "Sin ronda, `cleanup_owner` encola"
         mutants = (
+            # PX9: an enqueue at every lease end.
+            (0, without + " `vehicle_release`", "`cleanup_owner` encola `vehicle_release`"),
             # PX9 b: the round case enqueues the release.
-            (explicit, "`cleanup_owner` no lo encola", "`cleanup_owner` lo encola"),
+            (0, "`cleanup_owner` no lo encola", "`cleanup_owner` lo encola"),
             # PX9 b: enqueued with and without a round.
             (
-                expiry,
+                1,
                 "interno solo se encola sin ronda de cierre",
                 "interno se encola con y sin ronda de cierre",
             ),
-            # The case without a round denies the release (PX9 c: with any
-            # negator, also one word away from the verb).
-            *(
-                (
-                    explicit,
-                    "Sin ronda, `cleanup_owner` encola",
-                    f"Sin ronda, `cleanup_owner` {negation} encola",
-                )
-                for negation in ("no", "nunca", "jamás", "tampoco", "ni", "no siempre")
-            ),
-            # "no solo" no longer limits the release to the case without one.
-            (expiry, "interno solo se encola", "interno no solo se encola"),
+            # PX9 c: the case without a round denies the release.
+            (0, without, "Sin ronda, `cleanup_owner` nunca encola"),
+            # PX9 d: a partial negation added for the round case.
+            (0, without, "Con ronda, `cleanup_owner` no siempre lo encola. " + without),
+            # PX9 d: a true rewording fails too, and goes back to review.
+            (0, without, "Sin ronda, no obstante, `cleanup_owner` encola"),
+            # The release left queued with a round.
+            (1, "Sin ronda, el release queda", "Con ronda, el release queda"),
+            # A citation's path stays pinned; only its line numbers move.
+            (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/server.py:3257`"),
         )
-        for paragraph, old, new in mutants:
+        for index, old, new in mutants:
             with self.subTest(new=new):
-                flat = " ".join(paragraph.split())
-                self.assertEqual(flat.count(old), 1, old)
-                self.assertFalse(_servermod_release_claim_ok(flat.replace(old, new)))
-
-    def test_neg_an_enqueue_at_every_lease_end_fails(self) -> None:
-        old = (
-            "`BOUND` (`vehicle_active` en ...), `cleanup_owner` encola\n"
-            "`vehicle_release` interno en `_fire_and_forget_ids`"
-        )
-        self.assertEqual(_servermod_release_paragraphs(old), [old])
-        self.assertFalse(_servermod_release_claim_ok(old))
+                paragraph = paragraphs[index]
+                self.assertEqual(paragraph.count(old), 1, old)
+                self.assertNotEqual(
+                    _servermod_release_digest(paragraph.replace(old, new)),
+                    _SERVERMOD_RELEASE_SHA256[index],
+                )
 
 
 # PX9 c P2 (#343): with a lease-end round, a reachable peer whose fresh census
