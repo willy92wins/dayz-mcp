@@ -2,7 +2,8 @@
 
 Contract, tool, admission and census checks run here. MCP_CameraPath.c and the
 camera_path_play, camera_path_release, camera_set and hud_set dispatch, the
-camera_set job, CameraReadError, ApplyCameraSet, ApplyFreeCamera and the frame
+camera_set job, CameraReadError, IsValidCameraFocus, ApplyCameraSet,
+ApplyFreeCamera, ApplyCameraDOF, ClearCameraDOF, ReleaseCamera and the frame
 method of MCPClientBridge.c also run here, translated from the .c source by
 tests.enforce_subset_helpers (see _executed_camera_path below); that runs their
 branching and arithmetic, not the engine. The other asserts on Enforce text are
@@ -73,6 +74,9 @@ VALID_WIRE_ARGS: dict[str, dict[str, Any]] = {
         "settle_ticks": 3,
         "focus_distance": 2.0,
         "focus_blur": 1.0,
+        "focus_length": 750.0,
+        "focus_length_near": 500.0,
+        "focus_depth_offset": 10.0,
     },
     "hud_set": {"visible": False},
 }
@@ -447,9 +451,10 @@ _BRIDGE_METHODS = (
     "protected void TickCameraPath(float timeslice)",
     "protected void StopCameraPath()",
     "protected void DeleteOwnedCamera()",
+    "protected void ClearCameraDOF(string reason)",
 )
 _BRIDGE_SIBLINGS = (
-    "FinishCameraHandoff|SuppressGameplay|DeleteOwnedCamera|RestoreGameplay|StopCameraPath|"
+    "FinishCameraHandoff|SuppressGameplay|DeleteOwnedCamera|ClearCameraDOF|RestoreGameplay|StopCameraPath|"
     "HasExclusiveJob|ReleaseCamera|PostResult|Log|QueueCameraPathReleaseJob"
 )
 
@@ -458,7 +463,8 @@ class _ClientBridge:
     """The members the path methods use; the rest of the bridge is a log.
 
     DispatchCameraPathPlay, DispatchCameraPathRelease, TickCameraPath,
-    StopCameraPath and DeleteOwnedCamera are the translated ones.
+    StopCameraPath, DeleteOwnedCamera and ClearCameraDOF are the translated
+    ones.
     TickCameraPath runs as OnTick calls it, after m_Tick goes up by one; a
     dispatch reads m_Tick as it stands, as Dispatch does from the poll
     callback or from DrainPending. HasExclusiveJob answers `exclusive`; it,
@@ -479,6 +485,10 @@ class _ClientBridge:
         self.player = SimpleNamespace(
             DisableSimulation=lambda off: self.log.append(("player", "DisableSimulation", off))
         )
+        self.game: SimpleNamespace | None = SimpleNamespace(
+            GetPlayer=lambda: self.player,
+            OverrideDOF=self._override_dof,
+        )
         self.m_CameraPath = path_class()
         self.m_CameraPathCam: _Camera | None = None
         self.m_CameraPathCommandId = 0
@@ -486,16 +496,21 @@ class _ClientBridge:
         self.m_ActiveCam: _Camera | None = None
         self.m_ActiveCamOwned = False
         self.m_PlayerSimulationDisabled = False
+        self.m_CameraDOFActive = False
         namespace: dict[str, Any] = {
             "_S": _Text,
             "MCPCameraPath": path_class,
             "MCPCameraPathState": _state_block,
             "MCPResult": lambda: SimpleNamespace(),
-            "g_Game": SimpleNamespace(CreateObject=self._create, ObjectDelete=self._delete),
+            "g_Game": SimpleNamespace(
+                CreateObject=self._create,
+                ObjectDelete=self._delete,
+                OverrideDOF=self._override_dof,
+            ),
             "Camera": SimpleNamespace(Cast=lambda thing: thing if isinstance(thing, _Camera) else None),
             "FreeDebugCamera": SimpleNamespace(GetInstance=lambda: self.free_cam),
             "PlayerBase": SimpleNamespace(Cast=lambda thing: thing),
-            "GetGame": lambda: SimpleNamespace(GetPlayer=lambda: self.player),
+            "GetGame": lambda: self.game,
         }
         for signature in _BRIDGE_METHODS:
             head, code = _function(
@@ -526,6 +541,28 @@ class _ClientBridge:
 
     def _delete(self, thing: object) -> None:
         self.log.append(("engine", "ObjectDelete", thing))
+
+    def _override_dof(
+        self,
+        enable: bool,
+        distance: float,
+        length: float,
+        length_near: float,
+        blur: float,
+        depth_offset: float,
+    ) -> None:
+        self.log.append(
+            (
+                "engine",
+                "OverrideDOF",
+                enable,
+                float(distance),
+                float(length),
+                float(length_near),
+                float(blur),
+                float(depth_offset),
+            )
+        )
 
     def FinishCameraHandoff(self) -> None:
         self.log.append(("bridge", "FinishCameraHandoff"))
@@ -616,7 +653,7 @@ class _CameraSetBridge:
     what they call is a log.
 
     ApplyCameraSet stands for the whole apply (path stop, SuppressGameplay, the
-    camera, SetFOV, SetFocus; ExecutedApplyTest runs the real one) and logs
+    camera, SetFOV, OverrideDOF; ExecutedApplyTest runs the real one) and logs
     whether it was asked for focus; it answers `apply_ok` and, when it
     applies, turns m_ActiveCam on, as every apply does last. m_ActiveCam is a
     fake camera on the same log that reads this m_Tick, so a camera call from
@@ -691,7 +728,13 @@ class _CameraSetBridge:
         self.log.append(("bridge", "Log", line.text))
 
     def dispatch(self, cmd: str, command_id: int = 21) -> tuple[bool, SimpleNamespace]:
-        args = SimpleNamespace(focus_distance=_F32(2.0), focus_blur=_F32(1.0))
+        args = SimpleNamespace(
+            focus_distance=_F32(2.0),
+            focus_blur=_F32(1.0),
+            focus_length=_F32(750.0),
+            focus_length_near=_F32(500.0),
+            focus_depth_offset=_F32(10.0),
+        )
         command = SimpleNamespace(id=command_id, cmd=_Text.of(cmd), args=args)
         result = SimpleNamespace(
             ok=False, error=_Text.of(""), tick_poll_sent=1, tick_poll_callback=2, tick_dispatch=self.m_Tick
@@ -709,47 +752,69 @@ class _CameraSetBridge:
 _APPLY_METHODS = (
     "protected bool ApplyCameraSet(MCPJob job)",
     "protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)",
+    "protected void ApplyCameraDOF(MCPArgs args)",
+    "protected void ClearCameraDOF(string reason)",
+    "protected void ReleaseCamera()",
     "protected void DeleteOwnedCamera()",
+    "protected bool IsValidCameraFocus(MCPArgs args)",
 )
 _APPLY_SIBLINGS = (
     "ValidateCameraArgs|StopCameraPath|FinishCameraHandoff|SuppressGameplay|ApplyFreeCamera|"
-    "DeleteOwnedCamera|ArrayToMatrix"
+    "ApplyCameraDOF|ClearCameraDOF|BeginCameraHandoff|DeleteOwnedCamera|ArrayToMatrix|Log"
 )
 # ApplyCameraSet's static array, which the translator does not parse, becomes
 # the list of four rows that the ArrayToMatrix fake fills, as its out
 # parameter does.
 _MATRIX_LOCAL = ("vector matrix[4];", "MatrixRows matrix = MatrixRows();")
+_FLOAT32_MAX = _F32(struct.unpack("<f", b"\xff\xff\x7f\x7f")[0])
 
 
 class _ApplyBridge:
-    """ApplyCameraSet, ApplyFreeCamera and DeleteOwnedCamera translated, on fakes.
+    """ApplyCameraSet, ApplyFreeCamera, ApplyCameraDOF, ClearCameraDOF,
+    ReleaseCamera, DeleteOwnedCamera and IsValidCameraFocus translated, on fakes.
 
     ValidateCameraArgs answers `validation`. StopCameraPath,
-    FinishCameraHandoff and SuppressGameplay only log. CreateObject logs and
-    makes the `static` camera, FreeDebugCamera.GetInstance answers the `free`
-    one, both on the bridge's log, and ArrayToMatrix fills the matrix with the
-    rows of cam_matrix, three numbers each.
+    FinishCameraHandoff, SuppressGameplay and BeginCameraHandoff log (and
+    BeginCameraHandoff answers `begin_handoff`). CreateObject logs and makes
+    `next_static_object` (by default the `static` camera),
+    FreeDebugCamera.GetInstance answers `free_cam`, both on the bridge's log,
+    g_Game/GetGame OverrideDOF logs all six arguments, and ArrayToMatrix fills
+    the matrix with the rows of cam_matrix, three numbers each.
     """
 
     def __init__(self, bridge_source: str) -> None:
         self.log: list[tuple[Any, ...]] = []
         self.static_cam = _Camera(self.log, "static")
-        self.free_cam = _Camera(self.log, "free")
+        self.next_static_object: object = self.static_cam
+        self.free_cam: _Camera | None = _Camera(self.log, "free")
         self.player = SimpleNamespace(
             DisableSimulation=lambda off: self.log.append(("player", "DisableSimulation", off))
+        )
+        self.game: SimpleNamespace | None = SimpleNamespace(
+            GetPlayer=lambda: self.player,
+            OverrideDOF=self._override_dof,
         )
         self.validation: SimpleNamespace | None = None
         self.m_ActiveCam: _Camera | None = None
         self.m_ActiveCamOwned = False
         self.m_PlayerSimulationDisabled = False
+        self.m_CameraDOFActive = False
+        self.m_CameraHandoffPending = False
+        self.m_Shutdown = False
+        self.begin_handoff = False
         self.constants = _bridge_constants(bridge_source)
         namespace: dict[str, Any] = {
             "_S": _Text,
-            "g_Game": SimpleNamespace(CreateObject=self._create, ObjectDelete=self._delete),
+            "float": SimpleNamespace(MAX=_FLOAT32_MAX),
+            "g_Game": SimpleNamespace(
+                CreateObject=self._create,
+                ObjectDelete=self._delete,
+                OverrideDOF=self._override_dof,
+            ),
             "Camera": SimpleNamespace(Cast=lambda thing: thing if isinstance(thing, _Camera) else None),
             "FreeDebugCamera": SimpleNamespace(GetInstance=lambda: self.free_cam),
             "PlayerBase": SimpleNamespace(Cast=lambda thing: thing),
-            "GetGame": lambda: SimpleNamespace(GetPlayer=lambda: self.player),
+            "GetGame": lambda: self.game,
             "MatrixRows": lambda: [None, None, None, None],
             **self.constants,
         }
@@ -769,10 +834,32 @@ class _ApplyBridge:
 
     def _create(self, kind: _Text, position: tuple[float, ...], local: bool) -> object:
         self.log.append(("engine", "CreateObject", kind.text, tuple(float(v) for v in position), local))
-        return self.static_cam
+        return self.next_static_object
 
     def _delete(self, thing: object) -> None:
         self.log.append(("engine", "ObjectDelete", thing))
+
+    def _override_dof(
+        self,
+        enable: bool,
+        distance: float,
+        length: float,
+        length_near: float,
+        blur: float,
+        depth_offset: float,
+    ) -> None:
+        self.log.append(
+            (
+                "engine",
+                "OverrideDOF",
+                enable,
+                float(distance),
+                float(length),
+                float(length_near),
+                float(blur),
+                float(depth_offset),
+            )
+        )
 
     def ValidateCameraArgs(self, args: object) -> SimpleNamespace | None:
         return self.validation
@@ -785,6 +872,13 @@ class _ApplyBridge:
 
     def SuppressGameplay(self) -> None:
         self.log.append(("bridge", "SuppressGameplay"))
+
+    def BeginCameraHandoff(self) -> bool:
+        self.log.append(("bridge", "BeginCameraHandoff"))
+        return self.begin_handoff
+
+    def Log(self, line: _Text) -> None:
+        self.log.append(("bridge", "Log", line.text))
 
     def ArrayToMatrix(self, values: list[float] | None, matrix: list[Any]) -> bool:
         if values is None or len(values) != 12:
@@ -1093,30 +1187,84 @@ _ORIENT = {"cam_mode": "orient", "cam_pos": [1.0, 2.0, 3.0], "cam_orientation": 
 
 class CameraSetFocusTest(_ToolCase):
     async def test_focus_goes_out_on_camera_set_focus_and_is_echoed(self) -> None:
-        for label, arguments in (
-            ("orient", dict(_ORIENT)),
-            ("lookat", {"cam_mode": "lookat", "cam_pos": [1.0, 2.0, 3.0], "look_at": [4.0, 5.0, 6.0]}),
-            ("matrix", {"cam_mode": "matrix", "cam_matrix": [1.0] * 12}),
-            ("free", {"cam_mode": "free", "cam_pos": [1.0, 2.0, 3.0], "cam_orientation": [0.0, 0.0, 0.0]}),
-        ):
-            with self.subTest(cam_mode=label):
-                args, result = await self._forwarded(
-                    "camera_set",
-                    dict(arguments, focus_distance=2.0, focus_blur=0.0, timeout_s=1.0),
-                    _camera_answer(),
-                )
+        default_echo = {
+            "distance": 2.0,
+            "blur": 0.0,
+            "length": 450.0,
+            "length_near": 100.0,
+            "depth_offset": 10.0,
+        }
+        for tool in ("camera_set", "camera_set_focus"):
+            for label, arguments in (
+                ("orient", dict(_ORIENT)),
+                ("lookat", {"cam_mode": "lookat", "cam_pos": [1.0, 2.0, 3.0], "look_at": [4.0, 5.0, 6.0]}),
+                ("matrix", {"cam_mode": "matrix", "cam_matrix": [1.0] * 12}),
+                ("free", {"cam_mode": "free", "cam_pos": [1.0, 2.0, 3.0], "cam_orientation": [0.0, 0.0, 0.0]}),
+            ):
+                with self.subTest(tool=tool, cam_mode=label):
+                    args, result = await self._forwarded(
+                        tool,
+                        dict(arguments, focus_distance=2.0, focus_blur=0.0, timeout_s=1.0),
+                        _camera_answer(),
+                    )
+                    self.assertEqual(args[0], "camera_set_focus")
+                    self.assertEqual(args[1]["focus_distance"], 2.0)
+                    self.assertEqual(args[1]["focus_blur"], 0.0)
+                    self.assertEqual(args[1]["focus_length"], 450.0)
+                    self.assertEqual(args[1]["focus_length_near"], 100.0)
+                    self.assertEqual(args[1]["focus_depth_offset"], 10.0)
+                    self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
+                    self.assertEqual(result["focus_applied"], default_echo)
+                    self.assertNotIn("focus_applied", result["camera"])
+
+    async def test_explicit_optional_focus_values_go_out_as_given_and_are_echoed(self) -> None:
+        explicit = {
+            "focus_distance": 2.5,
+            "focus_blur": 0.75,
+            "focus_length": 700.0,
+            "focus_length_near": 450.0,
+            "focus_depth_offset": 12.0,
+        }
+        expected_echo = {
+            "distance": 2.5,
+            "blur": 0.75,
+            "length": 700.0,
+            "length_near": 450.0,
+            "depth_offset": 12.0,
+        }
+        for tool in ("camera_set", "camera_set_focus"):
+            with self.subTest(tool=tool):
+                args, result = await self._forwarded(tool, dict(_ORIENT, **explicit), _camera_answer())
                 self.assertEqual(args[0], "camera_set_focus")
-                self.assertEqual(args[1]["focus_distance"], 2.0)
-                self.assertEqual(args[1]["focus_blur"], 0.0)
+                for key, value in explicit.items():
+                    self.assertEqual(args[1][key], value)
                 self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
-                self.assertEqual(result["focus_applied"], {"distance": 2.0, "blur": 0.0})
-                self.assertNotIn("focus_applied", result["camera"])
+                self.assertEqual(result["focus_applied"], expected_echo)
+        args, result = await self._forwarded(
+            "camera_set_focus",
+            dict(_ORIENT, focus_distance=2.5, focus_blur=0.75, focus_length=400.0),
+            _camera_answer(),
+        )
+        self.assertEqual(
+            (args[1]["focus_length"], args[1]["focus_length_near"], args[1]["focus_depth_offset"]),
+            (400.0, 100.0, 10.0),
+        )
+        self.assertEqual(
+            result["focus_applied"],
+            {"distance": 2.5, "blur": 0.75, "length": 400.0, "length_near": 100.0, "depth_offset": 10.0},
+        )
 
     async def test_omitted_focus_stays_camera_set_and_echoes_null(self) -> None:
         args, result = await self._forwarded("camera_set", dict(_ORIENT, fov=1.1), _camera_answer())
         self.assertEqual(args[0], "camera_set")
-        self.assertNotIn("focus_distance", args[1])
-        self.assertNotIn("focus_blur", args[1])
+        for key in (
+            "focus_distance",
+            "focus_blur",
+            "focus_length",
+            "focus_length_near",
+            "focus_depth_offset",
+        ):
+            self.assertNotIn(key, args[1])
         self.assertIn("focus_applied", result)
         self.assertIsNone(result["focus_applied"])
         self.assertEqual(result["fov_applied"], 1.1)
@@ -1125,6 +1273,26 @@ class CameraSetFocusTest(_ToolCase):
         for extra, expected in (
             ({"focus_distance": 2.0}, "bad_args: focus_distance and focus_blur go together"),
             ({"focus_blur": 1.0}, "bad_args: focus_distance and focus_blur go together"),
+            (
+                {"focus_distance": 2.0, "focus_length": 750.0},
+                "bad_args: focus_distance and focus_blur go together",
+            ),
+            (
+                {"focus_length": 750.0},
+                "bad_args: focus_length, focus_length_near and focus_depth_offset require focus_distance and focus_blur",
+            ),
+            (
+                {"focus_length_near": 500.0},
+                "bad_args: focus_length, focus_length_near and focus_depth_offset require focus_distance and focus_blur",
+            ),
+            (
+                {"focus_depth_offset": 10.0},
+                "bad_args: focus_length, focus_length_near and focus_depth_offset require focus_distance and focus_blur",
+            ),
+            (
+                {"focus_length": 750.0, "focus_length_near": 500.0, "focus_depth_offset": 10.0},
+                "bad_args: focus_length, focus_length_near and focus_depth_offset require focus_distance and focus_blur",
+            ),
             (
                 {"focus_distance": 0.0, "focus_blur": 1.0},
                 "bad_args: focus_distance 0.0 must be a number of metres above 0, also as a 32-bit float, "
@@ -1150,27 +1318,123 @@ class CameraSetFocusTest(_ToolCase):
             with self.subTest(extra=extra):
                 self.assertIn(expected, await self._refused("camera_set", dict(_ORIENT, **extra)))
 
+        base = dict(_ORIENT, focus_distance=2.0, focus_blur=1.0)
+        for tool in ("camera_set", "camera_set_focus"):
+            for param in ("focus_length", "focus_length_near", "focus_depth_offset"):
+                for bad, expected in (
+                    (
+                        -0.5,
+                        f"bad_args: {param} -0.5 must be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    ),
+                    (math.nan, f"bad_args: {param} nan"),
+                    (math.inf, f"bad_args: {param} inf"),
+                    (-math.inf, f"bad_args: {param} -inf"),
+                    (1.5e9, f"bad_args: {param} 1500000000.0"),
+                    (1e100, f"bad_args: {param} 1e+100"),
+                    (1e-46, f"bad_args: {param} 1e-46"),
+                    (
+                        True,
+                        f"bad_args: {param} True must be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    ),
+                    (
+                        False,
+                        f"bad_args: {param} False must be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    ),
+                ):
+                    with self.subTest(tool=tool, param=param, bad=bad):
+                        text = await self._refused(tool, dict(base, **{param: bad}))
+                        self.assertIn(param, text)
+                        self.assertIn(expected, text)
+        # Direct handler call (bypassing StrictFloat) also refuses bools as bad_args without calling the bridge.
+        bridge = AsyncMock(return_value={"ok": 1})
+        with patch.object(self.runtime, "call_bridge", new=bridge):
+            for param in ("focus_length", "focus_length_near", "focus_depth_offset"):
+                for flag in (True, False):
+                    with self.subTest(direct_param=param, flag=flag):
+                        with self.assertRaises(ToolError) as caught:
+                            await self.tools["camera_set"].fn(
+                                cam_mode="orient",
+                                cam_pos=[1.0, 2.0, 3.0],
+                                cam_orientation=[10.0, 0.0, 0.0],
+                                focus_distance=2.0,
+                                focus_blur=1.0,
+                                **{param: flag},
+                            )
+                        self.assertIn(f"bad_args: {param} {flag}", str(caught.exception))
+        bridge.assert_not_awaited()
+
     async def test_focus_at_the_float_bounds_goes_out_as_given(self) -> None:
-        for distance, blur in ((1e9, 1e9), (1e-45, 0.0), (2.0, 1e-45)):
-            with self.subTest(distance=distance, blur=blur):
+        for distance, blur, length, near, offset in (
+            (1e9, 1e9, 1e9, 1e9, 1e9),
+            (1e-45, 0.0, 0.0, 0.0, 0.0),
+            (2.0, 1e-45, 1e-45, 1e-45, 1e-45),
+        ):
+            with self.subTest(distance=distance, blur=blur, length=length):
                 args, _result = await self._forwarded(
-                    "camera_set", dict(_ORIENT, focus_distance=distance, focus_blur=blur), _camera_answer()
+                    "camera_set",
+                    dict(
+                        _ORIENT,
+                        focus_distance=distance,
+                        focus_blur=blur,
+                        focus_length=length,
+                        focus_length_near=near,
+                        focus_depth_offset=offset,
+                    ),
+                    _camera_answer(),
                 )
-                self.assertEqual((args[1]["focus_distance"], args[1]["focus_blur"]), (distance, blur))
+                self.assertEqual(
+                    (
+                        args[1]["focus_distance"],
+                        args[1]["focus_blur"],
+                        args[1]["focus_length"],
+                        args[1]["focus_length_near"],
+                        args[1]["focus_depth_offset"],
+                    ),
+                    (distance, blur, length, near, offset),
+                )
                 self.assertEqual(loopback.validate_command_args(args[0], args[1]), (True, None))
 
     def test_the_ingress_checks_focus_as_the_tool_does(self) -> None:
         wire = dict(VALID_WIRE_ARGS["camera_set_focus"])
+        focus_fields = (
+            "focus_distance",
+            "focus_blur",
+            "focus_length",
+            "focus_length_near",
+            "focus_depth_offset",
+        )
+        for missing in focus_fields:
+            with self.subTest(missing=missing):
+                incomplete = {key: val for key, val in wire.items() if key != missing}
+                self.assertEqual(loopback.validate_command_args("camera_set_focus", incomplete), (False, "bad_args"))
+
+        plain_variants = (
+            {"cam_mode": "orient", "cam_pos": [0.0, 2.0, 0.0], "cam_orientation": [90.0, 0.0, 0.0], "fov": 0.0, "settle_ticks": 3},
+            {"cam_mode": "lookat", "cam_pos": [0.0, 2.0, 0.0], "look_at": [1.0, 2.0, 3.0], "fov": 0.0, "settle_ticks": 3},
+            {"cam_mode": "matrix", "cam_matrix": [1.0] * 12, "fov": 0.0, "settle_ticks": 3},
+            {"cam_mode": "free", "cam_pos": [0.0, 2.0, 0.0], "cam_orientation": [90.0, 0.0, 0.0], "fov": 0.0, "settle_ticks": 3},
+        )
+        for plain in plain_variants:
+            self.assertEqual(loopback.validate_command_args("camera_set", plain), (True, None))
+            for forbidden in focus_fields:
+                with self.subTest(cam_mode=plain["cam_mode"], forbidden=forbidden):
+                    self.assertEqual(
+                        loopback.validate_command_args("camera_set", dict(plain, **{forbidden: 2.0})),
+                        (False, "bad_args"),
+                    )
+
         for field, value in (
             ("focus_distance", 1e100),
             ("focus_distance", 1e-46),
             ("focus_distance", 0.0),
             ("focus_distance", 1.5e9),
             ("focus_distance", 10**400),
-            ("focus_blur", 1e100),
-            ("focus_blur", 1e-46),
-            ("focus_blur", -0.5),
-            ("focus_blur", 10**400),
+            ("focus_distance", True),
+            *[
+                (blur_like, bad)
+                for blur_like in ("focus_blur", "focus_length", "focus_length_near", "focus_depth_offset")
+                for bad in (1e100, 1e-46, -0.5, 1.5e9, 10**400, math.nan, math.inf, True, False)
+            ],
         ):
             with self.subTest(field=field, value=value):
                 self.assertEqual(
@@ -1179,7 +1443,15 @@ class CameraSetFocusTest(_ToolCase):
                 )
                 checker = camera_path.focus_distance if field == "focus_distance" else camera_path.focus_blur
                 self.assertIsNone(checker(value))
-        for field, value in (("focus_distance", 1e9), ("focus_distance", 1e-45), ("focus_blur", 0.0), ("focus_blur", 1e-45)):
+        for field, value in (
+            ("focus_distance", 1e9),
+            ("focus_distance", 1e-45),
+            *[
+                (blur_like, good)
+                for blur_like in ("focus_blur", "focus_length", "focus_length_near", "focus_depth_offset")
+                for good in (0.0, 1e-45, 1e9)
+            ],
+        ):
             with self.subTest(field=field, value=value):
                 self.assertEqual(
                     loopback.validate_command_args("camera_set_focus", dict(wire, **{field: value})), (True, None)
@@ -1206,19 +1478,47 @@ class CameraSetFocusTest(_ToolCase):
         for phrase in (
             "focus_distance (metres, above 0, also as the 32-bit float the bridge reads) and focus_blur "
             "(0, or above 0 also as that float), each at most 1e9, go together",
+            "Optional focus_length (default 450), focus_length_near (default 100) and focus_depth_offset "
+            "(default 10), from vanilla's Close up preset",
+            "Measured in game: focus_length sets how much what lies beyond focus_distance blurs and "
+            "focus_length_near how much what lies nearer blurs (2000 also blurs a subject at focus_distance); "
+            "focus_depth_offset 0 draws no blur.",
             "A timeout does not prove the camera was not applied: the bridge applies it when the command "
             "arrives, before the settle.",
-            "Camera.SetFocus(focus_distance, focus_blur)",
-            "focus_applied {distance, blur}",
+            "CGame.OverrideDOF(true, focus_distance, focus_length, focus_length_near, focus_blur, focus_depth_offset)",
+            "focus_applied {distance, blur, length, length_near, depth_offset}",
             "focus_applied is null",
+            "turned off on camera release",
+            "on every camera_set",
+            "and on camera_path_play",
             "an echo of the values sent, not a read-back",
-            "depth-of-field video option, which is not measured",
+            "post-processing video option, which is not measured",
             "bridge_capability_missing",
             "the client bridge bound to the run does not announce camera_set_focus",
             "with no client bound, the loopback's binding fence refuses it first (legacy_unbound",
         ):
-            with self.subTest(phrase=phrase):
+            with self.subTest(tool="camera_set", phrase=phrase):
                 self.assertIn(phrase, description)
+        focus_description = self.tools["camera_set_focus"].description or ""
+        for phrase in (
+            "CGame.OverrideDOF",
+            "focus_length (default 450)",
+            "focus_length_near (default 100)",
+            "focus_depth_offset (default 10), from vanilla's Close up preset",
+            "Measured in game: focus_length sets how much what lies beyond focus_distance blurs and "
+            "focus_length_near how much what lies nearer blurs (2000 also blurs a subject at focus_distance); "
+            "focus_depth_offset 0 draws no blur.",
+            "turned off on camera release, on every camera_set and on camera_path_play",
+            "focus_applied {distance, blur, length, length_near, depth_offset}",
+            "an echo of the values sent, not a read-back",
+            "post-processing video option, which is not measured",
+        ):
+            with self.subTest(tool="camera_set_focus", phrase=phrase):
+                self.assertIn(phrase, focus_description)
+        for text in (description, focus_description):
+            self.assertNotIn("SetFocus", text)
+            self.assertNotIn("depth-of-field video option", text)
+            self.assertNotIn("keeps the last focus", text)
 
 
 class HudSetToolTest(_ToolCase):
@@ -2683,18 +2983,93 @@ class ExecutedDispatchTest(unittest.TestCase):
                 self.assertEqual(self.client.log[frames:], [])
                 self.assertEqual(_report(self.client.m_CameraPath)["state"], "aborted")
 
+    def test_a_play_clears_active_camera_dof_once(self) -> None:
+        dof_off = ("engine", "OverrideDOF", False, 0.0, 0.0, 0.0, 0.0, 1.0)
+        # Without previous DOF, play calls no OverrideDOF.
+        self._played()
+        self.assertEqual([entry for entry in self.client.log if entry[:2] == ("engine", "OverrideDOF")], [])
+        self.assertFalse(self.client.m_CameraDOFActive)
+
+        # With DOF active, a refused/busy/failed-create play leaves DOF as it was.
+        for failure in ("bad_args", "busy", "create_failed"):
+            with self.subTest(failure=failure):
+                self.setUp()
+                self.client.m_CameraDOFActive = True
+                if failure == "bad_args":
+                    answer = self.client.play({"mode": "play", "keys": [_key(0)], "easing": "linear", "path_id": ""})
+                elif failure == "busy":
+                    self.client.exclusive = True
+                    self._new_camera()
+                    answer = self.client.play(self._wire())
+                else:
+                    self.client.next_object = None
+                    answer = self.client.play(self._wire())
+                self.assertFalse(answer.ok)
+                self.assertTrue(self.client.m_CameraDOFActive)
+                self.assertEqual(
+                    [entry for entry in self.client.log if entry[:2] == ("engine", "OverrideDOF")], []
+                )
+
+        # With DOF active, a starting play turns it off once before activating the path camera.
+        self.setUp()
+        owned = _Camera(self.client.log, "owned")
+        self.client.m_ActiveCam = owned
+        self.client.m_ActiveCamOwned = True
+        self.client.m_CameraDOFActive = True
+        self._played()
+        self.assertFalse(self.client.m_CameraDOFActive)
+        self.assertEqual(
+            [entry for entry in self.client.log if entry[:2] == ("engine", "OverrideDOF")], [dof_off]
+        )
+        self.assertIn(("bridge", "Log", "camera dof off reason=camera_path_play"), self.client.log)
+        self._in_order(
+            [
+                ("engine", "ObjectDelete", owned),
+                dof_off,
+                ("path", "SetPosition", (0.0, 2.0, 0.0)),
+                ("path", "SetActive", True),
+            ]
+        )
+
+
+_DOF_ON_ARGS = (2.5, 700.0, 450.0, 0.75, 12.0)
+_DOF_ON_ENTRY = ("engine", "OverrideDOF", True, *_DOF_ON_ARGS)
+_DOF_ON_LOG = (
+    "bridge",
+    "Log",
+    "camera dof on distance=2.5 length=700.0 length_near=450.0 blur=0.75 depth_offset=12.0",
+)
+_DOF_OFF_ENTRY = ("engine", "OverrideDOF", False, 0.0, 0.0, 0.0, 0.0, 1.0)
+
 
 class ExecutedApplyTest(unittest.TestCase):
-    """ApplyCameraSet and ApplyFreeCamera of MCPClientBridge.c run on fakes:
-    camera_set_focus sets Camera.SetFocus with its distance and blur on the
-    camera it applies, before turning it on, and camera_set sets none (702f)."""
+    """ApplyCameraSet, ApplyFreeCamera, ApplyCameraDOF, ClearCameraDOF,
+    ReleaseCamera and IsValidCameraFocus of MCPClientBridge.c run on fakes:
+    camera_set_focus sets CGame.OverrideDOF after activating the camera, and
+    camera_set / ReleaseCamera turn any active DOF off (702f)."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.bridge_source = _source(BRIDGE)
 
-    def _applied(self, mode: str, focus: bool) -> _ApplyBridge:
-        bridge = _ApplyBridge(self.bridge_source)
+    @staticmethod
+    def _focus_args(mode: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            cam_matrix=_floats([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
+            look_at=_floats([4.0, 5.0, 6.0]) if mode in ("lookat", "free") else None,
+            focus_distance=_F32(2.5),
+            focus_blur=_F32(0.75),
+            focus_length=_F32(700.0),
+            focus_length_near=_F32(450.0),
+            focus_depth_offset=_F32(12.0),
+        )
+
+    def _run_apply(
+        self,
+        bridge: _ApplyBridge,
+        mode: str,
+        focus: bool,
+    ) -> SimpleNamespace:
         mode_id = bridge.constants[f"CAMERA_MODE_{mode.upper()}"]
         bridge.validation = SimpleNamespace(
             ok=True,
@@ -2707,15 +3082,49 @@ class ExecutedApplyTest(unittest.TestCase):
         )
         job = _new_job()
         job.camera_focus = focus
-        job.args = SimpleNamespace(
-            cam_matrix=_floats([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
-            look_at=_floats([4.0, 5.0, 6.0]) if mode in ("lookat", "free") else None,
-            focus_distance=_F32(2.5),
-            focus_blur=_F32(0.75),
-        )
+        job.args = self._focus_args(mode)
+        return job
+
+    def _applied(self, mode: str, focus: bool, bridge_source: str | None = None) -> _ApplyBridge:
+        bridge = _ApplyBridge(bridge_source or self.bridge_source)
+        job = self._run_apply(bridge, mode, focus)
         self.assertTrue(bridge.ApplyCameraSet(job))  # type: ignore[attr-defined]
         self.assertEqual(job.error.text, "")
         return bridge
+
+    def _check_focus_apply_uses_override_dof(self, bridge_source: str) -> None:
+        for mode in ("lookat", "free"):
+            bridge = self._applied(mode, True, bridge_source=bridge_source)
+            camera = bridge.free_cam if mode == "free" else bridge.static_cam
+            assert camera is not None
+            overrides = [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")]
+            self.assertEqual(overrides, [_DOF_ON_ENTRY])
+            self.assertLess(
+                bridge.log.index((camera.name, "SetActive", True)),
+                bridge.log.index(_DOF_ON_ENTRY),
+            )
+            self.assertEqual([entry for entry in bridge.log if entry[1] == "SetFocus"], [])
+            self.assertTrue(bridge.m_CameraDOFActive)
+
+    def test_camera_set_focus_in_lookat_and_free_sets_override_dof_after_set_active(self) -> None:
+        self._check_focus_apply_uses_override_dof(self.bridge_source)
+
+    def test_negative_apply_camera_set_calling_set_focus_fails_the_first_check(self) -> None:
+        body = _method_body(self.bridge_source, "protected bool ApplyCameraSet(MCPJob job)")
+        self.assertEqual(body.count("ApplyCameraDOF(job.args);"), 1)
+        legacy = self.bridge_source.replace(
+            body,
+            body.replace(
+                "ApplyCameraDOF(job.args);",
+                "cam.SetFocus(job.args.focus_distance, job.args.focus_blur);",
+                1,
+            ),
+            1,
+        )
+        mutant_bridge = self._applied("lookat", True, bridge_source=legacy)
+        self.assertIn(("static", "SetFocus", 2.5, 0.75), mutant_bridge.log)
+        with self.assertRaises(AssertionError):
+            self._check_focus_apply_uses_override_dof(legacy)
 
     def test_each_mode_applies_its_pose_and_sets_focus_only_when_asked(self) -> None:
         create = ("engine", "CreateObject", "staticcamera", (1.0, 2.0, 3.0), True)
@@ -2741,20 +3150,142 @@ class ExecutedApplyTest(unittest.TestCase):
                 with self.subTest(mode=mode, focus=focus):
                     bridge = self._applied(mode, focus)
                     camera = bridge.free_cam if mode == "free" else bridge.static_cam
+                    assert camera is not None
                     expected = [
                         ("bridge", "StopCameraPath"),
                         ("bridge", "FinishCameraHandoff"),
                         ("bridge", "SuppressGameplay"),
                         *pose,
                         (camera.name, "SetFOV", 0.5),
+                        (camera.name, "SetActive", True),
                     ]
                     if focus:
-                        expected.append((camera.name, "SetFocus", 2.5, 0.75))
-                    expected.append((camera.name, "SetActive", True))
+                        expected.extend([_DOF_ON_ENTRY, _DOF_ON_LOG])
                     self.assertEqual(bridge.log, expected)
+                    self.assertEqual(bridge.m_CameraDOFActive, focus)
                     self.assertIs(bridge.m_ActiveCam, camera)
                     self.assertEqual(bridge.m_ActiveCamOwned, mode != "free")
                     self.assertEqual(bridge.m_PlayerSimulationDisabled, mode == "free")
+
+    def test_camera_set_without_focus_clears_previous_dof_only_when_active(self) -> None:
+        # Without previous focus, camera_set makes no OverrideDOF call.
+        for mode in ("lookat", "free"):
+            with self.subTest(without_prior=mode):
+                bridge = self._applied(mode, False)
+                self.assertEqual(
+                    [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")], []
+                )
+                self.assertFalse(bridge.m_CameraDOFActive)
+
+        # After camera_set_focus, a camera_set without focus clears DOF once and sets no new one.
+        for first_mode, second_mode in (("lookat", "orient"), ("lookat", "free"), ("free", "lookat")):
+            with self.subTest(first_mode=first_mode, second_mode=second_mode):
+                bridge = self._applied(first_mode, True)
+                self.assertTrue(bridge.m_CameraDOFActive)
+                bridge.log.clear()
+                job = self._run_apply(bridge, second_mode, False)
+                self.assertTrue(bridge.ApplyCameraSet(job))  # type: ignore[attr-defined]
+                self.assertFalse(bridge.m_CameraDOFActive)
+                overrides = [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")]
+                self.assertEqual(overrides, [_DOF_OFF_ENTRY])
+                self.assertIn(("bridge", "Log", "camera dof off reason=camera_set"), bridge.log)
+                self.assertLess(
+                    bridge.log.index(("bridge", "SuppressGameplay")),
+                    bridge.log.index(_DOF_OFF_ENTRY),
+                )
+
+        # A failed apply after previous focus leaves DOF turned off.
+        for fail_mode, focus in (("lookat", True), ("free", True), ("lookat", False)):
+            with self.subTest(fail_mode=fail_mode, focus=focus):
+                bridge = self._applied("lookat", True)
+                bridge.log.clear()
+                if fail_mode == "free":
+                    bridge.free_cam = None
+                else:
+                    bridge.next_static_object = None
+                job = self._run_apply(bridge, fail_mode, focus)
+                self.assertFalse(bridge.ApplyCameraSet(job))  # type: ignore[attr-defined]
+                self.assertEqual(job.error.text, "camera_create_failed")
+                self.assertFalse(bridge.m_CameraDOFActive)
+                self.assertEqual(
+                    [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")],
+                    [_DOF_OFF_ENTRY],
+                )
+
+    def test_release_camera_clears_dof_only_when_active_and_game_present(self) -> None:
+        # Plain release after camera_set_focus free (no handoff).
+        bridge = self._applied("free", True)
+        bridge.log.clear()
+        bridge.ReleaseCamera()  # type: ignore[attr-defined]
+        self.assertFalse(bridge.m_CameraDOFActive)
+        self.assertEqual(
+            [entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")],
+            [_DOF_OFF_ENTRY],
+        )
+        self.assertIn(("bridge", "Log", "camera dof off reason=release"), bridge.log)
+
+        # With a camera handoff already pending (early return 1).
+        bridge = self._applied("lookat", True)
+        bridge.m_CameraHandoffPending = True
+        bridge.log.clear()
+        bridge.ReleaseCamera()  # type: ignore[attr-defined]
+        self.assertFalse(bridge.m_CameraDOFActive)
+        self.assertEqual(
+            bridge.log,
+            [_DOF_OFF_ENTRY, ("bridge", "Log", "camera dof off reason=release")],
+        )
+
+        # Starting a new camera handoff on an owned active static camera (early return 2).
+        bridge = self._applied("lookat", True)
+        bridge.begin_handoff = True
+        bridge.log.clear()
+        bridge.ReleaseCamera()  # type: ignore[attr-defined]
+        self.assertFalse(bridge.m_CameraDOFActive)
+        self.assertEqual(
+            bridge.log,
+            [
+                _DOF_OFF_ENTRY,
+                ("bridge", "Log", "camera dof off reason=release"),
+                ("bridge", "BeginCameraHandoff"),
+            ],
+        )
+
+        # Without DOF active, ReleaseCamera calls no OverrideDOF.
+        bridge = self._applied("lookat", False)
+        bridge.log.clear()
+        bridge.ReleaseCamera()  # type: ignore[attr-defined]
+        self.assertFalse(bridge.m_CameraDOFActive)
+        self.assertEqual([entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")], [])
+
+        # Shutdown without GetGame(): no OverrideDOF call, no DOF log, flag cleared.
+        bridge = self._applied("free", True)
+        bridge.game = None
+        bridge.m_Shutdown = True
+        bridge.log.clear()
+        bridge.ReleaseCamera()  # type: ignore[attr-defined]
+        self.assertFalse(bridge.m_CameraDOFActive)
+        self.assertEqual([entry for entry in bridge.log if entry[:2] == ("engine", "OverrideDOF")], [])
+        self.assertEqual([entry for entry in bridge.log if entry[:2] == ("bridge", "Log")], [])
+
+    def test_is_valid_camera_focus_checks_all_five_dof_values(self) -> None:
+        bridge = _ApplyBridge(self.bridge_source)
+        self.assertFalse(bridge.IsValidCameraFocus(None))  # type: ignore[attr-defined]
+        valid = {
+            "focus_distance": _F32(2.0),
+            "focus_blur": _F32(0.0),
+            "focus_length": _F32(0.0),
+            "focus_length_near": _F32(0.0),
+            "focus_depth_offset": _F32(0.0),
+        }
+        self.assertTrue(bridge.IsValidCameraFocus(SimpleNamespace(**valid)))  # type: ignore[attr-defined]
+        self.assertFalse(
+            bridge.IsValidCameraFocus(SimpleNamespace(**dict(valid, focus_distance=_F32(0.0))))  # type: ignore[attr-defined]
+        )
+        for field in valid:
+            for bad in (_F32(-0.5), _F32(math.nan), _FLOAT32_MAX, _F32(math.inf)):
+                with self.subTest(field=field, bad=bad):
+                    args = SimpleNamespace(**dict(valid, **{field: bad}))
+                    self.assertFalse(bridge.IsValidCameraFocus(args))  # type: ignore[attr-defined]
 
 
 class ExecutedHudSetTest(unittest.TestCase):
@@ -2845,6 +3376,9 @@ class EnforceWiringTest(unittest.TestCase):
             ("string", "path_id"),
             ("float", "focus_distance"),
             ("float", "focus_blur"),
+            ("float", "focus_length"),
+            ("float", "focus_length_near"),
+            ("float", "focus_depth_offset"),
             ("bool", "visible"),
         ):
             self.assertIn(member, args)
@@ -2889,6 +3423,7 @@ class EnforceWiringTest(unittest.TestCase):
             "freeCam.SetActive(false);",
             "player.DisableSimulation(false);",
             "DeleteOwnedCamera();",
+            'ClearCameraDOF("camera_path_play");',
             "candidate.Begin();",
             "candidate.Apply(cam);",
             "cam.SetActive(true);",
@@ -2973,21 +3508,53 @@ class EnforceWiringTest(unittest.TestCase):
         positions = [dispatch.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("ApplyCameraSet", _code(_method_body(self.bridge, "protected bool ProcessCameraSetJob(MCPJob job)")))
+        apply_body = _flat(_method_body(self.bridge, "protected bool ApplyCameraSet(MCPJob job)"))
+        self.assertLess(
+            apply_body.index("SuppressGameplay();"),
+            apply_body.index('ClearCameraDOF("camera_set");'),
+        )
+        self.assertLess(
+            apply_body.index('ClearCameraDOF("camera_set");'),
+            apply_body.index("if (validation.mode_id == CAMERA_MODE_FREE)"),
+        )
         for signature, camera in (
             ("protected bool ApplyCameraSet(MCPJob job)", "cam"),
             ("protected bool ApplyFreeCamera(MCPJob job, MCPCameraValidation validation)", "freeCam"),
         ):
             with self.subTest(apply=signature):
                 body = _flat(_method_body(self.bridge, signature))
-                self.assertIn(
-                    f"if (job.camera_focus) {{ {camera}.SetFocus(job.args.focus_distance, job.args.focus_blur); }}",
-                    body,
+                self.assertNotIn("SetFocus(", body)
+                self.assertIn("if (job.camera_focus) { ApplyCameraDOF(job.args); }", body)
+                self.assertLess(
+                    body.index(f"{camera}.SetActive(true);"),
+                    body.index("if (job.camera_focus) { ApplyCameraDOF(job.args); }"),
                 )
-                self.assertEqual(body.count("SetFocus("), 1)
+        dof_on = _flat(_method_body(self.bridge, "protected void ApplyCameraDOF(MCPArgs args)"))
+        self.assertIn(
+            "g_Game.OverrideDOF(true, args.focus_distance, args.focus_length, "
+            "args.focus_length_near, args.focus_blur, args.focus_depth_offset);",
+            dof_on,
+        )
+        dof_off = _flat(_method_body(self.bridge, "protected void ClearCameraDOF(string reason)"))
+        self.assertIn("g_Game.OverrideDOF(false, 0.0, 0.0, 0.0, 0.0, 1.0);", dof_off)
+        release = _flat(_method_body(self.bridge, "protected void ReleaseCamera()"))
+        self.assertTrue(release.startswith('ClearCameraDOF("release");'))
+        # Only ui_focus's widget SetFocus remains in MCPClientBridge.c; no ResetDOFOverride or PPEffects.
+        self.assertEqual(_code(self.bridge).count("SetFocus("), 1)
+        self.assertIn("SetFocus(target);", _flat(_method_body(self.bridge, "protected bool DispatchUiFocus(")))
+        self.assertNotIn("ResetDOFOverride", self.bridge)
+        self.assertNotIn("PPEffects", _code(self.bridge))
         check = _flat(_method_body(self.bridge, "protected bool IsValidCameraFocus(MCPArgs args)"))
-        self.assertIn("if (distance != distance || blur != blur)", check)
+        self.assertIn(
+            "if (distance != distance || blur != blur || length != length "
+            "|| lengthNear != lengthNear || depthOffset != depthOffset)",
+            check,
+        )
         self.assertIn("if (distance <= 0.0 || distance >= float.MAX)", check)
         self.assertIn("if (blur < 0.0 || blur >= float.MAX)", check)
+        self.assertIn("if (length < 0.0 || length >= float.MAX)", check)
+        self.assertIn("if (lengthNear < 0.0 || lengthNear >= float.MAX)", check)
+        self.assertIn("if (depthOffset < 0.0 || depthOffset >= float.MAX)", check)
 
     def test_hud_set_uses_the_hide_key_flags_and_reads_them_back(self) -> None:
         body = _flat(_method_body(self.bridge, "protected bool DispatchHudSet(MCPCommand command, MCPResult result)"))

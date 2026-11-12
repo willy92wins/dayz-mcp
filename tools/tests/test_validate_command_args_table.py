@@ -97,7 +97,13 @@ def _focus_args(
     else:
         args["cam_pos"] = [0.0, 2.0, 0.0]
         args[aim] = [5.0, 1.0, 5.0] if aim == "look_at" else [90.0, 0.0, 0.0]
-    args.update(focus_distance=2.0, focus_blur=1.5)
+    args.update(
+        focus_distance=2.0,
+        focus_blur=1.5,
+        focus_length=750.0,
+        focus_length_near=500.0,
+        focus_depth_offset=10.0,
+    )
     args.update(overrides)
     if drop:
         del args[drop]
@@ -2536,6 +2542,42 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         # carries it to a bridge that would drop it.
         ("focus_is_camera_set_focus_only", _focus_args(), (False, "bad_args")),
         (
+            "focus_length_alone_rejected",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "focus_length": 750.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "focus_length_near_alone_rejected",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "focus_length_near": 500.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
+            "focus_depth_offset_alone_rejected",
+            {
+                "cam_mode": "orient",
+                "cam_pos": [0.0, 2.0, 0.0],
+                "cam_orientation": [90.0, 0.0, 0.0],
+                "fov": 0.0,
+                "settle_ticks": 3,
+                "focus_depth_offset": 10.0,
+            },
+            (False, "bad_args"),
+        ),
+        (
             "extra_key",
             {
                 "cam_mode": "orient",
@@ -2554,7 +2596,7 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("empty_cam_mode", {"cam_mode": ""}, (False, "bad_args")),
         ("extra_key", {"cam_mode": "get", "extra": None}, (False, "bad_args")),
     ),
-    # 702f: camera_set's five shapes, each with both focus arguments.
+    # 702f: camera_set's five shapes, each with all five OverrideDOF arguments.
     "camera_set_focus": (
         ("valid_orient", _focus_args(), (True, None)),
         ("valid_lookat", _focus_args("lookat", "look_at"), (True, None)),
@@ -2562,9 +2604,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("valid_free_look_at", _focus_args("free", "look_at"), (True, None)),
         ("valid_free_orientation", _focus_args("free", "cam_orientation"), (True, None)),
         ("valid_blur_zero", _focus_args(focus_blur=0.0), (True, None)),
+        (
+            "valid_optional_zeros",
+            _focus_args(focus_length=0.0, focus_length_near=0.0, focus_depth_offset=0.0),
+            (True, None),
+        ),
         ("valid_integer_distance", _focus_args(focus_distance=50), (True, None)),
         ("missing_blur", _focus_args(drop="focus_blur"), (False, "bad_args")),
         ("missing_distance", _focus_args(drop="focus_distance"), (False, "bad_args")),
+        ("missing_length", _focus_args(drop="focus_length"), (False, "bad_args")),
+        ("missing_length_near", _focus_args(drop="focus_length_near"), (False, "bad_args")),
+        ("missing_depth_offset", _focus_args(drop="focus_depth_offset"), (False, "bad_args")),
         (
             "camera_set_shape_without_focus",
             {
@@ -2577,6 +2627,9 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
             (False, "bad_args"),
         ),
         ("blur_null", _focus_args(focus_blur=None), (False, "bad_args")),
+        ("length_null", _focus_args(focus_length=None), (False, "bad_args")),
+        ("length_near_null", _focus_args(focus_length_near=None), (False, "bad_args")),
+        ("depth_offset_null", _focus_args(focus_depth_offset=None), (False, "bad_args")),
         ("distance_zero", _focus_args(focus_distance=0.0), (False, "bad_args")),
         ("distance_negative", _focus_args(focus_distance=-2.0), (False, "bad_args")),
         ("distance_inf", _focus_args(focus_distance=float("inf")), (False, "bad_args")),
@@ -2586,15 +2639,38 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("blur_negative", _focus_args(focus_blur=-0.1), (False, "bad_args")),
         ("blur_inf", _focus_args(focus_blur=float("inf")), (False, "bad_args")),
         ("blur_bool", _focus_args(focus_blur=False), (False, "bad_args")),
+        ("length_negative", _focus_args(focus_length=-0.1), (False, "bad_args")),
+        ("length_inf", _focus_args(focus_length=float("inf")), (False, "bad_args")),
+        ("length_nan", _focus_args(focus_length=float("nan")), (False, "bad_args")),
+        ("length_bool", _focus_args(focus_length=True), (False, "bad_args")),
+        ("length_near_negative", _focus_args(focus_length_near=-0.1), (False, "bad_args")),
+        ("length_near_inf", _focus_args(focus_length_near=float("inf")), (False, "bad_args")),
+        ("length_near_nan", _focus_args(focus_length_near=float("nan")), (False, "bad_args")),
+        ("length_near_bool", _focus_args(focus_length_near=False), (False, "bad_args")),
+        ("depth_offset_negative", _focus_args(focus_depth_offset=-0.1), (False, "bad_args")),
+        ("depth_offset_inf", _focus_args(focus_depth_offset=float("inf")), (False, "bad_args")),
+        ("depth_offset_nan", _focus_args(focus_depth_offset=float("nan")), (False, "bad_args")),
+        ("depth_offset_bool", _focus_args(focus_depth_offset=True), (False, "bad_args")),
         # The tool's bounds (camera_path.focus_distance and focus_blur): at most
         # 1e9, and above 0 still as the bridge's 32-bit float.
         ("valid_distance_at_the_bound", _focus_args(focus_distance=1e9), (True, None)),
         ("valid_distance_least_float", _focus_args(focus_distance=1e-45), (True, None)),
         ("valid_blur_least_float", _focus_args(focus_blur=1e-45), (True, None)),
+        (
+            "valid_optionals_at_bounds",
+            _focus_args(focus_length=1e9, focus_length_near=1e-45, focus_depth_offset=1e9),
+            (True, None),
+        ),
         ("distance_1e100", _focus_args(focus_distance=1e100), (False, "bad_args")),
         ("distance_1e-46", _focus_args(focus_distance=1e-46), (False, "bad_args")),
         ("blur_1e100", _focus_args(focus_blur=1e100), (False, "bad_args")),
         ("blur_1e-46", _focus_args(focus_blur=1e-46), (False, "bad_args")),
+        ("length_1e100", _focus_args(focus_length=1e100), (False, "bad_args")),
+        ("length_1e-46", _focus_args(focus_length=1e-46), (False, "bad_args")),
+        ("length_near_1e100", _focus_args(focus_length_near=1e100), (False, "bad_args")),
+        ("length_near_1e-46", _focus_args(focus_length_near=1e-46), (False, "bad_args")),
+        ("depth_offset_1e100", _focus_args(focus_depth_offset=1e100), (False, "bad_args")),
+        ("depth_offset_1e-46", _focus_args(focus_depth_offset=1e-46), (False, "bad_args")),
         ("alias_never_on_the_wire", _focus_args("look_at", "look_at"), (False, "bad_args")),
         ("extra_key", _focus_args(extra=None), (False, "bad_args")),
     ),

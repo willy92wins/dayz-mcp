@@ -184,11 +184,17 @@ DayZ-MCP is a local control and observation surface, not a hosted knowledge serv
 
 **No OS keystrokes, no OCR, no second game process.** Control is `CreateObjectEx` / `StartCommand_Vehicle` (`dayz-mcp-architecture.md:79`, `dayz-mcp-architecture.md:84`) / `MissionServer` reads. No OS input (`product-spec.md:160-161`). Several agent sessions share one running instance through one daemon (`product-spec.md:164-166`).
 
+**Measured in game on 2026-11-11** (DayZDiag 1.30.164289, v1.5; runs `9b4390c2`, `44497a99` and `d47db64b`):
+
+- Navmesh: a probe mod drove `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition` and `PGFilter.SetCost` (`aiworld.c`), with `AIWorld` from `GetGame().GetWorld().GetAIWorld()` and `new PGFilter()`; a filter without `SetFlags` includes 65535 and excludes 32768. At run time the `PGPolyFlags` members are bit values (WALK=1, DISABLED=2, DOOR=4, INSIDE=8, SWIM=16, SWIM_SEA=32). `RaycastNavMesh` is false on a clear line and true with the hit point and the edge normal. `SampleNavmeshPosition`'s radius bounds only the horizontal move: with an all-flags filter, a sea point snapped 58 m down to the seabed. `SetCost` on BUILDING and OBJECTS changed a 618 m path, on ROADWAY it changed nothing, and TERRAIN at 100 made `FindPath` return true with a path that stops short. `nav_path_query` has three known defects (inbox d5d6): its masks shift those bits again (include 137, exclude 32770), it answers ok with a path that stops short of the destination, and each call leaks one `PGFilter`.
+- Survivor locomotion: `survivor_drive` on a `SurvivorM_Mirek` moves on the requested heading, at 1.53 m/s walking and 6.75 m/s sprinting forward and 4.08 m/s jogging sideways, but the body keeps the heading it spawned with, so a drive behind it walks backwards at 1.26 m/s and cannot sprint (2.98 m/s) (inbox 851c). Fifty driven survivors at once took the server from 2433 to 1899 average fps (minimum 1273), and all fifty moved. Driven point by point along a `nav_path_query` path, a survivor stays within 0.3 to 1.2 m of it on flat ground but sticks at steps and stairs. The vanilla bot FSM (`bot_start`) starts and stops all ten actions; on the server, four inventory actions raise vanilla Virtual Machine Exceptions, two of them about 30 a second, and `PLAYER_BOT_RANDOMIZE_MOVEMENT` only moves forward (inbox 6b52).
+- `infected_drive`: one call moves the infected for 1.6 to 8.5 s, then it stops (inbox 7c86). Re-sent every second, `speed` 0.5, 1, 1.5, 2, 2.5, 3 and 4 gave 0.24, 0.45, 0.52, 2.0, 4.9, 5.5 and 5.9 m/s, within 0.5° of the heading; with the player 1 m away it barely moves.
+
 **Not tested:**
 
-- Navmesh follow: `AIWorld.FindPath`, `RaycastNavMesh`, `SampleNavmeshPosition`, `PGFilter.SetCost` (all in `aiworld.c`; the four protos are adjacent but none has been driven). `AIWorld` has a private constructor (`aiworld.c`, `private void AIWorld()`); `new PGFilter()` has not been instantiated in-game.
-- Survivor locomotion overrides: `HumanInputController.OverrideMovementSpeed` / `OverrideMovementAngle` / `OverrideAimChangeX` / `OverrideAimChangeY` (`human.c:253-262`) and the vanilla bot FSM under `4_world/systems/bot/`. Whether a synthetic survivor population is viable is open.
-- Calibrating `infected_drive` `speed` to m/s.
+- `OverrideAimChangeX` / `OverrideAimChangeY` on a spawned survivor; on the player they are driven by `player_look_at` and `weapon_aim`.
+- A manual gearbox below idle: a CivilianSedan's rpm never fell below its idle of 900.
+- The DayZDiag free camera: `PluginKeyBinding` reads the physical key state, so `input_trigger` cannot toggle it.
 
 ## What you need
 

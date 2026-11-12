@@ -553,6 +553,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected Camera m_CameraHandoffCam;
 	protected bool m_CameraHandoffPending;
 	protected int m_CameraHandoffTicks;
+	//! 702f: true while camera_set_focus has CGame.OverrideDOF enabled.
+	protected bool m_CameraDOFActive;
 	//! camera_path_play (d026): the current or last path, idle until the first
 	//! play, and the staticcamera a playing path moves (not ref, an entity the
 	//! world owns; m_ActiveCam holds it as an owned camera).
@@ -584,6 +586,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_StartPauseDone;
 	protected float m_StartPauseFromS;
 	protected const float START_PAUSE_WINDOW_S = 60.0;
+	//! §2.6 C14 (PX3 a, PX6 a): ui_pause left a queued pause (vanilla
+	//! m_PauseQueued) that was not queued before its call, or opened this
+	//! pause menu (MENU_INGAME). Not ref: the UI manager owns the menu. The
+	//! mark is the instance, so a pause menu the person opens after MCP's
+	//! closed is another menu, not MCP's. MaintainMCPPause keeps each mark as
+	//! long as the pause it names; the lease close cancels the queued one
+	//! and closes MCP's menu (StopLeaseClosePause), and its census counts both.
+	protected bool m_MCPPauseQueued;
+	protected UIScriptedMenu m_MCPPauseMenu;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -623,6 +634,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_ActiveCamOwned = false;
 		m_CameraHandoffPending = false;
 		m_CameraHandoffTicks = 0;
+		m_CameraDOFActive = false;
 		m_CameraPath = new MCPCameraPath();
 		m_CameraPathCommandId = 0;
 		m_CameraPathPlayTick = 0;
@@ -636,6 +648,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogHostTried = false;
 		m_StartPauseDone = false;
 		m_StartPauseFromS = -1.0;
+		m_MCPPauseQueued = false;
+		m_MCPPauseMenu = null;
 	}
 
 	void ~MCPClientBridge()
@@ -727,6 +741,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// §4 #266: the MCP-started mark falls as soon as its emote stops,
 		// even after its job ended. Before the job runner.
 		MaintainMCPEmoteStarted();
+		// §2.6 C14: the ui_pause marks fall as soon as their pause does,
+		// even after the job answered. Before the job runner.
+		MaintainMCPPause();
 
 		if (m_JobRunner)
 		{
@@ -2156,10 +2173,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return true;
 		}
 
-		// camera_set_focus is camera_set plus SetFocus on the camera it applies
-		// (702f). The command name turns focus on, so camera_set never reads the
-		// focus fields and an older bridge answers unknown_command instead of
-		// dropping them.
+		// camera_set_focus is camera_set plus CGame.OverrideDOF after the camera
+		// it applies is active (702f). The command name turns focus on, so
+		// camera_set never reads the five focus fields and an older bridge
+		// answers unknown_command instead of dropping them.
 		bool focus = command.cmd == "camera_set_focus";
 		if (focus && !IsValidCameraFocus(command.args))
 		{
@@ -2207,14 +2224,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		return false;
 	}
 
-	// 702f: focus_distance in metres, finite and above 0, and focus_blur finite
-	// and 0 or more, the two arguments of Camera.SetFocus (camera.c:70-74).
-	// NaN fails every comparison, so it is tested first; float.MAX stands for
-	// an infinity, as the server's IsFiniteFloat does.
+	// 702f: focus_distance in metres, finite and above 0, and focus_blur,
+	// focus_length, focus_length_near and focus_depth_offset finite and 0 or
+	// more, the five DOF values of CGame.OverrideDOF (game.c:1379). NaN fails
+	// every comparison, so it is tested first; float.MAX stands for an
+	// infinity, as the server's IsFiniteFloat does.
 	protected bool IsValidCameraFocus(MCPArgs args)
 	{
 		float distance;
 		float blur;
+		float length;
+		float lengthNear;
+		float depthOffset;
 		if (!args)
 		{
 			return false;
@@ -2222,7 +2243,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		distance = args.focus_distance;
 		blur = args.focus_blur;
-		if (distance != distance || blur != blur)
+		length = args.focus_length;
+		lengthNear = args.focus_length_near;
+		depthOffset = args.focus_depth_offset;
+		if (distance != distance || blur != blur || length != length || lengthNear != lengthNear || depthOffset != depthOffset)
 		{
 			return false;
 		}
@@ -2231,6 +2255,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			return false;
 		}
 		if (blur < 0.0 || blur >= float.MAX)
+		{
+			return false;
+		}
+		if (length < 0.0 || length >= float.MAX)
+		{
+			return false;
+		}
+		if (lengthNear < 0.0 || lengthNear >= float.MAX)
+		{
+			return false;
+		}
+		if (depthOffset < 0.0 || depthOffset >= float.MAX)
 		{
 			return false;
 		}
@@ -2309,6 +2345,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				m_PlayerSimulationDisabled = false;
 			}
 			DeleteOwnedCamera();
+			ClearCameraDOF("camera_path_play");
 
 			candidate.Begin();
 			candidate.Apply(cam);
@@ -6660,6 +6697,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// simulation with this apply: finish it first (f47b). No-op otherwise.
 		FinishCameraHandoff();
 		SuppressGameplay();
+		// 702f: OverrideDOF is global, so every camera_set clears any previous
+		// DOF first; a failed apply leaves it off, and camera_set_focus sets
+		// the new one after SetActive(true).
+		ClearCameraDOF("camera_set");
 
 		if (validation.mode_id == CAMERA_MODE_FREE)
 		{
@@ -6705,13 +6746,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			cam.SetFOV(validation.fov);
 		}
-		// camera_set_focus only, with the arguments its dispatch checked (702f).
-		if (job.camera_focus)
-		{
-			cam.SetFocus(job.args.focus_distance, job.args.focus_blur);
-		}
 
 		cam.SetActive(true);
+		// camera_set_focus only, after the camera is active, with the five
+		// OverrideDOF arguments its dispatch checked (702f).
+		if (job.camera_focus)
+		{
+			ApplyCameraDOF(job.args);
+		}
 		m_ActiveCam = cam;
 		m_ActiveCamOwned = true;
 		return true;
@@ -6754,16 +6796,48 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			freeCam.SetFOV(validation.fov);
 		}
-		// The free camera is a singleton: the focus set here stays on it.
-		if (job.camera_focus)
-		{
-			freeCam.SetFocus(job.args.focus_distance, job.args.focus_blur);
-		}
 
 		freeCam.SetActive(true);
+		// camera_set_focus only, after the free camera is active (702f).
+		if (job.camera_focus)
+		{
+			ApplyCameraDOF(job.args);
+		}
 		m_ActiveCam = freeCam;
 		m_ActiveCamOwned = false;
 		return true;
+	}
+
+	// 702f: CGame.OverrideDOF parameter order from 3_game/global/game.c:1379.
+	protected void ApplyCameraDOF(MCPArgs args)
+	{
+		if (!args || !GetGame())
+		{
+			return;
+		}
+
+		g_Game.OverrideDOF(true, args.focus_distance, args.focus_length, args.focus_length_near, args.focus_blur, args.focus_depth_offset);
+		m_CameraDOFActive = true;
+		Log("camera dof on distance=" + args.focus_distance + " length=" + args.focus_length + " length_near=" + args.focus_length_near + " blur=" + args.focus_blur + " depth_offset=" + args.focus_depth_offset);
+	}
+
+	// 702f: turns off the DOF this bridge set, with vanilla's off arguments
+	// from 3_game/ppemanager/materials/matclasses/exceptions/ppedof.c:70.
+	protected void ClearCameraDOF(string reason)
+	{
+		if (!m_CameraDOFActive)
+		{
+			return;
+		}
+
+		m_CameraDOFActive = false;
+		if (!GetGame())
+		{
+			return;
+		}
+
+		g_Game.OverrideDOF(false, 0.0, 0.0, 0.0, 0.0, 1.0);
+		Log("camera dof off reason=" + reason);
 	}
 
 	override void MCP_PostJobSuccess(MCPJob job)
@@ -8431,6 +8505,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int beforeId;
 		int afterId;
 		bool deferred;
+		bool queuedBefore;
+		bool pausedBefore;
 		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
 		{
 			result.ok = false;
@@ -8456,6 +8532,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				beforeId = menuBefore.GetID();
 			}
 		}
+		queuedBefore = mission.MCP_IsPauseQueued();
+		pausedBefore = mission.IsPaused();
 		mission.Pause();
 		afterId = -1;
 		ui = GetGame().GetUIManager();
@@ -8466,6 +8544,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			{
 				afterId = menuAfter.GetID();
 			}
+		}
+		// §2.6 C14: mark only what this call left for the lease close. A
+		// pause already queued, or a menu already open, is someone else's.
+		if (!queuedBefore && mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = true;
+		}
+		if (!pausedBefore && afterId == MENU_INGAME)
+		{
+			m_MCPPauseMenu = menuAfter;
 		}
 		reply = new MCPUiPause();
 		reply.menu_id_before = beforeId;
@@ -8940,6 +9028,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// tick, so it still tears down at once.
 	protected void ReleaseCamera()
 	{
+		ClearCameraDOF("release");
 		if (!m_Shutdown)
 		{
 			// A release already handing off owns the free camera until it finishes.
@@ -9404,6 +9493,30 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
+		// §2.6 C14: after StopLeaseClosePause, the pause ui_pause queued and
+		// still queued, or the pause menu it opened and still open (under a
+		// submenu too, uimanager.c:160), is residue the 25 s observer
+		// re-reads. A pause MCP neither queued nor opened is not counted.
+		bool pauseActive = false;
+		if (m_MCPPauseQueued || m_MCPPauseMenu)
+		{
+			MissionGameplay closeMission = MissionGameplay.Cast(GetGame().GetMission());
+			if (closeMission)
+			{
+				if (m_MCPPauseQueued && closeMission.MCP_IsPauseQueued())
+				{
+					pauseActive = true;
+				}
+
+				UIManager closeUi = GetGame().GetUIManager();
+				if (m_MCPPauseMenu && closeUi && closeUi.FindMenu(MENU_INGAME) == m_MCPPauseMenu)
+				{
+					pauseActive = true;
+				}
+			}
+		}
+
+		AddCloseEntry(census, "ui_pause", pauseActive, "ui_pause");
 		// §2.9: the client half reads the action manager, not the job, so a
 		// Take that cleared the hold control cannot make this row clean.
 		bool holdActive = MCPHoldControl.IsActive();
@@ -9535,6 +9648,100 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		emotes.MCP_RequestEmoteEnd();
 	}
 
+	// §2.6 C14: each ui_pause mark lives as long as the pause it names, as
+	// m_MCPEmoteStarted does (MaintainMCPEmoteStarted). A queued pause that
+	// vanilla then opened (missiongameplay.c:308-311, :1331) makes the open
+	// pause menu MCP's. MCP's menu stops being MCP's once it is not the open
+	// MENU_INGAME, even when the person's Continue and Esc replace it
+	// between two ticks (PX6 a). No mission or UI manager: both fall.
+	protected void MaintainMCPPause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+			ui = GetGame().GetUIManager();
+		}
+
+		if (!mission || !ui)
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseMenu = null;
+			return;
+		}
+
+		if (m_MCPPauseQueued && !mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = false;
+			m_MCPPauseMenu = ui.FindMenu(MENU_INGAME);
+		}
+
+		if (m_MCPPauseMenu && ui.FindMenu(MENU_INGAME) != m_MCPPauseMenu)
+		{
+			m_MCPPauseMenu = null;
+		}
+	}
+
+	// §2.6 C14 (PX3 a, PX6 a): the close cancels the pause ui_pause queued,
+	// which vanilla would otherwise open under the next lease once loading
+	// or the respawn ends (missiongameplay.c:308-311; Continue() leaves the
+	// queue, :1334-1348), and closes the pause menu ui_pause opened with the
+	// mission's Continue(), as ContinueStartPauseMenu does, only while that
+	// same menu is on top: a submenu above it means someone is in it, and a
+	// pause menu the person opened after it is another instance. A pause MCP
+	// neither queued nor opened is neither touched nor counted.
+	protected void StopLeaseClosePause()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		UIScriptedMenu menu;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+		}
+
+		if (!mission)
+		{
+			return;
+		}
+
+		if (m_MCPPauseQueued)
+		{
+			mission.MCP_CancelQueuedPause();
+			m_MCPPauseQueued = false;
+		}
+
+		if (!m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		menu = ui.GetMenu();
+		if (!menu || menu != m_MCPPauseMenu)
+		{
+			return;
+		}
+
+		mission.Continue();
+	}
+
 	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
 	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
 	{
@@ -9568,6 +9775,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_JobRunner.AbortAll(this);
 		}
 
+		// §2.6 C14: after AbortAll, so an open ui_pause job answers once,
+		// and before the census.
+		StopLeaseClosePause();
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
 		if (LeaseCloseCensusSettled(census))
 		{
