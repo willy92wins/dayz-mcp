@@ -282,6 +282,143 @@ class AIGroupAdapterErrorSurfaceTest(unittest.TestCase):
         )
 
 
+def _adapter_spawn_refusal(field: str, allowed: list, error: str = "bad_args") -> dict:
+    """The ok=0 result DispatchAIGroupSpawn posts for a refusal.
+
+    Built from MCPExpansionAI.c: report.args_read is assigned before any
+    check (:727), faction/count at :735-736 and waypoints at :737-745;
+    AISpawnRefuse (:688-695) sets created=false (:690) and field (:691).
+    faction fills allowed via AIFillFactionAllowed (:457-471) called at
+    :827 before refusing at :828; formation via AIFillFormationAllowed
+    (:473-487) called at :845 before :846; loadout refuses at :861/:867
+    with no allowed fill, so allowed stays the empty array from the
+    MCPAIGroup constructor (:56). living/limit are only set for
+    ai_limit_reached at :889-890 before :891.
+    """
+    return {
+        "ok": 0,
+        "error": error,
+        "ai_group": {
+            "created": False,
+            "field": field,
+            "allowed": list(allowed),
+            "args_read": {
+                "faction": "Nope",
+                "count": 2,
+                "waypoints": [10.0, 2.0, 20.0, 30.0, 2.0, 40.0],
+            },
+            "living": 20 if error == "ai_limit_reached" else 0,
+            "limit": 24 if error == "ai_limit_reached" else 0,
+        },
+    }
+
+
+class AIGroupSpawnBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
+    """Round B: a spawn bad_args reaches the agent with its report.
+
+    Mutant killed: the ai_group_spawn branch of _bridge_error_detail
+    removed (as in b8fb379) -- every POS assertion below collapses to the
+    bare code. The bridge result arrives as wait_for_result raises it
+    (server.py wait_for_result: not ok -> _bridge_error(result, cmd)).
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.app, self.runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+
+    async def _refusal_text(self, result: dict, arguments: dict | None = None) -> str:
+        async def fake_call_bridge(cmd, _args, _peer, _timeout, _result=result):
+            if not _result.get("ok"):
+                raise server._bridge_error(_result, cmd)
+            return _result
+
+        with patch.object(
+            self.runtime, "call_bridge", new=AsyncMock(side_effect=fake_call_bridge)
+        ):
+            with self.assertRaises(Exception) as caught:
+                await self.app.call_tool(SPAWN, arguments or dict(TOOL_ARGS))
+        return _tool_error_text(caught.exception)
+
+    async def test_pos_faction_formation_and_loadout_carry_the_report(self) -> None:
+        args = {**TOOL_ARGS, "faction": "Nope", "waypoints": [[10.0, 2.0, 20.0], [30.0, 2.0, 40.0]]}
+        text = await self._refusal_text(_adapter_spawn_refusal("faction", FACTIONS), args)
+        self.assertIn("bad_args", text)
+        self.assertIn("field=faction", text)
+        self.assertIn("allowed=West,East", text)
+        self.assertIn(
+            "args_read=faction=Nope count=2 waypoints=10.0,2.0,20.0,30.0,2.0,40.0", text
+        )
+        self.assertIn("created=false", text)
+
+        text = await self._refusal_text(_adapter_spawn_refusal("formation", FORMATIONS), args)
+        self.assertIn("field=formation", text)
+        self.assertIn("allowed=" + ",".join(FORMATIONS), text)
+        self.assertIn("args_read=faction=Nope count=2", text)
+        self.assertIn("created=false", text)
+
+        text = await self._refusal_text(_adapter_spawn_refusal("loadout", []), args)
+        self.assertIn("field=loadout", text)
+        self.assertNotIn("allowed=", text)
+        self.assertIn("args_read=faction=Nope count=2", text)
+        self.assertIn("created=false", text)
+
+    async def test_pos_ai_limit_reached_carries_living_limit_and_created(self) -> None:
+        result = _adapter_spawn_refusal("", [], error="ai_limit_reached")
+        text = await self._refusal_text(result)
+        self.assertIn("ai_limit_reached", text)
+        self.assertIn("living=20", text)
+        self.assertIn("limit=24", text)
+        self.assertIn("created=false", text)
+
+    async def test_neg_unlisted_field_and_values_do_not_cross(self) -> None:
+        result = _adapter_spawn_refusal("secret_field", ["West", "C:\\host\\secret"])
+        result["ai_group"]["args_read"]["faction"] = "Nope; rm -rf"
+        text = await self._refusal_text(result)
+        self.assertNotIn("secret_field", text)
+        self.assertNotIn("field=", text)
+        self.assertNotIn("secret", text)
+        self.assertNotIn("rm -rf", text)
+        self.assertIn("allowed=West", text)
+        self.assertIn("created=false", text)
+        # Scope: the same report under a verb without a branch stays
+        # bare (ai_group_order has its own field/allowed branch, #340).
+        other = server._bridge_error(result, "ai_group_state")
+        self.assertEqual(str(other), "bad_args")
+        timeout = _adapter_spawn_refusal("", [], error="timeout")
+        self.assertEqual(str(server._bridge_error(timeout, SPAWN)), "timeout")
+
+    async def test_neg_bad_args_does_not_carry_living_or_limit(self) -> None:
+        # The adapter serializes living=0 and limit=0 on every refusal
+        # (MCPAIGroup ints, MCPExpansionAI.c:44-45); only ai_limit_reached
+        # sets them (:889-890).
+        result = _adapter_spawn_refusal("faction", FACTIONS)
+        result["ai_group"]["living"] = 7
+        result["ai_group"]["limit"] = 9
+        text = await self._refusal_text(result)
+        self.assertIn("field=faction", text)
+        self.assertNotIn("living=", text)
+        self.assertNotIn("limit=", text)
+
+    async def test_neg_oversized_values_are_capped(self) -> None:
+        result = _adapter_spawn_refusal("faction", ["Z" * 65] + [f"F{i}" for i in range(200)])
+        result["ai_group"]["args_read"]["faction"] = "Q" * 65
+        result["ai_group"]["args_read"]["waypoints"] = [1.0] * 97
+        text = await self._refusal_text(result)
+        allowed = re.search(r"allowed=([^;]*)", text).group(1).split(",")
+        self.assertEqual(allowed, [f"F{i}" for i in range(63)])
+        self.assertNotIn("Z" * 65, text)
+        self.assertNotIn("Q" * 65, text)
+        self.assertNotIn("waypoints=", text)
+        self.assertIn("args_read=count=2", text)
+
+    async def test_neg_bad_args_without_ai_group_stays_bare(self) -> None:
+        text = await self._refusal_text({"ok": 0, "error": "bad_args"})
+        self.assertTrue(text.rstrip().endswith("bad_args"), text)
+        self.assertNotIn("field=", text)
+        self.assertNotIn("created=", text)
+
+
 def _bound_state() -> loopback.ServerState:
     state = loopback.ServerState(key="k")
     state.daemon_generation = "gen-xai-spawn"

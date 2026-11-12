@@ -189,6 +189,22 @@ class AiGroupOrderToolTest(unittest.IsolatedAsyncioTestCase):
         args, _result = await self._call({"group_id": GROUP_ID, "behaviour": "HOLD"})
         self.assertEqual(args[1], {"group_id": GROUP_ID, "behaviour": "HOLD"})
 
+    async def test_neg_explicit_empty_waypoints_is_bad_args_and_sends_nothing(self) -> None:
+        # Round B NEG: waypoints=[] explicit is refused at this layer
+        # (server.py:8808, 1..32) and at the broker (loopback.py:1107-1110,
+        # _is_order_waypoints needs >=3 floats), so an empty array in the
+        # game can only be an absent key the JsonSerializer materialised.
+        text = await self._refused(
+            {"group_id": GROUP_ID, "behaviour": "HOLD", "waypoints": []}
+        )
+        self.assertIn("bad_args", text)
+        self.assertIs(
+            loopback.validate_command_args(
+                ORDER, {"group_id": GROUP_ID, "behaviour": "HOLD", "waypoints": []}
+            )[0],
+            False,
+        )
+
 
 class AiGroupOrderBrokerTest(unittest.TestCase):
     """The loopback schema and the plan 2.2 admission for this verb."""
@@ -783,14 +799,38 @@ class ExpansionOrderEnforceTest(unittest.TestCase):
         for member in members:
             self.assertEqual(member.calls, [])
 
+    def test_e5_hold_with_empty_waypoint_array_is_accepted(self) -> None:
+        # Round B POS (ids 560/561/583): HOLD without waypoints. The tool
+        # omits the key (server.py:8807-8831), the JsonSerializer delivers
+        # a non-null empty array, and `waypoints != null` read it as a
+        # present-but-empty route. An empty EnforceArray stands in for
+        # that delivered array; _command's None default cannot repro it.
+        # Mutant killed: hasWaypoints back to `waypoints != null`.
+        record, group, members = _record(self.namespace)
+        result = _dispatch(
+            self.namespace,
+            _command(behaviour=_s("HOLD"), waypoints=EnforceArray()),
+        )
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual((group.formation_state, group.waypoint_behaviour), (0, HALT))
+        self.assertEqual(result.ai_group.behaviour.text, "HOLD")
+        self.assertNotIn("command.args.waypoints != null", self.source)
+        self.assertIn(
+            "command.args.waypoints && command.args.waypoints.Count() > 0",
+            self.source,
+        )
+
     def test_e5_empty_waypoints_and_random_formation_change_nothing(self) -> None:
         # Mutants killed: an empty route clearing the waypoints and
         # keeping the old destination, and RANDOM resolving to a sane
-        # formation instead of being refused.
+        # formation instead of being refused. An empty array alone is now
+        # the absent key (see the POS above), so it refuses as an order
+        # with no fields, without a report; the explicit [] the caller
+        # can send is refused by the tool and the broker (tool test).
         record, group, members = _record(self.namespace)
         result = _dispatch(self.namespace, _command(waypoints=EnforceArray()))
         self.assertEqual(result.error.text, "bad_args")
-        self.assertEqual(result.ai_group.field.text, "waypoints")
+        self.assertIsNone(result.ai_group)
         result = _dispatch(self.namespace, _command(formation=_s("RANDOM")))
         self.assertEqual(result.error.text, "bad_args")
         self.assertEqual(result.ai_group.field.text, "formation")
@@ -890,6 +930,84 @@ class ExpansionOrderEnforceTest(unittest.TestCase):
         self.assertEqual((gone.speed_limit, gone.speed_limit_threat), (0, 0))
         self.assertTrue(result.ai_group.members.Get(0).alive)
 
+def _adapter_order_refusal(field: str, allowed: list) -> dict:
+    """The ok=0 result DispatchAIGroupOrder posts for a bad_args refusal.
+
+    Built from MCPExpansionAI.c DispatchAIGroupOrder: formation fills
+    allowed via AIFillFormationAllowed before refusing, behaviour via
+    AIFillBehaviourAllowed, speed and waypoints fill no allowed. The
+    MCPAIGroup report always serialises created=false by default; an
+    order must not surface it (diagnosis point 1, #340 half).
+    """
+    return {
+        "ok": 0,
+        "error": "bad_args",
+        "ai_group": {
+            "created": False,
+            "field": field,
+            "allowed": list(allowed),
+            "args_read": {"faction": "Nope", "count": 2, "waypoints": [1.0, 2.0, 3.0]},
+        },
+    }
+
+
+class AiGroupOrderBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
+    """Round B: an order bad_args reaches the agent with field/allowed.
+
+    Mutant killed: the ai_group_order branch of _bridge_error_detail
+    removed -- every POS assertion below collapses to the bare code.
+    The bridge result arrives as wait_for_result raises it
+    (server.py wait_for_result: not ok -> _bridge_error(result, cmd)).
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.app, self.runtime = server.build_app(
+            server.ServerConfig(key="test-key", port=0, log_sink=lambda _message: None)
+        )
+
+    async def _refusal_text(self, result: dict) -> str:
+        async def fake_call_bridge(cmd, _args, _peer, _timeout, _result=result):
+            if not _result.get("ok"):
+                raise server._bridge_error(_result, cmd)
+            return _result
+
+        with patch.object(
+            self.runtime, "call_bridge", new=AsyncMock(side_effect=fake_call_bridge)
+        ):
+            with self.assertRaises(Exception) as caught:
+                await self.app.call_tool(ORDER, {"group_id": GROUP_ID, "behaviour": "HOLD"})
+        return _tool_error_text(caught.exception)
+
+    async def test_pos_formation_and_speed_carry_field_and_allowed(self) -> None:
+        text = await self._refusal_text(_adapter_order_refusal("formation", FORMATIONS))
+        self.assertIn("bad_args; field=formation; allowed=" + ",".join(FORMATIONS), text)
+        self.assertNotIn("created", text)
+        self.assertNotIn("args_read", text)
+
+        text = await self._refusal_text(_adapter_order_refusal("behaviour", ["HOLD", "ONCE", "LOOP", "ROAM"]))
+        self.assertIn("bad_args; field=behaviour; allowed=HOLD,ONCE,LOOP,ROAM", text)
+        self.assertNotIn("created", text)
+
+        # Speed fills no allowed in the adapter, so only field crosses.
+        text = await self._refusal_text(_adapter_order_refusal("speed", []))
+        self.assertIn("bad_args; field=speed", text)
+        self.assertNotIn("allowed=", text)
+        self.assertNotIn("created", text)
+
+    async def test_neg_unlisted_field_and_values_do_not_cross(self) -> None:
+        result = _adapter_order_refusal("secret_field", ["Vee", "C:\\host\\secret"])
+        text = await self._refusal_text(result)
+        self.assertNotIn("secret_field", text)
+        self.assertNotIn("field=", text)
+        self.assertNotIn("secret", text)
+        self.assertIn("allowed=Vee", text)
+        self.assertNotIn("created", text)
+        self.assertNotIn("args_read", text)
+        # Scope: the same report under ai_group_state stays bare.
+        other = server._bridge_error(result, "ai_group_state")
+        self.assertEqual(str(other), "bad_args")
+
+
 class ExpansionOrderMutantTest(unittest.TestCase):
     """R26: the two named E5 mutants, on a mutated copy of the source."""
 
@@ -917,6 +1035,28 @@ class ExpansionOrderMutantTest(unittest.TestCase):
         self.assertNotEqual(mutant, self.source)
         self.assertEqual(self._hold_then_loop_calls(self.source), [(JOG, SPRINT)])
         self.assertEqual(self._hold_then_loop_calls(mutant), [(SPRINT, SPRINT)])
+
+    def test_mutant_waypoints_not_null_is_killed(self) -> None:
+        # Mutant: presence back to `waypoints != null`, so the empty
+        # array the serializer delivers for an absent key refuses HOLD.
+        mutant = self.source.replace(
+            "if (command.args.waypoints && command.args.waypoints.Count() > 0)",
+            "if (command.args.waypoints != null)",
+        )
+        self.assertNotEqual(mutant, self.source)
+        real = _order_namespace(self.source)
+        _record(real)
+        result = _dispatch(
+            real, _command(behaviour=_s("HOLD"), waypoints=EnforceArray())
+        )
+        self.assertTrue(result.ok, result.error)
+        mutated = _order_namespace(mutant)
+        _record(mutated)
+        result = _dispatch(
+            mutated, _command(behaviour=_s("HOLD"), waypoints=EnforceArray())
+        )
+        self.assertEqual(result.error.text, "bad_args")
+        self.assertEqual(result.ai_group.field.text, "waypoints")
 
     def test_mutant_a_hold_stomping_the_threat_limit_is_killed(self) -> None:
         # Mutant: HOLD writes the normal preference as the threat limit.

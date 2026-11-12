@@ -1261,7 +1261,7 @@ modded class MCPBridge
 		{
 			hasFormation = true;
 		}
-		if (command.args.waypoints != null)
+		if (command.args.waypoints && command.args.waypoints.Count() > 0)
 		{
 			hasWaypoints = true;
 		}
