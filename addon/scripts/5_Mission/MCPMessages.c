@@ -305,6 +305,8 @@ class MCPArgs
 	string path_id;
 	// camera_set_focus (702f): camera_set plus CGame.OverrideDOF. The command
 	// name, not these fields, turns focus on; all five always travel with it.
+	// The tools of the SetFocus bridge send distance and blur only: the other
+	// three keep the tools' defaults 450, 100 and 10 set below, not 0.
 	float focus_distance;
 	float focus_blur;
 	float focus_length;
@@ -350,6 +352,9 @@ class MCPArgs
 		heading = MCP_ARG_FLOAT_UNSET;
 		speed = MCP_ARG_FLOAT_UNSET;
 		lifetime_s = MCP_ARG_FLOAT_UNSET;
+		focus_length = 450.0;
+		focus_length_near = 100.0;
+		focus_depth_offset = 10.0;
 	}
 };
 
