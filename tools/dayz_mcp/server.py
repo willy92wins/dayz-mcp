@@ -112,6 +112,9 @@ from dayz_mcp.server_freshness import (
 )
 from dayz_mcp import log_tail, result_prune
 from dayz_mcp.loopback import (
+    AI_BEHAVIOURS,
+    AI_GROUP_COUNT_MAX,
+    AI_GROUP_WAYPOINTS_MAX,
     ACTOR_EMOTE_END,
     ACTOR_EMOTE_WAIT_MAX_S,
     ACTOR_EMOTE_WAIT_MIN_S,
@@ -283,6 +286,7 @@ from dayz_mcp.tool_args import (
     _patch_closed_tool_schema,
     _patch_mode_enum_from_authority,
     _patch_public_argument_alias,
+    _is_wire_number,
     _require_float_list,
     _require_range,
     _require_vec3,
@@ -692,6 +696,8 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "survivor_drive",
     "actor_emote",
     "chat_read",
+    # A mistyped key must not spawn a group on defaults: refused, not dropped.
+    "ai_group_spawn",
 )
 
 
@@ -8687,6 +8693,81 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             args["speed_set"] = True
         async with runtime.tool_lock:
             return await runtime.call_bridge("survivor_drive", args, "server", _timeout(timeout_s))
+
+    @app.tool(
+        description=(
+            f"{LEASE_TOOL_LINE} Create a group of Expansion AI survivors with "
+            "the optional DayZ_MCP_ExpansionAI adapter. faction and formation "
+            "are Expansion names the server validates against its registered "
+            "types (an unknown one is bad_args naming the field, with the "
+            "allowed names); loadout is a loadout name under "
+            "$profile:ExpansionMod/Loadouts (empty takes the faction's "
+            "default; a trailing .json is stripped). behaviour is HOLD, ONCE, "
+            "LOOP or ROAM: HOLD sets formation state NONE and waypoint "
+            "behaviour HALT with STATIC speed, the others follow the "
+            "waypoints (ROAM also roams Expansion locations). waypoints are "
+            f"up to {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points. The reply's "
+            "ai_group is read back from the server: group_id, created, the "
+            "faction and formation the group reports, behaviour in tool and "
+            "Expansion names, and members with object_id, type, pos, "
+            "loadout_applied and attachment types. A refusal before creation "
+            "carries created false and args_read. At most "
+            f"{AI_GROUP_COUNT_MAX} members per group and 24 living adapter "
+            "members in total (ai_limit_reached). Without the adapter the "
+            "call is expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported "
+            "and creates nothing. scene_id "
+            f"registers the members under that scene. {SCENE_CAP_LINE}"
+        )
+    )
+    async def ai_group_spawn(
+        faction: StrictStr,
+        count: Any,
+        pos: list[Any],
+        loadout: StrictStr,
+        formation: StrictStr,
+        behaviour: StrictStr,
+        waypoints: list[Any] | None = None,
+        scene_id: StrictStr = "",
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= AI_GROUP_COUNT_MAX:
+            raise ToolError(_bad_args("count", count, f"be an int from 1 to {AI_GROUP_COUNT_MAX}"))
+        if not isinstance(faction, str) or faction == "" or len(faction) > 64:
+            raise ToolError(_bad_args("faction", faction, "be a non-empty string of at most 64 characters"))
+        if not isinstance(formation, str) or formation == "" or len(formation) > 64:
+            raise ToolError(_bad_args("formation", formation, "be a non-empty string of at most 64 characters"))
+        if not isinstance(loadout, str) or len(loadout) > 64 or re.fullmatch(r"[A-Za-z0-9_.-]*", loadout) is None:
+            raise ToolError(_bad_args("loadout", loadout, "use only A-Z a-z 0-9 _ . - and at most 64 characters"))
+        if behaviour not in AI_BEHAVIOURS:
+            raise ToolError(_bad_args("behaviour", behaviour, "be one of HOLD, ONCE, LOOP, ROAM"))
+        if not isinstance(pos, list) or len(pos) != 3 or not all(_is_wire_number(item) for item in pos):
+            raise ToolError(_bad_args("pos", pos, "be [x, y, z] finite numbers"))
+        pos_wire = [float(item) for item in pos]
+        waypoint_items = [] if waypoints is None else waypoints
+        if not isinstance(waypoint_items, list) or len(waypoint_items) > AI_GROUP_WAYPOINTS_MAX:
+            raise ToolError(_bad_args("waypoints", waypoints, f"be a list of at most {AI_GROUP_WAYPOINTS_MAX} [x, y, z] points"))
+        waypoints_wire: list[float] = []
+        for index, point in enumerate(waypoint_items):
+            if not isinstance(point, list) or len(point) != 3 or not all(_is_wire_number(item) for item in point):
+                raise ToolError(_bad_args(f"waypoints[{index}]", point, "be [x, y, z] finite numbers"))
+            waypoints_wire.extend(float(item) for item in point)
+        if scene_id != "" and not is_scene_id(scene_id):
+            raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+        args: dict[str, Any] = {
+            "faction": faction,
+            "count": count,
+            "pos": pos_wire,
+            "loadout": loadout,
+            "formation": formation,
+            "behaviour": behaviour,
+            "waypoints": waypoints_wire,
+            "spawn_token": uuid.uuid4().hex,
+        }
+        if scene_id != "":
+            args["scene_id"] = scene_id
+        async with runtime.tool_lock:
+            return await runtime.call_bridge("ai_group_spawn", args, "server", _timeout(timeout_s))
 
     # Spawn into a player's inventory.
     @app.tool(

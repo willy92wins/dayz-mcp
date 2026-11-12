@@ -154,7 +154,50 @@ _BATCH_ITEM: dict[str, object] = {
 }
 
 
+_AI_SPAWN: dict[str, object] = {
+    "faction": "West",
+    "count": 2,
+    "pos": [1.0, 2.0, 3.0],
+    "loadout": "",
+    "formation": "Vee",
+    "behaviour": "HOLD",
+    "waypoints": [],
+    "spawn_token": "a" * 32,
+}
+
+
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
+    # Expansion AI adapter (plan 3.1/3.6/4): flat waypoint triples, a
+    # 32-hex token, scene_id only when a scene is named.
+    "ai_group_spawn": (
+        ("valid", dict(_AI_SPAWN), (True, None)),
+        ("valid_scene", {**_AI_SPAWN, "scene_id": "xai"}, (True, None)),
+        ("valid_waypoints", {**_AI_SPAWN, "waypoints": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}, (True, None)),
+        ("count_zero", {**_AI_SPAWN, "count": 0}, (False, "bad_args")),
+        ("count_nine", {**_AI_SPAWN, "count": 9}, (False, "bad_args")),
+        ("count_float", {**_AI_SPAWN, "count": 1.5}, (False, "bad_args")),
+        ("count_bool", {**_AI_SPAWN, "count": True}, (False, "bad_args")),
+        ("behaviour_lower", {**_AI_SPAWN, "behaviour": "hold"}, (False, "bad_args")),
+        ("waypoints_not_triples", {**_AI_SPAWN, "waypoints": [1.0, 2.0]}, (False, "bad_args")),
+        ("waypoints_nan", {**_AI_SPAWN, "waypoints": [1.0, float("nan"), 3.0]}, (False, "bad_args")),
+        ("waypoints_33", {**_AI_SPAWN, "waypoints": [0.0] * 99}, (False, "bad_args")),
+        ("waypoints_huge_int", {**_AI_SPAWN, "waypoints": [10**400, 0, 0]}, (False, "bad_args")),
+        ("pos_two", {**_AI_SPAWN, "pos": [1.0, 2.0]}, (False, "bad_args")),
+        ("token_upper", {**_AI_SPAWN, "spawn_token": "A" * 32}, (False, "bad_args")),
+        ("loadout_slash", {**_AI_SPAWN, "loadout": "a/b"}, (False, "bad_args")),
+        ("faction_empty", {**_AI_SPAWN, "faction": ""}, (False, "bad_args")),
+        ("faction_65", {**_AI_SPAWN, "faction": "a" * 65}, (False, "bad_args")),
+        ("scene_bad", {**_AI_SPAWN, "scene_id": "a*"}, (False, "bad_args")),
+        ("missing_token", {k: v for k, v in _AI_SPAWN.items() if k != "spawn_token"}, (False, "bad_args")),
+        ("extra_key", {**_AI_SPAWN, "extra": None}, (False, "bad_args")),
+    ),
+    "ai_group_release": (
+        ("valid", {"spawn_token": "a" * 32}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("short", {"spawn_token": "a" * 31}, (False, "bad_args")),
+        ("upper", {"spawn_token": "A" * 32}, (False, "bad_args")),
+        ("extra_key", {"spawn_token": "a" * 32, "group_id": 1}, (False, "bad_args")),
+    ),
     "gameplay_state": (
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),

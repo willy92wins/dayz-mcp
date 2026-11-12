@@ -173,7 +173,14 @@ _DISPATCH_PREAMBLE = (
     "result.tick_poll_callback = m_TickPollCallback; "
     "result.tick_dispatch = m_Tick; bool postNow = true;"
 )
-_DISPATCH_UNKNOWN = 'result.ok = false; result.error = "unknown_command";'
+# expansion-ai-adapter plan 2.1 hook 3: DispatchExtension runs just before
+# unknown_command; 0 keeps the old answer.
+_DISPATCH_UNKNOWN = (
+    "int extensionHandled = DispatchExtension(command, result); "
+    "if (extensionHandled == 1) { postNow = true; } "
+    "else if (extensionHandled == 2) { postNow = false; } "
+    "else { result.ok = false; result.error = \"unknown_command\"; }"
+)
 _DISPATCH_POST_CALL = "if (postNow) { PostResult(result); }"
 
 
