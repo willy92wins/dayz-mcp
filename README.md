@@ -138,7 +138,9 @@ its id as `camera_path.replaced_command_id`; `busy` still rejects an exclusive
 job. The daemon settles lease tracking on the client's terminal `finished`
 report. Explicit mode=stop keeps its existing last-pose behavior.
 `camera_path_release(command_id)` is public and requires the same lease as play;
-the daemon also uses it internally for lease cleanup. A matching command_id
+the daemon also sends it internally when it abandons a delivered play (a
+cancelled or timed-out call), but not at lease end, where the client's lease
+close stops the path. A matching command_id
 aborts the path and releases camera/gameplay (`matched=true`); a stale id cannot
 stop its successor (`matched=false`). The LIVE tool pack still excludes it.
 `camera_set_focus` exposes the existing camera setter with required focus

@@ -6,7 +6,15 @@
 // MCPPlayerMoveControl.Enable passes them. The angle is the wanted compass
 // heading minus the compass heading of GetHeadingAngle, wrapped to -180..180,
 // recomputed on every server bridge tick (Tick, the MCPBotControl.Tick
-// pattern). A driven id is dropped, with DISABLED, on release, on the
+// pattern). Outside MCPLookAtControl's band, Apply also turns the body toward
+// that heading with a ONE_FRAME OverrideAimChangeX pulse (1.30 human.c:259;
+// MCPLookAtControl.TieBreakDeg, WithinBand and ServerPulseX, inbox 851c), and
+// Disable sets the two movement overrides DISABLED and holds
+// OverrideAimChangeX at 0.0 with ENABLED. With DISABLED, a released survivor
+// kept turning (measured 2026-11-12, run b3c35f6a, inbox 851c). The first
+// ONE_FRAME pulse of a new drive replaces that zero, because ONE_FRAME applies
+// its value and then goes DISABLED (human.c:7-12).
+// A driven id is dropped through Disable on release, on the
 // survivor's death or deletion (Tick, OnObjectGone), at bridge shutdown
 // (ShutdownAll) and on survivor_drive_release (ReleaseCommand), which the
 // broker sends with the id of a drive command and its survivor's object_id when
@@ -76,8 +84,9 @@ class MCPSurvivorDrive
 		Apply(survivor, entry);
 	}
 
-	// Drops the id with DISABLED. An id that is not driven changes nothing:
-	// DISABLED is applied only where this code enabled the overrides.
+	// Drops the id: sets the two movement overrides DISABLED and holds
+	// OverrideAimChangeX at 0.0 with ENABLED. An id that is not driven changes
+	// nothing: Disable is applied only where this code enabled the overrides.
 	static void Release(MCPBridge bridge, int objectId)
 	{
 		int index;
@@ -96,8 +105,8 @@ class MCPSurvivorDrive
 		Disable(PlayerBase.Cast(target));
 	}
 
-	// survivor_drive_release: drops objectId's drive, with DISABLED as Release
-	// does, when commandId set it, and answers true. Anything else changes
+	// survivor_drive_release: drops objectId's drive, as Release does,
+	// when commandId set it, and answers true. Anything else changes
 	// nothing and answers false: an id that is not driven, or a drive another
 	// command set, such as a later one that replaced it. The release names the
 	// survivor because command ids restart with each daemon, so the same id
@@ -197,6 +206,7 @@ class MCPSurvivorDrive
 		HumanInputController hic;
 		float compass;
 		float angle;
+		float error;
 		if (!survivor || !entry)
 		{
 			return;
@@ -209,6 +219,11 @@ class MCPSurvivorDrive
 		compass = MCPPlayerMoveControl.CompassFromHeading(hic.GetHeadingAngle());
 		angle = MCPPlayerMoveControl.WrapDeg180(entry.heading_deg - compass);
 		MCPPlayerMoveControl.Enable(hic, entry.speed, angle);
+		error = MCPLookAtControl.TieBreakDeg(MCPPlayerMoveControl.WrapDeg180(entry.heading_deg - compass));
+		if (!MCPLookAtControl.WithinBand(error))
+		{
+			hic.OverrideAimChangeX(HumanInputControllerOverrideType.ONE_FRAME, MCPLookAtControl.ServerPulseX(error));
+		}
 	}
 
 	protected static void Disable(PlayerBase survivor)
@@ -224,6 +239,7 @@ class MCPSurvivorDrive
 			return;
 		}
 		MCPPlayerMoveControl.Disable(hic);
+		hic.OverrideAimChangeX(HumanInputControllerOverrideType.ENABLED, 0.0);
 	}
 
 	protected static int Find(int objectId)

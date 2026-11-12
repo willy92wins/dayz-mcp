@@ -124,6 +124,7 @@ from dayz_mcp.loopback import (
     AWAIT_LONG_POLL_MAX_IN_FLIGHT,
     AWAIT_LONG_POLL_MAX_S,
     BOT_START_ACTIONS,
+    BOT_START_INVENTORY_ACTIONS,
     BOT_TTL_MAX_S,
     INPUT_NAME_MAX_CHARS,
     INPUT_TRIGGER_DIK_MAX,
@@ -5317,6 +5318,7 @@ def _failed_active_run_result(
                 "cleanup_degraded": False,
                 "server_alive": None,
                 "client_alive": None,
+                "server_boot": None,
                 **extra,
             },
             box,
@@ -6389,6 +6391,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "active_run_exists without that reason or a queue_offer. A failed "
             "launch whose run_id the run store does not list (dayz_test_stop "
             "would answer run_not_found) returns run_id null. "
+            "server_boot reports what this launch's server compiled per module "
+            "according to its script log, where missing_files > 0 is a hint "
+            "that a module .c file from a mod's PBOs was not loaded; with "
+            "mode=server the call waits for the Mission line up to "
+            "server_wait_s (capped at 60 s), and server_boot is null when the "
+            "mode starts no server or the logs could not be read. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -6810,6 +6818,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         isinstance(stop_result, dict)
                         and stop_result.get("status") == "failed"
                     ):
+                        # The stop envelope answers this launch, so it carries
+                        # the server_boot key of every dayz_test_run answer.
+                        stop_result.setdefault("server_boot", None)
                         return annotated(stop_result)
                     evicted_run_id = target
                 execute_error, result = await execute(
@@ -8302,12 +8313,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "id. The dummy must be a living PlayerBase with no connected "
             "identity. action is one of the 1.30 debug transitions "
             "(PLAYER_BOT_RANDOMIZE_STANCE, PLAYER_BOT_RANDOMIZE_MOVEMENT, "
-            "PLAYER_BOT_SPAM_USER_ACTIONS, "
-            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
+            "PLAYER_BOT_SPAM_USER_ACTIONS, PLAYER_BOT_TEST_SPAWN_OPEN, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
+            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT). The four vanilla inventory "
+            "actions (PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE, "
             "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH, "
-            "PLAYER_BOT_TEST_SPAWN_OPEN, PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY, "
-            "PLAYER_BOT_TEST_SPAWN_OPEN_EAT, PLAYER_BOT_TEST_SWAP_G2H, "
-            "PLAYER_BOT_TEST_SWAP_INTERNAL). ttl_s is how long the server keeps "
+            "PLAYER_BOT_TEST_SWAP_G2H, PLAYER_BOT_TEST_SWAP_INTERNAL) are "
+            "omitted and refused with bad_args because they raise vanilla "
+            "script exceptions on a server dummy. "
+            "ttl_s is how long the server keeps "
             "it running, from just above 0 to 30 seconds, default 5. A second "
             "start while one is active is bot_busy. A survivor that "
             "survivor_drive walks is drive_busy and nothing changes: release "
@@ -8316,15 +8330,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "bot_unavailable and nothing is initialized. The answer is bot: "
             "object_id, action, started, ttl_s. started means the bot FSM "
             "accepted the transition, not that the action's effect happened. "
-            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: all "
-            "ten actions start and bot_stop stops them, but "
-            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE and "
-            "PLAYER_BOT_TEST_SWAP_INTERNAL fill the server script log with "
-            "vanilla Virtual Machine Exceptions, about 30 a second while they "
-            "run (a NULL player in vanilla's "
-            "DayZPlayerInventory.HandleTakeToDst and HandleForceSwapEntities), "
-            "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH and "
-            "PLAYER_BOT_TEST_SWAP_G2H raise one each, and "
+            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: the "
+            "six actions start and bot_stop stops them, and "
             "PLAYER_BOT_RANDOMIZE_MOVEMENT only moves forward (inbox 6b52). "
             "Errors: bad_args, bot_unavailable, drive_busy, object_not_found, "
             "not_dummy_player, player_dead, bot_busy, bot_action_rejected."
@@ -8339,6 +8346,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if isinstance(object_id, bool) or not isinstance(object_id, int) or object_id <= 0:
             raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if not isinstance(action, str) or action not in BOT_START_ACTIONS:
+            if isinstance(action, str) and action in BOT_START_INVENTORY_ACTIONS:
+                raise ToolError(
+                    _bad_args(
+                        "action",
+                        action,
+                        "not be one of the vanilla bot inventory actions: "
+                        "they raise vanilla script exceptions on a server dummy",
+                    )
+                )
             raise ToolError(
                 _bad_args("action", action, "be one of the debug-bot action names")
             )
@@ -8590,7 +8606,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g} to "
             f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}; speed is walk, jog or "
             "sprint (OverrideMovementSpeed 1, 2, 3, as player_move; not m/s). "
-            "Measured on 2026-11-11 (DayZDiag 1.30.164289, SurvivorM_Mirek): "
+            "The survivor turns its body toward heading with OverrideAimChangeX "
+            "pulses and then walks forward. "
+            "Measured on 2026-11-11 before the turn pulse (DayZDiag "
+            "1.30.164289, SurvivorM_Mirek): "
             "it moves on heading exactly, but the body keeps the heading it "
             "spawned with (telemetry_read orientation stays [0, 0, 0]), so a "
             "drive off that axis walks sideways or backwards: forward 1.53 m/s "
@@ -8600,16 +8619,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "1899 average fps. "
             "A drive needs both; a new drive on a driven survivor replaces its "
             "heading and speed. mode='release', with neither heading nor speed, "
-            "sets the overrides DISABLED and ends the drive; on a survivor that "
-            "is not driven it changes nothing. The end of the lease that sent "
-            "the drive ends it too: the broker queues its release "
-            "(survivor_drive_release), which stops the drive only while that "
-            "call's drive is the one set. A call that times out or is "
-            "cancelled after the server received it still runs, and its "
-            "release is queued only if its result is not stored yet and the "
-            "queue admits the release: once the result is stored, nothing is "
-            "queued and the drive keeps going until a mode='release' or the "
-            "end of the lease. Nothing else ends a drive but the survivor's "
+            "sets the overrides DISABLED and ends the drive; on a survivor that is not driven it "
+            "changes nothing. The end of the lease that sent the drive ends it too: the server's "
+            "lease close stops every drive. A reachable server whose fresh census lacks the close "
+            "gets none and owes nothing (close_not_supported), so its drives keep going; any other "
+            "server the close does not reach leaves it owed (lease_end.unconfirmed). A call that "
+            "times out or is cancelled after the server received it still runs, and its release "
+            "(survivor_drive_release, which stops the drive only while that call's drive is the one "
+            "set) is queued only if its result is not stored yet and the queue admits the release: "
+            "once the result is stored, nothing is queued and the drive keeps going until a "
+            "mode='release' or the end of the lease. Nothing else ends a drive but the survivor's "
             "death, its object_delete and the bridge shutting down: until one "
             "of those the survivor keeps walking. A probe like "
             "infected_drive: if the survivor does not move, that is the "
@@ -9837,20 +9856,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ends, the whole query inside one server frame, so a long path "
             "costs that frame. The answer is points (FindPath's own waypoints, "
             "both ends included, each [x, y, z]), length_m (the sum of their 3D "
-            "segment lengths), from_snapped and to_snapped. The path filter is "
-            "meant to take the walking flags (ground, doors, inside buildings) "
-            "and leave out the disabled and swimming ones, but measured on "
-            "2026-11-11 (DayZDiag 1.30.164289) its masks are wrong: the "
-            "PGPolyFlags members are already bit values at run time (WALK=1, "
-            "DISABLED=2, DOOR=4, INSIDE=8, SWIM=16, SWIM_SEA=32) and the "
-            "bridge shifts them again, so the filter includes 137 (WALK, "
-            "INSIDE and bit 128) and excludes 32770 (DISABLED and bit 32768): "
-            "doors are not admitted, and water stays out only because the "
-            "include mask lacks it. FindPath can also return a path that stops "
-            "short of to_snapped and the tool still answers ok (from "
-            "Chernogorsk to Skalisty Island the last point was 6845 m short), "
-            "so compare the last point with to_snapped; and each call leaks "
-            "one PGFilter until the mission ends (inbox d5d6). A terrain "
+            "segment lengths), from_snapped and to_snapped. One shared PGFilter "
+            "for the bridge's lifetime (calls no longer leak one each; at mission "
+            "close the RPT still reports the shared one once, as measured on "
+            "2026-11-12) passes the unshifted PGPolyFlags bit values measured on "
+            "DayZDiag 1.30.164289: include WALK|DOOR|INSIDE = 13 (1|4|8) and "
+            "exclude DISABLED|SWIM|SWIM_SEA = 50 (2|16|32). FindPath can "
+            "return true on a partial path that stops short of to_snapped; a "
+            "path whose last point is more than 0.5 m from to_snapped answers "
+            "no_path. A terrain "
             "without a navmesh (a custom map that ships none) answers "
             "no_navmesh, or no_navmesh_at_from / no_navmesh_at_to, as does an "
             "end with no navmesh the filter admits within snap_radius (open "
@@ -10363,12 +10377,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "during a path ends it aborted, and so do stop, the engine reporting "
             "the path's camera inactive and vanilla's developer free camera "
             "turned on; another camera turned on from outside the bridge ends it "
-            "only if the engine then reports the path's camera inactive. When the "
-            "lease that played it ends, the daemon queues an internal "
-            "camera_path_release for the client, which ends the path aborted when "
-            "the client runs it; nothing confirms that stop, and the daemon can "
-            "miss a play the client ran out of order or one that followed many "
-            "unanswered plays. path_id is an optional label of up to "
+            "only if the engine then reports the path's camera inactive. When the lease that played "
+            "it ends, the daemon sends no camera_path_release: the client's lease close stops the "
+            "path before it restores gameplay and the camera. A reachable client whose fresh census "
+            "lacks the close gets none and owes nothing (close_not_supported), so its path plays "
+            "on; any other client the close does not reach leaves it owed (lease_end.unconfirmed). "
+            "path_id is an optional label of up to "
             f"{camera_path_contract.PATH_ID_MAX_CHARS} characters from A-Z a-z "
             "0-9 _ -; given to state or stop it must name the current or last "
             "path. Read the pose with camera_get. Errors: bad_args (refused "
@@ -10405,8 +10419,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "command_id (camera_path.command_id returned by camera_path_play). "
         "A positive integer is required. matched=true means it stopped that "
         "play and released its camera and gameplay; false changes nothing "
-        "(already finished or another play is current). The daemon also uses "
-        "this bridge command internally when the owning lease ends."
+        "(already finished or another play is current). The daemon sends it internally "
+        "only to abandon a delivered play; at lease end the client's lease close stops the path."
     ))
     async def camera_path_release(
         command_id: StrictInt,
