@@ -48,6 +48,7 @@ Out of scope, on purpose (an honest watchdog beats a pretend-complete one):
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import os
 import re
@@ -792,6 +793,399 @@ class NamespaceSourceMismatchDocsTest(unittest.TestCase):
         self.assertIn("$PBOPREFIX$", readme)
         self.assertIn("build_namespace_source_mismatch", readme)
         self.assertIn(_NAMESPACE_SOURCE_MISMATCH_REMEDIATION, readme)
+
+
+_SERVERMOD_DOC = "docs/SERVERMOD.md"
+_SERVERMOD_HEADING = "## Qué tools dejan de funcionar"
+# The one list form the reader accepts: "- Label: `tool_a`, `tool_b`", with a
+# plain-text label (so the item cannot be read as a link reference definition,
+# a nested list, a heading or a quote).
+_SERVERMOD_ITEM = re.compile(
+    r"- [^\W_][\w ,/()-]*: `[a-z0-9_]+`(?:, `[a-z0-9_]+`)*[ \t]*"
+)
+# Any CommonMark list marker, bullet or ordered, so an item written in another
+# form is caught instead of being skipped.
+_SERVERMOD_MARKER = re.compile(r" {0,3}(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+# A line opening or closing a fenced code block, which would turn the list into
+# code.
+_SERVERMOD_FENCE = re.compile(r" {0,3}(?:`{3,}|~{3,})")
+# A level-1 or level-2 heading ends the section.
+_SERVERMOD_SECTION_END = re.compile(r"#{1,2}[ \t]")
+# Raw HTML that hides text or stops the Markdown after it from being parsed
+# (CommonMark 0.31.2 HTML block types 1-5): comments, processing instructions,
+# declarations and CDATA anywhere on a line, and a line that opens a script,
+# pre, style or textarea block. Code spans are not read, so these markers are
+# refused inside backticks too.
+_SERVERMOD_HIDING_HTML = re.compile(
+    r"<!--|<\?|<![A-Za-z]|<!\[CDATA\["
+    r"|^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)",
+    re.IGNORECASE,
+)
+_SERVERMOD_FORM = (
+    "write the list as one block of lines '- Label: `tool_a`, `tool_b`' "
+    "(marker '-', a plain-text label of letters, digits, spaces and , / ( ) -, "
+    "one item per line, plain tool names in single backticks, a blank line "
+    "before and after the block)"
+)
+
+
+class ServerModClientToolsDocsTest(unittest.TestCase):
+    """docs/SERVERMOD.md client-bridge tool list must match the code (964e).
+
+    Ground truth is CLIENT_COMMANDS intersected with the MCP tool names parsed
+    from server.py, plus the MCP tools whose own execution path reaches a client
+    bridge command under another name (tools that only reach owner cleanup via
+    the lease-expiry sweep are excluded). Like LeaseListDocsTest, the reader
+    anchors the section and takes the names in backticks. It accepts one list
+    form only; any other form (another marker, a label that is not plain text,
+    a wrapped or continued item, an item paragraph, an indented line, a code
+    fence before the end of the list, an HTML marker that can hide text, even
+    inside backticks) fails naming the line and the expected form instead of
+    being interpreted. The section ends at the next level-1 or level-2 heading.
+    """
+
+    def test_client_bridge_tool_list_matches_code(self) -> None:
+        from dayz_mcp.loopback import CLIENT_COMMANDS
+
+        indirect_client_tools: dict[str, str] = {
+            "object_delete": (
+                "_client_seat_refusal probes vehicle_telemetry on client; "
+                "fails whole with vehicle_seat_unverified without client bridge"
+            ),
+            "playbook_run": (
+                "runs playbooks whose steps call ui_dialog (ask_restart) and "
+                "vehicle_telemetry (lease_spawn_prepare_trace)"
+            ),
+            "player_teleport": (
+                "probes vehicle_telemetry on client when probeable; skips only "
+                "that seat precheck without client bridge"
+            ),
+            "scene_clear": (
+                "_client_seat_refusal probes vehicle_telemetry on client; "
+                "fails whole with vehicle_seat_unverified without client bridge"
+            ),
+            "session_release": (
+                "explicit release runs cleanup_owner: with a lease-end round "
+                "the client close needs the client census (close_support_unknown "
+                "leaves its row owed); without one, when vehicle_active it "
+                "enqueues internal vehicle_release with no consumer until TTL "
+                "or binding retirement"
+            ),
+        }
+        lines = _doc(_SERVERMOD_DOC).split("\n")
+        heads = [
+            i for i, line in enumerate(lines) if line.rstrip() == _SERVERMOD_HEADING
+        ]
+        self.assertEqual(
+            len(heads),
+            1,
+            f"{_SERVERMOD_DOC} must have exactly one line '{_SERVERMOD_HEADING}' "
+            f"(found {len(heads)}); the list is read under that heading",
+        )
+        start = heads[0]
+        end = next(
+            (
+                i
+                for i in range(start + 1, len(lines))
+                if _SERVERMOD_SECTION_END.match(lines[i])
+            ),
+            len(lines),
+        )
+        hiding = [
+            f":{i + 1} {lines[i].strip()}"
+            for i in range(end)
+            if _SERVERMOD_HIDING_HTML.search(lines[i])
+        ]
+        self.assertEqual(
+            hiding,
+            [],
+            f"HTML comment, processing instruction, declaration or CDATA markers "
+            f"(even inside backticks: this test does not read code spans), and "
+            f"lines that open a script, pre, style or textarea block, are not "
+            f"supported in {_SERVERMOD_DOC} up to the end of "
+            f"'{_SERVERMOD_HEADING}', because they can hide the heading or the "
+            f"list, or stop them from being read as Markdown: {hiding}; remove or "
+            f"rephrase them (outside backticks, '<' can be written '&lt;'), and "
+            f"{_SERVERMOD_FORM}",
+        )
+        section = range(start + 1, end)
+        indented = [
+            f":{i + 1} {lines[i]}"
+            for i in section
+            if lines[i][:1] in (" ", "\t") and lines[i].strip()
+        ]
+        self.assertEqual(
+            indented,
+            [],
+            f"indented lines are not supported under '{_SERVERMOD_HEADING}' "
+            f"(they would continue a list item or open a code block): "
+            f"{indented}; {_SERVERMOD_FORM}",
+        )
+        items = [i for i in section if _SERVERMOD_MARKER.match(lines[i])]
+        self.assertNotEqual(
+            items, [], f"no list under '{_SERVERMOD_HEADING}'; {_SERVERMOD_FORM}"
+        )
+        fences = [
+            f":{i + 1} {lines[i]}"
+            for i in range(start + 1, items[-1] + 1)
+            if _SERVERMOD_FENCE.match(lines[i])
+        ]
+        self.assertEqual(
+            fences,
+            [],
+            f"fenced code blocks (``` or ~~~) are not supported between "
+            f"'{_SERVERMOD_HEADING}' and the end of its list, because they turn "
+            f"the list into code: {fences}; {_SERVERMOD_FORM}",
+        )
+        inside = [
+            f":{i + 1} {lines[i]}"
+            for i in range(items[0], items[-1] + 1)
+            if i not in items
+        ]
+        self.assertEqual(
+            inside,
+            [],
+            f"the list under '{_SERVERMOD_HEADING}' must be one block of "
+            f"consecutive item lines; found other lines inside it: {inside}; "
+            f"{_SERVERMOD_FORM}",
+        )
+        around = [
+            f":{i + 1} {lines[i]}"
+            for i in (items[0] - 1, items[-1] + 1)
+            if start < i < end and lines[i].strip()
+        ]
+        self.assertEqual(
+            around,
+            [],
+            f"the list under '{_SERVERMOD_HEADING}' needs a blank line before "
+            f"and after it; a line next to an item continues it: {around}; "
+            f"{_SERVERMOD_FORM}",
+        )
+        malformed = [
+            f":{i + 1} {lines[i]}"
+            for i in items
+            if not _SERVERMOD_ITEM.fullmatch(lines[i])
+        ]
+        self.assertEqual(
+            malformed,
+            [],
+            f"list lines under '{_SERVERMOD_HEADING}' in an unsupported form: "
+            f"{malformed}; {_SERVERMOD_FORM}",
+        )
+        listed = set(re.findall(r"`([a-z0-9_]+)`", "\n".join(lines[i] for i in items)))
+        tool_names = _tool_names()
+        self.assertTrue(
+            set(indirect_client_tools) <= tool_names,
+            f"indirect_client_tools names absent from server.py: "
+            f"{sorted(set(indirect_client_tools) - tool_names)}",
+        )
+        expected = (CLIENT_COMMANDS & tool_names) | set(indirect_client_tools)
+        self.assertEqual(
+            listed,
+            expected,
+            f"docs/SERVERMOD.md omits {sorted(expected - listed)} from "
+            f"'Qué tools dejan de funcionar' and lists "
+            f"{sorted(listed - expected)} which do not send a client bridge "
+            f"command",
+        )
+
+
+
+# PX9 P2 (#343): since bridge v13 a lease-end round's aggregated close replaces
+# the per-lease vehicle_release (cleanup_owner, plan section 2.14), so
+# docs/SERVERMOD.md must tie that release to a lease end without a round.
+_SERVERMOD_ROUND_GATE = "if vehicle_active and not has_round:"
+
+
+def _servermod_release_paragraphs(text: str) -> list[str]:
+    """The paragraphs of docs/SERVERMOD.md on the internal vehicle_release."""
+    return [
+        block
+        for block in text.split("\n\n")
+        if "`vehicle_release`" in block and "interno" in block
+    ]
+
+
+# PX9 b, c and d: three readers of Spanish negation in turn let a wrong
+# wording through or turned a true one away ("lo encola", "nunca encola", "no
+# siempre lo encola", "no obstante"), so the check no longer reads the prose.
+# It pins each paragraph as reviewed in PX9 to PX9 d, with whitespace folded
+# and the line numbers of its path:line citations set to 0 (#386's citations
+# move with every change to the files they cite). The path and the colon stay
+# pinned, so a citation that loses its line numbers fails (PX9 e). A change of
+# wording, true or false, fails here and goes back to review; the code side is
+# pinned by test_code_gates_the_release_on_no_round.
+_SERVERMOD_LINE_CITE = re.compile(r"(`[\w./-]+\.(?:py|c|md|toml)):\d+(?:-\d+)?(?=`)")
+_SERVERMOD_RELEASE_SHA256 = (
+    # The explicit session_release paragraph.
+    "83ac75eb794189918775eab8214b1b6092f06ddab8c00c3c174b2d04515c132f",
+    # The expired-lease paragraph.
+    "0f6a66eed9db545b2d8df4e69c7c1ef14e40158048affcf2e67f5a428809c20f",
+)
+
+
+def _servermod_release_text(paragraph: str) -> str:
+    """The paragraph as pinned: whitespace folded, citation line numbers 0."""
+    return _SERVERMOD_LINE_CITE.sub(r"\1:0", " ".join(paragraph.split()))
+
+
+def _servermod_release_digest(paragraph: str) -> str:
+    return hashlib.sha256(_servermod_release_text(paragraph).encode("utf-8")).hexdigest()
+
+
+class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
+    """docs/SERVERMOD.md's two paragraphs on the internal vehicle_release (an
+    explicit session_release and an expired lease) must say it is enqueued only
+    without a lease-end round, as cleanup_owner does since v13 (PX9 P2), in
+    the wording _SERVERMOD_RELEASE_SHA256 pins (PX9 d). The
+    behaviour itself is pinned by test_session_e2e
+    test_lease_close_cleanup_is_enqueued_exactly_once (a round: 0 enqueued) and
+    test_session_http_contract
+    test_release_enqueues_internal_vehicle_release_without_wire_owner_metadata
+    (no round: 1 enqueued)."""
+
+    def test_code_gates_the_release_on_no_round(self) -> None:
+        self.assertEqual(
+            _module_text("dayz_mcp/loopback.py").count(_SERVERMOD_ROUND_GATE), 1
+        )
+
+    def _release_paragraphs(self) -> list[str]:
+        paragraphs = _servermod_release_paragraphs(_doc(_SERVERMOD_DOC))
+        self.assertEqual(len(paragraphs), 2, [p[:80] for p in paragraphs])
+        return paragraphs
+
+    def test_both_paragraphs_read_as_reviewed(self) -> None:
+        for paragraph, digest in zip(self._release_paragraphs(), _SERVERMOD_RELEASE_SHA256):
+            with self.subTest(digest=digest[:12]):
+                self.assertEqual(
+                    _servermod_release_digest(paragraph),
+                    digest,
+                    "a paragraph of docs/SERVERMOD.md on the internal vehicle_release "
+                    "changed: check that it still says the release is enqueued only "
+                    f"without a lease-end round ({_SERVERMOD_ROUND_GATE!r} in loopback.py), "
+                    "then pin the digest of: " + _servermod_release_text(paragraph),
+                )
+
+    def test_a_moved_line_number_keeps_the_pin(self) -> None:
+        explicit = self._release_paragraphs()[0]
+        moved = explicit.replace("loopback.py:8378-8387", "loopback.py:9378-9390")
+        self.assertNotEqual(moved, explicit)
+        self.assertEqual(_servermod_release_digest(moved), _SERVERMOD_RELEASE_SHA256[0])
+
+    def test_neg_a_changed_wording_fails(self) -> None:
+        paragraphs = [" ".join(p.split()) for p in self._release_paragraphs()]
+        without = "Sin ronda, `cleanup_owner` encola"
+        mutants = (
+            # PX9: an enqueue at every lease end.
+            (0, without + " `vehicle_release`", "`cleanup_owner` encola `vehicle_release`"),
+            # PX9 b: the round case enqueues the release.
+            (0, "`cleanup_owner` no lo encola", "`cleanup_owner` lo encola"),
+            # PX9 b: enqueued with and without a round.
+            (
+                1,
+                "interno solo se encola sin ronda de cierre",
+                "interno se encola con y sin ronda de cierre",
+            ),
+            # PX9 c: the case without a round denies the release.
+            (0, without, "Sin ronda, `cleanup_owner` nunca encola"),
+            # PX9 d: a partial negation added for the round case.
+            (0, without, "Con ronda, `cleanup_owner` no siempre lo encola. " + without),
+            # PX9 d: a true rewording fails too, and goes back to review.
+            (0, without, "Sin ronda, no obstante, `cleanup_owner` encola"),
+            # The release left queued with a round.
+            (1, "Sin ronda, el release queda", "Con ronda, el release queda"),
+            # A citation's path stays pinned; only its line numbers move.
+            (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/server.py:3257`"),
+            # PX9 e: a citation that loses its line numbers, in each paragraph.
+            (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/loopback.py`"),
+            (
+                1,
+                "`tools/dayz_mcp/session_coordination.py:2366-2368`",
+                "`tools/dayz_mcp/session_coordination.py`",
+            ),
+        )
+        for index, old, new in mutants:
+            with self.subTest(new=new):
+                paragraph = paragraphs[index]
+                self.assertEqual(paragraph.count(old), 1, old)
+                self.assertNotEqual(
+                    _servermod_release_digest(paragraph.replace(old, new)),
+                    _SERVERMOD_RELEASE_SHA256[index],
+                )
+
+    def test_neg_citations_without_line_numbers_fail(self) -> None:
+        # PX9 e: every citation of a paragraph loses its line numbers.
+        for index, paragraph in enumerate(self._release_paragraphs()):
+            with self.subTest(index=index):
+                bare, count = _SERVERMOD_LINE_CITE.subn(r"\1", paragraph)
+                self.assertGreater(count, 0)
+                self.assertNotEqual(
+                    _servermod_release_digest(bare), _SERVERMOD_RELEASE_SHA256[index]
+                )
+
+
+# PX9 c P2 (#343): with a lease-end round, a reachable peer whose fresh census
+# does not announce the close gets neither a close nor a debt
+# (close_not_supported, the bridge 12 exemption of the plan's section 2.4), so
+# product-spec H5 may not promise one or the other for every known peer.
+_CLOSE_NOT_SUPPORTED_SETTLES = re.compile(
+    r'if reason == "close_not_supported":\s+self\._settle_row_locked\(row\)'
+)
+_H5_EXEMPTION_TEST = "test_f1_client_not_supported_server_published"
+
+
+def _h5_names_the_exemption(row: str) -> bool:
+    return "`close_not_supported`" in row and f"`{_H5_EXEMPTION_TEST}`" in row
+
+
+class ProductSpecH5LeaseEndDocsTest(unittest.TestCase):
+    """product-spec H5 names the exemption and the test that pins it (PX9 c
+    P2): loopback answers close_not_supported for a fresh census without the
+    close name, and session_coordination settles that row with no debt, at the
+    hook's report and at a deferred server publish."""
+
+    def test_code_settles_close_not_supported(self) -> None:
+        self.assertEqual(
+            _module_text("dayz_mcp/loopback.py").count('return False, "close_not_supported"'),
+            1,
+        )
+        coordination = _module_text("dayz_mcp/session_coordination.py")
+        self.assertEqual(len(_CLOSE_NOT_SUPPORTED_SETTLES.findall(coordination)), 2)
+        self.assertIn(
+            f"def {_H5_EXEMPTION_TEST}(", _module_text("tests/test_lease_close_broker.py")
+        )
+
+    def _h5(self) -> str:
+        rows = [
+            line for line in _doc("product-spec.md").splitlines() if line.startswith("| H5 |")
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]
+
+    def test_h5_names_the_exemption(self) -> None:
+        self.assertTrue(_h5_names_the_exemption(self._h5()))
+
+    def test_neg_a_close_or_debt_for_every_peer_fails(self) -> None:
+        row = self._h5()
+        # Back to the promise of 97f54e7: a close per known peer, or a debt.
+        for old, new in (
+            (
+                "publican un cierre a cada peer conocido que alcanzan y cuyo censo lo anuncia; "
+                "la fila de uno alcanzable cuyo censo fresco no lo anuncia se salda sin cierre "
+                "ni deuda (`close_not_supported`, la exención del bridge 12, que no confirma "
+                "que el juego quede limpio), y la de cualquier otro al que el cierre no llega "
+                "queda debida",
+                "publican un cierre por peer conocido y la fila del que no se alcanza queda debida",
+            ),
+            (
+                ", mientras que un censo fresco sin el cierre la salda sin publicarlo "
+                f"(`{_H5_EXEMPTION_TEST}`)",
+                "",
+            ),
+        ):
+            self.assertEqual(row.count(old), 1, old)
+            row = row.replace(old, new)
+        self.assertFalse(_h5_names_the_exemption(row))
 
 
 if __name__ == "__main__":

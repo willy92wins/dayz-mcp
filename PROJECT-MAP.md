@@ -34,7 +34,7 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (27 files, 837 KB)
+## Enforce scripts (27 files, 840 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
@@ -49,7 +49,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/4_World/MCP_DiagPlugins.c` - 3 KB
 - `scripts/4_World/MCP_Emote.c` - 2 KB
 - `scripts/4_World/MCP_InventoryMove.c` - 7 KB
-- `scripts/4_World/MCP_LookAt.c` - 33 KB
+- `scripts/4_World/MCP_LookAt.c` - 34 KB
 - `scripts/4_World/MCP_PlayerCare.c` - 15 KB
 - `scripts/4_World/MCP_PlayerMove.c` - 34 KB
 - `scripts/4_World/MCP_PlayerTrace.c` - 17 KB
@@ -60,8 +60,8 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MCP_ActionCursor.c` - 7 KB
 - `scripts/5_Mission/MCP_BotControl.c` - 10 KB
 - `scripts/5_Mission/MCP_CameraPath.c` - 11 KB
-- `scripts/5_Mission/MCP_SurvivorDrive.c` - 7 KB
-- `scripts/5_Mission/MCPBridge.c` - 233 KB
+- `scripts/5_Mission/MCP_SurvivorDrive.c` - 8 KB
+- `scripts/5_Mission/MCPBridge.c` - 234 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
 - `scripts/5_Mission/MCPChatLog.c` - 12 KB
 - `scripts/5_Mission/MCPClientBridge.c` - 252 KB
@@ -98,7 +98,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 216 KB, touched 2026-11-09 (UTC)
+- `CHANGELOG.md` - 220 KB, touched 2026-11-09 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-11 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-10 (UTC)
