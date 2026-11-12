@@ -1160,8 +1160,10 @@ class CameraPathToolTest(_ToolCase):
             "camera turned on",
             "another camera turned on from outside the bridge ends it only if the engine then reports the "
             "path's camera inactive",
-            "When the lease that played it ends, the daemon queues an internal camera_path_release for the "
-            "client, which ends the path aborted when the client runs it; nothing confirms that stop",
+            "When the lease that played it ends, the daemon sends no camera_path_release: the client's lease "
+            "close stops the path before it restores gameplay and the camera. A reachable client whose fresh "
+            "census lacks the close gets none and owes nothing (close_not_supported), so its path plays on; "
+            "any other client the close does not reach leaves it owed (lease_end.unconfirmed)",
             "the client bridge bound to the run does not announce both camera_path_play and camera_path_release",
             "With no client bound, the loopback's binding fence refuses the call first (legacy_unbound",
             "there is no Camera.InterpolateTo",
@@ -1180,6 +1182,9 @@ class CameraPathToolTest(_ToolCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, description)
         self.assertNotIn("path_busy", description)
+        self.assertNotIn("queues an internal camera_path_release", description)
+        # PX9 c: no close or debt for every client (close_not_supported).
+        self.assertNotIn("and a client the close does not reach leaves that close owed", description)
 
 
 _ORIENT = {"cam_mode": "orient", "cam_pos": [1.0, 2.0, 3.0], "cam_orientation": [10.0, 0.0, 0.0]}

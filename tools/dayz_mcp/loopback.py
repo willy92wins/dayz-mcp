@@ -1394,16 +1394,20 @@ def _player_move_variant(phase: str, direction: str | None) -> _SchemaVariant:
 
 # bot_start allowlist. Names match EActions in 1.30 Bot.c transitions.
 # PLAYER_BOT_STOP_CURRENT and PLAYER_BOT_TEST_SWAP_C2H are not startable.
+# The four vanilla inventory actions in BOT_START_INVENTORY_ACTIONS are
+# excluded (6b52): they raise vanilla script exceptions on a server dummy.
 BOT_TTL_MAX_S = 30.0
 BOT_START_ACTIONS = (
     "PLAYER_BOT_RANDOMIZE_STANCE",
     "PLAYER_BOT_RANDOMIZE_MOVEMENT",
     "PLAYER_BOT_SPAM_USER_ACTIONS",
-    "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE",
-    "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH",
     "PLAYER_BOT_TEST_SPAWN_OPEN",
     "PLAYER_BOT_TEST_SPAWN_OPEN_DESTROY",
     "PLAYER_BOT_TEST_SPAWN_OPEN_EAT",
+)
+BOT_START_INVENTORY_ACTIONS = (
+    "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE",
+    "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH",
     "PLAYER_BOT_TEST_SWAP_G2H",
     "PLAYER_BOT_TEST_SWAP_INTERNAL",
 )
@@ -1522,8 +1526,8 @@ _XAI_HASH = re.compile(r"\A[0-9a-f]{16}\Z")
 # the plain case), so these codes mean a bound client whose census does not
 # name the verb, is stale or comes from another instance. action_hold
 # keeps the hold_not_supported its tool publishes; any other verb is refused
-# with the server census code, bridge_capability_missing. Internal uses of
-# camera_path_release skip the live lease at owner cleanup, not this check.
+# with the server census code, bridge_capability_missing. The internal
+# camera_path_release of an abandoned play skips the live lease, not this check.
 _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "action_hold": "hold_not_supported",
     "actor_emote": "bridge_capability_missing",
