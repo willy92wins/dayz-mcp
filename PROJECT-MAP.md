@@ -21,6 +21,7 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | B1-P2: regresiones de salida abrupta sin finally y prior presente/ausente | `tools/tests/test_b1p2_profile_not_persisted.py` |
 | Expansion AI adapter (optional PBO) | `addon_expansion_ai/` (`$PBOPREFIX$`, `config.cpp`, `scripts/5_Mission/MCPExpansionAI.c`); guide `docs/expansion-ai-adapter.md` |
 | Expansion AI adapter: `ai_group_state` (90f9) | `addon_expansion_ai/scripts/5_Mission/MCPExpansionAI.c` (DispatchAIGroupState); tool en `tools/dayz_mcp/server.py`; admisión en `tools/dayz_mcp/loopback.py` y `tools/dayz_mcp/bridge_readiness.py`; `tools/tests/test_xai_group_state.py`; doc en `docs/expansion-ai-adapter.md` |
+| Expansion AI adapter: `ai_emote` (36fa NPC) | `addon_expansion_ai/scripts/5_Mission/MCPExpansionAI.c` (DispatchAIEmote); parámetro `object_id` de `actor_emote` en `tools/dayz_mcp/server.py`; admisión en `tools/dayz_mcp/loopback.py` y `tools/dayz_mcp/bridge_readiness.py`; `tools/tests/test_xai_emote.py`; doc en `docs/expansion-ai-adapter.md` |
 | Plans | `plans` |
 | Reviews | `reviews` |
 | Decisions | `decisions` (ausente en este checkout) |
@@ -99,7 +100,7 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 225 KB, touched 2026-11-09 (UTC)
+- `CHANGELOG.md` - 227 KB, touched 2026-11-09 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-11 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-10 (UTC)

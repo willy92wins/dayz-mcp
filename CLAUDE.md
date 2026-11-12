@@ -16,7 +16,7 @@ producción**: 112 tools registradas (lista en `README.md:108`, contada el 2026-
 
 ## Definición de Producto Final
 **Qué es "terminado" → [`product-spec.md`](product-spec.md)** — contrato de aceptación
-(11 tools en 6 dominios en el alcance original —hoy 109 registradas—, seguridad fail-closed, captura visual, criterios verificables por
+(11 tools en 6 dominios en el alcance original —hoy 112 registradas—, seguridad fail-closed, captura visual, criterios verificables por
 fase, fuera de alcance, paridad). Leerlo antes de planificar cualquier fase. El Grill de
 plan (Modo B) exige que cada fase trace a un criterio de ahí.
 

@@ -568,6 +568,20 @@ _ACTOR_EMOTE_STANCES = frozenset(
 )
 
 
+def _ai_emote_detail(result: dict[str, Any]) -> str:
+    # ai_emote (plan 3.5; docs/expansion-ai-adapter.md:164-166): only this text
+    # crosses on ok=false, and every server answer carries emote_pending.
+    # npc_dormant (round B) reaches this same path: _bridge_error keeps it
+    # as the message head (not remote_error/bad_args) and this detail adds
+    # observed=emote_pending=false, since the dispatch refused before any
+    # SetEmote write and left no request pending.
+    pending = "true" if result.get("emote_pending") else "false"
+    state = result.get("emote_state")
+    if isinstance(state, str) and state in _ACTOR_EMOTE_ERROR_STATES:
+        return f"observed=emote_state={state} emote_pending={pending}"
+    return f"observed=emote_pending={pending}"
+
+
 def _actor_emote_detail(result: dict[str, Any]) -> str:
     code = str(result.get("error") or "")
     if code not in _ACTOR_EMOTE_STATE_CODES:
@@ -644,11 +658,12 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
 
 # ai_group_spawn refusals fill the ai_group report before refusing
 # (MCPExpansionAI.c AISpawnRefuse :688-695, args_read :727 and :735-745).
-# Only this verb crosses here; ai_group_state and the emote path
-# publish different shapes and stay bare (ai_group_order has its own
-# field/allowed branch below). The field is
-# an allowlist, not an echo: the adapter only ever writes the names in
-# _AI_GROUP_SPAWN_FIELDS for a spawn refusal (DispatchAIGroupSpawn).
+# Only this verb crosses here; ai_group_order has its own field/allowed
+# branch below and ai_emote its emote_pending one (_ai_emote_detail),
+# while ai_group_state publishes a different shape and stays bare. The
+# field is an allowlist, not an echo: the adapter only ever writes the
+# names in _AI_GROUP_SPAWN_FIELDS for a spawn refusal
+# (DispatchAIGroupSpawn).
 _AI_GROUP_SPAWN_FIELDS = frozenset(
     {
         "behaviour",
@@ -802,7 +817,9 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     actor_emote is the ninth: emote_rejected, no_emote_playing and
     emote_timed_out carry observed=emote_state= (rejected or timed_out). An
     emote_rejected from a new emote's checks also carries reason= (the check
-    that refused it) and stance= in observed= (36fa).
+    that refused it) and stance= in observed= (36fa). ai_emote carries
+    observed=emote_pending= on every ok=false bridge answer, keeping
+    emote_state= when rejected or timed_out.
 
     action_use and action_hold are the tenth: a deploy's hologram_colliding
     carries observed= with hologram_checks, hologram_pos, hologram_min_m and
@@ -861,6 +878,8 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         return _object_set_health_detail(result)
     if cmd == "actor_emote":
         return _actor_emote_detail(result)
+    if cmd == "ai_emote":
+        return _ai_emote_detail(result)
     if cmd in _HOLOGRAM_COMMANDS and str(result.get("error") or "") == "hologram_colliding":
         return _hologram_colliding_detail(result)
     if cmd not in _UI_ECHO_VERBS:
@@ -908,6 +927,8 @@ def _bridge_error(result: dict[str, Any], cmd: str | None = None) -> ToolError:
     # after read-back,
     # actor_emote, whose refusals carry observed=emote_state= (and reason= and
     # stance= on a new emote's emote_rejected),
+    # ai_emote, whose ok=false bridge answers carry observed=emote_pending= (plus
+    # emote_state= when rejected or timed_out),
     # action_use and action_hold, whose deploy's hologram_colliding carries
     # observed= with the hologram the client read,
     # ai_group_spawn, whose refusals carry field, allowed, args_read and
