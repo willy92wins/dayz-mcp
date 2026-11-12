@@ -638,7 +638,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         })()
         return manager, state
 
-    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3, pause_queued_mark=None, pause_menu_mark=None, pause_queued=None, open_pause_menu=None):
+    def _client_census(self, source, *, active=(), conn_gen=7, mutant_clean=False, emote_mcp=False, emote_playing=False, mutant_emote=None, emote_pending=False, emote_queued=False, emote_no_mgr=False, look_release_pending=False, look_generation=3, look_floor=None, pause_queued_mark=None, pause_menu_mark=None, pause_queued=None, open_pause_menu=None):
         # Translate the real client census builder against controller doubles.
         flags = {name: (name in active) for name in (
             "vehicle_drive", "input_trigger", "player_move", "weapon", "look_at",
@@ -691,6 +691,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
                 "IsActive": staticmethod(lambda: flags["look_at"]),
                 "ServerReleasePending": staticmethod(lambda: look_release_pending),
                 "Generation": staticmethod(lambda: look_generation),
+                "CloseFloor": staticmethod(lambda: look_generation if look_floor is None else look_floor),
             }),
             "MCPHoldControl": type("H", (), {"IsActive": staticmethod(lambda: flags["action_hold"]), "Shutdown": staticmethod(lambda cause: None), "InputInFlight": staticmethod(lambda: flags.get("action_input_in_flight", False))}),
             "MCPVehicleTrace": type("V", (), {"IsActive": staticmethod(lambda: flags["samplers"]), "Abort": staticmethod(lambda cause: None)}),
@@ -1713,6 +1714,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
             "s_ServerLookId": 0,
             "s_ServerReleasePending": False,
             "s_ServerReleaseId": 0,
+            "s_LastSentLookId": 0,
         }
 
         class _UDT(_Msg):
@@ -1725,6 +1727,7 @@ class LeaseCloseCensusTests(unittest.TestCase):
         for sig in (
             "static void Reset()",
             "static int Generation()",
+            "static int CloseFloor()",
             "static bool ServerReleasePending()",
             "static bool IsActive()",
             "static void FlushServerRelease()",
@@ -1744,20 +1747,26 @@ class LeaseCloseCensusTests(unittest.TestCase):
         err = owner_ns["Begin"](object(), (10.0, 0.0, 0.0), 2.0, 41)
         self.assertEqual(err.text, "")
         self.assertEqual(owner_ns["Generation"](), 1)
+        # The start actually sent carries id 1; that is the close floor.
+        self.assertEqual(owner_ns["CloseFloor"](), 1)
         channel["can_store"] = False
         owner_ns["Release"](EnforceString.of("restore"))
         self.assertFalse(owner_ns["IsActive"]())
         self.assertTrue(owner_ns["ServerReleasePending"]())
         self.assertEqual(owner_ns["Generation"](), 2)
+        # The restore release writes no new id: floor stays at the sent id.
+        # A CloseFloor() returning Generation() would read 2 here and fail.
+        self.assertEqual(owner_ns["CloseFloor"](), 1)
 
         # POS client census: pending server release reports look_at residue and
-        # carries Generation() as look_floor; observer stays unsettled.
+        # carries the last sent id as look_floor; observer stays unsettled.
         c_pending = self._client_census(
             client_src,
             look_release_pending=owner_ns["ServerReleasePending"](),
             look_generation=owner_ns["Generation"](),
+            look_floor=owner_ns["CloseFloor"](),
         )
-        self.assertEqual(c_pending.look_floor, 2)
+        self.assertEqual(c_pending.look_floor, 1)
         self.assertEqual(c_pending.state.text, "residue")
         self.assertEqual(
             [e.name.text for e in c_pending.entries if e.state.text != "clean"],
@@ -1773,8 +1782,9 @@ class LeaseCloseCensusTests(unittest.TestCase):
             client_src,
             look_release_pending=owner_ns["ServerReleasePending"](),
             look_generation=owner_ns["Generation"](),
+            look_floor=owner_ns["CloseFloor"](),
         )
-        self.assertEqual(c_flushed.look_floor, 2)
+        self.assertEqual(c_flushed.look_floor, 1)
         self.assertEqual(c_flushed.state.text, "clean")
 
         # POS/NEG server census: live server copy reports look_copy residue and
@@ -3087,6 +3097,7 @@ class LeaseCloseDeliverable5Tests(unittest.TestCase):
                     IsActive=lambda: False,
                     ServerReleasePending=lambda: False,
                     Generation=lambda: 3,
+                    CloseFloor=lambda: 3,
                 ),
                 "MCPHoldControl": hold_ctl,
                 "MCPVehicleTrace": _NS(IsActive=lambda: False, Abort=lambda _c: None),
