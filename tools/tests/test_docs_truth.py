@@ -794,5 +794,198 @@ class NamespaceSourceMismatchDocsTest(unittest.TestCase):
         self.assertIn(_NAMESPACE_SOURCE_MISMATCH_REMEDIATION, readme)
 
 
+_SERVERMOD_DOC = "docs/SERVERMOD.md"
+_SERVERMOD_HEADING = "## Qué tools dejan de funcionar"
+# The one list form the reader accepts: "- Label: `tool_a`, `tool_b`", with a
+# plain-text label (so the item cannot be read as a link reference definition,
+# a nested list, a heading or a quote).
+_SERVERMOD_ITEM = re.compile(
+    r"- [^\W_][\w ,/()-]*: `[a-z0-9_]+`(?:, `[a-z0-9_]+`)*[ \t]*"
+)
+# Any CommonMark list marker, bullet or ordered, so an item written in another
+# form is caught instead of being skipped.
+_SERVERMOD_MARKER = re.compile(r" {0,3}(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+# A line opening or closing a fenced code block, which would turn the list into
+# code.
+_SERVERMOD_FENCE = re.compile(r" {0,3}(?:`{3,}|~{3,})")
+# A level-1 or level-2 heading ends the section.
+_SERVERMOD_SECTION_END = re.compile(r"#{1,2}[ \t]")
+# Raw HTML that hides text or stops the Markdown after it from being parsed
+# (CommonMark 0.31.2 HTML block types 1-5): comments, processing instructions,
+# declarations and CDATA anywhere on a line, and a line that opens a script,
+# pre, style or textarea block. Code spans are not read, so these markers are
+# refused inside backticks too.
+_SERVERMOD_HIDING_HTML = re.compile(
+    r"<!--|<\?|<![A-Za-z]|<!\[CDATA\["
+    r"|^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)",
+    re.IGNORECASE,
+)
+_SERVERMOD_FORM = (
+    "write the list as one block of lines '- Label: `tool_a`, `tool_b`' "
+    "(marker '-', a plain-text label of letters, digits, spaces and , / ( ) -, "
+    "one item per line, plain tool names in single backticks, a blank line "
+    "before and after the block)"
+)
+
+
+class ServerModClientToolsDocsTest(unittest.TestCase):
+    """docs/SERVERMOD.md client-bridge tool list must match the code (964e).
+
+    Ground truth is CLIENT_COMMANDS intersected with the MCP tool names parsed
+    from server.py, plus the MCP tools whose own execution path reaches a client
+    bridge command under another name (tools that only reach owner cleanup via
+    the lease-expiry sweep are excluded). Like LeaseListDocsTest, the reader
+    anchors the section and takes the names in backticks. It accepts one list
+    form only; any other form (another marker, a label that is not plain text,
+    a wrapped or continued item, an item paragraph, an indented line, a code
+    fence before the end of the list, an HTML marker that can hide text, even
+    inside backticks) fails naming the line and the expected form instead of
+    being interpreted. The section ends at the next level-1 or level-2 heading.
+    """
+
+    def test_client_bridge_tool_list_matches_code(self) -> None:
+        from dayz_mcp.loopback import CLIENT_COMMANDS
+
+        indirect_client_tools: dict[str, str] = {
+            "object_delete": (
+                "_client_seat_refusal probes vehicle_telemetry on client; "
+                "fails whole with vehicle_seat_unverified without client bridge"
+            ),
+            "playbook_run": (
+                "runs playbooks whose steps call ui_dialog (ask_restart) and "
+                "vehicle_telemetry (lease_spawn_prepare_trace)"
+            ),
+            "player_teleport": (
+                "probes vehicle_telemetry on client when probeable; skips only "
+                "that seat precheck without client bridge"
+            ),
+            "scene_clear": (
+                "_client_seat_refusal probes vehicle_telemetry on client; "
+                "fails whole with vehicle_seat_unverified without client bridge"
+            ),
+            "session_release": (
+                "explicit release runs cleanup_owner, which when vehicle_active "
+                "enqueues internal vehicle_release with no consumer until TTL "
+                "or binding retirement"
+            ),
+        }
+        lines = _doc(_SERVERMOD_DOC).split("\n")
+        heads = [
+            i for i, line in enumerate(lines) if line.rstrip() == _SERVERMOD_HEADING
+        ]
+        self.assertEqual(
+            len(heads),
+            1,
+            f"{_SERVERMOD_DOC} must have exactly one line '{_SERVERMOD_HEADING}' "
+            f"(found {len(heads)}); the list is read under that heading",
+        )
+        start = heads[0]
+        end = next(
+            (
+                i
+                for i in range(start + 1, len(lines))
+                if _SERVERMOD_SECTION_END.match(lines[i])
+            ),
+            len(lines),
+        )
+        hiding = [
+            f":{i + 1} {lines[i].strip()}"
+            for i in range(end)
+            if _SERVERMOD_HIDING_HTML.search(lines[i])
+        ]
+        self.assertEqual(
+            hiding,
+            [],
+            f"HTML comment, processing instruction, declaration or CDATA markers "
+            f"(even inside backticks: this test does not read code spans), and "
+            f"lines that open a script, pre, style or textarea block, are not "
+            f"supported in {_SERVERMOD_DOC} up to the end of "
+            f"'{_SERVERMOD_HEADING}', because they can hide the heading or the "
+            f"list, or stop them from being read as Markdown: {hiding}; remove or "
+            f"rephrase them (outside backticks, '<' can be written '&lt;'), and "
+            f"{_SERVERMOD_FORM}",
+        )
+        section = range(start + 1, end)
+        indented = [
+            f":{i + 1} {lines[i]}"
+            for i in section
+            if lines[i][:1] in (" ", "\t") and lines[i].strip()
+        ]
+        self.assertEqual(
+            indented,
+            [],
+            f"indented lines are not supported under '{_SERVERMOD_HEADING}' "
+            f"(they would continue a list item or open a code block): "
+            f"{indented}; {_SERVERMOD_FORM}",
+        )
+        items = [i for i in section if _SERVERMOD_MARKER.match(lines[i])]
+        self.assertNotEqual(
+            items, [], f"no list under '{_SERVERMOD_HEADING}'; {_SERVERMOD_FORM}"
+        )
+        fences = [
+            f":{i + 1} {lines[i]}"
+            for i in range(start + 1, items[-1] + 1)
+            if _SERVERMOD_FENCE.match(lines[i])
+        ]
+        self.assertEqual(
+            fences,
+            [],
+            f"fenced code blocks (``` or ~~~) are not supported between "
+            f"'{_SERVERMOD_HEADING}' and the end of its list, because they turn "
+            f"the list into code: {fences}; {_SERVERMOD_FORM}",
+        )
+        inside = [
+            f":{i + 1} {lines[i]}"
+            for i in range(items[0], items[-1] + 1)
+            if i not in items
+        ]
+        self.assertEqual(
+            inside,
+            [],
+            f"the list under '{_SERVERMOD_HEADING}' must be one block of "
+            f"consecutive item lines; found other lines inside it: {inside}; "
+            f"{_SERVERMOD_FORM}",
+        )
+        around = [
+            f":{i + 1} {lines[i]}"
+            for i in (items[0] - 1, items[-1] + 1)
+            if start < i < end and lines[i].strip()
+        ]
+        self.assertEqual(
+            around,
+            [],
+            f"the list under '{_SERVERMOD_HEADING}' needs a blank line before "
+            f"and after it; a line next to an item continues it: {around}; "
+            f"{_SERVERMOD_FORM}",
+        )
+        malformed = [
+            f":{i + 1} {lines[i]}"
+            for i in items
+            if not _SERVERMOD_ITEM.fullmatch(lines[i])
+        ]
+        self.assertEqual(
+            malformed,
+            [],
+            f"list lines under '{_SERVERMOD_HEADING}' in an unsupported form: "
+            f"{malformed}; {_SERVERMOD_FORM}",
+        )
+        listed = set(re.findall(r"`([a-z0-9_]+)`", "\n".join(lines[i] for i in items)))
+        tool_names = _tool_names()
+        self.assertTrue(
+            set(indirect_client_tools) <= tool_names,
+            f"indirect_client_tools names absent from server.py: "
+            f"{sorted(set(indirect_client_tools) - tool_names)}",
+        )
+        expected = (CLIENT_COMMANDS & tool_names) | set(indirect_client_tools)
+        self.assertEqual(
+            listed,
+            expected,
+            f"docs/SERVERMOD.md omits {sorted(expected - listed)} from "
+            f"'Qué tools dejan de funcionar' and lists "
+            f"{sorted(listed - expected)} which do not send a client bridge "
+            f"command",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
