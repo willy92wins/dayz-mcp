@@ -1208,7 +1208,7 @@ class ReadsToolTest(unittest.IsolatedAsyncioTestCase):
                 "SampleNavmeshPosition",
                 "FindPath",
                 "both ends included",
-                "not measured in game yet",
+                "its masks are wrong",
                 "no_navmesh_at_to",
                 "no navmesh the filter admits within snap_radius",
                 "no_path",
