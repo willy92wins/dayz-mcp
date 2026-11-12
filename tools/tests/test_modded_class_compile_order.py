@@ -1,11 +1,25 @@
 """Compile-order guard for `modded class` members (RPT 2026-11-12 00:37).
 
-DayZ compiles every file of a script module (the directories named by
-``files[]`` in ``addon/config.cpp`` under ``$PBOPREFIX$``) by file name, and
-a ``modded class X`` block only sees the members that earlier files of the
-chain (and the vanilla class) have already declared. The offline linter
-accepts a reference to a member declared by a later file of the same chain,
-but the engine does not: the server died at boot with
+Compile order is a HYPOTHESIS, not taken from the engine: the RPT does not
+log per-file loading. The only evidence is ronda-A-server.RPT:125/156
+(2026-11-12 00:37): mcp_lookat.c failed to see a field declared in
+mcp_playermove.c, so LookAt compiled first; this is consistent with
+case-insensitive file-name order (the RPT reports lower-cased paths) and is
+what this test assumes. Refuted by: an in-game run where a field declared in
+a later-named file is visible from an earlier-named one, or where
+MCP_ActionCursor.c / MCPBridge.c (5_Mission, where lower() and ordinal
+order disagree) show the other order.
+
+That disagreement is real in 5_Mission: ``MCP_`` sorts before ``MCPBridge``
+with ``lower()`` (``_`` < ``b``) but after it in ordinal ASCII order
+(``B`` < ``_``). This test therefore checks BOTH orders and fails if either
+one is violated; a member is safe only when a declaration in the same or an
+earlier file exists under both orders.
+
+A ``modded class X`` block is assumed to see only the members that earlier
+files of the chain (and the vanilla class) have already declared. The
+offline linter accepts a reference to a member declared by a later file of
+the same chain, but the engine did not: the server died at boot with
 
     DayZ_MCP/scripts/4_World/mcp_lookat.c(1171): Can't find variable 'm_MCPConnGen'
     SCRIPT (E): Can't compile "World" script module!
@@ -13,17 +27,21 @@ but the engine does not: the server died at boot with
 because ``MCPLookCloseServer`` (MCP_LookAt.c) read ``m_MCPConnGen``, declared
 only in MCP_PlayerMove.c, which compiles after MCP_LookAt.c.
 
-This test walks each module's files in that same name order and fails when
+This test walks each module's files in both name orders above and fails when
 code inside a ``modded class X`` block uses a field, or calls a non-override
 method, whose only declaration in this repo is another ``modded class X``
 in a file that compiles later. Override methods are not reported: the
 vanilla class already declares them, so an earlier call binds to vanilla.
-Comments and string literals are stripped before scanning, so a mention in
-prose is not a use.
+The method check is also a hypothesis: the RPT only covers fields
+(``Can't find variable``); there is no evidence that the engine fails when
+calling a non-override method declared in a later file, so a method-only
+failure may be a false positive. Comments and string literals are stripped
+before scanning, so a mention in prose is not a use.
 """
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -32,7 +50,8 @@ from tests._addon_paths import addon_root
 _MODDED_RE = re.compile(r"\bmodded\s+class\s+(\w+)")
 _FIELD_RE = re.compile(
     r"^\s*(?:protected|private|public)?\s*(?:static\s+)?(?:ref\s+)?"
-    r"(?:const\s+)?(?:autoptr\s+)?[\w\[\]]+(?:\s*<.*>)?\s+(m_\w+)\s*(?:=[^;]*)?;\s*$"
+    r"(?:const\s+)?(?:autoptr\s+)?[\w\[\]]+(?:\s*<.*>)?\s+"
+    r"((?:m_\w+\s*(?:=[^;,]*)?)(?:\s*,\s*m_\w+\s*(?:=[^;,]*)?)*)\s*;\s*$"
 )
 _METHOD_RE = re.compile(
     r"^\s*(override\s+)?(?:protected\s+|private\s+|public\s+)?(?:static\s+)?"
@@ -143,7 +162,8 @@ def _declarations(block: list[tuple[int, str]]) -> list[tuple[str, str]]:
             continue
         field = _FIELD_RE.match(line)
         if field:
-            found.append((field.group(1), "field"))
+            for name in re.findall(r"\bm_\w+", field.group(1)):
+                found.append((name, "field"))
             continue
         method = _METHOD_RE.match(line)
         if method and "(" in line:
@@ -152,50 +172,117 @@ def _declarations(block: list[tuple[int, str]]) -> list[tuple[str, str]]:
     return found
 
 
-def _violations() -> list[str]:
+def _violations(
+    module_dirs: list[Path] | None = None, root: Path | None = None
+) -> list[str]:
+    root = root or addon_root()
     problems: list[str] = []
-    for module_dir in _module_dirs():
-        files = sorted(module_dir.glob("*.c"), key=lambda p: p.name.lower())
-        order = {path.name.lower(): idx for idx, path in enumerate(files)}
-        # (class, member) -> (earliest file index, file name, kinds)
-        declared: dict[tuple[str, str], tuple[int, str, set[str]]] = {}
-        parsed: list[tuple[Path, list[tuple[str, int, list[tuple[int, str]]]]]] = []
-        for path in files:
-            text = _strip_comments_and_strings(path.read_text(encoding="utf-8"))
-            blocks = _modded_blocks(text.splitlines())
-            parsed.append((path, blocks))
-            for class_name, _start, block in blocks:
-                for member, kind in _declarations(block):
-                    key = (class_name, member)
-                    idx = order[path.name.lower()]
-                    if key not in declared or idx < declared[key][0]:
-                        kinds = {kind} if key not in declared else declared[key][2] | {kind}
-                        declared[key] = (idx, path.name, kinds)
-                    else:
-                        declared[key][2].add(kind)
-        for path, blocks in parsed:
-            idx = order[path.name.lower()]
-            for class_name, _start, block in blocks:
-                for lineno, line in block:
-                    for (decl_class, member), (decl_idx, decl_file, kinds) in declared.items():
-                        if decl_class != class_name or decl_idx <= idx:
-                            continue
-                        if member.startswith("m_"):
-                            used = re.search(r"\b" + re.escape(member) + r"\b", line)
+    seen: set[str] = set()
+    for module_dir in (module_dirs if module_dirs is not None else _module_dirs()):
+        unsorted = list(module_dir.glob("*.c"))
+        # Check both orders: lower() and ordinal disagree in 5_Mission.
+        for key in (lambda p: p.name.lower(), lambda p: p.name):
+            files = sorted(unsorted, key=key)
+            # (class, member) -> (earliest file index, file name, kinds)
+            declared: dict[tuple[str, str], tuple[int, str, set[str]]] = {}
+            parsed: list[tuple[Path, list[tuple[str, int, list[tuple[int, str]]]]]] = []
+            for idx, path in enumerate(files):
+                text = _strip_comments_and_strings(path.read_text(encoding="utf-8"))
+                blocks = _modded_blocks(text.splitlines())
+                parsed.append((path, blocks))
+                for class_name, _start, block in blocks:
+                    for member, kind in _declarations(block):
+                        decl_key = (class_name, member)
+                        if decl_key not in declared:
+                            declared[decl_key] = (idx, path.name, {kind})
                         else:
-                            if kinds != {"method"}:
+                            declared[decl_key][2].add(kind)
+            for idx, (path, blocks) in enumerate(parsed):
+                for class_name, _start, block in blocks:
+                    for lineno, line in block:
+                        for (decl_class, member), (decl_idx, decl_file, kinds) in declared.items():
+                            if decl_class != class_name or decl_idx <= idx:
                                 continue
-                            used = re.search(r"\b" + re.escape(member) + r"\s*\(", line)
-                            if used and line[: used.start()].rstrip().endswith("super."):
-                                used = None
-                        if used:
-                            rel = path.relative_to(addon_root())
-                            problems.append(
-                                f"{rel}:{lineno}: modded class {class_name} uses "
-                                f"{member}, only declared in {decl_file} "
-                                f"(compiles later): {line.strip()}"
-                            )
+                            if member.startswith("m_"):
+                                used = re.search(r"\b" + re.escape(member) + r"\b", line)
+                            else:
+                                if kinds != {"method"}:
+                                    continue
+                                used = re.search(r"\b" + re.escape(member) + r"\s*\(", line)
+                                if used and line[: used.start()].rstrip().endswith("super."):
+                                    used = None
+                            if used:
+                                rel = path.relative_to(root)
+                                problem = (
+                                    f"{rel}:{lineno}: modded class {class_name} uses "
+                                    f"{member}, only declared in {decl_file} "
+                                    f"(compiles later): {line.strip()}"
+                                )
+                                if problem not in seen:
+                                    seen.add(problem)
+                                    problems.append(problem)
     return problems
+
+
+_USE = (
+    "modded class PlayerBase\n{\n\tbool MCPLookCloseServer(int g)\n\t{\n"
+    "\t\treturn g == m_MCPConnGen;\n\t}\n}\n"
+)
+_DECL = "modded class PlayerBase\n{\n\tprotected int m_MCPConnGen;\n}\n"
+_DECL_MULTI = (
+    "modded class PlayerBase\n{\n\tprotected int m_MCPConnGen, m_Other;\n}\n"
+)
+
+
+class CompileOrderFixtureTests(unittest.TestCase):
+    def _run(self, files: dict[str, str]) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            mod = Path(tmp) / "4_World"
+            mod.mkdir()
+            for name, body in files.items():
+                (mod / name).write_text(body, encoding="utf-8", newline="\n")
+            return _violations([mod], Path(tmp))
+
+    def test_pos_use_before_later_declaration_fails(self) -> None:
+        # Caso RPT 2026-11-12: LookAt usa, PlayerMove (posterior) declara.
+        got = self._run({"MCP_LookAt.c": _USE, "MCP_PlayerMove.c": _DECL})
+        self.assertEqual(len(got), 1)
+        self.assertIn("m_MCPConnGen", got[0])
+
+    def test_neg_declared_in_earlier_file_passes(self) -> None:
+        self.assertEqual(
+            self._run({"MCP_InventoryMove.c": _DECL, "MCP_LookAt.c": _USE}), []
+        )
+
+    def test_multiple_declarations_earlier_and_later_passes(self) -> None:
+        self.assertEqual(
+            self._run(
+                {
+                    "MCP_InventoryMove.c": _DECL,
+                    "MCP_LookAt.c": _USE,
+                    "MCP_PlayerMove.c": _DECL,
+                }
+            ),
+            [],
+        )
+
+    def test_multi_member_declaration_in_later_file_fails(self) -> None:
+        # Mutante M5 de D-r14: `int m_MCPConnGen, m_Other;` debe registrarse.
+        got = self._run({"MCP_LookAt.c": _USE, "MCP_PlayerMove.c": _DECL_MULTI})
+        self.assertEqual(len(got), 1)
+        self.assertIn("m_MCPConnGen", got[0])
+
+    def test_multi_member_declaration_in_earlier_file_passes(self) -> None:
+        self.assertEqual(
+            self._run({"MCP_InventoryMove.c": _DECL_MULTI, "MCP_LookAt.c": _USE}),
+            [],
+        )
+
+    def test_ordinal_only_violation_fails(self) -> None:
+        # lower(): MCP_Decl antes que MCPBridge (pasa); ordinal: al reves (falla).
+        got = self._run({"MCP_Decl.c": _DECL, "MCPBridge.c": _USE})
+        self.assertEqual(len(got), 1)
+        self.assertIn("m_MCPConnGen", got[0])
 
 
 class ModdedClassCompileOrderTests(unittest.TestCase):
