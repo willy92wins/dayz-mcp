@@ -125,12 +125,12 @@ pasando por `cleanup` en `tools/dayz_mcp/daemon.py:541-552` y `cleanup_begin`
 en `tools/dayz_mcp/daemon.py:89-97` hasta `cleanup_owner` en
 `tools/dayz_mcp/loopback.py:8220-8482`, que retira holds en cola en
 `tools/dayz_mcp/loopback.py:8247`). Sin sondeos del cliente, las limpiezas
-internas `lease_close_client` (`tools/dayz_mcp/loopback.py:6325-6378` exige
-censo anunciado), `action_hold_cancel` (`tools/dayz_mcp/loopback.py:8173-8200`)
-y `player_look_at_release` (`tools/dayz_mcp/loopback.py:6189-6202`, solo para
+internas `lease_close_client` (`tools/dayz_mcp/loopback.py:6331-6384` exige
+censo anunciado), `action_hold_cancel` (`tools/dayz_mcp/loopback.py:8179-8206`)
+y `player_look_at_release` (`tools/dayz_mcp/loopback.py:6195-6208`, solo para
 comandos ya entregados) no llegan a encolarse, y `camera_path_release` ya no se
 encola por lease: con bridge v13 la trayectoria la para el cierre del cliente
-(`addon/scripts/5_Mission/MCPClientBridge.c:9762-9767`), que sin censo tampoco
+(`addon/scripts/5_Mission/MCPClientBridge.c:10011-10016`), que sin censo tampoco
 se publica. Si sin `--require-version` el lease admitió
 `vehicle_trace(mode="start")` o un `vehicle_control` no nulo para un cliente
 `BOUND` (`vehicle_active` en
@@ -139,23 +139,23 @@ el fin del lease abre una ronda de cierre, cosa que hace si el lease entregó
 alguna mutación o quedan filas debidas (`_open_lease_end_round_locked` en
 `tools/dayz_mcp/session_coordination.py:4711-4753`). Con ronda, el cierre
 agregado sustituye al `vehicle_release` y `cleanup_owner` no lo encola
-(`tools/dayz_mcp/loopback.py:8148-8162` y
-`tools/dayz_mcp/loopback.py:8378-8387`); sin censo del cliente, su cierre no se
-publica (`close_support_unknown` en `tools/dayz_mcp/loopback.py:6366-6377` y
-`tools/dayz_mcp/loopback.py:8234-8247`), así que la fila del cliente queda
+(`tools/dayz_mcp/loopback.py:8154-8168` y
+`tools/dayz_mcp/loopback.py:8384-8393`); sin censo del cliente, su cierre no se
+publica (`close_support_unknown` en `tools/dayz_mcp/loopback.py:6372-6383` y
+`tools/dayz_mcp/loopback.py:8240-8253`), así que la fila del cliente queda
 debida (`tools/dayz_mcp/session_coordination.py:1854-1859`) y sale en
 `unconfirmed` de `lease_end`. Sin ronda, `cleanup_owner` encola
 `vehicle_release` interno en `_fire_and_forget_ids`
-(`tools/dayz_mcp/loopback.py:3257` y `tools/dayz_mcp/loopback.py:8378-8387`)
+(`tools/dayz_mcp/loopback.py:3263` y `tools/dayz_mcp/loopback.py:8384-8393`)
 sin consumidor: exento de la valla del propietario
-(`tools/dayz_mcp/loopback.py:4604-4610` y
-`tools/dayz_mcp/loopback.py:4628-4629`), permanece en `_bound_queues` hasta
+(`tools/dayz_mcp/loopback.py:4610-4616` y
+`tools/dayz_mcp/loopback.py:4634-4635`), permanece en `_bound_queues` hasta
 que un `/poll` de cualquier peer (`record_poll` en
-`tools/dayz_mcp/loopback.py:7055-7060` hacia `_expire_stale_commands` en
-`tools/dayz_mcp/loopback.py:7477-7498`) lo descarta como `stale_discarded`
+`tools/dayz_mcp/loopback.py:7061-7066` hacia `_expire_stale_commands` en
+`tools/dayz_mcp/loopback.py:7483-7504`) lo descarta como `stale_discarded`
 pasados `COMMAND_TTL_S` (`30.0` s, `tools/dayz_mcp/loopback.py:459`, sin
-guardar resultado fallido en `tools/dayz_mcp/loopback.py:7523-7532`) o hasta
-que `_retire_instance_locked` (`tools/dayz_mcp/loopback.py:4552-4581`) retira
+guardar resultado fallido en `tools/dayz_mcp/loopback.py:7529-7538`) o hasta
+que `_retire_instance_locked` (`tools/dayz_mcp/loopback.py:4558-4587`) retira
 el enlace del cliente (`binding_retired`), quedando en cola si no ocurre
 ninguno de los dos.
 
@@ -173,23 +173,23 @@ puede expirar un lease ya vencido mediante `_expire_due` (`authorize` en
 un lease vencido puede encolarla cualquiera que sea la siguiente llamada que
 llegue al daemon. Sin el bridge del cliente, esa limpieza corre la misma suerte
 que la del cierre explícito anterior: las limpiezas internas que exigen censo
-anunciado o comandos ya entregados (`tools/dayz_mcp/loopback.py:6189-6202`,
-`tools/dayz_mcp/loopback.py:6325-6378` y `tools/dayz_mcp/loopback.py:8173-8200`)
+anunciado o comandos ya entregados (`tools/dayz_mcp/loopback.py:6195-6208`,
+`tools/dayz_mcp/loopback.py:6331-6384` y `tools/dayz_mcp/loopback.py:8179-8206`)
 no llegan a encolarse, y si el lease vencido había dejado `vehicle_active`
 activo (`tools/dayz_mcp/session_coordination.py:1679-1686` y
 `tools/dayz_mcp/session_coordination.py:2356-2363`), el `vehicle_release`
 interno solo se encola sin ronda de cierre
-(`tools/dayz_mcp/loopback.py:8378-8387`). Con ronda, la fila del cliente queda
+(`tools/dayz_mcp/loopback.py:8384-8393`). Con ronda, la fila del cliente queda
 debida como en el cierre explícito. Sin ronda, el release queda en
-`_bound_queues` y `_fire_and_forget_ids` (`tools/dayz_mcp/loopback.py:3257`)
+`_bound_queues` y `_fire_and_forget_ids` (`tools/dayz_mcp/loopback.py:3263`)
 sin consumidor, exento de la valla del propietario
-(`tools/dayz_mcp/loopback.py:4604-4610` y
-`tools/dayz_mcp/loopback.py:4628-4629`), hasta que cualquier `/poll`
-(`tools/dayz_mcp/loopback.py:7055-7060` y
-`tools/dayz_mcp/loopback.py:7477-7498`) lo descarta como `stale_discarded`
+(`tools/dayz_mcp/loopback.py:4610-4616` y
+`tools/dayz_mcp/loopback.py:4634-4635`), hasta que cualquier `/poll`
+(`tools/dayz_mcp/loopback.py:7061-7066` y
+`tools/dayz_mcp/loopback.py:7483-7504`) lo descarta como `stale_discarded`
 pasados `COMMAND_TTL_S` (`30.0` s, `tools/dayz_mcp/loopback.py:459` y
-`tools/dayz_mcp/loopback.py:7523-7532`) o hasta que `_retire_instance_locked`
-(`tools/dayz_mcp/loopback.py:4552-4581`) retira el enlace (`binding_retired`),
+`tools/dayz_mcp/loopback.py:7529-7538`) o hasta que `_retire_instance_locked`
+(`tools/dayz_mcp/loopback.py:4558-4587`) retira el enlace (`binding_retired`),
 quedando en cola si no ocurre ninguno de los dos.
 
 En la medida del 11/11, `ui_tree` devolvió al momento `ok: false`,

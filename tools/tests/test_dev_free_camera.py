@@ -75,6 +75,7 @@ PROCESS_HOOK = "override bool MCP_ProcessJob(MCPJob job)"
 SUCCESS_HOOK = "override void MCP_PostJobSuccess(MCPJob job)"
 FAILURE_HOOK = "override void MCP_PostJobFailure(MCPJob job)"
 TIMEOUT_HOOK = "override void MCP_PostJobTimeout(MCPJob job)"
+RELEASE = "protected void ReleaseCamera()"
 
 # The checks in the brief's order (a to e), then the toggle and the reads.
 DISPATCH_STEPS = (
@@ -294,6 +295,46 @@ def assert_amended_zones(dispatch: str) -> None:
     if zone_two != _ZONE_TWO_PINNED:
         raise AssertionError(
             f"zone 2 of DispatchDevFreeCameraSet does not match its pinned literal: {zone_two!r} != {_ZONE_TWO_PINNED!r}"
+        )
+
+
+# Amendment B2: ReleaseCamera's free-camera block, normalized as the B1
+# zones are. It is the only unconditional turn-off of the singleton.
+_LEASE_CLOSE_FREE_CAMERA_BLOCK = (
+    "FreeDebugCamerafreeCam=FreeDebugCamera.GetInstance();"
+    "if(freeCam){freeCam.SetActive(false);}"
+)
+
+
+def assert_lease_close_turns_the_free_camera_off(release_body: str) -> None:
+    """ReleaseCamera turns the free camera off whoever turned it on.
+
+    The block sits at the method's top level (not inside the
+    ``if (!m_Shutdown)`` early-return block), after FinishCameraHandoff()
+    and before DeleteOwnedCamera(), guarded only by ``if (freeCam)``.
+    """
+    code = _without_comments(release_body)
+    normalized = _normalize_pinned(release_body)
+    if normalized.count(_LEASE_CLOSE_FREE_CAMERA_BLOCK) != 1:
+        raise AssertionError(
+            "ReleaseCamera's free-camera block does not match its pinned literal or does not appear once: "
+            f"{_LEASE_CLOSE_FREE_CAMERA_BLOCK!r} occurs {normalized.count(_LEASE_CLOSE_FREE_CAMERA_BLOCK)} time(s)"
+        )
+    decl = "FreeDebugCamera freeCam = FreeDebugCamera.GetInstance();"
+    finish = code.find("FinishCameraHandoff();")
+    delete = code.find("DeleteOwnedCamera();")
+    at = code.find(decl)
+    if finish < 0 or delete < 0 or at < 0 or not finish < at < delete:
+        raise AssertionError(
+            "ReleaseCamera's free-camera block must sit after FinishCameraHandoff(); and before DeleteOwnedCamera();"
+        )
+    try:
+        shutdown = _if_body(code, "!m_Shutdown")
+    except AssertionError:
+        raise AssertionError("ReleaseCamera's if (!m_Shutdown) block is missing or not unique") from None
+    if decl in shutdown or "freeCam.SetActive(false);" in shutdown:
+        raise AssertionError(
+            "ReleaseCamera's free-camera block must sit at the method's top level, not inside if (!m_Shutdown)"
         )
 
 
@@ -525,6 +566,7 @@ class DevFreeCameraEnforceTest(unittest.TestCase):
         self.process = _method_body(self.source, PROCESS)
         self.post = _method_body(self.source, POST)
         self.exclusive = _method_body(self.source, EXCLUSIVE)
+        self.release = _method_body(self.source, RELEASE)
 
     def test_checks_run_in_order_before_the_one_toggle(self) -> None:
         assert_dispatch_contract(self.dispatch)
@@ -575,6 +617,48 @@ class DevFreeCameraEnforceTest(unittest.TestCase):
                 self.assertNotEqual(mutated, self.dispatch, f"{name} did not change the dispatcher")
                 with self.assertRaises(AssertionError):
                     assert_amended_zones(mutated)
+
+    # Amendment B2: the lease close turns the free camera off through
+    # ReleaseCamera, whoever turned it on. The rest is already pinned by
+    # main and is not duplicated here: the close's order (ReleaseCamera()
+    # before BuildLeaseCloseCensus(command.args)) by
+    # test_lease_close_bridge.py LeaseCloseCensusTests
+    # .test_k26_k28_dispatch_order_and_observer, the handoff path's
+    # freeCam.SetActive(false); by test_fb_f47b_release_render.py
+    # test_handoff_finishes_free_off_then_simulation_on_then_delete, and
+    # ReleaseCamera naming FreeDebugCamera.GetInstance() with its
+    # SetActive(false) before DeleteOwnedCamera(); by test_guards_bridge.py
+    # BridgeGuardsTest
+    # .test_g7_camera_get_distinguishes_liberated_from_illegible.
+    def test_the_lease_close_turns_the_free_camera_off(self) -> None:
+        assert_lease_close_turns_the_free_camera_off(self.release)
+        self.assertEqual(self.release.count("if (freeCam)"), 1, "the free-camera guard does not have the expected shape")
+        owned = self.release.replace("if (freeCam)", "if (freeCam && m_ActiveCam == freeCam)", 1)
+        self.assertNotEqual(owned, self.release, "the ownership guard did not change ReleaseCamera")
+        with self.assertRaises(AssertionError):
+            assert_lease_close_turns_the_free_camera_off(owned)
+        self.assertEqual(
+            self.release.count("freeCam.SetActive(false);"),
+            1,
+            "the free-camera turn-off does not have the expected shape",
+        )
+        removed = self.release.replace("freeCam.SetActive(false);", "", 1)
+        with self.assertRaises(AssertionError):
+            assert_lease_close_turns_the_free_camera_off(removed)
+        decl = "FreeDebugCamera freeCam = FreeDebugCamera.GetInstance();"
+        self.assertEqual(self.release.count(decl), 1, "the free-camera declaration does not have the expected shape")
+        start = self.release.index(decl)
+        end = self.release.index("freeCam.SetActive(false);", start)
+        end = self.release.index("}", end) + 1
+        block = self.release[start:end]
+        without_block = self.release[:start] + self.release[end:]
+        shutdown = "if (!m_Shutdown)"
+        self.assertEqual(without_block.count(shutdown), 1, "the shutdown block does not have the expected shape")
+        brace = without_block.index("{", without_block.index(shutdown))
+        moved = without_block[: brace + 1] + "\n" + block + without_block[brace + 1 :]
+        self.assertNotEqual(moved, self.release, "moving the block inside if (!m_Shutdown) did not change ReleaseCamera")
+        with self.assertRaises(AssertionError):
+            assert_lease_close_turns_the_free_camera_off(moved)
 
     def test_dispatch_answers_bad_args_before_the_in_game_gate(self) -> None:
         chain = _method_body(self.source, DISPATCH_CHAIN)
@@ -903,7 +987,9 @@ class DevFreeCameraToolTest(unittest.IsolatedAsyncioTestCase):
             "aborted",
             "turning it on ends a playing camera_path_play aborted",
             "restore_gameplay turns it off",
-            "stays on when the lease ends",
+            "the lease close turns it off as restore_gameplay does",
+            "both through ReleaseCamera",
+            "also when the player turned it on with the key",
             "dev_free_camera {active_before, active_after}",
             "bad_args",
             "client_not_in_game",
@@ -915,6 +1001,7 @@ class DevFreeCameraToolTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, description)
+        self.assertNotIn("stays on when the lease ends", description)
 
     async def test_active_true_and_false_reach_the_client_as_sent(self) -> None:
         for active in (True, False):
