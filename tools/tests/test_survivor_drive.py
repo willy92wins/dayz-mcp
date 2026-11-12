@@ -41,6 +41,7 @@ COMMAND = "survivor_drive"
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 DRIVE = addon_root() / "scripts" / "5_Mission" / "MCP_SurvivorDrive.c"
 MOVE = addon_root() / "scripts" / "4_World" / "MCP_PlayerMove.c"
+LOOK = addon_root() / "scripts" / "4_World" / "MCP_LookAt.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 # The arg-contract hash of main before this verb: the PBO a user may still run.
 PREVIOUS_ARG_CONTRACT_HASH = "4f90284258023d98"
@@ -265,6 +266,14 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(part, self.tool.description)
         self.assertNotIn("still runs, and its release is queued.", self.tool.description)
+
+    def test_the_description_says_the_survivor_turns_its_body_toward_heading(self) -> None:
+        for part in (
+            "The survivor turns its body toward heading with OverrideAimChangeX pulses and then walks forward.",
+            "Measured on 2026-11-11 before the turn pulse (DayZDiag 1.30.164289, SurvivorM_Mirek):",
+            "Fifty driven at once took the server from 2433 to 1899 average fps.",
+        ):
+            self.assertIn(part, self.tool.description)
 
     async def test_each_gait_and_release_reach_the_server_as_the_ingress_takes_them(self) -> None:
         for arguments, wire in (
@@ -788,6 +797,28 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
         for absent in ("OverrideMovementSpeed(", "OverrideMovementAngle(", "MCPResult", "GetGame().GetPlayer"):
             self.assertNotIn(absent, self.drive)
 
+    def test_the_drive_turns_the_body_through_the_look_at_helpers(self) -> None:
+        apply = _method_body(
+            self.drive, "protected static void Apply(PlayerBase survivor, MCPSurvivorDriveEntry entry)"
+        )
+        _in_order(
+            self,
+            apply,
+            "MCPPlayerMoveControl.Enable(hic, entry.speed, angle);",
+            "error = MCPLookAtControl.TieBreakDeg(MCPPlayerMoveControl.WrapDeg180(entry.heading_deg - compass));",
+            "if (!MCPLookAtControl.WithinBand(error))",
+            "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ONE_FRAME, MCPLookAtControl.ServerPulseX(error));",
+        )
+        disable = _method_body(self.drive, "protected static void Disable(PlayerBase survivor)")
+        _in_order(
+            self,
+            disable,
+            "MCPPlayerMoveControl.Disable(hic);",
+            "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ENABLED, 0.0);",
+        )
+        self.assertEqual(disable.count("OverrideAimChangeX("), 1)
+        self.assertNotIn("OverrideAimChangeX(HumanInputControllerOverrideType.DISABLED", disable)
+
     def test_release_disables_only_a_driven_id(self) -> None:
         release = _method_body(self.drive, "static void Release(MCPBridge bridge, int objectId)")
         _in_order(
@@ -922,6 +953,12 @@ MOVE_HELPERS = (
     "static void Enable(HumanInputController hic, float speed, float angleDeg)",
     "static void Disable(HumanInputController hic)",
 )
+LOOK_HELPERS = (
+    "protected static float ClampPulse(float value)",
+    "static bool WithinBand(float errorDeg)",
+    "static float ServerPulseX(float errorDeg)",
+    "static float TieBreakDeg(float errorDeg)",
+)
 # The translator has no statics and no `new`: the registry becomes G.s_Driven
 # and the two constructors factory calls; nothing else changes.
 _DRIVE_REWRITES = (
@@ -929,22 +966,30 @@ _DRIVE_REWRITES = (
     (re.compile(r"new array<ref MCPSurvivorDriveEntry>\(\)"), "NewArray()"),
     (re.compile(r"new MCPSurvivorDriveEntry\(\)"), "NewEntry()"),
 )
-_OVERRIDE = SimpleNamespace(DISABLED="DISABLED", ENABLED="ENABLED")
+_OVERRIDE = SimpleNamespace(DISABLED="DISABLED", ENABLED="ENABLED", ONE_FRAME="ONE_FRAME")
 
 
 def _method_name(signature: str) -> str:
     return signature[: signature.index("(")].split()[-1]
 
 
+def _look_constants(source: str) -> dict[str, float]:
+    return {
+        name: float(value)
+        for name, value in re.findall(r"static const (?:float|int) (\w+) = ([0-9.]+);", source)
+    }
+
+
 class _Controller:
-    """A survivor's server HumanInputController: GetHeadingAngle in radians
-    and the two movement overrides, each the last (type, value) it was given,
-    with every call in `calls`."""
+    """A survivor's server HumanInputController: GetHeadingAngle in radians,
+    the two movement overrides and OverrideAimChangeX, each the last
+    (type, value) it was given, with every call in `calls`."""
 
     def __init__(self) -> None:
         self.heading_rad = 0.0
         self.speed: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
         self.angle: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
+        self.aim_x: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
         self.calls: list[tuple[str, str, float]] = []
 
     def face(self, compass_deg: float) -> None:
@@ -961,6 +1006,10 @@ class _Controller:
     def OverrideMovementAngle(self, kind: str, value: float) -> None:
         self.calls.append(("angle", kind, value))
         self.angle = (kind, value)
+
+    def OverrideAimChangeX(self, kind: str, value: float) -> None:
+        self.calls.append(("aim_x", kind, value))
+        self.aim_x = (kind, value)
 
     def driving(self) -> tuple[float, float] | None:
         """(speed, angle) while both overrides are ENABLED, None while both
@@ -1080,24 +1129,40 @@ class _DriveModel:
     def __init__(self) -> None:
         drive = DRIVE.read_text(encoding="utf-8")
         move = MOVE.read_text(encoding="utf-8")
+        look_source = LOOK.read_text(encoding="utf-8")
         self.G = SimpleNamespace(s_Driven=None)
         self.objects: dict[int, object] = {}
         self._next_command_id = 100
         self.bridge = SimpleNamespace(RuntimeObjectById=self.objects.get)
+        enforce_math = SimpleNamespace(RAD2DEG=180.0 / math.pi, DEG2RAD=math.pi / 180.0)
         helpers: dict[str, object] = {
-            "Math": SimpleNamespace(RAD2DEG=180.0 / math.pi),
+            "Math": enforce_math,
             "HumanInputControllerOverrideType": _OVERRIDE,
         }
         for signature in MOVE_HELPERS:
             translate(move, signature, helpers)
+        look: dict[str, object] = {
+            "Math": enforce_math,
+            **_look_constants(look_source),
+        }
+        for signature in LOOK_HELPERS:
+            translate(look_source, signature, look)
         entry = declared_fields(drive, "MCPSurvivorDriveEntry")
         self.namespace: dict[str, object] = {
             "G": self.G,
             "NewArray": _Array,
             "NewEntry": lambda: SimpleNamespace(**entry),
             "PlayerBase": SimpleNamespace(Cast=lambda item: item if isinstance(item, _Survivor) else None),
+            "HumanInputControllerOverrideType": _OVERRIDE,
             "MCPPlayerMoveControl": SimpleNamespace(
                 **{_method_name(signature): helpers[_method_name(signature)] for signature in MOVE_HELPERS}
+            ),
+            "MCPLookAtControl": SimpleNamespace(
+                **{
+                    _method_name(signature): look[_method_name(signature)]
+                    for signature in LOOK_HELPERS
+                    if not signature.startswith("protected ")
+                }
             ),
         }
         for signature in DRIVE_METHODS:
@@ -1406,9 +1471,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(self.model.registry(), [])
         self.assertIs(self.model.call("IsDriven", 7), False)
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(
-            survivor.controller.calls[-2:],
-            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+            survivor.controller.calls[-3:],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
         )
         calls = len(survivor.controller.calls)
         self.model.call("Tick", self.model.bridge)
@@ -1436,12 +1506,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.model.call("Tick", self.model.bridge)
         self.assertEqual(self.model.registry(), [(8, 0.0, 2.0)])
         self.assertIsNone(dying.controller.driving())
+        self.assertEqual(dying.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(deleted.controller.driving(), (2.0, 0.0))
         # object_delete calls OnObjectGone while the id still resolves, then
         # deletes the object (DispatchObjectDelete).
         self.model.call("OnObjectGone", self.model.bridge, 8)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(deleted.controller.driving())
+        self.assertEqual(deleted.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
 
     def test_a_driven_id_that_no_longer_resolves_leaves_the_registry(self) -> None:
         self.model.spawn(9)
@@ -1474,6 +1546,8 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIs(self.model.call("IsDriven", 7), False)
         self.assertIsNone(first.controller.driving())
         self.assertIsNone(second.controller.driving())
+        self.assertEqual(first.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+        self.assertEqual(second.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         calls = (len(first.controller.calls), len(second.controller.calls))
         self.model.call("Tick", self.model.bridge)
         self.assertEqual((len(first.controller.calls), len(second.controller.calls)), calls)
@@ -1498,9 +1572,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 43), True)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(
             survivor.controller.calls[writes:],
-            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
         )
         writes = self.model.writes()
         self.model.call("Tick", self.model.bridge)
@@ -1737,6 +1816,152 @@ class SurvivorDriveModelTest(unittest.TestCase):
             with self.subTest(speed=speed):
                 self.assertIs(self.model.call("IsDriveSpeed", speed), expected)
 
+    def test_apply_pulses_aim_right_toward_heading_and_keeps_movement_angle(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        survivor = self.model.spawn(7)
+        pulse_90 = look.ServerPulseX(90.0)
+        self.assertGreater(pulse_90, 0.0)
+        self.model.drive(7, 90.0, 1.0)
+        self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
+        self.assertEqual(
+            survivor.controller.calls,
+            [
+                ("speed", _OVERRIDE.ENABLED, 1.0),
+                ("angle", _OVERRIDE.ENABLED, 90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_90),
+            ],
+        )
+        small = self.model.spawn(8)
+        pulse_10 = look.ServerPulseX(10.0)
+        self.assertGreater(pulse_10, 0.0)
+        self.assertLess(pulse_10, pulse_90)
+        self.model.drive(8, 10.0, 2.0)
+        self.assertEqual(small.controller.driving(), (2.0, 10.0))
+        self.assertEqual(
+            small.controller.calls,
+            [
+                ("speed", _OVERRIDE.ENABLED, 2.0),
+                ("angle", _OVERRIDE.ENABLED, 10.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_10),
+            ],
+        )
+        left = self.model.spawn(9)
+        pulse_left = look.ServerPulseX(-90.0)
+        self.assertLess(pulse_left, 0.0)
+        self.model.drive(9, -90.0, 3.0)
+        self.assertEqual(left.controller.driving(), (3.0, -90.0))
+        self.assertEqual(
+            left.controller.calls,
+            [
+                ("speed", _OVERRIDE.ENABLED, 3.0),
+                ("angle", _OVERRIDE.ENABLED, -90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_left),
+            ],
+        )
+
+    def test_within_the_band_apply_pulses_no_aim_and_still_steers_movement(self) -> None:
+        for object_id, facing, heading, speed, expected_angle in (
+            (7, 0.0, 0.5, 1.0, 0.5),
+            (8, 0.0, -0.5, 1.0, -0.5),
+            (9, 0.0, 1.0, 1.0, 1.0),
+            (10, 0.0, -1.0, 1.0, -1.0),
+            (11, 89.5, 90.0, 2.0, 0.5),
+        ):
+            with self.subTest(facing=facing, heading=heading):
+                survivor = self.model.spawn(object_id)
+                if facing != 0.0:
+                    survivor.controller.face(facing)
+                self.model.drive(object_id, heading, speed)
+                self.assertEqual(survivor.controller.driving(), (speed, expected_angle))
+                self.assertEqual([call for call in survivor.controller.calls if call[0] == "aim_x"], [])
+
+    def test_tie_break_at_180_and_minus_180_pulses_aim_right(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        pulse_180 = look.ServerPulseX(180.0)
+        self.assertGreater(pulse_180, 0.0)
+        for object_id, facing, heading, speed in (
+            (7, 0.0, 180.0, 1.0),
+            (8, 0.0, -180.0, 1.0),
+            (9, 180.0, 0.0, 2.0),
+            (10, 0.0, -179.0, 3.0),
+        ):
+            with self.subTest(facing=facing, heading=heading):
+                survivor = self.model.spawn(object_id)
+                if facing != 0.0:
+                    survivor.controller.face(facing)
+                self.model.drive(object_id, heading, speed)
+                driving = survivor.controller.driving()
+                self.assertIsNotNone(driving)
+                self.assertEqual(driving[0], speed)
+                aim_calls = [call for call in survivor.controller.calls if call[0] == "aim_x"]
+                self.assertEqual(aim_calls, [("aim_x", _OVERRIDE.ONE_FRAME, pulse_180)])
+        self.assertEqual(self.model.objects[7].controller.driving(), (1.0, 180.0))
+        self.assertEqual(self.model.objects[8].controller.driving(), (1.0, -180.0))
+        self.assertEqual(abs(self.model.objects[9].controller.driving()[1]), 180.0)
+
+    def test_release_death_and_shutdown_disable_aim_and_idle_release_touches_nothing(self) -> None:
+        disabled = [
+            ("speed", _OVERRIDE.DISABLED, 0.0),
+            ("angle", _OVERRIDE.DISABLED, 0.0),
+            ("aim_x", _OVERRIDE.ENABLED, 0.0),
+        ]
+        released = self.model.spawn(7)
+        dying = self.model.spawn(8)
+        shut = self.model.spawn(9)
+        idle = self.model.spawn(10)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.drive(8, 90.0, 2.0)
+        self.model.drive(9, 180.0, 3.0)
+        self.model.call("Release", self.model.bridge, 10)
+        self.assertEqual(idle.controller.calls, [])
+        before = len(released.controller.calls)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(released.controller.driving())
+        self.assertEqual(released.controller.calls[before:], disabled)
+        dying.alive = False
+        before = len(dying.controller.calls)
+        self.model.call("Tick", self.model.bridge)
+        self.assertIsNone(dying.controller.driving())
+        self.assertEqual(dying.controller.calls[before:], disabled)
+        before = len(shut.controller.calls)
+        self.model.call("ShutdownAll", self.model.bridge)
+        self.assertIsNone(shut.controller.driving())
+        self.assertEqual(shut.controller.calls[before:], disabled)
+        self.assertEqual(idle.controller.calls, [])
+
+    def test_a_new_drive_after_release_pulses_aim_again_and_release_holds_zero_again(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        pulse_90 = look.ServerPulseX(90.0)
+        survivor = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+        before = len(survivor.controller.calls)
+        self.model.drive(7, 90.0, 1.0)
+        self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
+        self.assertEqual(
+            survivor.controller.calls[before:],
+            [
+                ("speed", _OVERRIDE.ENABLED, 1.0),
+                ("angle", _OVERRIDE.ENABLED, 90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_90),
+            ],
+        )
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ONE_FRAME, pulse_90))
+        before = len(survivor.controller.calls)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(
+            survivor.controller.calls[before:],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
+        )
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+
 
 class SurvivorDriveBridgeHookTest(unittest.TestCase):
     """MCPBridge.c's own OnTick, DispatchObjectDelete and Shutdown
@@ -1771,11 +1996,15 @@ class SurvivorDriveBridgeHookTest(unittest.TestCase):
         self.assertNotIn(7, self.model.objects)
         self.assertEqual(self.model.command_ids(), {9: 42})
         self.assertIs(self.model.call("IsDriven", 7), False)
-        # The deleted survivor's own controller: DISABLED reached it before
+        # The deleted survivor's own controller: Disable reached it before
         # the registry forgot the id.
         self.assertEqual(
             self.first.controller.calls[calls:],
-            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
         )
         self.assertEqual(self.second.controller.driving(), (3.0, 0.0))
 
