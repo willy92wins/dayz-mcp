@@ -5310,6 +5310,7 @@ def _failed_active_run_result(
                 "cleanup_degraded": False,
                 "server_alive": None,
                 "client_alive": None,
+                "server_boot": None,
                 **extra,
             },
             box,
@@ -6382,6 +6383,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "active_run_exists without that reason or a queue_offer. A failed "
             "launch whose run_id the run store does not list (dayz_test_stop "
             "would answer run_not_found) returns run_id null. "
+            "server_boot reports what this launch's server compiled per module "
+            "according to its script log, where missing_files > 0 is a hint "
+            "that a module .c file from a mod's PBOs was not loaded; with "
+            "mode=server the call waits for the Mission line up to "
+            "server_wait_s (capped at 60 s), and server_boot is null when the "
+            "mode starts no server or the logs could not be read. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -6803,6 +6810,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         isinstance(stop_result, dict)
                         and stop_result.get("status") == "failed"
                     ):
+                        # The stop envelope answers this launch, so it carries
+                        # the server_boot key of every dayz_test_run answer.
+                        stop_result.setdefault("server_boot", None)
                         return annotated(stop_result)
                     evicted_run_id = target
                 execute_error, result = await execute(
@@ -9661,20 +9671,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ends, the whole query inside one server frame, so a long path "
             "costs that frame. The answer is points (FindPath's own waypoints, "
             "both ends included, each [x, y, z]), length_m (the sum of their 3D "
-            "segment lengths), from_snapped and to_snapped. The path filter is "
-            "meant to take the walking flags (ground, doors, inside buildings) "
-            "and leave out the disabled and swimming ones, but measured on "
-            "2026-11-11 (DayZDiag 1.30.164289) its masks are wrong: the "
-            "PGPolyFlags members are already bit values at run time (WALK=1, "
-            "DISABLED=2, DOOR=4, INSIDE=8, SWIM=16, SWIM_SEA=32) and the "
-            "bridge shifts them again, so the filter includes 137 (WALK, "
-            "INSIDE and bit 128) and excludes 32770 (DISABLED and bit 32768): "
-            "doors are not admitted, and water stays out only because the "
-            "include mask lacks it. FindPath can also return a path that stops "
-            "short of to_snapped and the tool still answers ok (from "
-            "Chernogorsk to Skalisty Island the last point was 6845 m short), "
-            "so compare the last point with to_snapped; and each call leaks "
-            "one PGFilter until the mission ends (inbox d5d6). A terrain "
+            "segment lengths), from_snapped and to_snapped. One shared PGFilter "
+            "for the bridge's lifetime (calls no longer leak one each; at mission "
+            "close the RPT still reports the shared one once, as measured on "
+            "2026-11-12) passes the unshifted PGPolyFlags bit values measured on "
+            "DayZDiag 1.30.164289: include WALK|DOOR|INSIDE = 13 (1|4|8) and "
+            "exclude DISABLED|SWIM|SWIM_SEA = 50 (2|16|32). FindPath can "
+            "return true on a partial path that stops short of to_snapped; a "
+            "path whose last point is more than 0.5 m from to_snapped answers "
+            "no_path. A terrain "
             "without a navmesh (a custom map that ships none) answers "
             "no_navmesh, or no_navmesh_at_from / no_navmesh_at_to, as does an "
             "end with no navmesh the filter admits within snap_radius (open "
