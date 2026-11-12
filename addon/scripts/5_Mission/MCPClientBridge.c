@@ -586,13 +586,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_StartPauseDone;
 	protected float m_StartPauseFromS;
 	protected const float START_PAUSE_WINDOW_S = 60.0;
-	//! §2.6 C14 (PX3 a): ui_pause left a queued pause (vanilla m_PauseQueued)
-	//! that was not queued before its call, or opened the pause menu
-	//! (MENU_INGAME) that is still open. MaintainMCPPause keeps each mark as
+	//! §2.6 C14 (PX3 a, PX6 a): ui_pause left a queued pause (vanilla
+	//! m_PauseQueued) that was not queued before its call, or opened this
+	//! pause menu (MENU_INGAME). Not ref: the UI manager owns the menu. The
+	//! mark is the instance, so a pause menu the person opens after MCP's
+	//! closed is another menu, not MCP's. MaintainMCPPause keeps each mark as
 	//! long as the pause it names; the lease close cancels the queued one
-	//! and closes the open one (StopLeaseClosePause), and its census counts both.
+	//! and closes MCP's menu (StopLeaseClosePause), and its census counts both.
 	protected bool m_MCPPauseQueued;
-	protected bool m_MCPPauseOpened;
+	protected UIScriptedMenu m_MCPPauseMenu;
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -647,7 +649,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_StartPauseDone = false;
 		m_StartPauseFromS = -1.0;
 		m_MCPPauseQueued = false;
-		m_MCPPauseOpened = false;
+		m_MCPPauseMenu = null;
 	}
 
 	void ~MCPClientBridge()
@@ -8551,7 +8553,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 		if (!pausedBefore && afterId == MENU_INGAME)
 		{
-			m_MCPPauseOpened = true;
+			m_MCPPauseMenu = menuAfter;
 		}
 		reply = new MCPUiPause();
 		reply.menu_id_before = beforeId;
@@ -9492,11 +9494,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		AddCloseEntry(census, "ui_preview", previewSet, "ui_preview");
 		// §2.6 C14: after StopLeaseClosePause, the pause ui_pause queued and
-		// still queued, or the pause menu it opened and still open, is
-		// residue the 25 s observer re-reads. A pause MCP neither queued nor
-		// opened is not counted.
+		// still queued, or the pause menu it opened and still open (under a
+		// submenu too, uimanager.c:160), is residue the 25 s observer
+		// re-reads. A pause MCP neither queued nor opened is not counted.
 		bool pauseActive = false;
-		if (m_MCPPauseQueued || m_MCPPauseOpened)
+		if (m_MCPPauseQueued || m_MCPPauseMenu)
 		{
 			MissionGameplay closeMission = MissionGameplay.Cast(GetGame().GetMission());
 			if (closeMission)
@@ -9506,7 +9508,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 					pauseActive = true;
 				}
 
-				if (m_MCPPauseOpened && closeMission.IsPaused())
+				UIManager closeUi = GetGame().GetUIManager();
+				if (m_MCPPauseMenu && closeUi && closeUi.FindMenu(MENU_INGAME) == m_MCPPauseMenu)
 				{
 					pauseActive = true;
 				}
@@ -9647,13 +9650,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 	// §2.6 C14: each ui_pause mark lives as long as the pause it names, as
 	// m_MCPEmoteStarted does (MaintainMCPEmoteStarted). A queued pause that
-	// vanilla then opened (missiongameplay.c:308-311, :1331) is MCP's open
-	// menu; that menu closed by anyone drops its mark, so a pause menu
-	// opened later, by Esc, is not MCP's. No mission, no pause: both fall.
+	// vanilla then opened (missiongameplay.c:308-311, :1331) makes the open
+	// pause menu MCP's. MCP's menu stops being MCP's once it is not the open
+	// MENU_INGAME, even when the person's Continue and Esc replace it
+	// between two ticks (PX6 a). No mission or UI manager: both fall.
 	protected void MaintainMCPPause()
 	{
 		MissionGameplay mission;
-		if (!m_MCPPauseQueued && !m_MCPPauseOpened)
+		UIManager ui;
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
 		{
 			return;
 		}
@@ -9661,43 +9666,42 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (GetGame())
 		{
 			mission = MissionGameplay.Cast(GetGame().GetMission());
+			ui = GetGame().GetUIManager();
 		}
 
-		if (!mission)
+		if (!mission || !ui)
 		{
 			m_MCPPauseQueued = false;
-			m_MCPPauseOpened = false;
+			m_MCPPauseMenu = null;
 			return;
 		}
 
 		if (m_MCPPauseQueued && !mission.MCP_IsPauseQueued())
 		{
 			m_MCPPauseQueued = false;
-			if (mission.IsPaused())
-			{
-				m_MCPPauseOpened = true;
-			}
+			m_MCPPauseMenu = ui.FindMenu(MENU_INGAME);
 		}
 
-		if (m_MCPPauseOpened && !mission.IsPaused())
+		if (m_MCPPauseMenu && ui.FindMenu(MENU_INGAME) != m_MCPPauseMenu)
 		{
-			m_MCPPauseOpened = false;
+			m_MCPPauseMenu = null;
 		}
 	}
 
-	// §2.6 C14 (PX3 a): the close cancels the pause ui_pause queued, which
-	// vanilla would otherwise open under the next lease once loading or the
-	// respawn ends (missiongameplay.c:308-311; Continue() leaves the queue,
-	// :1334-1348), and closes the pause menu ui_pause opened with the
-	// mission's Continue(), as ContinueStartPauseMenu does, only while it is
-	// on top: a submenu above it means someone is in it. A pause MCP neither
-	// queued nor opened is neither touched nor counted.
+	// §2.6 C14 (PX3 a, PX6 a): the close cancels the pause ui_pause queued,
+	// which vanilla would otherwise open under the next lease once loading
+	// or the respawn ends (missiongameplay.c:308-311; Continue() leaves the
+	// queue, :1334-1348), and closes the pause menu ui_pause opened with the
+	// mission's Continue(), as ContinueStartPauseMenu does, only while that
+	// same menu is on top: a submenu above it means someone is in it, and a
+	// pause menu the person opened after it is another instance. A pause MCP
+	// neither queued nor opened is neither touched nor counted.
 	protected void StopLeaseClosePause()
 	{
 		MissionGameplay mission;
 		UIManager ui;
 		UIScriptedMenu menu;
-		if (!m_MCPPauseQueued && !m_MCPPauseOpened)
+		if (!m_MCPPauseQueued && !m_MCPPauseMenu)
 		{
 			return;
 		}
@@ -9718,7 +9722,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			m_MCPPauseQueued = false;
 		}
 
-		if (!m_MCPPauseOpened)
+		if (!m_MCPPauseMenu)
 		{
 			return;
 		}
@@ -9730,7 +9734,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		menu = ui.GetMenu();
-		if (!menu || menu.GetID() != MENU_INGAME)
+		if (!menu || menu != m_MCPPauseMenu)
 		{
 			return;
 		}

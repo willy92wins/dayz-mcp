@@ -412,7 +412,7 @@ class _Menu:
 
 
 class _UIManager:
-    """Models vanilla UIManager.GetMenu / IsMenuOpen / CloseAll / EnterScriptedMenu."""
+    """Models vanilla UIManager.GetMenu / IsMenuOpen / FindMenu / CloseAll / EnterScriptedMenu."""
 
     def __init__(self, top: _Menu | None = None) -> None:
         self.top = top
@@ -428,6 +428,16 @@ class _UIManager:
                 return True
             cursor = cursor.parent
         return False
+
+    def FindMenu(self, target_id: int) -> _Menu | None:
+        # uimanager.c:160: the first menu with that id from the top down, so a
+        # pause menu under a submenu is found too; each Pause() opens a new one.
+        cursor = self.top
+        while cursor is not None:
+            if cursor.menu_id == target_id:
+                return cursor
+            cursor = cursor.parent
+        return None
 
     def CloseAll(self) -> None:
         self.top = None
@@ -583,7 +593,7 @@ class _UiPauseClientModel:
             m_DialogJob=None,
             m_CameraHandoffPending=False,
             m_MCPPauseQueued=False,
-            m_MCPPauseOpened=False,
+            m_MCPPauseMenu=None,
         )
         constants: dict[str, float | int] = {
             name: float(value) if kind == "float" else int(value)
@@ -1354,7 +1364,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         code = _without_comments(self.source)
         constructor = re.sub(r"\s+", "", method_body(code, CONSTRUCTOR))
         self.assertIn("m_MCPPauseQueued=false;", constructor)
-        self.assertIn("m_MCPPauseOpened=false;", constructor)
+        self.assertIn("m_MCPPauseMenu=null;", constructor)
         tick = method_body(code, ON_TICK)
         self.assertEqual(tick.count("MaintainMCPPause();"), 1)
         self.assertLess(tick.index("MaintainMCPEmoteStarted();"), tick.index("MaintainMCPPause();"))
@@ -1378,6 +1388,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         dispatch = method_body(code, DISPATCH_UI_PAUSE)
         self.assertLess(dispatch.index("queuedBefore = mission.MCP_IsPauseQueued();"), dispatch.index("mission.Pause();"))
         self.assertLess(dispatch.index("pausedBefore = mission.IsPaused();"), dispatch.index("mission.Pause();"))
+        self.assertLess(dispatch.index("mission.Pause();"), dispatch.index("m_MCPPauseMenu = menuAfter;"))
 
     def test_a_deferred_pause_answered_then_closed_never_opens_under_the_next_lease(self) -> None:
         model = _UiPauseClientModel()
@@ -1441,7 +1452,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         model = _UiPauseClientModel()
         model.dispatch(COMMAND, 53)
         self.assertEqual(model.replies(), [(53, True, "", (-1, MENU_INGAME_ID))])
-        self.assertTrue(model.state.m_MCPPauseOpened)
+        self.assertIs(model.state.m_MCPPauseMenu, model.ui.GetMenu())
         model.on_update(0.016)
         self.assertTrue(model.census_ui_pause())
         self.assertFalse(model.lease_close())
@@ -1466,7 +1477,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         model.on_update(0.016)
         self.assertEqual(model.replies(), [(54, True, "", (-1, MENU_INGAME_ID))])
         self.assertFalse(model.state.m_MCPPauseQueued)
-        self.assertTrue(model.state.m_MCPPauseOpened)
+        self.assertIs(model.state.m_MCPPauseMenu, model.ui.GetMenu())
         self.assertFalse(model.lease_close())
         assert isinstance(model.mission, _MissionGameplay)
         self.assertEqual(model.mission.continue_calls, 1)
@@ -1477,7 +1488,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
             client=_mutate(
                 self.source,
                 MAINTAIN_PAUSE,
-                "\t\t\tif (mission.IsPaused())\n\t\t\t{\n\t\t\t\tm_MCPPauseOpened = true;\n\t\t\t}\n",
+                "\t\t\tm_MCPPauseMenu = ui.FindMenu(MENU_INGAME);\n",
                 "",
             )
         )
@@ -1507,20 +1518,20 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         reopened.dispatch(COMMAND, 55)
         reopened.mission.Continue()
         reopened.on_update(0.016)
-        self.assertFalse(reopened.state.m_MCPPauseOpened)
+        self.assertIsNone(reopened.state.m_MCPPauseMenu)
         reopened.mission.Pause()
         reopened.on_update(0.016)
         before = reopened.mission.continue_calls
         self.assertFalse(reopened.lease_close())
         self.assertEqual(reopened.mission.continue_calls, before)
         self.assertTrue(reopened.menu_open())
-        # Mutant whose upkeep keeps the mark of a menu someone else closed: the close then
-        # shuts the person's own menu.
+        # Mutant whose upkeep keeps the mark of a menu someone else closed: the mark
+        # outlives the pause it names.
         sticky = _UiPauseClientModel(
             client=_mutate(
                 self.source,
                 MAINTAIN_PAUSE,
-                "\t\tif (m_MCPPauseOpened && !mission.IsPaused())\n\t\t{\n\t\t\tm_MCPPauseOpened = false;\n\t\t}\n",
+                "\t\tif (m_MCPPauseMenu && ui.FindMenu(MENU_INGAME) != m_MCPPauseMenu)\n\t\t{\n\t\t\tm_MCPPauseMenu = null;\n\t\t}\n",
                 "",
             )
         )
@@ -1528,10 +1539,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         sticky.dispatch(COMMAND, 55)
         sticky.mission.Continue()
         sticky.on_update(0.016)
-        sticky.mission.Pause()
-        sticky.on_update(0.016)
-        sticky.lease_close()
-        self.assertFalse(sticky.menu_open())
+        self.assertIsNotNone(sticky.state.m_MCPPauseMenu)
 
         # A queue vanilla already had before ui_pause is not cancelled, and opens later.
         queued = _UiPauseClientModel()
@@ -1589,7 +1597,7 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
             client=_mutate(
                 self.source,
                 STOP_PAUSE,
-                "\t\tif (!menu || menu.GetID() != MENU_INGAME)\n",
+                "\t\tif (!menu || menu != m_MCPPauseMenu)\n",
                 "\t\tif (!menu)\n",
             )
         )
@@ -1599,6 +1607,62 @@ class UiPauseLeaseCloseTest(unittest.TestCase):
         blind.on_update(0.016)
         blind.lease_close()
         self.assertEqual(blind.mission.continue_calls, 1)
+
+    def test_f_a_pause_menu_the_person_opens_after_mcp_s_is_not_mcp_s(self) -> None:
+        # PX6 a: the person's Continue (queued on the GUI call queue, which ticks after the
+        # bridge, dayzgame.c:3012/:3044) and Esc (the next frame, before the bridge's tick)
+        # replace MCP's pause menu with a new one, with no upkeep in between.
+        model = _UiPauseClientModel()
+        assert isinstance(model.mission, _MissionGameplay)
+        model.dispatch(COMMAND, 58)
+        mcp_menu = model.ui.GetMenu()
+        self.assertIs(model.state.m_MCPPauseMenu, mcp_menu)
+        model.mission.Continue()
+        model.mission.Pause()
+        persons_menu = model.ui.GetMenu()
+        self.assertIsNot(persons_menu, mcp_menu)
+        calls = model.mission.continue_calls
+        # A close in that same frame, before any upkeep: the person's menu stays, clean.
+        self.assertFalse(model.lease_close())
+        self.assertEqual(model.mission.continue_calls, calls)
+        self.assertIs(model.ui.GetMenu(), persons_menu)
+        # The upkeep then drops the mark, and a later close still leaves the menu.
+        model.on_update(0.016)
+        self.assertIsNone(model.state.m_MCPPauseMenu)
+        self.assertFalse(model.lease_close())
+        self.assertEqual(model.mission.continue_calls, calls)
+        self.assertIs(model.ui.GetMenu(), persons_menu)
+
+        # Mutant whose close shuts any MENU_INGAME on top (the check of 043ae5e): the
+        # person's menu closes.
+        by_id = _UiPauseClientModel(
+            client=_mutate(
+                self.source,
+                STOP_PAUSE,
+                "\t\tif (!menu || menu != m_MCPPauseMenu)\n",
+                "\t\tif (!menu || menu.GetID() != MENU_INGAME)\n",
+            )
+        )
+        assert isinstance(by_id.mission, _MissionGameplay)
+        by_id.dispatch(COMMAND, 58)
+        by_id.mission.Continue()
+        by_id.mission.Pause()
+        by_id.lease_close()
+        self.assertFalse(by_id.menu_open())
+        # Mutant whose census counts any open pause menu: the person's menu is residue.
+        any_menu = _UiPauseClientModel(
+            client=_mutate(
+                self.source,
+                CENSUS,
+                "closeUi.FindMenu(MENU_INGAME) == m_MCPPauseMenu",
+                "closeUi.FindMenu(MENU_INGAME) != null",
+            )
+        )
+        assert isinstance(any_menu.mission, _MissionGameplay)
+        any_menu.dispatch(COMMAND, 58)
+        any_menu.mission.Continue()
+        any_menu.mission.Pause()
+        self.assertTrue(any_menu.lease_close())
 
 
 class UiPauseIngressAndAdmissionTest(unittest.TestCase):
