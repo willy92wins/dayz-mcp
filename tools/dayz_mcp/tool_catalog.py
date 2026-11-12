@@ -189,9 +189,19 @@ def _compact_initial_catalog(tools: list[Any]) -> list[Any]:
     return compacted
 
 
-_SCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "definitions")
+# Every keyword whose value holds subschemas, in JSON Schema 2020-12 and
+# draft-07 (PX6 c). "dependencies" maps to a subschema or to a list of
+# property names, which the walk returns as it is.
+_SCHEMA_MAP_KEYS = (
+    "properties", "patternProperties", "$defs", "definitions",
+    "dependentSchemas", "dependencies",
+)
 _SCHEMA_LIST_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
-_SCHEMA_ONE_KEYS = ("items", "additionalProperties", "not")
+_SCHEMA_ONE_KEYS = (
+    "items", "additionalItems", "additionalProperties", "not", "if", "then",
+    "else", "propertyNames", "contains", "unevaluatedItems",
+    "unevaluatedProperties", "contentSchema",
+)
 
 
 def _drop_generated_titles(schema: Any) -> Any:
@@ -199,8 +209,9 @@ def _drop_generated_titles(schema: Any) -> Any:
 
     Pydantic writes one per field from its name ("group_id" gives "Group Id")
     and one per arguments model, so they repeat the names (PX3 c: about 4 KB
-    of the 23 KB catalog). Only schema positions are walked: a property named
-    "title", or a "title" inside a default, enum or const value, is kept.
+    of the 23 KB catalog). Only schema positions are walked, all of them: a
+    property named "title", or a "title" inside a default, enum, const or
+    examples value, is kept.
     """
     if not isinstance(schema, dict):
         return schema
