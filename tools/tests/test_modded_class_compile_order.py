@@ -4,8 +4,9 @@ Compile order is a HYPOTHESIS, not taken from the engine: the RPT does not
 log per-file loading. The only evidence is ronda-A-server.RPT:125/156
 (2026-11-12 00:37): mcp_lookat.c failed to see a field declared in
 mcp_playermove.c, so LookAt compiled first; this is consistent with
-case-insensitive file-name order (the RPT reports lower-cased paths) and is
-what this test assumes. Refuted by: an in-game run where a field declared in
+case-insensitive file-name order (the RPT reports lower-cased paths); since
+lower() and ordinal order are not distinguished by that evidence, this test
+assumes either may hold (see below). Refuted by: an in-game run where a field declared in
 a later-named file is visible from an earlier-named one, or where
 MCP_ActionCursor.c / MCPBridge.c (5_Mission, where lower() and ordinal
 order disagree) show the other order.
@@ -230,7 +231,7 @@ _USE = (
 )
 _DECL = "modded class PlayerBase\n{\n\tprotected int m_MCPConnGen;\n}\n"
 _DECL_MULTI = (
-    "modded class PlayerBase\n{\n\tprotected int m_MCPConnGen, m_Other;\n}\n"
+    "modded class PlayerBase\n{\n\tprotected int m_Other, m_MCPConnGen;\n}\n"
 )
 
 
@@ -267,7 +268,7 @@ class CompileOrderFixtureTests(unittest.TestCase):
         )
 
     def test_multi_member_declaration_in_later_file_fails(self) -> None:
-        # Mutante M5 de D-r14: `int m_MCPConnGen, m_Other;` debe registrarse.
+        # Mutante M5 de D-r14: `int m_Other, m_MCPConnGen;` debe registrarse.
         got = self._run({"MCP_LookAt.c": _USE, "MCP_PlayerMove.c": _DECL_MULTI})
         self.assertEqual(len(got), 1)
         self.assertIn("m_MCPConnGen", got[0])
@@ -283,6 +284,18 @@ class CompileOrderFixtureTests(unittest.TestCase):
         got = self._run({"MCP_Decl.c": _DECL, "MCPBridge.c": _USE})
         self.assertEqual(len(got), 1)
         self.assertIn("m_MCPConnGen", got[0])
+
+    def test_lower_only_violation_fails(self) -> None:
+        # ordinal: MCPBridge antes que MCP_Use (pasa); lower(): al reves (falla).
+        got = self._run({"MCPBridge.c": _DECL, "MCP_Use.c": _USE})
+        self.assertEqual(len(got), 1)
+        self.assertIn("m_MCPConnGen", got[0])
+
+    def test_later_declaration_in_other_class_is_not_a_declaration(self) -> None:
+        other = _DECL.replace("PlayerBase", "DayZPlayerImplement")
+        self.assertEqual(
+            self._run({"MCP_LookAt.c": _USE, "MCP_PlayerMove.c": other}), []
+        )
 
 
 class ModdedClassCompileOrderTests(unittest.TestCase):
