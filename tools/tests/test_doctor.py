@@ -1576,6 +1576,65 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(free_exit, 0)
         self.assertNotIn("RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED", self.codes(free))
 
+    def _readable_preprune_slots(self, count: int) -> list[Path]:
+        empty = json.dumps({"version": 1, "runs": []})
+        (self.runtime / "runs.json").write_text(empty, encoding="utf-8")
+        slots = [self.runtime / "runs.json.bak-preprune"] + [
+            self.runtime / f"runs.json.bak-preprune.{index}" for index in range(2, 11)
+        ]
+        for slot in slots[:count]:
+            slot.write_text(empty, encoding="utf-8")
+        return slots
+
+    def _exhausted(self, payload: dict[str, object]) -> list[dict[str, object]]:
+        return [
+            item
+            for item in payload["findings"]
+            if item["code"] == "RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED"
+        ]
+
+    def test_ten_readable_preprune_backups_are_not_a_finding(self) -> None:
+        self._readable_preprune_slots(10)
+
+        payload, exit_code = self.execute()
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED", self.codes(payload))
+
+    def test_full_preprune_slots_name_the_first_unreadable_file(self) -> None:
+        slots = self._readable_preprune_slots(10)
+        slots[3].write_text("{", encoding="utf-8")
+
+        payload, exit_code = self.execute()
+
+        self.assertEqual(exit_code, 1)
+        exhausted = self._exhausted(payload)
+        self.assertEqual(len(exhausted), 1)
+        self.assertEqual(exhausted[0]["severity"], "FAIL")
+        self.assertEqual(exhausted[0]["slots"], 10)
+        self.assertEqual(Path(exhausted[0]["path"]).resolve(), slots[3].resolve())
+
+        slots[3].write_text(json.dumps({"version": 1, "runs": []}), encoding="utf-8")
+        targets = self.runtime / "runs.json.bak-preprune.targets"
+        targets.write_text(json.dumps({"version": 1}), encoding="utf-8")
+
+        payload, exit_code = self.execute()
+
+        self.assertEqual(exit_code, 1)
+        exhausted = self._exhausted(payload)
+        self.assertEqual(len(exhausted), 1)
+        self.assertEqual(Path(exhausted[0]["path"]).resolve(), targets.resolve())
+
+    def test_nine_preprune_backups_are_not_a_finding_even_one_unreadable(self) -> None:
+        slots = self._readable_preprune_slots(9)
+        slots[3].write_text("{", encoding="utf-8")
+        (self.runtime / "runs.json.bak-preprune.targets").write_text("{", encoding="utf-8")
+
+        payload, exit_code = self.execute()
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("RUN_PREPRUNE_BACKUP_SLOTS_EXHAUSTED", self.codes(payload))
+
     def _hex_backup_dir(self, index: int) -> Path:
         backups = self.runtime / "lifecycle-recovery-faults" / "backups"
         backups.mkdir(parents=True, exist_ok=True)

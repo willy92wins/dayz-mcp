@@ -60,6 +60,7 @@ from dayz_mcp.idle_warden import (
 from dayz_mcp.process_lifecycle import (
     ProcessLifecycle,
     RunManifestStore,
+    restart_debt_pairs,
 )
 from dayz_mcp.native_process_guard import NativeProcessGuard
 from dayz_mcp.session_coordination import CleanupDisposition, SessionCoordinator
@@ -766,6 +767,14 @@ def _activate_server_coordination(
             on_pending=arm_lifecycle_recovery_fault,
         )
         runs = bounded_io(manifest.list_runs)
+        # §2.12: every live run of the startup listing owes a close from the
+        # previous daemon (daemon_restart). Seeded on the coordinator before
+        # it is attached to the state below; the relaunch of each run clears
+        # it through note_processes_gone. With a recovered lifecycle fault
+        # the listing is deferred to the repair paths in loopback.py.
+        restart_pairs = restart_debt_pairs(runs)
+        if restart_pairs:
+            bounded_io(coordinator.seed_restart_debt, restart_pairs)
     else:
         runs = []
     restart_owned = [

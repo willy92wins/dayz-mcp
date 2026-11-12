@@ -18,7 +18,7 @@
 // survivor's death or deletion (Tick, OnObjectGone), at bridge shutdown
 // (ShutdownAll) and on survivor_drive_release (ReleaseCommand), which the
 // broker sends with the id of a drive command and its survivor's object_id when
-// the lease that sent it ends or abandons it: that drops that survivor's drive
+// the caller abandons that drive mid-lease: that drops that survivor's drive
 // only while the command's own drive is the one set. A new drive on a driven id
 // replaces its heading, speed and command id. Nothing else ends a drive: the
 // survivor keeps walking until one of those. MCPBridge.DispatchSurvivorDrive
@@ -168,6 +168,13 @@ class MCPSurvivorDrive
 			}
 			index = index - 1;
 		}
+	}
+
+	// §4 #266: the lease-close census reads the registry itself: a survivor
+	// still driven after ShutdownAll is residue.
+	static bool LeaseCloseBusy()
+	{
+		return s_Driven && s_Driven.Count() > 0;
 	}
 
 	static void ShutdownAll(MCPBridge bridge)

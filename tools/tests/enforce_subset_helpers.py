@@ -214,6 +214,9 @@ class EnforceMap:
         if index >= 0:
             del self._pairs[index]
 
+    def Clear(self) -> None:
+        self._pairs.clear()
+
     def Contains(self, key: object) -> bool:
         return self._find(key) >= 0
 

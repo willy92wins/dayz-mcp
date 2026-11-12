@@ -1,4 +1,4 @@
-const string MCP_BRIDGE_VERSION = "12";
+const string MCP_BRIDGE_VERSION = "13";
 const float MCP_ARG_FLOAT_UNSET = float.MAX;
 const int MCP_FIXTURE_SEQ_UNSET = -2147483647;
 
@@ -90,6 +90,47 @@ class MCPPathKey
 	ref array<float> cam_orientation;
 	ref array<float> look_at;
 	float fov;
+};
+
+// lease_close census rows (plan §2.16). No constructor defaults: a field the
+// bridge does not write must read as 0 or empty, never as an invented value.
+class MCPLeaseCloseEntry
+{
+	string name;
+	string state;
+	string reason;
+};
+
+class MCPLeaseCloseFloor
+{
+	int net_low;
+	int net_high;
+	int conn_gen;
+	int move_id;
+	int weapon_id;
+	int look_id;
+};
+
+class MCPLeaseCloseCensus
+{
+	string generation;
+	string lease_id;
+	string peer;
+	string state;
+	ref array<ref MCPLeaseCloseEntry> entries;
+	int move_floor;
+	int weapon_floor;
+	int look_floor;
+	int conn_gen;
+	int net_low;
+	int net_high;
+	ref array<ref MCPLeaseCloseFloor> floors;
+
+	void MCPLeaseCloseCensus()
+	{
+		entries = new array<ref MCPLeaseCloseEntry>();
+		floors = new array<ref MCPLeaseCloseFloor>();
+	}
 };
 
 // Command args. A key absent from the command JSON reaches the handler as 0 or
@@ -315,6 +356,11 @@ class MCPArgs
 	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
 	// max_lines above is reused.
 	int marker;
+	// lease_close / lease_close_client (§2.16). close_floors travels only on
+	// the server close; an absent key leaves the array empty.
+	string close_generation;
+	string close_lease_id;
+	ref array<ref MCPLeaseCloseFloor> close_floors;
 
 	void MCPArgs()
 	{
@@ -332,6 +378,7 @@ class MCPArgs
 		keys = new array<ref MCPPathKey>();
 		net_low = new array<int>();
 		net_high = new array<int>();
+		close_floors = new array<ref MCPLeaseCloseFloor>();
 		items = new array<ref MCPSpawnBatchItem>();
 		component = -1;
 		dik = -1;
@@ -1624,6 +1671,8 @@ class MCPResult
 	ref MCPChatRead chat_read;
 	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
 	ref MCPUiPause ui_pause;
+	// lease_close / lease_close_client census (§2.16). Unassigned on other commands.
+	ref MCPLeaseCloseCensus lease_close;
 };
 
 class MCPJob

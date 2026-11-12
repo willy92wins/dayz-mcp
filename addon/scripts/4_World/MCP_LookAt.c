@@ -57,6 +57,11 @@ class MCPLookAtControl
 	protected static int s_ServerLookId;
 	protected static bool s_ServerReleasePending;
 	protected static int s_ServerReleaseId;
+	// The last look id actually written to the input channel (0: none).
+	// SendServerStart sets it only on "sent". FlushServerRelease writes
+	// no new floor: it only carries s_ServerReleaseId, which comes from
+	// s_ServerLookId, an id already set by a sent start.
+	protected static int s_LastSentLookId;
 
 	protected static const float MAX_CONTROL_S = 3.0;
 	protected static const float BAND_DEG = 1.0;
@@ -192,9 +197,28 @@ class MCPLookAtControl
 		return "";
 	}
 
+	// Job identity only: Release() advances s_Generation on every release,
+	// including the close's own Release("restore"), which writes no id to
+	// the input channel. It is therefore NOT the lease-close floor: the
+	// server can only reach ids it received, so the floor is the last id
+	// actually sent (CloseFloor).
 	static int Generation()
 	{
 		return s_Generation;
+	}
+
+	// Lease-close floor: the last look id written to the input channel.
+	// The server counts a start on receipt (MCPLookAccept) and a release
+	// id likewise (MCPLookReadRelease), and releases only carry ids of
+	// starts already sent, so this is exactly what it can reach.
+	static int CloseFloor()
+	{
+		return s_LastSentLookId;
+	}
+
+	static bool ServerReleasePending()
+	{
+		return s_ServerReleasePending;
 	}
 
 	static bool IsActive()
@@ -377,6 +401,7 @@ class MCPLookAtControl
 		message.Write(budgetS);
 		message.Write(turnSign);
 		message.Send();
+		s_LastSentLookId = lookId;
 		return "sent";
 	}
 
@@ -838,6 +863,13 @@ modded class PlayerBase
 	protected string m_MCPLookLastNote;
 	// The way the owner latched at the look's start (MCPLookAtControl.LatchDeg).
 	protected int m_MCPLookTurn;
+	// Connection generation of this body (plan §2.5), set by the conn-gen
+	// RPC in MCP_PlayerMove.c (MCPSetConnGen) and read there, in
+	// MCP_Weapon.c (via MCPConnGenValue) and by MCPLookCloseServer below.
+	// Declared here, not in MCP_PlayerMove.c: this file compiles before
+	// MCP_PlayerMove.c, and a modded class only sees members declared by
+	// earlier files of the chain (in-game boot failure, 2026-11-12).
+	protected int m_MCPConnGen;
 
 	// playerbase.c:6250. Ours stops here, as player_move's does.
 	override bool OnInputUserDataProcess(int userDataType, ParamsReadContext ctx)
@@ -1138,6 +1170,40 @@ modded class PlayerBase
 		}
 		m_MCPLookLastNote = reason;
 		Print("[DayZ_MCP] player_look_at server ignored look=" + lookId.ToString() + " reason=" + reason);
+	}
+
+	int MCPLookServerFloor()
+	{
+		return m_MCPLookLastId;
+	}
+
+	bool MCPLookActiveNow()
+	{
+		if (m_MCPLookId > 0)
+		{
+			return true;
+		}
+		return false;
+	}
+
+	// Lease close (§2.7): raises the floor to floorId and releases a copy at
+	// or below it, only when connGen is this body's generation. A mismatch
+	// changes nothing and the caller reports it as residue.
+	bool MCPLookCloseServer(int floorId, int connGen)
+	{
+		if (connGen == 0 || connGen != m_MCPConnGen)
+		{
+			return false;
+		}
+		if (floorId > m_MCPLookLastId)
+		{
+			m_MCPLookLastId = floorId;
+		}
+		if (m_MCPLookId > 0 && m_MCPLookId <= floorId)
+		{
+			MCPLookServerRelease("lease_close");
+		}
+		return true;
 	}
 
 	// A client reconnecting into this body (missionserver.c:620-626) may be a
