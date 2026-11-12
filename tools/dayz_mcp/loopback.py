@@ -1248,7 +1248,7 @@ def _is_focus_blur(value: object) -> bool:
 def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVariant:
     # One camera_set shape per cam_mode the tool emits; fov and settle_ticks
     # travel with every one of them. focus is the camera_set_focus shape
-    # (702f): the same plus both Camera.SetFocus arguments, always together.
+    # (702f): the same plus the five CGame.OverrideDOF values, always together.
     validators: dict[str, _FieldValidator] = {
         "cam_mode": _equal_to(mode),
         "fov": _SAFE_NON_NEGATIVE_REAL,
@@ -1261,9 +1261,19 @@ def _camera_variant(mode: str, *vectors: str, focus: bool = False) -> _SchemaVar
     if focus:
         # The tool's check, camera_path.focus_distance and focus_blur: at most
         # 1e9 and kept by the bridge's 32-bit float, not just finite here.
-        required = (*required, "focus_distance", "focus_blur")
+        required = (
+            *required,
+            "focus_distance",
+            "focus_blur",
+            "focus_length",
+            "focus_length_near",
+            "focus_depth_offset",
+        )
         validators["focus_distance"] = _is_focus_distance
         validators["focus_blur"] = _is_focus_blur
+        validators["focus_length"] = _is_focus_blur
+        validators["focus_length_near"] = _is_focus_blur
+        validators["focus_depth_offset"] = _is_focus_blur
     return _schema_variant(required=required, validators=validators)
 
 
@@ -2552,8 +2562,8 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _camera_variant("free", "cam_pos", "look_at"),
         _camera_variant("free", "cam_pos", "cam_orientation"),
     ),
-    # camera_set with focus_distance and focus_blur (702f): the same five
-    # shapes, each with both focus arguments.
+    # camera_set with CGame.OverrideDOF (702f): the same five shapes, each
+    # with all five focus values.
     "camera_set_focus": _command_schema(
         _camera_variant("orient", "cam_pos", "cam_orientation", focus=True),
         _camera_variant("lookat", "cam_pos", "look_at", focus=True),

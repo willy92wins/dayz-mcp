@@ -129,10 +129,12 @@ neither flag is active. The obsolete `IngameHud.IsHudVisible()` stub is not used
 Read it after `restore_gameplay`, whose automatic verification remains camera-only.
 `camera_path_release(command_id)` requires a lease, aborts only that playing id,
 restores camera/gameplay and returns `matched`; lease-end internal cleanup uses
-the same bridge command. `camera_set_focus` takes `camera_set`'s camera arguments
-and required `focus_distance`/`focus_blur`, with the same validation and lease.
-Both focus values are at most 1e9; distance must be above zero and blur
-non-negative, including as the bridge's 32-bit floats. These controls are listed
+the same bridge command. `camera_set_focus` takes `camera_set`'s camera arguments,
+required `focus_distance`/`focus_blur`, and optional `focus_length` (default 450),
+`focus_length_near` (default 100) and `focus_depth_offset` (default 10), with the
+same validation and lease: all five focus values are at most 1e9, with distance
+above zero and blur and the three optional values non-negative, including as the
+bridge's 32-bit floats. These controls are listed
 with a lease or `--no-progressive-disclosure`; the reader is listed before a lease.
 
 
