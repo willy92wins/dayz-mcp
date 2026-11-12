@@ -5,7 +5,8 @@ reads that need no lease: about 17 KB since fb-20260925-233937-b753 added the
 reads (11 KB before) and about 20 KB since loadout_get, server_perf,
 nav_path_query, players_visibility and scene_entities joined them (fb99,
 2427, 0131, 33c5, 165a) and about 23 KB with chat_read and ai_group_state
-(0205, 90f9), against about 88 KB for the whole catalog. The
+(0205, 90f9), back to about 19 KB once the listing dropped the schema titles
+Pydantic generates (PX3 c), against about 88 KB for the whole catalog. The
 mutating world_*/vehicle_*/ui_* tools appear only after a lease is held.
 """
 
@@ -47,6 +48,7 @@ if sys.platform != "win32":
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from dayz_mcp.server import ServerConfig, build_app
+from dayz_mcp.tool_catalog import _drop_generated_titles
 from tests.camera_tool_helpers import _FakeClientRuntime
 from tests._tiers import slow_test
 
@@ -55,7 +57,7 @@ LEASE_REVEAL_PREFIXES = ("world_", "vehicle_", "ui_")
 # The three lease-free reads behind a reveal prefix (b753, and world_time_get);
 # every other world_*/vehicle_*/ui_* tool mutates and waits for the lease.
 PREFIXED_LEASE_FREE_READS = frozenset({"ui_tree", "vehicle_telemetry", "world_time_get"})
-INITIAL_CATALOG_MAX_BYTES = 24_000
+INITIAL_CATALOG_MAX_BYTES = 23_000
 INITIAL_CATALOG_TARGET_BYTES = 20_000
 
 
@@ -71,6 +73,25 @@ def _catalog_bytes(tools: list[object]) -> int:
 
 def _names(tools: list[object]) -> set[str]:
     return {tool.name for tool in tools}
+
+
+def _schema_titles(schema: object, path: str = "") -> list[str]:
+    """Paths of the string "title" annotations in a schema's own positions."""
+    found: list[str] = []
+    if not isinstance(schema, dict):
+        return found
+    for key, value in schema.items():
+        if key == "title" and isinstance(value, str):
+            found.append(path or "/")
+        elif key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(value, dict):
+            for name, sub in value.items():
+                found.extend(_schema_titles(sub, f"{path}/{key}/{name}"))
+        elif key in ("anyOf", "oneOf", "allOf", "prefixItems", "items") and isinstance(value, list):
+            for index, sub in enumerate(value):
+                found.extend(_schema_titles(sub, f"{path}/{key}/{index}"))
+        elif key in ("items", "additionalProperties", "not"):
+            found.extend(_schema_titles(value, f"{path}/{key}"))
+    return found
 
 
 async def _protocol_list_tools(app) -> list[object]:
@@ -124,6 +145,51 @@ class ProgressiveDisclosureTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("world_spawn", names)
         self.assertNotIn("vehicle_control", names)
         self.assertNotIn("ui_dialog", names)
+
+    async def test_initial_catalog_drops_only_the_generated_schema_titles(self) -> None:
+        # PX3 c: the generated titles were about 4 KB of the 23 KB listing.
+        # Mutants killed: the compact listing keeping them, and the full
+        # listing (after the lease) losing them.
+        app, runtime = self._client_app()
+        compact = {tool.name: tool for tool in await app.list_tools()}
+        for name, tool in compact.items():
+            with self.subTest(tool=name):
+                self.assertEqual(_schema_titles(tool.inputSchema), [])
+        feedback = compact["pipeline_feedback"].inputSchema["properties"]
+        self.assertEqual(feedback["title"], {"maxLength": 120, "minLength": 1, "type": "string"})
+        runtime.active_lease_token = "lease-token-after-acquire"
+        full = {tool.name: tool for tool in await app.list_tools()}
+        self.assertIn("/properties/group_id", _schema_titles(full["ai_group_state"].inputSchema))
+        for name, tool in compact.items():
+            with self.subTest(tool=name):
+                self.assertEqual(tool.inputSchema, _drop_generated_titles(full[name].inputSchema))
+
+    def test_drop_generated_titles_walks_only_schema_positions(self) -> None:
+        schema = {
+            "title": "exampleArguments",
+            "type": "object",
+            "properties": {
+                "title": {"title": "Title", "type": "string"},
+                "mode": {"title": "Mode", "enum": ["title"], "default": {"title": "x"}},
+                "pair": {"anyOf": [{"title": "A", "type": "integer"}, {"type": "null"}]},
+                "points": {"type": "array", "items": {"title": "Point", "type": "number"}},
+            },
+            "$defs": {"Inner": {"title": "Inner", "type": "object"}},
+        }
+        self.assertEqual(
+            _drop_generated_titles(schema),
+            {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "mode": {"enum": ["title"], "default": {"title": "x"}},
+                    "pair": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                    "points": {"type": "array", "items": {"type": "number"}},
+                },
+                "$defs": {"Inner": {"type": "object"}},
+            },
+        )
+        self.assertEqual(schema["properties"]["title"], {"title": "Title", "type": "string"})
 
     async def test_client_catalog_reveals_world_vehicle_ui_after_lease(self) -> None:
         app, runtime = self._client_app()
