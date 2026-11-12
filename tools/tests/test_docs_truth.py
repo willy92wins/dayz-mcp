@@ -1008,30 +1008,42 @@ def _servermod_release_paragraphs(text: str) -> list[str]:
 # PX9 b P2: naming both cases is not enough; each clause that names a case
 # must tie it to its result. One naming the round case may not enqueue the
 # release, one naming the case without a round may not deny it, and no clause
-# may name both ("con y sin ronda").
-_SERVERMOD_ENQUEUES = re.compile(r"(?<!\bno )(?<!\bno lo )(?<!\bno se )\bencola\b")
-_SERVERMOD_SKIPS = re.compile(r"\bno (?:lo |se )?encola\b")
-_SERVERMOD_ONLY_WITHOUT = re.compile(r"(?<!\bno )\bsolo se encola sin ronda\b")
+# may name both ("con y sin ronda"). PX9 c P2: an "encola" is negated when one
+# of the Spanish negators (no, nunca, jamás, tampoco, ni) comes at most two
+# words before it ("no lo encola", "nunca encola", "no siempre encola").
+_SERVERMOD_NEGATED = re.compile(r"\b(?:no|nunca|jamás|tampoco|ni)(?: \S+){0,2} $")
+_SERVERMOD_ONLY_WITHOUT = re.compile(r"\bsolo se encola sin ronda\b")
+
+
+def _servermod_encola(clause: str, *, negated: bool) -> bool:
+    """Whether the clause has an "encola" that is (or is not) negated."""
+    return any(
+        bool(_SERVERMOD_NEGATED.search(clause[: m.start()])) == negated
+        for m in re.finditer(r"\bencola\b", clause)
+    )
 
 
 def _servermod_release_claim_ok(paragraph: str) -> bool:
     """The paragraph ties each case to its result: with a lease-end round the
     release is not enqueued, without one it is."""
     flat = " ".join(paragraph.split()).lower()
-    skips = enqueues = bool(_SERVERMOD_ONLY_WITHOUT.search(flat))
+    skips = enqueues = any(
+        not _SERVERMOD_NEGATED.search(flat[: m.start()])
+        for m in _SERVERMOD_ONLY_WITHOUT.finditer(flat)
+    )
     for clause in re.split(r"[.;:]\s+", flat):
         with_round = "con ronda" in clause or "con y sin ronda" in clause
         without_round = "sin ronda" in clause
         if with_round and without_round:
             return False
         if with_round:
-            if _SERVERMOD_ENQUEUES.search(clause):
+            if _servermod_encola(clause, negated=False):
                 return False
-            skips = skips or bool(_SERVERMOD_SKIPS.search(clause))
+            skips = skips or _servermod_encola(clause, negated=True)
         if without_round:
-            if _SERVERMOD_SKIPS.search(clause):
+            if _servermod_encola(clause, negated=True):
                 return False
-            enqueues = enqueues or bool(_SERVERMOD_ENQUEUES.search(clause))
+            enqueues = enqueues or _servermod_encola(clause, negated=False)
     return skips and enqueues
 
 
@@ -1071,11 +1083,15 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
                 "interno solo se encola sin ronda de cierre",
                 "interno se encola con y sin ronda de cierre",
             ),
-            # The case without a round denies the release.
-            (
-                explicit,
-                "Sin ronda, `cleanup_owner` encola",
-                "Sin ronda, `cleanup_owner` no encola",
+            # The case without a round denies the release (PX9 c: with any
+            # negator, also one word away from the verb).
+            *(
+                (
+                    explicit,
+                    "Sin ronda, `cleanup_owner` encola",
+                    f"Sin ronda, `cleanup_owner` {negation} encola",
+                )
+                for negation in ("no", "nunca", "jamás", "tampoco", "ni", "no siempre")
             ),
             # "no solo" no longer limits the release to the case without one.
             (expiry, "interno solo se encola", "interno no solo se encola"),
@@ -1093,6 +1109,70 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
         )
         self.assertEqual(_servermod_release_paragraphs(old), [old])
         self.assertFalse(_servermod_release_claim_ok(old))
+
+
+# PX9 c P2 (#343): with a lease-end round, a reachable peer whose fresh census
+# does not announce the close gets neither a close nor a debt
+# (close_not_supported, the bridge 12 exemption of the plan's section 2.4), so
+# product-spec H5 may not promise one or the other for every known peer.
+_CLOSE_NOT_SUPPORTED_SETTLES = re.compile(
+    r'if reason == "close_not_supported":\s+self\._settle_row_locked\(row\)'
+)
+_H5_EXEMPTION_TEST = "test_f1_client_not_supported_server_published"
+
+
+def _h5_names_the_exemption(row: str) -> bool:
+    return "`close_not_supported`" in row and f"`{_H5_EXEMPTION_TEST}`" in row
+
+
+class ProductSpecH5LeaseEndDocsTest(unittest.TestCase):
+    """product-spec H5 names the exemption and the test that pins it (PX9 c
+    P2): loopback answers close_not_supported for a fresh census without the
+    close name, and session_coordination settles that row with no debt, at the
+    hook's report and at a deferred server publish."""
+
+    def test_code_settles_close_not_supported(self) -> None:
+        self.assertEqual(
+            _module_text("dayz_mcp/loopback.py").count('return False, "close_not_supported"'),
+            1,
+        )
+        coordination = _module_text("dayz_mcp/session_coordination.py")
+        self.assertEqual(len(_CLOSE_NOT_SUPPORTED_SETTLES.findall(coordination)), 2)
+        self.assertIn(
+            f"def {_H5_EXEMPTION_TEST}(", _module_text("tests/test_lease_close_broker.py")
+        )
+
+    def _h5(self) -> str:
+        rows = [
+            line for line in _doc("product-spec.md").splitlines() if line.startswith("| H5 |")
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]
+
+    def test_h5_names_the_exemption(self) -> None:
+        self.assertTrue(_h5_names_the_exemption(self._h5()))
+
+    def test_neg_a_close_or_debt_for_every_peer_fails(self) -> None:
+        row = self._h5()
+        # Back to the promise of 97f54e7: a close per known peer, or a debt.
+        for old, new in (
+            (
+                "publican un cierre a cada peer conocido que alcanzan y cuyo censo lo anuncia; "
+                "la fila de uno alcanzable cuyo censo fresco no lo anuncia se salda sin cierre "
+                "ni deuda (`close_not_supported`, la exención del bridge 12, que no confirma "
+                "que el juego quede limpio), y la de cualquier otro al que el cierre no llega "
+                "queda debida",
+                "publican un cierre por peer conocido y la fila del que no se alcanza queda debida",
+            ),
+            (
+                ", mientras que un censo fresco sin el cierre la salda sin publicarlo "
+                f"(`{_H5_EXEMPTION_TEST}`)",
+                "",
+            ),
+        ):
+            self.assertEqual(row.count(old), 1, old)
+            row = row.replace(old, new)
+        self.assertFalse(_h5_names_the_exemption(row))
 
 
 if __name__ == "__main__":

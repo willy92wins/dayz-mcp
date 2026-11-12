@@ -271,7 +271,9 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.app._tool_manager.get_tool(DRIVE_RELEASE))
         for part in (
             "The end of the lease that sent the drive ends it too: the server's lease close stops every "
-            "drive, and a server the close does not reach leaves that close owed (lease_end.unconfirmed).",
+            "drive. A reachable server whose fresh census lacks the close gets none and owes nothing "
+            "(close_not_supported), so its drives keep going; any other server the close does not reach "
+            "leaves it owed (lease_end.unconfirmed).",
             "A call that times out or is cancelled after the server received it still runs, and its "
             "release (survivor_drive_release, which stops the drive only while that call's drive is the "
             "one set) is queued only if its result is not stored yet and the queue admits the release: "
@@ -281,6 +283,8 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn(part, self.tool.description)
         self.assertNotIn("still runs, and its release is queued.", self.tool.description)
         self.assertNotIn("the broker queues its release", self.tool.description)
+        # PX9 c: no close or debt for every server (close_not_supported).
+        self.assertNotIn("and a server the close does not reach leaves that close owed", self.tool.description)
 
     def test_the_description_says_the_survivor_turns_its_body_toward_heading(self) -> None:
         for part in (
