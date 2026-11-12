@@ -1010,22 +1010,23 @@ def _servermod_release_paragraphs(text: str) -> list[str]:
 # wording through or turned a true one away ("lo encola", "nunca encola", "no
 # siempre lo encola", "no obstante"), so the check no longer reads the prose.
 # It pins each paragraph as reviewed in PX9 to PX9 d, with whitespace folded
-# and the line numbers of its path:line citations taken out (#386's citations move
-# with every change to the files they cite; the paths stay pinned). A change of
+# and the line numbers of its path:line citations set to 0 (#386's citations
+# move with every change to the files they cite). The path and the colon stay
+# pinned, so a citation that loses its line numbers fails (PX9 e). A change of
 # wording, true or false, fails here and goes back to review; the code side is
 # pinned by test_code_gates_the_release_on_no_round.
 _SERVERMOD_LINE_CITE = re.compile(r"(`[\w./-]+\.(?:py|c|md|toml)):\d+(?:-\d+)?(?=`)")
 _SERVERMOD_RELEASE_SHA256 = (
     # The explicit session_release paragraph.
-    "13b17111ae95e9898537ba04d6849c7cfc78d05c0aa6702e3269c0bab13a7feb",
+    "83ac75eb794189918775eab8214b1b6092f06ddab8c00c3c174b2d04515c132f",
     # The expired-lease paragraph.
-    "43fd5ac04738e021cc85f7e02efe16edccdc9a9d1e9416ad3e09bdbefa52d8ad",
+    "0f6a66eed9db545b2d8df4e69c7c1ef14e40158048affcf2e67f5a428809c20f",
 )
 
 
 def _servermod_release_text(paragraph: str) -> str:
-    """The paragraph as pinned: whitespace folded, citation line numbers out."""
-    return _SERVERMOD_LINE_CITE.sub(r"\1", " ".join(paragraph.split()))
+    """The paragraph as pinned: whitespace folded, citation line numbers 0."""
+    return _SERVERMOD_LINE_CITE.sub(r"\1:0", " ".join(paragraph.split()))
 
 
 def _servermod_release_digest(paragraph: str) -> str:
@@ -1095,6 +1096,13 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
             (1, "Sin ronda, el release queda", "Con ronda, el release queda"),
             # A citation's path stays pinned; only its line numbers move.
             (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/server.py:3257`"),
+            # PX9 e: a citation that loses its line numbers, in each paragraph.
+            (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/loopback.py`"),
+            (
+                1,
+                "`tools/dayz_mcp/session_coordination.py:2366-2368`",
+                "`tools/dayz_mcp/session_coordination.py`",
+            ),
         )
         for index, old, new in mutants:
             with self.subTest(new=new):
@@ -1103,6 +1111,16 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
                 self.assertNotEqual(
                     _servermod_release_digest(paragraph.replace(old, new)),
                     _SERVERMOD_RELEASE_SHA256[index],
+                )
+
+    def test_neg_citations_without_line_numbers_fail(self) -> None:
+        # PX9 e: every citation of a paragraph loses its line numbers.
+        for index, paragraph in enumerate(self._release_paragraphs()):
+            with self.subTest(index=index):
+                bare, count = _SERVERMOD_LINE_CITE.subn(r"\1", paragraph)
+                self.assertGreater(count, 0)
+                self.assertNotEqual(
+                    _servermod_release_digest(bare), _SERVERMOD_RELEASE_SHA256[index]
                 )
 
 
