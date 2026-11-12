@@ -385,6 +385,32 @@ class AIGroupSpawnBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         # bare (ai_group_order has its own field/allowed branch, #340).
         other = server._bridge_error(result, "ai_group_state")
         self.assertEqual(str(other), "bad_args")
+        timeout = _adapter_spawn_refusal("", [], error="timeout")
+        self.assertEqual(str(server._bridge_error(timeout, SPAWN)), "timeout")
+
+    async def test_neg_bad_args_does_not_carry_living_or_limit(self) -> None:
+        # The adapter serializes living=0 and limit=0 on every refusal
+        # (MCPAIGroup ints, MCPExpansionAI.c:44-45); only ai_limit_reached
+        # sets them (:889-890).
+        result = _adapter_spawn_refusal("faction", FACTIONS)
+        result["ai_group"]["living"] = 7
+        result["ai_group"]["limit"] = 9
+        text = await self._refusal_text(result)
+        self.assertIn("field=faction", text)
+        self.assertNotIn("living=", text)
+        self.assertNotIn("limit=", text)
+
+    async def test_neg_oversized_values_are_capped(self) -> None:
+        result = _adapter_spawn_refusal("faction", ["Z" * 65] + [f"F{i}" for i in range(200)])
+        result["ai_group"]["args_read"]["faction"] = "Q" * 65
+        result["ai_group"]["args_read"]["waypoints"] = [1.0] * 97
+        text = await self._refusal_text(result)
+        allowed = re.search(r"allowed=([^;]*)", text).group(1).split(",")
+        self.assertEqual(allowed, [f"F{i}" for i in range(63)])
+        self.assertNotIn("Z" * 65, text)
+        self.assertNotIn("Q" * 65, text)
+        self.assertNotIn("waypoints=", text)
+        self.assertIn("args_read=count=2", text)
 
     async def test_neg_bad_args_without_ai_group_stays_bare(self) -> None:
         text = await self._refusal_text({"ok": 0, "error": "bad_args"})
