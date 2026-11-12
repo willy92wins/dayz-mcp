@@ -583,6 +583,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool m_StartPauseDone;
 	protected float m_StartPauseFromS;
 	protected const float START_PAUSE_WINDOW_S = 60.0;
+	protected bool m_MCPPauseQueued; // 59da: true while ui_pause newly armed MissionGameplay.m_PauseQueued.
 	//! Hot-UI preview root. Not ref: the workspace owns the widget tree; this
 	//! pointer only exists so the next reload can Unlink the previous one.
 	protected Widget m_UiPreviewRoot;
@@ -636,6 +637,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		m_DialogHostTried = false;
 		m_StartPauseDone = false;
 		m_StartPauseFromS = -1.0;
+		m_MCPPauseQueued = false;
 	}
 
 	void ~MCPClientBridge()
@@ -8439,6 +8441,13 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	// MissionGameplay.OnUpdate runs :308-311 ahead of bridge.OnTick), answering
 	// ok=true if that next update opened MENU_INGAME or pause_not_opened if
 	// loading/respawning kept m_PauseQueued deferred.
+	// Queue cleanup and start-pause window (fb-20261112-003154-59da):
+	// m_MCPPauseQueued records whether this call newly set m_PauseQueued (leaving
+	// a start-up queue from missiongameplay.c:294-299 untouched); any non-ok
+	// completion (sync or PostUiPauseJob) cancels an MCP-queued pause still on
+	// MissionGameplay and logs "ui_pause queue cancelled id=<id>", while any ok
+	// completion sets m_StartPauseDone so ContinueStartPauseMenu in OnTick
+	// (:730 vs :750) never closes the menu ui_pause opened.
 	protected bool DispatchUiPause(MCPCommand command, MCPResult result)
 	{
 		MissionGameplay mission;
@@ -8450,6 +8459,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		MCPJob job;
 		int beforeId;
 		int afterId;
+		bool queuedBefore;
 		bool deferred;
 		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
 		{
@@ -8476,7 +8486,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 				beforeId = menuBefore.GetID();
 			}
 		}
+		queuedBefore = mission.MCP_IsPauseQueued();
 		mission.Pause();
+		if (!queuedBefore && mission.MCP_IsPauseQueued())
+		{
+			m_MCPPauseQueued = true;
+		}
 		afterId = -1;
 		ui = GetGame().GetUIManager();
 		if (ui)
@@ -8521,6 +8536,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (afterId == MENU_INGAME)
 		{
 			result.ok = true;
+			m_StartPauseDone = true;
+			m_MCPPauseQueued = false;
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=1");
 		}
 		else
@@ -8528,6 +8545,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = "pause_not_opened";
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
+			if (m_MCPPauseQueued && mission.MCP_IsPauseQueued())
+			{
+				mission.MCP_CancelQueuedPause();
+				Log("ui_pause queue cancelled id=" + command.id);
+			}
+			m_MCPPauseQueued = false;
 		}
 		return true;
 	}
@@ -8545,6 +8568,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	{
 		MCPResult result;
 		MCPUiPause reply;
+		MissionGameplay mission;
 		UIManager ui;
 		UIScriptedMenu menuAfter;
 		int beforeId;
@@ -8566,6 +8590,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		afterId = -1;
 		if (GetGame())
 		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
 			ui = GetGame().GetUIManager();
 			if (ui)
 			{
@@ -8589,10 +8614,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = job.error;
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=" + job.error);
+			if (m_MCPPauseQueued && mission && mission.MCP_IsPauseQueued())
+			{
+				mission.MCP_CancelQueuedPause();
+				Log("ui_pause queue cancelled id=" + job.id);
+			}
+			m_MCPPauseQueued = false;
 		}
 		else if (afterId == MENU_INGAME)
 		{
 			result.ok = true;
+			m_StartPauseDone = true;
+			m_MCPPauseQueued = false;
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=1");
 		}
 		else
@@ -8600,6 +8633,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.ok = false;
 			result.error = "pause_not_opened";
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
+			if (m_MCPPauseQueued && mission && mission.MCP_IsPauseQueued())
+			{
+				mission.MCP_CancelQueuedPause();
+				Log("ui_pause queue cancelled id=" + job.id);
+			}
+			m_MCPPauseQueued = false;
 		}
 		PostResult(result);
 	}

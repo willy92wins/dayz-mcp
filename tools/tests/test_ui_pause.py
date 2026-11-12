@@ -49,6 +49,7 @@ MENU_INGAME_ID = 9  # vanilla MENU_INGAME on 1.30.164289
 DAYZ_GAME_STATE_IN_GAME = 5
 SCRIPTS = addon_root() / "scripts"
 CLIENT_PATH = SCRIPTS / "5_Mission" / "MCPClientBridge.c"
+MISSION_GAMEPLAY_PATH = SCRIPTS / "5_Mission" / "MissionGameplay.c"
 RUNNER_PATH = SCRIPTS / "5_Mission" / "MCPJobRunner.c"
 SERVER_BRIDGE_PATH = SCRIPTS / "5_Mission" / "MCPBridge.c"
 MESSAGES_PATH = SCRIPTS / "5_Mission" / "MCPMessages.c"
@@ -56,10 +57,14 @@ CENSUS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "bridge_capabili
 
 DISPATCH_CHAIN = "protected void Dispatch(MCPCommand command)"
 IN_GAME = "protected bool IsClientInGame()"
+CONTINUE_START_PAUSE = "protected void ContinueStartPauseMenu()"
 DISPATCH_UI_PAUSE = "protected bool DispatchUiPause(MCPCommand command, MCPResult result)"
 PROCESS_UI_PAUSE = "protected bool ProcessUiPauseJob(MCPJob job)"
 POST_UI_PAUSE = "protected void PostUiPauseJob(MCPJob job)"
 VERB_METHODS = (DISPATCH_UI_PAUSE, PROCESS_UI_PAUSE, POST_UI_PAUSE)
+MISSION_IS_PAUSE_QUEUED = "bool MCP_IsPauseQueued()"
+MISSION_CANCEL_QUEUED_PAUSE = "void MCP_CancelQueuedPause()"
+MISSION_PAUSE_METHODS = (MISSION_IS_PAUSE_QUEUED, MISSION_CANCEL_QUEUED_PAUSE)
 
 PROCESS_HOOK = "override bool MCP_ProcessJob(MCPJob job)"
 READY_HOOK = "override bool MCP_IsJobReady(MCPJob job)"
@@ -350,7 +355,7 @@ def assert_dispatch_ui_pause_contract(
 
 
 class _WireString(EnforceString):
-    """EnforceString supporting Enforce `+` concatenation with string and int values."""
+    """EnforceString supporting Enforce `+` concatenation with string, int, and float values."""
 
     __slots__ = ()
 
@@ -359,6 +364,8 @@ class _WireString(EnforceString):
             return _WireString(self.data + other.data)
         if type(other) is int:
             return _WireString(self.data + str(other).encode("ascii"))
+        if type(other) is float:
+            return _WireString(self.data + repr(other).encode("ascii"))
         raise TypeError(f"unsupported Enforce string + {type(other).__name__}")
 
     def __radd__(self, other: object) -> "_WireString":
@@ -366,6 +373,8 @@ class _WireString(EnforceString):
             return _WireString(other.data + self.data)
         if type(other) is int:
             return _WireString(str(other).encode("ascii") + self.data)
+        if type(other) is float:
+            return _WireString(repr(other).encode("ascii") + self.data)
         raise TypeError(f"unsupported {type(other).__name__} + Enforce string")
 
 
@@ -388,11 +397,12 @@ class _Menu:
 
 
 class _UIManager:
-    """Models vanilla UIManager.GetMenu / IsMenuOpen / CloseAll / EnterScriptedMenu."""
+    """Models vanilla UIManager.GetMenu / IsMenuOpen / CloseAll / CloseMenu / EnterScriptedMenu."""
 
     def __init__(self, top: _Menu | None = None) -> None:
         self.top = top
         self.enter_visible = True
+        self.ingame_openings = 0
 
     def GetMenu(self) -> _Menu | None:
         return self.top
@@ -408,10 +418,16 @@ class _UIManager:
     def CloseAll(self) -> None:
         self.top = None
 
+    def CloseMenu(self, target_id: int) -> None:
+        if self.top is not None and self.top.menu_id == target_id:
+            self.top = self.top.parent
+
     def EnterScriptedMenu(self, menu_id: int, parent: _Menu | None) -> _Menu | None:
         if not self.enter_visible:
             return None
         opened = _Menu(menu_id, parent=parent, visible=True)
+        if menu_id == MENU_INGAME_ID:
+            self.ingame_openings += 1
         self.top = opened
         return opened
 
@@ -429,13 +445,31 @@ class _Player(_Man):
 
 
 class _MissionGameplay:
-    """Models vanilla 1.30.164289 MissionGameplay.IsPaused / Pause / OnUpdate (:308-311, :1294-1332)."""
+    """Models vanilla 1.30.164289 MissionGameplay.IsPaused / Pause / Continue (:308-311, :1294-1349) plus translated modded queue helpers."""
 
-    def __init__(self, model: "_UiPauseClientModel") -> None:
+    def __init__(
+        self,
+        model: "_UiPauseClientModel",
+        mission_source: str | None = None,
+    ) -> None:
+        mission_source = (
+            _source(MISSION_GAMEPLAY_PATH) if mission_source is None else mission_source
+        )
         self._model = model
         self.m_PauseQueued = False
         self.respawning = False
         self.pause_calls = 0
+        self.continue_calls = 0
+        mission_ns: dict[str, Any] = {"this": self, "_S": _WireString}
+        for signature in MISSION_PAUSE_METHODS:
+            translate(
+                _free_method(mission_source, signature),
+                signature,
+                mission_ns,
+                class_types=LOCAL_CLASS_TYPES,
+            )
+        self.MCP_IsPauseQueued = mission_ns["MCP_IsPauseQueued"]
+        self.MCP_CancelQueuedPause = mission_ns["MCP_CancelQueuedPause"]
 
     def IsPaused(self) -> bool:
         return self._model.ui.IsMenuOpen(MENU_INGAME_ID)
@@ -462,6 +496,14 @@ class _MissionGameplay:
         # which hits the IsPaused() / MENU_INGAME guard above and returns.
         self.Pause()
         self.m_PauseQueued = False
+
+    def Continue(self) -> None:
+        self.continue_calls += 1
+        top = self._model.ui.GetMenu()
+        if top is not None:
+            if not self.IsPaused() or top.GetID() != MENU_INGAME_ID:
+                return
+        self._model.ui.CloseMenu(MENU_INGAME_ID)
 
 
 class _JobMap:
@@ -494,17 +536,23 @@ class _UiPauseClientModel:
         client: str | None = None,
         runner: str | None = None,
         messages: str | None = None,
+        mission_gameplay: str | None = None,
     ) -> None:
         client = _source(CLIENT_PATH) if client is None else client
         runner = _source(RUNNER_PATH) if runner is None else runner
         messages = _source(MESSAGES_PATH) if messages is None else messages
+        mission_gameplay = (
+            _source(MISSION_GAMEPLAY_PATH)
+            if mission_gameplay is None
+            else mission_gameplay
+        )
 
         self.player: object | None = _Player(loaded=True)
         self.is_dedicated_server = False
         self.is_client = True
         self.game_state = DAYZ_GAME_STATE_IN_GAME
         self.ui = _UIManager()
-        self.mission: object | None = _MissionGameplay(self)
+        self.mission: object | None = _MissionGameplay(self, mission_gameplay)
         self.has_game = True
 
         self.posted: list[Any] = []
@@ -534,13 +582,19 @@ class _UiPauseClientModel:
             m_JobRunner=self.runner,
             m_DialogJob=None,
             m_CameraHandoffPending=False,
+            m_MCPPauseQueued=False,
+            m_StartPauseDone=False,
+            m_StartPauseFromS=-1.0,
         )
         constants: dict[str, float | int] = {
             name: float(value) if kind == "float" else int(value)
             for kind, name, value in re.findall(
-                r"protected const (float|int) (CAMERA_\w+) = ([0-9.]+);", client
+                r"protected const (float|int) (CAMERA_\w+|START_PAUSE_WINDOW_S)\s*=\s*([0-9.]+)\s*;",
+                _without_comments(client),
             )
         }
+        if "START_PAUSE_WINDOW_S" not in constants:
+            raise AssertionError("START_PAUSE_WINDOW_S is not declared")
         game = SimpleNamespace(
             GetPlayer=lambda: self.player,
             IsDedicatedServer=lambda: self.is_dedicated_server,
@@ -572,7 +626,13 @@ class _UiPauseClientModel:
         for cls_name in ("MCPCommand", "MCPResult", "MCPJob", "MCPUiPause"):
             fake_class(messages, cls_name, self.ns)
 
-        for signature in (DISPATCH_CHAIN, IN_GAME, *VERB_METHODS, *OWNER_HOOKS):
+        for signature in (
+            DISPATCH_CHAIN,
+            IN_GAME,
+            CONTINUE_START_PAUSE,
+            *VERB_METHODS,
+            *OWNER_HOOKS,
+        ):
             translate(
                 _free_method(client, signature),
                 signature,
@@ -613,6 +673,7 @@ class _UiPauseClientModel:
             if self.mission.m_PauseQueued and not self.mission.IsPaused():
                 self.mission.Pause()
         self.runner.Tick(timeslice, self.owner)
+        self.ns["ContinueStartPauseMenu"]()
 
     def replies(self) -> list[tuple[int, bool, str, tuple[int, int] | None]]:
         out: list[tuple[int, bool, str, tuple[int, int] | None]] = []
@@ -697,6 +758,7 @@ class UiPauseEnforceTest(unittest.TestCase):
                 "job",
                 "beforeId",
                 "afterId",
+                "queuedBefore",
                 "deferred",
             ],
         )
@@ -706,7 +768,7 @@ class UiPauseEnforceTest(unittest.TestCase):
         )
         self.assertEqual(
             _locals_declared_at_top(self.post),
-            ["result", "reply", "ui", "menuAfter", "beforeId", "afterId"],
+            ["result", "reply", "mission", "ui", "menuAfter", "beforeId", "afterId"],
         )
         for signature, body in (
             (DISPATCH_UI_PAUSE, self.dispatch),
@@ -899,6 +961,17 @@ class UiPauseEnforceTest(unittest.TestCase):
             prune_unfilled_fields("gameplay_state", {"ok": 1, "ui_pause": None}),
         )
 
+    def test_mcp_pause_queued_member_and_constructor_init(self) -> None:
+        bridge_body = _class_body(
+            _without_comments_or_strings(self.source), "MCPClientBridge"
+        )
+        self.assertEqual(
+            len(re.findall(r"(?m)^\tprotected bool m_MCPPauseQueued;\s*$", bridge_body)),
+            1,
+        )
+        ctor_body = re.sub(r"\s+", "", method_body(self.source, "void MCPClientBridge()"))
+        self.assertIn("m_MCPPauseQueued=false;", ctor_body)
+
 
 class UiPauseEnforceRunTest(unittest.TestCase):
     """Execute the real translated Enforce methods across sync, deferred, and refusal paths."""
@@ -1024,7 +1097,10 @@ class UiPauseEnforceRunTest(unittest.TestCase):
         self.assertEqual(invisible.replies(), [(23, False, "pause_not_opened", (-1, -1))])
         self.assertEqual(
             invisible.logs,
-            ["ui_pause before=-1 after=-1 ok=0 error=pause_not_opened"],
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=23",
+            ],
         )
 
         # Negative control (review-r2): unconditionally deferring onto m_JobRunner when
@@ -1070,7 +1146,7 @@ class UiPauseEnforceRunTest(unittest.TestCase):
 
         still_loading.on_update(0.016)
         self.assertEqual(still_loading.jobs.Count(), 0)
-        self.assertTrue(still_loading.mission.m_PauseQueued)
+        self.assertFalse(still_loading.mission.m_PauseQueued)
         self.assertIsNone(still_loading.ui.GetMenu())
         self.assertEqual(
             still_loading.replies(),
@@ -1078,12 +1154,15 @@ class UiPauseEnforceRunTest(unittest.TestCase):
         )
         self.assertEqual(
             still_loading.logs,
-            ["ui_pause before=-1 after=-1 ok=0 error=pause_not_opened"],
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=31",
+            ],
         )
         for _ in range(6):
             still_loading.on_update(0.05)
         self.assertEqual(len(still_loading.replies()), 1)
-        self.assertEqual(len(still_loading.logs), 1)
+        self.assertEqual(len(still_loading.logs), 2)
 
         # Same next-tick pause_not_opened read-back while respawning or pre-IN_GAME persists.
         still_respawning = _UiPauseClientModel()
@@ -1261,6 +1340,364 @@ class UiPauseEnforceRunTest(unittest.TestCase):
             failed.logs,
             ["ui_pause before=7 after=-1 ok=0 error=synthetic_error"],
         )
+
+    def test_case_a_unloaded_player_cancels_queued_pause_and_never_opens_on_load(self) -> None:
+        model = _UiPauseClientModel()
+        player = _Player(loaded=False)
+        model.player = player
+        assert isinstance(model.mission, _MissionGameplay)
+
+        model.dispatch(COMMAND, 51)
+        self.assertEqual(model.jobs.Count(), 1)
+        self.assertTrue(model.mission.m_PauseQueued)
+        self.assertTrue(model.state.m_MCPPauseQueued)
+        self.assertEqual(model.replies(), [])
+
+        model.on_update(0.25)
+        self.assertEqual(model.jobs.Count(), 0)
+        self.assertEqual(model.replies(), [(51, False, "pause_not_opened", (-1, -1))])
+        self.assertFalse(model.mission.m_PauseQueued)
+        self.assertFalse(model.state.m_MCPPauseQueued)
+        self.assertEqual(
+            model.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=51",
+            ],
+        )
+
+        player.loaded = True
+        for _ in range(10):
+            model.on_update(0.25)
+        self.assertEqual(model.ui.ingame_openings, 0)
+        self.assertIsNone(model.ui.GetMenu())
+        self.assertEqual(model.mission.continue_calls, 0)
+        self.assertEqual(
+            model.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=51",
+            ],
+        )
+
+    def test_case_b_respawning_player_cancels_queued_pause_and_never_opens_after_respawn(
+        self,
+    ) -> None:
+        model = _UiPauseClientModel()
+        assert isinstance(model.mission, _MissionGameplay)
+        model.mission.respawning = True
+
+        model.dispatch(COMMAND, 52)
+        self.assertEqual(model.jobs.Count(), 1)
+        self.assertTrue(model.mission.m_PauseQueued)
+        self.assertTrue(model.state.m_MCPPauseQueued)
+        self.assertEqual(model.replies(), [])
+
+        model.on_update(0.25)
+        self.assertEqual(model.jobs.Count(), 0)
+        self.assertEqual(model.replies(), [(52, False, "pause_not_opened", (-1, -1))])
+        self.assertFalse(model.mission.m_PauseQueued)
+        self.assertFalse(model.state.m_MCPPauseQueued)
+        self.assertEqual(
+            model.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=52",
+            ],
+        )
+
+        model.mission.respawning = False
+        for _ in range(10):
+            model.on_update(0.25)
+        self.assertEqual(model.ui.ingame_openings, 0)
+        self.assertIsNone(model.ui.GetMenu())
+        self.assertEqual(model.mission.continue_calls, 0)
+        self.assertEqual(
+            model.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=52",
+            ],
+        )
+
+    def test_case_c_deferred_job_failure_and_timeout_cancel_queued_pause(self) -> None:
+        # 1. Deferred job finishes with job.error != "" via MCP_PostJobFailure.
+        failed = _UiPauseClientModel()
+        failed_player = _Player(loaded=False)
+        failed.player = failed_player
+        assert isinstance(failed.mission, _MissionGameplay)
+        failed.dispatch(COMMAND, 53)
+        self.assertEqual(failed.jobs.Count(), 1)
+        self.assertTrue(failed.mission.m_PauseQueued)
+        self.assertTrue(failed.state.m_MCPPauseQueued)
+        failed_job = failed.jobs.GetElement(0)
+        failed_job.error = _WireString.of("synthetic_failure")
+        failed.on_update(0.25)
+        self.assertIn("MCP_PostJobFailure", failed.hook_calls)
+        self.assertEqual(failed.replies(), [(53, False, "synthetic_failure", (-1, -1))])
+        self.assertFalse(failed.mission.m_PauseQueued)
+        self.assertFalse(failed.state.m_MCPPauseQueued)
+        self.assertEqual(
+            failed.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=synthetic_failure",
+                "ui_pause queue cancelled id=53",
+            ],
+        )
+        failed_player.loaded = True
+        for _ in range(10):
+            failed.on_update(0.25)
+        self.assertEqual(failed.ui.ingame_openings, 0)
+        self.assertIsNone(failed.ui.GetMenu())
+        self.assertEqual(failed.mission.continue_calls, 0)
+        self.assertEqual(len(failed.logs), 2)
+
+        # 2. Deferred job expires past deadline_s with job.error != "" via MCP_PostJobTimeout.
+        timeout_err = _UiPauseClientModel()
+        timeout_err_player = _Player(loaded=False)
+        timeout_err.player = timeout_err_player
+        assert isinstance(timeout_err.mission, _MissionGameplay)
+        timeout_err.dispatch(COMMAND, 54)
+        timeout_err_job = timeout_err.jobs.GetElement(0)
+        timeout_err_job.sample_start_s = 10.0
+        timeout_err_job.error = _WireString.of("synthetic_timeout")
+        timeout_err.on_update(6.0)
+        self.assertIn("MCP_PostJobTimeout", timeout_err.hook_calls)
+        self.assertEqual(timeout_err.replies(), [(54, False, "synthetic_timeout", (-1, -1))])
+        self.assertFalse(timeout_err.mission.m_PauseQueued)
+        self.assertFalse(timeout_err.state.m_MCPPauseQueued)
+        self.assertEqual(
+            timeout_err.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=synthetic_timeout",
+                "ui_pause queue cancelled id=54",
+            ],
+        )
+        timeout_err_player.loaded = True
+        for _ in range(10):
+            timeout_err.on_update(0.25)
+        self.assertEqual(timeout_err.ui.ingame_openings, 0)
+        self.assertIsNone(timeout_err.ui.GetMenu())
+        self.assertEqual(timeout_err.mission.continue_calls, 0)
+        self.assertEqual(len(timeout_err.logs), 2)
+
+        # 3. Deferred job expires past deadline_s with empty job.error via MCP_PostJobTimeout.
+        timeout_plain = _UiPauseClientModel()
+        timeout_plain_player = _Player(loaded=False)
+        timeout_plain.player = timeout_plain_player
+        assert isinstance(timeout_plain.mission, _MissionGameplay)
+        timeout_plain.dispatch(COMMAND, 55)
+        timeout_plain_job = timeout_plain.jobs.GetElement(0)
+        timeout_plain_job.sample_start_s = 10.0
+        timeout_plain.on_update(6.0)
+        self.assertIn("MCP_PostJobTimeout", timeout_plain.hook_calls)
+        self.assertEqual(timeout_plain.replies(), [(55, False, "pause_not_opened", (-1, -1))])
+        self.assertFalse(timeout_plain.mission.m_PauseQueued)
+        self.assertFalse(timeout_plain.state.m_MCPPauseQueued)
+        self.assertEqual(
+            timeout_plain.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "ui_pause queue cancelled id=55",
+            ],
+        )
+        timeout_plain_player.loaded = True
+        for _ in range(10):
+            timeout_plain.on_update(0.25)
+        self.assertEqual(timeout_plain.ui.ingame_openings, 0)
+        self.assertIsNone(timeout_plain.ui.GetMenu())
+        self.assertEqual(timeout_plain.mission.continue_calls, 0)
+        self.assertEqual(len(timeout_plain.logs), 2)
+
+    def test_case_d_preexisting_vanilla_queue_is_preserved_and_opens_on_load(self) -> None:
+        model = _UiPauseClientModel()
+        player = _Player(loaded=False)
+        model.player = player
+        assert isinstance(model.mission, _MissionGameplay)
+        model.mission.m_PauseQueued = True
+
+        model.dispatch(COMMAND, 56)
+        self.assertEqual(model.jobs.Count(), 1)
+        self.assertTrue(model.mission.m_PauseQueued)
+        self.assertFalse(model.state.m_MCPPauseQueued)
+
+        model.on_update(0.25)
+        self.assertEqual(model.jobs.Count(), 0)
+        self.assertEqual(model.replies(), [(56, False, "pause_not_opened", (-1, -1))])
+        self.assertTrue(model.mission.m_PauseQueued)
+        self.assertFalse(model.state.m_MCPPauseQueued)
+        self.assertEqual(
+            model.logs,
+            ["ui_pause before=-1 after=-1 ok=0 error=pause_not_opened"],
+        )
+
+        player.loaded = True
+        model.on_update(0.5)
+        self.assertFalse(model.mission.m_PauseQueued)
+        self.assertEqual(model.ui.ingame_openings, 1)
+        self.assertEqual(model.mission.continue_calls, 1)
+        self.assertIsNone(model.ui.GetMenu())
+        self.assertEqual(
+            model.logs,
+            [
+                "ui_pause before=-1 after=-1 ok=0 error=pause_not_opened",
+                "start pause menu closed elapsed_s=0.75 from_s=0.25",
+            ],
+        )
+
+        # Synchronous pause_not_opened also preserves a queue that was already armed beforehand.
+        sync_prequeued = _UiPauseClientModel()
+        assert isinstance(sync_prequeued.mission, _MissionGameplay)
+        sync_prequeued.mission.m_PauseQueued = True
+        sync_prequeued.ui.enter_visible = False
+        sync_prequeued.dispatch(COMMAND, 57)
+        self.assertEqual(sync_prequeued.replies(), [(57, False, "pause_not_opened", (-1, -1))])
+        self.assertTrue(sync_prequeued.mission.m_PauseQueued)
+        self.assertFalse(sync_prequeued.state.m_MCPPauseQueued)
+        self.assertEqual(
+            sync_prequeued.logs,
+            ["ui_pause before=-1 after=-1 ok=0 error=pause_not_opened"],
+        )
+
+    def test_case_e_deferred_pause_opening_on_next_tick_replies_ok_without_cancel_or_start_close(
+        self,
+    ) -> None:
+        model = _UiPauseClientModel()
+        player = _Player(loaded=False)
+        model.player = player
+        assert isinstance(model.mission, _MissionGameplay)
+
+        model.dispatch(COMMAND, 58)
+        self.assertEqual(model.jobs.Count(), 1)
+        self.assertTrue(model.mission.m_PauseQueued)
+        self.assertTrue(model.state.m_MCPPauseQueued)
+
+        player.loaded = True
+        model.on_update(0.25)
+        self.assertEqual(model.jobs.Count(), 0)
+        self.assertEqual(model.replies(), [(58, True, "", (-1, MENU_INGAME_ID))])
+        self.assertFalse(model.mission.m_PauseQueued)
+        self.assertFalse(model.state.m_MCPPauseQueued)
+        self.assertEqual(model.ui.ingame_openings, 1)
+        top = model.ui.GetMenu()
+        self.assertIsNotNone(top)
+        assert top is not None
+        self.assertEqual(top.GetID(), MENU_INGAME_ID)
+        self.assertEqual(
+            model.logs,
+            [f"ui_pause before=-1 after={MENU_INGAME_ID} ok=1"],
+        )
+
+        for _ in range(5):
+            model.on_update(0.25)
+        top_after = model.ui.GetMenu()
+        self.assertIsNotNone(top_after)
+        assert top_after is not None
+        self.assertEqual(top_after.GetID(), MENU_INGAME_ID)
+        self.assertEqual(model.mission.continue_calls, 0)
+        self.assertEqual(
+            model.logs,
+            [f"ui_pause before=-1 after={MENU_INGAME_ID} ok=1"],
+        )
+
+    def test_case_f_synchronous_ok_inside_start_window_keeps_menu_open_across_updates(
+        self,
+    ) -> None:
+        model = _UiPauseClientModel()
+        assert isinstance(model.mission, _MissionGameplay)
+        model.on_update(0.25)
+
+        model.dispatch(COMMAND, 59)
+        self.assertEqual(model.jobs.Count(), 0)
+        self.assertEqual(model.replies(), [(59, True, "", (-1, MENU_INGAME_ID))])
+        self.assertFalse(model.state.m_MCPPauseQueued)
+        top = model.ui.GetMenu()
+        self.assertIsNotNone(top)
+        assert top is not None
+        self.assertEqual(top.GetID(), MENU_INGAME_ID)
+
+        for _ in range(5):
+            model.on_update(0.25)
+        top_after = model.ui.GetMenu()
+        self.assertIsNotNone(top_after)
+        assert top_after is not None
+        self.assertEqual(top_after.GetID(), MENU_INGAME_ID)
+        self.assertEqual(model.mission.continue_calls, 0)
+        self.assertEqual(
+            model.logs,
+            [f"ui_pause before=-1 after={MENU_INGAME_ID} ok=1"],
+        )
+
+    def test_case_g_without_ui_pause_start_window_closes_pause_once_as_before(self) -> None:
+        model = _UiPauseClientModel()
+        player = _Player(loaded=False)
+        model.player = player
+        assert isinstance(model.mission, _MissionGameplay)
+        model.mission.m_PauseQueued = True
+
+        model.on_update(0.25)
+        self.assertTrue(model.mission.m_PauseQueued)
+        self.assertEqual(model.logs, [])
+
+        player.loaded = True
+        model.on_update(0.5)
+        self.assertFalse(model.mission.m_PauseQueued)
+        self.assertEqual(model.ui.ingame_openings, 1)
+        self.assertIsNone(model.ui.GetMenu())
+        self.assertEqual(model.mission.continue_calls, 1)
+        self.assertEqual(
+            model.logs,
+            ["start pause menu closed elapsed_s=0.75 from_s=0.25"],
+        )
+
+        # One-shot: a later non-MCP pause inside the 60 s window is left open.
+        model.mission.Pause()
+        model.on_update(1.0)
+        top = model.ui.GetMenu()
+        self.assertIsNotNone(top)
+        assert top is not None
+        self.assertEqual(top.GetID(), MENU_INGAME_ID)
+        self.assertEqual(model.mission.continue_calls, 1)
+        self.assertEqual(len(model.logs), 1)
+
+    def test_overlapping_ui_pause_during_respawn_cancels_queue_once(self) -> None:
+        model = _UiPauseClientModel()
+        assert isinstance(model.mission, _MissionGameplay)
+        model.mission.respawning = True
+
+        model.dispatch(COMMAND, 61)
+        model.dispatch(COMMAND, 62)
+        self.assertEqual(model.jobs.Count(), 2)
+        self.assertEqual(model.replies(), [])
+
+        model.on_update(0.25)
+        self.assertEqual(model.jobs.Count(), 0)
+        self.assertEqual(
+            sorted(model.replies()),
+            [
+                (61, False, "pause_not_opened", (-1, -1)),
+                (62, False, "pause_not_opened", (-1, -1)),
+            ],
+        )
+
+        model.mission.respawning = False
+        for _ in range(10):
+            model.on_update(0.25)
+        self.assertEqual(model.ui.ingame_openings, 0)
+        self.assertIsNone(model.ui.GetMenu())
+        self.assertEqual(model.mission.continue_calls, 0)
+        self.assertFalse(model.mission.m_PauseQueued)
+        self.assertFalse(model.state.m_MCPPauseQueued)
+        cancel_lines = [
+            line for line in model.logs if line.startswith("ui_pause queue cancelled")
+        ]
+        self.assertEqual(len(cancel_lines), 1)
+        self.assertRegex(cancel_lines[0], r"^ui_pause queue cancelled id=(61|62)$")
+        self.assertEqual(
+            model.logs.count("ui_pause before=-1 after=-1 ok=0 error=pause_not_opened"),
+            2,
+        )
+        self.assertEqual(len(model.logs), 3)
 
 
 class UiPauseIngressAndAdmissionTest(unittest.TestCase):

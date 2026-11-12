@@ -85,4 +85,20 @@ modded class MissionGameplay
 			super.OnEvent(eventTypeId, params);
 		}
 	}
+
+	// Expose vanilla's protected m_PauseQueued (missiongameplay.c:45) so
+	// MCPClientBridge can cancel a pause queued by ui_pause when the menu did
+	// not open: Pause() sets it before its loading, respawning and menu
+	// visibility guards (:1306, :1308-1326), OnUpdate retries it (:308-311),
+	// only opening MENU_INGAME clears it (:1331), and Continue() leaves it
+	// (:1334-1348).
+	bool MCP_IsPauseQueued()
+	{
+		return m_PauseQueued;
+	}
+
+	void MCP_CancelQueuedPause()
+	{
+		m_PauseQueued = false;
+	}
 };
