@@ -8761,7 +8761,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "HOLD, ONCE, LOOP or ROAM (anything else, lower case included, is "
             "bad_args naming the four); HOLD stops the group on its mark, and "
             "ROAM roams to Expansion locations, not only to waypoints. "
-            "waypoints is a list of at most 32 [x, y, z] finite triples, sent "
+            "waypoints is a list of 1 to 32 [x, y, z] finite triples, sent "
             "as flat triples. formation is a formation name the server "
             "validates against its Expansion build. speed is walk, jog or "
             "sprint and travels as 1, 2 or 3 with speed_set. A group that is "
@@ -8774,7 +8774,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "combat_may_override (the combat FSM may ignore the order), plus "
             "one member row per registered member with object_id, alive, "
             "speed_limit and speed_limit_threat (limits are 0 when the "
-            "entity is gone). Errors: bad_args, "
+            "entity is gone). Errors: bad_args (from the server with field= "
+            "and, for behaviour and formation, allowed=), "
             "not_found, expansion_unavailable; detail=adapter_not_loaded|"
             "adapter_contract_mismatch|lease_close_not_supported."
         )

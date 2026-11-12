@@ -50,9 +50,15 @@ server. It ships in `addon_expansion_ai/` and packs as
   (HOLD, ONCE, LOOP, ROAM), `formation` (a name registered in
   `eAIFormation.s_FormationTypes` of the installed Expansion build, so a
   formation a newer build adds is accepted and `RANDOM` is not),
-  `waypoints` (flat triples, 1 to 32 points; an empty list is refused)
-  and `speed` (1 to 3, only beside `speed_set`). A bad formation changes
-  nothing, not even the other fields of the call.
+  `waypoints` (flat triples, 1 to 32 points) and `speed` (1 to 3, only
+  beside `speed_set`). A bad formation changes nothing, not even the
+  other fields of the call. A `bad_args` from the adapter names the
+  `field` in its message and, for `behaviour` and `formation`, the
+  `allowed` names.
+- The tool and the broker refuse an explicit empty `waypoints` list. The
+  adapter reads an empty one as no waypoints, the form an absent key
+  reaches it in (in-game round B), so a behaviour sent alone keeps the
+  route.
 - Only the fields present are applied. Waypoints replace the route
   (`ClearWaypoints`, backtracking off, one `AddWaypoint` per point, the
   current waypoint set to the first new point). `ROAM` roams to Expansion
