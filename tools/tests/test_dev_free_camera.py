@@ -328,6 +328,22 @@ def assert_lease_close_turns_the_free_camera_off(release_body: str) -> None:
         raise AssertionError(
             "ReleaseCamera's free-camera block must sit after FinishCameraHandoff(); and before DeleteOwnedCamera();"
         )
+    stripped = _without_comments_or_strings(release_body)
+    decl_at = stripped.find(decl)
+    if decl_at < 0:
+        raise AssertionError("ReleaseCamera's free-camera declaration is missing")
+    guard = "if (freeCam)"
+    guard_at = stripped.find(guard, decl_at)
+    if guard_at < 0:
+        raise AssertionError("ReleaseCamera's if (freeCam) guard after the free-camera declaration is missing")
+    for label, offset in (("declaration", decl_at), ("if (freeCam) block", guard_at)):
+        depth = stripped[:offset].count("{") - stripped[:offset].count("}")
+        if depth != 0:
+            raise AssertionError(
+                f"ReleaseCamera's free-camera {label} must sit at brace depth 0 of ReleaseCamera's body "
+                "(the method's top level, with no enclosing block open around it); "
+                f"found brace depth {depth}"
+            )
     try:
         shutdown = _if_body(code, "!m_Shutdown")
     except AssertionError:
@@ -659,6 +675,10 @@ class DevFreeCameraEnforceTest(unittest.TestCase):
         self.assertNotEqual(moved, self.release, "moving the block inside if (!m_Shutdown) did not change ReleaseCamera")
         with self.assertRaises(AssertionError):
             assert_lease_close_turns_the_free_camera_off(moved)
+        wrapped = self.release[:start] + "if (m_ActiveCam)\n\t\t{\n" + block + "\n\t\t}\n" + self.release[end:]
+        self.assertNotEqual(wrapped, self.release, "wrapping the block in if (m_ActiveCam) did not change ReleaseCamera")
+        with self.assertRaises(AssertionError):
+            assert_lease_close_turns_the_free_camera_off(wrapped)
 
     def test_dispatch_answers_bad_args_before_the_in_game_gate(self) -> None:
         chain = _method_body(self.source, DISPATCH_CHAIN)
