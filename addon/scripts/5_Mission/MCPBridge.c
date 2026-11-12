@@ -43,7 +43,8 @@ class MCPBridge : Managed
 	protected const float SERVER_PERF_WINDOW_MIN_S = 1.0;
 	protected const float SERVER_PERF_WINDOW_MAX_S = 60.0;
 	protected const float NAV_SNAP_RADIUS_MAX = 50.0;
-	protected const int NAV_POLY_BIT_OFFSET = 1;
+	// d5d6: FindPath can return true on a partial path; require the last waypoint within 0.5 m of toSnapped.
+	protected const float NAV_END_MAX_DISTANCE_M = 0.5;
 	protected const float VISIBILITY_RADIUS_MAX = 100.0;
 	// players_visibility: the field of view either side of the heading, in
 	// degrees; the head bone; the head height over the position used when that
@@ -154,6 +155,10 @@ class MCPBridge : Managed
 	protected ref array<Object> m_ReadyObjects;
 	protected ref array<CargoBase> m_ReadyProxyCargos;
 	protected ref array<ref MCPTelemetryFixtureLine> m_TelemetryFixtureLinePool;
+	// d5d6: one strong ref reused across nav_path_query calls and nulled on shutdown/destruction
+	// (Pack enforce-script-reference/SKILL.md rules 12 & 14, references/memory-management.md,
+	// references/production-patterns.md).
+	protected ref PGFilter m_NavWalkFilter;
 
 	void MCPBridge()
 	{
@@ -218,6 +223,7 @@ class MCPBridge : Managed
 
 	void ~MCPBridge()
 	{
+		m_NavWalkFilter = null;
 		if (g_Game)
 		{
 			g_Game.Event_OnRPC.Remove(MCPOnInventoryMoveRefused);
@@ -6264,7 +6270,11 @@ class MCPBridge : Managed
 
 		fromPos = Vector(command.args.from.Get(0), command.args.from.Get(1), command.args.from.Get(2));
 		toPos = Vector(command.args.to.Get(0), command.args.to.Get(1), command.args.to.Get(2));
-		filter = BuildNavWalkFilter();
+		if (!m_NavWalkFilter)
+		{
+			m_NavWalkFilter = BuildNavWalkFilter();
+		}
+		filter = m_NavWalkFilter;
 		// On false SampleNavmeshPosition leaves its output as it was
 		// (aiworld.c:112-121), so that output is never read after a false.
 		if (!aiWorld.SampleNavmeshPosition(fromPos, command.args.snap_radius, filter, fromSnapped))
@@ -6281,10 +6291,11 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		// The waypoints include both ends (aiworld.c:89-97).
+		// The waypoints include both ends (aiworld.c:89-97), except when FindPath
+		// returns true on a partial path that stops short of toSnapped (d5d6).
 		waypoints = new TVectorArray();
 		found = aiWorld.FindPath(fromSnapped, toSnapped, filter, waypoints);
-		if (!found || !waypoints || waypoints.Count() == 0)
+		if (!found || !waypoints || waypoints.Count() == 0 || vector.Distance(waypoints.Get(waypoints.Count() - 1), toSnapped) > NAV_END_MAX_DISTANCE_M)
 		{
 			result.ok = false;
 			result.error = "no_path";
@@ -6317,19 +6328,24 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// Shared by both endpoint samples and FindPath; admit walking, reject water.
-	// Vanilla scripts/3_Game/ai/aiworld.c:1-26 declares sequential PGPolyFlags;
-	// :61-65 declares SetFlags(includeFlags, excludeFlags, exclusiveFlags) as masks.
-	// With bit = 1 << (flag - NAV_POLY_BIT_OFFSET), offset 1 maps WALK=1 -> 1,
-	// DOOR=3 -> 4, INSIDE=4 -> 8 (include 13); DISABLED=2 -> 2, SWIM=5 -> 16,
-	// SWIM_SEA=6 -> 32 (exclude 50). NONE=0 is never shifted.
-	// The native bit convention and sea rejection still need an in-game check;
-	// changing NAV_POLY_BIT_OFFSET to 0 selects the alternative 1 << flag.
+	// Shared across nav_path_query calls (both endpoint samples and FindPath);
+	// admit walking, reject water. Measured in game on DayZDiag 1.30.164289
+	// (REPORT-st1.md, inbox d5d6): PGPolyFlags members (scripts/3_Game/ai/aiworld.c:1-26)
+	// are already bit values at runtime (WALK=1, DISABLED=2, DOOR=4, INSIDE=8,
+	// SWIM=16, SWIM_SEA=32), so SetFlags (:61-65) takes them without shifting:
+	// include = 13 (WALK | DOOR | INSIDE) and exclude = 50 (DISABLED | SWIM | SWIM_SEA).
+	// PGFilter : Managed (:59) leaked one script instance per call when held only in
+	// plain locals; per DayZ Modding Knowledge Pack enforce-script-reference/SKILL.md
+	// (Memory Management Rules 12 & 14: ref only on class member fields, never delete),
+	// references/memory-management.md ("The `ref` Keyword", "The `delete` Keyword - NEVER USE")
+	// and references/production-patterns.md ("Static Instance Cleanup", "Temporary Allocations
+	// in Update Loops"), MCPBridge holds one ref PGFilter m_NavWalkFilter for the bridge
+	// and nulls it in Shutdown() and ~MCPBridge().
 	protected PGFilter BuildNavWalkFilter()
 	{
 		PGFilter filter = new PGFilter();
-		int includeFlags = (1 << (PGPolyFlags.WALK - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.DOOR - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.INSIDE - NAV_POLY_BIT_OFFSET));
-		int excludeFlags = (1 << (PGPolyFlags.DISABLED - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM - NAV_POLY_BIT_OFFSET)) | (1 << (PGPolyFlags.SWIM_SEA - NAV_POLY_BIT_OFFSET));
+		int includeFlags = PGPolyFlags.WALK | PGPolyFlags.DOOR | PGPolyFlags.INSIDE;
+		int excludeFlags = PGPolyFlags.DISABLED | PGPolyFlags.SWIM | PGPolyFlags.SWIM_SEA;
 		filter.SetFlags(includeFlags, excludeFlags, 0);
 		return filter;
 	}
@@ -9126,6 +9142,7 @@ class MCPBridge : Managed
 		m_PollVersion = "";
 		m_Ctx = null;
 		m_CallbackRefs = null;
+		m_NavWalkFilter = null;
 		m_Players = null;
 		m_Pending = null;
 		m_Jobs = null;
