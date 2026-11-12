@@ -77,12 +77,12 @@ class MCPBridge : Managed
 	// lockstep with the dispatcher and never derive it from the daemon side.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
-	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,infected_drive_release,inventory_attach,inventory_give,inventory_move," + "loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
 	// still lists the same command names fails the version/capability gate.
-	protected const string SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c";
+	protected const string SERVER_ARG_CONTRACT_HASH = "8ac18200322451d8";
 
 	protected static ref MCPBridge m_Instance;
 
@@ -228,6 +228,7 @@ class MCPBridge : Managed
 		m_SincePollS = m_SincePollS + timeslice;
 		MCPBotControl.Tick(this, m_ElapsedS);
 		MCPSurvivorDrive.Tick(this);
+		MCPInfectedDrive.Tick();
 
 		if (!m_Configured)
 		{
@@ -797,6 +798,10 @@ class MCPBridge : Managed
 		else if (command.cmd == "survivor_drive_release")
 		{
 			postNow = DispatchSurvivorDriveRelease(command, result);
+		}
+		else if (command.cmd == "infected_drive_release")
+		{
+			postNow = DispatchInfectedDriveRelease(command, result);
 		}
 		else if (command.cmd == "inventory_give")
 		{
@@ -4234,11 +4239,13 @@ class MCPBridge : Managed
 		return true;
 	}
 
-	// Impose heading/speed on an infected server-side through its AI input controller.
-	// Vanilla precedent: PluginDayZInfectedDebug drives a possessed infected the same
-	// way (plugindayzinfecteddebug.c:385); combo order follows dayzanimal.c:548-550.
-	// Heading arrives in degrees and is converted here (OverrideHeading takes radians).
-	// mode "release" hands control back to the vanilla AI.
+	// Impose heading/speed on an infected server-side through its AI input controller
+	// (MCPInfectedDrive, MCP_InfectedDrive.c). Vanilla precedent: PluginDayZInfectedDebug
+	// drives a possessed infected the same way (plugindayzinfecteddebug.c:385); combo
+	// order follows dayzanimal.c:548-550. Heading arrives in degrees and is converted
+	// here (OverrideHeading takes radians). The drive is held, re-applied every tick,
+	// until mode "release", death, deletion or the end of the lease
+	// (infected_drive_release).
 	protected bool DispatchInfectedDrive(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3)
@@ -4299,17 +4306,17 @@ class MCPBridge : Managed
 			return true;
 		}
 
+		int replacedCommandId = 0;
 		if (release)
 		{
+			replacedCommandId = MCPInfectedDrive.Release(infected);
 			controller.OverrideMovementSpeed(false, 0.0);
 			controller.OverrideHeading(false, 0.0);
 			controller.OverrideTurnSpeed(false, 0.0);
 		}
 		else
 		{
-			controller.OverrideTurnSpeed(true, Math.PI2);
-			controller.OverrideMovementSpeed(true, command.args.speed);
-			controller.OverrideHeading(true, command.args.heading * Math.DEG2RAD);
+			replacedCommandId = MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed, command.id);
 		}
 
 		vector current = infected.GetPosition();
@@ -4319,6 +4326,28 @@ class MCPBridge : Managed
 		result.pos_real.Insert(current[2]);
 		result.type = command.args.type;
 		result.found = true;
+		result.replaced_command_id = replacedCommandId;
+		result.ok = true;
+		return true;
+	}
+
+	// infected_drive_release (7c86), internal: the broker sends it with the id
+	// of an infected_drive command when the lease that sent the command ends
+	// (cleanup_owner) or abandons it after delivery (RELEASE_REGISTRY). It drops
+	// every entry that command id set, with the three overrides set to false
+	// (MCPInfectedDrive.ReleaseCommand), and answers whether one was removed in
+	// matched; any other id changes nothing. Command ids restart with each
+	// daemon, so an entry a previous daemon set with the same id, which no
+	// lease owns any more, goes too.
+	protected bool DispatchInfectedDriveRelease(MCPCommand command, MCPResult result)
+	{
+		if (!command.args || command.args.command_id <= 0)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return true;
+		}
+		result.matched = MCPInfectedDrive.ReleaseCommand(command.args.command_id);
 		result.ok = true;
 		return true;
 	}
@@ -8467,6 +8496,7 @@ class MCPBridge : Managed
 	{
 		MCPBotControl.ShutdownAll(this);
 		MCPSurvivorDrive.ShutdownAll(this);
+		MCPInfectedDrive.ShutdownAll();
 		// A completed cached callback is no longer in m_CallbackRefs.
 		if (m_PollCallback)
 		{

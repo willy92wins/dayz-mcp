@@ -1787,7 +1787,8 @@ class CensusTest(unittest.TestCase):
             with self.subTest(args=refused):
                 self.assertEqual(loopback.validate_command_args("camera_path_release", refused), (False, "bad_args"))
         self.assertEqual(
-            result_prune.OWNED_SCALAR_FIELDS["matched"], frozenset({"action_hold_cancel", "camera_path_release", "survivor_drive_release"})
+            result_prune.OWNED_SCALAR_FIELDS["matched"],
+            frozenset({"action_hold_cancel", "camera_path_release", "infected_drive_release", "survivor_drive_release"}),
         )
         answer = result_prune.prune_unfilled_fields("camera_path_release", {"ok": 1, "matched": 0, "camera_path": {}})
         self.assertEqual(answer, {"ok": 1, "matched": 0})
@@ -1795,7 +1796,7 @@ class CensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         for command in (*NEW_COMMANDS, "camera_path_release"):
             self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES))
 
 

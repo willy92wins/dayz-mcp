@@ -262,8 +262,17 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "already_placed": frozenset({"action_hold"}),
     "flag_restored": frozenset({"action_hold"}),
     "cleanup_complete": frozenset({"action_hold", "action_hold_cancel", "loadout_clear"}),
-    # survivor_drive_release answers whether the id named the live drive (c801).
-    "matched": frozenset({"action_hold_cancel", "camera_path_release", "survivor_drive_release"}),
+    # survivor_drive_release (c801) and infected_drive_release (7c86) answer
+    # whether the id named a live drive.
+    "matched": frozenset({
+        "action_hold_cancel",
+        "camera_path_release",
+        "infected_drive_release",
+        "survivor_drive_release",
+    }),
+    # infected_drive answers the command id of the drive it replaced or ended
+    # on that infected, or 0 (7c86).
+    "replaced_command_id": frozenset({"infected_drive"}),
     # player_view_set read-back (854c), also on view_not_applied.
     "person_view": frozenset({"player_view_set"}),
     "camera_class": frozenset({"player_view_set"}),

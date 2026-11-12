@@ -34,7 +34,7 @@ through. Inputs are the production ones: the key install-mcp.ps1 mints
 (32 random bytes, base64url without padding: 43 characters), a UUID instance,
 the game version of those runs, and the longest base IsLoopbackBridgeUrl
 accepts (a five-digit port). The bounds hold for those inputs only. A longer
-key spends the margin: pinned_keyfile accepts up to 1024 characters, and 41
+key spends the margin: pinned_keyfile accepts up to 1024 characters, and 18
 more than the 43 minted take the saturated server poll to 1025.
 """
 

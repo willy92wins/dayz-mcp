@@ -119,6 +119,8 @@ SERVER_COMMANDS = {
     "object_set_health",
     "object_doors",
     "infected_drive",
+    # Internal: the broker's release of an infected drive (7c86), never a public tool.
+    "infected_drive_release",
     "survivor_drive",
     # Internal: the broker's release of one drive (c801), never a public tool.
     "survivor_drive_release",
@@ -275,6 +277,11 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "action_hold",
         "action_hold_cancel",
         lambda command_id, args: {"hold_id": args["hold_id"]},
+    ),
+    (
+        "infected_drive",
+        "infected_drive_release",
+        lambda command_id, args: {"command_id": command_id},
     ),
     (
         "survivor_drive",
@@ -1437,6 +1444,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "world_spawn_batch",
     "scene_entities",
     "scene_clear",
+    "infected_drive_release",
     "survivor_drive",
     "survivor_drive_release",
 })
@@ -1485,6 +1493,7 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
         "bot_stop",
         "player_look_at_release",
         "action_hold_cancel",
+        "infected_drive_release",
         "survivor_drive_release",
         "camera_path_release",
     }
@@ -2524,6 +2533,16 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={"view": _one_of("first", "third")},
         )
     ),
+    # infected_drive_release (7c86), internal: the id of the infected_drive
+    # command to drop. Command ids restart with each daemon, so an entry a
+    # previous daemon set with the same id, which no lease owns any more, goes
+    # too.
+    "infected_drive_release": _command_schema(
+        _schema_variant(
+            required=("command_id",),
+            validators={"command_id": _integer_in_range(minimum=1)},
+        )
+    ),
     # survivor_drive_release (c801), internal: the id of the drive command and
     # its survivor's object_id. The bridge drops that survivor's drive only
     # while that command's drive is the one set: command ids restart with each
@@ -3205,6 +3224,9 @@ class ServerState:
         # lease -> survivor object_id -> id of the latest survivor_drive of that
         # lease delivered to drive it (c801). cleanup_owner releases each one.
         self._drive_by_lease: dict[str, dict[int, int]] = {}
+        # lease -> delivered infected_drive command ids (mode != "release") not
+        # yet replaced or refused (7c86). cleanup_owner releases each one.
+        self._infected_drive_by_lease: dict[str, set[int]] = {}
         # Delivered plays stay held until the client confirms their replacement
         # or refusal, or their cleanup is queued. Command ids are not execution
         # order: the client's pending array removes by swapping with its last.
@@ -5430,6 +5452,81 @@ class ServerState:
                     failed += 1
         return {"enqueued": enqueued, "failed": failed}
 
+    def _record_delivered_infected_drive_locked(
+        self, command_id: int, command: dict
+    ) -> None:
+        """At delivery, hold an infected_drive command id under its owner's
+        lease unless mode is release (7c86). Caller holds self._lock.
+        """
+        owner = self._command_owner.get(command_id)
+        args = command.get("args")
+        if owner is None or not isinstance(args, dict):
+            return
+        lease_id = owner[1]
+        if (
+            isinstance(lease_id, str)
+            and lease_id
+            and args.get("mode") != "release"
+        ):
+            self._infected_drive_by_lease.setdefault(lease_id, set()).add(command_id)
+
+    def _note_infected_drive_result_locked(
+        self, command_id: int, stored: dict
+    ) -> None:
+        """Prune an infected_drive id that a bridge reply replaced, ended or
+        refused (7c86). Caller holds self._lock.
+        """
+        if not self._infected_drive_by_lease:
+            return
+        replaced = stored.get("replaced_command_id")
+        replaced_id = replaced if type(replaced) is int and replaced > 0 else 0
+        ok_value = stored.get("ok")
+        failed = ok_value is False or (type(ok_value) is int and ok_value == 0)
+        if not replaced_id and not failed:
+            return
+        for lease_id in list(self._infected_drive_by_lease):
+            command_ids = self._infected_drive_by_lease[lease_id]
+            # Ids restart with each daemon, so a prior daemon's same-id entry echoes command_id.
+            if replaced_id and replaced_id != command_id:
+                command_ids.discard(replaced_id)
+            if failed:
+                command_ids.discard(command_id)
+            if not command_ids:
+                del self._infected_drive_by_lease[lease_id]
+
+    def enqueue_infected_drive_releases_for_lease(
+        self, lease_id: str
+    ) -> dict[str, int]:
+        """infected_drive_release for each remaining delivered infected_drive
+        of that lease, newest first (7c86).
+
+        Same rules as enqueue_survivor_drive_releases_for_lease: the caller
+        holds the queue lock, and the releases are fire-and-forget owner
+        cleanup.
+        """
+        if not isinstance(lease_id, str) or not lease_id:
+            return {"enqueued": 0, "failed": 0}
+        with self._lock:
+            command_ids = sorted(
+                self._infected_drive_by_lease.pop(lease_id, set()), reverse=True
+            )
+            enqueued = 0
+            failed = 0
+            for driven_command_id in command_ids:
+                status, payload = self.enqueue_command(
+                    "infected_drive_release",
+                    {"command_id": driven_command_id},
+                    peer="server",
+                    internal=True,
+                )
+                release_id = payload.get("id") if isinstance(payload, dict) else None
+                if status == 200 and isinstance(release_id, int):
+                    self._fire_and_forget_ids.add(release_id)
+                    enqueued += 1
+                else:
+                    failed += 1
+        return {"enqueued": enqueued, "failed": failed}
+
     def _note_camera_path_play_locked(self, command_id: int, args: object) -> None:
         """Remember a delivered play under its owner's lease (d026). Caller holds the lock."""
 
@@ -7455,6 +7552,8 @@ class ServerState:
                                 record["delivered"] = True
                     if command_name == "survivor_drive" and isinstance(command_id, int):
                         self._record_delivered_drive_locked(command_id, command)
+                    if command_name == "infected_drive" and isinstance(command_id, int):
+                        self._record_delivered_infected_drive_locked(command_id, command)
                     commands.append(wire_command)
                 queue[:] = remaining + queue[len(snapshot) :]
                 if commands and self._poll_delay_ms > 0:
@@ -7857,6 +7956,7 @@ class ServerState:
                     command_id, stored, discarded, instance or ""
                 )
                 self._note_camera_path_result_locked(command_id, stored)
+                self._note_infected_drive_result_locked(command_id, stored)
             if coordination is not None:
                 # Last in the section: the returns above publish nothing, and
                 # a server close this result's client outcome lets go goes now.
@@ -8433,13 +8533,18 @@ class ServerState:
                 vehicle_active = False
             if "server" in ended:
                 self._drive_by_lease.pop(lease_id, None)
+                self._infected_drive_by_lease.pop(lease_id, None)
             pending_bots = bool(self._bot_by_lease.get(lease_id))
             pending_drives = bool(self._drive_by_lease.get(lease_id))
+            pending_infected_drives = bool(
+                self._infected_drive_by_lease.get(lease_id)
+            )
             pending_paths = bool(self._camera_path_play_by_lease.get(lease_id))
         if (
             not vehicle_active
             and not pending_bots
             and not pending_drives
+            and not pending_infected_drives
             and not pending_paths
         ):
             return cleanup
@@ -8451,6 +8556,8 @@ class ServerState:
                 values.append("retail_quarantine")
             if pending_drives:
                 values.append("survivor_drive_release_unconfirmed")
+            if pending_infected_drives:
+                values.append("infected_drive_release_unconfirmed")
             if pending_paths:
                 # No release goes out now. Keep the obligation for a later
                 # drain after quarantine clears; no client confirmed a stop.
@@ -8482,6 +8589,9 @@ class ServerState:
                     cleanup["cleanup_degraded"] = ["vehicle_release_failed"]
             report = self.enqueue_bot_stops_for_lease(lease_id)
             drive_report = self.enqueue_survivor_drive_releases_for_lease(lease_id)
+            infected_drive_report = (
+                self.enqueue_infected_drive_releases_for_lease(lease_id)
+            )
             paths = self.enqueue_camera_path_releases_for_lease(lease_id)
         if report["enqueued"] or report["failed"]:
             cleanup["bot_stop_enqueued"] = report["enqueued"]
@@ -8499,6 +8609,15 @@ class ServerState:
             degraded = cleanup.get("cleanup_degraded", [])
             values = list(degraded) if isinstance(degraded, list) else []
             values.append("survivor_drive_release_unconfirmed")
+            cleanup["cleanup_degraded"] = values
+        if infected_drive_report["enqueued"] or infected_drive_report["failed"]:
+            cleanup["infected_drive_release_enqueued"] = infected_drive_report[
+                "enqueued"
+            ]
+        if infected_drive_report["failed"]:
+            degraded = cleanup.get("cleanup_degraded", [])
+            values = list(degraded) if isinstance(degraded, list) else []
+            values.append("infected_drive_release_unconfirmed")
             cleanup["cleanup_degraded"] = values
         if paths["enqueued"] or paths["failed"]:
             cleanup["camera_path_release_enqueued"] = paths["enqueued"]

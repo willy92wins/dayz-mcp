@@ -1294,6 +1294,9 @@ class _HandlerModel(_DriveModel):
                     if not signature.startswith("protected ")
                 }
             ),
+            "MCPInfectedDrive": SimpleNamespace(
+                Tick=lambda *_args: None, ShutdownAll=lambda *_args: None
+            ),
         }
         for signature in (*HANDLER_METHODS, *HOOK_METHODS):
             body = method_body(bridge, signature)

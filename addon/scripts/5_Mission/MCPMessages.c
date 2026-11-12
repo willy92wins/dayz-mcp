@@ -260,6 +260,7 @@ class MCPArgs
 	// camera_path_release (d026): the command id of the play to stop.
 	// survivor_drive_release (c801): the id of the drive command to drop, with
 	// object_id, its survivor.
+	// infected_drive_release (7c86): the id of the infected_drive command to drop.
 	int command_id;
 	// loadout_apply (220f): the rows to create, in apply order. object_id and
 	// uid above select the target.
@@ -1571,9 +1572,13 @@ class MCPResult
 	// Also loadout_clear's: true when every object it deleted read null at
 	// its job's last check, which can come one tick after the deadline.
 	bool cleanup_complete;
-	// action_hold_cancel, and survivor_drive_release (c801): whether the id
-	// named the live hold, or the survivor's live drive.
+	// action_hold_cancel, survivor_drive_release (c801) and
+	// infected_drive_release (7c86): whether the id named the live hold or
+	// drive.
 	bool matched;
+	// infected_drive (7c86): the command id of the drive that this call
+	// replaced or ended on that infected, or 0.
+	int replaced_command_id;
 	// player_view_set read-back after its settle: person_view is third when
 	// IsInThirdPerson, else first; camera_class is the ClassName of the
 	// player's GetCurrentCamera, empty when it returns null. Unassigned on its

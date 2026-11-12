@@ -282,6 +282,7 @@ SERVER_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
     "bot_start": ("action", "bot_ttl_s", "object_id"),
     "bot_stop": ("object_id",),
     "hands_attach": ("object_id", "slot", "uid"),
+    "infected_drive_release": ("command_id",),
     "loadout_apply": ("loadout_items", "object_id", "uid"),
     "loadout_clear": ("object_id", "uid"),
     "loadout_get": ("object_id", "uid"),
@@ -354,6 +355,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "hands_attach": "hands_attach",
         "hands_take": "hands_take",
         "infected_drive": "infected_drive",
+        "infected_drive_release": None,  # internal: the broker's infected drive cleanup
         "inventory_attach": "inventory_attach",
         "inventory_give": "inventory_give",
         "inventory_move": "inventory_move",

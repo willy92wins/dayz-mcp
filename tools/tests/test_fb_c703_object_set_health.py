@@ -679,9 +679,9 @@ class ObjectSetHealthCensusTest(unittest.TestCase):
             canonical.index("object_set_health=health01,object_id,pos,slot,type,zone"),
             canonical.index("player_kill=uid"),
         )
-        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
         self.assertNotEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, PREVIOUS_ARG_CONTRACT_HASH)
-        self.assertIn('SERVER_ARG_CONTRACT_HASH = "3b800b7c7ee0674c"', self.source)
+        self.assertIn('SERVER_ARG_CONTRACT_HASH = "8ac18200322451d8"', self.source)
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
 

@@ -14,6 +14,7 @@
       "hands_attach": "hands_attach",
       "hands_take": "hands_take",
       "infected_drive": "infected_drive",
+      "infected_drive_release": null,
       "inventory_attach": "inventory_attach",
       "inventory_give": "inventory_give",
       "inventory_move": "inventory_move",

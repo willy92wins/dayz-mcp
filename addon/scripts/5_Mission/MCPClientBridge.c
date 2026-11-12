@@ -2254,6 +2254,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	protected bool DispatchCameraPathPlay(MCPCommand command, MCPResult result)
 	{
 		int replacedCommandId;
+		MCPCameraPathState playState;
 		MCPCameraPath candidate;
 		Object cameraObject;
 		Camera cam;
@@ -2338,7 +2339,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			result.camera_path = new MCPCameraPathState();
 			m_CameraPath.Fill(result.camera_path);
 			result.camera_path.command_id = m_CameraPathCommandId;
-			result.camera_path.replaced_command_id = replacedCommandId;
+			playState = result.camera_path;
+			playState.replaced_command_id = replacedCommandId;
 			result.ok = true;
 			return true;
 		}

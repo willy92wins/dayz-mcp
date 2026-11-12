@@ -186,7 +186,14 @@ class PresenceFlagEnforceContractTest(unittest.TestCase):
             "!release && (!IsFiniteFloat(command.args.heading) || !IsFiniteFloat(command.args.speed))",
         )
         self.assertIn('result.error = "bad_args";', finite)
-        self.assertLess(body.index("headingUnset ||"), body.index("OverrideHeading(true"))
+        self.assertNotIn("OverrideHeading(true", body)
+        self.assertLess(body.index("headingUnset ||"), body.index("MCPInfectedDrive.Drive("))
+        drive = _without_comments((MISSION / "MCP_InfectedDrive.c").read_text(encoding="utf-8"))
+        self.assertIn("Apply(infected, entry);", _method_body(drive, "static int Drive("))
+        apply = _method_body(
+            drive, "protected static void Apply(DayZInfected infected, MCPInfectedDriveEntry entry)"
+        )
+        self.assertIn("OverrideHeading(true", apply)
 
     def test_world_time_set_applies_and_checks_the_multiplier_only_when_flagged(self) -> None:
         dispatch = _method_body(self.bridge, "protected bool DispatchWorldTimeSet(")

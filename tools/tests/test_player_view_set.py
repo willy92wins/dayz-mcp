@@ -860,8 +860,8 @@ class PlayerViewSetCensusTest(unittest.TestCase):
     def test_the_version_and_the_server_arg_contract_hash_stay(self) -> None:
         # A client command: the hash covers the server's arguments only.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
-        self.assertEqual(server.server_arg_contract_hash(), "3b800b7c7ee0674c")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
+        self.assertEqual(server.server_arg_contract_hash(), "8ac18200322451d8")
         self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:
