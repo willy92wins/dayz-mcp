@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -1769,6 +1770,95 @@ class RetiredRunDiagnostic:
     launch_operation_id: str | None = None
 
 
+PREPRUNE_BACKUP_SLOTS = 10
+
+
+def preprune_backup_paths(runs_path: Path) -> list[Path]:
+    """The pre-prune backup slots in fill order: .bak-preprune, then .2 .. .10."""
+    base_name = runs_path.name + ".bak-preprune"
+    return [runs_path.with_name(base_name)] + [
+        runs_path.with_name(f"{base_name}.{index}")
+        for index in range(2, PREPRUNE_BACKUP_SLOTS + 1)
+    ]
+
+
+def preprune_targets_path(runs_path: Path) -> Path:
+    """The file a full set of slots is compacted into, beside runs.json."""
+    return runs_path.with_name(runs_path.name + ".bak-preprune.targets")
+
+
+def preprune_compaction_sources(runs_path: Path) -> list[Path]:
+    """What a compaction reads, in order: the .targets file if present, then the slots."""
+    targets = preprune_targets_path(runs_path)
+    present = [targets] if os.path.lexists(targets) else []
+    return present + preprune_backup_paths(runs_path)
+
+
+def read_preprune_backup(path: Path) -> list[object] | None:
+    """The runs list of a pre-prune backup or of the .targets file, or None.
+
+    None when the file is not a plain file (absent, a directory, a link or
+    another reparse point), does not read as UTF-8 JSON, or is not an object
+    with a runs list: what loopback._preprune_exited_runs skips or reports as
+    profile_backup_invalid. The compaction and the doctor both judge a file
+    by this, so the doctor names the file that makes a full prune give up.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or (
+        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    runs = payload.get("runs")
+    return runs if isinstance(runs, list) else None
+
+
+def preprune_target_runs(documents: list[list[object]]) -> list[dict[str, object]]:
+    """One EXITED run per (profiles, mission) pair, in first-seen order.
+
+    Each keeps run_id, state, profiles and mission and nothing else. A run
+    whose profiles is not an absolute path is left out: the loopback's restore
+    skips it (loopback._lifecycle_restore_targets). A mission that is not a
+    string is kept as None, which the restore reads like an empty one.
+    """
+    seen: set[tuple[str, str | None]] = set()
+    entries: list[dict[str, object]] = []
+    for runs in documents:
+        for run in runs:
+            if not isinstance(run, dict) or run.get("state") != "EXITED":
+                continue
+            profiles = run.get("profiles")
+            if (
+                not isinstance(profiles, str)
+                or not profiles
+                or not Path(profiles).is_absolute()
+            ):
+                continue
+            mission = run.get("mission")
+            if not isinstance(mission, str):
+                mission = None
+            if (profiles, mission) in seen:
+                continue
+            seen.add((profiles, mission))
+            entries.append(
+                {
+                    "run_id": run.get("run_id"),
+                    "state": "EXITED",
+                    "profiles": profiles,
+                    "mission": mission,
+                }
+            )
+    return entries
+
+
 class RunManifestStore:
     def __init__(
         self,
@@ -1820,14 +1910,22 @@ class RunManifestStore:
     def _create_preprune_backup(self, raw: bytes) -> bool:
         """Write a unique pre-prune backup; never overwrite an existing one.
 
-        Slot names: runs.json.bak-preprune, then .bak-preprune.2 .. .10.
-        Returns False (fail-closed, no prune) if every slot is occupied or I/O fails.
+        Slot names: runs.json.bak-preprune, then .bak-preprune.2 .. .10. When
+        every slot is occupied they are compacted first
+        (_compact_preprune_backups) and the search runs once more.
+        Returns False (fail-closed, no prune) if the compaction or I/O fails.
         """
-        base_name = self.paths.runs_path.name + ".bak-preprune"
-        slot_names = [base_name] + [f"{base_name}.{index}" for index in range(2, 11)]
+        written = self._write_preprune_backup_slot(raw)
+        if written is None:
+            if not self._compact_preprune_backups():
+                return False
+            written = self._write_preprune_backup_slot(raw)
+        return written is True
+
+    def _write_preprune_backup_slot(self, raw: bytes) -> bool | None:
+        """True: raw is in the first free slot. False: I/O failed. None: no free slot."""
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        for slot_name in slot_names:
-            backup_path = self.paths.runs_path.with_name(slot_name)
+        for backup_path in preprune_backup_paths(self.paths.runs_path):
             try:
                 descriptor = os.open(backup_path, flags, 0o600)
             except FileExistsError:
@@ -1851,7 +1949,44 @@ class RunManifestStore:
                     pass
                 return False
             return True
-        return False
+        return None
+
+    def _compact_preprune_backups(self) -> bool:
+        """Fold the ten slots into runs.json.bak-preprune.targets, then free them.
+
+        The loopback reads the slots at startup for one thing: the profiles
+        and mission of their EXITED runs, which it restores
+        (loopback._preprune_exited_runs). Those pairs go into the .targets
+        file, merged with the pairs it already holds, before any slot is
+        removed. False with nothing changed when a file does not read
+        (read_preprune_backup) or the .targets write fails; False after any
+        failed unlink, the rest still removed and the .targets already
+        holding every slot's pairs.
+        """
+        runs_path = self.paths.runs_path
+        documents: list[list[object]] = []
+        for source in preprune_compaction_sources(runs_path):
+            runs = read_preprune_backup(source)
+            if runs is None:
+                return False
+            documents.append(runs)
+        payload = {"version": 1, "runs": preprune_target_runs(documents)}
+        try:
+            # ASCII escapes: a string a slot carried that UTF-8 cannot encode
+            # (a lone surrogate from a \ud800 escape) is written as it was read.
+            raw = json.dumps(payload, separators=(",", ":")).encode("ascii") + b"\n"
+            # A temporary beside the target (O_EXCL), written whole, fsynced and
+            # os.replace'd; on failure only that temporary is removed.
+            atomic_write_bytes(preprune_targets_path(runs_path), raw)
+        except Exception:
+            return False
+        removed_all = True
+        for slot in preprune_backup_paths(runs_path):
+            try:
+                slot.unlink()
+            except OSError:
+                removed_all = False
+        return removed_all
 
     def _prune_exited_on_load(self) -> bool:
         retired = {
