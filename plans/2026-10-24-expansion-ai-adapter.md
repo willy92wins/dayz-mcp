@@ -141,6 +141,7 @@ Cada rechazo antes de crear trae `created: false` y `args_read`: la facción, `c
 - Si `group_id` no está en el registro, o el grupo está `releasing`, `not_found` sin cambiar nada.
 - Valida todo antes de aplicar ningún campo: la formación como en el spawn, `behaviour`, `waypoints` y `speed`.
 - Aplica solo los campos presentes; la formación, con `SetFormation` (`eAIGroup.c:933`). `speed` cambia la preferencia `normal` de cada miembro vivo: fuera de un HOLD la aplica con `SetMovementSpeedLimits(normal, amenaza)`, y en un HOLD solo la guarda.
+- Una lista de `waypoints` vacía es, en el bridge, la ausencia de `waypoints`: el lector JSON del juego entrega así la clave ausente (ronda B en el juego). Un `behaviour` solo conserva la ruta. La tool y el broker rechazan la lista vacía explícita (§4).
 - La respuesta trae todo leído después del cambio: `behaviour` (`GetWaypointBehaviour`, `eAIGroup.c:304`), `formation` (`GetFormation`, :903), `formation_state` (`GetFormationState`, :624), el número de waypoints, `waypoint_index` (`m_CurrentWaypointIndex`, :37) y los dos límites de cada miembro (`eAIBase.c:5926`, :5931).
 - Trae además `in_combat`, de `group.IsInCombat()` (`eAIGroup.c:1123`). Con `true`, añade `combat_may_override: true`: la FSM de combate puede ignorar la orden (ficha 3ca5; `eAIState_Fighting.c:18`).
 
@@ -226,9 +227,11 @@ El dispatch retira el autocancel pendiente del miembro en la call queue de siste
   - `scene_id`, con la regla de #262.
 - La facción, la formación y el loadout los valida el servidor, que conoce los de verdad. Una lista fija en Python rechazaría una formación nueva de Expansion.
 - Va al peer servidor con lease y genera el `spawn_token`.
+- Un rechazo del bridge llega al agente con su informe en el mensaje del error (`bridge_errors._ai_group_spawn_detail`, ronda B): `field`, `allowed` y `args_read` con `bad_args`, `living` y `limit` con `ai_limit_reached`, y `created`. Solo cruzan nombres de una lista fija y valores comprobados, con topes.
 
 **`ai_group_order(group_id, behaviour=None, waypoints=None, formation=None, speed=None, timeout_s)`**
 - Con lease. Sin ningún campo, da `bad_args`. `speed` es `walk`, `jog` o `sprint`, y viaja como 1, 2 o 3 con `speed_set` (§3.3).
+- `waypoints` lleva de 1 a 32 puntos: la lista vacía explícita da `bad_args` en la tool y en el broker. Un `bad_args` del bridge llega con `field` y, para `behaviour` y `formation`, `allowed` en el mensaje del error (`bridge_errors._ai_group_order_detail`, ronda B).
 
 **`ai_group_state(group_id=None, scene_id=None, timeout_s)`**
 - Uno de los dos y no los dos. Sin lease: `ai_group_state` entra en `READ_ONLY_COMMANDS` (main @de12fd6b, `session_coordination.py`). Todo comando que no esté ahí pide lease (`session_coordination.py::command_requires_lease` y `authorize`, main @de12fd6b), y sin token da `lease_required`. #262 ya integró `scene_entities` en esa lista de main @de12fd6b.

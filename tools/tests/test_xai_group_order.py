@@ -110,15 +110,18 @@ class AiGroupOrderToolTest(unittest.IsolatedAsyncioTestCase):
     def test_description_lists_the_three_expansion_details(self) -> None:
         # PX8 b H2: the agent gets expansion_unavailable with its detail
         # (f743f20), and the order is a new mutation behind the
-        # close-support gate, so all three details can reach it. Mutant
-        # killed: the details dropped from the description's error list.
+        # close-support gate, so all three details can reach it. PX8 c:
+        # a bad_args from the server carries field and allowed (a289414).
+        # Mutants killed: either detail dropped from the error list.
         self.assertIn(ORDER, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
         self.assertIn(
-            "Errors: bad_args, not_found, expansion_unavailable; "
-            "detail=adapter_not_loaded|adapter_contract_mismatch|"
-            "lease_close_not_supported.",
+            "Errors: bad_args (from the server with field= and, for "
+            "behaviour and formation, allowed=), not_found, "
+            "expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported.",
             self.tool.description,
         )
+        self.assertIn("waypoints is a list of 1 to 32", self.tool.description)
 
     async def test_o4_order_without_fields_is_bad_args_and_sends_nothing(self) -> None:
         # Mutant killed: an empty order travelling to the bridge, where the
@@ -833,6 +836,33 @@ class ExpansionOrderEnforceTest(unittest.TestCase):
             self.source,
         )
 
+    def test_e5_each_behaviour_without_waypoints_keeps_the_route(self) -> None:
+        # PX8 c: the empty array an absent key reaches the bridge as is no
+        # route, so HOLD, ONCE, LOOP and ROAM sent alone each keep the
+        # route the group already had (plan 3.3, only the fields present
+        # are applied). Mutant killed: an empty array read as a route
+        # (`waypoints != null` with a 0-point minimum clears the route).
+        for behaviour, state, value in (
+            ("HOLD", 0, HALT), ("ONCE", 1, ONCE_B), ("LOOP", 1, LOOP_B), ("ROAM", 1, ROAMING_B),
+        ):
+            with self.subTest(behaviour=behaviour):
+                namespace = _order_namespace(self.source)
+                record, group, members = _record(namespace, behaviour="ONCE" if behaviour != "ONCE" else "LOOP")
+                route = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+                self.assertTrue(_dispatch(namespace, _command(waypoints=EnforceArray(route))).ok)
+                group.m_CurrentWaypointIndex = 1
+                group.m_BackTracking = True
+                result = _dispatch(
+                    namespace, _command(behaviour=_s(behaviour), waypoints=EnforceArray())
+                )
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual((group.formation_state, group.waypoint_behaviour), (state, value))
+                self.assertEqual(list(record.waypoints), route)
+                self.assertEqual(group.waypoints.Count(), 2)
+                self.assertEqual(group.m_CurrentWaypointIndex, 1)
+                self.assertTrue(group.m_BackTracking)
+                self.assertEqual(result.ai_group.waypoint_count, 2)
+
     def test_e5_empty_waypoints_and_random_formation_change_nothing(self) -> None:
         # Mutants killed: an empty route clearing the waypoints and
         # keeping the old destination, and RANDOM resolving to a sane
@@ -1019,6 +1049,32 @@ class AiGroupOrderBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         # Scope: the same report under ai_group_state stays bare.
         other = server._bridge_error(result, "ai_group_state")
         self.assertEqual(str(other), "bad_args")
+
+
+class AiGroupOrderEmptyWaypointsDocsTest(unittest.TestCase):
+    """PX8 c: the texts say who refuses an empty waypoints list, and what
+    an order's bad_args carries. Mutants killed: the 3ca5 entry or the
+    guide promising the bridge refuses an empty list again, or dropping
+    the empty-list rule or the field/allowed detail."""
+
+    def test_changelog_and_guide_say_the_bridge_reads_an_empty_list_as_none(self) -> None:
+        root = _TOOLS_DIR.parent
+        entries = [
+            line
+            for line in (root / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("- Expansion AI adapter `ai_group_order` (3ca5")
+        ]
+        self.assertEqual(len(entries), 1)
+        guide = (root / "docs" / "expansion-ai-adapter.md").read_text(encoding="utf-8")
+        start = guide.index("## Ordering a group")
+        section = guide[start : guide.index("\n## ", start + 1)]
+        for text in (entries[0], section):
+            flat = " ".join(text.split())
+            self.assertNotRegex(flat, r"empty list is refused[^.;)]*bridge")
+            self.assertIn("refuse an explicit empty", flat)
+            self.assertIn("reads an empty one as no waypoints", flat)
+            self.assertIn("`field`", flat)
+            self.assertIn("`allowed`", flat)
 
 
 class ExpansionOrderMutantTest(unittest.TestCase):
