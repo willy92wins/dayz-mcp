@@ -3389,13 +3389,15 @@ class EnforceWiringTest(unittest.TestCase):
             self.assertIn(member, args)
         result = _members(_class_body(self.messages, "MCPResult"))
         self.assertEqual(
-            result[-6:],
+            result[-8:],
             [
                 ("ref MCPCameraPathState", "camera_path"),
                 ("ref MCPHudState", "hud"),
                 ("ref MCPGameplayState", "gameplay"),
                 ("ref MCPChatRead", "chat_read"),
                 ("ref MCPUiPause", "ui_pause"),
+                ("ref MCPUiMenu", "ui_menu"),
+                ("ref MCPUiMap", "ui_map"),
                 # §2.16: lease_close is the last ref member of MCPResult.
                 ("ref MCPLeaseCloseCensus", "lease_close"),
             ],
@@ -3404,8 +3406,8 @@ class EnforceWiringTest(unittest.TestCase):
 
     def test_the_blocks_are_prunable_and_kept_when_filled(self) -> None:
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-6:],
-            ("camera_path", "hud", "gameplay", "chat_read", "ui_pause", "lease_close"),
+            result_prune.PRUNABLE_FIELDS[-8:],
+            ("camera_path", "hud", "gameplay", "chat_read", "ui_pause", "ui_menu", "ui_map", "lease_close"),
         )
         path = {"state": "idle", "t_s": 0.0, "duration_s": 0.0, "path_id": ""}
         kept = result_prune.prune_unfilled_fields("camera_path_play", {"ok": 1, "camera_path": dict(path), "hud": {}})

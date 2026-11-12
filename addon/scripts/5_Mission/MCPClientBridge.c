@@ -493,7 +493,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move,player_respawn,player_trace," + "player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move,player_respawn,player_trace," + "player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_map_set,ui_menu_set,ui_pause,ui_reload_layout,ui_set_text,ui_tree," + "vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -744,6 +744,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// §2.6 C14: the ui_pause marks fall as soon as their pause does,
 		// even after the job answered. Before the job runner.
 		MaintainMCPPause();
+		// E1 (d4b4): the map mark falls as soon as its menu does, even
+		// when the player closed it. Before the job runner.
+		MaintainMCPMapMenu();
 
 		if (m_JobRunner)
 		{
@@ -1328,6 +1331,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int triggerJobs;
 		int moveJobs;
 		int emoteJobs;
+		int uiMenuJobs;
+		int uiMapJobs;
 		if (!m_JobRunner)
 		{
 			return false;
@@ -1336,7 +1341,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
 		// Nor does an input_trigger click or hold, which waits on a key release,
 		// a player_move hold, which waits on its release, or an actor_emote,
-		// which only watches m_bEmoteIsPlaying.
+		// which only watches m_bEmoteIsPlaying. Nor do the ui_menu_set and
+		// ui_map_set one-tick read-backs (d4b4), which only re-read the menu
+		// and its MapWidget on the next tick.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
@@ -1345,6 +1352,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		blocking = blocking - moveJobs;
 		emoteJobs = m_JobRunner.CountOfKind("actor_emote");
 		blocking = blocking - emoteJobs;
+		uiMenuJobs = m_JobRunner.CountOfKind("ui_menu");
+		blocking = blocking - uiMenuJobs;
+		uiMapJobs = m_JobRunner.CountOfKind("ui_map");
+		blocking = blocking - uiMapJobs;
 		return blocking > 0;
 	}
 
@@ -1417,6 +1428,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			if (cmd == "ui_pause")
 			{
 				Log("ui_pause before=-1 after=-1 ok=0 error=client_not_in_game");
+			}
+			if (cmd == "ui_menu_set")
+			{
+				Log("ui_menu_set ok=0 error=client_not_in_game");
+			}
+			if (cmd == "ui_map_set")
+			{
+				Log("ui_map_set ok=0 error=client_not_in_game");
 			}
 			PostResult(result);
 			return;
@@ -1605,6 +1624,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "ui_pause")
 		{
 			postNow = DispatchUiPause(command, result);
+		}
+		else if (command.cmd == "ui_menu_set")
+		{
+			postNow = DispatchUiMenuSet(command, result);
+		}
+		else if (command.cmd == "ui_map_set")
+		{
+			postNow = DispatchUiMapSet(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -5846,6 +5873,14 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessUiPauseJob(job);
 		}
+		else if (job.kind == "ui_menu")
+		{
+			return ProcessUiMenuJob(job);
+		}
+		else if (job.kind == "ui_map")
+		{
+			return ProcessUiMapJob(job);
+		}
 		else if (job.kind == "actor_emote")
 		{
 			return ProcessActorEmoteJob(job);
@@ -6978,6 +7013,16 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostUiPauseJob(job);
 		}
 
+		if (job.kind == "ui_menu")
+		{
+			PostUiMenuJob(job);
+		}
+
+		if (job.kind == "ui_map")
+		{
+			PostUiMapJob(job);
+		}
+
 		// ProcessActorEmoteJob is done only when it saw the end.
 		if (job.kind == "actor_emote")
 		{
@@ -7019,6 +7064,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job && job.kind == "ui_pause")
 		{
 			PostUiPauseJob(job);
+			return;
+		}
+
+		if (job && job.kind == "ui_menu")
+		{
+			PostUiMenuJob(job);
+			return;
+		}
+
+		if (job && job.kind == "ui_map")
+		{
+			PostUiMapJob(job);
 			return;
 		}
 
@@ -7116,6 +7173,18 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "ui_pause")
 		{
 			PostUiPauseJob(job);
+			return;
+		}
+
+		if (job.kind == "ui_menu")
+		{
+			PostUiMenuJob(job);
+			return;
+		}
+
+		if (job.kind == "ui_map")
+		{
+			PostUiMapJob(job);
 			return;
 		}
 
@@ -8672,6 +8741,643 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		PostResult(result);
 	}
 
+	// ui_menu_set / ui_map_set (fb-20261112-153815-d4b4): the closed menu
+	// table, one site per side (UI_MENU_NAMES in loopback.py is the Python
+	// one). "map" is the only entry; another menu arrives with its own
+	// ticket and its own vanilla reading.
+	protected bool UiMenuId(string menu, out int menuId)
+	{
+		menuId = -1;
+		if (menu == "map")
+		{
+			menuId = MENU_MAP;
+			return true;
+		}
+		return false;
+	}
+
+	// E1: the map menu instance this tool opened, or null. Not ref: the
+	// UI manager owns the menu. The mark is the instance, so a map the
+	// player or a mod opened, even one opened right after this tool's
+	// closed, is never this tool's to clean up after. MaintainMCPMapMenu
+	// keeps the mark as long as the menu it names; the lease close
+	// closes that menu (StopLeaseCloseMap) and its census counts it.
+	protected UIScriptedMenu m_MCPMapMenu;
+
+	// The read of ui_menu_set: open_after is IsMenuOpen (uimanager.c:154),
+	// class_name the ClassName() of FindMenu (uimanager.c:160) when open
+	// and "" otherwise, menu_id_after the top menu from GetMenu
+	// (uimanager.c:59) or -1.
+	protected void FillUiMenuRead(MCPUiMenu reply, int menuId)
+	{
+		UIManager ui;
+		UIScriptedMenu top;
+		UIScriptedMenu found;
+		reply.open_after = false;
+		reply.class_name = "";
+		reply.menu_id_after = -1;
+		if (!GetGame())
+		{
+			return;
+		}
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+		reply.open_after = ui.IsMenuOpen(menuId);
+		top = ui.GetMenu();
+		if (top)
+		{
+			reply.menu_id_after = top.GetID();
+		}
+		if (reply.open_after)
+		{
+			found = ui.FindMenu(menuId);
+			if (found)
+			{
+				reply.class_name = found.ClassName();
+			}
+		}
+	}
+
+	// ui_menu_set (d4b4): open or close the 2D map without a key press.
+	// Vanilla 1.30 reading: MissionGameplay.OnUpdate opens the 2D map on
+	// UAMapToggle only behind GetMapIgnoreMapOwnership() &&
+	// !GetUse3DMap() (missiongameplay.c:606-615) and then
+	// HandleMapToggleByKeyboardShortcut (missiongameplay.c:1459-1473)
+	// calls EnterScriptedMenu(MENU_MAP, null) (uimanager.c:4) and adds the
+	// "map" input excludes and the MAP input restriction. This tool drops
+	// both gates (map ownership and the 3D map) and does the rest, no
+	// more: it never calls CloseAll, because another open menu is
+	// ui_menu_busy, and it closes through MapMenu.CloseMapMenu
+	// (mapmenu.c:332-367), the call vanilla makes when the player closes
+	// the map (mapmenu.c:192, :303), on the FindMenu(MENU_MAP) instance
+	// so the override of a class a mod creates for MENU_MAP runs.
+	// Only MENU_MAP is covered; a mod map opened with another menu id
+	// is not seen by this tool. CloseMapMenu only undoes the
+	// input excludes and restriction the open added behind its gates
+	// (mapmenu.c:352-364), and a subclass override may undo neither.
+	// So when the map this tool opened (m_MCPMapMenu) closes here, the
+	// tool asks what is still active with IsInputExcludeActive
+	// (missiongameplay.c:1135) and IsInputRestrictionActive
+	// (missiongameplay.c:1141) and removes each that is, with the same
+	// Remove calls and arguments as mapmenu.c:352-364, and nothing
+	// else; a map it did not open is only CloseMapMenu. MapMenu is created for
+	// MENU_MAP by MissionBase.CreateScriptedMenu (missionbase.c:260-262).
+	// Neither path touches the camera, the HUD or the player simulation,
+	// and restore_gameplay does not close this menu.
+	protected bool DispatchUiMenuSet(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		UIScriptedMenu topBefore;
+		MapMenu mapMenu;
+		MCPUiMenu reply;
+		MCPJob job;
+		int menuId;
+		int beforeId;
+		bool openBefore;
+		bool wantOpen;
+		bool openedByTool;
+		string removed;
+		menuId = -1;
+		openedByTool = false;
+		removed = "none";
+		if (!command.args || !UiMenuId(command.args.menu, menuId))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			Log("ui_menu_set ok=0 error=bad_args");
+			return true;
+		}
+		wantOpen = command.args.open;
+		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			Log("ui_menu_set ok=0 error=client_not_in_game");
+			return true;
+		}
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "no_mission";
+			Log("ui_menu_set ok=0 error=no_mission");
+			return true;
+		}
+		reply = new MCPUiMenu();
+		reply.menu = command.args.menu;
+		openBefore = false;
+		beforeId = -1;
+		ui = GetGame().GetUIManager();
+		if (ui)
+		{
+			openBefore = ui.IsMenuOpen(menuId);
+			topBefore = ui.GetMenu();
+			if (topBefore)
+			{
+				beforeId = topBefore.GetID();
+			}
+		}
+		reply.open_before = openBefore;
+		reply.menu_id_before = beforeId;
+		if (openBefore == wantOpen)
+		{
+			FillUiMenuRead(reply, menuId);
+			result.ui_menu = reply;
+			result.ok = true;
+			if (!wantOpen)
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + beforeId + " after=" + reply.menu_id_after + " ok=1 removed=none");
+			}
+			else
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + beforeId + " after=" + reply.menu_id_after + " ok=1");
+			}
+			return true;
+		}
+		if (wantOpen && topBefore)
+		{
+			FillUiMenuRead(reply, menuId);
+			result.ui_menu = reply;
+			result.ok = false;
+			result.error = "ui_menu_busy";
+			Log("ui_menu_set menu=" + reply.menu + " before=" + beforeId + " after=" + reply.menu_id_after + " ok=0 error=ui_menu_busy");
+			return true;
+		}
+		if (ui)
+		{
+			if (wantOpen)
+			{
+				ui.EnterScriptedMenu(menuId, null);
+				mission.AddActiveInputExcludes({"map"});
+				mission.AddActiveInputRestriction(EInputRestrictors.MAP);
+				m_MCPMapMenu = ui.FindMenu(menuId);
+			}
+			else
+			{
+				mapMenu = MapMenu.Cast(ui.FindMenu(menuId));
+				if (mapMenu)
+				{
+					openedByTool = m_MCPMapMenu && mapMenu == m_MCPMapMenu;
+					mapMenu.CloseMapMenu();
+					if (openedByTool)
+					{
+						// mapmenu.c:352-364 may have removed neither of
+						// this open's states (a subclass CloseMapMenu
+						// that only calls Close() removes none at all).
+						// Query each one still active after the override
+						// (missiongameplay.c:1135, missiongameplay.c:1141)
+						// and remove only that one, with the same Remove
+						// calls and arguments as that block.
+						if (mission.IsInputExcludeActive("map"))
+						{
+							mission.RemoveActiveInputExcludes({"map"});
+							removed = "map_exclude";
+						}
+						if (mission.IsInputRestrictionActive(EInputRestrictors.MAP))
+						{
+							mission.RemoveActiveInputRestriction(EInputRestrictors.MAP);
+							if (removed == "map_exclude")
+							{
+								removed = "map_exclude+map_restriction";
+							}
+							else
+							{
+								removed = "map_restriction";
+							}
+						}
+						// CloseMapMenu (mapmenu.c:332-367) calls Close()
+						// (uiscriptedmenu.c:31), which may only take
+						// effect on a later tick, and a subclass override
+						// may keep the menu open at all. The mark falls
+						// only once FindMenu (uimanager.c:160) no longer
+						// returns this instance; while it does, the map
+						// is still this tool's, MaintainMCPMapMenu drops
+						// the mark when it goes, and the lease-close
+						// census still counts it.
+						if (ui.FindMenu(menuId) != m_MCPMapMenu)
+						{
+							m_MCPMapMenu = null;
+						}
+					}
+				}
+			}
+		}
+		FillUiMenuRead(reply, menuId);
+		if (reply.open_after == wantOpen)
+		{
+			result.ui_menu = reply;
+			result.ok = true;
+			if (!wantOpen)
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + beforeId + " after=" + reply.menu_id_after + " ok=1 removed=" + removed);
+			}
+			else
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + beforeId + " after=" + reply.menu_id_after + " ok=1");
+			}
+			return true;
+		}
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "ui_menu";
+		job.ui_menu = reply;
+		job.ui_menu_open = wantOpen;
+		job.ui_menu_removed = removed;
+		job.sample_start_s = m_JobRunner.GetElapsedS();
+		job.deadline_s = job.sample_start_s + CAMERA_JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	protected bool ProcessUiMenuJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return false;
+		}
+		return m_JobRunner.GetElapsedS() > job.sample_start_s;
+	}
+
+	protected void PostUiMenuJob(MCPJob job)
+	{
+		MCPResult result;
+		MCPUiMenu reply;
+		int menuId;
+		string removedPost;
+		if (!job)
+		{
+			return;
+		}
+		reply = job.ui_menu;
+		if (!reply)
+		{
+			reply = new MCPUiMenu();
+		}
+		menuId = -1;
+		UiMenuId(reply.menu, menuId);
+		FillUiMenuRead(reply, menuId);
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.ui_menu = reply;
+		removedPost = job.ui_menu_removed;
+		if (removedPost == "")
+		{
+			removedPost = "none";
+		}
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+			if (!job.ui_menu_open)
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + reply.menu_id_before + " after=" + reply.menu_id_after + " ok=0 error=" + job.error + " removed=" + removedPost);
+			}
+			else
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + reply.menu_id_before + " after=" + reply.menu_id_after + " ok=0 error=" + job.error);
+			}
+		}
+		else if (reply.open_after == job.ui_menu_open)
+		{
+			result.ok = true;
+			if (!job.ui_menu_open)
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + reply.menu_id_before + " after=" + reply.menu_id_after + " ok=1 removed=" + removedPost);
+			}
+			else
+			{
+				Log("ui_menu_set menu=" + reply.menu + " before=" + reply.menu_id_before + " after=" + reply.menu_id_after + " ok=1");
+			}
+		}
+		else if (job.ui_menu_open)
+		{
+			result.ok = false;
+			result.error = "ui_menu_not_opened";
+			Log("ui_menu_set menu=" + reply.menu + " before=" + reply.menu_id_before + " after=" + reply.menu_id_after + " ok=0 error=ui_menu_not_opened");
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "ui_menu_not_closed";
+			Log("ui_menu_set menu=" + reply.menu + " before=" + reply.menu_id_before + " after=" + reply.menu_id_after + " ok=0 error=ui_menu_not_closed removed=" + removedPost);
+		}
+		PostResult(result);
+	}
+
+	// ui_map_set (d4b4): the MapWidget of the open map menu, found by
+	// class and never by name, so a class a mod creates for MENU_MAP
+	// keeps working. Vanilla MapMenu.Init finds its widget by the layout name
+	// "Map" (mapmenu.c:66) and then calls SetScale and SetMapPos on it
+	// (mapmenu.c:97-98); this search deliberately does not copy that
+	// name lookup.
+	protected MapWidget FindMapWidgetByClass(Widget root)
+	{
+		MapWidget found;
+		Widget child;
+		MapWidget hit;
+		if (!root)
+		{
+			return null;
+		}
+		found = MapWidget.Cast(root);
+		if (found)
+		{
+			return found;
+		}
+		child = root.GetChildren();
+		while (child)
+		{
+			hit = FindMapWidgetByClass(child);
+			if (hit)
+			{
+				return hit;
+			}
+			child = child.GetSibling();
+		}
+		return null;
+	}
+
+	// The open map menu and its MapWidget, or null on either absence.
+	protected MapWidget UiMapWidget(UIManager ui, int menuId, out UIScriptedMenu menu)
+	{
+		menu = null;
+		if (!ui)
+		{
+			return null;
+		}
+		menu = ui.FindMenu(menuId);
+		if (!menu)
+		{
+			return null;
+		}
+		return FindMapWidgetByClass(menu.GetLayoutRoot());
+	}
+
+	protected void FillUiMapRead(MCPUiMap reply, MapWidget widget)
+	{
+		vector mapPos;
+		reply.center_after.Clear();
+		if (!widget)
+		{
+			reply.scale_after = 0.0;
+			return;
+		}
+		reply.scale_after = widget.GetScale();
+		mapPos = widget.GetMapPos();
+		reply.center_after.Insert(mapPos[0]);
+		reply.center_after.Insert(mapPos[2]);
+	}
+
+	protected bool UiMapMatches(MCPUiMap reply, MCPJob job)
+	{
+		float scaleDiff;
+		float centerDx;
+		float centerDz;
+		if (job.ui_map_scale_set)
+		{
+			scaleDiff = reply.scale_after - job.ui_map_scale;
+			if (scaleDiff < 0.0)
+			{
+				scaleDiff = -scaleDiff;
+			}
+			if (scaleDiff > 0.001 * job.ui_map_scale)
+			{
+				return false;
+			}
+		}
+		if (job.ui_map_center_set)
+		{
+			if (!reply.center_after || reply.center_after.Count() != 2)
+			{
+				return false;
+			}
+			centerDx = reply.center_after.Get(0) - job.ui_map_center.Get(0);
+			centerDz = reply.center_after.Get(1) - job.ui_map_center.Get(1);
+			if (centerDx * centerDx + centerDz * centerDz >= 1.0)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// ui_map_set (d4b4): set the scale and centre of the open 2D map, as
+	// MapMenu.Init does with SetScale and SetMapPos (mapmenu.c:97-98),
+	// and read GetScale and GetMapPos back. No camera, HUD or player
+	// simulation is touched, and restore_gameplay does not close the map.
+	protected bool DispatchUiMapSet(MCPCommand command, MCPResult result)
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		UIScriptedMenu menu;
+		MapWidget widget;
+		MCPUiMap reply;
+		MCPJob job;
+		int menuId;
+		int centerIndex;
+		bool scaleSet;
+		bool centerSet;
+		bool badScale;
+		bool badCenter;
+		menuId = -1;
+		UiMenuId("map", menuId);
+		scaleSet = false;
+		centerSet = false;
+		badScale = false;
+		badCenter = false;
+		if (command.args && command.args.scale != MCP_ARG_FLOAT_UNSET)
+		{
+			scaleSet = true;
+			if (!IsFiniteFloat(command.args.scale) || command.args.scale <= 0.0)
+			{
+				badScale = true;
+			}
+		}
+		if (command.args && command.args.center && command.args.center.Count() != 0)
+		{
+			centerSet = true;
+			if (command.args.center.Count() != 2)
+			{
+				badCenter = true;
+			}
+			else if (!IsFiniteFloat(command.args.center.Get(0)) || !IsFiniteFloat(command.args.center.Get(1)))
+			{
+				badCenter = true;
+			}
+		}
+		if (!command.args || (!scaleSet && !centerSet) || badScale || badCenter)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			Log("ui_map_set ok=0 error=bad_args");
+			return true;
+		}
+		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			Log("ui_map_set ok=0 error=client_not_in_game");
+			return true;
+		}
+		mission = MissionGameplay.Cast(GetGame().GetMission());
+		if (!mission)
+		{
+			result.ok = false;
+			result.error = "no_mission";
+			Log("ui_map_set ok=0 error=no_mission");
+			return true;
+		}
+		reply = new MCPUiMap();
+		ui = GetGame().GetUIManager();
+		if (!ui || !ui.IsMenuOpen(menuId))
+		{
+			result.ui_map = reply;
+			result.ok = false;
+			result.error = "ui_map_not_open";
+			Log("ui_map_set ok=0 error=ui_map_not_open");
+			return true;
+		}
+		widget = UiMapWidget(ui, menuId, menu);
+		if (!widget)
+		{
+			if (menu)
+			{
+				reply.class_name = menu.ClassName();
+			}
+			result.ui_map = reply;
+			result.ok = false;
+			result.error = "ui_map_widget_missing";
+			Log("ui_map_set ok=0 error=ui_map_widget_missing");
+			return true;
+		}
+		reply.class_name = menu.ClassName();
+		FillUiMapRead(reply, widget);
+		reply.scale_before = reply.scale_after;
+		reply.center_before.Clear();
+		if (reply.center_after.Count() == 2)
+		{
+			reply.center_before.Insert(reply.center_after.Get(0));
+			reply.center_before.Insert(reply.center_after.Get(1));
+		}
+		if (scaleSet)
+		{
+			widget.SetScale(command.args.scale);
+		}
+		if (centerSet)
+		{
+			widget.SetMapPos(Vector(command.args.center.Get(0), 0.0, command.args.center.Get(1)));
+		}
+		FillUiMapRead(reply, widget);
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "ui_map";
+		job.ui_map = reply;
+		job.ui_map_scale = command.args.scale;
+		job.ui_map_scale_set = scaleSet;
+		job.ui_map_center = new array<float>();
+		if (command.args.center)
+		{
+			centerIndex = 0;
+			while (centerIndex < command.args.center.Count())
+			{
+				job.ui_map_center.Insert(command.args.center.Get(centerIndex));
+				centerIndex = centerIndex + 1;
+			}
+		}
+		job.ui_map_center_set = centerSet;
+		job.sample_start_s = m_JobRunner.GetElapsedS();
+		job.deadline_s = job.sample_start_s + CAMERA_JOB_TIMEOUT_S;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		if (UiMapMatches(reply, job))
+		{
+			result.ui_map = reply;
+			result.ok = true;
+			Log("ui_map_set ok=1 class=" + reply.class_name);
+			return true;
+		}
+		m_JobRunner.AddJob(job);
+		return false;
+	}
+
+	protected bool ProcessUiMapJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return false;
+		}
+		return m_JobRunner.GetElapsedS() > job.sample_start_s;
+	}
+
+	protected void PostUiMapJob(MCPJob job)
+	{
+		MCPResult result;
+		MCPUiMap reply;
+		UIManager ui;
+		UIScriptedMenu menu;
+		MapWidget widget;
+		int menuId;
+		if (!job)
+		{
+			return;
+		}
+		reply = job.ui_map;
+		if (!reply)
+		{
+			reply = new MCPUiMap();
+		}
+		menuId = -1;
+		UiMenuId("map", menuId);
+		if (GetGame())
+		{
+			ui = GetGame().GetUIManager();
+			widget = UiMapWidget(ui, menuId, menu);
+			if (widget)
+			{
+				FillUiMapRead(reply, widget);
+			}
+			if (menu)
+			{
+				reply.class_name = menu.ClassName();
+			}
+		}
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.ui_map = reply;
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+			Log("ui_map_set ok=0 error=" + job.error);
+		}
+		else if (UiMapMatches(reply, job))
+		{
+			result.ok = true;
+			Log("ui_map_set ok=1 class=" + reply.class_name);
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "ui_map_not_set";
+			Log("ui_map_set ok=0 error=ui_map_not_set class=" + reply.class_name);
+		}
+		PostResult(result);
+	}
+
 	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",
 	// the form the daemon and both installers write. It is the RestContext base
 	// that "poll?..." and "result?..." are appended to, so the final "/" belongs
@@ -9517,6 +10223,20 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 
 		AddCloseEntry(census, "ui_pause", pauseActive, "ui_pause");
+		// E3 (d4b4): after StopLeaseCloseMap, the map ui_menu_set opened
+		// and still open is residue the 25 s observer re-reads. A map
+		// the player or a mod opened is not MCP's and is not counted.
+		bool mapActive = false;
+		if (m_MCPMapMenu)
+		{
+			UIManager closeMapUi = GetGame().GetUIManager();
+			if (closeMapUi && closeMapUi.FindMenu(MENU_MAP) == m_MCPMapMenu)
+			{
+				mapActive = true;
+			}
+		}
+
+		AddCloseEntry(census, "ui_menu", mapActive, "ui_menu");
 		// §2.9: the client half reads the action manager, not the job, so a
 		// Take that cleared the hold control cannot make this row clean.
 		bool holdActive = MCPHoldControl.IsActive();
@@ -9688,6 +10408,29 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		}
 	}
 
+	// E1 (d4b4): the map mark lives as long as the menu it names, as
+	// the ui_pause marks do (MaintainMCPPause). A tool-opened map the
+	// player closes with Esc drops the mark here; what its open left
+	// behind then stays (the brief's known limit, for the PR).
+	protected void MaintainMCPMapMenu()
+	{
+		UIManager ui;
+		if (!m_MCPMapMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			ui = GetGame().GetUIManager();
+		}
+
+		if (!ui || ui.FindMenu(MENU_MAP) != m_MCPMapMenu)
+		{
+			m_MCPMapMenu = null;
+		}
+	}
+
 	// §2.6 C14 (PX3 a, PX6 a): the close cancels the pause ui_pause queued,
 	// which vanilla would otherwise open under the next lease once loading
 	// or the respawn ends (missiongameplay.c:308-311; Continue() leaves the
@@ -9742,6 +10485,68 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		mission.Continue();
 	}
 
+	// E3 (d4b4): the lease close closes the map ui_menu_set opened, as
+	// ui_menu_set("map", false) does: CloseMapMenu (mapmenu.c:332-367)
+	// on the FindMenu(MENU_MAP) instance that is still m_MCPMapMenu,
+	// then the E1 cleanup of whatever that call left of the opening's
+	// excludes and restriction (mapmenu.c:352-364), queried with
+	// IsInputExcludeActive (missiongameplay.c:1135) and
+	// IsInputRestrictionActive (missiongameplay.c:1141). A map the
+	// player or a mod opened is another instance and is not touched.
+	// The mark falls only once FindMenu (uimanager.c:160) no longer
+	// returns this instance: Close() (uiscriptedmenu.c:31) may take
+	// effect on a later tick and a subclass CloseMapMenu override may
+	// keep the menu open, so clearing the mark here unconditionally
+	// would make the census below read clean over a map still open.
+	protected void StopLeaseCloseMap()
+	{
+		MissionGameplay mission;
+		UIManager ui;
+		MapMenu mapMenu;
+		if (!m_MCPMapMenu)
+		{
+			return;
+		}
+
+		if (GetGame())
+		{
+			mission = MissionGameplay.Cast(GetGame().GetMission());
+		}
+
+		if (!mission)
+		{
+			return;
+		}
+
+		ui = GetGame().GetUIManager();
+		if (!ui)
+		{
+			return;
+		}
+
+		mapMenu = MapMenu.Cast(ui.FindMenu(MENU_MAP));
+		if (!mapMenu || mapMenu != m_MCPMapMenu)
+		{
+			return;
+		}
+
+		mapMenu.CloseMapMenu();
+		if (mission.IsInputExcludeActive("map"))
+		{
+			mission.RemoveActiveInputExcludes({"map"});
+		}
+
+		if (mission.IsInputRestrictionActive(EInputRestrictors.MAP))
+		{
+			mission.RemoveActiveInputRestriction(EInputRestrictors.MAP);
+		}
+
+		if (ui.FindMenu(MENU_MAP) != m_MCPMapMenu)
+		{
+			m_MCPMapMenu = null;
+		}
+	}
+
 	// §2.6 stop steps, in Shutdown's order, without the bridge teardown.
 	protected bool DispatchLeaseCloseClient(MCPCommand command, MCPResult result)
 	{
@@ -9778,6 +10583,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		// §2.6 C14: after AbortAll, so an open ui_pause job answers once,
 		// and before the census.
 		StopLeaseClosePause();
+		// E3 (d4b4): alongside it, close the map ui_menu_set opened,
+		// before the census reads it.
+		StopLeaseCloseMap();
 		MCPLeaseCloseCensus census = BuildLeaseCloseCensus(command.args);
 		if (LeaseCloseCensusSettled(census))
 		{

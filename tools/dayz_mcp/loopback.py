@@ -169,6 +169,8 @@ CLIENT_COMMANDS = {
     "ui_click",
     "ui_reload_layout",
     "ui_focus",
+    "ui_map_set",
+    "ui_menu_set",
     "ui_pause",
     "ui_dialog",
     "action_hold",
@@ -188,6 +190,11 @@ CLIENT_COMMANDS = {
     "player_view_set",
     "actor_emote",
 }
+
+# ui_menu_set (d4b4): the closed menu table, the one Python site for it
+# (UiMenuId in MCPClientBridge.c is the Enforce one). "map" is the only
+# entry; another menu arrives with its own ticket and vanilla reading.
+UI_MENU_NAMES = frozenset({"map"})
 
 CREDENTIAL_RECOVERY_TTL_S = 300.0
 CREDENTIAL_RECOVERY_COUNT_MAX = 2_147_483_647
@@ -1534,6 +1541,8 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "gameplay_state": "bridge_capability_missing",
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
+    "ui_map_set": "bridge_capability_missing",
+    "ui_menu_set": "bridge_capability_missing",
     "ui_pause": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
@@ -1584,6 +1593,30 @@ _AI_ORDER_VALIDATORS: dict[str, _FieldValidator] = {
 _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     "gameplay_state": _command_schema(_schema_variant()),
     "ui_pause": _command_schema(_schema_variant()),
+    # ui_menu_set (d4b4): menu from the closed table, open a strict bool.
+    "ui_menu_set": _command_schema(
+        _schema_variant(
+            required=("menu", "open"),
+            validators={
+                "menu": _one_of(*sorted(UI_MENU_NAMES)),
+                "open": _is_strict_bool,
+            },
+        )
+    ),
+    # ui_map_set (d4b4): scale and center ([x, z] in world metres), each
+    # optional, at least one, and no other keys.
+    "ui_map_set": _command_schema(
+        _schema_variant(
+            required=("scale",), validators={"scale": _SAFE_POSITIVE_REAL}
+        ),
+        _schema_variant(
+            required=("center",), validators={"center": _is_real_list(2)}
+        ),
+        _schema_variant(
+            required=("scale", "center"),
+            validators={"scale": _SAFE_POSITIVE_REAL, "center": _is_real_list(2)},
+        ),
+    ),
     "restore_gameplay": _command_schema(_schema_variant()),
     "player_respawn": _command_schema(_schema_variant()),
     "key_press": _command_schema(

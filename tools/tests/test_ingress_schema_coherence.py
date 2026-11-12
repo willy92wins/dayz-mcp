@@ -432,6 +432,11 @@ _TOOL_CALLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     ("chat_read", {"marker": 10, "max_lines": 50}, "chat_read"),
     ("ui_pause", {}, "ui_pause"),
     ("ui_pause", {"timeout_s": 5.0}, "ui_pause"),
+    ("ui_menu_set", {"menu": "map", "open": True}, "ui_menu_set"),
+    ("ui_menu_set", {"menu": "map", "open": False, "timeout_s": 5.0}, "ui_menu_set"),
+    ("ui_map_set", {"scale": 1.5}, "ui_map_set"),
+    ("ui_map_set", {"center": [100.0, 200.0]}, "ui_map_set"),
+    ("ui_map_set", {"scale": 0.5, "center": [100.0, 200.0], "timeout_s": 5.0}, "ui_map_set"),
 )
 
 # A bridge answer per verb, enough for each tool to reach its bridge call and

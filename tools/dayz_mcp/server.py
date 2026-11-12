@@ -135,6 +135,7 @@ from dayz_mcp.loopback import (
     SPAWN_BATCH_ITEMS_MAX,
     SPAWN_BATCH_PER_TICK_MAX,
     SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG,
+    UI_MENU_NAMES,
     LoopbackServer,
     _FENCE_OMITTED,
     is_printable_input_name,
@@ -668,6 +669,7 @@ InputTriggerKind = Literal["key", "input"]
 InputTriggerEntry = Literal["game", "mission"]
 InputTriggerPhase = Literal["click", "hold", "press", "release"]
 PlayerViewMode = Literal["first", "third"]
+UiMenuName = Literal["map"]
 
 _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "pipeline_resolve",
@@ -700,6 +702,10 @@ _CLOSED_SCHEMA_TOOLS: tuple[str, ...] = (
     "ai_group_spawn",
     # A mistyped order key must not order a group on defaults.
     "ai_group_order",
+    # A mistyped key (centre= for center=) must not move the map on the
+    # scale alone: an unknown key is refused, not dropped.
+    "ui_menu_set",
+    "ui_map_set",
 )
 
 
@@ -10587,7 +10593,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "script_camera while camera_set's camera is mounted "
             "(restore_gameplay first) and busy while an exclusive client job "
             "runs, such as camera_set or player_look_at (a ui_dialog, "
-            "weapon_action, input_trigger, player_move or actor_emote job does not count). "
+            "weapon_action, input_trigger, player_move, actor_emote, ui_menu "
+            "or ui_map job does not count). "
             "After the settle the view is already set, and no_player answers "
             "when the player is gone by then, script_camera when camera_set's "
             "camera is mounted by then."
@@ -11805,6 +11812,119 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Open or close a client scripted menu by name; "
+        "menu is 'map', the only entry in the closed menu table. Only "
+        "MENU_MAP is covered; a mod map opened with another menu id, such "
+        "as Expansion's, is not seen by this tool. Opening "
+        "imitates the 2D-map branch of vanilla UAMapToggle: "
+        "HandleMapToggleByKeyboardShortcut calls EnterScriptedMenu(MENU_MAP, "
+        "null) and adds the 'map' input excludes and the MAP input "
+        "restriction (missiongameplay.c:606-615, :1459-1473; uimanager.c:4), "
+        "and closing calls MapMenu.CloseMapMenu on the FindMenu(MENU_MAP) "
+        "instance, the call vanilla makes when the player closes the map "
+        "(mapmenu.c:332-367), so the override of a class a mod creates "
+        "for MENU_MAP runs. It opens "
+        "the 2D map without vanilla's two gates, map ownership and the 3D "
+        "map, and it is idempotent: a call that asks for the state the map "
+        "is already in changes nothing. The answer is ui_menu {menu, "
+        "open_before, open_after, class_name, menu_id_before, "
+        "menu_id_after}; class_name is the opened menu's ClassName() (a "
+        "class a mod creates for MENU_MAP reports its own) and '' when the "
+        "map is not open, and a menu id is -1 when no scripted menu is on "
+        "top. When the lease ends, the lease close closes a map this tool "
+        "opened (a map opened by the player or a mod stays open), and "
+        "restore_gameplay does not close it. Errors: bad_args in the "
+        "daemon, without sending anything (a menu outside the table, or an open that is not a "
+        "bool); client_not_in_game, no_mission, ui_menu_busy (opening while "
+        "another menu is on top), ui_menu_not_opened, ui_menu_not_closed "
+        "and bridge_capability_missing (the client bridge bound to the run "
+        "does not announce ui_menu_set, as an older PBO does not; nothing "
+        "is sent)."
+    ))
+    async def ui_menu_set(
+        menu: UiMenuName,
+        open: StrictBool,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(menu, str) or menu not in UI_MENU_NAMES:
+            raise ToolError(_bad_args("menu", menu, "be 'map'"))
+        if not isinstance(open, bool):
+            raise ToolError(_bad_args("open", open, "be a bool"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ui_menu_set",
+                {"menu": menu, "open": open},
+                "client",
+                _timeout(timeout_s),
+            )
+
+    @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Set the scale and centre of the open 2D map. "
+        "Only MENU_MAP is covered; a mod map opened with another menu id, "
+        "such as Expansion's, is not seen by this tool. scale is a number "
+        "above 0 and center is [x, z] in world metres; "
+        "each is optional and at least one is required. It imitates "
+        "MapMenu.Init, which calls SetScale and SetMapPos on its MapWidget "
+        "(mapmenu.c:97-98), here found by class in the layout of the open "
+        "MENU_MAP menu so a class a mod creates for MENU_MAP keeps working, and "
+        "reads GetScale and GetMapPos back. The answer is ui_map "
+        "{scale_before, scale_after, center_before, center_after, "
+        "class_name}. When the lease ends, the lease close closes a map "
+        "ui_menu_set opened (a map opened by the player or a mod stays "
+        "open), and restore_gameplay does not close it. Errors: bad_args in the "
+        "daemon, without sending anything (neither scale nor center, a "
+        "scale that is not a finite number above 0, or a center that is "
+        "not two finite numbers); client_not_in_game, no_mission, "
+        "ui_map_not_open (MENU_MAP is not open), ui_map_widget_missing (no "
+        "MapWidget in the open menu's layout), ui_map_not_set (what was "
+        "read back does not match what was asked: the scale within a "
+        "relative tolerance of 1e-3, the centre within 1 m) and "
+        "bridge_capability_missing (the client bridge bound to the run "
+        "does not announce ui_map_set, as an older PBO does not; nothing "
+        "is sent)."
+    ))
+    async def ui_map_set(
+        scale: StrictFloat | None = None,
+        center: list[StrictFloat] | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if scale is None and center is None:
+            raise ToolError(
+                _bad_args("scale", scale, "give scale, center, or both")
+            )
+        args: dict[str, Any] = {}
+        if scale is not None:
+            if (
+                isinstance(scale, bool)
+                or not isinstance(scale, (int, float))
+                or not math.isfinite(float(scale))
+                or float(scale) <= 0.0
+            ):
+                raise ToolError(
+                    _bad_args("scale", scale, "be a finite number above 0")
+                )
+            args["scale"] = float(scale)
+        if center is not None:
+            if (
+                not isinstance(center, (list, tuple))
+                or len(center) != 2
+                or any(
+                    isinstance(component, bool)
+                    or not isinstance(component, (int, float))
+                    or not math.isfinite(float(component))
+                    for component in center
+                )
+            ):
+                raise ToolError(
+                    _bad_args("center", center, "be [x, z] finite numbers")
+                )
+            args["center"] = [float(center[0]), float(center[1])]
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ui_map_set", args, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
         "Blocks up to timeout_s for the local player's answer; "
         "cancelled and timed_out are valid."
@@ -12308,6 +12428,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     _describe_run_parameters(app, "dayz_test_run")
     for _closed_tool in _CLOSED_SCHEMA_TOOLS:
         _patch_closed_tool_schema(app, _closed_tool)
+    _patch_ui_menu_map_bad_args(app)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
     _patch_optional_focus_bool_bad_args(app, "camera_set")
@@ -12367,6 +12488,68 @@ _OPTIONAL_FOCUS_FIELDS: tuple[str, ...] = (
 _OPTIONAL_FOCUS_REQUIREMENT = (
     "be 0, or above 0 also as a 32-bit float, and at most 1e9"
 )
+
+
+def _patch_ui_menu_map_bad_args(app: FastMCP) -> None:
+    # d4b4: the Literal/StrictBool/StrictFloat schemas refuse a bad menu,
+    # open, scale or center component with a bare validation error. The
+    # brief's daemon error for them is bad_args, so name it here, before
+    # Pydantic validation, for the values that are present. Missing keys,
+    # ranges and finiteness stay with the schema and the handler.
+    for tool_name in ("ui_menu_set", "ui_map_set"):
+        tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+        if tool is None:
+            raise RuntimeError(f"missing tool {tool_name}")
+        original = tool.fn_metadata.call_fn_with_arg_validation
+
+        async def patched(
+            fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly,
+            _original=original, _tool_name=tool_name,
+        ):
+            if isinstance(arguments_to_validate, dict):
+                if _tool_name == "ui_menu_set":
+                    if "menu" in arguments_to_validate:
+                        menu = arguments_to_validate["menu"]
+                        if not isinstance(menu, str) or menu not in UI_MENU_NAMES:
+                            raise ToolError(_bad_args("menu", menu, "be 'map'"))
+                    if "open" in arguments_to_validate:
+                        open_value = arguments_to_validate["open"]
+                        if not isinstance(open_value, bool):
+                            raise ToolError(
+                                _bad_args("open", open_value, "be a bool")
+                            )
+                else:
+                    if "scale" in arguments_to_validate:
+                        scale = arguments_to_validate["scale"]
+                        if scale is not None and (
+                            isinstance(scale, bool)
+                            or not isinstance(scale, (int, float))
+                        ):
+                            raise ToolError(
+                                _bad_args(
+                                    "scale", scale, "be a finite number above 0"
+                                )
+                            )
+                    if "center" in arguments_to_validate:
+                        center = arguments_to_validate["center"]
+                        if center is not None and (
+                            not isinstance(center, (list, tuple))
+                            or any(
+                                isinstance(component, bool)
+                                or not isinstance(component, (int, float))
+                                for component in center
+                            )
+                        ):
+                            raise ToolError(
+                                _bad_args(
+                                    "center", center, "be [x, z] finite numbers"
+                                )
+                            )
+            return await _original(
+                fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly
+            )
+
+        object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
 def _patch_optional_focus_bool_bad_args(app: FastMCP, tool_name: str) -> None:
