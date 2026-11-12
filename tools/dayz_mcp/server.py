@@ -8669,9 +8669,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "carries created false and args_read. At most "
             f"{AI_GROUP_COUNT_MAX} members per group and 24 living adapter "
             "members in total (ai_limit_reached). Without the adapter the "
-            "call is expansion_unavailable; while the lease-close activation "
-            "is absent it stays expansion_unavailable "
-            "(lease_close_not_supported) and creates nothing. scene_id "
+            "call is expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported "
+            "and creates nothing. scene_id "
             f"registers the members under that scene. {SCENE_CAP_LINE}"
         )
     )

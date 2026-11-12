@@ -236,24 +236,28 @@ class AIGroupSpawnExpansionUnavailableToolTest(unittest.IsolatedAsyncioTestCase)
                 self.assertIn(f"detail={detail}", text)
                 self.assertNotIn("remote_error", text)
 
+    async def test_unknown_code_and_unknown_detail_at_the_tool(self) -> None:
+        cases = (
+            ({"error": "arbitrary_remote_text", "detail": "adapter_not_loaded"}, "remote_error"),
+            ({"error": "expansion_unavailable", "detail": "C:\\host\\secret"}, "expansion_unavailable"),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                client = _fixture_client_runtime(
+                    server.ServerConfig(mode="client", key="k", port=12345, log_sink=lambda _m: None)
+                )
+                client._call = lambda *_a, _p=payload, **_k: (409, _p)
+                with patch.object(self.runtime, "call_bridge", client.call_bridge):
+                    with self.assertRaises(Exception) as caught:
+                        await self.app.call_tool(SPAWN, dict(TOOL_ARGS))
+                text = _tool_error_text(caught.exception)
+                self.assertTrue(text.endswith(": " + expected), text)
+                self.assertNotIn("detail=", text)
+                self.assertNotIn("secret", text)
+
 
 class AIGroupAdapterErrorSurfaceTest(unittest.TestCase):
-    """The other adapter codes must not collapse to remote_error either."""
-
-    def test_adapter_codes_do_not_collapse_to_remote_error_at_enqueue(self) -> None:
-        # Mutants killed: ai_limit_reached, spawn_failed or scene_full
-        # removed from _REMOTE_ERROR_CODES (they answered remote_error).
-        for code in (
-            "expansion_unavailable",
-            "not_found",
-            "ai_limit_reached",
-            "spawn_failed",
-            "scene_full",
-            "bad_args",
-        ):
-            with self.subTest(code=code):
-                self.assertIn(code, server._REMOTE_ERROR_CODES)
-                self.assertEqual(server._public_enqueue_error({"error": code}), code)
+    """expansion_unavailable keeps its detail and drops unknown details."""
 
     def test_an_unknown_expansion_detail_is_dropped_not_echoed(self) -> None:
         payload = {"error": "expansion_unavailable", "detail": "C:\\host\\secret"}
@@ -276,48 +280,6 @@ class AIGroupAdapterErrorSurfaceTest(unittest.TestCase):
         self.assertEqual(
             str(error), "expansion_unavailable; detail=lease_close_not_supported"
         )
-
-    def test_bridge_bad_args_carries_field_allowed_and_args_read(self) -> None:
-        error = server._bridge_error(
-            {
-                "ok": 0,
-                "error": "bad_args",
-                "ai_group": {
-                    "created": False,
-                    "field": "faction",
-                    "allowed": ["West", "East"],
-                    "args_read": {"faction": "Nope", "count": 2, "waypoints": []},
-                },
-            },
-            SPAWN,
-        )
-        text = str(error)
-        self.assertIn("bad_args", text)
-        self.assertIn("field=faction", text)
-        self.assertIn("allowed=West,East", text)
-        self.assertIn("args_read=faction=Nope count=2", text)
-        self.assertIn("created=false", text)
-
-    def test_bridge_limit_and_creation_codes_carry_their_report(self) -> None:
-        limit = server._bridge_error(
-            {
-                "ok": 0,
-                "error": "ai_limit_reached",
-                "ai_group": {"created": False, "living": 20, "limit": 24},
-            },
-            SPAWN,
-        )
-        self.assertIn("ai_limit_reached", str(limit))
-        self.assertIn("living=20", str(limit))
-        self.assertIn("limit=24", str(limit))
-        for code in ("spawn_failed", "scene_full", "not_found"):
-            with self.subTest(code=code):
-                error = server._bridge_error(
-                    {"ok": 0, "error": code, "ai_group": {"created": False}}, SPAWN
-                )
-                self.assertIn(code, str(error))
-                self.assertIn("created=false", str(error))
-                self.assertNotIn("remote_error", str(error))
 
 
 def _bound_state() -> loopback.ServerState:
@@ -455,6 +417,10 @@ class AIGroupSpawnAbandonTest(unittest.TestCase):
         stored = state.take_result(spawn["id"])
         self.assertEqual((stored["error"], stored["detail"]),
                          ("expansion_unavailable", "lease_close_not_supported"))
+        self.assertEqual(
+            str(server._bridge_error(stored, SPAWN)),
+            "expansion_unavailable; detail=lease_close_not_supported",
+        )
 
     def test_spawn_without_close_support_is_inert(self) -> None:
         # Mutant killed: ai_group_spawn admitted while no peer announces

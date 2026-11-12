@@ -56,10 +56,6 @@ _RETAIL_QUARANTINE_REASONS = frozenset({
 _REMOTE_ERROR_CODES = frozenset({
     "audit_failed",
     "arg_contract_mismatch",
-    # Adapter bridge codes (plan 3.1): the game-side refusal the caller must
-    # be able to tell apart from a generic failure. Without these the enqueue
-    # mapper collapsed them to remote_error.
-    "ai_limit_reached",
     "bad_args",
     "bad_binding_fence",
     "bad_release_builder",
@@ -105,9 +101,6 @@ _REMOTE_ERROR_CODES = frozenset({
     "operation_conflict",
     "operation_tombstones_saturated",
     "session_releasing",
-    # Adapter/scene bridge codes, as ai_limit_reached above.
-    "scene_full",
-    "spawn_failed",
     "ticket_expired",
     "ticket_invalid",
     "unauthorized",
@@ -649,80 +642,6 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
     return "observed=" + " ".join(pairs)
 
 
-# Adapter verbs whose refusals fill the ai_group report before refusing
-# (MCPExpansionAI.c AISpawnRefuse and its siblings in the other adapter
-# branches). ai_emote is the server command behind actor_emote(object_id=..);
-# it shares this path when that branch lands, so it is named here, not as a
-# tool. Only the allowlisted report fields below cross, each token-checked.
-_AI_GROUP_COMMANDS = frozenset({
-    "ai_emote",
-    "ai_group_order",
-    "ai_group_release",
-    "ai_group_spawn",
-    "ai_group_state",
-})
-_AI_GROUP_TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
-_AI_GROUP_FIELD_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
-_AI_GROUP_ALLOWED_MAX = 64
-_AI_GROUP_WAYPOINT_NUMBERS_MAX = 96
-
-
-def _ai_group_detail(result: dict[str, Any]) -> str:
-    code = str(result.get("error") or "")
-    report = result.get("ai_group")
-    if not isinstance(report, dict):
-        return ""
-    parts: list[str] = []
-    if code == "bad_args":
-        field = report.get("field")
-        if isinstance(field, str) and _AI_GROUP_FIELD_RE.fullmatch(field):
-            parts.append(f"field={field}")
-        allowed = report.get("allowed")
-        if isinstance(allowed, list):
-            names = [
-                name
-                for name in allowed[:_AI_GROUP_ALLOWED_MAX]
-                if isinstance(name, str) and _AI_GROUP_TOKEN_RE.fullmatch(name)
-            ]
-            if names:
-                parts.append("allowed=" + ",".join(names))
-        args_read = report.get("args_read")
-        if isinstance(args_read, dict):
-            read: list[str] = []
-            faction = args_read.get("faction")
-            if isinstance(faction, str) and _AI_GROUP_TOKEN_RE.fullmatch(faction):
-                read.append(f"faction={faction}")
-            count = args_read.get("count")
-            if isinstance(count, int) and not isinstance(count, bool):
-                read.append(f"count={count}")
-            waypoints = args_read.get("waypoints")
-            if (
-                isinstance(waypoints, list)
-                and len(waypoints) <= _AI_GROUP_WAYPOINT_NUMBERS_MAX
-                and all(_is_finite_number(value) for value in waypoints)
-            ):
-                read.append(
-                    "waypoints=" + ",".join(repr(float(value)) for value in waypoints)
-                )
-            if read:
-                parts.append("args_read=" + " ".join(read))
-    if code == "ai_limit_reached":
-        for key in ("living", "limit"):
-            value = report.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                parts.append(f"{key}={value}")
-    created = report.get("created")
-    if code in {
-        "ai_limit_reached",
-        "bad_args",
-        "not_found",
-        "scene_full",
-        "spawn_failed",
-    } and isinstance(created, bool):
-        parts.append(f"created={'true' if created else 'false'}")
-    return "; ".join(parts)
-
-
 def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
     """Diagnostics the bridge filled BEFORE deciding the error, as message text.
 
@@ -790,8 +709,6 @@ def _bridge_error_detail(result: dict[str, Any], cmd: str | None) -> str:
         # result (loopback._mark_discarded); any verb can carry it.
         expansion_detail = _expansion_unavailable_detail(result)
         return f"detail={expansion_detail}" if expansion_detail is not None else ""
-    if cmd in _AI_GROUP_COMMANDS:
-        return _ai_group_detail(result)
     if cmd == "world_spawn" and str(result.get("error") or "") == "vehicle_eject_failed":
         object_id = result.get("object_id")
         if isinstance(object_id, int) and not isinstance(object_id, bool) and object_id > 0:
