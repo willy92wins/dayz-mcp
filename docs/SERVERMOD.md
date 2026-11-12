@@ -76,7 +76,7 @@ cliente por `peer_for_command` en `tools/dayz_mcp/loopback.py:517-523`) y las
 que en su propio camino de ejecución llegan bajo otro nombre a uno de esos
 comandos:
 
-- Cámara y vista: `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `hud_set`, `player_look_at`, `player_view_set`, `restore_gameplay`
+- Cámara y vista: `camera_get`, `camera_path_play`, `camera_path_release`, `camera_set`, `camera_set_focus`, `dev_free_camera_set`, `hud_set`, `player_look_at`, `player_view_set`, `restore_gameplay`
 - UI y chat: `chat_read`, `gameplay_state`, `ui_click`, `ui_dialog`, `ui_focus`, `ui_pause`, `ui_reload_layout`, `ui_set_text`, `ui_tree`
 - Input, acciones y jugador: `action_cursor`, `action_hold`, `action_use`, `actor_emote`, `anim_timeline`, `input_describe`, `input_trigger`, `key_press`, `player_move`, `player_respawn`, `player_trace`
 - Vehículos y armas: `engine_set`, `vehicle_control`, `vehicle_get_in_client`, `vehicle_release`, `vehicle_telemetry`, `vehicle_trace`, `weapon_aim`, `weapon_fire`, `weapon_raise`, `weapon_sights`

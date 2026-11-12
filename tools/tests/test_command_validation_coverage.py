@@ -206,6 +206,8 @@ def _minimal_args(cmd: str) -> dict:
         return {"path": "p"}
     if cmd == "ui_pause":
         return {}
+    if cmd == "dev_free_camera_set":
+        return {"active": True}
     if cmd == "ui_reload_layout":
         return {"mode": "close"}
     if cmd == "ui_dialog":

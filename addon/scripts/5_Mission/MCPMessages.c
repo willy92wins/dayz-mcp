@@ -315,6 +315,10 @@ class MCPArgs
 	// chat_read: return lines and drops with seq above marker (0 reads the whole ring).
 	// max_lines above is reused.
 	int marker;
+	// dev_free_camera_set (beb3): the free camera state to set, true for on. The
+	// tool always sends it and the daemon refuses a command without it; an
+	// absent key reads false.
+	bool active;
 
 	void MCPArgs()
 	{
@@ -1409,6 +1413,15 @@ class MCPUiPause
 	}
 };
 
+// dev_free_camera_set reply (beb3): FreeDebugCamera.GetInstance().IsActive()
+// before the call and after it, read right after the toggle or on the next
+// tick by the read job; also sent with dev_free_camera_not_switched.
+class MCPDevFreeCamera
+{
+	bool active_before;
+	bool active_after;
+};
+
 class MCPResult
 {
 	int id;
@@ -1624,6 +1637,9 @@ class MCPResult
 	ref MCPChatRead chat_read;
 	// ui_pause read-back, also on pause_not_opened (726c). Unassigned on other commands.
 	ref MCPUiPause ui_pause;
+	// dev_free_camera_set read-back, also on dev_free_camera_not_switched (beb3).
+	// Unassigned on its other refusals and on other commands.
+	ref MCPDevFreeCamera dev_free_camera;
 };
 
 class MCPJob
@@ -1704,6 +1720,8 @@ class MCPJob
 	bool camera_focus;
 	// ui_pause: carries menu_id_before across the job-runner read-back (726c).
 	ref MCPUiPause ui_pause;
+	// dev_free_camera_set: carries active_before across the one-tick read job (beb3).
+	ref MCPDevFreeCamera dev_free_camera;
 };
 
 class MCPSpawnValidation

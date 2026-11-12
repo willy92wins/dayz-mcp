@@ -142,6 +142,9 @@ PRUNABLE_FIELDS = (
     "chat_read",
     # ui_pause fills it with menu_id_before and menu_id_after, also on pause_not_opened (726c).
     "ui_pause",
+    # dev_free_camera_set fills it with active_before and active_after, also on
+    # dev_free_camera_not_switched (beb3).
+    "dev_free_camera",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

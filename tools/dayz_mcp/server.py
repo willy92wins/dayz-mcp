@@ -10344,7 +10344,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "script_camera while camera_set's camera is mounted "
             "(restore_gameplay first) and busy while an exclusive client job "
             "runs, such as camera_set or player_look_at (a ui_dialog, "
-            "weapon_action, input_trigger, player_move or actor_emote job does not count). "
+            "weapon_action, input_trigger, player_move, actor_emote or "
+            "dev_free_camera_set job does not count). "
             "After the settle the view is already set, and no_player answers "
             "when the player is gone by then, script_camera when camera_set's "
             "camera is mounted by then."
@@ -11562,6 +11563,43 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Turn DayZDiag's developer free camera on "
+        "(active=true) or off (active=false) as its numpad divide key does: "
+        "the client calls PluginDeveloper.ToggleFreeCameraBackPos, the method "
+        "DayZDiag binds to KC_DIVIDE, only when the free camera is not already "
+        "in the requested state, and that toggle never teleports the player. "
+        "This is not camera_set's free mode: the bridge does not own this "
+        "camera and does not move it (the real keyboard and mouse move it), so "
+        "turning it on ends a playing camera_path_play aborted on a following "
+        "client tick. "
+        "restore_gameplay turns it off; it stays on when the lease ends. The "
+        "answer is dev_free_camera {active_before, active_after}, read on the "
+        "client right after the toggle or, when that read does not show the "
+        "requested state yet, on the next client tick. Errors: an active that "
+        "is not a bool is refused with bad_args before anything is sent, and "
+        "the daemon refuses it with bad_args too; client_not_in_game (no local "
+        "player); dev_free_camera_unavailable (no PluginDeveloper or no free "
+        "camera, as on a client that is not DayZDiag; the reason is in the "
+        "client log); dev_free_camera_bridge_owned (camera_set's free mode or "
+        "a camera release holds the free camera); busy (an exclusive client "
+        "job, such as a camera_set that is still settling, is running); these "
+        "change nothing. dev_free_camera_not_switched: the next client tick "
+        "still reads the other state. bridge_capability_missing: the client "
+        "bridge bound to the run does not announce dev_free_camera_set, as "
+        "one older than this release does not; nothing is sent."
+    ))
+    async def dev_free_camera_set(
+        active: StrictBool,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(active, bool):
+            raise ToolError(_bad_args("active", active, "be a bool"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "dev_free_camera_set", {"active": active}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
         "Blocks up to timeout_s for the local player's answer; "
         "cancelled and timed_out are valid."
@@ -12069,6 +12107,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
     _patch_optional_focus_bool_bad_args(app, "camera_set")
     _patch_optional_focus_bool_bad_args(app, "camera_set_focus")
+    _patch_strict_bool_bad_args(app, "dev_free_camera_set", "active")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 
@@ -12140,6 +12179,26 @@ def _patch_optional_focus_bool_bad_args(app: FastMCP, tool_name: str) -> None:
                 value = arguments_to_validate.get(field)
                 if isinstance(value, bool) and camera_path_contract.focus_blur(value) is None:
                     raise ToolError(_bad_args(field, value, _OPTIONAL_FOCUS_REQUIREMENT))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+def _patch_strict_bool_bad_args(app: FastMCP, tool_name: str, field: str) -> None:
+    # beb3: keep StrictBool in the published schema and answer a value of
+    # `field` that is not a bool (1, 0, "true", null) with bad_args before
+    # Pydantic validation, the code the daemon's ingress gives it
+    # (loopback._is_strict_bool). A missing field is left to Pydantic.
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        if isinstance(arguments_to_validate, dict) and field in arguments_to_validate:
+            value = arguments_to_validate[field]
+            if not isinstance(value, bool):
+                raise ToolError(_bad_args(field, value, "be a bool"))
         return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
 
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
