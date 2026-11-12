@@ -185,6 +185,21 @@ class AiEmoteToolTest(unittest.TestCase):
         self.assertNotIn("remote_error", str(raised.exception))
         self.assertNotIn("bad_args", str(raised.exception))
 
+    def test_description_lists_the_object_id_errors_with_expansion_details(self) -> None:
+        # PX8 b H2: with object_id the call is ai_emote, a new mutation
+        # behind the close-support gate, and the agent gets
+        # expansion_unavailable with one of the three details (f743f20).
+        # Mutants killed: the object_id-only codes or the details dropped
+        # from the description's error list.
+        description = self.app._tool_manager.get_tool("actor_emote").description
+        self.assertIn(EMOTE, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
+        self.assertIn(
+            "with object_id only, bad_target, npc_dormant, emote_interrupted "
+            "and expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported.",
+            description,
+        )
+
     def test_o8_server_states_keep_times_only_where_reached(self) -> None:
         # Mutant killed: a cancelled/timed_out answer keeping a start time
         # the watch never reached.
@@ -388,6 +403,33 @@ class AiEmoteAdmissionTest(unittest.TestCase):
         emote = doc.index("## Playing an emote on a member (`ai_emote`")
         self.assertLess(reading, doc.index(paragraph))
         self.assertLess(doc.index(paragraph), emote)
+
+    def test_npc_dormant_is_in_the_plan_and_changelog_contract(self) -> None:
+        # PX8 b H1: 9b52470 put the dormant refusal in the dispatch, the
+        # tool description and the guide, not in the plan's 3.5 or the
+        # ai_emote CHANGELOG entry. Mutants killed: either document without
+        # npc_dormant, and step 4b outside its place between the combat
+        # guard (4) and the one write (5).
+        root = addon_root().parent
+        plan = (root / "plans" / "2026-10-24-expansion-ai-adapter.md").read_text(
+            encoding="utf-8"
+        )
+        start = plan.index("### 3.5 `ai_emote`")
+        section = plan[start : plan.index("### 3.6 ", start)]
+        step4 = section.index("\n4. ")
+        step4b = section.index("\n4b. ")
+        step5 = section.index("\n5. ")
+        self.assertLess(step4, step4b)
+        self.assertLess(step4b, step5)
+        self.assertIn("`npc_dormant`", section[step4b:step5])
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        entries = [
+            line
+            for line in changelog.splitlines()
+            if line.startswith("- Expansion AI adapter `ai_emote`")
+        ]
+        self.assertEqual(len(entries), 1)
+        self.assertIn("`npc_dormant`", entries[0])
 
     def test_mask_bit4_is_ai_emote_append_only(self) -> None:
         # Mutant killed: ai_emote reusing an earlier bit (an old adapter

@@ -10658,9 +10658,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "there. Errors: bad_args "
             "(it lists the allowed names), client_not_in_game, no_player, "
             "no_emote_manager, emote_rejected, no_emote_playing, "
-            "emote_timed_out, npc_dormant (with object_id only), and "
-            "bridge_capability_missing from a PBO "
-            "without the verb, which is never handed it."
+            "emote_timed_out, bridge_capability_missing from a PBO "
+            "without the verb, which is never handed it, and, with "
+            "object_id only, bad_target, npc_dormant, emote_interrupted and "
+            "expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
         )
     )
     async def actor_emote(
