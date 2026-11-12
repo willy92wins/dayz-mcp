@@ -223,6 +223,7 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
   - `scene_id`, con la regla de #262.
 - La facción, la formación y el loadout los valida el servidor, que conoce los de verdad. Una lista fija en Python rechazaría una formación nueva de Expansion.
 - Va al peer servidor con lease y genera el `spawn_token`.
+- Un rechazo del bridge llega al agente con su informe en el mensaje del error (`bridge_errors._ai_group_spawn_detail`, ronda B): `field`, `allowed` y `args_read` con `bad_args`, `living` y `limit` con `ai_limit_reached`, y `created`. Solo cruzan nombres de una lista fija y valores comprobados, con topes.
 
 **`ai_group_order(group_id, behaviour=None, waypoints=None, formation=None, speed=None, timeout_s)`**
 - Con lease. Sin ningún campo, da `bad_args`. `speed` es `walk`, `jog` o `sprint`, y viaja como 1, 2 o 3 con `speed_set` (§3.3).

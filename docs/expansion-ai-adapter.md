@@ -24,6 +24,12 @@ server. It ships in `addon_expansion_ai/` and packs as
   `eAISurvivor` members under a tool-generated `spawn_token`, applies the
   faction loadout, formation and one of HOLD / ONCE / LOOP / ROAM, and
   answers with what the server reads back (faction, formation, members).
+  A refusal's message carries what the server filled before refusing:
+  `field`, `allowed` (for an unknown faction or formation, the names the
+  server knows) and `args_read` with `bad_args`, `living` and `limit`
+  with `ai_limit_reached`, and `created`. Only names from a fixed list
+  and checked names and numbers cross, so nothing else the caller sent
+  is echoed.
 - `ai_group_order` (tool, lease required) orders one group registered by
   `ai_group_spawn`, on the server. At least one of `behaviour`,
   `waypoints`, `formation` or `speed` must be given (none is `bad_args`
