@@ -400,13 +400,18 @@ class AIGroupSpawnBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         # Mutant killed: any int accepted as created (2 would cross as
         # created=true). The allowlist is closed: only bool or the
         # exact ints 0/1 cross; float, string and None stay omitted.
-        for bad in (2, -1, "0", 0.0, None):
+        for bad in (2, -1, "0", "false", 0.0, None):
             with self.subTest(created=bad):
                 result = _adapter_spawn_refusal("faction", FACTIONS)
                 result["ai_group"]["created"] = bad
                 text = await self._refusal_text(result)
                 self.assertIn("field=faction", text)
                 self.assertNotIn("created=", text)
+
+    async def test_neg_created_zero_outside_created_codes_stays_bare(self) -> None:
+        timeout = _adapter_spawn_refusal("", [], error="timeout")
+        timeout["ai_group"]["created"] = 0
+        self.assertEqual(str(server._bridge_error(timeout, SPAWN)), "timeout")
 
     async def test_neg_unlisted_field_and_values_do_not_cross(self) -> None:
         result = _adapter_spawn_refusal("secret_field", ["West", "C:\\host\\secret"])
