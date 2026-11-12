@@ -1037,6 +1037,17 @@ class AiGroupOrderBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("allowed=", text)
         self.assertNotIn("created", text)
 
+    async def test_neg_order_with_no_field_to_apply_stays_bare(self) -> None:
+        # PX8 d: an order that reaches the bridge with no field to apply
+        # (only group_id, or only the empty array of an absent key) is
+        # refused before any report is filled, so nothing but the code
+        # crosses (MCPExpansionAI.c DispatchAIGroupOrder, the
+        # no-field check).
+        text = await self._refusal_text({"ok": 0, "error": "bad_args"})
+        self.assertTrue(text.rstrip().endswith("bad_args"), text)
+        self.assertNotIn("field=", text)
+        self.assertNotIn("allowed=", text)
+
     async def test_neg_unlisted_field_and_values_do_not_cross(self) -> None:
         result = _adapter_order_refusal("secret_field", ["Vee", "C:\\host\\secret"])
         text = await self._refusal_text(result)
@@ -1055,7 +1066,10 @@ class AiGroupOrderEmptyWaypointsDocsTest(unittest.TestCase):
     """PX8 c: the texts say who refuses an empty waypoints list, and what
     an order's bad_args carries. Mutants killed: the 3ca5 entry or the
     guide promising the bridge refuses an empty list again, or dropping
-    the empty-list rule or the field/allowed detail."""
+    the empty-list rule or the field/allowed detail. PX8 d: they also
+    say an order with no field to apply is a bare bad_args (the bridge
+    posts no ai_group for it), so a text promising field on every
+    bad_args fails."""
 
     def test_changelog_and_guide_say_the_bridge_reads_an_empty_list_as_none(self) -> None:
         root = _TOOLS_DIR.parent
@@ -1073,8 +1087,14 @@ class AiGroupOrderEmptyWaypointsDocsTest(unittest.TestCase):
             self.assertNotRegex(flat, r"empty list is refused[^.;)]*bridge")
             self.assertIn("refuse an explicit empty", flat)
             self.assertIn("reads an empty one as no waypoints", flat)
+            self.assertIn("round B", flat)
             self.assertIn("`field`", flat)
             self.assertIn("`allowed`", flat)
+            self.assertIn("with no field to apply is a bare `bad_args`", flat)
+        plan = (root / "plans" / "2026-10-24-expansion-ai-adapter.md").read_text(encoding="utf-8")
+        start = plan.index("**`ai_group_order(group_id")
+        block = " ".join(plan[start : plan.index("**`ai_group_state(", start)].split())
+        self.assertIn("sin ningún campo que aplicar da `bad_args` sin más", block)
 
 
 class ExpansionOrderMutantTest(unittest.TestCase):
