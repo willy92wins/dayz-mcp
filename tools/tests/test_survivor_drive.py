@@ -814,8 +814,10 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
             self,
             disable,
             "MCPPlayerMoveControl.Disable(hic);",
-            "hic.OverrideAimChangeX(HumanInputControllerOverrideType.DISABLED, 0.0);",
+            "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ENABLED, 0.0);",
         )
+        self.assertEqual(disable.count("OverrideAimChangeX("), 1)
+        self.assertNotIn("OverrideAimChangeX(HumanInputControllerOverrideType.DISABLED", disable)
 
     def test_release_disables_only_a_driven_id(self) -> None:
         release = _method_body(self.drive, "static void Release(MCPBridge bridge, int objectId)")
@@ -1469,12 +1471,13 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(self.model.registry(), [])
         self.assertIs(self.model.call("IsDriven", 7), False)
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(
             survivor.controller.calls[-3:],
             [
                 ("speed", _OVERRIDE.DISABLED, 0.0),
                 ("angle", _OVERRIDE.DISABLED, 0.0),
-                ("aim_x", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
             ],
         )
         calls = len(survivor.controller.calls)
@@ -1503,12 +1506,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.model.call("Tick", self.model.bridge)
         self.assertEqual(self.model.registry(), [(8, 0.0, 2.0)])
         self.assertIsNone(dying.controller.driving())
+        self.assertEqual(dying.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(deleted.controller.driving(), (2.0, 0.0))
         # object_delete calls OnObjectGone while the id still resolves, then
         # deletes the object (DispatchObjectDelete).
         self.model.call("OnObjectGone", self.model.bridge, 8)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(deleted.controller.driving())
+        self.assertEqual(deleted.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
 
     def test_a_driven_id_that_no_longer_resolves_leaves_the_registry(self) -> None:
         self.model.spawn(9)
@@ -1541,6 +1546,8 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIs(self.model.call("IsDriven", 7), False)
         self.assertIsNone(first.controller.driving())
         self.assertIsNone(second.controller.driving())
+        self.assertEqual(first.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+        self.assertEqual(second.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         calls = (len(first.controller.calls), len(second.controller.calls))
         self.model.call("Tick", self.model.bridge)
         self.assertEqual((len(first.controller.calls), len(second.controller.calls)), calls)
@@ -1565,12 +1572,13 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 43), True)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(
             survivor.controller.calls[writes:],
             [
                 ("speed", _OVERRIDE.DISABLED, 0.0),
                 ("angle", _OVERRIDE.DISABLED, 0.0),
-                ("aim_x", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
             ],
         )
         writes = self.model.writes()
@@ -1895,7 +1903,7 @@ class SurvivorDriveModelTest(unittest.TestCase):
         disabled = [
             ("speed", _OVERRIDE.DISABLED, 0.0),
             ("angle", _OVERRIDE.DISABLED, 0.0),
-            ("aim_x", _OVERRIDE.DISABLED, 0.0),
+            ("aim_x", _OVERRIDE.ENABLED, 0.0),
         ]
         released = self.model.spawn(7)
         dying = self.model.spawn(8)
@@ -1920,6 +1928,39 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIsNone(shut.controller.driving())
         self.assertEqual(shut.controller.calls[before:], disabled)
         self.assertEqual(idle.controller.calls, [])
+
+    def test_a_new_drive_after_release_pulses_aim_again_and_release_holds_zero_again(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        pulse_90 = look.ServerPulseX(90.0)
+        survivor = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+        before = len(survivor.controller.calls)
+        self.model.drive(7, 90.0, 1.0)
+        self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
+        self.assertEqual(
+            survivor.controller.calls[before:],
+            [
+                ("speed", _OVERRIDE.ENABLED, 1.0),
+                ("angle", _OVERRIDE.ENABLED, 90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_90),
+            ],
+        )
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ONE_FRAME, pulse_90))
+        before = len(survivor.controller.calls)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(
+            survivor.controller.calls[before:],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
+        )
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
 
 
 class SurvivorDriveBridgeHookTest(unittest.TestCase):
@@ -1955,14 +1996,14 @@ class SurvivorDriveBridgeHookTest(unittest.TestCase):
         self.assertNotIn(7, self.model.objects)
         self.assertEqual(self.model.command_ids(), {9: 42})
         self.assertIs(self.model.call("IsDriven", 7), False)
-        # The deleted survivor's own controller: DISABLED reached it before
+        # The deleted survivor's own controller: Disable reached it before
         # the registry forgot the id.
         self.assertEqual(
             self.first.controller.calls[calls:],
             [
                 ("speed", _OVERRIDE.DISABLED, 0.0),
                 ("angle", _OVERRIDE.DISABLED, 0.0),
-                ("aim_x", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
             ],
         )
         self.assertEqual(self.second.controller.driving(), (3.0, 0.0))
