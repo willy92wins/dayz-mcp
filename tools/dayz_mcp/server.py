@@ -8316,6 +8316,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "bot_unavailable and nothing is initialized. The answer is bot: "
             "object_id, action, started, ttl_s. started means the bot FSM "
             "accepted the transition, not that the action's effect happened. "
+            "Measured on 2026-11-11 on a SurvivorM_Mirek on the server: all "
+            "ten actions start and bot_stop stops them, but "
+            "PLAYER_BOT_TEST_ATTACH_AND_DROP_CYCLE and "
+            "PLAYER_BOT_TEST_SWAP_INTERNAL fill the server script log with "
+            "vanilla Virtual Machine Exceptions, about 30 a second while they "
+            "run (a NULL player in vanilla's "
+            "DayZPlayerInventory.HandleTakeToDst and HandleForceSwapEntities), "
+            "PLAYER_BOT_TEST_ITEM_MOVE_BACK_AND_FORTH and "
+            "PLAYER_BOT_TEST_SWAP_G2H raise one each, and "
+            "PLAYER_BOT_RANDOMIZE_MOVEMENT only moves forward (inbox 6b52). "
             "Errors: bad_args, bot_unavailable, drive_busy, object_not_found, "
             "not_dummy_player, player_dead, bot_busy, bot_action_rejected."
         )
@@ -8510,8 +8520,16 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "Impose heading/speed on an infected by classname near pos, through its "
             "AI input controller. heading is DEGREES (0=north), speed 0-5 "
             "(0 idle, 1 walk, 2 run, 3 sprint). Pass mode='release' to hand control "
-            "back to the vanilla AI. The override may need reapplying each tick; if "
-            "the infected does not move, that is the finding."
+            "back to the vanilla AI. Measured on 2026-11-11 (DayZDiag 1.30.164289, "
+            "ZmbM_CitizenASkinny_Blue, player 100 m away): one call moves the "
+            "infected for 1.6 to 8.5 s, then it stops on its own, so re-send the "
+            "drive every second, with pos set to the pos_real of the "
+            "last reply (the infected is looked up by type within 25 m "
+            "of pos), to keep it moving (inbox 7c86). Re-sent every "
+            "second, speed 0.5, 1, 1.5, 2, 2.5, 3 and 4 gave 0.24, 0.45, 0.52, "
+            "2.0, 4.9, 5.5 and 5.9 m/s, within 0.5 degrees of heading: 1 and 1.5 "
+            "are the same walk, 2 alternates walking and running, and 2.5 and up "
+            "run. With the player 1 m away it barely moves (0.56 m/s)."
         )
     )
     async def infected_drive(
@@ -8572,6 +8590,14 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g} to "
             f"{SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG:g}; speed is walk, jog or "
             "sprint (OverrideMovementSpeed 1, 2, 3, as player_move; not m/s). "
+            "Measured on 2026-11-11 (DayZDiag 1.30.164289, SurvivorM_Mirek): "
+            "it moves on heading exactly, but the body keeps the heading it "
+            "spawned with (telemetry_read orientation stays [0, 0, 0]), so a "
+            "drive off that axis walks sideways or backwards: forward 1.53 m/s "
+            "walking and 6.75 sprinting, sideways 4.08 jogging, backwards 1.26 "
+            "walking and 2.98 sprinting, since it cannot sprint backwards "
+            "(inbox 851c). Fifty driven at once took the server from 2433 to "
+            "1899 average fps. "
             "A drive needs both; a new drive on a driven survivor replaces its "
             "heading and speed. mode='release', with neither heading nor speed, "
             "sets the overrides DISABLED and ends the drive; on a survivor that "
@@ -9809,15 +9835,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "ends, the whole query inside one server frame, so a long path "
             "costs that frame. The answer is points (FindPath's own waypoints, "
             "both ends included, each [x, y, z]), length_m (the sum of their 3D "
-            "segment lengths), from_snapped and to_snapped. The path filter "
-            "takes the walking flags (ground, doors, inside buildings) and "
-            "leaves out the disabled and swimming ones; its flag values are "
-            "not measured in game yet. A terrain without a navmesh (a custom "
-            "map that ships none) answers no_navmesh, or no_navmesh_at_from / "
-            "no_navmesh_at_to, as does an end with no navmesh the filter "
-            "admits within snap_radius (expected of open sea farther than "
-            "snap_radius from the shore; not measured in game yet). Errors "
-            "carry only the error: "
+            "segment lengths), from_snapped and to_snapped. The path filter is "
+            "meant to take the walking flags (ground, doors, inside buildings) "
+            "and leave out the disabled and swimming ones, but measured on "
+            "2026-11-11 (DayZDiag 1.30.164289) its masks are wrong: the "
+            "PGPolyFlags members are already bit values at run time (WALK=1, "
+            "DISABLED=2, DOOR=4, INSIDE=8, SWIM=16, SWIM_SEA=32) and the "
+            "bridge shifts them again, so the filter includes 137 (WALK, "
+            "INSIDE and bit 128) and excludes 32770 (DISABLED and bit 32768): "
+            "doors are not admitted, and water stays out only because the "
+            "include mask lacks it. FindPath can also return a path that stops "
+            "short of to_snapped and the tool still answers ok (from "
+            "Chernogorsk to Skalisty Island the last point was 6845 m short), "
+            "so compare the last point with to_snapped; and each call leaks "
+            "one PGFilter until the mission ends (inbox d5d6). A terrain "
+            "without a navmesh (a custom map that ships none) answers "
+            "no_navmesh, or no_navmesh_at_from / no_navmesh_at_to, as does an "
+            "end with no navmesh the filter admits within snap_radius (open "
+            "sea and the middle of a pond did on 2026-11-09). snap_radius "
+            "bounds only the horizontal move: with an all-flags filter, a sea "
+            "point snapped 58 m down to the seabed. Errors carry only the "
+            "error: "
             "bad_args, no_navmesh, no_navmesh_at_from, no_navmesh_at_to, "
             "no_path, and bridge_capability_missing or arg_contract_mismatch "
             "from a PBO built before this verb."
@@ -9989,14 +10027,27 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "focus_distance (metres, above 0, also as the 32-bit float the bridge "
         "reads) and focus_blur (0, or above 0 also as that float), each at most "
         "1e9, go together or not at all; one without the other is bad_args. "
-        "Given, the applied camera also gets Camera.SetFocus(focus_distance, "
-        "focus_blur), its depth of field, and a successful apply echoes them as "
-        "top-level focus_applied {distance, blur}; omitted, the focus is left "
-        "as it is and focus_applied is null. focus_applied is an echo of the "
-        "values sent, not a read-back: Camera has no focus getter. Whether the "
-        "blur shows may depend on the client's depth-of-field video option, "
-        "which is not measured. The free camera is a singleton and keeps the "
-        "last focus set on it. A call with focus is refused as "
+        "Optional focus_length (default 450), focus_length_near (default 100) "
+        "and focus_depth_offset (default 10), from vanilla's Close up "
+        "preset, take the same 0-or-above bound as focus_blur and require "
+        "focus_distance and focus_blur (otherwise bad_args). "
+        "Measured in game: focus_length sets how much what lies beyond "
+        "focus_distance blurs and focus_length_near how much what lies nearer "
+        "blurs (2000 also blurs a subject at focus_distance); "
+        "focus_depth_offset 0 draws no blur. "
+        "Given, the bridge applies vanilla's global depth of field through "
+        "CGame.OverrideDOF(true, focus_distance, focus_length, "
+        "focus_length_near, focus_blur, focus_depth_offset) after activating "
+        "the camera, and a successful apply echoes all five as top-level "
+        "focus_applied {distance, blur, length, length_near, depth_offset}; "
+        "omitted, focus_applied is null. Any DOF the bridge set is turned off "
+        "on camera release (including restore_gameplay, camera_path_release, "
+        "a path's natural end and shutdown), on every camera_set (before a "
+        "new focus, if any, is applied; a failed apply leaves it off), and on "
+        "camera_path_play. focus_applied is an echo of the values sent, not a "
+        "read-back: there is no DOF getter. Whether the blur shows may depend "
+        "on the client's post-processing video option, which is not measured. "
+        "A call with focus is refused as "
         "bridge_capability_missing, with nothing sent, while the client bridge "
         "bound to the run does not announce camera_set_focus, as one older than "
         "this release does not; with no client bound, the loopback's binding "
@@ -10021,6 +10072,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
         focus_distance: StrictFloat | None = None,
         focus_blur: StrictFloat | None = None,
+        focus_length: StrictFloat | None = None,
+        focus_length_near: StrictFloat | None = None,
+        focus_depth_offset: StrictFloat | None = None,
     ) -> dict[str, Any]:
         # The wire value is `lookat`, but the vector argument sitting
         # right beside it is `look_at`, so a caller naturally spells the mode
@@ -10069,7 +10123,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "(0 keeps the default of three ticks; each tick is 0.05 s)"
             )
         args["settle_ticks"] = settle_ticks
-        # 702f: the two Camera.SetFocus arguments travel together, on the
+        # 702f: the five CGame.OverrideDOF values travel together, on the
         # camera_set_focus command, so a bridge that does not know them answers
         # for the command instead of dropping them; camera_set never carries them.
         command = "camera_set"
@@ -10077,6 +10131,15 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         if (focus_distance is None) != (focus_blur is None):
             raise ToolError(
                 "bad_args: focus_distance and focus_blur go together; give both or neither"
+            )
+        if focus_distance is None and (
+            focus_length is not None
+            or focus_length_near is not None
+            or focus_depth_offset is not None
+        ):
+            raise ToolError(
+                "bad_args: focus_length, focus_length_near and focus_depth_offset "
+                "require focus_distance and focus_blur"
             )
         if focus_distance is not None and focus_blur is not None:
             # The ingress makes the same check (camera_path.py): a finite
@@ -10100,10 +10163,49 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         "be 0, or above 0 also as a 32-bit float, and at most 1e9",
                     )
                 )
+            raw_length = 450.0 if focus_length is None else focus_length
+            length = camera_path_contract.focus_blur(raw_length)
+            if length is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_length",
+                        focus_length,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
+            raw_length_near = 100.0 if focus_length_near is None else focus_length_near
+            length_near = camera_path_contract.focus_blur(raw_length_near)
+            if length_near is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_length_near",
+                        focus_length_near,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
+            raw_depth_offset = 10.0 if focus_depth_offset is None else focus_depth_offset
+            depth_offset = camera_path_contract.focus_blur(raw_depth_offset)
+            if depth_offset is None:
+                raise ToolError(
+                    _bad_args(
+                        "focus_depth_offset",
+                        focus_depth_offset,
+                        "be 0, or above 0 also as a 32-bit float, and at most 1e9",
+                    )
+                )
             args["focus_distance"] = distance
             args["focus_blur"] = blur
+            args["focus_length"] = length
+            args["focus_length_near"] = length_near
+            args["focus_depth_offset"] = depth_offset
             command = "camera_set_focus"
-            focus_applied = {"distance": distance, "blur": blur}
+            focus_applied = {
+                "distance": distance,
+                "blur": blur,
+                "length": length,
+                "length_near": length_near,
+                "depth_offset": depth_offset,
+            }
         async with runtime.tool_lock:
             result: dict[str, Any] | None = None
             failed = False
@@ -10154,19 +10256,28 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         camera_observation = result.get("camera")
         if result.get("ok") and isinstance(camera_observation, dict) and camera_observation.get("ok"):
             result["fov_applied"] = fov_value if fov_value > 0.0 else None
-            # 702f: the same rule; omitted focus sent no SetFocus, an explicit null.
+            # 702f: the same rule; omitted focus sent no OverrideDOF, an explicit null.
             result["focus_applied"] = focus_applied
         return result
 
     @app.tool(description=(
-        f"{LEASE_TOOL_LINE} Set the client camera and its depth of field. "
-        "Same modes, pose, FOV, settle and result as camera_set, with required "
-        "focus_distance and focus_blur. Distance is metres above 0; blur is "
-        "non-negative; both must remain valid as 32-bit floats and be at most "
-        "1e9. Uses camera_set_focus on the bridge. focus_applied echoes the "
-        "values sent to Camera.SetFocus, not a native readback. Visibility "
-        "of blur depends on the client's video options. Use restore_gameplay "
-        "to release the camera."
+        f"{LEASE_TOOL_LINE} Set the client camera and vanilla's depth of field "
+        "(CGame.OverrideDOF). Same modes, pose, FOV, settle and result as "
+        "camera_set, with required focus_distance and focus_blur and optional "
+        "focus_length (default 450), focus_length_near (default 100) and "
+        "focus_depth_offset (default 10), from vanilla's Close up preset. "
+        "Measured in game: focus_length sets how much what lies beyond "
+        "focus_distance blurs and focus_length_near how much what lies nearer "
+        "blurs (2000 also blurs a subject at focus_distance); "
+        "focus_depth_offset 0 draws no blur. Distance is metres above 0; blur and "
+        "the three optional values are 0 or above; all five must stay valid as "
+        "32-bit floats and be at most 1e9. Uses camera_set_focus on the "
+        "bridge. Any DOF the bridge set is turned off on camera release, on "
+        "every camera_set and on camera_path_play. focus_applied {distance, "
+        "blur, length, length_near, depth_offset} is an echo of the values "
+        "sent, not a read-back. Visibility of blur may depend on the client's "
+        "post-processing video option, which is not measured. Use "
+        "restore_gameplay to release the camera."
     ))
     async def camera_set_focus(
         cam_mode: StrictStr,
@@ -10179,12 +10290,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         fov: StrictFloat = 0.0,
         settle_ticks: StrictInt = 3,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+        focus_length: StrictFloat | None = None,
+        focus_length_near: StrictFloat | None = None,
+        focus_depth_offset: StrictFloat | None = None,
     ) -> dict[str, Any]:
         return await camera_set(
             cam_mode=cam_mode, cam_pos=cam_pos, cam_orientation=cam_orientation,
             look_at=look_at, cam_matrix=cam_matrix, fov=fov,
             settle_ticks=settle_ticks, timeout_s=timeout_s,
             focus_distance=focus_distance, focus_blur=focus_blur,
+            focus_length=focus_length, focus_length_near=focus_length_near,
+            focus_depth_offset=focus_depth_offset,
         )
 
     @app.tool(description=(
@@ -11413,7 +11529,20 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         "tool returned earlier comes back as a lower returned marker, the client "
         "mission changed and reading should start again from 0. A requested "
         "marker above the newest seq also returns the newest seq, so a lower "
-        "returned marker alone proves nothing."
+        "returned marker alone proves nothing. "
+        "Each line also reports current widget state from its ChatLine text "
+        "widget at read time: visible_hierarchy (IsVisibleHierarchy), alpha "
+        "(product of GetAlpha of the text widget and its ChatLine root, "
+        "which vanilla fades, and not widgets above it), "
+        "screen_x/screen_y/screen_w/screen_h (screen-space rect as in ui_tree), "
+        "replaced (true when that ChatLine already shows a newer seq or is gone, "
+        "zeroing alpha and screen_* with visible_hierarchy false), and "
+        "shown_at_ms (first client frame ms within 2000 ms of t_client_ms where "
+        "visible_hierarchy was true and alpha >= 0.9, or -1 if not seen on "
+        "screen within 2 s or replaced first); dropped entries do not carry "
+        "these fields. "
+        "chat_read.hud_shown reports IngameHud panel visibility "
+        "(GetHudPanelWidget().IsVisible(), false without a HUD)."
     ))
     async def chat_read(
         # Not `StrictInt | None`: FastMCP would publish anyOf[integer,null] and
@@ -12105,6 +12234,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         _patch_closed_tool_schema(app, _closed_tool)
     _patch_public_argument_alias(app, "scene_raycast", "from_pos", "from")
     _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
+    _patch_optional_focus_bool_bad_args(app, "camera_set")
+    _patch_optional_focus_bool_bad_args(app, "camera_set_focus")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 
@@ -12150,6 +12281,35 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     app.list_tools = list_tools_progressive  # type: ignore[method-assign]
     app._mcp_server.list_tools()(list_tools_progressive)
     return app, runtime
+
+
+_OPTIONAL_FOCUS_FIELDS: tuple[str, ...] = (
+    "focus_length",
+    "focus_length_near",
+    "focus_depth_offset",
+)
+_OPTIONAL_FOCUS_REQUIREMENT = (
+    "be 0, or above 0 also as a 32-bit float, and at most 1e9"
+)
+
+
+def _patch_optional_focus_bool_bad_args(app: FastMCP, tool_name: str) -> None:
+    # 702f: keep StrictFloat | None in the schema while normalizing bools on
+    # the three optional DOF values to bad_args before Pydantic validation.
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        if isinstance(arguments_to_validate, dict):
+            for field in _OPTIONAL_FOCUS_FIELDS:
+                value = arguments_to_validate.get(field)
+                if isinstance(value, bool) and camera_path_contract.focus_blur(value) is None:
+                    raise ToolError(_bad_args(field, value, _OPTIONAL_FOCUS_REQUIREMENT))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
 
 
 def parse_args(argv: list[str] | None = None) -> ServerConfig:

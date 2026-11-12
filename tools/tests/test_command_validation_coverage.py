@@ -82,6 +82,9 @@ def _minimal_args(cmd: str) -> dict:
             "settle_ticks": 0,
             "focus_distance": 2.0,
             "focus_blur": 0.0,
+            "focus_length": 750.0,
+            "focus_length_near": 500.0,
+            "focus_depth_offset": 10.0,
         }
     if cmd == "camera_path_play":
         return {"mode": "state", "path_id": ""}
