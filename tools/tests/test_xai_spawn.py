@@ -371,6 +371,43 @@ class AIGroupSpawnBadArgsDetailToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("limit=24", text)
         self.assertIn("created=false", text)
 
+    async def test_pos_enforce_created_zero_and_one_carry(self) -> None:
+        # Mutant killed: created accepted only as a Python bool (the
+        # pre-fix isinstance(created, bool)). Enforce serializes its
+        # bool created (MCPExpansionAI.c:37, AISpawnRefuse :690) through
+        # JsonSerializer (MCPBridge.c:8983-8985) as the int 0 or 1, so
+        # the in-game bad_args arrived without created= at all.
+        # This is the end-to-end case: app.call_tool with the payload
+        # exactly as Enforce sends it (created: 0).
+        result = _adapter_spawn_refusal("faction", FACTIONS)
+        result["ai_group"]["created"] = 0
+        text = await self._refusal_text(result)
+        self.assertIn("bad_args", text)
+        self.assertIn("field=faction", text)
+        self.assertIn("created=false", text)
+        self.assertNotIn("created=0", text)
+
+        result = _adapter_spawn_refusal("", [], error="ai_limit_reached")
+        result["ai_group"]["created"] = 1
+        text = await self._refusal_text(result)
+        self.assertIn("ai_limit_reached", text)
+        self.assertIn("living=20", text)
+        self.assertIn("limit=24", text)
+        self.assertIn("created=true", text)
+        self.assertNotIn("created=1", text)
+
+    async def test_neg_enforce_created_outside_zero_one_does_not_cross(self) -> None:
+        # Mutant killed: any int accepted as created (2 would cross as
+        # created=true). The allowlist is closed: only bool or the
+        # exact ints 0/1 cross; float, string and None stay omitted.
+        for bad in (2, -1, "0", 0.0, None):
+            with self.subTest(created=bad):
+                result = _adapter_spawn_refusal("faction", FACTIONS)
+                result["ai_group"]["created"] = bad
+                text = await self._refusal_text(result)
+                self.assertIn("field=faction", text)
+                self.assertNotIn("created=", text)
+
     async def test_neg_unlisted_field_and_values_do_not_cross(self) -> None:
         result = _adapter_spawn_refusal("secret_field", ["West", "C:\\host\\secret"])
         result["ai_group"]["args_read"]["faction"] = "Nope; rm -rf"
