@@ -465,6 +465,51 @@ def _same_scheduled_fn(left, right) -> bool:
     return left == right
 
 
+class AdapterBridgeErrorMatrixTest(unittest.TestCase):
+    """PX8 c P3: which adapter verbs carry a detail in their error message.
+
+    The same ok=false result reaches _bridge_error under each verb: the
+    spawn keeps field, allowed, args_read and created, the order only
+    field and allowed, the emote observed=emote_pending=, and
+    ai_group_state stays bare. The comment above _AI_GROUP_SPAWN_FIELDS
+    says the same. Mutants killed: the comment calling the emote path
+    bare again, and a verb's branch lost or given to ai_group_state.
+    """
+
+    RESULT = {
+        "ok": 0,
+        "error": "bad_args",
+        "emote_pending": False,
+        "ai_group": {
+            "created": False,
+            "field": "formation",
+            "allowed": ["Vee", "Wall"],
+            "args_read": {"faction": "West", "count": 2, "waypoints": []},
+        },
+    }
+
+    def test_each_adapter_verb_carries_its_own_detail(self) -> None:
+        spawn = str(_bridge_error(dict(self.RESULT), "ai_group_spawn"))
+        for part in ("field=formation", "allowed=Vee,Wall", "args_read=", "created=false"):
+            self.assertIn(part, spawn)
+        order = str(_bridge_error(dict(self.RESULT), "ai_group_order"))
+        self.assertEqual(order, "bad_args; field=formation; allowed=Vee,Wall")
+        state = str(_bridge_error(dict(self.RESULT), "ai_group_state"))
+        self.assertEqual(state, "bad_args")
+        rejected = dict(self.RESULT, error="emote_rejected")
+        emote = str(_bridge_error(rejected, "ai_emote"))
+        self.assertEqual(emote, "emote_rejected; observed=emote_pending=false")
+
+    def test_the_comment_names_the_verbs_that_carry_a_detail(self) -> None:
+        source = (_TOOLS_DIR / "dayz_mcp" / "bridge_errors.py").read_text(encoding="utf-8")
+        end = source.index("_AI_GROUP_SPAWN_FIELDS = frozenset(")
+        start = source.rindex("\n\n", 0, end)
+        block = " ".join(line.lstrip("# ") for line in source[start:end].splitlines())
+        self.assertIn("ai_emote its emote_pending one", block)
+        self.assertIn("ai_group_state publishes a different shape and stays bare", block)
+        self.assertNotIn("emote path", block)
+
+
 class _FakeCallQueue:
     """ScriptCallQueue double (2_gamelib/tools.c:52-74): CallLater by time, Remove by fn and instance."""
 

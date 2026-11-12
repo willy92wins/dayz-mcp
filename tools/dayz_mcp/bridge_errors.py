@@ -658,11 +658,12 @@ def _hologram_colliding_detail(result: dict[str, Any]) -> str:
 
 # ai_group_spawn refusals fill the ai_group report before refusing
 # (MCPExpansionAI.c AISpawnRefuse :688-695, args_read :727 and :735-745).
-# Only this verb crosses here; ai_group_state and the emote path
-# publish different shapes and stay bare (ai_group_order has its own
-# field/allowed branch below). The field is
-# an allowlist, not an echo: the adapter only ever writes the names in
-# _AI_GROUP_SPAWN_FIELDS for a spawn refusal (DispatchAIGroupSpawn).
+# Only this verb crosses here; ai_group_order has its own field/allowed
+# branch below and ai_emote its emote_pending one (_ai_emote_detail),
+# while ai_group_state publishes a different shape and stays bare. The
+# field is an allowlist, not an echo: the adapter only ever writes the
+# names in _AI_GROUP_SPAWN_FIELDS for a spawn refusal
+# (DispatchAIGroupSpawn).
 _AI_GROUP_SPAWN_FIELDS = frozenset(
     {
         "behaviour",
