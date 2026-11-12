@@ -864,7 +864,9 @@ class ServerModClientToolsDocsTest(unittest.TestCase):
                 "fails whole with vehicle_seat_unverified without client bridge"
             ),
             "session_release": (
-                "explicit release runs cleanup_owner, which when vehicle_active "
+                "explicit release runs cleanup_owner: with a lease-end round "
+                "the client close needs the client census (close_support_unknown "
+                "leaves its row owed); without one, when vehicle_active it "
                 "enqueues internal vehicle_release with no consumer until TTL "
                 "or binding retirement"
             ),
@@ -985,6 +987,59 @@ class ServerModClientToolsDocsTest(unittest.TestCase):
             f"{sorted(listed - expected)} which do not send a client bridge "
             f"command",
         )
+
+
+
+# PX9 P2 (#343): since bridge v13 a lease-end round's aggregated close replaces
+# the per-lease vehicle_release (cleanup_owner, plan section 2.14), so
+# docs/SERVERMOD.md must tie that release to a lease end without a round.
+_SERVERMOD_ROUND_GATE = "if vehicle_active and not has_round:"
+
+
+def _servermod_release_paragraphs(text: str) -> list[str]:
+    """The paragraphs of docs/SERVERMOD.md on the internal vehicle_release."""
+    return [
+        block
+        for block in text.split("\n\n")
+        if "`vehicle_release`" in block and "interno" in block
+    ]
+
+
+def _servermod_release_claim_ok(paragraph: str) -> bool:
+    """The paragraph says what a close round does and what happens without
+    one, instead of an enqueue at every lease end."""
+    flat = " ".join(paragraph.split()).lower()
+    return "con ronda" in flat and "sin ronda" in flat
+
+
+class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
+    """docs/SERVERMOD.md's two paragraphs on the internal vehicle_release (an
+    explicit session_release and an expired lease) must say it is enqueued only
+    without a lease-end round, as cleanup_owner does since v13 (PX9 P2). The
+    behaviour itself is pinned by test_session_e2e
+    test_lease_close_cleanup_is_enqueued_exactly_once (a round: 0 enqueued) and
+    test_session_http_contract
+    test_release_enqueues_internal_vehicle_release_without_wire_owner_metadata
+    (no round: 1 enqueued)."""
+
+    def test_code_gates_the_release_on_no_round(self) -> None:
+        self.assertEqual(
+            _module_text("dayz_mcp/loopback.py").count(_SERVERMOD_ROUND_GATE), 1
+        )
+
+    def test_both_paragraphs_name_both_cases(self) -> None:
+        paragraphs = _servermod_release_paragraphs(_doc(_SERVERMOD_DOC))
+        self.assertEqual(len(paragraphs), 2, [p[:80] for p in paragraphs])
+        for paragraph in paragraphs:
+            self.assertTrue(_servermod_release_claim_ok(paragraph), paragraph[:300])
+
+    def test_neg_an_enqueue_at_every_lease_end_fails(self) -> None:
+        old = (
+            "`BOUND` (`vehicle_active` en ...), `cleanup_owner` encola\n"
+            "`vehicle_release` interno en `_fire_and_forget_ids`"
+        )
+        self.assertEqual(_servermod_release_paragraphs(old), [old])
+        self.assertFalse(_servermod_release_claim_ok(old))
 
 
 if __name__ == "__main__":
