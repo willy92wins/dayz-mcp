@@ -269,9 +269,9 @@ The adapter cannot tell it apart from any other item, so neither
 `ai_group_release` nor the close deletes it or counts it as residue: it
 stays on the ground after a clean close.
 When a bound peer's
-census announces no close, the spawn and the order are refused with
-`expansion_unavailable` / `lease_close_not_supported` before anything is
-created or ordered (a real bridge v12 peer is already stopped earlier by
+census announces no close, the spawn, the order and the emote are refused
+with `expansion_unavailable` / `lease_close_not_supported` before anything
+is created, ordered or played (a real bridge v12 peer is already stopped earlier by
 the version gate). Without the adapter at all, the refusal is
 `expansion_unavailable` / `adapter_not_loaded`; with a stale adapter
 contract hash, `adapter_contract_mismatch`.
