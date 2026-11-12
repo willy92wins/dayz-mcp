@@ -5310,6 +5310,7 @@ def _failed_active_run_result(
                 "cleanup_degraded": False,
                 "server_alive": None,
                 "client_alive": None,
+                "server_boot": None,
                 **extra,
             },
             box,
@@ -6382,6 +6383,12 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "active_run_exists without that reason or a queue_offer. A failed "
             "launch whose run_id the run store does not list (dayz_test_stop "
             "would answer run_not_found) returns run_id null. "
+            "server_boot reports what this launch's server compiled per module "
+            "according to its script log, where missing_files > 0 is a hint "
+            "that a module .c file from a mod's PBOs was not loaded; with "
+            "mode=server the call waits for the Mission line up to "
+            "server_wait_s (capped at 60 s), and server_boot is null when the "
+            "mode starts no server or the logs could not be read. "
             "A DayZ server holding a game port counts as an "
             "occupied box even without a run record, and a launch onto a "
             "port held by a process that is not ours is refused "
@@ -6803,6 +6810,9 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                         isinstance(stop_result, dict)
                         and stop_result.get("status") == "failed"
                     ):
+                        # The stop envelope answers this launch, so it carries
+                        # the server_boot key of every dayz_test_run answer.
+                        stop_result.setdefault("server_boot", None)
                         return annotated(stop_result)
                     evicted_run_id = target
                 execute_error, result = await execute(
