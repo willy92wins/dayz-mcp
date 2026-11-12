@@ -182,6 +182,15 @@ dispatch, in this order, is the only place the verb writes:
    so what it sees afterwards is its own.
 4. Fighting (`m_eAI_IsFightingFSM`), group in combat, or
    `GetThreatToSelf(true) > 0.2`: `emote_rejected`, no write.
+4b. Simulation disabled (`GetIsSimulationDisabled()`, `entity.c:6`) or
+   FSM state `Dormant` (read with the `GetFSM()`/`GetState()`/`GetName()`
+   chain `ai_group_state` uses): `npc_dormant`, no write. `PlayEmote` is
+   unreachable from `Dormant` and its guard never wakes it, so a request
+   written here would stay pending past `wait_s` (in-game round B); the
+   refusal leaves `emote_pending=false` and no pending request. Python
+   publishes it through `bridge_errors._ai_emote_detail` as
+   `npc_dormant; observed=emote_pending=false`, its own code, not
+   `remote_error` or `bad_args`.
 5. One write: `Expansion_SetEmote(id, true, wait_s * 1000)`. With
    `autoCancel=true` Expansion consumes the request in its own attempt
    even if nothing plays, and schedules the cancel of static poses

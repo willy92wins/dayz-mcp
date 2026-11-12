@@ -1995,6 +1995,9 @@ modded class MCPBridge
 		eAIBase member;
 		EmoteManager emotes;
 		MCPJob job;
+		eAIFSM emoteFsm;
+		ExpansionState emoteFsmState;
+		string emoteFsmName;
 		int emoteId = 0;
 		bool isEnd = false;
 
@@ -2128,6 +2131,31 @@ modded class MCPBridge
 			result.ok = false;
 			result.error = "emote_rejected";
 			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		// 4b. Dormant refuses before the write (in-game round B): PlayEmote is
+		// unreachable from Dormant (Master.xml:432-433) and its guard never
+		// wakes it, so a request written here would stay pending past wait_s.
+		// Simulation is read with GetIsSimulationDisabled (entity.c:6) and
+		// the FSM state with the GetFSM/GetState/GetName chain ai_group_state
+		// already uses (FillAIMemberState above); no SetEmote is called.
+		emoteFsmName = "";
+		emoteFsm = member.GetFSM();
+		if (emoteFsm)
+		{
+			emoteFsmState = emoteFsm.GetState();
+			if (emoteFsmState)
+			{
+				emoteFsmName = emoteFsmState.GetName();
+			}
+		}
+
+		if (member.GetIsSimulationDisabled() || emoteFsmName == "Dormant")
+		{
+			result.ok = false;
+			result.error = "npc_dormant";
 			result.emote_pending = AIEmotePending(member, emotes);
 			return 1;
 		}
