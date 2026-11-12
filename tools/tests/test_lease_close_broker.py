@@ -2206,6 +2206,91 @@ class LeaseCloseBrokerStage2aTest(unittest.TestCase):
                 else:
                     self.assertNotIn("lease_end", self.coordinator.status(self.a))
 
+    def test_residue_floor_settled_by_server_at_same_floor(self) -> None:
+        # B' round: a residue client still gives its floor (L=10, W=46);
+        # the server close carries none, so its row is owed both gaps. A
+        # server clean reporting exactly that floor settles its row; one
+        # look id short stays owed for the look gap.
+        client_floor = _floor(10, 20, conn_gen=1, move_id=0, weapon_id=46, look_id=10)
+        cases = (
+            ("at_floor", 10, None),
+            ("one_look_short", 9, ["look_floor_unapplied"]),
+        )
+        for name, server_look, expected_server_reasons in cases:
+            with self.subTest(name):
+                self.coordinator = self._make_coordinator()
+                round_id, ids = self._published_round([])
+                client = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "client",
+                            ids["client"],
+                            "residue",
+                            reasons=["action_input_in_flight"],
+                            floor=dict(client_floor),
+                        )
+                    ]
+                )
+                self.assertEqual(client, ["applied"])
+                self.assertEqual(
+                    self._owed(),
+                    [
+                        ("client", ["action_input_in_flight"]),
+                        ("server", ["weapon_floor_unapplied", "look_floor_unapplied"]),
+                    ],
+                )
+                server = self.coordinator.note_close_outcomes(
+                    [
+                        self._close_outcome(
+                            round_id,
+                            "run-1",
+                            "server",
+                            ids["server"],
+                            "clean",
+                            reported_floors=[
+                                _floor(
+                                    10,
+                                    20,
+                                    conn_gen=1,
+                                    move_id=0,
+                                    weapon_id=46,
+                                    look_id=server_look,
+                                )
+                            ],
+                        )
+                    ]
+                )
+                self.assertEqual(server, ["applied"])
+                if expected_server_reasons is None:
+                    self.assertEqual(
+                        self._owed(), [("client", ["action_input_in_flight"])]
+                    )
+                    late_client = self.coordinator.note_close_outcomes(
+                        [
+                            self._close_outcome(
+                                round_id,
+                                "run-1",
+                                "client",
+                                ids["client"],
+                                "clean",
+                                floor=dict(client_floor),
+                            )
+                        ]
+                    )
+                    self.assertEqual(late_client, ["applied"])
+                    self.assertEqual(self._owed(), [])
+                    self.assertNotIn(
+                        "lease_end", self.coordinator.status(self.a)
+                    )
+                else:
+                    owed = dict(self._owed())
+                    self.assertEqual(
+                        owed.get("client"), ["action_input_in_flight"]
+                    )
+                    self.assertIn("look_floor_unapplied", owed.get("server", []))
+
     def test_k17_weapon_floor_unapplied(self) -> None:
         self._bind()
         lease = self._commit_work(self.a)
