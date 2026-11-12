@@ -181,6 +181,22 @@ class AiGroupStateToolTest(unittest.TestCase):
         self.assertIn(STATE, loopback.SERVER_COMMANDS)
         self.assertNotIn(STATE, loopback.CLIENT_COMMANDS)
 
+    def test_description_names_the_expansion_details_a_read_can_get(self) -> None:
+        # PX8 b H2: the agent gets expansion_unavailable with its detail
+        # (f743f20), so the description names the two a read can get.
+        # lease_close_not_supported gates only the new mutations, never
+        # this read. Mutants killed: the details missing from the
+        # description, and the close-support detail claimed for a read.
+        description = self.app._tool_manager.get_tool(STATE).description
+        self.assertIn(STATE, loopback._EXPANSION_ADMISSION_COMMANDS)
+        self.assertNotIn(STATE, loopback._EXPANSION_NEW_MUTATION_COMMANDS)
+        self.assertIn(
+            "expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch.",
+            description,
+        )
+        self.assertNotIn("lease_close_not_supported", description)
+
 
 class AiGroupStateAuthorizeTest(unittest.TestCase):
     """O4 (authorize + managed-run fence): coordinator authorize vs idle run."""
