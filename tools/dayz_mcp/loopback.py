@@ -140,6 +140,7 @@ SERVER_COMMANDS = {
     "ai_group_spawn",
     "ai_group_order",
     "ai_group_release",
+    "ai_group_state",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -1493,13 +1494,17 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "ai_group_order",
     "ai_group_release",
     "ai_group_spawn",
+    "ai_group_state",
 })
 # Expansion AI adapter verbs (plan 2.2): the specific refusal replaces the
 # generic missing-verb one for these, after the common census and ach guards.
+# ai_group_state is a read: it is admitted by census/ach/verb/xai only and
+# never by the lease-close gate below (it reads residues without a lease).
 _EXPANSION_ADMISSION_COMMANDS = frozenset({
     "ai_group_order",
     "ai_group_release",
     "ai_group_spawn",
+    "ai_group_state",
 })
 # New adapter mutations are gated on real lease-close support (plan 5.1):
 # while no peer announces lease_close they stay inert. Internal releases
@@ -2418,6 +2423,17 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _schema_variant(
             required=("spawn_token",), validators={"spawn_token": _is_spawn_token}
         )
+    ),
+    # ai_group_state (90f9): exactly one of group_id and scene_id; each
+    # variant names only its own key, so both or neither is bad_args.
+    "ai_group_state": _command_schema(
+        _schema_variant(
+            required=("group_id",),
+            validators={"group_id": _integer_in_range(minimum=1)},
+        ),
+        _schema_variant(
+            required=("scene_id",), validators={"scene_id": is_scene_id}
+        ),
     ),
     # uid selects the player to seat; the bridge never seats the first human (091a).
     "vehicle_enter": _command_schema(

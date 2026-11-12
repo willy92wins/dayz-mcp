@@ -916,6 +916,7 @@ def _spawn_namespace(*, files=(), parse_ok=None, fail_at=None, read_name=None):
         "protected void EnsureAIRegistry()",
         "protected MCPAIGroupRecord FindAIGroupByToken(string spawnToken)",
         "protected bool AIGroupGone(MCPAIGroupRecord record)",
+        "protected bool AIGroupOriginalPresent(MCPAIGroupRecord record)",
         "protected bool AIGroupRequestRelease(MCPAIGroupRecord record)",
         "protected bool AIIsSpawnToken(string value)",
         "protected string AINormalizeLoadout(string name)",

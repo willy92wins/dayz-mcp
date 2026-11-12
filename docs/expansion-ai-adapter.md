@@ -34,6 +34,8 @@ server. It ships in `addon_expansion_ai/` and packs as
   `ai_group_spawn`, on the server. At least one of `behaviour`,
   `waypoints`, `formation` or `speed` must be given (none is `bad_args`
   and sends nothing).
+- `ai_group_state` (tool, no lease) reads one group by `group_id`, or
+  every group registered under a `scene_id`, exactly one of the two.
 - `ai_group_release` is internal: the broker queues it by `spawn_token`
   when a delivered spawn is abandoned (timeout or cancel). It is not a
   public tool and never runs from lease-end cleanup.
@@ -85,6 +87,87 @@ Offline coverage: `tools/tests/test_xai_group_order.py` (criteria O3 and
 O4 for this verb, E5, and the mutants "not restoring the limit after a
 HOLD" and "a HOLD stomping the threat limit", run on a mutated copy of
 the adapter source).
+
+## Reading a group (`ai_group_state`, 90f9)
+
+Read-only tool `ai_group_state(group_id=None, scene_id=None, timeout_s)`.
+Exactly one of the two ids must be given; both or neither is `bad_args`
+(the tool refuses before sending, the loopback `_command_schema` admits
+only one-key variants, and the bridge dispatch refuses again). It takes
+no lease: `ai_group_state` is in `READ_ONLY_COMMANDS`, so the real
+`authorize` passes it without a token, including after
+`session_release`, while a mutating command in the same state answers
+`lease_required`. In a run launched by `dayz_test_run`, after
+`session_release` leaves the run idle (`RUNNING_IDLE`), `ai_group_state`
+answers `run_not_owned` like any command until a lease adopts the run
+(then it reads again without a token: `loopback.py`
+`_enqueue_run_rejection` lets a `RUNNING` run through); `session_status`
+(`lease_end.unconfirmed`) only says the close owes the release of some
+group (`ai_group_release_unconfirmed`), not which ones nor in what
+state; the groups' state is read before the release. Outside a managed
+run, the read still needs no lease.
+
+The broker admits the server verb by census, base `ach`, verb and `xai`
+only (`expansion_unavailable` with `adapter_not_loaded` or
+`adapter_contract_mismatch`); it is not a new mutation, so the
+lease-close gate never applies and residues stay readable on a census
+that announces no close support
+(a real bridge v12 peer is stopped earlier by the version gate). The
+adapter announces the verb as bit3 of its `xai` bitmask (see "How the
+adapter announces itself"); it adds no name to `caps=`.
+
+The dispatch answers at once, with no job and no setter call. It never
+reads through `eAITarget.GetThreat` or `GetPosition(false)`, which would
+update state while reading.
+
+With `group_id` the reply is `ai_group`; with `scene_id` it is
+`ai_groups` with every group of that scene in registration order (a
+scene with none answers an empty list). Per group: `group_id`,
+`scene_id`, `faction`, `formation`, `formation_state`, `behaviour` (tool
+vocabulary) and `behaviour_expansion` (waypoint-behaviour name),
+`waypoint_index`, `waypoint_count`, `current_waypoint`, `in_combat`,
+`alive` (members alive now), `members_total` and `group_present`
+(whether `eAIGroup.GetGroupByID(id, false)` still returns the original
+group). A releasing group with anything left also carries
+`release: "pending"`, `confirmed: false` and the pending member ids in
+`remaining_ids`. Getters of a group Expansion no longer returns are
+never called: its Expansion-read fields stay unavailable (empty strings,
+`waypoint_index: -1`, no current waypoint) while its registered members
+are still read and `behaviour` answers from the adapter registry.
+Behaviour and formation are read back through the same mapping the
+spawn and order replies use (`AIFillBehaviour` and the enum constants),
+so the three verbs answer alike for the same group; `ROAMING_LOCAL`
+refines `ROAMING` when Expansion roams locally.
+
+Per member: `object_id`, `alive`, `pos`, `health`, `fsm_state` and
+`fsm_substate` (from `GetFSM()`/`GetState()`/`GetName()` and
+`GetSubFSM()`; any null reference in that chain reads empty), `threat`
+(`GetThreatToSelf(true)`), `fighting`, `speed_limit` and
+`speed_limit_threat`, `emote_playing`, and `emote_pending` (a request in
+either the Expansion layer, `m_Expansion_EmoteID`, or the vanilla layer,
+`m_bEmoteIsRequestPending`). A live read refreshes the member's last
+observation; a member whose entity is gone answers `gone: true` with
+that last observation (`pos`, `health`, `alive`) and
+`last_observation: true`. A member seen dead stays `alive: false`.
+
+Errors: an unknown `group_id`, or the id of a releasing group that is
+already fully gone (no member entity left and the original group no
+longer returned), is `not_found`. A group with no living members
+answers ok with `alive: 0`.
+
+The state-only fields of the shared `MCPAIGroup` reply (`group_present`,
+`alive`, `members_total`, `current_waypoint`, `scene_id`) are only
+filled by `ai_group_state`; a spawn/order/release reply leaves them at
+their defaults.
+
+Offline coverage: `tools/tests/test_xai_group_state.py` (O4, E7, the O13
+part that reads residues when the census announces no close support, and
+the real bridge v12 poll stopped by the version gate). In-game
+validation is pending; this section describes the offline contract only.
+
+As a server read it is also admitted under the live profile:
+`LIVE_ALLOWED_COMMANDS` derives from `READ_ONLY_COMMANDS & SERVER_COMMANDS`
+(`loopback.py`), and the adapter mutations stay outside it.
 
 ## How the adapter announces itself (deviation from plan 2.2)
 

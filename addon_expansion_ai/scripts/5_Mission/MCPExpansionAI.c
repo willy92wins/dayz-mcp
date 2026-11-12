@@ -24,8 +24,17 @@ class MCPAIGroupMember
 	bool loadout_applied;
 	ref array<string> inventory;
 	bool alive;
+	bool gone;
+	bool last_observation;
+	float health;
+	string fsm_state;
+	string fsm_substate;
+	float threat;
+	bool fighting;
 	int speed_limit;
 	int speed_limit_threat;
+	bool emote_playing;
+	bool emote_pending;
 
 	void MCPAIGroupMember()
 	{
@@ -58,12 +67,18 @@ class MCPAIGroup
 	int released;
 	ref array<int> remaining_ids;
 	ref array<ref MCPAIGroupMember> members;
+	string scene_id;
+	ref array<float> current_waypoint;
+	int alive;
+	int members_total;
+	bool group_present;
 
 	void MCPAIGroup()
 	{
 		allowed = new array<string>();
 		remaining_ids = new array<int>();
 		members = new array<ref MCPAIGroupMember>();
+		current_waypoint = new array<float>();
 	}
 };
 
@@ -141,10 +156,10 @@ modded class MCPBridge
 
 	// Adapter verbs as an xai bitmask (bridge_readiness.EXPANSION_AI_VERB_BITS,
 	// append only): bit0 ai_group_release, bit1 ai_group_spawn,
-	// bit2 ai_group_order. The adapter adds no names to caps, so the
-	// saturated poll stays within 1024 (#321); the broker expands the
-	// mask to names before storing the census.
-	protected const string EXPANSION_AI_VERBS = "7";
+	// bit2 ai_group_order, bit3 ai_group_state. The adapter adds no names
+	// to caps, so the saturated poll stays within 1024 (#321); the broker
+	// expands the mask to names before storing the census.
+	protected const string EXPANSION_AI_VERBS = "15";
 
 	protected override string ExtensionPollParams()
 	{
@@ -168,6 +183,12 @@ modded class MCPBridge
 		if (command.cmd == "ai_group_order")
 		{
 			DispatchAIGroupOrder(command, result);
+			return 1;
+		}
+
+		if (command.cmd == "ai_group_state")
+		{
+			DispatchAIGroupState(command, result);
 			return 1;
 		}
 
@@ -270,7 +291,6 @@ modded class MCPBridge
 	{
 		int index = 0;
 		MCPAIGroupMemberRecord memberRecord;
-		eAIGroup found;
 
 		if (!record)
 		{
@@ -288,16 +308,7 @@ modded class MCPBridge
 			index = index + 1;
 		}
 
-		if (record.group && record.expansion_id > 0)
-		{
-			found = eAIGroup.GetGroupByID(record.expansion_id, false);
-			if (found == record.group)
-			{
-				return false;
-			}
-		}
-
-		return true;
+		return !AIGroupOriginalPresent(record);
 	}
 
 	// The release request of plan 3.6, shared by ai_group_release and the
@@ -1356,6 +1367,294 @@ modded class MCPBridge
 		}
 		AIFillGroupOrderFields(record, report);
 		result.ai_group = report;
+		result.ok = true;
+	}
+
+	// True only while Expansion still returns this exact group for its id
+	// (plan 3.4/3.6): a reused id naming another group is not this one, and
+	// holding the reference alone does not prove it is still registered.
+	protected bool AIGroupOriginalPresent(MCPAIGroupRecord record)
+	{
+		eAIGroup found;
+
+		if (!record)
+		{
+			return false;
+		}
+
+		if (!record.group)
+		{
+			return false;
+		}
+
+		if (record.expansion_id <= 0)
+		{
+			return false;
+		}
+
+		found = eAIGroup.GetGroupByID(record.expansion_id, false);
+		if (found == record.group)
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	// One member read (plan 3.4). Only getters and public fields are read:
+	// no setter and none of the target reads that would update state while
+	// reading. A live read refreshes the last observation; a gone member
+	// answers with it, marked as such.
+	protected void FillAIMemberState(MCPAIGroupMemberRecord memberRecord, MCPAIGroupMember row)
+	{
+		eAIFSM fsm;
+		ExpansionState fsmState;
+		ExpansionFSM subFsm;
+		ExpansionState subState;
+		EmoteManager emoteManager;
+		vector memberPos;
+
+		row.object_id = memberRecord.object_id;
+		if (!memberRecord.member)
+		{
+			row.gone = true;
+			row.last_observation = true;
+			row.alive = memberRecord.last_alive;
+			row.health = memberRecord.last_health;
+			if (memberRecord.last_pos.Count() > 2)
+			{
+				row.pos.Insert(memberRecord.last_pos.Get(0));
+				row.pos.Insert(memberRecord.last_pos.Get(1));
+				row.pos.Insert(memberRecord.last_pos.Get(2));
+			}
+
+			return;
+		}
+
+		row.alive = memberRecord.member.IsAlive();
+		row.health = memberRecord.member.GetHealth();
+		memberPos = memberRecord.member.GetPosition();
+		VectorToArray(memberPos, row.pos);
+		VectorToArray(memberPos, memberRecord.last_pos);
+		memberRecord.last_health = row.health;
+		memberRecord.last_alive = row.alive;
+		fsm = memberRecord.member.GetFSM();
+		if (fsm)
+		{
+			fsmState = fsm.GetState();
+			if (fsmState)
+			{
+				row.fsm_state = fsmState.GetName();
+				subFsm = fsmState.GetSubFSM();
+				if (subFsm)
+				{
+					subState = subFsm.GetState();
+					if (subState)
+					{
+						row.fsm_substate = subState.GetName();
+					}
+				}
+			}
+		}
+
+		row.threat = memberRecord.member.GetThreatToSelf(true);
+		row.fighting = memberRecord.member.m_eAI_IsFightingFSM;
+		row.speed_limit = memberRecord.member.GetMovementSpeedLimit();
+		row.speed_limit_threat = memberRecord.member.GetMovementSpeedLimitUnderThreat();
+		emoteManager = memberRecord.member.GetEmoteManager();
+		if (emoteManager)
+		{
+			row.emote_playing = emoteManager.m_bEmoteIsPlaying;
+			row.emote_pending = emoteManager.m_bEmoteIsRequestPending;
+		}
+
+		if (memberRecord.member.m_Expansion_EmoteID != 0)
+		{
+			row.emote_pending = true;
+		}
+	}
+
+	// One group read (plan 3.4). Getters of a group Expansion no longer
+	// returns are never called: its Expansion-read fields stay unavailable
+	// (empty strings, waypoint_index -1, no current waypoint) while its
+	// registered members are still read and behaviour answers from the
+	// registry. Behaviour is read back through AIFillBehaviour, the helper
+	// the spawn and order replies share, so the three verbs answer alike
+	// for the same group; ROAMING_LOCAL refines ROAMING when Expansion
+	// roams locally (SetWaypointBehaviour stores it as ROAMING).
+	protected MCPAIGroup BuildAIGroupState(MCPAIGroupRecord record)
+	{
+		MCPAIGroup report = new MCPAIGroup();
+		MCPAIGroupMemberRecord memberRecord;
+		MCPAIGroupMember row;
+		int index = 0;
+		int aliveCount = 0;
+		int formationStateValue = 0;
+		int waypointBehaviourValue = 0;
+		bool present = false;
+
+		report.group_id = record.group_id;
+		report.scene_id = record.scene_id;
+		report.behaviour = record.behaviour;
+		report.members_total = record.members.Count();
+		report.waypoint_index = -1;
+		present = AIGroupOriginalPresent(record);
+		report.group_present = present;
+		if (present)
+		{
+			if (record.group.GetFaction())
+			{
+				report.faction = record.group.GetFaction().GetName();
+			}
+
+			if (record.group.GetFormation())
+			{
+				report.formation = record.group.GetFormation().GetName();
+			}
+
+			formationStateValue = record.group.GetFormationState();
+			if (formationStateValue == eAIGroupFormationState.NONE)
+			{
+				report.formation_state = "NONE";
+			}
+
+			if (formationStateValue == eAIGroupFormationState.IN)
+			{
+				report.formation_state = "IN";
+			}
+
+			if (formationStateValue == eAIGroupFormationState.FLANK)
+			{
+				report.formation_state = "FLANK";
+			}
+
+			waypointBehaviourValue = record.group.GetWaypointBehaviour();
+			AIFillBehaviour(record.group, report);
+			if (waypointBehaviourValue == eAIWaypointBehavior.ROAMING && record.group.m_RoamingLocal)
+			{
+				report.behaviour_expansion = "ROAMING_LOCAL";
+			}
+
+			report.waypoint_index = record.group.m_CurrentWaypointIndex;
+			report.waypoint_count = record.group.GetWaypoints().Count();
+			VectorToArray(record.group.GetCurrentWaypoint(), report.current_waypoint);
+			report.in_combat = record.group.IsInCombat();
+		}
+
+		while (index < record.members.Count())
+		{
+			memberRecord = record.members.Get(index);
+			row = new MCPAIGroupMember();
+			FillAIMemberState(memberRecord, row);
+			if (!row.gone && row.alive)
+			{
+				aliveCount = aliveCount + 1;
+			}
+
+			report.members.Insert(row);
+			index = index + 1;
+		}
+
+		report.alive = aliveCount;
+		// Callers already answer not_found for a releasing group that is gone.
+		if (record.group_state == "releasing")
+		{
+			report.release = "pending";
+			report.confirmed = false;
+			FillRemainingIds(record, report);
+		}
+
+		return report;
+	}
+
+	// ai_group_state (plan 3.4): read-only, answered in this dispatch with
+	// no job and no setter. Exactly one of group_id and scene_id.
+	protected void DispatchAIGroupState(MCPCommand command, MCPResult result)
+	{
+		MCPAIGroupRecord record;
+		MCPAIGroup report;
+		int index = 0;
+		bool hasGroup = false;
+		bool hasScene = false;
+
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return;
+		}
+
+		if (command.args.group_id > 0)
+		{
+			hasGroup = true;
+		}
+
+		if (command.args.scene_id != "")
+		{
+			hasScene = true;
+		}
+
+		if (hasGroup && hasScene)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return;
+		}
+
+		if (!hasGroup && !hasScene)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return;
+		}
+
+		EnsureAIRegistry();
+		if (hasGroup)
+		{
+			record = FindAIGroupById(command.args.group_id);
+			if (!record)
+			{
+				result.ok = false;
+				result.error = "not_found";
+				return;
+			}
+
+			if (record.group_state == "releasing" && AIGroupGone(record))
+			{
+				result.ok = false;
+				result.error = "not_found";
+				return;
+			}
+
+			report = BuildAIGroupState(record);
+			result.ai_group = report;
+			result.ok = true;
+			return;
+		}
+
+		if (!IsValidSceneId(command.args.scene_id))
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			return;
+		}
+
+		result.ai_groups = new array<ref MCPAIGroup>();
+		while (index < m_AIGroups.Count())
+		{
+			record = m_AIGroups.Get(index);
+			if (record.scene_id == command.args.scene_id)
+			{
+				if (record.group_state != "releasing" || !AIGroupGone(record))
+				{
+					report = BuildAIGroupState(record);
+					result.ai_groups.Insert(report);
+				}
+			}
+
+			index = index + 1;
+		}
+
 		result.ok = true;
 	}
 

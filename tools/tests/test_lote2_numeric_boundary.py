@@ -134,12 +134,16 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # read bad_args, pos and waypoints are lists, the rest strings).
         # + 2 from 3ca5 (ai_group_order group_id/timeout_s; behaviour,
         # formation and speed are strings and waypoints a list).
+        # + 2 from 90f9 (ai_group_state group_id/timeout_s; scene_id is a
+        # string, not in this census).
         # + 3 from 0205 (chat_read marker/max_lines/timeout_s).
         # + 1 from 726c (ui_pause timeout_s).
         # + 6 from 702f OverrideDOF (camera_set and camera_set_focus focus_length/focus_length_near/focus_depth_offset).
-        self.assertEqual(len(rows), 251)
+        self.assertEqual(len(rows), 253)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
+        self.assertIn(("ai_group_state", "group_id", "int"), rows)
+        self.assertIn(("ai_group_state", "timeout_s", "float"), rows)
         self.assertIn(("chat_read", "marker", "int"), rows)
         self.assertIn(("chat_read", "max_lines", "int"), rows)
         self.assertIn(("chat_read", "timeout_s", "float"), rows)

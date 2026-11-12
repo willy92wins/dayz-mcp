@@ -8867,6 +8867,66 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
                 "ai_group_order", args, "server", _timeout(timeout_s)
             )
 
+    @app.tool(
+        description=(
+            "Read the state of one Expansion AI group, or of every group "
+            "registered under a scene. No lease: this is a read-only read of "
+            "the optional Expansion AI adapter, answered by the server in "
+            "its dispatch with no job and no world change. Exactly one of "
+            "group_id and scene_id must be given; both or neither is "
+            "bad_args, as is a scene_id that is not 1 to "
+            f"{SCENE_ID_MAX_CHARS} characters from A-Z a-z 0-9 _ -. Without "
+            "the adapter PBO, or with one whose arg contract differs, the "
+            "broker answers expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch. With "
+            "group_id the reply's ai_group holds group_id, scene_id, "
+            "faction, formation, formation_state, behaviour and "
+            "behaviour_expansion, waypoint_index, waypoint_count, "
+            "current_waypoint, in_combat, alive (members alive now), "
+            "members_total, group_present and members; with scene_id the "
+            "same rows are in ai_groups, in registration order. Each member "
+            "holds object_id, alive, pos, health, fsm_state, fsm_substate, "
+            "threat, fighting, speed_limit, speed_limit_threat, "
+            "emote_playing and emote_pending; a member whose entity is gone "
+            "answers gone true with its last observation (pos, health, "
+            "alive) marked last_observation true, and a member seen dead "
+            "stays alive false. A releasing group that still has anything "
+            "left carries release pending, the pending member ids in "
+            "remaining_ids and group_present; group fields a disappeared "
+            "group can no longer answer stay empty with waypoint_index -1. "
+            "An unknown group_id, or a releasing group already gone, is "
+            "not_found; a group with no living members answers ok with "
+            "alive 0. A scene nothing was registered under answers "
+            "ai_groups []."
+        )
+    )
+    async def ai_group_state(
+        group_id: StrictInt | None = None,
+        scene_id: StrictStr | None = None,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if (group_id is None) == (scene_id is None):
+            raise ToolError(
+                _bad_args(
+                    "group_id/scene_id",
+                    (group_id, scene_id),
+                    "name exactly one of group_id and scene_id",
+                )
+            )
+        args: dict[str, Any] = {}
+        if group_id is not None:
+            if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id <= 0:
+                raise ToolError(_bad_args("group_id", group_id, "be a positive int"))
+            args["group_id"] = int(group_id)
+        else:
+            if not is_scene_id(scene_id):
+                raise ToolError(_bad_args("scene_id", scene_id, SCENE_ID_REQUIREMENT))
+            args["scene_id"] = scene_id
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "ai_group_state", args, "server", _timeout(timeout_s)
+            )
+
     # Spawn into a player's inventory.
     @app.tool(
         description=(

@@ -1212,6 +1212,10 @@ def _adapter_namespace() -> dict:
             (),
         ),
         (
+            "protected bool AIGroupOriginalPresent(MCPAIGroupRecord record)",
+            (),
+        ),
+        (
             "protected bool AIGroupRequestRelease(MCPAIGroupRecord record)",
             ("m_RuntimeObjects",),
         ),

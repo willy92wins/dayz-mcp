@@ -366,6 +366,7 @@ EXPANSION_AI_COMMANDS = frozenset(EXPANSION_AI_ARG_CONTRACT)
 EXPANSION_AI_TOOLS = frozenset({
     "ai_group_order",
     "ai_group_spawn",
+    "ai_group_state",
 })
 
 
@@ -442,6 +443,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "ai_group_order": "ai_group_order",
         "ai_group_release": None,  # internal: the broker's abandoned-spawn cleanup
         "ai_group_spawn": "ai_group_spawn",
+        "ai_group_state": "ai_group_state",
         "bot_start": "bot_start",
         "bot_stop": "bot_stop",
         "entities_query": "entities_query",

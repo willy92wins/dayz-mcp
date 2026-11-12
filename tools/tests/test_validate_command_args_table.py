@@ -218,6 +218,19 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("upper", {"spawn_token": "A" * 32}, (False, "bad_args")),
         ("extra_key", {"spawn_token": "a" * 32, "group_id": 1}, (False, "bad_args")),
     ),
+    # ai_group_state (90f9): exactly one of group_id and scene_id.
+    "ai_group_state": (
+        ("valid_group", {"group_id": 7}, (True, None)),
+        ("valid_scene", {"scene_id": "scene1"}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("both_ids", {"group_id": 7, "scene_id": "scene1"}, (False, "bad_args")),
+        ("zero_group", {"group_id": 0}, (False, "bad_args")),
+        ("bool_group", {"group_id": True}, (False, "bad_args")),
+        ("float_group", {"group_id": 1.5}, (False, "bad_args")),
+        ("empty_scene", {"scene_id": ""}, (False, "bad_args")),
+        ("bad_scene", {"scene_id": "a/b"}, (False, "bad_args")),
+        ("extra_key", {"group_id": 7, "extra": None}, (False, "bad_args")),
+    ),
     "gameplay_state": (
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
