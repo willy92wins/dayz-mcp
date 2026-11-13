@@ -131,6 +131,7 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
+    NOTIFY_STRING_MAX_BYTES,
     SCENE_ID_MAX_CHARS,
     SPAWN_BATCH_ITEMS_MAX,
     SPAWN_BATCH_PER_TICK_MAX,
@@ -8081,7 +8082,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "non-empty uid targets that identity. Returns error=no_players "
             "when the server reports zero connected players. timeout_s is "
             "the total budget for the player check plus send; a failed "
-            "player query still attempts the notification."
+            "player query still attempts the notification. title, detail "
+            "and icon each must be at most 1023 UTF-8 bytes (not "
+            "characters); that bound comes from a one-string ScriptRPC "
+            "probe, and the combined size of the three strings in one RPC "
+            "was not measured."
         )
     )
     async def notify_players(
@@ -8108,6 +8113,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("icon", icon, "be a string"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        for field, value in (("title", title), ("detail", detail), ("icon", icon)):
+            byte_length = len(value.encode("utf-8", "surrogatepass"))
+            if byte_length > NOTIFY_STRING_MAX_BYTES:
+                raise ToolError(
+                    f"bad_args: {field} must be at most "
+                    f"{NOTIFY_STRING_MAX_BYTES} UTF-8 bytes; it is "
+                    f"{byte_length} UTF-8 bytes (the limit counts UTF-8 "
+                    "bytes, not characters; it comes from a one-string "
+                    "ScriptRPC probe and the combined size of the three "
+                    "strings in one RPC was not measured)"
+                )
         _require_admin_uid(uid)
         args: dict[str, Any] = {
             "show_time": show_time_value,
