@@ -63,7 +63,16 @@ EXPECTED_LOCK = {
             "size": 12023245,
             "url": "https://www.python.org/ftp/python/3.14.3/python-3.14.3-embed-amd64.zip",
             "version": "3.14.3",
-        }
+        },
+        "dayzmake_linux": {
+            "architecture": "x86_64",
+            "binary_sha256": "6626BF1D4EA95C43B607C4B9550DAB22549777ADBBE58032637E8717BD175D38",
+            "license": "GPL-2.0",
+            "sha256": "1593E670BAE4CCAF1F60EFF4E1A0201E191AB7879713334FBEADA12DAD8580FC",
+            "size": 2354278,
+            "url": "https://github.com/bzed/dayzmake/releases/download/v1.0.0/dayzmake-v1.0.0-debian-trixie-x86_64.tar.gz",
+            "version": "1.0.0",
+        },
     },
     "toolchains": {
         "msvc": {
@@ -153,8 +162,20 @@ def _validate_lock(payload: object) -> None:
                 raise ValueError(f"artifact {name}: absolute path")
         else:
             raise ValueError(f"artifact {name}: location")
-    remote = _require_exact_keys(root["remote_artifacts"], {"cpython_embed"}, "remote")
+    remote = _require_exact_keys(
+        root["remote_artifacts"], {"cpython_embed", "dayzmake_linux"}, "remote"
+    )
     _require_exact_keys(remote["cpython_embed"], {"architecture", "license", "sha256", "size", "url", "version"}, "cpython_embed")
+    dayzmake = _require_exact_keys(
+        remote["dayzmake_linux"],
+        {"architecture", "binary_sha256", "license", "sha256", "size", "url", "version"},
+        "dayzmake_linux",
+    )
+    for field in ("binary_sha256", "sha256"):
+        if type(dayzmake[field]) is not str or not SHA256_PATTERN.fullmatch(dayzmake[field]):
+            raise ValueError(f"dayzmake_linux: {field}")
+    if type(dayzmake["size"]) is not int or dayzmake["size"] <= 0:
+        raise ValueError("dayzmake_linux: size")
     toolchains = _require_exact_keys(root["toolchains"], {"msvc", "windows_sdk"}, "toolchains")
     for toolchain_name, toolchain in toolchains.items():
         for file_name, item in toolchain["files"].items():

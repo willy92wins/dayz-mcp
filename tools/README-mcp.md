@@ -167,7 +167,7 @@ a process differ.
   `open_osfhandle` only while it is imported (the cancel handle is a pipe descriptor; a module named `msvcrt`
   left in `sys.modules` turns `subprocess` into its Windows branch), and points its bundle root at `--bundle`.
   Not rebuilt: the debugger gate on every image a child maps and the job object. Build mode
-  runs armake2 instead of AddonBuilder (**Build**, below).
+  runs dayzmake instead of AddonBuilder (**Build**, below).
 - **Sealed path semantics** (`linux_compat.install_sealed_worker_paths`): `dayz_test_request`,
   `dayz_test_worker`, `dayz_test_attestation` and `dayz_test_storage` get `linux_compat.DRIVE_PATH_AWARE`
   as their `ntpath` (each call takes `ntpath` for a drive or UNC path, `posixpath` otherwise, so
@@ -202,7 +202,10 @@ Setup: Steam installed natively, since the Steam check reads `~/.steam/steam.pid
 elsewhere and is not seen); for `DayZDiag_x64.exe`, server and client alike (the normal setup), Steam Linux
 Runtime 4, the Proton tool `DAYZ_MCP_PROTON` names and `sway`; for the native `DayZServer`, rootless podman and
 its runtime image, built once with `python -m dayz_mcp.podman_server image` (a start refuses with
-`runtime_image_missing` without it, and never builds it); for `build=true`, `armake2` on `PATH`. Then a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
+`runtime_image_missing` without it, and never builds it); for `build=true`, the pinned `dayzmake` v1.0.0
+release asset on `PATH` (`dayzmake-v1.0.0-debian-trixie-x86_64.tar.gz` from
+https://github.com/bzed/dayzmake/releases/tag/v1.0.0; the build refuses any other binary, see **Build**).
+Then a dev root with `_server/serverDZ.cfg` (`allowFilePatching = 1`), `_server/profiles/` and
 `_client/profiles/`, the missions under a mission root, the mods under a mod root, `diag_executable` =
 `<game>/DayZDiag_x64.exe` (see "Which binary runs"); then
 `python -m dayz_mcp.linux_launcher install --policy <file>` and `status`.
@@ -271,10 +274,16 @@ and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")
   "no input, no foreground window" is the true reading. Without it every run read `use_state: unknown` and could
   never be adopted. Adoption rules are then the Windows ones: another session gets `run_protected` with
   `retry_after_s` until the 600 s abandon timer runs out.
-- **Build** (`dayz_mcp/linux_build.py`): `build=true` relays the sealed worker's `ADDON_BUILDER` frame to armake2
-  from `PATH` (https://github.com/bzed/armake2): `pack` for `pack_only`, otherwise `build --proton-binarize`, which
+- **Build** (`dayz_mcp/linux_build.py`): `build=true` relays the sealed worker's `ADDON_BUILDER` frame to dayzmake
+  from `PATH` (https://github.com/bzed/dayzmake): `pack` for `pack_only`, otherwise `build --proton-binarize`, which
   brings its own `P:` sandbox, so the worker's junction stage is not used. The argv comes only from the validated
-  frame. Unlike the sealed `AddonBuilder.exe` on Windows, the armake2 binary is **not pinned** by the bundle. The
+  frame. Unlike the sealed `AddonBuilder.exe` on Windows, dayzmake is not sealed, so the executable is pinned by
+  content: only the v1.0.0 release asset runs, matched against `DAYZMAKE_SHA256` (the archive's digest and the
+  executable's are both in `dependency-lock.json`), and anything else is refused as `dayzmake_pin_mismatch`
+  before it starts. A development build runs only when `DAYZ_MCP_DAYZMAKE_SHA256` names its digest. The child
+  gets a whitelisted environment (`build_environment()`: `HOME`, `PATH`, the locale, the `XDG_*` directories and
+  the names dayzmake reads for the Proton binarize -- `PROTON`, `DAYZ_TOOLS`, `STEAM_ROOT`, `BIOUTPUT`,
+  `STEAM_COMPAT_CLIENT_INSTALL_PATH`), not the daemon's whole block. The
   PBO goes to `@Mod/Addons/` (both engines load that spelling on Linux). The `msvcrt` shared build lock is replaced
   by a `byte_lock` port. `security_runtime_audit` accepts exactly one `subprocess.Popen` here, in `run_addon_builder`,
   with `build_argv(...)` as its argv and no shell: the counterpart of the launcher's AddonBuilder child.
