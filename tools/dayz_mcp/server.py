@@ -3925,7 +3925,7 @@ def _steam_auth_login(line: str) -> tuple[str, str | None] | None:
     """
     kind: str | None = None
     if re.search(
-        r"\([^()]*\)\s+kicked from server:\s*\d+\s*\(.*"
+        r"\([^()]*\)\s+kicked from server[:]\s*\d+\s*\(.*"
         r"\(WaitAuthPlayerLoginState\)\)?\s*$",
         line,
     ):
