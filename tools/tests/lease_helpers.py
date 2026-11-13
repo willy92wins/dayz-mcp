@@ -67,7 +67,7 @@ def _identity(name: str, *, session_id: str | None = None) -> ClientIdentity:
             "platform": "codex" if name != "b" else "claude",
             "pid": 100 + ord(name[0]),
             "ppid": 10,
-            "started_at_utc": f"2026-07-14T20:00:0{len(name)}Z",
+            "started_at_utc": f"2026-07-14T20:00:{len(name) % 60:02d}Z",
             "session_id": session_id or f"session-{name}",
             "task_label": name,
         }

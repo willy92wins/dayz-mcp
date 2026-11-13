@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
+from dayz_mcp.runtime_state import bounded_text, valid_utc_timestamp
+
 
 SESSION_TTL_S = 120.0
 LEASE_WORK_IDLE_S = 1800.0
@@ -174,6 +176,15 @@ class ClientIdentity:
             or not started
             or not isinstance(session_id, str)
             or not session_id
+        ):
+            raise ValueError("invalid_identity")
+        # Same predicates CoordinationFaultStore.validate applies to the WAL
+        # marker in runtime_state.py: refuse at admission an identity the WAL
+        # would refuse at grant, instead of queueing it to fail wal_arm.
+        if (
+            not bounded_text(started, 64)
+            or not valid_utc_timestamp(started)
+            or not bounded_text(session_id, 200)
         ):
             raise ValueError("invalid_identity")
         if not isinstance(label, str) or len(label) > 120:
