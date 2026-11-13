@@ -58,9 +58,14 @@ STARTED_CASES = [
 ]
 
 SESSION_CASES = [
-    ("s" * 201, False),
-    ("session-\x01id", False),
+    # The WAL receives session_id[:12] (public_payload), so length past 12
+    # and characters past 12 do not reach its bounded_text(session, 200).
+    ("s" * 300, True),
+    ("s" * 201, True),
     ("s" * 200, True),
+    (" " * 12 + "x", False),  # first 12 all blank: the WAL would refuse it
+    ("session-\x01id", False),  # control character within the first 12
+    ("s" * 12 + "\x01" + "x", True),  # control character after position 12
     ("session-a", True),
 ]
 
@@ -103,6 +108,14 @@ def _wal_accepts(marker: dict[str, object]) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _wal_accepts_for(candidate: ClientIdentity) -> bool:
+    # Build the marker's client from the plain constructor's public_payload()
+    # (bypassing from_payload), exactly what _arm_wal_locked puts in the WAL.
+    marker = _marker()
+    marker["client"] = candidate.public_payload()
+    return _wal_accepts(marker)
 
 
 def _identity_accepts(payload: dict[str, object]) -> bool:
@@ -148,17 +161,23 @@ class IdentityAdmissionTests(unittest.TestCase):
     def test_identity_predicate_matches_wal_for_started_at(self) -> None:
         for value, _accepted in STARTED_CASES:
             with self.subTest(started_at_utc=value):
+                candidate = ClientIdentity(
+                    "codex", 11, 1, value, "session-a", "b3ad"
+                )
                 self.assertEqual(
                     _identity_accepts(_payload(started_at_utc=value)),
-                    _wal_accepts(_marker(started_at_utc=value)),
+                    _wal_accepts_for(candidate),
                 )
 
     def test_identity_predicate_matches_wal_for_session(self) -> None:
         for value, _accepted in SESSION_CASES:
             with self.subTest(session_id=value):
+                candidate = ClientIdentity(
+                    "codex", 11, 1, "2026-11-12T10:00:00Z", value, "b3ad"
+                )
                 self.assertEqual(
                     _identity_accepts(_payload(session_id=value)),
-                    _wal_accepts(_marker(session=value)),
+                    _wal_accepts_for(candidate),
                 )
 
 
@@ -226,6 +245,27 @@ class B3adHttpTests(SessionLoopback, unittest.TestCase):
             "/session/acquire", {"identity": queued_payload, "purpose": "next"}
         )
         self.assertEqual((status, body["status"]), (202, "queued"))
+
+    def test_abandon_plus_offset_is_400_bad_abandon_and_queue_stays_empty(
+        self,
+    ) -> None:
+        # /abandon does not surface invalid_identity: request_abandon maps a
+        # from_payload failure to its own bad_abandon (loopback.py:6393-6396).
+        status, body = self.request(
+            "/abandon",
+            {
+                "identity": PLUS_OFFSET_PAYLOAD,
+                "generation": "g",
+                "id": 1,
+                "reason": "cancelled",
+            },
+        )
+        self.assertEqual((status, body), (400, {"error": "bad_abandon"}))
+
+        status, snapshot = self.request("/session/status", {"identity": BASE_PAYLOAD})
+        self.assertEqual(status, 200)
+        self.assertEqual(snapshot["queue"], [])
+        self.assertIsNone(snapshot["owner"])
 
     def test_wait_cancel_and_release_plus_offset_are_400(self) -> None:
         for path, extra in (
