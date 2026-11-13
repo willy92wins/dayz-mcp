@@ -119,8 +119,6 @@ SERVER_COMMANDS = {
     "object_set_health",
     "object_doors",
     "infected_drive",
-    # Internal: the broker's release of an infected drive (7c86), never a public tool.
-    "infected_drive_release",
     "survivor_drive",
     # Internal: the broker's release of one drive (c801), never a public tool.
     "survivor_drive_release",
@@ -284,11 +282,6 @@ RELEASE_REGISTRY: tuple[tuple[str, str, Callable[[int, dict], dict]], ...] = (
         "action_hold",
         "action_hold_cancel",
         lambda command_id, args: {"hold_id": args["hold_id"]},
-    ),
-    (
-        "infected_drive",
-        "infected_drive_release",
-        lambda command_id, args: {"command_id": command_id},
     ),
     (
         "survivor_drive",
@@ -1497,7 +1490,6 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "world_spawn_batch",
     "scene_entities",
     "scene_clear",
-    "infected_drive_release",
     "survivor_drive",
     "survivor_drive_release",
     "ai_group_order",
@@ -1572,7 +1564,6 @@ _OWNER_CLEANUP_COMMANDS = frozenset(
         "bot_stop",
         "player_look_at_release",
         "action_hold_cancel",
-        "infected_drive_release",
         "survivor_drive_release",
         "camera_path_release",
         "ai_group_release",
@@ -2681,16 +2672,6 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
         _schema_variant(
             required=("view",),
             validators={"view": _one_of("first", "third")},
-        )
-    ),
-    # infected_drive_release (7c86), internal: the id of the infected_drive
-    # command to drop. Command ids restart with each daemon, so an entry a
-    # previous daemon set with the same id, which no lease owns any more, goes
-    # too.
-    "infected_drive_release": _command_schema(
-        _schema_variant(
-            required=("command_id",),
-            validators={"command_id": _integer_in_range(minimum=1)},
         )
     ),
     # survivor_drive_release (c801), internal: the id of the drive command and

@@ -569,7 +569,7 @@ class PlayerMoveCensusTest(unittest.TestCase):
         # A client command: the hash covers the server's arguments only, and a
         # bridge without this verb answers unknown_command and fails the census.
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
-        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
+        self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
         self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
     def test_a_stale_client_census_names_the_missing_tool(self) -> None:

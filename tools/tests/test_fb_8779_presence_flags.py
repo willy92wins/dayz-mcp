@@ -189,7 +189,7 @@ class PresenceFlagEnforceContractTest(unittest.TestCase):
         self.assertNotIn("OverrideHeading(true", body)
         self.assertLess(body.index("headingUnset ||"), body.index("MCPInfectedDrive.Drive("))
         drive = _without_comments((MISSION / "MCP_InfectedDrive.c").read_text(encoding="utf-8"))
-        self.assertIn("Apply(infected, entry);", _method_body(drive, "static int Drive("))
+        self.assertIn("Apply(infected, entry);", _method_body(drive, "static void Drive("))
         apply = _method_body(
             drive, "protected static void Apply(DayZInfected infected, MCPInfectedDriveEntry entry)"
         )

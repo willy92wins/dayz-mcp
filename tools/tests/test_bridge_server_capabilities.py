@@ -85,7 +85,6 @@ EXPECTED_SERVER_CAPABILITIES = (
     "hands_attach",
     "hands_take",
     "infected_drive",
-    "infected_drive_release",
     "inventory_attach",
     "inventory_give",
     "inventory_move",

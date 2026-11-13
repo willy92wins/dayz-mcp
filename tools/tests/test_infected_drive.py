@@ -17,7 +17,6 @@ if str(_TOOLS_DIR) not in sys.path:
 from dayz_mcp import loopback, server
 from dayz_mcp.bridge_readiness import EXPECTED_SERVER_ARG_CONTRACT_HASH
 from dayz_mcp.core import EXPECTED_BRIDGE_VERSION
-from dayz_mcp.result_prune import OWNED_SCALAR_FIELDS, prune_unfilled_fields
 from dayz_mcp.session_coordination import (
     READ_ONLY_COMMANDS,
     ClientIdentity,
@@ -43,8 +42,6 @@ DRIVE_RELEASE = "infected_drive_release"
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 DRIVE = addon_root() / "scripts" / "5_Mission" / "MCP_InfectedDrive.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
-# The arg-contract hash of main before 7c86: the PBO an unupdated server runs.
-PREVIOUS_ARG_CONTRACT_HASH = "3b800b7c7ee0674c"
 INFECTED_TYPE = "ZmbM_CitizenASkinny_Blue"
 POS = [4200.0, 338.66, 10610.0]
 DRIVE_WIRE = {
@@ -116,14 +113,6 @@ def _poll(state: loopback.ServerState, commands: list[str], ach: str):
         caps=",".join(commands),
         ach=ach,
     )
-
-
-def _schema_keys(command: str) -> set[str]:
-    variants, _delegated = loopback._COMMAND_ARG_SCHEMAS[command]
-    keys: set[str] = set()
-    for required, optional, _validators in variants:
-        keys |= required | optional
-    return keys
 
 
 OWNER_A = {
@@ -314,102 +303,8 @@ class InfectedDriveToolTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(arguments=arguments):
                 self.assertIn(part, await self._refused(arguments))
 
-    def test_owned_scalars_keep_release_matched(self) -> None:
-        self.assertNotIn("replaced_command_id", OWNED_SCALAR_FIELDS)
-        self.assertIn(DRIVE_RELEASE, OWNED_SCALAR_FIELDS["matched"])
-
-        dropped_elsewhere = prune_unfilled_fields(
-            COMMAND, {"ok": 1, "pos_real": list(POS), "matched": 0}
-        )
-        self.assertNotIn("matched", dropped_elsewhere)
-
-        release_reply = prune_unfilled_fields(
-            DRIVE_RELEASE, {"ok": 1, "matched": False}
-        )
-        self.assertIs(release_reply["matched"], False)
-
 
 class InfectedDriveBrokerTest(unittest.TestCase):
-    def test_release_is_an_internal_server_cleanup_verb_and_in_release_registry(self) -> None:
-        self.assertIn(DRIVE_RELEASE, loopback.SERVER_COMMANDS)
-        self.assertIn(DRIVE_RELEASE, loopback.WHITELISTED_COMMANDS)
-        self.assertNotIn(DRIVE_RELEASE, loopback.CLIENT_COMMANDS)
-        self.assertEqual(loopback.peer_for_command(DRIVE_RELEASE), "server")
-        self.assertIn(DRIVE_RELEASE, loopback._CAPABILITY_ADMISSION_COMMANDS)
-        self.assertIn(DRIVE_RELEASE, loopback._OWNER_CLEANUP_COMMANDS)
-        self.assertEqual(server.SERVER_ARG_CONTRACT[DRIVE_RELEASE], ("command_id",))
-        self.assertEqual(_schema_keys(DRIVE_RELEASE), {"command_id"})
-        self.assertIn(DRIVE_RELEASE, server._BRIDGE_COMMAND_TOOLS["server"])
-        self.assertIsNone(server._BRIDGE_COMMAND_TOOLS["server"][DRIVE_RELEASE])
-        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
-
-        matches = [entry for entry in loopback.RELEASE_REGISTRY if entry[0] == COMMAND]
-        self.assertEqual(len(matches), 1)
-        verb, release_verb, build_args = matches[0]
-        self.assertEqual((verb, release_verb), (COMMAND, DRIVE_RELEASE))
-        self.assertEqual(build_args(41, dict(DRIVE_WIRE)), {"command_id": 41})
-
-        self.assertEqual(
-            loopback.validate_command_args(DRIVE_RELEASE, {"command_id": 41}),
-            (True, None),
-        )
-        for bad in (
-            {},
-            {"command_id": 0},
-            {"command_id": -1},
-            {"command_id": True},
-            {"command_id": "41"},
-            {"command_id": 1.0},
-            {"command_id": 41, "object_id": 7},
-        ):
-            with self.subTest(args=bad):
-                self.assertIs(
-                    loopback.validate_command_args(DRIVE_RELEASE, bad)[0], False
-                )
-
-        # Public callers cannot enqueue the internal release without internal=True
-        # when a lease gate or capability check protects it; an unannounced peer
-        # refuses even internal=True.
-        state = _bound_state()
-        status, body = state.enqueue_command(
-            DRIVE_RELEASE, {"command_id": 5}, peer="server", internal=True
-        )
-        self.assertEqual((status, body), (409, {"error": "bridge_capability_missing"}))
-
-    def test_an_older_pbo_is_never_handed_the_drive_release(self) -> None:
-        full = _full_commands()
-        without_release = [name for name in full if name != DRIVE_RELEASE]
-        for name, commands, ach, error in (
-            ("previous_pbo", without_release, PREVIOUS_ARG_CONTRACT_HASH, "arg_contract_mismatch"),
-            ("missing_release", without_release, EXPECTED_SERVER_ARG_CONTRACT_HASH, "bridge_capability_missing"),
-            ("no_census", None, None, "bridge_capability_missing"),
-        ):
-            with self.subTest(name=name):
-                state = _bound_state()
-                if commands is not None:
-                    _announce(state, commands, ach)
-                before_id = state._next_id
-                status, body = state.enqueue_command(
-                    DRIVE_RELEASE, {"command_id": 5}, peer="server", internal=True
-                )
-                self.assertEqual((status, body), (409, {"error": error}))
-                self.assertEqual(state._next_id, before_id)
-                self.assertEqual(bound_queue(state, "server"), [])
-
-        # Admitted under the current census, then dropped at delivery to a peer
-        # whose poll census omits infected_drive_release.
-        state = _bound_state()
-        _announce(state, full, EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        status, body = state.enqueue_command(
-            DRIVE_RELEASE, {"command_id": 5}, peer="server", internal=True
-        )
-        self.assertEqual(status, 200, body)
-        self.assertEqual(_delivered(state, without_release), [])
-        self.assertEqual(
-            state.take_result(body["id"])["error"], "bridge_capability_missing"
-        )
-        self.assertEqual(bound_queue(state, "server"), [])
-
     def test_a_drive_the_queue_drops_at_the_lease_end_is_cancelled_not_released(self) -> None:
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
@@ -507,34 +402,18 @@ class InfectedDriveBrokerTest(unittest.TestCase):
         self.assertEqual(_delivered(state), [])
 
     def test_a_close_the_bridge_is_not_handed_and_quarantine_are_reported(self) -> None:
-        for name in ("missing_release", "retail_quarantine"):
-            with self.subTest(name=name):
-                state, coordinator = _leased_state()
-                token = _acquire(coordinator, OWNER_A)
-                drive = _send(state, OWNER_A, token, DRIVE_WIRE)
-                self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
-                _answered(state, drive)
-                if name == "missing_release":
-                    _announce(
-                        state,
-                        [cmd for cmd in _full_commands() if cmd != DRIVE_RELEASE],
-                        EXPECTED_SERVER_ARG_CONTRACT_HASH,
-                    )
-                else:
-                    state.retail_probe = lambda: {"known": False}
-                released = _release(coordinator, OWNER_A, token)
-                self.assertNotIn(
-                    DRIVE_RELEASE, [row["cmd"] for row in bound_queue(state, "server")]
-                )
-                self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
-                self.assertNotIn("infected_drive_release_unconfirmed", released["cleanup_degraded"])
-                if name == "missing_release":
-                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
-                    _lease_close(state)
-                else:
-                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 0)
-                    self.assertIn("retail_quarantine", released["cleanup_degraded"])
-                    self.assertEqual(_delivered(state), [])
+        state, coordinator = _leased_state()
+        token = _acquire(coordinator, OWNER_A)
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
+        _answered(state, drive)
+        state.retail_probe = lambda: {"known": False}
+        released = _release(coordinator, OWNER_A, token)
+        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+        self.assertNotIn("infected_drive_release_unconfirmed", released["cleanup_degraded"])
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 0)
+        self.assertIn("retail_quarantine", released["cleanup_degraded"])
+        self.assertEqual(_delivered(state), [])
 
     def test_a_lease_end_after_the_run_ended_queues_and_degrades_nothing(self) -> None:
         state, coordinator = _leased_state()
@@ -548,65 +427,6 @@ class InfectedDriveBrokerTest(unittest.TestCase):
         self.assertEqual(released["cleanup_degraded"], [])
         self.assertEqual(bound_queue(state, "server"), [])
         self.assertEqual(state._fire_and_forget_ids, set())
-
-    def test_abandoning_a_delivered_drive_queues_its_release(self) -> None:
-        state = _bound_state()
-        _announce(state, _full_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        status, drive = state.enqueue_command(COMMAND, dict(DRIVE_WIRE), peer="server")
-        self.assertEqual(status, 200, drive)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive["id"]])
-        abandoned = state.abandon_command(drive["id"], "tool_timeout")
-        self.assertEqual(abandoned.get("status"), "release_queued", abandoned)
-        self.assertEqual(
-            _delivered(state),
-            [
-                {
-                    "id": abandoned["release_id"],
-                    "cmd": DRIVE_RELEASE,
-                    "args": {"command_id": drive["id"]},
-                }
-            ],
-        )
-
-        # Abandoned before delivery: dropped without queuing a release.
-        status, queued = state.enqueue_command(COMMAND, dict(DRIVE_WIRE), peer="server")
-        self.assertEqual(status, 200, queued)
-        self.assertEqual(
-            state.abandon_command(queued["id"], "cancelled"), {"status": "dropped"}
-        )
-        self.assertEqual(_delivered(state), [])
-
-    def test_a_drive_abandoned_after_its_result_is_stored_goes_on_until_the_lease_ends(self) -> None:
-        state, coordinator = _leased_state()
-        token = _acquire(coordinator, OWNER_A)
-        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
-        state.store_result(
-            {"id": drive, "ok": 1, "pos_real": list(POS)},
-            instance=INST_SERVER,
-        )
-        self.assertEqual(
-            state.abandon_command(drive, "tool_timeout"), {"status": "noop"}
-        )
-        self.assertEqual(_delivered(state), [])
-        released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
-        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
-        _lease_close(state)
-        self.assertEqual(_delivered(state), [])
-
-    def test_a_running_drive_abandoned_under_quarantine_queues_no_release(self) -> None:
-        state = _bound_state()
-        _announce(state, _full_commands(), EXPECTED_SERVER_ARG_CONTRACT_HASH)
-        status, drive = state.enqueue_command(COMMAND, dict(DRIVE_WIRE), peer="server")
-        self.assertEqual(status, 200, drive)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive["id"]])
-        state.retail_probe = lambda: {"known": False}
-        self.assertEqual(
-            state.abandon_command(drive["id"], "cancelled"),
-            {"status": "cleanup_degraded", "cause": "quarantine"},
-        )
-        self.assertEqual(bound_queue(state, "server"), [])
 
 
 class InfectedDriveEnforceSourceTest(unittest.TestCase):
@@ -622,7 +442,6 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
             class_members(self.drive_raw, "MCPInfectedDriveEntry"),
             [
                 ("DayZInfected", "infected"),
-                ("int", "command_id"),
                 ("float", "heading_rad"),
                 ("float", "speed"),
             ],
@@ -673,8 +492,7 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
         shutdown = _method_body(self.drive, "static void ShutdownAll()")
         _in_order(self, shutdown, "Disable(entry.infected);", "s_Driven.Clear();")
 
-    def test_bridge_hooks_and_dispatch_wire_infected_drive_and_release(self) -> None:
-        self.assertIn("infected_drive_release,", self.bridge)
+    def test_bridge_hooks_and_dispatch_wire_infected_drive(self) -> None:
         self.assertIn(
             f'SERVER_ARG_CONTRACT_HASH = "{EXPECTED_SERVER_ARG_CONTRACT_HASH}";',
             self.bridge,
@@ -705,7 +523,6 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
             'else if (command.cmd == "infected_drive")',
             'else if (command.cmd == "survivor_drive")',
             'else if (command.cmd == "survivor_drive_release")',
-            'else if (command.cmd == "infected_drive_release")\n\t\t{\n\t\t\tpostNow = DispatchInfectedDriveRelease(command, result);',
             'else if (command.cmd == "entities_query")',
         )
 
@@ -720,22 +537,19 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
             "controller.OverrideMovementSpeed(false, 0.0);",
             "controller.OverrideHeading(false, 0.0);",
             "controller.OverrideTurnSpeed(false, 0.0);",
-            "MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed, command.id);",
+            "MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed);",
             "result.ok = true;",
         )
 
-        release_body = _method_body(
-            self.bridge,
-            "protected bool DispatchInfectedDriveRelease(MCPCommand command, MCPResult result)",
-        )
-        _in_order(
-            self,
-            release_body,
-            "if (!command.args || command.args.command_id <= 0)",
-            'result.error = "bad_args";',
-            "result.matched = MCPInfectedDrive.ReleaseCommand(command.args.command_id);",
-            "result.ok = true;",
-        )
+    def test_no_infected_drive_release_command_because_the_poll_url_has_no_room(self) -> None:
+        # No infected_drive_release anywhere: any new server command name
+        # pushes the saturated server poll URL with the Expansion AI adapter
+        # past the engine's 1024-character limit (ENGINE_URL_MAX).
+        self.assertNotIn(DRIVE_RELEASE, loopback.WHITELISTED_COMMANDS)
+        self.assertNotIn(DRIVE_RELEASE, loopback.SERVER_COMMANDS)
+        self.assertNotIn(DRIVE_RELEASE, self.bridge)
+        self.assertNotIn(DRIVE_RELEASE, server.SERVER_ARG_CONTRACT)
+        self.assertEqual(EXPECTED_SERVER_ARG_CONTRACT_HASH, "3b800b7c7ee0674c")
 
     def test_the_lease_close_shuts_the_registry_down_before_the_infected_record(self) -> None:
         close = _method_body(
@@ -754,9 +568,8 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
 
 
 DRIVE_METHODS = (
-    "static void Drive(DayZInfected infected, float headingRad, float speed, int commandId)",
+    "static void Drive(DayZInfected infected, float headingRad, float speed)",
     "static void Release(DayZInfected infected)",
-    "static bool ReleaseCommand(int commandId)",
     "static void Tick()",
     "static void ShutdownAll()",
     "protected static void Apply(DayZInfected infected, MCPInfectedDriveEntry entry)",
@@ -918,6 +731,22 @@ class _Array:
             )
 
 
+class _OverriddenArray(_Array):
+    """array<DayZInfected> as DispatchInfectedDrive uses m_InfectedOverridden:
+    Find and RemoveItem by identity, Insert as _Array."""
+
+    def Find(self, value: object) -> int:
+        for index, item in enumerate(self.items):
+            if item is value:
+                return index
+        return -1
+
+    def RemoveItem(self, value: object) -> None:
+        index = self.Find(value)
+        if index >= 0:
+            del self.items[index]
+
+
 class _DriveModel:
     """MCPInfectedDrive's methods (MCP_InfectedDrive.c), translated and run on
     one registry (s_Driven, here G.s_Driven)."""
@@ -926,7 +755,6 @@ class _DriveModel:
         drive = DRIVE.read_text(encoding="utf-8")
         self.G = SimpleNamespace(s_Driven=None)
         self.world: list[object] = []
-        self._next_command_id = 100
         entry = declared_fields(drive, "MCPInfectedDriveEntry")
         self.namespace: dict[str, object] = {
             "G": self.G,
@@ -979,20 +807,15 @@ class _DriveModel:
         infected: _Infected,
         heading_deg: float,
         speed: float,
-        command_id: int | None = None,
     ) -> None:
-        if command_id is None:
-            self._next_command_id += 1
-            command_id = self._next_command_id
-        self.call("Drive", infected, math.radians(heading_deg), speed, command_id)
+        self.call("Drive", infected, math.radians(heading_deg), speed)
 
-    def registry(self) -> list[tuple[object, int, float, float]]:
+    def registry(self) -> list[tuple[object, float, float]]:
         if self.G.s_Driven is None:
             return []
         return [
             (
                 entry.infected,
-                entry.command_id,
                 round(entry.heading_rad, 9),
                 entry.speed,
             )
@@ -1010,7 +833,6 @@ class _DriveModel:
 HANDLER_METHODS = (
     "protected bool IsFiniteFloat(float value)",
     "protected bool DispatchInfectedDrive(MCPCommand command, MCPResult result)",
-    "protected bool DispatchInfectedDriveRelease(MCPCommand command, MCPResult result)",
 )
 HOOK_METHODS = (
     "void OnTick(float timeslice)",
@@ -1075,8 +897,8 @@ class _Result(SimpleNamespace):
 
 
 class _HandlerModel(_DriveModel):
-    """_DriveModel with MCPBridge.c's DispatchInfectedDrive,
-    DispatchInfectedDriveRelease, OnTick and Shutdown translated on top."""
+    """_DriveModel with MCPBridge.c's DispatchInfectedDrive, OnTick and
+    Shutdown translated on top."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1157,6 +979,7 @@ class _HandlerModel(_DriveModel):
             m_PollVersion=EnforceString(b""),
             m_Players=None,
             m_Ctx=SimpleNamespace(reset=lambda: None),
+            m_InfectedOverridden=_OverriddenArray(),
             **{
                 name: _Array()
                 for name in (
@@ -1227,7 +1050,6 @@ class _HandlerModel(_DriveModel):
         result = _Result(**fresh_fields)
         handler = {
             COMMAND: "DispatchInfectedDrive",
-            DRIVE_RELEASE: "DispatchInfectedDriveRelease",
         }[cmd]
         post_now = self.handlers[handler](command, result)
         return result, post_now
@@ -1245,10 +1067,10 @@ class InfectedDriveModelTest(unittest.TestCase):
 
     def test_a_drive_registers_and_a_second_drive_replaces_it(self) -> None:
         infected = self.model.spawn()
-        self.model.drive(infected, 90.0, 2.5, command_id=41)
+        self.model.drive(infected, 90.0, 2.5)
         self.assertEqual(
             self.model.registry(),
-            [(infected, 41, round(math.radians(90.0), 9), 2.5)],
+            [(infected, round(math.radians(90.0), 9), 2.5)],
         )
         self.assertEqual(
             infected.controller.driving(),
@@ -1263,10 +1085,10 @@ class InfectedDriveModelTest(unittest.TestCase):
             ],
         )
 
-        self.model.drive(infected, 180.0, 3.0, command_id=42)
+        self.model.drive(infected, 180.0, 3.0)
         self.assertEqual(
             self.model.registry(),
-            [(infected, 42, round(math.radians(180.0), 9), 3.0)],
+            [(infected, round(math.radians(180.0), 9), 3.0)],
         )
         self.assertEqual(
             infected.controller.driving(),
@@ -1275,14 +1097,14 @@ class InfectedDriveModelTest(unittest.TestCase):
 
     def test_the_tick_reapplies_all_three_overrides_after_ai_reset(self) -> None:
         infected = self.model.spawn()
-        self.model.drive(infected, 90.0, 2.5, command_id=41)
+        self.model.drive(infected, 90.0, 2.5)
         infected.controller.reset_by_ai()
         self.assertIsNone(infected.controller.driving())
 
         self.model.call("Tick")
         self.assertEqual(
             self.model.registry(),
-            [(infected, 41, round(math.radians(90.0), 9), 2.5)],
+            [(infected, round(math.radians(90.0), 9), 2.5)],
         )
         self.assertEqual(
             infected.controller.driving(),
@@ -1306,6 +1128,12 @@ class InfectedDriveModelTest(unittest.TestCase):
         self.assertEqual(result_drive.pos_real.items, list(POS))
         self.assertEqual(result_drive.type, EnforceString.of(INFECTED_TYPE))
         self.assertIs(result_drive.found, True)
+        self.assertEqual(model.bridge.m_InfectedOverridden.items, [infected])
+
+        # A second drive on the same infected records it only once.
+        result_second, _post_now = model.dispatch(44, COMMAND, DRIVE_WIRE)
+        self.assertIs(result_second.ok, True)
+        self.assertEqual(model.bridge.m_InfectedOverridden.items, [infected])
 
         infected.position = (4205.0, 338.66, 10610.0)
         result_rel, _post_now = model.dispatch(
@@ -1315,6 +1143,7 @@ class InfectedDriveModelTest(unittest.TestCase):
         )
         self.assertIs(result_rel.ok, True)
         self.assertEqual(model.registry(), [])
+        self.assertEqual(model.bridge.m_InfectedOverridden.items, [])
         self.assertIsNone(infected.controller.driving())
         self.assertEqual(
             infected.controller.calls[-3:],
@@ -1348,9 +1177,9 @@ class InfectedDriveModelTest(unittest.TestCase):
         dying = self.model.spawn((4200.0, 338.66, 10610.0))
         vanishing = self.model.spawn((4250.0, 338.66, 10610.0))
         staying = self.model.spawn((4300.0, 338.66, 10610.0))
-        self.model.drive(dying, 0.0, 1.0, command_id=10)
-        self.model.drive(vanishing, 90.0, 2.0, command_id=11)
-        self.model.drive(staying, 180.0, 3.0, command_id=12)
+        self.model.drive(dying, 0.0, 1.0)
+        self.model.drive(vanishing, 90.0, 2.0)
+        self.model.drive(staying, 180.0, 3.0)
 
         dying.alive = False
         vanishing_calls_before = list(vanishing.controller.calls)
@@ -1360,7 +1189,7 @@ class InfectedDriveModelTest(unittest.TestCase):
         self.model.call("Tick")
         self.assertEqual(
             self.model.registry(),
-            [(staying, 12, round(math.radians(180.0), 9), 3.0)],
+            [(staying, round(math.radians(180.0), 9), 3.0)],
         )
         self.assertIsNone(dying.controller.driving())
         self.assertEqual(vanishing.controller.calls, vanishing_calls_before)
@@ -1380,9 +1209,9 @@ class InfectedDriveModelTest(unittest.TestCase):
         first = self.model.spawn((4200.0, 338.66, 10610.0))
         middle = self.model.spawn((4250.0, 338.66, 10610.0))
         last = self.model.spawn((4300.0, 338.66, 10610.0))
-        self.model.drive(first, 0.0, 1.0, command_id=21)
-        self.model.drive(middle, 90.0, 2.5, command_id=22)
-        self.model.drive(last, 180.0, 3.0, command_id=23)
+        self.model.drive(first, 0.0, 1.0)
+        self.model.drive(middle, 90.0, 2.5)
+        self.model.drive(last, 180.0, 3.0)
 
         first.alive = False
         last.alive = False
@@ -1391,61 +1220,13 @@ class InfectedDriveModelTest(unittest.TestCase):
 
         self.assertEqual(
             self.model.registry(),
-            [(middle, 22, round(math.radians(90.0), 9), 2.5)],
+            [(middle, round(math.radians(90.0), 9), 2.5)],
         )
         self.assertIsNone(first.controller.driving())
         self.assertIsNone(last.controller.driving())
         self.assertEqual(
             middle.controller.driving(),
             (round(2.0 * math.pi, 9), 2.5, round(math.radians(90.0), 9)),
-        )
-
-    def test_release_command_drops_matching_entries_including_daemon_restart_duplicates(
-        self,
-    ) -> None:
-        model = _HandlerModel()
-        first = model.spawn((4200.0, 338.66, 10610.0))
-        second = model.spawn((4260.0, 338.66, 10610.0))
-        third = model.spawn((4320.0, 338.66, 10610.0))
-        model.dispatch(41, COMMAND, DRIVE_WIRE)
-        model.dispatch(
-            42, COMMAND, {**DRIVE_WIRE, "pos": [4260.0, 338.66, 10610.0], "heading": 0.0}
-        )
-        # Replace first's drive with command 43: releasing 41 now matches nothing.
-        res_replace, _ = model.dispatch(
-            43, COMMAND, {**DRIVE_WIRE, "heading": 270.0, "speed": 3.0}
-        )
-        self.assertIs(res_replace.ok, True)
-
-        for bad in (None, {}, {"command_id": 0}, {"command_id": -5}):
-            with self.subTest(wire=bad):
-                res_bad, post_now = model.dispatch(50, DRIVE_RELEASE, bad)
-                self.assertIs(post_now, True)
-                self.assertEqual(
-                    (res_bad.ok, res_bad.error, res_bad.matched),
-                    (False, EnforceString.of("bad_args"), False),
-                )
-
-        writes_before = model.writes()
-        res_stale, _ = model.dispatch(51, DRIVE_RELEASE, {"command_id": 41})
-        self.assertEqual((res_stale.ok, res_stale.matched), (True, False))
-        self.assertEqual(model.writes(), writes_before)
-
-        # Simulate daemon restart reusing command id 42 on a third infected while an
-        # unleased entry from the prior daemon still carries 42 on `second`.
-        model.dispatch(
-            42,
-            COMMAND,
-            {**DRIVE_WIRE, "pos": [4320.0, 338.66, 10610.0], "heading": 45.0},
-        )
-        res_match, _ = model.dispatch(52, DRIVE_RELEASE, {"command_id": 42})
-        self.assertEqual((res_match.ok, res_match.matched), (True, True))
-        self.assertIsNone(second.controller.driving())
-        self.assertIsNone(third.controller.driving())
-        self.assertIsNotNone(first.controller.driving())
-        self.assertEqual(
-            model.registry(),
-            [(first, 43, round(math.radians(270.0), 9), 3.0)],
         )
 
     def test_each_refusal_of_dispatch_infected_drive_changes_nothing(self) -> None:
@@ -1523,6 +1304,8 @@ class InfectedDriveModelTest(unittest.TestCase):
             infected.controller.driving(),
             (round(2.0 * math.pi, 9), 3.0, round(math.radians(180.0), 9)),
         )
+        # Two drives on the same infected record it once in m_InfectedOverridden.
+        self.assertEqual(model.bridge.m_InfectedOverridden.items, [infected])
         released = _release(coordinator, OWNER_A, token)
         self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
         self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
@@ -1580,7 +1363,7 @@ class InfectedDriveBridgeHookTest(unittest.TestCase):
         self.assertIsNone(self.second.controller.driving())
         self.assertEqual(
             self.model.registry(),
-            [(self.first, 41, round(math.radians(90.0), 9), 2.5)],
+            [(self.first, round(math.radians(90.0), 9), 2.5)],
         )
 
     def test_the_bridge_shutdown_ends_every_drive(self) -> None:

@@ -254,8 +254,6 @@ def _minimal_args(cmd: str) -> dict:
         return {"object_id": 1, "mode": "release"}
     if cmd == "survivor_drive_release":
         return {"command_id": 1, "object_id": 1}
-    if cmd == "infected_drive_release":
-        return {"command_id": 1}
     if cmd == "camera_path_release":
         return {"command_id": 1}
     if cmd == "ai_group_spawn":

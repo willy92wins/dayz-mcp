@@ -3040,16 +3040,6 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("object_id", {"emote": "sita", "wait_s": 10.0, "object_id": 1}, (False, "bad_args")),
         ("extra_key", {"emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
     ),
-    # infected_drive_release (7c86), internal: the id of one drive command.
-    "infected_drive_release": (
-        ("valid", {"command_id": 1}, (True, None)),
-        ("zero", {"command_id": 0}, (False, "bad_args")),
-        ("negative", {"command_id": -1}, (False, "bad_args")),
-        ("bool", {"command_id": True}, (False, "bad_args")),
-        ("string", {"command_id": "1"}, (False, "bad_args")),
-        ("missing", {}, (False, "bad_args")),
-        ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
-    ),
     # ai_emote (36fa NPC): actor_emote's catalog and bounds plus object_id.
     "ai_emote": (
         ("valid", {"object_id": 1, "emote": "nod", "wait_s": 10.0}, (True, None)),
