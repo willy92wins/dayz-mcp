@@ -692,7 +692,7 @@ class HealGodmodeCensusTest(unittest.TestCase):
                 self.assertNotIn(command, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
         self.assertIn('protected const string SERVER_ARG_CONTRACT_HASH = "8ac18200322451d8";', self.bridge)
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', _source(MESSAGES_PATH))
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', _source(MESSAGES_PATH))
 
 
 # --- the heal, run --------------------------------------------------------------
@@ -1409,6 +1409,23 @@ class GodmodeTopUpTest(unittest.TestCase):
         self.assertEqual(godmode.G.s_TopUpAccumS, 0.0)
 
 
+class _ConnGenPlayer:
+    """Player double for the conn-gen mission hooks (§2.5)."""
+
+    def __init__(self, gen: int = 0) -> None:
+        self._gen = gen
+        self.calls: list[tuple[Any, ...]] = []
+
+    def MCPConnGenValue(self) -> int:
+        return self._gen
+
+    def MCPSetConnGen(self, value: int) -> None:
+        self.calls.append(("MCPSetConnGen", value))
+
+    def MCPSendConnGen(self, identity: Any) -> None:
+        self.calls.append(("MCPSendConnGen", identity))
+
+
 class GodmodeMissionHookTest(unittest.TestCase):
     """The MissionServer overrides translated and run, in their order."""
 
@@ -1443,11 +1460,28 @@ class GodmodeMissionHookTest(unittest.TestCase):
         return order
 
     def test_a_connecting_body_gets_godmode_after_vanilla(self) -> None:
-        player, identity = object(), object()
+        order_player = _ConnGenPlayer()
+        identity = object()
+        order = self._run(INVOKE_ON_CONNECT, order_player, identity)
+        # §2.5: vanilla first, then godmode, then the body is named gen 1.
         self.assertEqual(
-            self._run(INVOKE_ON_CONNECT, player, identity),
-            [("super", "InvokeOnConnect", player, identity), ("MCPGodmode", "OnBodyReady", player, identity)],
+            order,
+            [
+                ("super", "InvokeOnConnect", order_player, identity),
+                ("MCPGodmode", "OnBodyReady", order_player, identity),
+            ],
         )
+        self.assertEqual(order_player.calls, [("MCPSetConnGen", 1), ("MCPSendConnGen", identity)])
+
+    def test_a_reconnecting_body_gets_the_next_generation_after_vanilla(self) -> None:
+        # §2.5/§2.8: the reconnect override bumps the body's generation, so
+        # a close of the old connection cannot touch the new one's floors.
+        signature = "override void OnClientReconnectEvent(PlayerIdentity identity, PlayerBase player)"
+        player = _ConnGenPlayer(gen=3)
+        identity = object()
+        order = self._run(signature, identity, player)
+        self.assertEqual(order[0], ("super", "OnClientReconnectEvent", identity, player))
+        self.assertEqual(player.calls, [("MCPSetConnGen", 4), ("MCPSendConnGen", identity)])
 
     def test_a_respawning_or_leaving_body_is_released_before_vanilla(self) -> None:
         player, identity = object(), object()

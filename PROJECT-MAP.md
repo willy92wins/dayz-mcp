@@ -19,6 +19,9 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 | 296-servermod: pruebas públicas y preflight | `tools/tests/test_server_only_mods.py`; regresiones en `test_dayz_test_request.py`, `test_dayz_test_tool.py`, `test_dayz_test_worker.py`, `test_dayz_test_storage.py`, `test_request_path_authority.py` bajo `tools/tests/` |
 | B1-P2: préstamo de profile, transición recuperable y reconciliación de endpoint | `tools/dayz_mcp/loopback.py` |
 | B1-P2: regresiones de salida abrupta sin finally y prior presente/ausente | `tools/tests/test_b1p2_profile_not_persisted.py` |
+| Expansion AI adapter (optional PBO) | `addon_expansion_ai/` (`$PBOPREFIX$`, `config.cpp`, `scripts/5_Mission/MCPExpansionAI.c`); guide `docs/expansion-ai-adapter.md` |
+| Expansion AI adapter: `ai_group_state` (90f9) | `addon_expansion_ai/scripts/5_Mission/MCPExpansionAI.c` (DispatchAIGroupState); tool en `tools/dayz_mcp/server.py`; admisión en `tools/dayz_mcp/loopback.py` y `tools/dayz_mcp/bridge_readiness.py`; `tools/tests/test_xai_group_state.py`; doc en `docs/expansion-ai-adapter.md` |
+| Expansion AI adapter: `ai_emote` (36fa NPC) | `addon_expansion_ai/scripts/5_Mission/MCPExpansionAI.c` (DispatchAIEmote); parámetro `object_id` de `actor_emote` en `tools/dayz_mcp/server.py`; admisión en `tools/dayz_mcp/loopback.py` y `tools/dayz_mcp/bridge_readiness.py`; `tools/tests/test_xai_emote.py`; doc en `docs/expansion-ai-adapter.md` |
 | Plans | `plans` |
 | Reviews | `reviews` |
 | Decisions | `decisions` (ausente en este checkout) |
@@ -33,42 +36,43 @@ Detener la lectura inicial en `LIVE-STATE:END`; buscar después solo las seccion
 No fijar números de línea, límites de lectura ni tamaños: el bloque cambia en cada cierre.
 El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
-## Enforce scripts (26 files, 762 KB)
+## Enforce scripts (27 files, 840 KB)
 
 Rutas relativas a la fuente del mod: `addon`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
 
 **4_World/**
 
-- `scripts/4_World/MCP_ActionHold.c` - 15 KB
+- `scripts/4_World/MCP_ActionHold.c` - 29 KB
 - `scripts/4_World/MCP_AnimTimeline.c` - 14 KB
+- `scripts/4_World/MCP_BotState.c` - 472 B
 - `scripts/4_World/MCP_CarDoor.c` - 4 KB
 - `scripts/4_World/MCP_CarScript.c` - 20 KB
 - `scripts/4_World/MCP_DiagPlugins.c` - 3 KB
 - `scripts/4_World/MCP_Emote.c` - 2 KB
 - `scripts/4_World/MCP_InventoryMove.c` - 7 KB
-- `scripts/4_World/MCP_LookAt.c` - 24 KB
+- `scripts/4_World/MCP_LookAt.c` - 34 KB
 - `scripts/4_World/MCP_PlayerCare.c` - 15 KB
-- `scripts/4_World/MCP_PlayerMove.c` - 31 KB
+- `scripts/4_World/MCP_PlayerMove.c` - 34 KB
 - `scripts/4_World/MCP_PlayerTrace.c` - 17 KB
-- `scripts/4_World/MCP_Weapon.c` - 34 KB
+- `scripts/4_World/MCP_Weapon.c` - 37 KB
 
 **5_Mission/**
 
 - `scripts/5_Mission/MCP_ActionCursor.c` - 7 KB
-- `scripts/5_Mission/MCP_BotControl.c` - 8 KB
+- `scripts/5_Mission/MCP_BotControl.c` - 10 KB
 - `scripts/5_Mission/MCP_CameraPath.c` - 11 KB
-- `scripts/5_Mission/MCP_SurvivorDrive.c` - 6 KB
-- `scripts/5_Mission/MCPBridge.c` - 215 KB
+- `scripts/5_Mission/MCP_SurvivorDrive.c` - 8 KB
+- `scripts/5_Mission/MCPBridge.c` - 234 KB
 - `scripts/5_Mission/MCPCallbacks.c` - 2 KB
 - `scripts/5_Mission/MCPChatLog.c` - 12 KB
-- `scripts/5_Mission/MCPClientBridge.c` - 237 KB
+- `scripts/5_Mission/MCPClientBridge.c` - 252 KB
 - `scripts/5_Mission/MCPDialogController.c` - 17 KB
-- `scripts/5_Mission/MCPJobRunner.c` - 2 KB
-- `scripts/5_Mission/MCPMessages.c` - 48 KB
+- `scripts/5_Mission/MCPJobRunner.c` - 3 KB
+- `scripts/5_Mission/MCPMessages.c` - 49 KB
 - `scripts/5_Mission/MCPVehicleEject.c` - 12 KB
 - `scripts/5_Mission/MissionGameplay.c` - 2 KB
-- `scripts/5_Mission/MissionServer.c` - 2 KB
+- `scripts/5_Mission/MissionServer.c` - 3 KB
 
 - **config.cpp** -> `addon\config.cpp` (536 B)
 
@@ -96,12 +100,12 @@ Documentos `.md` de la raíz; el mapa se excluye del inventario para evitar auto
 - `HANDOFF.md` - estado vivo; leer hasta `LIVE-STATE:END`.
 - `AGENTS.md` - 381 B, touched 2026-11-01 (UTC)
 - `ARCHITECTURE-DECISIONS.md` - 11 KB, touched 2026-11-01 (UTC)
-- `CHANGELOG.md` - 210 KB, touched 2026-11-12 (UTC)
+- `CHANGELOG.md` - 230 KB, touched 2026-11-13 (UTC)
 - `CLAUDE.md` - 7 KB, touched 2026-11-11 (UTC)
 - `dayz-harness-apis.md` - 26 KB, touched 2026-11-01 (UTC)
 - `dayz-mcp-architecture.md` - 25 KB, touched 2026-11-10 (UTC)
 - `GATES.md` - 4 KB, touched 2026-11-01 (UTC)
-- `product-spec.md` - 73 KB, touched 2026-11-11 (UTC)
+- `product-spec.md` - 75 KB, touched 2026-11-12 (UTC)
 - `QUICKSTART.md` - 6 KB, touched 2026-11-05 (UTC)
 - `README.md` - 39 KB, touched 2026-11-11 (UTC)
 

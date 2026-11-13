@@ -154,7 +154,83 @@ _BATCH_ITEM: dict[str, object] = {
 }
 
 
+_AI_SPAWN: dict[str, object] = {
+    "faction": "West",
+    "count": 2,
+    "pos": [1.0, 2.0, 3.0],
+    "loadout": "",
+    "formation": "Vee",
+    "behaviour": "HOLD",
+    "waypoints": [],
+    "spawn_token": "a" * 32,
+}
+
+
 _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
+    # Expansion AI adapter (plan 3.1/3.6/4): flat waypoint triples, a
+    # 32-hex token, scene_id only when a scene is named.
+    "ai_group_spawn": (
+        ("valid", dict(_AI_SPAWN), (True, None)),
+        ("valid_scene", {**_AI_SPAWN, "scene_id": "xai"}, (True, None)),
+        ("valid_waypoints", {**_AI_SPAWN, "waypoints": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}, (True, None)),
+        ("count_zero", {**_AI_SPAWN, "count": 0}, (False, "bad_args")),
+        ("count_nine", {**_AI_SPAWN, "count": 9}, (False, "bad_args")),
+        ("count_float", {**_AI_SPAWN, "count": 1.5}, (False, "bad_args")),
+        ("count_bool", {**_AI_SPAWN, "count": True}, (False, "bad_args")),
+        ("behaviour_lower", {**_AI_SPAWN, "behaviour": "hold"}, (False, "bad_args")),
+        ("waypoints_not_triples", {**_AI_SPAWN, "waypoints": [1.0, 2.0]}, (False, "bad_args")),
+        ("waypoints_nan", {**_AI_SPAWN, "waypoints": [1.0, float("nan"), 3.0]}, (False, "bad_args")),
+        ("waypoints_33", {**_AI_SPAWN, "waypoints": [0.0] * 99}, (False, "bad_args")),
+        ("waypoints_huge_int", {**_AI_SPAWN, "waypoints": [10**400, 0, 0]}, (False, "bad_args")),
+        ("pos_two", {**_AI_SPAWN, "pos": [1.0, 2.0]}, (False, "bad_args")),
+        ("token_upper", {**_AI_SPAWN, "spawn_token": "A" * 32}, (False, "bad_args")),
+        ("loadout_slash", {**_AI_SPAWN, "loadout": "a/b"}, (False, "bad_args")),
+        ("faction_empty", {**_AI_SPAWN, "faction": ""}, (False, "bad_args")),
+        ("faction_65", {**_AI_SPAWN, "faction": "a" * 65}, (False, "bad_args")),
+        ("scene_bad", {**_AI_SPAWN, "scene_id": "a*"}, (False, "bad_args")),
+        ("missing_token", {k: v for k, v in _AI_SPAWN.items() if k != "spawn_token"}, (False, "bad_args")),
+        ("extra_key", {**_AI_SPAWN, "extra": None}, (False, "bad_args")),
+    ),
+    "ai_group_order": (
+        ("valid_behaviour", {"group_id": 1, "behaviour": "HOLD"}, (True, None)),
+        ("valid_formation", {"group_id": 1, "formation": "Vee"}, (True, None)),
+        ("valid_waypoints", {"group_id": 1, "waypoints": [1.0, 2.0, 3.0]}, (True, None)),
+        ("valid_speed", {"group_id": 1, "speed": 3, "speed_set": True}, (True, None)),
+        ("lowercase_behaviour", {"group_id": 1, "behaviour": "hold"}, (False, "bad_args")),
+        ("group_id_zero", {"group_id": 0, "behaviour": "LOOP"}, (False, "bad_args")),
+        ("group_id_bool", {"group_id": True, "behaviour": "LOOP"}, (False, "bad_args")),
+        ("speed_four", {"group_id": 1, "speed": 4, "speed_set": True}, (False, "bad_args")),
+        ("speed_float", {"group_id": 1, "speed": 2.0, "speed_set": True}, (False, "bad_args")),
+        ("speed_set_false", {"group_id": 1, "speed": 2, "speed_set": False}, (False, "bad_args")),
+        ("speed_without_set", {"group_id": 1, "speed": 2}, (False, "bad_args")),
+        ("set_without_speed", {"group_id": 1, "speed_set": True}, (False, "bad_args")),
+        ("waypoints_not_triples", {"group_id": 1, "waypoints": [1.0, 2.0]}, (False, "bad_args")),
+        ("waypoints_empty", {"group_id": 1, "waypoints": []}, (False, "bad_args")),
+        ("waypoints_33", {"group_id": 1, "waypoints": [0.0] * 99}, (False, "bad_args")),
+        ("formation_too_long", {"group_id": 1, "formation": "x" * 65}, (False, "bad_args")),
+        ("extra_key", {"group_id": 1, "behaviour": "HOLD", "extra": 1}, (False, "bad_args")),
+        ("missing_group_id", {"behaviour": "HOLD"}, (False, "bad_args")),
+    ),
+    "ai_group_release": (
+        ("valid", {"spawn_token": "a" * 32}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("short", {"spawn_token": "a" * 31}, (False, "bad_args")),
+        ("upper", {"spawn_token": "A" * 32}, (False, "bad_args")),
+        ("extra_key", {"spawn_token": "a" * 32, "group_id": 1}, (False, "bad_args")),
+    ),
+    # ai_group_state (90f9): exactly one of group_id and scene_id.
+    "ai_group_state": (
+        ("valid_group", {"group_id": 7}, (True, None)),
+        ("valid_scene", {"scene_id": "scene1"}, (True, None)),
+        ("missing", {}, (False, "bad_args")),
+        ("both_ids", {"group_id": 7, "scene_id": "scene1"}, (False, "bad_args")),
+        ("zero_group", {"group_id": 0}, (False, "bad_args")),
+        ("bool_group", {"group_id": True}, (False, "bad_args")),
+        ("float_group", {"group_id": 1.5}, (False, "bad_args")),
+        ("empty_scene", {"scene_id": ""}, (False, "bad_args")),
+        ("bad_scene", {"scene_id": "a/b"}, (False, "bad_args")),
+        ("extra_key", {"group_id": 7, "extra": None}, (False, "bad_args")),
+    ),
     "gameplay_state": (
         ("valid_empty", {}, (True, None)),
         ("extra_key", {"extra": None}, (False, "bad_args")),
@@ -2973,6 +3049,20 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("string", {"command_id": "1"}, (False, "bad_args")),
         ("missing", {}, (False, "bad_args")),
         ("extra_key", {"command_id": 1, "extra": None}, (False, "bad_args")),
+    ),
+    # ai_emote (36fa NPC): actor_emote's catalog and bounds plus object_id.
+    "ai_emote": (
+        ("valid", {"object_id": 1, "emote": "nod", "wait_s": 10.0}, (True, None)),
+        ("valid_end", {"object_id": 7, "emote": "end", "wait_s": 0.5}, (True, None)),
+        ("wait_at_maximum", {"object_id": 1, "emote": "sita", "wait_s": 30.0}, (True, None)),
+        ("unknown_emote", {"object_id": 1, "emote": "nope", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_zero", {"object_id": 0, "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_bool", {"object_id": True, "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("object_id_string", {"object_id": "1", "emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("missing_object_id", {"emote": "nod", "wait_s": 10.0}, (False, "bad_args")),
+        ("wait_below", {"object_id": 1, "emote": "sita", "wait_s": 0.49}, (False, "bad_args")),
+        ("wait_nan", {"object_id": 1, "emote": "sita", "wait_s": float("nan")}, (False, "bad_args")),
+        ("extra_key", {"object_id": 1, "emote": "sita", "wait_s": 10.0, "extra": None}, (False, "bad_args")),
     ),
     # survivor_drive_release (c801), internal: the id of one drive command and
     # its survivor's object_id, both required.

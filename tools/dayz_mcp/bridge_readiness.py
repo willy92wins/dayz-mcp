@@ -8,6 +8,7 @@ server.py imports every name back, so dayz_mcp.server.<name> is the same object.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from dayz_mcp.agent_loop import next_step
@@ -335,6 +336,100 @@ def server_arg_contract_hash() -> str:
 EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 
 
+# Expansion AI adapter contract (expansion-ai-adapter plan 2.2): a separate
+# contract so the adapter never changes SERVER_ARG_CONTRACT or ach=. The
+# adapter announces its hash as poll xai=. Keys are the full arg sets spawn,
+# order, state and release will use, fixed here so later PRs do not change
+# the hash. Inherited keys keep their base types (pos, object_id, speed,
+# speed_set, scene_id in MCPMessages.c MCPArgs).
+EXPANSION_AI_ARG_CONTRACT: dict[str, tuple[str, ...]] = {
+    "ai_emote": ("emote", "object_id", "wait_s"),
+    "ai_group_order": ("behaviour", "formation", "group_id", "speed", "speed_set", "waypoints"),
+    "ai_group_release": ("spawn_token",),
+    "ai_group_spawn": (
+        "behaviour",
+        "count",
+        "faction",
+        "formation",
+        "loadout",
+        "pos",
+        "scene_id",
+        "spawn_token",
+        "waypoints",
+    ),
+    "ai_group_state": ("group_id", "scene_id"),
+}
+
+# Adapter verbs are optional in the census: a run without Expansion stays
+# match when they are not announced (plan 2.2).
+EXPANSION_AI_COMMANDS = frozenset(EXPANSION_AI_ARG_CONTRACT)
+# Public adapter tools registered so far; each adapter PR adds its own, so a
+# census without them never makes the comparator demand an unshipped tool.
+EXPANSION_AI_TOOLS = frozenset({
+    "ai_group_order",
+    "ai_group_spawn",
+    "ai_group_state",
+})
+
+
+def expansion_ai_arg_contract_canonical() -> str:
+    """Stable, newline-joined `cmd=k1,k2` lines (keys sorted, cmds sorted)."""
+
+    return "\n".join(
+        f"{cmd}={','.join(keys)}"
+        for cmd, keys in sorted(EXPANSION_AI_ARG_CONTRACT.items())
+    )
+
+
+def expansion_ai_arg_contract_hash() -> str:
+    """First 16 hex chars of sha256(canonical). Must match MCPExpansionAI.c."""
+
+    import hashlib
+
+    return hashlib.sha256(
+        expansion_ai_arg_contract_canonical().encode("utf-8")
+    ).hexdigest()[:16]
+
+
+EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH = expansion_ai_arg_contract_hash()
+
+# Adapter verb announcement (r1 H3, #321): the adapter does NOT add its verb
+# names to caps= (the saturated poll would pass 1024 chars). Its poll carries
+# &xai=<16 hex>.<bitmask> instead, one bit per verb in the order below. The
+# bit order is part of the adapter contract: append only, never reorder. The
+# broker expands the mask to names before storing the census, so admission
+# and the capability comparator keep seeing names. Provisional deviation
+# from plan 2.2, pending confirmation (docs/expansion-ai-adapter.md).
+EXPANSION_AI_VERB_BITS: tuple[str, ...] = (
+    "ai_group_release",
+    "ai_group_spawn",
+    "ai_group_order",
+    "ai_group_state",
+    "ai_emote",
+)
+_XAI_ANNOUNCE = re.compile(r"\A([0-9a-f]{16})\.(0|[1-9][0-9]{0,3})\Z")
+
+
+def parse_xai(raw: str | None) -> tuple[str | None, tuple[str, ...]]:
+    """'<hash>.<mask>' -> (hash, verbs); anything else -> (None, ()).
+
+    Known bits always expand, so the verb check of plan 2.2 passes and a
+    version skew reads adapter_contract_mismatch, not adapter_not_loaded.
+    A bit this broker does not know voids the hash (fail closed).
+    """
+
+    match = _XAI_ANNOUNCE.match(raw or "")
+    if match is None:
+        return None, ()
+    bits = int(match.group(2))
+    verbs = tuple(
+        name for index, name in enumerate(EXPANSION_AI_VERB_BITS) if bits & (1 << index)
+    )
+    if bits >> len(EXPANSION_AI_VERB_BITS):
+        return None, verbs
+    return match.group(1), verbs
+
+
 # peer + command -> the public tool that fronts it, or None when the command is
 # deliberately not exposed. Hand written from the two Enforce dispatchers
 # (MCPBridge.c SERVER_CAPABILITIES, MCPClientBridge.c CLIENT_POLL_CAPS).
@@ -348,10 +443,16 @@ EXPECTED_SERVER_ARG_CONTRACT_HASH = server_arg_contract_hash()
 # poll instead of on the first failed call.
 _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
     "server": {
+        "ai_emote": "actor_emote",
+        "ai_group_order": "ai_group_order",
+        "ai_group_release": None,  # internal: the broker's abandoned-spawn cleanup
+        "ai_group_spawn": "ai_group_spawn",
+        "ai_group_state": "ai_group_state",
         "bot_start": "bot_start",
         "bot_stop": "bot_stop",
         "entities_query": "entities_query",
         "exec_enforce": None,  # not a public tool by decision
+        "lease_close": None,  # internal: broker lease close, not a public tool
         "hands_attach": "hands_attach",
         "hands_take": "hands_take",
         "infected_drive": "infected_drive",
@@ -419,6 +520,7 @@ _BRIDGE_COMMAND_TOOLS: dict[str, dict[str, str | None]] = {
         "input_describe": "input_describe",
         "input_trigger": "input_trigger",
         "key_press": "key_press",
+        "lease_close_client": None,  # internal: broker lease close, not a public tool
         "player_look_at": "player_look_at",
         "player_look_at_release": None,
         "player_move": "player_move",
@@ -499,8 +601,17 @@ def _compare_bridge_capabilities(
     # Report the same capability requirement here instead of a false match.
     if peer == "client" and "camera_path_release" not in announced_set:
         announced_tools.discard("camera_path_play")
+    optional_tools = {
+        mapping[item]
+        for item in EXPANSION_AI_COMMANDS
+        if mapping.get(item)
+    }
     not_announced = sorted(
-        tool for tool in registered_bridge_tools if tool not in announced_tools
+        tool
+        for tool in registered_bridge_tools
+        if tool not in announced_tools
+        and tool not in EXPANSION_AI_TOOLS
+        and tool not in optional_tools
     )
     agrees = not (unmapped or missing_tool or not_announced)
     announced_hash = block.get("announced_arg_contract_hash")

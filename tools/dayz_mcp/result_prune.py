@@ -142,6 +142,8 @@ PRUNABLE_FIELDS = (
     "chat_read",
     # ui_pause fills it with menu_id_before and menu_id_after, also on pause_not_opened (726c).
     "ui_pause",
+    # lease_close / lease_close_client fill it with the close census (§2.16).
+    "lease_close",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.
@@ -284,9 +286,10 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "insufficient_samples": frozenset({"server_perf"}),
     "length_m": frozenset({"nav_path_query"}),
     # actor_emote's watch (36fa). The tool drops a time its state did not reach.
-    "emote_state": frozenset({"actor_emote"}),
-    "started_after_s": frozenset({"actor_emote"}),
-    "finished_after_s": frozenset({"actor_emote"}),
+    "emote_state": frozenset({"actor_emote", "ai_emote"}),
+    "started_after_s": frozenset({"actor_emote", "ai_emote"}),
+    "finished_after_s": frozenset({"actor_emote", "ai_emote"}),
+    "emote_pending": frozenset({"ai_emote"}),
     # The local player's stance on that refusal (36fa).
     "stance": frozenset({"actor_emote"}),
     # Whether the local player is placing once action_use ran (204e).

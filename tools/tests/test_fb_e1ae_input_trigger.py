@@ -404,7 +404,7 @@ class InputTriggerCensusTest(unittest.TestCase):
         self.assertNotIn(COMMAND, server.SERVER_ARG_CONTRACT)
         self.assertEqual(server.EXPECTED_SERVER_ARG_CONTRACT_HASH, "8ac18200322451d8")
         messages = MESSAGES_PATH.read_text(encoding="utf-8")
-        self.assertIn('const string MCP_BRIDGE_VERSION = "12";', messages)
+        self.assertIn('const string MCP_BRIDGE_VERSION = "13";', messages)
 
     def test_stale_client_census_names_this_tool(self) -> None:
         announced = sorted(_BRIDGE_COMMAND_TOOLS["client"])

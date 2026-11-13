@@ -170,7 +170,7 @@ server no se entera porque no usa Steam. Ya está documentado en `dayz-test-inga
 vive en `templates/dayz-test.ps1`, que **no es el camino que usa `dayz_test_run`**.
 
 **5.4 — Aviso de cuenta de Steam.** La caja cambió de cuenta entre las 03:51 y las 04:07
-(`76561197995575711` → `76561198141021937`; `steamID64 − 76561197960265728 = ActiveUser`). Las
+(`76561198000000102` → `76561198000000101`; `steamID64 − 76561197960265728 = ActiveUser`). Las
 fixtures persistidas viven en la primera. Un ciclo que dependa de estado persistido falla sin
 decir por qué y parece un fallo de persistencia del mod.
 

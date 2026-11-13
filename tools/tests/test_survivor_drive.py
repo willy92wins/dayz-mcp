@@ -41,14 +41,15 @@ COMMAND = "survivor_drive"
 BRIDGE = addon_root() / "scripts" / "5_Mission" / "MCPBridge.c"
 DRIVE = addon_root() / "scripts" / "5_Mission" / "MCP_SurvivorDrive.c"
 MOVE = addon_root() / "scripts" / "4_World" / "MCP_PlayerMove.c"
+LOOK = addon_root() / "scripts" / "4_World" / "MCP_LookAt.c"
 MESSAGES = addon_root() / "scripts" / "5_Mission" / "MCPMessages.c"
 # The arg-contract hash of main before this verb: the PBO a user may still run.
 PREVIOUS_ARG_CONTRACT_HASH = "4f90284258023d98"
 DRIVE_WIRE = {"object_id": 7, "heading": 90.0, "heading_set": True, "speed": 1.0, "speed_set": True}
 RELEASE_WIRE = {"object_id": 7, "mode": "release"}
-# The broker's release of one drive: internal, sent by cleanup_owner and
-# RELEASE_REGISTRY with the id of the drive command and its survivor's
-# object_id.
+# The broker's release of one drive: internal, sent only by the mid-lease
+# abandon (RELEASE_REGISTRY) with the id of the drive command and its
+# survivor's object_id. A lease end sends the aggregated close instead.
 DRIVE_RELEASE = "survivor_drive_release"
 HEADING_RULE = "be a finite number of compass degrees within [-360, 360]"
 
@@ -181,6 +182,19 @@ def _delivered(state: loopback.ServerState, commands: list[str] | None = None) -
     return list(polled["commands"])
 
 
+def _lease_close(state: loopback.ServerState) -> dict:
+    """The one command a lease end now sends the server for its drives:
+    the aggregated close whose dispatch stops every drive (\u00a74 #266)."""
+    [close] = _delivered(state)
+    if close["cmd"] != "lease_close":
+        raise AssertionError(close)
+    if close["args"].get("close_lease_id") != "drive-lease-1":
+        raise AssertionError(close)
+    if close["args"].get("close_generation") != "gen-drive":
+        raise AssertionError(close)
+    return close
+
+
 def _answered(state: loopback.ServerState, command_id: int, answer: dict | None = None) -> dict | None:
     """The bridge's answer to a delivered command, stored and then taken as
     the tool takes it."""
@@ -256,15 +270,29 @@ class SurvivorDriveToolTest(unittest.IsolatedAsyncioTestCase):
     def test_the_drive_release_is_no_tool_and_the_description_says_the_lease_end_stops_a_drive(self) -> None:
         self.assertIsNone(self.app._tool_manager.get_tool(DRIVE_RELEASE))
         for part in (
-            "The end of the lease that sent the drive ends it too: the broker queues its release "
-            "(survivor_drive_release), which stops the drive only while that call's drive is the one set.",
+            "The end of the lease that sent the drive ends it too: the server's lease close stops every "
+            "drive. A reachable server whose fresh census lacks the close gets none and owes nothing "
+            "(close_not_supported), so its drives keep going; any other server the close does not reach "
+            "leaves it owed (lease_end.unconfirmed).",
             "A call that times out or is cancelled after the server received it still runs, and its "
-            "release is queued only if its result is not stored yet and the queue admits the release: "
+            "release (survivor_drive_release, which stops the drive only while that call's drive is the "
+            "one set) is queued only if its result is not stored yet and the queue admits the release: "
             "once the result is stored, nothing is queued and the drive keeps going until a "
             "mode='release' or the end of the lease.",
         ):
             self.assertIn(part, self.tool.description)
         self.assertNotIn("still runs, and its release is queued.", self.tool.description)
+        self.assertNotIn("the broker queues its release", self.tool.description)
+        # PX9 c: no close or debt for every server (close_not_supported).
+        self.assertNotIn("and a server the close does not reach leaves that close owed", self.tool.description)
+
+    def test_the_description_says_the_survivor_turns_its_body_toward_heading(self) -> None:
+        for part in (
+            "The survivor turns its body toward heading with OverrideAimChangeX pulses and then walks forward.",
+            "Measured on 2026-11-11 before the turn pulse (DayZDiag 1.30.164289, SurvivorM_Mirek):",
+            "Fifty driven at once took the server from 2433 to 1899 average fps.",
+        ):
+            self.assertIn(part, self.tool.description)
 
     async def test_each_gait_and_release_reach_the_server_as_the_ingress_takes_them(self) -> None:
         for arguments, wire in (
@@ -542,7 +570,8 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
     def test_a_drive_abandoned_after_its_result_is_stored_goes_on_until_the_lease_ends(self) -> None:
         # The result is stored before the caller takes it: the abandon of a
         # timeout or a cancel, in process or over HTTP, finds nothing running
-        # and queues nothing; the end of the lease still releases the drive.
+        # and queues nothing; the end of the lease still stops the drive,
+        # now through the close, not a per-lease release.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
@@ -562,11 +591,10 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(_delivered(state), [])
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
-        )
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
     def test_a_running_drive_abandoned_under_quarantine_queues_no_release(self) -> None:
         # Still running, but the queue does not admit the release: nothing is
@@ -582,53 +610,53 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         )
         self.assertEqual(bound_queue(state, "server"), [])
 
-    def test_the_end_of_a_lease_queues_the_release_of_its_latest_drive_of_each_survivor(self) -> None:
+    def test_the_end_of_a_lease_queues_one_close_and_no_drive_release(self) -> None:
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         first = _send(state, OWNER_A, token, DRIVE_WIRE)
         other = _send(state, OWNER_A, token, {**DRIVE_WIRE, "object_id": 9})
         latest = _send(state, OWNER_A, token, {**DRIVE_WIRE, "heading": 180.0, "speed": 3.0})
-        # A mode release names no drive: the broker keeps 9's drive id.
+        # A mode release names no drive and stops 9's drive itself.
         stop = _send(state, OWNER_A, token, {"object_id": 9, "mode": "release"})
         self.assertEqual([command["id"] for command in _delivered(state)], [first, other, latest, stop])
         for command_id in (first, other, latest, stop):
             self.assertEqual(_answered(state, command_id)["ok"], 1)
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 2)
+        # \u00a74 #266: no per-survivor release at the lease end. The one
+        # close stops every driven survivor in the bridge (ShutdownAll),
+        # and its census reads s_Driven itself.
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(
             [value for value in released["cleanup_degraded"] if value.startswith("survivor_drive")], []
         )
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [
-                (DRIVE_RELEASE, {"command_id": latest, "object_id": 7}),
-                (DRIVE_RELEASE, {"command_id": other, "object_id": 9}),
-            ],
-        )
-        self.assertEqual(state._drive_by_lease, {})
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
+        self.assertEqual(bound_queue(state, "server"), [])
 
-    def test_a_clean_lease_end_reports_the_release_count_and_no_drive_degradation(self) -> None:
-        # As bot_stop and camera_path_release: a release that went out is
-        # counted and degrades nothing, so a control client sees no conflict;
-        # survivor_drive_release_unconfirmed is for one that was not queued.
+    def test_a_clean_lease_end_reports_the_close_count_and_no_drive_degradation(self) -> None:
+        # A close that went out is counted and degrades nothing;
+        # survivor_drive_release_unconfirmed belonged to the per-lease
+        # release and is never reported at a lease end any more.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
         self.assertEqual([command["id"] for command in _delivered(state)], [drive])
         _answered(state, drive)
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup"].get("cleanup_degraded", []), [])
         self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": drive, "object_id": 7})],
-        )
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
     def test_a_lease_end_after_the_run_ended_queues_and_degrades_nothing(self) -> None:
         # Round of 2026-11-09: session_release after dayz_test_close answered
         # survivor_drive_release_unconfirmed. The close retired the server's
-        # binding, and the survivor and its drive went with that server.
+        # binding, and the survivor and its drive went with that server, so
+        # under v13 there is no per-lease release to queue and nothing
+        # degrades; the drive bookkeeping is cleared with the lease.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
@@ -638,12 +666,14 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         released = _release(coordinator, OWNER_A, token)
         self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(state._drive_by_lease, {})
+        # v13 has no per-lease drive registry: nothing is queued for the
+        # retired server and no fire-and-forget release is outstanding.
+        self.assertEqual(bound_queue(state, "server"), [])
         self.assertEqual(state._fire_and_forget_ids, set())
 
-    def test_a_drive_the_queue_drops_at_the_lease_end_leaves_the_delivered_one_named(self) -> None:
-        # The id is taken at delivery: the queued drive is discarded by the
-        # release and never runs, so the release names the one before it.
+    def test_a_drive_the_queue_drops_at_the_lease_end_is_cancelled_not_released(self) -> None:
+        # The queued drive is discarded by the release and never runs.
+        # The delivered one is stopped by the close, which names no drive.
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         delivered = _send(state, OWNER_A, token, DRIVE_WIRE)
@@ -652,13 +682,12 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
         _send(state, OWNER_A, token, {**DRIVE_WIRE, "heading": 180.0})
         released = _release(coordinator, OWNER_A, token)
         self.assertEqual(released["cleanup"]["cancelled"], 1)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
-        self.assertEqual(
-            [(command["cmd"], command["args"]) for command in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": delivered, "object_id": 7})],
-        )
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
-    def test_a_release_the_bridge_is_not_handed_is_reported(self) -> None:
+    def test_a_close_the_bridge_is_not_handed_and_quarantine_are_reported(self) -> None:
         for name in ("missing_release", "retail_quarantine"):
             with self.subTest(name=name):
                 state, coordinator = _leased_state()
@@ -675,16 +704,20 @@ class SurvivorDriveAdmissionTest(unittest.TestCase):
                 else:
                     state.retail_probe = lambda: {"known": False}
                 released = _release(coordinator, OWNER_A, token)
-                self.assertEqual(bound_queue(state, "server"), [])
+                self.assertNotIn(
+                    DRIVE_RELEASE, [row["cmd"] for row in bound_queue(state, "server")]
+                )
+                self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+                self.assertNotIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
                 if name == "missing_release":
-                    # Not queued: unconfirmed, as camera_path_release says it.
-                    self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 0)
-                    self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
-                    self.assertNotIn("survivor_drive_release_failed", released["cleanup_degraded"])
+                    # The close does not need survivor_drive_release
+                    # announced: it goes out, and nothing is unconfirmed.
+                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+                    _lease_close(state)
                 else:
-                    self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
+                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 0)
                     self.assertIn("retail_quarantine", released["cleanup_degraded"])
-                    self.assertIn("survivor_drive_release_unconfirmed", released["cleanup_degraded"])
+                    self.assertEqual(_delivered(state), [])
 
     def test_delivery_drops_it_when_the_bound_peer_no_longer_advertises_it(self) -> None:
         state = _bound_state()
@@ -787,6 +820,28 @@ class SurvivorDriveEnforceContractTest(unittest.TestCase):
         self.assertIn("MCPPlayerMoveControl.Disable(hic);", disable)
         for absent in ("OverrideMovementSpeed(", "OverrideMovementAngle(", "MCPResult", "GetGame().GetPlayer"):
             self.assertNotIn(absent, self.drive)
+
+    def test_the_drive_turns_the_body_through_the_look_at_helpers(self) -> None:
+        apply = _method_body(
+            self.drive, "protected static void Apply(PlayerBase survivor, MCPSurvivorDriveEntry entry)"
+        )
+        _in_order(
+            self,
+            apply,
+            "MCPPlayerMoveControl.Enable(hic, entry.speed, angle);",
+            "error = MCPLookAtControl.TieBreakDeg(MCPPlayerMoveControl.WrapDeg180(entry.heading_deg - compass));",
+            "if (!MCPLookAtControl.WithinBand(error))",
+            "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ONE_FRAME, MCPLookAtControl.ServerPulseX(error));",
+        )
+        disable = _method_body(self.drive, "protected static void Disable(PlayerBase survivor)")
+        _in_order(
+            self,
+            disable,
+            "MCPPlayerMoveControl.Disable(hic);",
+            "hic.OverrideAimChangeX(HumanInputControllerOverrideType.ENABLED, 0.0);",
+        )
+        self.assertEqual(disable.count("OverrideAimChangeX("), 1)
+        self.assertNotIn("OverrideAimChangeX(HumanInputControllerOverrideType.DISABLED", disable)
 
     def test_release_disables_only_a_driven_id(self) -> None:
         release = _method_body(self.drive, "static void Release(MCPBridge bridge, int objectId)")
@@ -922,6 +977,12 @@ MOVE_HELPERS = (
     "static void Enable(HumanInputController hic, float speed, float angleDeg)",
     "static void Disable(HumanInputController hic)",
 )
+LOOK_HELPERS = (
+    "protected static float ClampPulse(float value)",
+    "static bool WithinBand(float errorDeg)",
+    "static float ServerPulseX(float errorDeg)",
+    "static float TieBreakDeg(float errorDeg)",
+)
 # The translator has no statics and no `new`: the registry becomes G.s_Driven
 # and the two constructors factory calls; nothing else changes.
 _DRIVE_REWRITES = (
@@ -929,22 +990,30 @@ _DRIVE_REWRITES = (
     (re.compile(r"new array<ref MCPSurvivorDriveEntry>\(\)"), "NewArray()"),
     (re.compile(r"new MCPSurvivorDriveEntry\(\)"), "NewEntry()"),
 )
-_OVERRIDE = SimpleNamespace(DISABLED="DISABLED", ENABLED="ENABLED")
+_OVERRIDE = SimpleNamespace(DISABLED="DISABLED", ENABLED="ENABLED", ONE_FRAME="ONE_FRAME")
 
 
 def _method_name(signature: str) -> str:
     return signature[: signature.index("(")].split()[-1]
 
 
+def _look_constants(source: str) -> dict[str, float]:
+    return {
+        name: float(value)
+        for name, value in re.findall(r"static const (?:float|int) (\w+) = ([0-9.]+);", source)
+    }
+
+
 class _Controller:
-    """A survivor's server HumanInputController: GetHeadingAngle in radians
-    and the two movement overrides, each the last (type, value) it was given,
-    with every call in `calls`."""
+    """A survivor's server HumanInputController: GetHeadingAngle in radians,
+    the two movement overrides and OverrideAimChangeX, each the last
+    (type, value) it was given, with every call in `calls`."""
 
     def __init__(self) -> None:
         self.heading_rad = 0.0
         self.speed: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
         self.angle: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
+        self.aim_x: tuple[str, float] = (_OVERRIDE.DISABLED, 0.0)
         self.calls: list[tuple[str, str, float]] = []
 
     def face(self, compass_deg: float) -> None:
@@ -961,6 +1030,10 @@ class _Controller:
     def OverrideMovementAngle(self, kind: str, value: float) -> None:
         self.calls.append(("angle", kind, value))
         self.angle = (kind, value)
+
+    def OverrideAimChangeX(self, kind: str, value: float) -> None:
+        self.calls.append(("aim_x", kind, value))
+        self.aim_x = (kind, value)
 
     def driving(self) -> tuple[float, float] | None:
         """(speed, angle) while both overrides are ENABLED, None while both
@@ -1080,24 +1153,40 @@ class _DriveModel:
     def __init__(self) -> None:
         drive = DRIVE.read_text(encoding="utf-8")
         move = MOVE.read_text(encoding="utf-8")
+        look_source = LOOK.read_text(encoding="utf-8")
         self.G = SimpleNamespace(s_Driven=None)
         self.objects: dict[int, object] = {}
         self._next_command_id = 100
         self.bridge = SimpleNamespace(RuntimeObjectById=self.objects.get)
+        enforce_math = SimpleNamespace(RAD2DEG=180.0 / math.pi, DEG2RAD=math.pi / 180.0)
         helpers: dict[str, object] = {
-            "Math": SimpleNamespace(RAD2DEG=180.0 / math.pi),
+            "Math": enforce_math,
             "HumanInputControllerOverrideType": _OVERRIDE,
         }
         for signature in MOVE_HELPERS:
             translate(move, signature, helpers)
+        look: dict[str, object] = {
+            "Math": enforce_math,
+            **_look_constants(look_source),
+        }
+        for signature in LOOK_HELPERS:
+            translate(look_source, signature, look)
         entry = declared_fields(drive, "MCPSurvivorDriveEntry")
         self.namespace: dict[str, object] = {
             "G": self.G,
             "NewArray": _Array,
             "NewEntry": lambda: SimpleNamespace(**entry),
             "PlayerBase": SimpleNamespace(Cast=lambda item: item if isinstance(item, _Survivor) else None),
+            "HumanInputControllerOverrideType": _OVERRIDE,
             "MCPPlayerMoveControl": SimpleNamespace(
                 **{_method_name(signature): helpers[_method_name(signature)] for signature in MOVE_HELPERS}
+            ),
+            "MCPLookAtControl": SimpleNamespace(
+                **{
+                    _method_name(signature): look[_method_name(signature)]
+                    for signature in LOOK_HELPERS
+                    if not signature.startswith("protected ")
+                }
             ),
         }
         for signature in DRIVE_METHODS:
@@ -1409,9 +1498,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(self.model.registry(), [])
         self.assertIs(self.model.call("IsDriven", 7), False)
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(
-            survivor.controller.calls[-2:],
-            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+            survivor.controller.calls[-3:],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
         )
         calls = len(survivor.controller.calls)
         self.model.call("Tick", self.model.bridge)
@@ -1439,12 +1533,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.model.call("Tick", self.model.bridge)
         self.assertEqual(self.model.registry(), [(8, 0.0, 2.0)])
         self.assertIsNone(dying.controller.driving())
+        self.assertEqual(dying.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(deleted.controller.driving(), (2.0, 0.0))
         # object_delete calls OnObjectGone while the id still resolves, then
         # deletes the object (DispatchObjectDelete).
         self.model.call("OnObjectGone", self.model.bridge, 8)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(deleted.controller.driving())
+        self.assertEqual(deleted.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
 
     def test_a_driven_id_that_no_longer_resolves_leaves_the_registry(self) -> None:
         self.model.spawn(9)
@@ -1477,6 +1573,8 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIs(self.model.call("IsDriven", 7), False)
         self.assertIsNone(first.controller.driving())
         self.assertIsNone(second.controller.driving())
+        self.assertEqual(first.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+        self.assertEqual(second.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         calls = (len(first.controller.calls), len(second.controller.calls))
         self.model.call("Tick", self.model.bridge)
         self.assertEqual((len(first.controller.calls), len(second.controller.calls)), calls)
@@ -1501,9 +1599,14 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertIs(self.model.call("ReleaseCommand", self.model.bridge, 7, 43), True)
         self.assertEqual(self.model.registry(), [])
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
         self.assertEqual(
             survivor.controller.calls[writes:],
-            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
         )
         writes = self.model.writes()
         self.model.call("Tick", self.model.bridge)
@@ -1692,7 +1795,8 @@ class SurvivorDriveModelTest(unittest.TestCase):
     def test_after_the_lease_ends_the_next_owner_inherits_no_drive(self) -> None:
         # Codex's probe, with the real coordinator, cleanup_owner and acquire
         # in memory and the translated bridge: A's drive is delivered and
-        # answered, A releases, B acquires, and the bridge runs what it polls.
+        # answered, A releases, the close stops it, B acquires, and the
+        # bridge runs what it polls.
         model = _HandlerModel()
         survivor = model.spawn(7, (11.0, 2.0, 33.0))
         state, coordinator = _leased_state()
@@ -1709,22 +1813,41 @@ class SurvivorDriveModelTest(unittest.TestCase):
         self.assertEqual(bound_queue(state, "server"), [])
         self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["survivor_drive_release_enqueued"], 1)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("survivor_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
-        _acquire(coordinator, OWNER_B)
-        [command] = _delivered(state)
-        self.assertEqual(
-            (command["cmd"], command["args"]), (DRIVE_RELEASE, {"command_id": drive, "object_id": 7})
-        )
-        result, _post_now = model.dispatch(command["id"], command["cmd"], command["args"])
-        self.assertEqual((result.ok, result.matched), (True, True))
+        # The next server poll hands the bridge the close, not a release.
+        # Its dispatch runs MCPSurvivorDrive.ShutdownAll(this) (pinned in
+        # test_lease_close_bridge); run that stop on the model and answer
+        # the close with the census it then reads: s_Driven empty.
+        close = _lease_close(state)
+        model.call("ShutdownAll", model.bridge)
         self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(model.registry(), [])
+        status, stored = state.store_result(
+            {
+                "id": close["id"],
+                "ok": True,
+                "lease_close": {
+                    "generation": close["args"]["close_generation"],
+                    "lease_id": close["args"]["close_lease_id"],
+                    "peer": "server",
+                    "state": "clean",
+                    "entries": [{"name": "survivor_drive", "state": "clean"}],
+                    "floors": [],
+                },
+            },
+            instance=INST_SERVER,
+        )
+        self.assertEqual(status, 200, stored)
+        self.assertNotIn("discarded", stored)
+        _acquire(coordinator, OWNER_B)
+        self.assertEqual(_delivered(state), [])
         writes = model.writes()
         for _tick in range(3):
             model.call("Tick", model.bridge)
         self.assertEqual(model.writes(), writes)
         self.assertEqual(model.registry(), [])
-        self.assertEqual(_delivered(state), [])
 
     def test_with_nothing_driven_the_hooks_change_nothing(self) -> None:
         idle = self.model.spawn(7)
@@ -1739,6 +1862,152 @@ class SurvivorDriveModelTest(unittest.TestCase):
         for speed, expected in ((1.0, True), (2.0, True), (3.0, True), (0.0, False), (1.5, False), (4.0, False)):
             with self.subTest(speed=speed):
                 self.assertIs(self.model.call("IsDriveSpeed", speed), expected)
+
+    def test_apply_pulses_aim_right_toward_heading_and_keeps_movement_angle(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        survivor = self.model.spawn(7)
+        pulse_90 = look.ServerPulseX(90.0)
+        self.assertGreater(pulse_90, 0.0)
+        self.model.drive(7, 90.0, 1.0)
+        self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
+        self.assertEqual(
+            survivor.controller.calls,
+            [
+                ("speed", _OVERRIDE.ENABLED, 1.0),
+                ("angle", _OVERRIDE.ENABLED, 90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_90),
+            ],
+        )
+        small = self.model.spawn(8)
+        pulse_10 = look.ServerPulseX(10.0)
+        self.assertGreater(pulse_10, 0.0)
+        self.assertLess(pulse_10, pulse_90)
+        self.model.drive(8, 10.0, 2.0)
+        self.assertEqual(small.controller.driving(), (2.0, 10.0))
+        self.assertEqual(
+            small.controller.calls,
+            [
+                ("speed", _OVERRIDE.ENABLED, 2.0),
+                ("angle", _OVERRIDE.ENABLED, 10.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_10),
+            ],
+        )
+        left = self.model.spawn(9)
+        pulse_left = look.ServerPulseX(-90.0)
+        self.assertLess(pulse_left, 0.0)
+        self.model.drive(9, -90.0, 3.0)
+        self.assertEqual(left.controller.driving(), (3.0, -90.0))
+        self.assertEqual(
+            left.controller.calls,
+            [
+                ("speed", _OVERRIDE.ENABLED, 3.0),
+                ("angle", _OVERRIDE.ENABLED, -90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_left),
+            ],
+        )
+
+    def test_within_the_band_apply_pulses_no_aim_and_still_steers_movement(self) -> None:
+        for object_id, facing, heading, speed, expected_angle in (
+            (7, 0.0, 0.5, 1.0, 0.5),
+            (8, 0.0, -0.5, 1.0, -0.5),
+            (9, 0.0, 1.0, 1.0, 1.0),
+            (10, 0.0, -1.0, 1.0, -1.0),
+            (11, 89.5, 90.0, 2.0, 0.5),
+        ):
+            with self.subTest(facing=facing, heading=heading):
+                survivor = self.model.spawn(object_id)
+                if facing != 0.0:
+                    survivor.controller.face(facing)
+                self.model.drive(object_id, heading, speed)
+                self.assertEqual(survivor.controller.driving(), (speed, expected_angle))
+                self.assertEqual([call for call in survivor.controller.calls if call[0] == "aim_x"], [])
+
+    def test_tie_break_at_180_and_minus_180_pulses_aim_right(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        pulse_180 = look.ServerPulseX(180.0)
+        self.assertGreater(pulse_180, 0.0)
+        for object_id, facing, heading, speed in (
+            (7, 0.0, 180.0, 1.0),
+            (8, 0.0, -180.0, 1.0),
+            (9, 180.0, 0.0, 2.0),
+            (10, 0.0, -179.0, 3.0),
+        ):
+            with self.subTest(facing=facing, heading=heading):
+                survivor = self.model.spawn(object_id)
+                if facing != 0.0:
+                    survivor.controller.face(facing)
+                self.model.drive(object_id, heading, speed)
+                driving = survivor.controller.driving()
+                self.assertIsNotNone(driving)
+                self.assertEqual(driving[0], speed)
+                aim_calls = [call for call in survivor.controller.calls if call[0] == "aim_x"]
+                self.assertEqual(aim_calls, [("aim_x", _OVERRIDE.ONE_FRAME, pulse_180)])
+        self.assertEqual(self.model.objects[7].controller.driving(), (1.0, 180.0))
+        self.assertEqual(self.model.objects[8].controller.driving(), (1.0, -180.0))
+        self.assertEqual(abs(self.model.objects[9].controller.driving()[1]), 180.0)
+
+    def test_release_death_and_shutdown_disable_aim_and_idle_release_touches_nothing(self) -> None:
+        disabled = [
+            ("speed", _OVERRIDE.DISABLED, 0.0),
+            ("angle", _OVERRIDE.DISABLED, 0.0),
+            ("aim_x", _OVERRIDE.ENABLED, 0.0),
+        ]
+        released = self.model.spawn(7)
+        dying = self.model.spawn(8)
+        shut = self.model.spawn(9)
+        idle = self.model.spawn(10)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.drive(8, 90.0, 2.0)
+        self.model.drive(9, 180.0, 3.0)
+        self.model.call("Release", self.model.bridge, 10)
+        self.assertEqual(idle.controller.calls, [])
+        before = len(released.controller.calls)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(released.controller.driving())
+        self.assertEqual(released.controller.calls[before:], disabled)
+        dying.alive = False
+        before = len(dying.controller.calls)
+        self.model.call("Tick", self.model.bridge)
+        self.assertIsNone(dying.controller.driving())
+        self.assertEqual(dying.controller.calls[before:], disabled)
+        before = len(shut.controller.calls)
+        self.model.call("ShutdownAll", self.model.bridge)
+        self.assertIsNone(shut.controller.driving())
+        self.assertEqual(shut.controller.calls[before:], disabled)
+        self.assertEqual(idle.controller.calls, [])
+
+    def test_a_new_drive_after_release_pulses_aim_again_and_release_holds_zero_again(self) -> None:
+        look = self.model.namespace["MCPLookAtControl"]
+        pulse_90 = look.ServerPulseX(90.0)
+        survivor = self.model.spawn(7)
+        self.model.drive(7, 90.0, 1.0)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
+        before = len(survivor.controller.calls)
+        self.model.drive(7, 90.0, 1.0)
+        self.assertEqual(survivor.controller.driving(), (1.0, 90.0))
+        self.assertEqual(
+            survivor.controller.calls[before:],
+            [
+                ("speed", _OVERRIDE.ENABLED, 1.0),
+                ("angle", _OVERRIDE.ENABLED, 90.0),
+                ("aim_x", _OVERRIDE.ONE_FRAME, pulse_90),
+            ],
+        )
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ONE_FRAME, pulse_90))
+        before = len(survivor.controller.calls)
+        self.model.call("Release", self.model.bridge, 7)
+        self.assertIsNone(survivor.controller.driving())
+        self.assertEqual(
+            survivor.controller.calls[before:],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
+        )
+        self.assertEqual(survivor.controller.aim_x, (_OVERRIDE.ENABLED, 0.0))
 
 
 class SurvivorDriveBridgeHookTest(unittest.TestCase):
@@ -1774,11 +2043,15 @@ class SurvivorDriveBridgeHookTest(unittest.TestCase):
         self.assertNotIn(7, self.model.objects)
         self.assertEqual(self.model.command_ids(), {9: 42})
         self.assertIs(self.model.call("IsDriven", 7), False)
-        # The deleted survivor's own controller: DISABLED reached it before
+        # The deleted survivor's own controller: Disable reached it before
         # the registry forgot the id.
         self.assertEqual(
             self.first.controller.calls[calls:],
-            [("speed", _OVERRIDE.DISABLED, 0.0), ("angle", _OVERRIDE.DISABLED, 0.0)],
+            [
+                ("speed", _OVERRIDE.DISABLED, 0.0),
+                ("angle", _OVERRIDE.DISABLED, 0.0),
+                ("aim_x", _OVERRIDE.ENABLED, 0.0),
+            ],
         )
         self.assertEqual(self.second.controller.driving(), (3.0, 0.0))
 
