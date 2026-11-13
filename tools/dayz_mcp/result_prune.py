@@ -144,6 +144,9 @@ PRUNABLE_FIELDS = (
     "ui_pause",
     # lease_close / lease_close_client fill it with the close census (§2.16).
     "lease_close",
+    # dev_free_camera_set fills it with active_before and active_after, also on
+    # dev_free_camera_not_switched (beb3).
+    "dev_free_camera",
 )
 
 # (command, field) pairs where an EMPTY container is the real answer.

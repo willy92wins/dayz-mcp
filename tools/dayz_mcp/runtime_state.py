@@ -2129,6 +2129,11 @@ def _valid_utc_timestamp(value: str) -> bool:
     return parsed.tzinfo is not None
 
 
+# Public names for the WAL predicates above, shared with admission checks.
+bounded_text = _bounded_text
+valid_utc_timestamp = _valid_utc_timestamp
+
+
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest().upper()
 
