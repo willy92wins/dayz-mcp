@@ -272,9 +272,6 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
         "infected_drive_release",
         "survivor_drive_release",
     }),
-    # infected_drive answers the command id of the drive it replaced or ended
-    # on that infected, or 0 (7c86).
-    "replaced_command_id": frozenset({"infected_drive"}),
     # player_view_set read-back (854c), also on view_not_applied.
     "person_view": frozenset({"player_view_set"}),
     "camera_class": frozenset({"player_view_set"}),

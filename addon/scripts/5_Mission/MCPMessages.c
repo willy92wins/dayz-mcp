@@ -1623,9 +1623,6 @@ class MCPResult
 	// infected_drive_release (7c86): whether the id named the live hold or
 	// drive.
 	bool matched;
-	// infected_drive (7c86): the command id of the drive that this call
-	// replaced or ended on that infected, or 0.
-	int replaced_command_id;
 	// player_view_set read-back after its settle: person_view is third when
 	// IsInThirdPerson, else first; camera_class is the ClassName of the
 	// player's GetCurrentCamera, empty when it returns null. Unassigned on its

@@ -4370,8 +4370,8 @@ class MCPBridge : Managed
 	// drives a possessed infected the same way (plugindayzinfecteddebug.c:385); combo
 	// order follows dayzanimal.c:548-550. Heading arrives in degrees and is converted
 	// here (OverrideHeading takes radians). The drive is held, re-applied every tick,
-	// until mode "release", death, deletion or the end of the lease
-	// (infected_drive_release).
+	// until mode "release", death, deletion, shutdown or the lease close
+	// (DispatchLeaseClose), or an abandon mid-lease (infected_drive_release).
 	protected bool DispatchInfectedDrive(MCPCommand command, MCPResult result)
 	{
 		if (!command.args || command.args.type == "" || !command.args.pos || command.args.pos.Count() != 3)
@@ -4432,10 +4432,9 @@ class MCPBridge : Managed
 			return true;
 		}
 
-		int replacedCommandId = 0;
 		if (release)
 		{
-			replacedCommandId = MCPInfectedDrive.Release(infected);
+			MCPInfectedDrive.Release(infected);
 			controller.OverrideMovementSpeed(false, 0.0);
 			controller.OverrideHeading(false, 0.0);
 			controller.OverrideTurnSpeed(false, 0.0);
@@ -4448,7 +4447,7 @@ class MCPBridge : Managed
 		}
 		else
 		{
-			replacedCommandId = MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed, command.id);
+			MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed, command.id);
 			// Record each infected this bridge overrides (§2.7 step 2).
 			if (m_InfectedOverridden && m_InfectedOverridden.Find(infected) < 0)
 			{
@@ -4463,14 +4462,13 @@ class MCPBridge : Managed
 		result.pos_real.Insert(current[2]);
 		result.type = command.args.type;
 		result.found = true;
-		result.replaced_command_id = replacedCommandId;
 		result.ok = true;
 		return true;
 	}
 
 	// infected_drive_release (7c86), internal: the broker sends it with the id
-	// of an infected_drive command when the lease that sent the command ends
-	// (cleanup_owner) or abandons it after delivery (RELEASE_REGISTRY). It drops
+	// of an infected_drive command only when a delivered drive is abandoned
+	// mid-lease (RELEASE_REGISTRY); the end of the lease is the lease close. It drops
 	// every entry that command id set, with the three overrides set to false
 	// (MCPInfectedDrive.ReleaseCommand), and answers whether one was removed in
 	// matched; any other id changes nothing. Command ids restart with each
@@ -8837,6 +8835,9 @@ class MCPBridge : Managed
 		// below reads s_Driven itself, so a drive that survives this is
 		// residue, never a silent clean.
 		MCPSurvivorDrive.ShutdownAll(this);
+		// The registry re-applies the overrides every tick, so the close
+		// must empty it, with the three overrides set to false on each entry.
+		MCPInfectedDrive.ShutdownAll();
 		// §2.7 step 2: release every recorded infected with the same three
 		// calls. The registry and the debt stay: the native lifetime cannot
 		// be read back, so this is unverified until the process exits.

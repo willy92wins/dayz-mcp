@@ -8,14 +8,13 @@
 // DayZInfected reference (nulled by the engine once deleted, enentity.c:164),
 // the command id that set or last replaced the drive, the heading in radians
 // and the speed. A new drive on an already driven infected replaces its
-// heading, speed and command id and returns the replaced command id. An entry
-// ends on mode="release" (Release returns the ended command id while
-// MCPBridge.DispatchInfectedDrive disables the three overrides with or without
-// an entry), on the infected's death or deletion (Tick, with the three set to
-// false while the entity still exists), at bridge shutdown (ShutdownAll) and on
-// infected_drive_release (ReleaseCommand), which the broker sends with
-// command_id when the lease that sent the drive ends or abandons it after
-// delivery.
+// heading, speed and command id. An entry ends on mode="release" (Release,
+// while MCPBridge.DispatchInfectedDrive disables the three overrides with or
+// without an entry), on the infected's death or deletion (Tick, with the
+// three set to false while the entity still exists), at bridge shutdown
+// (ShutdownAll), at the lease close (DispatchLeaseClose calls ShutdownAll)
+// and on infected_drive_release (ReleaseCommand), which the broker sends
+// with command_id only when a delivered drive is abandoned mid-lease.
 class MCPInfectedDriveEntry
 {
 	DayZInfected infected;
@@ -31,27 +30,23 @@ class MCPInfectedDrive
 	protected static ref array<ref MCPInfectedDriveEntry> s_Driven;
 
 	// Starts the drive, or replaces the heading, speed and command id of an
-	// already driven infected, applies the three overrides at once, and returns
-	// the command id it replaced on that infected or 0.
-	static int Drive(DayZInfected infected, float headingRad, float speed, int commandId)
+	// already driven infected, and applies the three overrides at once.
+	static void Drive(DayZInfected infected, float headingRad, float speed, int commandId)
 	{
 		int index;
-		int replacedCommandId;
 		MCPInfectedDriveEntry entry;
 		if (!infected)
 		{
-			return 0;
+			return;
 		}
 		if (!s_Driven)
 		{
 			s_Driven = new array<ref MCPInfectedDriveEntry>();
 		}
-		replacedCommandId = 0;
 		index = Find(infected);
 		if (index >= 0)
 		{
 			entry = s_Driven.Get(index);
-			replacedCommandId = entry.command_id;
 		}
 		else
 		{
@@ -63,34 +58,24 @@ class MCPInfectedDrive
 		entry.heading_rad = headingRad;
 		entry.speed = speed;
 		Apply(infected, entry);
-		return replacedCommandId;
 	}
 
-	// Removes infected's entry if any and returns its command id or 0.
+	// Removes infected's entry if any.
 	// MCPBridge.DispatchInfectedDrive sets the three overrides to false whether
 	// or not an entry existed.
-	static int Release(DayZInfected infected)
+	static void Release(DayZInfected infected)
 	{
 		int index;
-		int replacedCommandId;
-		MCPInfectedDriveEntry entry;
 		if (!infected)
 		{
-			return 0;
+			return;
 		}
 		index = Find(infected);
 		if (index < 0)
 		{
-			return 0;
-		}
-		entry = s_Driven.Get(index);
-		replacedCommandId = 0;
-		if (entry)
-		{
-			replacedCommandId = entry.command_id;
+			return;
 		}
 		s_Driven.Remove(index);
-		return replacedCommandId;
 	}
 
 	// infected_drive_release: removes, with the three overrides set to false,

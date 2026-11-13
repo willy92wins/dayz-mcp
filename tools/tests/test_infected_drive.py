@@ -1,4 +1,4 @@
-"""infected_drive (inbox 7c86): server tick hold, replaced_command_id and lease cleanup."""
+"""infected_drive (inbox 7c86): server tick hold and lease close."""
 
 from __future__ import annotations
 
@@ -195,12 +195,23 @@ def _answered(
     state: loopback.ServerState, command_id: int, answer: dict | None = None
 ) -> dict | None:
     body = (
-        {"ok": 1, "pos_real": list(POS), "replaced_command_id": 0}
-        if answer is None
-        else dict(answer)
+        {"ok": 1, "pos_real": list(POS)} if answer is None else dict(answer)
     )
     state.store_result({"id": command_id, **body}, instance=INST_SERVER)
     return state.take_result(command_id, remove=True)
+
+
+def _lease_close(state: loopback.ServerState) -> dict:
+    """The one command a lease end now sends the server for its drives:
+    the aggregated close whose dispatch stops every drive."""
+    [close] = _delivered(state)
+    if close["cmd"] != "lease_close":
+        raise AssertionError(close)
+    if close["args"].get("close_lease_id") != "infected-lease-1":
+        raise AssertionError(close)
+    if close["args"].get("close_generation") != "gen-infected-drive":
+        raise AssertionError(close)
+    return close
 
 
 class InfectedDriveToolTest(unittest.IsolatedAsyncioTestCase):
@@ -218,7 +229,6 @@ class InfectedDriveToolTest(unittest.IsolatedAsyncioTestCase):
                 return_value={
                     "ok": 1,
                     "pos_real": list(POS),
-                    "replaced_command_id": 0,
                 }
             ),
         ) as call:
@@ -304,34 +314,19 @@ class InfectedDriveToolTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(arguments=arguments):
                 self.assertIn(part, await self._refused(arguments))
 
-    def test_owned_scalars_keep_replaced_command_id_and_release_matched(self) -> None:
-        self.assertEqual(
-            OWNED_SCALAR_FIELDS["replaced_command_id"], frozenset({COMMAND})
-        )
+    def test_owned_scalars_keep_release_matched(self) -> None:
+        self.assertNotIn("replaced_command_id", OWNED_SCALAR_FIELDS)
         self.assertIn(DRIVE_RELEASE, OWNED_SCALAR_FIELDS["matched"])
 
-        kept_zero = prune_unfilled_fields(
-            COMMAND,
-            {"ok": 1, "pos_real": list(POS), "replaced_command_id": 0, "matched": 0},
-        )
-        self.assertEqual(kept_zero["replaced_command_id"], 0)
-        self.assertNotIn("matched", kept_zero)
-
-        kept_positive = prune_unfilled_fields(
-            COMMAND, {"ok": 1, "pos_real": list(POS), "replaced_command_id": 41}
-        )
-        self.assertEqual(kept_positive["replaced_command_id"], 41)
-
         dropped_elsewhere = prune_unfilled_fields(
-            "survivor_drive", {"ok": 1, "pos_real": list(POS), "replaced_command_id": 0}
+            COMMAND, {"ok": 1, "pos_real": list(POS), "matched": 0}
         )
-        self.assertNotIn("replaced_command_id", dropped_elsewhere)
+        self.assertNotIn("matched", dropped_elsewhere)
 
         release_reply = prune_unfilled_fields(
-            DRIVE_RELEASE, {"ok": 1, "matched": False, "replaced_command_id": 0}
+            DRIVE_RELEASE, {"ok": 1, "matched": False}
         )
         self.assertIs(release_reply["matched"], False)
-        self.assertNotIn("replaced_command_id", release_reply)
 
 
 class InfectedDriveBrokerTest(unittest.TestCase):
@@ -415,168 +410,103 @@ class InfectedDriveBrokerTest(unittest.TestCase):
         )
         self.assertEqual(bound_queue(state, "server"), [])
 
-    def test_delivery_records_drives_only_and_mode_release_records_nothing(self) -> None:
+    def test_a_drive_the_queue_drops_at_the_lease_end_is_cancelled_not_released(self) -> None:
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
-        stop = _send(state, OWNER_A, token, RELEASE_WIRE)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [stop])
-        self.assertEqual(state._infected_drive_by_lease, {})
-        _answered(state, stop, {"ok": 1, "pos_real": list(POS), "replaced_command_id": 0})
-
-        # A queued drive cancelled before delivery never enters _infected_drive_by_lease.
-        queued = _send(state, OWNER_A, token, DRIVE_WIRE)
-        self.assertEqual(state._infected_drive_by_lease, {})
+        delivered = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [delivered])
+        _answered(state, delivered)
+        _send(state, OWNER_A, token, {**DRIVE_WIRE, "heading": 180.0})
         released = _release(coordinator, OWNER_A, token)
         self.assertEqual(released["cleanup"]["cancelled"], 1)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
         self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
-        self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(bound_queue(state, "server"), [])
-        self.assertNotIn(queued, {cmd["id"] for cmd in _delivered(state)})
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
-    def test_echoed_replaced_command_id_prunes_prior_drives_across_leases(self) -> None:
+    def test_the_end_of_a_lease_queues_one_close_and_no_infected_drive_release(self) -> None:
         state, coordinator = _leased_state()
-        token_a = _acquire(coordinator, OWNER_A)
-        first = _send(state, OWNER_A, token_a, DRIVE_WIRE)
+        token = _acquire(coordinator, OWNER_A)
+        first = _send(state, OWNER_A, token, DRIVE_WIRE)
         second = _send(
-            state, OWNER_A, token_a, {**DRIVE_WIRE, "heading": 180.0, "speed": 3.0}
+            state, OWNER_A, token, {**DRIVE_WIRE, "heading": 180.0, "speed": 3.0}
         )
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [first, second])
+        stop = _send(state, OWNER_A, token, RELEASE_WIRE)
+        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [first, second, stop])
+        for command_id in (first, second, stop):
+            _answered(state, command_id)
+        released = _release(coordinator, OWNER_A, token)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+        self.assertNotIn("infected_drive_release_unconfirmed", released["cleanup"])
+        self.assertNotIn("infected_drive_release_unconfirmed", released["cleanup_degraded"])
         self.assertEqual(
-            state._infected_drive_by_lease, {"infected-lease-1": {first, second}}
+            [value for value in released["cleanup_degraded"] if value.startswith("infected_drive")], []
         )
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
+        self.assertEqual(bound_queue(state, "server"), [])
 
-        # Non-positive or bool replaced_command_id values prune nothing.
-        _answered(state, first, {"ok": 1, "pos_real": list(POS), "replaced_command_id": 0})
-        state.store_result(
-            {"id": 999, "ok": 1, "replaced_command_id": True}, instance=INST_SERVER
-        )
-        state.store_result(
-            {"id": 998, "ok": 1, "replaced_command_id": -1}, instance=INST_SERVER
-        )
-        self.assertEqual(
-            state._infected_drive_by_lease, {"infected-lease-1": {first, second}}
-        )
-
-        # Second drive replaced the first on the same infected: only second remains,
-        # so ending the lease queues exactly one release, for second.
-        _answered(
-            state,
-            second,
-            {"ok": 1, "pos_real": list(POS), "replaced_command_id": first},
-        )
-        self.assertEqual(
-            state._infected_drive_by_lease, {"infected-lease-1": {second}}
-        )
-        released = _release(coordinator, OWNER_A, token_a)
-        self.assertEqual(released["cleanup"]["infected_drive_release_enqueued"], 1)
-        self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(
-            [(cmd["cmd"], cmd["args"]) for cmd in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": second})],
-        )
-        self.assertEqual(state._infected_drive_by_lease, {})
-
-    def test_echoed_own_command_id_keeps_drive_in_lease_and_releases_at_lease_end(
-        self,
-    ) -> None:
+    def test_a_clean_lease_end_reports_the_close_count_and_no_drive_degradation(self) -> None:
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
         self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
-        self.assertEqual(state._infected_drive_by_lease, {"infected-lease-1": {drive}})
-
-        # After a daemon restart, the server registry may still hold an unleased
-        # entry from the previous daemon with the same command id, echoing it here.
-        _answered(
-            state,
-            drive,
-            {"ok": 1, "pos_real": list(POS), "replaced_command_id": drive},
-        )
-        self.assertEqual(state._infected_drive_by_lease, {"infected-lease-1": {drive}})
-
+        _answered(state, drive)
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["infected_drive_release_enqueued"], 1)
-        self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(state._infected_drive_by_lease, {})
-        self.assertEqual(
-            [(cmd["cmd"], cmd["args"]) for cmd in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": drive})],
-        )
-
-    def test_mode_release_echo_prunes_the_ended_drive_from_every_lease(self) -> None:
-        state, coordinator = _leased_state()
-        token_a = _acquire(coordinator, OWNER_A)
-        drive = _send(state, OWNER_A, token_a, DRIVE_WIRE)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
-        _answered(state, drive, {"ok": 1, "pos_real": list(POS), "replaced_command_id": 0})
-
-        stop = _send(state, OWNER_A, token_a, RELEASE_WIRE)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [stop])
-        _answered(
-            state, stop, {"ok": 1, "pos_real": list(POS), "replaced_command_id": drive}
-        )
-        self.assertEqual(state._infected_drive_by_lease, {})
-        released = _release(coordinator, OWNER_A, token_a)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
         self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+        self.assertEqual(released["cleanup"].get("cleanup_degraded", []), [])
         self.assertEqual(released["cleanup_degraded"], [])
+        _lease_close(state)
         self.assertEqual(_delivered(state), [])
 
-        # Also prunes across lease sets if a stale entry remained in another lease set.
-        state._infected_drive_by_lease["stale-lease"] = {77}
-        token_b = _acquire(coordinator, OWNER_B)
-        stop_b = _send(state, OWNER_B, token_b, RELEASE_WIRE)
-        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [stop_b])
-        _answered(
-            state, stop_b, {"ok": 1, "pos_real": list(POS), "replaced_command_id": 77}
-        )
-        self.assertEqual(state._infected_drive_by_lease, {})
-        _release(coordinator, OWNER_B, token_b)
+    def test_a_mode_release_drive_at_the_lease_end_queues_only_the_close(self) -> None:
+        state, coordinator = _leased_state()
+        token = _acquire(coordinator, OWNER_A)
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
+        _answered(state, drive)
+        stop = _send(state, OWNER_A, token, RELEASE_WIRE)
+        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [stop])
+        _answered(state, stop)
+        released = _release(coordinator, OWNER_A, token)
+        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+        self.assertEqual(released["cleanup_degraded"], [])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
-    def test_ok_false_result_prunes_its_own_command_id(self) -> None:
+    def test_an_ok_false_drive_at_the_lease_end_queues_only_the_close(self) -> None:
         for ok_value in (0, False):
             with self.subTest(ok_value=ok_value):
                 state, coordinator = _leased_state()
                 token = _acquire(coordinator, OWNER_A)
                 drive = _send(state, OWNER_A, token, DRIVE_WIRE)
                 self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
-                self.assertIn("infected-lease-1", state._infected_drive_by_lease)
                 _answered(
                     state,
                     drive,
                     {"ok": ok_value, "error": "object_not_found"},
                 )
-                self.assertEqual(state._infected_drive_by_lease, {})
                 released = _release(coordinator, OWNER_A, token)
                 self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
                 self.assertEqual(released["cleanup_degraded"], [])
+                _lease_close(state)
                 self.assertEqual(_delivered(state), [])
 
-    def test_lease_end_queues_remaining_releases_newest_first(self) -> None:
+    def test_the_broker_keeps_no_per_lease_infected_drive_ledger(self) -> None:
         state, coordinator = _leased_state()
         token = _acquire(coordinator, OWNER_A)
-        first = _send(state, OWNER_A, token, DRIVE_WIRE)
-        second = _send(state, OWNER_A, token, {**DRIVE_WIRE, "pos": [4210.0, 338.66, 10610.0]})
-        third = _send(state, OWNER_A, token, {**DRIVE_WIRE, "pos": [4220.0, 338.66, 10610.0]})
-        self.assertEqual(
-            [cmd["id"] for cmd in _delivered(state)], [first, second, third]
-        )
-        for command_id in (first, second, third):
-            _answered(state, command_id)
-
+        drive = _send(state, OWNER_A, token, DRIVE_WIRE)
+        self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
+        _answered(state, drive)
+        self.assertFalse(hasattr(state, "_infected_drive_by_lease"))
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["infected_drive_release_enqueued"], 3)
-        self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(state._infected_drive_by_lease, {})
-        self.assertEqual(
-            [(cmd["cmd"], cmd["args"]) for cmd in _delivered(state)],
-            [
-                (DRIVE_RELEASE, {"command_id": third}),
-                (DRIVE_RELEASE, {"command_id": second}),
-                (DRIVE_RELEASE, {"command_id": first}),
-            ],
-        )
+        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
-    def test_a_release_the_bridge_is_not_handed_is_reported(self) -> None:
+    def test_a_close_the_bridge_is_not_handed_and_quarantine_are_reported(self) -> None:
         for name in ("missing_release", "retail_quarantine"):
             with self.subTest(name=name):
                 state, coordinator = _leased_state()
@@ -593,24 +523,18 @@ class InfectedDriveBrokerTest(unittest.TestCase):
                 else:
                     state.retail_probe = lambda: {"known": False}
                 released = _release(coordinator, OWNER_A, token)
-                self.assertEqual(bound_queue(state, "server"), [])
+                self.assertNotIn(
+                    DRIVE_RELEASE, [row["cmd"] for row in bound_queue(state, "server")]
+                )
+                self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+                self.assertNotIn("infected_drive_release_unconfirmed", released["cleanup_degraded"])
                 if name == "missing_release":
-                    self.assertEqual(
-                        released["cleanup"]["infected_drive_release_enqueued"], 0
-                    )
-                    self.assertIn(
-                        "infected_drive_release_unconfirmed",
-                        released["cleanup_degraded"],
-                    )
+                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+                    _lease_close(state)
                 else:
-                    self.assertNotIn(
-                        "infected_drive_release_enqueued", released["cleanup"]
-                    )
+                    self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 0)
                     self.assertIn("retail_quarantine", released["cleanup_degraded"])
-                    self.assertIn(
-                        "infected_drive_release_unconfirmed",
-                        released["cleanup_degraded"],
-                    )
+                    self.assertEqual(_delivered(state), [])
 
     def test_a_lease_end_after_the_run_ended_queues_and_degrades_nothing(self) -> None:
         state, coordinator = _leased_state()
@@ -622,7 +546,7 @@ class InfectedDriveBrokerTest(unittest.TestCase):
         released = _release(coordinator, OWNER_A, token)
         self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
-        self.assertEqual(state._infected_drive_by_lease, {})
+        self.assertEqual(bound_queue(state, "server"), [])
         self.assertEqual(state._fire_and_forget_ids, set())
 
     def test_abandoning_a_delivered_drive_queues_its_release(self) -> None:
@@ -658,7 +582,7 @@ class InfectedDriveBrokerTest(unittest.TestCase):
         drive = _send(state, OWNER_A, token, DRIVE_WIRE)
         self.assertEqual([cmd["id"] for cmd in _delivered(state)], [drive])
         state.store_result(
-            {"id": drive, "ok": 1, "pos_real": list(POS), "replaced_command_id": 0},
+            {"id": drive, "ok": 1, "pos_real": list(POS)},
             instance=INST_SERVER,
         )
         self.assertEqual(
@@ -666,11 +590,10 @@ class InfectedDriveBrokerTest(unittest.TestCase):
         )
         self.assertEqual(_delivered(state), [])
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["infected_drive_release_enqueued"], 1)
-        self.assertEqual(
-            [(cmd["cmd"], cmd["args"]) for cmd in _delivered(state)],
-            [(DRIVE_RELEASE, {"command_id": drive})],
-        )
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
+        _lease_close(state)
+        self.assertEqual(_delivered(state), [])
 
     def test_a_running_drive_abandoned_under_quarantine_queues_no_release(self) -> None:
         state = _bound_state()
@@ -793,12 +716,11 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
         _in_order(
             self,
             drive_body,
-            "replacedCommandId = MCPInfectedDrive.Release(infected);",
+            "MCPInfectedDrive.Release(infected);",
             "controller.OverrideMovementSpeed(false, 0.0);",
             "controller.OverrideHeading(false, 0.0);",
             "controller.OverrideTurnSpeed(false, 0.0);",
-            "replacedCommandId = MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed, command.id);",
-            "result.replaced_command_id = replacedCommandId;",
+            "MCPInfectedDrive.Drive(infected, command.args.heading * Math.DEG2RAD, command.args.speed, command.id);",
             "result.ok = true;",
         )
 
@@ -815,10 +737,25 @@ class InfectedDriveEnforceSourceTest(unittest.TestCase):
             "result.ok = true;",
         )
 
+    def test_the_lease_close_shuts_the_registry_down_before_the_infected_record(self) -> None:
+        close = _method_body(
+            self.bridge,
+            "protected bool DispatchLeaseClose(MCPCommand command, MCPResult result)",
+        )
+        _in_order(
+            self,
+            close,
+            "MCPSurvivorDrive.ShutdownAll(this);",
+            "MCPInfectedDrive.ShutdownAll();",
+            "m_InfectedOverridden",
+        )
+        shutdown = _method_body(self.bridge, "void Shutdown()")
+        self.assertIn("MCPInfectedDrive.ShutdownAll();", shutdown)
+
 
 DRIVE_METHODS = (
-    "static int Drive(DayZInfected infected, float headingRad, float speed, int commandId)",
-    "static int Release(DayZInfected infected)",
+    "static void Drive(DayZInfected infected, float headingRad, float speed, int commandId)",
+    "static void Release(DayZInfected infected)",
     "static bool ReleaseCommand(int commandId)",
     "static void Tick()",
     "static void ShutdownAll()",
@@ -1043,13 +980,11 @@ class _DriveModel:
         heading_deg: float,
         speed: float,
         command_id: int | None = None,
-    ) -> int:
+    ) -> None:
         if command_id is None:
             self._next_command_id += 1
             command_id = self._next_command_id
-        return int(
-            self.call("Drive", infected, math.radians(heading_deg), speed, command_id)
-        )
+        self.call("Drive", infected, math.radians(heading_deg), speed, command_id)
 
     def registry(self) -> list[tuple[object, int, float, float]]:
         if self.G.s_Driven is None:
@@ -1308,12 +1243,9 @@ class InfectedDriveModelTest(unittest.TestCase):
     def setUp(self) -> None:
         self.model = _DriveModel()
 
-    def test_a_drive_registers_and_a_second_drive_replaces_and_returns_prior_id(
-        self,
-    ) -> None:
+    def test_a_drive_registers_and_a_second_drive_replaces_it(self) -> None:
         infected = self.model.spawn()
-        replaced = self.model.drive(infected, 90.0, 2.5, command_id=41)
-        self.assertEqual(replaced, 0)
+        self.model.drive(infected, 90.0, 2.5, command_id=41)
         self.assertEqual(
             self.model.registry(),
             [(infected, 41, round(math.radians(90.0), 9), 2.5)],
@@ -1331,8 +1263,7 @@ class InfectedDriveModelTest(unittest.TestCase):
             ],
         )
 
-        replaced_second = self.model.drive(infected, 180.0, 3.0, command_id=42)
-        self.assertEqual(replaced_second, 41)
+        self.model.drive(infected, 180.0, 3.0, command_id=42)
         self.assertEqual(
             self.model.registry(),
             [(infected, 42, round(math.radians(180.0), 9), 3.0)],
@@ -1366,14 +1297,12 @@ class InfectedDriveModelTest(unittest.TestCase):
             ],
         )
 
-    def test_mode_release_removes_entry_returns_its_id_and_disables_even_without_entry(
-        self,
-    ) -> None:
+    def test_mode_release_removes_entry_and_disables_even_without_entry(self) -> None:
         model = _HandlerModel()
         infected = model.spawn()
         result_drive, post_now = model.dispatch(41, COMMAND, DRIVE_WIRE)
         self.assertIs(post_now, True)
-        self.assertEqual((result_drive.ok, result_drive.replaced_command_id), (True, 0))
+        self.assertIs(result_drive.ok, True)
         self.assertEqual(result_drive.pos_real.items, list(POS))
         self.assertEqual(result_drive.type, EnforceString.of(INFECTED_TYPE))
         self.assertIs(result_drive.found, True)
@@ -1384,7 +1313,7 @@ class InfectedDriveModelTest(unittest.TestCase):
             COMMAND,
             {"type": INFECTED_TYPE, "pos": [4205.0, 338.66, 10610.0], "mode": "release"},
         )
-        self.assertEqual((result_rel.ok, result_rel.replaced_command_id), (True, 41))
+        self.assertIs(result_rel.ok, True)
         self.assertEqual(model.registry(), [])
         self.assertIsNone(infected.controller.driving())
         self.assertEqual(
@@ -1396,15 +1325,14 @@ class InfectedDriveModelTest(unittest.TestCase):
             ],
         )
 
-        # Releasing an infected that has no entry still disables all three overrides
-        # and answers replaced_command_id == 0.
+        # Releasing an infected that has no entry still disables all three overrides.
         infected.controller.calls.clear()
         result_idle, _post_now = model.dispatch(
             43,
             COMMAND,
             {"type": INFECTED_TYPE, "pos": [4205.0, 338.66, 10610.0], "mode": "release"},
         )
-        self.assertEqual((result_idle.ok, result_idle.replaced_command_id), (True, 0))
+        self.assertIs(result_idle.ok, True)
         self.assertEqual(
             infected.controller.calls,
             [
@@ -1487,7 +1415,7 @@ class InfectedDriveModelTest(unittest.TestCase):
         res_replace, _ = model.dispatch(
             43, COMMAND, {**DRIVE_WIRE, "heading": 270.0, "speed": 3.0}
         )
-        self.assertEqual((res_replace.ok, res_replace.replaced_command_id), (True, 41))
+        self.assertIs(res_replace.ok, True)
 
         for bad in (None, {}, {"command_id": 0}, {"command_id": -5}):
             with self.subTest(wire=bad):
@@ -1563,7 +1491,6 @@ class InfectedDriveModelTest(unittest.TestCase):
                 self.assertIs(post_now, True)
                 self.assertIs(result.ok, False)
                 self.assertEqual(result.error, EnforceString.of(error))
-                self.assertEqual(result.replaced_command_id, 0)
                 self.assertEqual((model.registry(), model.writes()), before)
         self.assertIsNotNone(driven.controller.driving())
 
@@ -1589,7 +1516,6 @@ class InfectedDriveModelTest(unittest.TestCase):
                 {
                     "ok": 1,
                     "pos_real": list(res.pos_real.items),
-                    "replaced_command_id": res.replaced_command_id,
                 },
             )
 
@@ -1598,19 +1524,15 @@ class InfectedDriveModelTest(unittest.TestCase):
             (round(2.0 * math.pi, 9), 3.0, round(math.radians(180.0), 9)),
         )
         released = _release(coordinator, OWNER_A, token)
-        self.assertEqual(released["cleanup"]["infected_drive_release_enqueued"], 1)
+        self.assertEqual(released["cleanup"].get("lease_close_enqueued"), 1)
+        self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
 
         _acquire(coordinator, OWNER_B)
-        [release_cmd] = _delivered(state)
-        self.assertEqual(
-            (release_cmd["cmd"], release_cmd["args"]),
-            (DRIVE_RELEASE, {"command_id": second}),
-        )
-        res_rel, _ = model.dispatch(
-            release_cmd["id"], release_cmd["cmd"], release_cmd["args"]
-        )
-        self.assertEqual((res_rel.ok, res_rel.matched), (True, True))
+        _lease_close(state)
+        # DispatchLeaseClose calls MCPInfectedDrive.ShutdownAll (the source
+        # test above pins that order), which ends every drive.
+        model.call("ShutdownAll")
         self.assertIsNone(infected.controller.driving())
 
         writes = model.writes()
