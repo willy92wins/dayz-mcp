@@ -493,7 +493,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 	//! the tools it registers. Written as short literals joined with +, split at
 	//! commas (5_Mission\gui\chat\chatline.c:8): the longest single literal in
 	//! vanilla is 237 bytes and this census is longer than that.
-	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move,player_respawn,player_trace," + "player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release,vehicle_telemetry,vehicle_trace," + "weapon_aim,weapon_fire,weapon_raise,weapon_sights";
+	protected const string CLIENT_POLL_CAPS = "action_cursor,action_hold,action_hold_cancel,action_use,action_use_component,action_use_door,action_use_target,actor_emote,anim_timeline,camera_get,camera_path_play,camera_path_release,camera_set," + "camera_set_focus,chat_read,dev_free_camera_set,engine_set,gameplay_state,hud_set,input_describe,input_trigger,key_press,lease_close_client,player_look_at,player_look_at_release,player_move," + "player_respawn,player_trace,player_view_set,restore_gameplay,ui_click,ui_dialog,ui_focus,ui_pause,ui_reload_layout,ui_set_text,ui_tree,vehicle_control,vehicle_get_in_client,vehicle_release," + "vehicle_telemetry,vehicle_trace,weapon_aim,weapon_fire,weapon_raise,weapon_sights";
 
 	protected static ref MCPClientBridge m_Instance;
 
@@ -1328,6 +1328,7 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		int triggerJobs;
 		int moveJobs;
 		int emoteJobs;
+		int freeCameraJobs;
 		if (!m_JobRunner)
 		{
 			return false;
@@ -1335,8 +1336,9 @@ class MCPClientBridge extends MCPJobRunnerOwner
 
 		// weapon_action is a one-tick read-back. It must not refuse camera_set.
 		// Nor does an input_trigger click or hold, which waits on a key release,
-		// a player_move hold, which waits on its release, or an actor_emote,
-		// which only watches m_bEmoteIsPlaying.
+		// a player_move hold, which waits on its release, an actor_emote,
+		// which only watches m_bEmoteIsPlaying, or a dev_free_camera_set read,
+		// which reads the free camera on the next tick.
 		blocking = m_JobRunner.CountExcluding("ui_dialog");
 		weaponJobs = m_JobRunner.CountOfKind("weapon_action");
 		triggerJobs = m_JobRunner.CountOfKind("input_trigger");
@@ -1345,6 +1347,8 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		blocking = blocking - moveJobs;
 		emoteJobs = m_JobRunner.CountOfKind("actor_emote");
 		blocking = blocking - emoteJobs;
+		freeCameraJobs = m_JobRunner.CountOfKind("dev_free_camera_set");
+		blocking = blocking - freeCameraJobs;
 		return blocking > 0;
 	}
 
@@ -1406,6 +1410,15 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		result.tick_dispatch = m_Tick;
 		bool postNow = true;
 
+		if (cmd == "dev_free_camera_set" && !command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			Log("dev_free_camera_set requested=-1 before=-1 after=-1 ok=0 error=bad_args");
+			PostResult(result);
+			return;
+		}
+
 		// Fail-closed readiness gate: every client command touches the
 		// local player/camera/vehicle, which the engine has not built during
 		// preload. A stale command delivered before the client is in-game crashed
@@ -1417,6 +1430,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			if (cmd == "ui_pause")
 			{
 				Log("ui_pause before=-1 after=-1 ok=0 error=client_not_in_game");
+			}
+			if (cmd == "dev_free_camera_set")
+			{
+				Log("dev_free_camera_set requested=-1 before=-1 after=-1 ok=0 error=client_not_in_game");
 			}
 			PostResult(result);
 			return;
@@ -1605,6 +1622,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		else if (command.cmd == "ui_pause")
 		{
 			postNow = DispatchUiPause(command, result);
+		}
+		else if (command.cmd == "dev_free_camera_set")
+		{
+			postNow = DispatchDevFreeCameraSet(command, result);
 		}
 		else if (command.cmd == "ui_dialog")
 		{
@@ -5846,6 +5867,10 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		{
 			return ProcessUiPauseJob(job);
 		}
+		else if (job.kind == "dev_free_camera_set")
+		{
+			return ProcessDevFreeCameraJob(job);
+		}
 		else if (job.kind == "actor_emote")
 		{
 			return ProcessActorEmoteJob(job);
@@ -6978,6 +7003,11 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			PostUiPauseJob(job);
 		}
 
+		if (job.kind == "dev_free_camera_set")
+		{
+			PostDevFreeCameraJob(job);
+		}
+
 		// ProcessActorEmoteJob is done only when it saw the end.
 		if (job.kind == "actor_emote")
 		{
@@ -7019,6 +7049,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job && job.kind == "ui_pause")
 		{
 			PostUiPauseJob(job);
+			return;
+		}
+
+		if (job && job.kind == "dev_free_camera_set")
+		{
+			PostDevFreeCameraJob(job);
 			return;
 		}
 
@@ -7116,6 +7152,12 @@ class MCPClientBridge extends MCPJobRunnerOwner
 		if (job.kind == "ui_pause")
 		{
 			PostUiPauseJob(job);
+			return;
+		}
+
+		if (job.kind == "dev_free_camera_set")
+		{
+			PostDevFreeCameraJob(job);
 			return;
 		}
 
@@ -8670,6 +8712,213 @@ class MCPClientBridge extends MCPJobRunnerOwner
 			Log("ui_pause before=" + beforeId + " after=" + afterId + " ok=0 error=pause_not_opened");
 		}
 		PostResult(result);
+	}
+
+	// dev_free_camera_set (fb-20261112-142535-beb3): DayZDiag's developer free
+	// camera on or off without a keyboard, through the method its KC_DIVIDE key
+	// calls. Vanilla 1.30 reading (P:/scripts/4_world/plugins):
+	// - PluginKeyBinding binds KC_DIVIDE to PluginDeveloper.ToggleFreeCameraBackPos
+	//   under DIAG_DEVELOPER (pluginbase/pluginkeybinding.c:60-66, :63) and calls it
+	//   by name only while the physical key reads pressed (:132-185, :380-383).
+	// - ToggleFreeCameraBackPos is DeveloperFreeCamera.FreeCameraToggle with
+	//   teleport_player false (pluginbase/plugindeveloper.c:49-53): off when
+	//   FreeDebugCamera.GetInstance() is active, on otherwise
+	//   (pluginbase/plugindeveloper/developerfreecamera.c:6-16, :23-26). On is
+	//   SetActive(true) (:36-50); off is SetActive(false) with no teleport
+	//   (:52-74). Both also refresh the debug crosshair, under DEVELOPER only
+	//   (:42-44, :63-67), which a DayZDiag build does not define.
+	// - PluginDeveloper.GetInstance() is GetPlugin(PluginDeveloper)
+	//   (plugindeveloper.c:26-29). The class has no define, but PluginManager.Init
+	//   registers it with RegisterPluginDiag (pluginmanager.c:66), which registers
+	//   under DIAG_DEVELOPER only (:249-256), and GetPlugin answers null for a type
+	//   that is not registered (:327-348). The code that names it is therefore
+	//   under DIAG_DEVELOPER, as MCP_DiagPlugins.c is, and a build without that
+	//   define answers dev_free_camera_unavailable.
+	// - FreeDebugCamera.GetInstance() is a native singleton
+	//   (P:/scripts/3_game/entities/camera.c:84-90) that FreeCameraToggle reads
+	//   with no null check (developerfreecamera.c:25).
+	// The checks run in order and the first that fails answers without changing
+	// anything. The bridge does not own this camera: the camera path,
+	// m_ActiveCam, m_ActiveCamOwned, the player simulation, the HUD and the DOF
+	// are left as they are, as the key leaves them, so a playing camera_path_play
+	// is aborted by TickCameraPath's own check. When the read right after the
+	// toggle does not show the requested state yet, a one-tick read job
+	// (ProcessDevFreeCameraJob, not exclusive) reads it on the next OnTick.
+	protected bool DispatchDevFreeCameraSet(MCPCommand command, MCPResult result)
+	{
+		FreeDebugCamera freeCam;
+		MCPDevFreeCamera reply;
+		MCPJob job;
+		string unavailable;
+		string requestedBit;
+		bool requested;
+		bool before;
+		bool after;
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			Log("dev_free_camera_set requested=-1 before=-1 after=-1 ok=0 error=bad_args");
+			return true;
+		}
+		requested = command.args.active;
+		requestedBit = DevFreeCameraBit(requested);
+		if (!GetGame() || !GetGame().GetPlayer() || GetGame().IsDedicatedServer())
+		{
+			result.ok = false;
+			result.error = "client_not_in_game";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=client_not_in_game");
+			return true;
+		}
+		unavailable = "no_diag_developer";
+#ifdef DIAG_DEVELOPER
+		unavailable = "";
+		if (!PluginDeveloper.GetInstance())
+		{
+			unavailable = "plugin_developer_missing";
+		}
+#endif
+		freeCam = FreeDebugCamera.GetInstance();
+		if (unavailable == "" && !freeCam)
+		{
+			unavailable = "free_debug_camera_missing";
+		}
+		if (unavailable != "")
+		{
+			result.ok = false;
+			result.error = "dev_free_camera_unavailable";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=dev_free_camera_unavailable reason=" + unavailable);
+			return true;
+		}
+		// The bridge holds the free camera after camera_set free (ApplyFreeCamera)
+		// and while a release hands off through it (BeginCameraHandoff).
+		if (m_CameraHandoffPending || m_ActiveCam == freeCam)
+		{
+			result.ok = false;
+			result.error = "dev_free_camera_bridge_owned";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=dev_free_camera_bridge_owned");
+			return true;
+		}
+		// A playing camera_path_play is not a job, so it does not refuse this call.
+		if (HasExclusiveJob())
+		{
+			result.ok = false;
+			result.error = "busy";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=-1 after=-1 ok=0 error=busy");
+			return true;
+		}
+		before = freeCam.IsActive();
+#ifdef DIAG_DEVELOPER
+		if (before != requested)
+		{
+			PluginDeveloper.GetInstance().ToggleFreeCameraBackPos();
+		}
+#endif
+		after = freeCam.IsActive();
+		reply = new MCPDevFreeCamera();
+		reply.active_before = before;
+		reply.active_after = after;
+		if (after != requested)
+		{
+			job = new MCPJob();
+			job.id = command.id;
+			job.kind = "dev_free_camera_set";
+			job.args = command.args;
+			job.dev_free_camera = reply;
+			job.sample_start_s = m_JobRunner.GetElapsedS();
+			job.deadline_s = job.sample_start_s + CAMERA_JOB_TIMEOUT_S;
+			job.tick_poll_sent = result.tick_poll_sent;
+			job.tick_poll_callback = result.tick_poll_callback;
+			job.tick_dispatch = result.tick_dispatch;
+			m_JobRunner.AddJob(job);
+			return false;
+		}
+		result.dev_free_camera = reply;
+		result.ok = true;
+		Log("dev_free_camera_set requested=" + requestedBit + " before=" + DevFreeCameraBit(before) + " after=" + DevFreeCameraBit(after) + " ok=1");
+		return true;
+	}
+
+	// One tick, as ProcessUiPauseJob: done on the first job-runner tick after
+	// the dispatch. It only waits; PostDevFreeCameraJob reads.
+	protected bool ProcessDevFreeCameraJob(MCPJob job)
+	{
+		if (!job)
+		{
+			return false;
+		}
+		return m_JobRunner.GetElapsedS() > job.sample_start_s;
+	}
+
+	protected void PostDevFreeCameraJob(MCPJob job)
+	{
+		FreeDebugCamera freeCam;
+		MCPResult result;
+		MCPDevFreeCamera reply;
+		string requestedBit;
+		string beforeBit;
+		string afterBit;
+		bool requested;
+		bool after;
+		if (!job)
+		{
+			return;
+		}
+		reply = job.dev_free_camera;
+		if (!reply)
+		{
+			reply = new MCPDevFreeCamera();
+		}
+		requested = false;
+		if (job.args)
+		{
+			requested = job.args.active;
+		}
+		after = reply.active_after;
+		freeCam = FreeDebugCamera.GetInstance();
+		if (freeCam)
+		{
+			after = freeCam.IsActive();
+		}
+		reply.active_after = after;
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.dev_free_camera = reply;
+		requestedBit = DevFreeCameraBit(requested);
+		beforeBit = DevFreeCameraBit(reply.active_before);
+		afterBit = DevFreeCameraBit(after);
+		if (job.error != "")
+		{
+			result.ok = false;
+			result.error = job.error;
+			Log("dev_free_camera_set requested=" + requestedBit + " before=" + beforeBit + " after=" + afterBit + " ok=0 error=" + job.error);
+		}
+		else if (after == requested)
+		{
+			result.ok = true;
+			Log("dev_free_camera_set requested=" + requestedBit + " before=" + beforeBit + " after=" + afterBit + " ok=1");
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "dev_free_camera_not_switched";
+			Log("dev_free_camera_set requested=" + requestedBit + " before=" + beforeBit + " after=" + afterBit + " ok=0 error=dev_free_camera_not_switched");
+		}
+		PostResult(result);
+	}
+
+	// "1" or "0" for a dev_free_camera_set log line: no bool is concatenated into
+	// a string in this file (ui_focus converts its own the same way).
+	protected string DevFreeCameraBit(bool value)
+	{
+		if (value)
+		{
+			return "1";
+		}
+		return "0";
 	}
 
 	// fb-20260822-191204-46b3: the only bridge URL is "http://127.0.0.1:<port>/",

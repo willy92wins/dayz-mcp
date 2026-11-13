@@ -83,7 +83,7 @@ RUNNER_METHODS = (
     "protected void ProcessJobs(MCPJobRunnerOwner owner)",
 )
 # The job kinds HasExclusiveJob leaves out; the tool description names them.
-NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move", "actor_emote")
+NON_EXCLUSIVE_KINDS = ("ui_dialog", "weapon_action", "input_trigger", "player_move", "actor_emote", "dev_free_camera_set")
 EXCLUSION_CLAUSE = (
     "busy while an exclusive client job runs, such as camera_set or player_look_at (a "
     + ", ".join(NON_EXCLUSIVE_KINDS[:-1])
@@ -1159,7 +1159,7 @@ class PlayerViewSetEnforceRunTest(unittest.TestCase):
         self.assertEqual(model.replies()[1], (8, False, "no_player", "", ""))
         self.assertEqual(model.handled, [COMMAND])
 
-    def test_the_five_kinds_left_out_of_exclusive_jobs_do_not_refuse(self) -> None:
+    def test_the_six_kinds_left_out_of_exclusive_jobs_do_not_refuse(self) -> None:
         exclusive = _method_body(_source(CLIENT_PATH), EXCLUSIVE)
         left_out = re.findall(r'(?:CountExcluding|CountOfKind)\("(\w+)"\)', exclusive)
         self.assertEqual(sorted(left_out), sorted(NON_EXCLUSIVE_KINDS))
