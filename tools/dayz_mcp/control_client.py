@@ -31,7 +31,11 @@ def _revalidation_sleep(seconds: float) -> None:
 # likely holder is a host tool rewriting its own config, but that attribution
 # and the collision's duration are not measured, so the revalidation is
 # retried only briefly before the request is refused; every other failure
-# stays fail-fast.
+# stays fail-fast. The budget bounds when a new attempt may start, not how
+# long an attempt itself takes: an attempt that starts inside the budget
+# and passes is accepted whenever it returns, so the worst case is the
+# budget plus one attempt's own duration. Every attempt is still a full
+# revalidation.
 _REVALIDATION_RETRY_BUDGET_S = 0.5
 _REVALIDATION_RETRY_INTERVAL_S = 0.05
 

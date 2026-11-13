@@ -187,6 +187,88 @@ class SharingRetryFakePolicyTests(unittest.TestCase):
         self.assertIn("could not be validated", error.hint)
         self.assertNotIn("If the tool list includes server_reload", error.hint)
 
+    def test_attempt_started_inside_budget_that_passes_late_is_sent(self) -> None:
+        # Each attempt itself takes 0.44 s: the first fails at 0.44 s,
+        # one 0.05 s wait leaves the second attempt starting at 0.49 s,
+        # inside the 0.5 s budget, and passing at 0.93 s. The budget
+        # bounds when an attempt may start, not how long it takes, so
+        # the late pass is accepted and the request is sent.
+        attempts = 0
+        clock = _FakeClock()
+
+        def hook() -> None:
+            nonlocal attempts
+            attempts += 1
+            clock.now += 0.44
+            if attempts == 1:
+                raise host_config.HostConfigError(
+                    "daemon_provenance_conflict", winerror=32
+                )
+
+        client, temporary = _client_with_hook(hook)
+        try:
+            with (
+                patch.object(
+                    client._credential_provider,
+                    "request_with_refresh",
+                    return_value=(200, b'{"status":"ok"}'),
+                ) as send,
+                patch.object(control_client, "_monotonic", clock.monotonic),
+                patch.object(control_client, "_revalidation_sleep", clock.sleep),
+            ):
+                result = client._request_once("/session/status", {}, 5.0)
+        finally:
+            temporary.cleanup()
+        self.assertEqual(result, {"status": "ok"})
+        send.assert_called_once()
+        self.assertEqual(attempts, 2)
+        self.assertEqual(clock.sleeps, [0.05])
+        self.assertAlmostEqual(clock.now, 1000.93, places=6)
+
+    def test_attempt_started_inside_budget_that_fails_late_is_not_retried(self) -> None:
+        # Same 0.44 s attempts, but the second attempt also fails with
+        # winerror 32, at 0.93 s: no third attempt may start, and the
+        # call ends in the same rejection as an exhausted budget.
+        attempts = 0
+        clock = _FakeClock()
+
+        def hook() -> None:
+            nonlocal attempts
+            attempts += 1
+            clock.now += 0.44
+            raise host_config.HostConfigError(
+                "daemon_provenance_conflict", winerror=32
+            )
+
+        client, temporary = _client_with_hook(hook)
+        try:
+            with (
+                patch.object(
+                    client._credential_provider,
+                    "request_with_refresh",
+                    return_value=(200, b'{"status":"ok"}'),
+                ) as send,
+                patch.object(control_client, "_monotonic", clock.monotonic),
+                patch.object(control_client, "_revalidation_sleep", clock.sleep),
+            ):
+                with self.assertRaises(
+                    control_client.ControlClientError
+                ) as raised:
+                    client._request_once("/session/status", {}, 5.0)
+        finally:
+            temporary.cleanup()
+        error = raised.exception
+        self.assertEqual(attempts, 2)
+        self.assertEqual(clock.sleeps, [0.05])
+        self.assertAlmostEqual(clock.now, 1000.93, places=6)
+        self.assertEqual(error.code, "client_policy_untrusted_open_new_session")
+        self.assertEqual(error.policy_cause, "HostConfigError:32")
+        self.assertEqual(error.request_stage, "pre_request")
+        self.assertEqual(error.http_bytes_sent, 0)
+        send.assert_not_called()
+        self.assertIn("could not be validated", error.hint)
+        self.assertNotIn("If the tool list includes server_reload", error.hint)
+
     def test_winerror_5_is_not_retried(self) -> None:
         attempts = 0
 
