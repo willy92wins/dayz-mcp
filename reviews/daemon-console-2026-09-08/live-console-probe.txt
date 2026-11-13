@@ -1,12 +1,12 @@
 daemon processes found: 4
   pid=28500 ppid=35796 created=/Date(1788800210052)/
-  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 8765 --keyfile "C:\Users\guill\On
+  cmdline="%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 8765 --keyfile "%USERPROFILE%\On
   pid=20568 ppid=28500 created=/Date(1788800210060)/
-  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 8765 --keyfile "C:\Users\guill\On
+  cmdline="%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 8765 --keyfile "%USERPROFILE%\On
   pid=61576 ppid=27916 created=/Date(1788827028814)/
-  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 60001 --keyfile C:\Users\guill\Ap
+  cmdline="%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 60001 --keyfile %USERPROFILE%\Ap
   pid=47756 ppid=61576 created=/Date(1788827028819)/
-  cmdline="C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 60001 --keyfile C:\Users\guill\Ap
+  cmdline="%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe" -m dayz_mcp --daemon --port 60001 --keyfile %USERPROFILE%\Ap
 
 {
   "pid": 28500,

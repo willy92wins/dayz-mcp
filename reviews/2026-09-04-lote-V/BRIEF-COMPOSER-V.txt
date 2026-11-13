@@ -90,7 +90,7 @@ S1. ENTORNO - verificado hoy
     `gate/` y los .md de la raiz. Todo lo que no este en el write-set del S5 es de solo
     lectura.
   - Interprete, exacto y sin alternativa:
-      C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
+      %USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe
   - **Esa venv NO tiene pytest.** La suite es `unittest`: clases `unittest.TestCase` /
     `unittest.IsolatedAsyncioTestCase`.
   - Para importar el paquete: `cd tools` y `PYTHONPATH=.`

@@ -1,10 +1,10 @@
 Eres el REDACTOR DEL GATE de un lote de implementación que hará otro modelo (Grok). Escribes el ledger y el oráculo ANTES de que exista la implementación, los calibras contra el árbol actual (tienen que salir ROJOS por la razón correcta) y entregas un informe de calibración. No implementas el producto. No editas el repo. Escribe en español; código, identificadores y comentarios de código en inglés.
 
 ## Entorno (caveats reales)
-- Árbol de referencia (LECTURA): `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\integ\tools\` — es una copia congelada de `tools/` del repo tras la ronda 5 del lote anterior. Léelo con Read/Grep. No es git. NO toques `lote-G\ws\` (hay un worker editándolo ahora mismo).
-- Los planes de las fichas y el DAG: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans\inbox-20260830\` (OneDrive; sólo lectura con Read).
-- Python: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`. Para ejecutar tu oráculo contra el árbol de referencia: `cd <integ\tools> && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> <ruta del oraculo>`.
-- Tu directorio de escritura, y el único: `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-H\draft\`.
+- Árbol de referencia (LECTURA): `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\integ\tools\` — es una copia congelada de `tools/` del repo tras la ronda 5 del lote anterior. Léelo con Read/Grep. No es git. NO toques `lote-G\ws\` (hay un worker editándolo ahora mismo).
+- Los planes de las fichas y el DAG: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans\inbox-20260830\` (OneDrive; sólo lectura con Read).
+- Python: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`. Para ejecutar tu oráculo contra el árbol de referencia: `cd <integ\tools> && PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 <python> <ruta del oraculo>`.
+- Tu directorio de escritura, y el único: `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-H\draft\`.
 - Un hit de grep es un indicio: abre el fichero en la línea antes de citar `path:line`.
 
 ## El lote H: el sobre de `dayz_test_stop` y los diagnósticos de runs retirados

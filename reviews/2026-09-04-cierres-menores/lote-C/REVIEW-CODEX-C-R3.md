@@ -5,7 +5,7 @@ Rama observada: `work/inbox-20260830-modules`.
 HEAD observado: `adc1c22f0b890f2132439541d6943ffed430c7d8`.
 
 Intérprete usado en todas las ejecuciones Python:
-`C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`.
+`%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`.
 
 Directorio de trabajo Python: `DayZ_MCP_dev\tools`, con `PYTHONPATH=.` y
 `PYTHONDONTWRITEBYTECODE=1`.
@@ -46,7 +46,7 @@ Comando [EXACT]:
 ```powershell
 $env:PYTHONPATH='.'
 $env:PYTHONDONTWRITEBYTECODE='1'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
   -m unittest `
   tests.test_ui_error_diagnostics.BridgeErrorDiagnosticsTest.test_verb_gate_decides_not_the_payload `
   -v
@@ -94,7 +94,7 @@ Comando [EXACT]:
 ```powershell
 $env:PYTHONPATH='.'
 $env:PYTHONDONTWRITEBYTECODE='1'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
   -m unittest `
   tests.test_ui_error_diagnostics.BridgeErrorDiagnosticsTest.test_echo_is_an_allowlist_not_an_iteration `
   -v
@@ -129,7 +129,7 @@ Comando focal [EXACT]:
 ```powershell
 $env:PYTHONPATH='.'
 $env:PYTHONDONTWRITEBYTECODE='1'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
   -m unittest tests.test_ui_error_diagnostics tests.test_lote_b_products -v
 ```
 
@@ -147,7 +147,7 @@ Los once casos, incluidos los dos tests objetivo de R-01 y el wire negativo
 Comando de regresión [EXACT]:
 
 ```powershell
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' `
   -m unittest `
   tests.test_d09_d10_spawn_timeout_object_id `
   tests.test_boundary_values_are_pinned `
@@ -214,10 +214,10 @@ TARGET_STATUS_EXIT=0
 Comando de identidad solicitado [EXACT]:
 
 ```powershell
-git -c safe.directory='C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev' `
-  -C 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev' `
+git -c safe.directory='%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev' `
+  -C '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev' `
   apply --reverse --check `
-  'C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\DIFF-C3.patch'
+  '%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\review-C\DIFF-C3.patch'
 ```
 
 Salida observada tanto antes como después de los mutantes:

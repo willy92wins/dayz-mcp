@@ -2,7 +2,7 @@
 
 Ronda 2: `root=null` explícito se rechaza ANTES de encolar en las cuatro tools. El tipo publicado deja de ser `str | None` (schema `anyOf[string,null]`, FastMCP colapsa null y omisión en el mismo `None`) y pasa a `root: str = None` (schema `type:string`, Pydantic corta el null). Las guardas de cuerpo no se tocaron.
 
-- `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-F\ws\tools\dayz_mcp\server.py:4195` — `ui_tree(..., root: str = None)` con comentario de por qué no `str | None`.
+- `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-F\ws\tools\dayz_mcp\server.py:4195` — `ui_tree(..., root: str = None)` con comentario de por qué no `str | None`.
 - `...\server.py:4222` — `ui_set_text`, misma anotación.
 - `...\server.py:4247` — `ui_click`, misma anotación.
 - `...\server.py:4325` — `ui_focus`, misma anotación.

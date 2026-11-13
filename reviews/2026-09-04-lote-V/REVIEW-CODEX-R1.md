@@ -13,7 +13,7 @@ BLOQUEANTES=2.
 **Repro literal [EXACT]:**
 
 ```powershell
-Set-Location 'C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-V\ws\tools'
+Set-Location '%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-V\ws\tools'
 $env:PYTHONPATH='.'
 $env:PYTHONDONTWRITEBYTECODE='1'
 @'
@@ -42,7 +42,7 @@ async def main():
     assert "reason" not in result, "probe had no players list, so absence was not positively established"
 
 asyncio.run(main())
-'@ | & 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -
+'@ | & '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -
 exit $LASTEXITCODE
 ```
 
@@ -66,7 +66,7 @@ AssertionError: probe had no players list, so absence was not positively establi
 **Repro literal [EXACT]:**
 
 ```powershell
-Set-Location 'C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-V\ws\tools'
+Set-Location '%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-V\ws\tools'
 $env:PYTHONPATH='.'
 $env:PYTHONDONTWRITEBYTECODE='1'
 @'
@@ -97,7 +97,7 @@ async def main():
     assert wall <= 0.15, f"deadline exceeded: {wall:.3f}s"
 
 asyncio.run(main())
-'@ | & 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -
+'@ | & '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -
 exit $LASTEXITCODE
 ```
 
@@ -168,7 +168,7 @@ El timestamp `deadline` no cambia, pero la llamada sí continúa después de él
 **Comando de refutación [EXACT]:**
 
 ```powershell
-git -c safe.directory="C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev" -C "C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev" log --oneline -2
+git -c safe.directory="%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev" -C "%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev" log --oneline -2
 ```
 
 **Salida observada:**

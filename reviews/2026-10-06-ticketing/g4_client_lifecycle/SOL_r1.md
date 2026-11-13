@@ -5,7 +5,7 @@ VERDICT: CHANGES_REQUIRED
 ## FINDINGS
 
 **F1 — P2 — Eligible client extensions still fail when a positive box-wait budget is supplied.**  
-[tools/dayz_mcp/server.py:3973](C:/Users/guill/dzmcp_gauntlet/g4_client_lifecycle/ws/tools/dayz_mcp/server.py:3973)
+[tools/dayz_mcp/server.py:3973](%USERPROFILE%/dzmcp_gauntlet/g4_client_lifecycle/ws/tools/dayz_mcp/server.py:3973)
 
 Executable scenario: caller is the original launcher, lease released, run `R` is `RUNNING_IDLE`, project matches, server alive, client confirmed dead, scans known, no other occupant. Call:
 
@@ -28,7 +28,7 @@ extension_calls=0
 **Fix:** apply eligible-extension admission before the wait in both admission modes. Preserve the blockers and downstream lease/adoption/replacement checks. Add a public-orchestration test with `on_busy="fail"` and a positive budget.
 
 **F2 — P2 — Concurrent status collection can invalidate the diagnostics iterator and break status responses.**  
-[tools/dayz_mcp/process_lifecycle.py:2442](C:/Users/guill/dzmcp_gauntlet/g4_client_lifecycle/ws/tools/dayz_mcp/process_lifecycle.py:2442), mutation at `:2318`.
+[tools/dayz_mcp/process_lifecycle.py:2442](%USERPROFILE%/dzmcp_gauntlet/g4_client_lifecycle/ws/tools/dayz_mcp/process_lifecycle.py:2442), mutation at `:2318`.
 
 Executable interleaving:
 
