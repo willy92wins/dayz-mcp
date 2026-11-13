@@ -3,7 +3,7 @@ Motivo: el producto cumple el contrato (a)/(b)/(c) medido en 41 casos ejecutados
 
 # Revisión cruzada ciega — lote df93, ronda 6 (revisor: familia Anthropic)
 
-Rutas abreviadas: `<lote>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6`; `<ws>` = `<lote>\ws`; `<rev>` = `<lote>\review-r6`; `<wt>` = `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93`; `<py>` = `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (Python 3.14.3).
+Rutas abreviadas: `<lote>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\2adef081-e055-49c6-9d06-f5c167808be8\scratchpad\lote-df93-r6`; `<ws>` = `<lote>\ws`; `<rev>` = `<lote>\review-r6`; `<wt>` = `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\e89adcdf-b230-4060-83b7-f733911e169a\scratchpad\wt-df93`; `<py>` = `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe` (Python 3.14.3).
 
 Método: nada del STATE.md se da por bueno; cada cifra sale de un comando ejecutado por mí, con su salida literal (las salidas largas están completas en los ficheros de `<rev>` que se citan). `<ws>` y `<wt>` no se han modificado: las ejecuciones desde `<ws>\tools` llevaron `PYTHONDONTWRITEBYTECODE=1` y un censo por mtime posterior dio 0 ficheros nuevos (§0.4); los mutantes y el rojo-primero corrieron sobre copias bajo `<rev>` (§0.5).
 
@@ -22,7 +22,7 @@ EXISTS : /p/Mods
 EXISTS : /p/Mods/@VPPAdminTools
 EXISTS : /p/Mods/@VPPAdminTools/meta.cpp
 $ cmd //c subst
-P:\: => C:\Users\guill\OneDrive\Documentos\DayZ Projects
+P:\: => %USERPROFILE%\OneDrive\Documentos\DayZ Projects
 ```
 
 - Veredicto real de la puerta para ese request en este host (`<rev>\q4_raised.py`, salida en `<rev>\q4-ws.jsonl`): la identidad se PRUEBA con el `meta.cpp` real y el rechazo descansa solo en el cfg ausente:

@@ -10,7 +10,7 @@ Aprobado por Guillermo el 2026-09-06 (picker: «Escribir la LL y proponer el cam
 `ERROR: You've hit your usage limit … try again at Sep 7th, 2026 4:27 AM` (RC=1, 197 543 tokens, sin marcador de cierre);
 la sesión corta lanzada a las 17:21 terminó (RC=0). Lección en el corpus (número tomado al escribir la noche del 06-sep) y
 memoria host `codex-window-cut-kills-running-session`. El hook `~/.claude/hooks/codex-quota-alert.ps1` ya dice lo medido
-(commit `0a7b6c0` en `~/.claude`). Se aplica en el Pack (`C:\Users\guill\DayZ-Modding-Knowledge-Pack`) y se promociona con
+(commit `0a7b6c0` en `~/.claude`). Se aplica en el Pack (`%USERPROFILE%\DayZ-Modding-Knowledge-Pack`) y se promociona con
 `packctl` (LL-390); no editar el árbol vivo `~/.claude/skills`.
 
 ## 1. Título de la sección

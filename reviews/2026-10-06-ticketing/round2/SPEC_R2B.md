@@ -4,12 +4,12 @@
 
 Alcance: especificación en solo lectura para la base solicitada `46833d7`, incluyendo el caso repetitivo d1a8 y la intención de acciones genéricas de 9ab8. No hay cambios, pruebas ejecutadas ni commit.
 
-Las rutas relativas pertenecen a `C:/Users/guill/dzmcp_gauntlet/base_v11f`. Para las citas siguientes:
+Las rutas relativas pertenecen a `%USERPROFILE%/dzmcp_gauntlet/base_v11f`. Para las citas siguientes:
 
-- `V` = `C:/Users/guill/OneDrive/Documentos/DayZ Projects/scripts`.
+- `V` = `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/scripts`.
 - `U` = `V/4_world/classes/useractionscomponent`.
-- `P` = `C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/.claude/worktrees/mcp-ticketing-session-7fe51f/reviews/2026-10-06-ticketing/ingame-v11b/probe_9941`.
-- `S` = `C:/Users/guill/OneDrive/Documentos/DayZ Projects/SimpleGroup`.
+- `P` = `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/.claude/worktrees/mcp-ticketing-session-7fe51f/reviews/2026-10-06-ticketing/ingame-v11b/probe_9941`.
+- `S` = `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/SimpleGroup`.
 
 **1. Contrato público [DESIGN]**
 

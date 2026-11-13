@@ -69,17 +69,17 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 232, in test_negative_opt_in_leaves_a_closed_steam_to_the_daemon
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 232, in test_negative_opt_in_leaves_a_closed_steam_to_the_daemon
     result = await self.run_tool(auto_remediate_steam=True)
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 186, in run_tool
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 186, in run_tool
     return await tool.execute_dayz_test_run(
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         self.runtime, project="ExampleMod", mode=mode,
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         extra_mods=["@DayZ_MCP"], **kwargs)
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
     require_extension_run(extension_status, policy, run_id)
     ~~~~~~~
 ERROR: test_negative_steam_running_launch_proceeds (tests.test_steam_not_running_preflight.SteamNotRunningToolGateTests.test_negative_steam_running_launch_proceeds)
@@ -91,20 +91,20 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 209, in test_negative_steam_running_launch_proceeds
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 209, in test_negative_steam_running_launch_proceeds
     result = await self.run_tool()
              ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 186, in run_tool
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_steam_not_running_preflight.py", line 186, in run_tool
     return await tool.execute_dayz_test_run(
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         self.runtime, project="ExampleMod", mode=mode,
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         extra_mods=["@DayZ_MCP"], **kwargs)
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
     require_extension_run(extension_status, policy, run_id)
     ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5
+  File "%USERPROFILE%\dzmcp_gauntlet\g5
 ERROR: test_real_replacement_refusal_keeps_existing_envelope (tests.test_db05_preflight_diagnostics.Db05DiagnosticsTest.test_real_replacement_refusal_keeps_existing_envelope)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
@@ -114,20 +114,20 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 139, in test_real_replacement_refusal_keeps_existing_envelope
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 139, in test_real_replacement_refusal_keeps_existing_envelope
     result = await self.run_tool()
              ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 68, in run_tool
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 68, in run_tool
     return await tool.execute_dayz_test_run(
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         self.runtime, project="ExampleMod", mode=mode,
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         extra_mods=["@DayZ_MCP"], **kwargs)
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
     require_extension_run(extension_status, policy, run_id)
     ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\
+  File "%USERPROFILE%\
 ERROR: test_real_success_keeps_existing_envelope (tests.test_db05_preflight_diagnostics.Db05DiagnosticsTest.test_real_success_keeps_existing_envelope)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
@@ -137,20 +137,20 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 130, in test_real_success_keeps_existing_envelope
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 130, in test_real_success_keeps_existing_envelope
     result = await self.run_tool()
              ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 68, in run_tool
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 68, in run_tool
     return await tool.execute_dayz_test_run(
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         self.runtime, project="ExampleMod", mode=mode,
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         extra_mods=["@DayZ_MCP"], **kwargs)
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
     require_extension_run(extension_status, policy, run_id)
     ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\too
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\too
 ERROR: test_repeated_steam_rejections_do_not_consume_attach_or_mutate_run (tests.test_db05_preflight_diagnostics.Db05DiagnosticsTest.test_repeated_steam_rejections_do_not_consume_attach_or_mutate_run)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
@@ -160,17 +160,17 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 208, in test_repeated_steam_rejections_do_not_consume_attach_or_mutate_run
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 208, in test_repeated_steam_rejections_do_not_consume_attach_or_mutate_run
     result = await self.run_tool()
              ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 68, in run_tool
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\tests\test_db05_preflight_diagnostics.py", line 68, in run_tool
     return await tool.execute_dayz_test_run(
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         self.runtime, project="ExampleMod", mode=mode,
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
         extra_mods=["@DayZ_MCP"], **kwargs)
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
+  File "%USERPROFILE%\dzmcp_gauntlet\g5fix_profiles\ws\tools\dayz_mcp\dayz_test_tool.py", line 2729, in execute_dayz_test_run
     require_extension_run(extension_status, policy, run_id)
     ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
 GAUNTLET_GATE: FAIL

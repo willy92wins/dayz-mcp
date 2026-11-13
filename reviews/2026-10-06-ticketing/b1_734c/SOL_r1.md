@@ -5,7 +5,7 @@ VERDICT: CHANGES_REQUIRED
 ## FINDINGS
 
 **F1 — P2 — Los fallos de solicitudes reservadas se envían al host.**  
-En [tools/dayz_mcp/mcp_supervisor.py:222](C:/Users/guill/dzmcp_gauntlet/b1_734c/r1/ws/tools/dayz_mcp/mcp_supervisor.py:222), `_fail_generation` responde a todos los IDs desprendidos, incluidos `HEARTBEAT_ID` y `REPLAY_ID`. El filtro del pump solo protege las respuestas procedentes del worker.
+En [tools/dayz_mcp/mcp_supervisor.py:222](%USERPROFILE%/dzmcp_gauntlet/b1_734c/r1/ws/tools/dayz_mcp/mcp_supervisor.py:222), `_fail_generation` responde a todos los IDs desprendidos, incluidos `HEARTBEAT_ID` y `REPLAY_ID`. El filtro del pump solo protege las respuestas procedentes del worker.
 
 **Escenario ejecutado:** completar el handshake; sustituir `worker.stdin.write` por `_broken_write`; enviar `reload_call(7)`. El host recibe una respuesta no solicitada con:
 
@@ -20,7 +20,7 @@ También reproduje EOF después de enviar el initialize de replay: el host recib
 Esto incumple el requisito de mantener internos esos resultados y genera respuestas sin solicitud correspondiente en el cliente MCP. **Corrección sugerida:** conservar su fallo en el estado interno, pero excluir los IDs reservados del despacho de respuestas al host.
 
 **F2 — P2 — Reload anuncia éxito cuando el reemplazo ya ha fallado durante el replay.**  
-En [tools/dayz_mcp/mcp_supervisor.py:501](C:/Users/guill/dzmcp_gauntlet/b1_734c/r1/ws/tools/dayz_mcp/mcp_supervisor.py:501), el éxito del replay depende del retorno de `_send_worker`. Este comprueba `failed` antes de escribir, pero devuelve `True` después de `flush()` sin comprobar el fallo concurrente ([línea 199](C:/Users/guill/dzmcp_gauntlet/b1_734c/r1/ws/tools/dayz_mcp/mcp_supervisor.py:199)).
+En [tools/dayz_mcp/mcp_supervisor.py:501](%USERPROFILE%/dzmcp_gauntlet/b1_734c/r1/ws/tools/dayz_mcp/mcp_supervisor.py:501), el éxito del replay depende del retorno de `_send_worker`. Este comprueba `failed` antes de escribir, pero devuelve `True` después de `flush()` sin comprobar el fallo concurrente ([línea 199](%USERPROFILE%/dzmcp_gauntlet/b1_734c/r1/ws/tools/dayz_mcp/mcp_supervisor.py:199)).
 
 **Escenario ejecutado con `FakeWorker`:**
 

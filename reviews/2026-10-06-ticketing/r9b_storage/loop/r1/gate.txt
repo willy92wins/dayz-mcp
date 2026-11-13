@@ -18,7 +18,7 @@ OK
 FAIL: test_doc_size_claims_within_rounding (tests.test_docs_truth.ProjectMapSizesDocsTest.test_doc_size_claims_within_rounding)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\dzmcp_gauntlet\r9b_impl\ws\tools\tests\test_docs_truth.py", line 637, in test_doc_size_claims_within_rounding
+  File "%USERPROFILE%\dzmcp_gauntlet\r9b_impl\ws\tools\tests\test_docs_truth.py", line 637, in test_doc_size_claims_within_rounding
     self.assertEqual(
     ~~~~~~~~~~~~~~~~^
         offenders, [],
@@ -40,7 +40,7 @@ First extra element 0:
 FAIL: test_fb_63c9_r2_default_stage_root_is_ignored_by_git (tests.test_pack_addon_staging.PackAddonStagingTest.test_fb_63c9_r2_default_stage_root_is_ignored_by_git)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\dzmcp_gauntlet\r9b_impl\ws\tools\tests\test_pack_addon_staging.py"
+  File "%USERPROFILE%\dzmcp_gauntlet\r9b_impl\ws\tools\tests\test_pack_addon_staging.py"
 GAUNTLET_GATE: FAIL
  - new fast-tier failures (confirmed by re-run):
 FAIL: test_doc_size_claims_within_rounding (tests.test_docs_truth.ProjectMapSizesDocsTest.test_doc_size_claims_within_rounding)

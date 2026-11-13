@@ -202,7 +202,7 @@ de ese campo no lo puede garantizar el árbol.
 
 ```json
 {"probe": "P2D/reason-libre-en-el-anillo", "reconciled": true,
- "reason_publicado": ["crash dump en C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\x.mdmp @ 2026-09-04T05:00:00Z"]}
+ "reason_publicado": ["crash dump en %USERPROFILE%\\OneDrive\\Documentos\\DayZ Projects\\x.mdmp @ 2026-09-04T05:00:00Z"]}
 ```
 
 Severidad BAJA: lo teclea el propio operador por la vía TTY, no un tercero. Pero

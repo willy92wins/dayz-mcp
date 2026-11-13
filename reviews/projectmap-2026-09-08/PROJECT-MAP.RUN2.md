@@ -9,15 +9,15 @@ Tamaños tomados al generar; KB = KiB (1024 bytes), redondeados al entero más c
 
 | What | Path |
 |---|---|
-| Dev / docs | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` |
-| Mod source (censo Enforce) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP` |
-| Tools | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools` |
-| Tests | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests` |
-| Plans | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans` |
-| Reviews | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews` |
-| Decisions | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\decisions` |
-| Server logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` |
-| Client logs (RPT + script.log) | `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` |
+| Dev / docs | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` |
+| Mod source (censo Enforce) | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP` |
+| Tools | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools` |
+| Tests | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\tests` |
+| Plans | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\plans` |
+| Reviews | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\reviews` |
+| Decisions | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\decisions` |
+| Server logs (RPT + script.log) | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_server\profiles` |
+| Client logs (RPT + script.log) | `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\_client\profiles` |
 | Destino PBO | `tools/pack-addon.ps1`: parámetro `-Destination`; evidencias de builds en `reviews/` |
 
 ## HANDOFF: cuánto leer
@@ -29,7 +29,7 @@ El histórico separado, si existe, está en `HANDOFF-ARCHIVE.md`.
 
 ## Enforce scripts (9 files, 216 KB)
 
-Rutas relativas a la fuente del mod: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP`.
+Rutas relativas a la fuente del mod: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP`.
 Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (incluidos junctions).
 
 **4_World/**
@@ -47,7 +47,7 @@ Censo de `scripts/**/*.c`; no se atraviesan ni se cuentan reparse points (inclui
 - `scripts/5_Mission/MissionGameplay.c` - 443 B
 - `scripts/5_Mission/MissionServer.c` - 409 B
 
-- **config.cpp** -> `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP\config.cpp` (536 B)
+- **config.cpp** -> `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP\config.cpp` (536 B)
 
 ## Build / test entry points
 
