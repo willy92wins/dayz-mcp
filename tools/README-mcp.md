@@ -121,7 +121,8 @@ launcher (`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) are 
 
 - `dayz_mcp/podman_server.py`: runs a DayZ dedicated server in rootless podman, the way dzo
   (dayz-server-operator) starts it: a minimal `debian:trixie-slim` runtime image
-  (`localhost/dayz-mcp-runtime:1`), a private tree per run (symlinks into the Steam install, real `keys/`),
+  (`localhost/dayz-mcp-runtime:1`; the rolling official tag rather than a digest, so a rebuild takes Debian's
+  current security updates), a private tree per run (symlinks into the Steam install, real `keys/`),
   `--network host`, the install and every mod mounted as overlays (`:O`) at their own paths, `ulimit -c 0` and
   the experimental builds' assertion prompt answered from `stdin`. Two entry points: the CLI
   (`python -m dayz_mcp.podman_server image|start|status|stop`, its own tree, config and profiles) and

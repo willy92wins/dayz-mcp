@@ -38,7 +38,9 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-BUILD_DEADLINE_S = 3600.0
+# The Windows launcher's ADDON_BUILDER deadline (launcher.cpp: 2 h); a binarizing
+# build under Proton is the slow case on both.
+BUILD_DEADLINE_S = 7200.0
 MARKER = "$PBOPREFIX$"
 _ERROR_TAIL_BYTES = 8192
 

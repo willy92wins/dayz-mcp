@@ -57,6 +57,12 @@ CONTAINERFILE = """\
 # The server build, the mods and the tree are mounted in; nothing of dayz-mcp lives here.
 # libcap2, libstdc++6 and libc6 are what DayZServer links against; ca-certificates is for
 # the server's and mods' HTTPS calls.
+#
+# The base is the official rolling tag on purpose, not a digest: Debian republishes it
+# with security updates, and `apt-get upgrade` takes the rest at build time. A digest
+# would freeze the image at the day it was pinned, which is the worse trade for a
+# runtime that faces the network. Rebuild it (`python -m dayz_mcp.podman_server image
+# --rebuild`) to pick up the current base.
 FROM debian:trixie-slim
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \\
@@ -606,10 +612,6 @@ def launch_lifecycle_process(
     except BaseException:
         _podman(podman, "rm", "-f", "-t", "0", name, check=False)
         raise
-    (tree / "container.json").write_text(
-        json.dumps({"name": name, "container_id": container_id, "image_id": image_id, "host_pid": pid}) + "\n",
-        encoding="utf-8",
-    )
     return LaunchedContainer(pid=pid, name=name, container_id=container_id, image_id=image_id, tree=str(tree))
 
 
