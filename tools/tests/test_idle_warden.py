@@ -385,6 +385,17 @@ class IdleWardenTest(unittest.TestCase):
             )
         )
 
+    def uncertain_input(self, at: float, pid: int = 802) -> list[str]:
+        # The guard cannot read this pid's identity, so the same movement
+        # the human tests record lands as uncertain input instead. The
+        # snapshot is restored afterwards: only the stamp stays behind.
+        saved = self.guard.snapshots.pop(pid, None)
+        try:
+            return self.human_input(at, pid=pid)
+        finally:
+            if saved is not None:
+                self.guard.snapshots[pid] = saved
+
     def row(self, now: float, run_id: str = "run-x") -> dict[str, object]:
         box = self.lifecycle.box_occupancy(now=now)
         for item in box["runs"]:
@@ -1060,6 +1071,44 @@ class IdleWardenTest(unittest.TestCase):
         self.assertEqual(self.drive(), "countdown_aborted")
         self.assertEqual(self.windows.posted, [])
         self.assertEqual(self.row(self.wall_value)["use_state"], "human")
+
+    def test_uncertain_input_during_countdown_cancels(self) -> None:
+        self.abandon()
+
+        def hook(name: str, _warden: IdleWarden) -> None:
+            if name == "countdown":
+                self.uncertain_input(self.wall_value)
+
+        self.phases.append(hook)
+        self.assertEqual(self.drive(), "countdown_aborted")
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(
+            self.lifecycle.uncertain_input_at("run-x"), self.wall_value
+        )
+        self.assertIsNone(self.lifecycle.human_input_at("run-x"))
+
+    def test_uncertain_input_during_countdown_after_last_reaction_check_cancels(
+        self,
+    ) -> None:
+        self.abandon()
+        original = self.lifecycle.close_run
+
+        def wrapped(client, token, run_id):
+            # The destruction guard is already built when close_run is
+            # called, so this stamp only the final pre-close check can see.
+            self.uncertain_input(self.wall_value)
+            return original(client, token, run_id)
+
+        self.lifecycle.close_run = wrapped
+        try:
+            self.assertEqual(self.drive(), "countdown_aborted")
+        finally:
+            self.lifecycle.close_run = original
+        self.assertEqual(self.windows.posted, [])
+        self.assertEqual(
+            self.lifecycle.uncertain_input_at("run-x"), self.wall_value
+        )
+        self.assertIsNone(self.lifecycle.human_input_at("run-x"))
 
     def test_input_just_after_the_last_sample_cancels_before_close(self) -> None:
         self.abandon()

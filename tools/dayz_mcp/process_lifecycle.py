@@ -7928,6 +7928,10 @@ class ProcessLifecycle:
             return True
         if "human_at" in guard and self.human_input_at(run_id) != guard.get("human_at"):
             return True
+        if "uncertain_at" in guard and self.uncertain_input_at(run_id) != guard.get(
+            "uncertain_at"
+        ):
+            return True
         if (
             "launcher_at" in guard
             and self.launcher_request_at(run_id) != guard.get("launcher_at")

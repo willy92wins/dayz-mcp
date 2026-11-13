@@ -385,6 +385,90 @@ class LeaseWorkIdleCoordinatorTest(unittest.TestCase):
                 ]
                 self.assertEqual(heartbeats[-1]["decision"], "renewed")
 
+    def test_authorize_during_refusal_audit_window_leaves_heartbeat_renewed(
+        self,
+    ) -> None:
+        clock = FakeClock()
+        probe = FakeIdleHoldProbe(result=True)
+        coordinator, audit, _cleanup = _make_coordinator(
+            clock, attached=True, idle_hold_probe=probe
+        )
+        owner = _identity("a")
+        status, grant = coordinator.acquire(owner, "work")
+        self.assertEqual(status, 200)
+        token = grant["lease_token"]
+        lease_id = grant["lease_id"]
+        authorized: list[bool] = []
+        triggered: list[bool] = []
+        original_write_audit = coordinator._write_audit_locked
+
+        def hooked_write_audit(event_name, **kwargs):
+            ok = original_write_audit(event_name, **kwargs)
+            if (
+                ok
+                and not triggered
+                and event_name == "session_heartbeat"
+                and kwargs.get("decision") == "work_idle"
+            ):
+                triggered.append(True)
+                # The refusal audit write has retaken the coordinator
+                # lock. Drop it so the read below lands in the window
+                # between that write and the heartbeat's own recheck,
+                # then take it back for the heartbeat to continue.
+                coordinator._condition.release()
+                try:
+                    decision = coordinator.authorize(owner, token, "camera_get")
+                    authorized.append(decision.allowed)
+                finally:
+                    coordinator._condition.acquire()
+            return ok
+
+        coordinator._write_audit_locked = hooked_write_audit
+        try:
+            for _ in range(16):
+                clock.advance(110.0)
+                hb_status, hb_body = coordinator.heartbeat(owner, token)
+                self.assertEqual(hb_status, 200)
+                self.assertNotIn("renewal_refused", hb_body)
+                self.assertEqual(hb_body["expires_in_s"], SESSION_TTL_S)
+            self.assertEqual(clock.value, 1760.0)
+            self.assertEqual(probe.calls, [])
+
+            clock.advance(110.0)
+            self.assertEqual(clock.value, 1870.0)
+            hb_status, hb_body = coordinator.heartbeat(owner, token)
+            self.assertEqual(hb_status, 200)
+            self.assertEqual(triggered, [True])
+            self.assertEqual(authorized, [True])
+            self.assertEqual(
+                probe.calls, [(owner.session_id, lease_id, LEASE_WORK_IDLE_S)]
+            )
+            self.assertNotIn("renewal_refused", hb_body)
+            self.assertNotIn("work_idle_s", hb_body)
+            self.assertEqual(hb_body["expires_in_s"], SESSION_TTL_S)
+            self.assertEqual(
+                coordinator._active.expires_at, clock.value + SESSION_TTL_S
+            )
+            heartbeats = [
+                event
+                for event in audit.events
+                if event.get("event") == "session_heartbeat"
+            ]
+            self.assertEqual(heartbeats[-1]["decision"], "renewed")
+
+            clock.advance(110.0)
+            self.assertEqual(clock.value, 1980.0)
+            hb_status, hb_body = coordinator.heartbeat(owner, token)
+            self.assertEqual(hb_status, 200)
+            self.assertNotEqual(hb_body.get("error"), "lease_expired")
+            self.assertNotIn("renewal_refused", hb_body)
+            self.assertEqual(hb_body["expires_in_s"], SESSION_TTL_S)
+            self.assertEqual(
+                coordinator._active.expires_at, clock.value + SESSION_TTL_S
+            )
+        finally:
+            coordinator._write_audit_locked = original_write_audit
+
     def test_probe_runs_without_coordinator_lock_held(self) -> None:
         clock = FakeClock()
         owner = _identity("a")

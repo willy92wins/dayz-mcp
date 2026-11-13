@@ -183,6 +183,7 @@ class IdleWarden:
         self._dead = False
         self._baseline: tuple[tuple[object, ...], ...] = ()
         self._human_mark: float | None = None
+        self._uncertain_mark: float | None = None
         self._launcher_mark: float | None = None
         self._closed = False
         self._adoption_started = False
@@ -309,6 +310,7 @@ class IdleWarden:
             return self._fail(run_id, "run_missing")
         self._baseline = baseline
         self._human_mark = self.lifecycle.human_input_at(run_id)
+        self._uncertain_mark = self.lifecycle.uncertain_input_at(run_id)
         self._launcher_mark = self.lifecycle.launcher_request_at(run_id)
         self._hook("adopted")
         if self._reacted(run_id) or self._drift(run_id):
@@ -629,6 +631,9 @@ class IdleWarden:
             return True
         human = self.lifecycle.human_input_at(run_id)
         if human is not None and human != self._human_mark:
+            return True
+        uncertain = self.lifecycle.uncertain_input_at(run_id)
+        if uncertain is not None and uncertain != self._uncertain_mark:
             return True
         launcher = self.lifecycle.launcher_request_at(run_id)
         if launcher is not None and launcher != self._launcher_mark:
@@ -1049,6 +1054,7 @@ class IdleWarden:
             "expected": self._baseline,
             "allow_gone": allow_gone,
             "human_at": self.lifecycle.human_input_at(run_id),
+            "uncertain_at": self.lifecycle.uncertain_input_at(run_id),
             "launcher_at": self.lifecycle.launcher_request_at(run_id),
             "wall": self.wall(),
             "operation": operation,

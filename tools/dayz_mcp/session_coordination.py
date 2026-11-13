@@ -1472,12 +1472,16 @@ class SessionCoordinator:
                     return 409, self._payload_with_degradation(
                         {"error": "lease_invalid"}, degraded
                     )
-                payload = self._active_payload_locked(lease)
-                payload["renewal_refused"] = "work_idle"
-                payload["work_idle_s"] = work_idle_s
-                if degraded:
-                    payload = self._merge_cleanup_degraded(payload, degraded)
-                return 200, payload
+                # The audit write dropped the lock: work that landed in
+                # that window restarts the idle clock, so recheck it.
+                work_idle_s = self._time_fn() - lease.last_work_at
+                if work_idle_s >= LEASE_WORK_IDLE_S:
+                    payload = self._active_payload_locked(lease)
+                    payload["renewal_refused"] = "work_idle"
+                    payload["work_idle_s"] = work_idle_s
+                    if degraded:
+                        payload = self._merge_cleanup_degraded(payload, degraded)
+                    return 200, payload
             if not self._write_audit_locked(
                 "session_heartbeat",
                 client=client,
