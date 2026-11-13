@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,7 +44,7 @@ _UID_RE = re.compile(
 _STEAM_ID_TEXT_RE = re.compile(r"7656119\d{10}")
 _UID_TEXT_RE = re.compile(r"[A-Za-z0-9_\-+/]{43}=")
 
-_TESTS_DIR = Path(__file__).resolve().parent
+_TESTS_DIR = Path(__file__).parent
 
 
 def _derive_uid(steam_id: str) -> str:
@@ -107,21 +109,20 @@ def _display_path(path: Path, root: Path | None = None) -> str:
     return _mask_path_text(str(relative))
 
 
-def _has_symlinked_parent(path: Path, base: Path) -> bool:
-    try:
-        relative = path.relative_to(base)
-    except ValueError:
-        return True
-    current = base
-    for part in relative.parts[:-1]:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
-
-
 def _walk_problem(display: str, exc: OSError) -> str:
     return f"{display}: unreadable ({type(exc).__name__})"
+
+
+def _entry_is_symlink(entry: os.DirEntry) -> bool:
+    return entry.is_symlink()
+
+
+def _entry_is_dir(entry: os.DirEntry) -> bool:
+    return entry.is_dir(follow_symlinks=False)
+
+
+def _entry_is_file(entry: os.DirEntry) -> bool:
+    return entry.is_file(follow_symlinks=False)
 
 
 def _iter_test_files_with_problems(
@@ -129,13 +130,19 @@ def _iter_test_files_with_problems(
 ) -> tuple[list[Path], list[str]]:
     """Return ``(files, problems)`` for the tree under *root*.
 
-    Every walk or metadata call is guarded: an OSError from resolving
-    the root, iterating ``rglob``, or calling ``is_symlink``,
-    ``stat``, ``is_file`` or ``resolve`` on an entry becomes a masked
-    problem string (masked display path plus the exception class name
-    only), so the entry is never skipped silently and no raw path or
-    exception text can leak. A sibling wrapper keeps the historical
-    files-only view for callers that do not report problems.
+    The walk is an explicit iterative ``os.scandir`` traversal (sorted
+    for determinism). Every step is guarded: an OSError from resolving
+    the root, from ``os.scandir`` (opening or iterating a directory),
+    or from an entry metadata call (``_entry_is_symlink``, or
+    ``_entry_is_dir`` / ``_entry_is_file`` with
+    ``follow_symlinks=False``) becomes a masked problem
+    string (masked display path plus the exception class name only),
+    so nothing is ever skipped silently and no raw path or exception
+    text can leak. Symlink entries are skipped and never descended
+    into, so the walk never follows links out of the resolved root,
+    and ``__pycache__`` directories are not descended into. A sibling
+    wrapper keeps the historical files-only view for callers that do
+    not report problems.
     """
     raw_base = _TESTS_DIR if root is None else root
     try:
@@ -145,34 +152,35 @@ def _iter_test_files_with_problems(
         return [], [_walk_problem(display, exc)]
     files: list[Path] = []
     problems: list[str] = []
-    try:
-        for path in base.rglob("*"):
+    stack: list[Path] = [base]
+    while stack:
+        directory = stack.pop()
+        display_dir = _display_path(directory, base)
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except OSError as exc:
+            problems.append(_walk_problem(display_dir, exc))
+            continue
+        entries.sort(key=lambda entry: entry.name)
+        subdirectories: list[Path] = []
+        for entry in entries:
+            path = directory / entry.name
             display = _display_path(path, base)
             try:
-                if path.is_symlink():
+                if _entry_is_symlink(entry):
                     continue
-                try:
-                    relative = path.relative_to(base)
-                except ValueError:
+                if _entry_is_dir(entry):
+                    if entry.name != "__pycache__":
+                        subdirectories.append(path)
                     continue
-                if "__pycache__" in relative.parts:
+                if not _entry_is_file(entry):
                     continue
-                if _has_symlinked_parent(path, base):
-                    continue
-                path.stat()
-                if not path.is_file():
-                    continue
-                resolved = path.resolve()
             except OSError as exc:
                 problems.append(_walk_problem(display, exc))
                 continue
-            try:
-                resolved.relative_to(base)
-            except ValueError:
-                continue
             files.append(path)
-    except OSError as exc:
-        problems.append(_walk_problem(_display_path(base, base), exc))
+        stack.extend(reversed(subdirectories))
     return sorted(files), problems
 
 
@@ -325,14 +333,16 @@ class WalkHelpersTest(unittest.TestCase):
             named.write_bytes(b"clean\n")
             plain = root / "plain.txt"
             plain.write_bytes(b"clean\n")
-            real_is_symlink = Path.is_symlink
+            real_helper = _entry_is_symlink
 
-            def fake_is_symlink(self: Path) -> bool:
-                if self.name == named.name:
+            def fake_helper(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
                     raise PermissionError(13, "Permission denied", secret)
-                return real_is_symlink(self)
+                return real_helper(entry)
 
-            with mock.patch.object(Path, "is_symlink", fake_is_symlink):
+            with mock.patch.object(
+                sys.modules[__name__], "_entry_is_symlink", fake_helper
+            ):
                 problems = _scan_directory(root)
 
         self.assertTrue(problems)
@@ -348,14 +358,16 @@ class WalkHelpersTest(unittest.TestCase):
             named.write_bytes(b"clean\n")
             plain = root / "plain.txt"
             plain.write_bytes(b"clean\n")
-            real_is_file = Path.is_file
+            real_helper = _entry_is_file
 
-            def fake_is_file(self: Path) -> bool:
-                if self.name == named.name:
+            def fake_helper(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
                     raise PermissionError(13, "Permission denied", secret)
-                return real_is_file(self)
+                return real_helper(entry)
 
-            with mock.patch.object(Path, "is_file", fake_is_file):
+            with mock.patch.object(
+                sys.modules[__name__], "_entry_is_file", fake_helper
+            ):
                 problems = _scan_directory(root)
 
         self.assertTrue(problems)
@@ -363,7 +375,7 @@ class WalkHelpersTest(unittest.TestCase):
         self.assertNotIn(secret, problems[0])
         self.assertIn("PermissionError", problems[0])
 
-    def test_stat_error_is_reported_masked(self) -> None:
+    def test_is_dir_error_is_reported_masked(self) -> None:
         secret = _derive_uid("7656119" + "9987654321")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -371,20 +383,101 @@ class WalkHelpersTest(unittest.TestCase):
             named.write_bytes(b"clean\n")
             plain = root / "plain.txt"
             plain.write_bytes(b"clean\n")
-            real_stat = Path.stat
+            real_helper = _entry_is_dir
 
-            def fake_stat(self: Path, *args, **kwargs):
-                if self.name == named.name:
+            def fake_helper(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
                     raise PermissionError(13, "Permission denied", secret)
-                return real_stat(self, *args, **kwargs)
+                return real_helper(entry)
 
-            with mock.patch.object(Path, "stat", fake_stat):
+            with mock.patch.object(
+                sys.modules[__name__], "_entry_is_dir", fake_helper
+            ):
                 problems = _scan_directory(root)
 
         self.assertTrue(problems)
         self.assertEqual(len(problems), 1)
         self.assertNotIn(secret, problems[0])
         self.assertIn("PermissionError", problems[0])
+
+    def test_scandir_error_for_root_is_reported_masked(self) -> None:
+        secret = _derive_uid(_FAKE_STEAM_ID)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plain = root / "plain.txt"
+            plain.write_bytes(b"clean\n")
+
+            def fake_scandir(path: Path) -> object:
+                raise PermissionError(13, "Permission denied", secret)
+
+            with mock.patch.object(os, "scandir", fake_scandir):
+                problems = _scan_directory(root)
+
+        self.assertTrue(problems)
+        for problem in problems:
+            self.assertNotIn(secret, problem)
+        self.assertTrue(
+            any("PermissionError" in problem for problem in problems)
+        )
+
+    def test_scandir_error_for_subdir_is_masked_and_sibling_scanned(
+        self,
+    ) -> None:
+        secret = _FAKE_STEAM_ID
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blocked = root / secret
+            blocked.mkdir()
+            hidden = blocked / "hidden.txt"
+            hidden.write_bytes(b"clean\n")
+            sibling = root / "sibling.txt"
+            sibling.write_bytes(b"clean\n")
+            real_scandir = os.scandir
+
+            def fake_scandir(path: Path) -> object:
+                if Path(path).name == secret:
+                    raise PermissionError(13, "Permission denied", secret)
+                return real_scandir(path)
+
+            with mock.patch.object(os, "scandir", fake_scandir):
+                files, walk_problems = _iter_test_files_with_problems(root)
+                problems = _scan_directory(root)
+
+        self.assertTrue(walk_problems)
+        self.assertEqual(len(walk_problems), 1)
+        self.assertNotIn(secret, walk_problems[0])
+        self.assertIn("PermissionError", walk_problems[0])
+        self.assertIn("sibling.txt", {path.name for path in files})
+        self.assertNotIn("hidden.txt", {path.name for path in files})
+        self.assertTrue(problems)
+        for problem in problems:
+            self.assertNotIn(secret, problem)
+        self.assertTrue(
+            any("PermissionError" in problem for problem in problems)
+        )
+
+    def test_resolve_error_is_reported_masked(self) -> None:
+        secret = _derive_uid(_FAKE_STEAM_ID)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plain = root / "plain.txt"
+            plain.write_bytes(b"clean\n")
+
+            def fake_resolve(self: Path, *args: object, **kwargs: object):
+                raise PermissionError(13, "Permission denied", secret)
+
+            with mock.patch.object(Path, "resolve", fake_resolve):
+                problems = _scan_directory(root)
+
+        self.assertTrue(problems)
+        for problem in problems:
+            self.assertNotIn(secret, problem)
+        self.assertTrue(
+            any("PermissionError" in problem for problem in problems)
+        )
+
+    def test_tests_dir_is_built_without_resolve(self) -> None:
+        self.assertEqual(_TESTS_DIR, Path(__file__).parent)
 
     def test_scan_masks_file_name_in_temp_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
