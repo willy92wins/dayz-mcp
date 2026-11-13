@@ -64,6 +64,12 @@ _FINGERPRINT_KEYS = frozenset(
 _REPRODUCIBILITY_MODES = ("clean-1", "clean-2", "offline")
 PACKAGED_MODULES = (
     "accredited_daemon_transport.py",
+    # The Linux overlay. It decides how the sealed worker behaves (paths, locks,
+    # the build relay), so it is sealed with it: outside app.pyz an edit would
+    # change the worker while the bundle still verified.
+    "byte_lock.py",
+    "linux_build.py",
+    "linux_compat.py",
     "daemon_contract.py",
     "daemon_policy_contract.py",
     "dayz_test_modes.py",

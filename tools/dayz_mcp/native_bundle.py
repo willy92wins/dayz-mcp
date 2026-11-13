@@ -68,6 +68,9 @@ _HASHED_MODULES = {
 _APP_PACKAGED_MODULES = frozenset(
     {
         "accredited_daemon_transport.py",
+        "byte_lock.py",
+        "linux_build.py",
+        "linux_compat.py",
         "daemon_contract.py",
         "daemon_policy_contract.py",
         "dayz_test_modes.py",

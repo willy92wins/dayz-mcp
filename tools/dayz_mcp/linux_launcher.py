@@ -375,6 +375,37 @@ class VerifiedLinuxBundle:
         self.close()
 
 
+def install_linux_launcher_backend() -> None:
+    """``dayz_mcp.native_launcher_backend`` off Windows: this module's relay.
+
+    The real module drives the signed PE through Win32 and cannot even be
+    imported here. ``secure_launcher`` is byte-pinned by ``dependency-lock.json``
+    (editing it costs a launcher rebuild), and it imports the backend by name
+    when a lease is granted, so a module of that name with
+    ``launch_registered_linux`` as ``launch_registered_native`` is where the
+    Linux run takes over. ``security_runtime_audit`` audits this module
+    explicitly for that reason. Called by ``load_verified_bundle``, i.e. only in
+    a process that is about to launch, and with this file as the stand-in's
+    file, so the server-code freshness check can read its source.
+
+    It lives here rather than in ``linux_compat`` so that ``linux_compat``, which
+    is sealed into ``app.pyz``, does not import this module: the sealed set has to
+    stay import-closed without pulling the launcher and its Windows verifier in.
+    """
+    if os.name == "nt" or "dayz_mcp.native_launcher_backend" in sys.modules:
+        return
+    import types
+
+    backend = types.ModuleType(
+        "dayz_mcp.native_launcher_backend",
+        "Off Windows: linux_launcher's relay under the native backend's name.",
+    )
+    backend.__file__ = __file__
+    backend.launch_registered_native = launch_registered_linux
+    backend.NativeLauncherBackendError = LinuxLauncherError
+    sys.modules[backend.__name__] = backend
+
+
 def load_verified_bundle(opened: object) -> VerifiedLinuxBundle:
     if type(opened) is not LinuxOpenedLauncher:
         _invalid()
@@ -410,10 +441,9 @@ def load_verified_bundle(opened: object) -> VerifiedLinuxBundle:
     policy = _closed_json(contents["request-policy.json"])
     sealed_policies = native_bundle._parse_policy(policy)
     runtime = _closed_json(contents["worker-runtime.json"])
-    from dayz_mcp import linux_compat
 
     # secure_launcher imports the backend by name once the lease is granted.
-    linux_compat.install_linux_launcher_backend()
+    install_linux_launcher_backend()
     return VerifiedLinuxBundle(
         sealed_policies=sealed_policies,
         manifest_sha256=_sha256(manifest_raw),

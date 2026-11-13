@@ -154,6 +154,45 @@ class LinuxBundleTest(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertNotIn(b"DZW1", done.stdout)
 
+    def test_the_linux_overlay_is_sealed_inside_app_pyz(self) -> None:
+        # The overlay decides how the sealed worker behaves (paths, locks, the
+        # build relay). Outside app.pyz an edit would change the worker while the
+        # bundle still verified, so the three modules must be members.
+        bundle = self.install_and_open()
+        root = self.state / "DayZ_MCP" / "linux-launchers" / "dayz-test-v1"
+        import zipfile
+
+        from dayz_mcp import linux_worker_host
+
+        with zipfile.ZipFile(root / "app.pyz") as archive:
+            members = set(archive.namelist())
+        for name in ("linux_compat.py", "linux_build.py", "byte_lock.py"):
+            with self.subTest(name=name):
+                self.assertIn(f"dayz_mcp/{name}", members)
+        # And the worker host's finder is what serves them: it is inserted at
+        # meta_path[0], ahead of the working tree.
+        app_members = linux_worker_host._read_app(root, bundle.app_sha256)
+        finder = linux_worker_host._SealedModuleFinder(app_members, str(root / "app.pyz"))
+        for name in ("linux_compat", "linux_build", "byte_lock"):
+            with self.subTest(name=name):
+                self.assertIsNotNone(finder.find_spec(f"dayz_mcp.{name}"))
+
+    def test_a_drifted_overlay_is_refused_before_the_worker_starts(self) -> None:
+        # Editing linux_compat.py must invalidate the bundle, not silently change
+        # what the sealed worker does. sealed_sources() is the check that runs.
+        lock = json.loads((TOOLS / "packaged-modules.lock.json").read_text())
+        relative = "tools/dayz_mcp/linux_compat.py"
+        self.assertIn(relative, lock["files"])
+        lock["files"][relative] = "0" * 64
+        with tempfile.TemporaryDirectory() as holder:
+            drifted = Path(holder) / "packaged-modules.lock.json"
+            drifted.write_text(json.dumps(lock))
+            with patch.object(linux_launcher, "_LOCK_PATH", drifted):
+                with self.assertRaises(ValueError) as caught:
+                    linux_launcher.sealed_sources()
+        self.assertIn("packaged_module_drift", str(caught.exception))
+        self.assertIn(relative, str(caught.exception))
+
 
 @unittest.skipUnless(POSIX, "the msvcrt shim of the Linux worker host")
 class WorkerHostShimTest(unittest.TestCase):

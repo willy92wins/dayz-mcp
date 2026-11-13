@@ -78,11 +78,15 @@ Operator error codes:
 
 ## Linux (partial port)
 
-Windows is the supported host and nothing below changes it. The modules sealed into the dayz-test-v1 native
-launcher (`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) are byte-identical to Windows-only
-`main`, so Linux support never forces a launcher rebuild. The Linux code lives in unsealed modules:
+Windows is the supported host and nothing below changes it. The modules sealed into the dayz-test-v1 launcher
+(`PACKAGED_MODULES`, hashed in `tools/packaged-modules.lock.json`) include the Linux overlay that decides how
+the sealed worker behaves -- `linux_compat.py`, `linux_build.py` and `byte_lock.py` -- so the worker executes
+only verified bytes: editing one of them makes the bundle stale (`packaged_module_drift`, then
+`invalid_linux_launcher_bundle__stale`) and requires a reseal, exactly as for any other sealed module. The rest
+of the Linux port is unsealed and runs in the daemon, not in the sealed worker: `posix_fileops.py`,
+`linux_launcher.py`, `linux_windows.py`, `proton_client.py`, `podman_server.py`, `steam_linux.py`.
 
-- `dayz_mcp/linux_compat.py`: `install()` runs first in `python -m dayz_mcp` and, outside Windows only, sets
+- `dayz_mcp/linux_compat.py` (sealed): `install()` runs first in `python -m dayz_mcp` and, outside Windows only, sets
   `LOCALAPPDATA` to `$XDG_STATE_HOME` (else `~/.local/state`) when unset, defines the two Win32
   `stat.IO_REPARSE_TAG_*` constants, and replaces in the sealed modules: `win32_fileinfo.bind_common_kernel32`
   (an `UnavailableLibrary`: prototypes bind at import, calls raise `OSError(win32_unavailable:...)`),
@@ -147,8 +151,8 @@ a process differ.
 
 - **Launcher** (`dayz_mcp/linux_launcher.py`, `dayz_mcp/linux_worker_host.py`). There is no signed PE, so
   `launcher_registry` opens an installed bundle instead, `native_bundle.load_verified_bundle` verifies it
-  with `linux_launcher`, and `linux_compat.install()` registers a stand-in `dayz_mcp.native_launcher_backend`
-  whose `launch_registered_native` is `launch_registered_linux`. `secure_launcher.py` and
+  with `linux_launcher`, and `linux_launcher.install_linux_launcher_backend()` registers a stand-in
+  `dayz_mcp.native_launcher_backend` whose `launch_registered_native` is `launch_registered_linux`. `secure_launcher.py` and
   `build_native_launcher.py` are not edited: `dependency-lock.json` pins the first and every Windows build
   contract records the hash of the second, so touching either would cost a launcher rebuild. The relay's two
   `subprocess.Popen` calls are the only process creation `security_runtime_audit` accepts in
@@ -222,7 +226,8 @@ busy-polls `/proc/self/statm` and `/proc/meminfo` after the last building type l
 landscape (4+ minutes, twice; ~10 s without); and a mod mounted read-only (`:ro`) is skipped without a log
 line, while from an overlay (`:O`) it loads. Absolute `-config` and `-profiles` work; absolute `-mission` looked like it did, but left the server without `init.c`'s `main` (2026-11-06, below).
 
-Tests: `tests/test_linux_launcher.py` (bundle install and tamper refusal, the worker host running the sealed
+Tests: `tests/test_linux_launcher.py` (bundle install and tamper refusal, the overlay sealed inside `app.pyz`
+and a drifted overlay refused, the worker host running the sealed
 worker from the archive, the `msvcrt` shim scope, the POSIX path authority, the host probes, the allow rule)
 and two relay-boundary tests in `tests/test_security_runtime_audit.py`. Tests of the Windows approval registry
 and of the `Popen` launch path are skipped off Windows (`skipIf(os.name != "nt")`, with the reason).

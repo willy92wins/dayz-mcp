@@ -388,7 +388,7 @@ else:
     from dayz_mcp import linux_compat, linux_launcher, native_bundle  # noqa: F401
     from dayz_mcp import linux_build, linux_windows, proton_client, steam_linux  # noqa: F401
 
-    linux_compat.install_linux_launcher_backend()
+    linux_launcher.install_linux_launcher_backend()
 playbook_tool_mod.load_runner()
 # Freeze at import, before build_app can be delayed or repeated.
 _SERVER_SOURCES = ServerSourceWatch(loaded_source_files())

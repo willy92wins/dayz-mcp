@@ -1,8 +1,11 @@
-"""Linux support kept outside the sealed native launcher.
+"""Linux behaviour for the sealed worker, sealed with it.
 
-The modules embedded in the dayz-test-v1 native launcher (``PACKAGED_MODULES`` in
-``build_native_launcher.py``, hashed in ``tools/packaged-modules.lock.json``) stay
-byte-identical, so a Linux change never forces a launcher rebuild. Instead
+This module is a member of ``PACKAGED_MODULES`` (``build_native_launcher.py``) and
+is hashed in ``tools/packaged-modules.lock.json``, so it travels inside ``app.pyz``
+and is verified with the rest of the sealed worker: editing it makes the bundle
+stale (``packaged_module_drift`` / ``invalid_linux_launcher_bundle__stale``) and a
+reseal is required. It is not loaded from the working tree.
+
 ``install()`` runs first in ``python -m dayz_mcp`` and, outside Windows only, puts
 Linux implementations in place before any other module binds them:
 
@@ -24,10 +27,10 @@ Linux implementations in place before any other module binds them:
 - ``dayz_test_request``, ``dayz_test_worker``, ``dayz_test_attestation`` and
   ``dayz_test_storage`` (``install_sealed_worker_paths``): ``DRIVE_PATH_AWARE`` for
   their ``ntpath`` (``posixpath`` on POSIX paths, ``ntpath`` on drive paths), and
-  drive-letter validators that also accept a POSIX path;
-- ``dayz_mcp.native_launcher_backend`` (``install_linux_launcher_backend``, called by
-  ``linux_launcher.load_verified_bundle``, not by ``install()``): a stand-in
-  whose ``launch_registered_native`` is ``linux_launcher.launch_registered_linux``.
+  drive-letter validators that also accept a POSIX path.
+
+The ``dayz_mcp.native_launcher_backend`` stand-in is not installed here: it lives in
+``linux_launcher``, so this module does not import the launcher.
 
 On Windows ``install()`` does nothing and importing this module has no side effect.
 Unsealed modules import ``win_dll`` and ``is_python_image`` from here directly.
@@ -40,7 +43,6 @@ import ntpath
 import os
 import posixpath
 import stat as _stat
-import sys
 from pathlib import Path
 
 _MAX_RAW_BYTES = 4096
@@ -271,36 +273,6 @@ def install() -> None:
         daemon_policy_contract.valid_absolute_path = absolute_rule
 
     install_sealed_worker_paths()
-
-
-def install_linux_launcher_backend() -> None:
-    """``dayz_mcp.native_launcher_backend`` off Windows: the Linux relay.
-
-    The real module drives the signed PE through Win32 and cannot even be
-    imported here. ``secure_launcher`` is byte-pinned by ``dependency-lock.json``
-    (editing it costs a launcher rebuild), and it imports the backend by name
-    when a lease is granted, so a module of that name with
-    ``linux_launcher.launch_registered_linux`` as ``launch_registered_native``
-    is where the Linux run takes over. ``security_runtime_audit`` audits
-    ``linux_launcher`` explicitly for that reason. Installed by
-    ``linux_launcher.load_verified_bundle``, i.e. only in a process that is about
-    to launch, and with ``linux_launcher.py`` as its file, so the server-code
-    freshness check can read its source.
-    """
-    if os.name == "nt" or "dayz_mcp.native_launcher_backend" in sys.modules:
-        return
-    import types
-
-    from dayz_mcp import linux_launcher
-
-    backend = types.ModuleType(
-        "dayz_mcp.native_launcher_backend",
-        "Off Windows: linux_launcher's relay under the native backend's name.",
-    )
-    backend.__file__ = linux_launcher.__file__
-    backend.launch_registered_native = linux_launcher.launch_registered_linux
-    backend.NativeLauncherBackendError = linux_launcher.LinuxLauncherError
-    sys.modules[backend.__name__] = backend
 
 
 # install_sealed_worker_paths covers the sealed modules a dayz_test_run request

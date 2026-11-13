@@ -8,7 +8,9 @@ worker sends. Outside Windows this module is that interpreter's entry:
 
 - ``app.pyz`` is read once, its SHA-256 must be the one the launcher verified
   against the bundle manifest, and every sealed module (``dayz_mcp/<name>.py``)
-  is then imported from those bytes, not from the working tree;
+  is then imported from those bytes, not from the working tree -- including the
+  Linux overlay (``linux_compat``, ``linux_build``, ``byte_lock``), which decides
+  how the sealed worker behaves and so is sealed with it;
 - ``msvcrt.open_osfhandle`` is the identity: the cancel handle is a POSIX pipe
   descriptor, and ``os.read`` on it returns when the launcher writes or closes
   (the shim exists only while the sealed module is imported);
