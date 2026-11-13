@@ -51,7 +51,7 @@ store, sin E/S) — acoplamiento nuevo loopback→manifest en la ruta caliente.
 
 ## Defectos del instrumento en la recepción (los dos corregidos y re-probados)
 - `recibir.py` lanzaba los gates con una ruta Windows absoluta → bash la trituraba
-  (`C:Usersguill...`). Ruta relativa con `cwd=ws`.
+  (`%USERPROFILE%...`). Ruta relativa con `cwd=ws`.
 - Y el `bash` que resuelve Python desde un subprocess es el de WSL (`System32\bash.exe`), no el
   de Git: para él `C:\...\python.exe` es «command not found». Ahora se usa
   `C:\Program Files\Git\bin\bash.exe` explícito. La prueba en seco no ejercitaba el paso 5;

@@ -6,7 +6,7 @@ VERDICT: CHANGES_REQUIRED
 
 **F1 — P2 — Previous F2 remains partially open: public capture results can still suppress selection errors.**
 
-Location: [tools/mcp_capture.py:1497](C:/Users/guill/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:1497), also `:1593`; validation is bypassed by the early return at `:896`.
+Location: [tools/mcp_capture.py:1497](%USERPROFILE%/dzmcp_gauntlet/g5r9_selection/ws/tools/mcp_capture.py:1497), also `:1593`; validation is bypassed by the early return at `:896`.
 
 **Executable scenario, verified with an in-memory backend probe:**
 

@@ -48,7 +48,7 @@ PASS N14 required decision fields
 PASS N15 required decision fields
 PASS N16 required decision fields
 PASS citation paths and bounds: 96 checked, invalid=[]
-FAIL source snapshots stable: 77 checked, drift=[('C:\\Users\\guill\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\control_client.py', 'changed')]
+FAIL source snapshots stable: 77 checked, drift=[('%USERPROFILE%\\OneDrive\\Documentos\\DayZ Projects\\DayZ_MCP_dev\\tools\\dayz_mcp\\control_client.py', 'changed')]
 PASS HEAD unchanged since inventory
 PASS staged path list unchanged since inventory
 PASS QA-TRIAJE.md UTF-8 without BOM/replacement character

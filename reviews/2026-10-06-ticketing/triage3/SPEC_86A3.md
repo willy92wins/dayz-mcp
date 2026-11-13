@@ -4,9 +4,9 @@
 
 Fuentes y abreviaturas de rutas:
 
-- `R` = `C:/Users/guill/dzmcp_gauntlet/triage3/tree`
-- `V` = `C:/Users/guill/OneDrive/Documentos/DayZ Projects/scripts`
-- `G` = `C:/Users/guill/OneDrive/Documentos/DayZ Projects/gui`
+- `R` = `%USERPROFILE%/dzmcp_gauntlet/triage3/tree`
+- `V` = `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/scripts`
+- `G` = `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/gui`
 - `E` = `E:/DayZ-Exp-Extract/1.30.164014/exp/scripts/scripts`
 
 Cada cita relativa se expande sobre estas raíces. `ba07cca` es la procedencia declarada por el encargo; no verificable mediante Git en esta copia, que carece de repositorio accesible.

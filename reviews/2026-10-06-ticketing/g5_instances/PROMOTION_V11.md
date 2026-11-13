@@ -6,7 +6,7 @@ implements: each instance from its own tools tree; both daemons upgraded before 
 default = stable DayZ 1.29, token `130` = DayZ 1.30 Experimental keeping `%LOCALAPPDATA%\DayZ_MCP_130`; batch E in v11.
 
 ## Names
-- LIVE = `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` (default, port 8765, `dayz-mcp`).
+- LIVE = `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev` (default, port 8765, `dayz-mcp`).
 - T130 = `C:\temp\DayZ_MCP_130` (instance 130, port 8775, `dayz-mcp-130`). Today a 506de5d checkout with local
   patches (root and `E:\SteamLibrary\steamapps\common\DayZ Exp` hardcoded), its venv and keyfile.
 - DEV130 = `C:\temp\DayZ_MCP_130_dev` (the 130 projects' dev tree, referenced by its launcher policy; kept).
@@ -15,7 +15,7 @@ default = stable DayZ 1.29, token `130` = DayZ 1.30 Experimental keeping `%LOCAL
   this cycle). CAND_SHA its commit.
 - PBO_DIR = `P:\Mods\@DayZ_MCP\Addons` (shared by both instances). STAGE_SRC = `P:\mcp_v11_stage\source` and
   STAGE_OUT = `P:\mcp_v11_stage\out\Addons` (siblings: pack-addon refuses a destination inside its stage root).
-- BACKUPS = `C:\Users\guill\DayZ_MCP_backups\v11-<date>\`. Every sub-step writes its result there (`steps.log`).
+- BACKUPS = `%USERPROFILE%\DayZ_MCP_backups\v11-<date>\`. Every sub-step writes its result there (`steps.log`).
 
 ## 0. Quiescence for the WHOLE promotion (stop if any fails)
 - Owner go-ahead. `session_status` read once on each instance (it can lazy-spawn a daemon: read, then quiesce).
@@ -64,7 +64,7 @@ default = stable DayZ 1.29, token `130` = DayZ 1.30 Experimental keeping `%LOCAL
   provenance `tools\dev\pbo_provenance.py <STAGE_OUT\DayZ_MCP.pbo> <LIVE> <CAND_SHA>`.
 - `tools\dev\swap_pbo.ps1 -Build STAGE_OUT\DayZ_MCP.pbo -WantNew <new sha> -WantOld <old sha> -Destination
   PBO_DIR`; record the retired file's name (rollback swaps the hashes back).
-- PROBE: pack `C:\Users\guill\dzmcp_gauntlet\probe_9941\ws\MCPHoldProbe` to `P:\Mods\_probe\@MCPHoldProbe\Addons`.
+- PROBE: pack `%USERPROFILE%\dzmcp_gauntlet\probe_9941\ws\MCPHoldProbe` to `P:\Mods\_probe\@MCPHoldProbe\Addons`.
 
 ## 6. Daemon health (no game yet)
 - Clients reopened by this session only: one stdio harness per instance; `session_status` on each (the daemons

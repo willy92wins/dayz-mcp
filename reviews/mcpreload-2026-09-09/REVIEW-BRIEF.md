@@ -43,7 +43,7 @@ desplazadas o ser inexactas: dilo cuando lo esten.
 
 2. **COSTE.** Dice que hace DOS lecturas de las fuentes de ~51 modulos por CADA llamada MCP,
    con una medida local de 6,30 ms. Dato que el implementador puede no haber tenido en
-   cuenta: **este arbol vive en OneDrive** (`C:\Users\guill\OneDrive\Documentos\DayZ
+   cuenta: **este arbol vive en OneDrive** (`%USERPROFILE%\OneDrive\Documentos\DayZ
    Projects\`), con sincronizacion activa y ficheros que pueden estar deshidratados. Evalua
    el peor caso, no el medio. Di si hay que cachear, y que se pierde al cachear.
 
