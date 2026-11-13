@@ -9,12 +9,12 @@ Escrito por la sesion orquestadora ANTES de delegar. El worker NO edita este fic
 
 ```gates
 [ ] G1: el ingress acepta el contrato aprobado y sigue rechazando todo lo demas
-  CHECK: "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe" gate/oracle_ui_schema.py
+  CHECK: "%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe" gate/oracle_ui_schema.py
   EXPECT: UI_INGRESS_SCHEMA_OK
   EVIDENCE: pending
 
 [ ] G2: los tests propios del modulo pasan enteros
-  CHECK: "C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe" -m unittest tests.test_loopback tests.test_validate_command_args_table
+  CHECK: "%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev/tools/.venv-mcp/Scripts/python.exe" -m unittest tests.test_loopback tests.test_validate_command_args_table
   EXPECT: OK
   CWD: tools
   EVIDENCE: pending

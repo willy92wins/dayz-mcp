@@ -1,8 +1,8 @@
 # Evidencia — verificación de #57 (2026-09-15)
 
 Puntero local, sin versionar. La evidencia vive en el vault:
-`C:\Users\guill\ObsidianVault\AI\10_Projects\DayZ_MCP\reviews\2026-09-15-post57\`.
-Sesión: `C:\Users\guill\ObsidianVault\AI\30_Sessions\2026-09-15-dayzmcp-post57.md`.
+`%USERPROFILE%\ObsidianVault\AI\10_Projects\DayZ_MCP\reviews\2026-09-15-post57\`.
+Sesión: `%USERPROFILE%\ObsidianVault\AI\30_Sessions\2026-09-15-dayzmcp-post57.md`.
 
 | Ficha | Veredicto | Evidencia en el vault |
 |---|---|---|

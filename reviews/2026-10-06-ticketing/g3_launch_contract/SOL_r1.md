@@ -214,7 +214,7 @@ The October 1 live-state snapshot proves nothing about this modified tree’s de
 ## NOT VERIFIED
 
 - Default Python 3.14 could not import the test module because `anyio` was absent.
-- With `C:\Users\guill\dzmcp_gauntlet\venv311\Scripts\python.exe -B`, the module ran 21 tests: seven errored because the read-only sandbox prohibited temporary-directory creation. The remaining 14 were rerun separately and passed.
+- With `%USERPROFILE%\dzmcp_gauntlet\venv311\Scripts\python.exe -B`, the module ran 21 tests: seven errored because the read-only sandbox prohibited temporary-directory creation. The remaining 14 were rerun separately and passed.
 - The supplied fast-tier and Python 3.11 gate results were not independently reproduced in full.
 - Adversarial probes used in-memory I/O and lifecycle fixtures. Real Windows races, containment defenses, heartbeat supervision and cancellation cleanup remain unverified.
 - No launcher reseal/registration, deployed PBO inspection, foreign-box live check, in-game argv inspection or storage-rotation experiment was performed.

@@ -16,16 +16,16 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\http\server.py", line 484, in handle_one_request
     method()
     ~~~~~~^^
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 2997, in do_POST
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 2997, in do_POST
     self._handle_session(session_action)
     ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 3266, in _handle_session
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 3266, in _handle_session
     payload = self._adopt_on_grant(client, payload)
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 3155, in _adopt_on_grant
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\loopback.py", line 3155, in _adopt_on_grant
     result = lifecycle.adopt_run(client, token, run_id)
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\ws\tools\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
     run = self.manifest.get(run_id)
-  File "C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\oracle_tests.py", line 610, in broken_get
+  File "%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-J\oracle_tests.py", line 610, in broken_get
     raise OSError("manifest read failed inside adopt_run")
 OSError: manifest read failed inside adopt_run
 ----------------------------------------

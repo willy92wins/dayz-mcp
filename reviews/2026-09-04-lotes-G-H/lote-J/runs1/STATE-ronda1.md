@@ -91,11 +91,11 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
     return future.result()
            ~~~~~~~~~~~~~^^
-  File "C:\Users\guill\AppData\Local\Temp\tmp.UTlRoMs8Yc\tests\test_session_e2e.py", line 403, in test_vehicle_release_cleanup_is_enqueued_exactly_once
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.UTlRoMs8Yc\tests\test_session_e2e.py", line 403, in test_vehicle_release_cleanup_is_enqueued_exactly_once
     await self.wait_until(
     ...<2 lines>...
     )
-  File "C:\Users\guill\AppData\Local\Temp\tmp.UTlRoMs8Yc\tests\test_session_e2e.py", line 244, in wait_until
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.UTlRoMs8Yc\tests\test_session_e2e.py", line 244, in wait_until
     self.fail("condition_not_reached")
     ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: condition_not_reached
@@ -104,7 +104,7 @@ AssertionError: condition_not_reached
 FAIL: test_acquire_adopts_the_ownerless_idle_run (tests.test_daemon.DaemonEndpointTest.test_acquire_adopts_the_ownerless_idle_run)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\tmp.UTlRoMs8Yc\tests\test_daemon.py", line 474, in test_acquire_adopts_the_ownerless_idle_run
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.UTlRoMs8Yc\tests\test_daemon.py", line 474, in test_acquire_adopts_the_ownerless_idle_run
     self.assertIsInstance(adopted, dict, acquired)
     ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: None is not an instance of <class 'dict'> : {'status': 'active', 'lease_token': '_o-6_gUWqjGOXWK9eOg2m40-3UmZ4M7kqXNz4YfdFoM', 'lease_id': '85086f15f485475caf310964187db453', 'expires_in_s': 119.97022210000432}

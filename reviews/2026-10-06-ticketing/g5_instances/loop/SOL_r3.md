@@ -113,16 +113,16 @@ inside B=False
 With an inherited override:
 
 ```text
-DAYZ_MCP_SHARED_ROOT=C:\Users\guill\Documents\dayz-locks
+DAYZ_MCP_SHARED_ROOT=%USERPROFILE%\Documents\dayz-locks
 fixture root=C:\fixture\C
-shared=C:\Users\guill\Documents\dayz-locks
+shared=%USERPROFILE%\Documents\dayz-locks
 inside fixture=False
 ```
 
 The real admission path resolver then requests creation of that user directory and returns:
 
 ```text
-C:\Users\guill\Documents\dayz-locks\box-admission.lock
+%USERPROFILE%\Documents\dayz-locks\box-admission.lock
 ```
 
 Thus tests using this fixture can recreate an expired fixture directory or write under the user’s home. The new `ProcessLifecycleTest` isolation does not cover this helper.
