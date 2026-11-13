@@ -281,9 +281,10 @@ OWNED_SCALAR_FIELDS: dict[str, frozenset[str]] = {
     "insufficient_samples": frozenset({"server_perf"}),
     "length_m": frozenset({"nav_path_query"}),
     # actor_emote's watch (36fa). The tool drops a time its state did not reach.
-    "emote_state": frozenset({"actor_emote"}),
-    "started_after_s": frozenset({"actor_emote"}),
-    "finished_after_s": frozenset({"actor_emote"}),
+    "emote_state": frozenset({"actor_emote", "ai_emote"}),
+    "started_after_s": frozenset({"actor_emote", "ai_emote"}),
+    "finished_after_s": frozenset({"actor_emote", "ai_emote"}),
+    "emote_pending": frozenset({"ai_emote"}),
     # The local player's stance on that refusal (36fa).
     "stance": frozenset({"actor_emote"}),
     # Whether the local player is placing once action_use ran (204e).

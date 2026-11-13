@@ -140,6 +140,15 @@ modded class MCPResult
 {
 	ref MCPAIGroup ai_group;
 	ref array<ref MCPAIGroup> ai_groups;
+	bool emote_pending;
+};
+
+modded class MCPJob
+{
+	int emote_gesture_id;
+	int emote_member_id;
+	bool emote_pending;
+	bool emote_interrupted;
 };
 
 modded class MCPBridge
@@ -152,14 +161,17 @@ modded class MCPBridge
 	protected const float AI_MEMBER_RING_M = 1.5;
 
 	// Must equal EXPECTED_EXPANSION_AI_ARG_CONTRACT_HASH in bridge_readiness.py.
-	protected const string EXPANSION_AI_ARG_CONTRACT_HASH = "68e2b957803c9a13";
+	protected const string EXPANSION_AI_ARG_CONTRACT_HASH = "f1ff4689ba7bc8b2";
 
 	// Adapter verbs as an xai bitmask (bridge_readiness.EXPANSION_AI_VERB_BITS,
 	// append only): bit0 ai_group_release, bit1 ai_group_spawn,
 	// bit2 ai_group_order, bit3 ai_group_state. The adapter adds no names
 	// to caps, so the saturated poll stays within 1024 (#321); the broker
 	// expands the mask to names before storing the census.
-	protected const string EXPANSION_AI_VERBS = "15";
+	protected const string EXPANSION_AI_VERBS = "31";
+
+	protected const float AI_EMOTE_WAIT_MIN_S = 0.5;
+	protected const float AI_EMOTE_WAIT_MAX_S = 30.0;
 
 	protected override string ExtensionPollParams()
 	{
@@ -190,6 +202,11 @@ modded class MCPBridge
 		{
 			DispatchAIGroupState(command, result);
 			return 1;
+		}
+
+		if (command.cmd == "ai_emote")
+		{
+			return DispatchAIEmote(command, result);
 		}
 
 		return 0;
@@ -332,6 +349,10 @@ modded class MCPBridge
 				memberRecord = record.members.Get(index);
 				if (memberRecord.member)
 				{
+					// A static pose's queued cancel (eAIBase.c:10914) would
+					// outlive the member and reach ServerRequestEmoteCancel
+					// (4_world/classes/emotemanager.c:1280) after the despawn.
+					AIClearEmoteAutoCancel(memberRecord.member.GetEmoteManager());
 					memberRecord.member.eAI_Despawn();
 				}
 
@@ -1656,6 +1677,654 @@ modded class MCPBridge
 		}
 
 		result.ok = true;
+	}
+
+	// ai_emote's closed catalog: the EmoteConstants names of actor_emote
+	// (MCPClientBridge.c ActorEmoteId), lowercase. 0 for any other name.
+	protected int AIEmoteId(string emote)
+	{
+		if (emote == "greeting")
+		{
+			return EmoteConstants.ID_EMOTE_GREETING;
+		}
+		if (emote == "sos")
+		{
+			return EmoteConstants.ID_EMOTE_SOS;
+		}
+		if (emote == "heart")
+		{
+			return EmoteConstants.ID_EMOTE_HEART;
+		}
+		if (emote == "taunt")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNT;
+		}
+		if (emote == "lyingdown")
+		{
+			return EmoteConstants.ID_EMOTE_LYINGDOWN;
+		}
+		if (emote == "tauntkiss")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTKISS;
+		}
+		if (emote == "facepalm")
+		{
+			return EmoteConstants.ID_EMOTE_FACEPALM;
+		}
+		if (emote == "tauntelbow")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTELBOW;
+		}
+		if (emote == "thumb")
+		{
+			return EmoteConstants.ID_EMOTE_THUMB;
+		}
+		if (emote == "throat")
+		{
+			return EmoteConstants.ID_EMOTE_THROAT;
+		}
+		if (emote == "dance")
+		{
+			return EmoteConstants.ID_EMOTE_DANCE;
+		}
+		if (emote == "campfire")
+		{
+			return EmoteConstants.ID_EMOTE_CAMPFIRE;
+		}
+		if (emote == "sita")
+		{
+			return EmoteConstants.ID_EMOTE_SITA;
+		}
+		if (emote == "sitb")
+		{
+			return EmoteConstants.ID_EMOTE_SITB;
+		}
+		if (emote == "thumbdown")
+		{
+			return EmoteConstants.ID_EMOTE_THUMBDOWN;
+		}
+		if (emote == "dabbing")
+		{
+			return EmoteConstants.ID_EMOTE_DABBING;
+		}
+		if (emote == "timeout")
+		{
+			return EmoteConstants.ID_EMOTE_TIMEOUT;
+		}
+		if (emote == "clap")
+		{
+			return EmoteConstants.ID_EMOTE_CLAP;
+		}
+		if (emote == "point")
+		{
+			return EmoteConstants.ID_EMOTE_POINT;
+		}
+		if (emote == "silent")
+		{
+			return EmoteConstants.ID_EMOTE_SILENT;
+		}
+		if (emote == "salute")
+		{
+			return EmoteConstants.ID_EMOTE_SALUTE;
+		}
+		if (emote == "rps")
+		{
+			return EmoteConstants.ID_EMOTE_RPS;
+		}
+		if (emote == "watching")
+		{
+			return EmoteConstants.ID_EMOTE_WATCHING;
+		}
+		if (emote == "hold")
+		{
+			return EmoteConstants.ID_EMOTE_HOLD;
+		}
+		if (emote == "listening")
+		{
+			return EmoteConstants.ID_EMOTE_LISTENING;
+		}
+		if (emote == "pointself")
+		{
+			return EmoteConstants.ID_EMOTE_POINTSELF;
+		}
+		if (emote == "lookatme")
+		{
+			return EmoteConstants.ID_EMOTE_LOOKATME;
+		}
+		if (emote == "tauntthink")
+		{
+			return EmoteConstants.ID_EMOTE_TAUNTTHINK;
+		}
+		if (emote == "move")
+		{
+			return EmoteConstants.ID_EMOTE_MOVE;
+		}
+		if (emote == "down")
+		{
+			return EmoteConstants.ID_EMOTE_DOWN;
+		}
+		if (emote == "come")
+		{
+			return EmoteConstants.ID_EMOTE_COME;
+		}
+		if (emote == "rps_r")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_R;
+		}
+		if (emote == "rps_p")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_P;
+		}
+		if (emote == "rps_s")
+		{
+			return EmoteConstants.ID_EMOTE_RPS_S;
+		}
+		if (emote == "nod")
+		{
+			return EmoteConstants.ID_EMOTE_NOD;
+		}
+		if (emote == "shake")
+		{
+			return EmoteConstants.ID_EMOTE_SHAKE;
+		}
+		if (emote == "shrug")
+		{
+			return EmoteConstants.ID_EMOTE_SHRUG;
+		}
+		return 0;
+	}
+
+	protected MCPAIGroupRecord AIFindEmoteGroup(int objectId)
+	{
+		int groupIndex = 0;
+		int memberIndex = 0;
+		MCPAIGroupRecord record;
+		MCPAIGroupMemberRecord memberRecord;
+
+		EnsureAIRegistry();
+		while (groupIndex < m_AIGroups.Count())
+		{
+			record = m_AIGroups.Get(groupIndex);
+			if (record.group_state == "active")
+			{
+				memberIndex = 0;
+				while (memberIndex < record.members.Count())
+				{
+					memberRecord = record.members.Get(memberIndex);
+					if (memberRecord.object_id == objectId && memberRecord.member && memberRecord.member.IsAlive())
+					{
+						return record;
+					}
+
+					memberIndex = memberIndex + 1;
+				}
+			}
+
+			groupIndex = groupIndex + 1;
+		}
+
+		return null;
+	}
+
+	protected MCPAIGroupMemberRecord AIFindEmoteMember(MCPAIGroupRecord record, int objectId)
+	{
+		int memberIndex = 0;
+		MCPAIGroupMemberRecord memberRecord;
+
+		if (!record)
+		{
+			return null;
+		}
+
+		while (memberIndex < record.members.Count())
+		{
+			memberRecord = record.members.Get(memberIndex);
+			if (memberRecord.object_id == objectId)
+			{
+				return memberRecord;
+			}
+
+			memberIndex = memberIndex + 1;
+		}
+
+		return null;
+	}
+
+	protected bool AIEmoteJobOpen(int objectId)
+	{
+		int index = 0;
+		MCPJob openJob;
+
+		if (!m_Jobs)
+		{
+			return false;
+		}
+
+		while (index < m_Jobs.Count())
+		{
+			openJob = m_Jobs.GetElement(index);
+			if (openJob && openJob.kind == "ai_emote" && openJob.emote_member_id == objectId)
+			{
+				return true;
+			}
+
+			index = index + 1;
+		}
+
+		return false;
+	}
+
+	protected bool AIEmotePending(eAIBase member, EmoteManager emotes)
+	{
+		if (member && member.m_Expansion_EmoteID != 0)
+		{
+			return true;
+		}
+
+		if (emotes && emotes.m_bEmoteIsRequestPending)
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	protected bool AIEmotePendingByObjectId(int objectId)
+	{
+		int groupIndex = 0;
+		int memberIndex = 0;
+		MCPAIGroupRecord record;
+		MCPAIGroupMemberRecord memberRecord;
+
+		if (objectId <= 0)
+		{
+			return false;
+		}
+
+		EnsureAIRegistry();
+		while (groupIndex < m_AIGroups.Count())
+		{
+			record = m_AIGroups.Get(groupIndex);
+			if (record.group_state == "active" || record.group_state == "releasing")
+			{
+				memberIndex = 0;
+				while (memberIndex < record.members.Count())
+				{
+					memberRecord = record.members.Get(memberIndex);
+					if (memberRecord.object_id == objectId && memberRecord.member)
+					{
+						return AIEmotePending(memberRecord.member, memberRecord.member.GetEmoteManager());
+					}
+
+					memberIndex = memberIndex + 1;
+				}
+			}
+
+			groupIndex = groupIndex + 1;
+		}
+
+		return false;
+	}
+
+	// Static poses schedule m_EmoteManager.ServerRequestEmoteCancel on the
+	// system call queue (eAIBase.c:10914; 4_world/classes/emotemanager.c:1275).
+	// Remove that bound call (2_gamelib/tools.c:65) before ending or starting
+	// an emote so an earlier pose's expiry cannot cancel the next one.
+	protected void AIClearEmoteAutoCancel(EmoteManager emotes)
+	{
+		ScriptCallQueue queue;
+
+		if (!emotes || !GetGame())
+		{
+			return;
+		}
+
+		queue = GetGame().GetCallQueue(CALL_CATEGORY_SYSTEM);
+		if (queue)
+		{
+			queue.Remove(emotes.ServerRequestEmoteCancel);
+		}
+	}
+
+	// ai_emote (plan 3.5): the dispatch, in its order, is the only place
+	// this verb writes. Its job (IsJobReady below) only reads.
+	protected int DispatchAIEmote(MCPCommand command, MCPResult result)
+	{
+		MCPAIGroupRecord record;
+		MCPAIGroupMemberRecord memberRecord;
+		eAIBase member;
+		EmoteManager emotes;
+		MCPJob job;
+		eAIFSM emoteFsm;
+		ExpansionState emoteFsmState;
+		string emoteFsmName;
+		int emoteId = 0;
+		bool isEnd = false;
+
+		if (!command.args)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			result.emote_pending = false;
+			return 1;
+		}
+
+		isEnd = command.args.emote == "end";
+		if (!isEnd)
+		{
+			emoteId = AIEmoteId(command.args.emote);
+			if (emoteId <= 0)
+			{
+				result.ok = false;
+				result.error = "bad_args";
+				result.emote_pending = AIEmotePendingByObjectId(command.args.object_id);
+				return 1;
+			}
+		}
+
+		if (!IsFiniteFloat(command.args.wait_s) || command.args.wait_s < AI_EMOTE_WAIT_MIN_S || command.args.wait_s > AI_EMOTE_WAIT_MAX_S)
+		{
+			result.ok = false;
+			result.error = "bad_args";
+			result.emote_pending = AIEmotePendingByObjectId(command.args.object_id);
+			return 1;
+		}
+
+		// 1. A living member of an active group.
+		record = AIFindEmoteGroup(command.args.object_id);
+		if (!record)
+		{
+			result.ok = false;
+			result.error = "bad_target";
+			result.emote_pending = AIEmotePendingByObjectId(command.args.object_id);
+			return 1;
+		}
+
+		memberRecord = AIFindEmoteMember(record, command.args.object_id);
+		member = memberRecord.member;
+		emotes = member.GetEmoteManager();
+		if (!emotes)
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		// 2. One emote job per member, end included.
+		if (AIEmoteJobOpen(command.args.object_id))
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		if (isEnd)
+		{
+			if (emotes.m_bEmoteIsPlaying)
+			{
+				if (member.m_Expansion_EmoteID != 0)
+				{
+					member.Expansion_SetEmote(0);
+				}
+
+				AIClearEmoteAutoCancel(emotes);
+				emotes.ServerRequestEmoteCancel();
+				job = new MCPJob();
+				job.id = command.id;
+				job.kind = "ai_emote";
+				job.args = command.args;
+				job.subject = member;
+				job.emote_end = true;
+				job.emote_member_id = command.args.object_id;
+				job.emote_request_s = GetGame().GetTickTime();
+				job.wait_s = command.args.wait_s;
+				job.deadline_s = m_ElapsedS + command.args.wait_s;
+				job.tick_poll_sent = result.tick_poll_sent;
+				job.tick_poll_callback = result.tick_poll_callback;
+				job.tick_dispatch = result.tick_dispatch;
+				m_Jobs.Insert(job.id, job);
+				return 2;
+			}
+
+			if (member.m_Expansion_EmoteID != 0)
+			{
+				member.Expansion_SetEmote(0);
+				result.ok = true;
+				result.emote_state = "cancelled";
+				result.emote_pending = AIEmotePending(member, emotes);
+				return 1;
+			}
+
+			if (emotes.m_bEmoteIsRequestPending)
+			{
+				result.ok = false;
+				result.error = "emote_rejected";
+				result.emote_state = "rejected";
+				result.emote_pending = true;
+				return 1;
+			}
+
+			result.ok = false;
+			result.error = "no_emote_playing";
+			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		// 3. Nothing sounding and no request in either layer.
+		if (member.m_Expansion_EmoteID != 0 || emotes.IsEmotePlaying())
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		// 4. The PlayEmote guard (eAIState_PlayEmote.c:13, :27), read first.
+		if (member.m_eAI_IsFightingFSM || (record.group && record.group.IsInCombat()) || member.GetThreatToSelf(true) > 0.2)
+		{
+			result.ok = false;
+			result.error = "emote_rejected";
+			result.emote_state = "rejected";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		// 4b. Dormant refuses before the write (in-game round B): PlayEmote is
+		// unreachable from Dormant (Master.xml:432-433) and its guard never
+		// wakes it, so a request written here would stay pending past wait_s.
+		// Simulation is read with GetIsSimulationDisabled (entity.c:6) and
+		// the FSM state with the GetFSM/GetState/GetName chain ai_group_state
+		// already uses (FillAIMemberState above); no SetEmote is called.
+		emoteFsmName = "";
+		emoteFsm = member.GetFSM();
+		if (emoteFsm)
+		{
+			emoteFsmState = emoteFsm.GetState();
+			if (emoteFsmState)
+			{
+				emoteFsmName = emoteFsmState.GetName();
+			}
+		}
+
+		if (member.GetIsSimulationDisabled() || emoteFsmName == "Dormant")
+		{
+			result.ok = false;
+			result.error = "npc_dormant";
+			result.emote_pending = AIEmotePending(member, emotes);
+			return 1;
+		}
+
+		// 5. The one write: autoCancel consumes it in Expansion's attempt.
+		AIClearEmoteAutoCancel(emotes);
+		member.Expansion_SetEmote(emoteId, true, Math.Floor(command.args.wait_s * 1000.0));
+		job = new MCPJob();
+		job.id = command.id;
+		job.kind = "ai_emote";
+		job.args = command.args;
+		job.subject = member;
+		job.emote_end = false;
+		job.emote_gesture_id = emoteId;
+		job.emote_member_id = command.args.object_id;
+		job.emote_request_s = GetGame().GetTickTime();
+		job.wait_s = command.args.wait_s;
+		job.deadline_s = m_ElapsedS + command.args.wait_s;
+		job.tick_poll_sent = result.tick_poll_sent;
+		job.tick_poll_callback = result.tick_poll_callback;
+		job.tick_dispatch = result.tick_dispatch;
+		m_Jobs.Insert(job.id, job);
+		return 2;
+	}
+
+	// The ai_emote job only reads the member's EmoteManager and Expansion
+	// request, and writes only its own fields (plan 3.5).
+	protected override bool IsJobReady(MCPJob job)
+	{
+		eAIBase member;
+		EmoteManager emotes;
+		float nowS = 0.0;
+		bool playing = false;
+
+		if (job.kind != "ai_emote")
+		{
+			return super.IsJobReady(job);
+		}
+
+		nowS = GetGame().GetTickTime();
+		member = eAIBase.Cast(job.subject);
+		if (!member || !member.IsAlive())
+		{
+			job.emote_interrupted = true;
+			job.emote_pending = false;
+			if (member)
+			{
+				job.emote_pending = AIEmotePending(member, member.GetEmoteManager());
+			}
+
+			return true;
+		}
+
+		if (nowS - job.emote_request_s > job.wait_s)
+		{
+			return false;
+		}
+
+		emotes = member.GetEmoteManager();
+		job.emote_pending = AIEmotePending(member, emotes);
+		if (emotes)
+		{
+			playing = emotes.m_bEmoteIsPlaying;
+		}
+
+		if (job.emote_end)
+		{
+			if (playing)
+			{
+				return false;
+			}
+
+			job.emote_finished_s = nowS;
+			return true;
+		}
+
+		if (playing)
+		{
+			if (!job.emote_started && emotes && emotes.Expansion_GetCurrentGesture() == job.emote_gesture_id)
+			{
+				job.emote_started = true;
+				job.emote_started_s = nowS;
+			}
+
+			return false;
+		}
+
+		if (!job.emote_started)
+		{
+			return false;
+		}
+
+		job.emote_finished_s = nowS;
+		return true;
+	}
+
+	protected override void PostJobSuccess(MCPJob job)
+	{
+		MCPResult result;
+
+		if (job.kind != "ai_emote")
+		{
+			super.PostJobSuccess(job);
+			return;
+		}
+
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		result.emote_pending = job.emote_pending;
+		if (job.emote_started && !job.emote_end)
+		{
+			result.started_after_s = job.emote_started_s - job.emote_request_s;
+		}
+
+		if (job.emote_interrupted)
+		{
+			result.ok = false;
+			result.error = "emote_interrupted";
+			result.emote_state = "interrupted";
+			PostResult(result);
+			return;
+		}
+
+		result.ok = true;
+		result.emote_state = "finished";
+		result.finished_after_s = job.emote_finished_s - job.emote_request_s;
+		PostResult(result);
+	}
+
+	protected override void PostJobTimeout(MCPJob job)
+	{
+		MCPResult result;
+		eAIBase member;
+
+		if (job.kind != "ai_emote")
+		{
+			super.PostJobTimeout(job);
+			return;
+		}
+
+		result = new MCPResult();
+		result.id = job.id;
+		result.tick_poll_sent = job.tick_poll_sent;
+		result.tick_poll_callback = job.tick_poll_callback;
+		result.tick_dispatch = job.tick_dispatch;
+		// Read here: this tick is past the last IsJobReady read, and the
+		// lease close calls this without any tick (MCPBridge.c:8661).
+		member = eAIBase.Cast(job.subject);
+		if (member)
+		{
+			result.emote_pending = AIEmotePending(member, member.GetEmoteManager());
+		}
+		if (job.emote_started && !job.emote_end)
+		{
+			result.ok = true;
+			result.emote_state = "started";
+			result.started_after_s = job.emote_started_s - job.emote_request_s;
+		}
+		else
+		{
+			result.ok = false;
+			result.error = "emote_timed_out";
+			result.emote_state = "timed_out";
+		}
+
+		PostResult(result);
 	}
 
 	protected void DispatchAIGroupRelease(MCPCommand command, MCPResult result)

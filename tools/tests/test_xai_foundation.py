@@ -664,7 +664,7 @@ class ExpansionContractTest(unittest.TestCase):
                 self.assertIn(key, known)
         result_block = adapter.split("modded class MCPResult")[1].split("};")[0]
         result_fields = re.findall(r"\n\t(?:ref\s+)?[A-Za-z_][\w<> ]*?\s+(\w+);", result_block)
-        self.assertEqual(set(result_fields), {"ai_group", "ai_groups"})
+        self.assertEqual(set(result_fields), {"ai_group", "ai_groups", "emote_pending"})
         # Inherited keys keep their base types.
         self.assertIn("ref array<float> pos;", base_args)
         self.assertIn("int object_id;", base_args)
@@ -1173,11 +1173,48 @@ class ExpansionO13InertTest(unittest.TestCase):
 # --- E6/E9: translated Enforce bodies -------------------------------------
 
 class _FakeMember:
-    def __init__(self) -> None:
+    def __init__(self, emotes: object = None) -> None:
         self.despawns = 0
+        self.emotes = emotes
+
+    def GetEmoteManager(self) -> object:
+        return self.emotes
 
     def eAI_Despawn(self) -> None:
         self.despawns += 1
+
+
+class _FakeEmoteManager:
+    def __init__(self) -> None:
+        self.cancel_calls = 0
+
+    def ServerRequestEmoteCancel(self) -> None:
+        self.cancel_calls += 1
+
+
+class _FakeSystemQueue:
+    """ScriptCallQueue double (2_gamelib/tools.c:61, :65): CallLater keeps the bound call, Remove drops that instance's."""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def CallLater(self, fn, delay: int = 0, repeat: bool = False, *_args) -> None:
+        self.calls.append(fn)
+
+    def Remove(self, fn) -> None:
+        self.calls = [
+            call
+            for call in self.calls
+            if not (
+                getattr(call, "__self__", None) is getattr(fn, "__self__", None)
+                and getattr(call, "__func__", None) is getattr(fn, "__func__", None)
+            )
+        ]
+
+    def run_due(self) -> None:
+        calls, self.calls = self.calls, []
+        for call in calls:
+            call()
 
 
 class _FakeGroup:
@@ -1191,6 +1228,7 @@ class _FakeGroup:
 def _adapter_namespace() -> dict:
     source = ADAPTER.read_text(encoding="utf-8")
     registry: dict[str, object] = {"by_id": {}}
+    system_queue = _FakeSystemQueue()
     namespace: dict[str, object] = {
         "_S": _WireString,
         "m_AIGroups": None,
@@ -1204,9 +1242,15 @@ def _adapter_namespace() -> dict:
             name=None, state=None, reason=None
         ),
         "_registry": registry,
+        "_system_queue": system_queue,
+        "CALL_CATEGORY_SYSTEM": 0,
+        "GetGame": lambda: SimpleNamespace(
+            GetCallQueue=lambda category: system_queue if category == 0 else None
+        ),
     }
     for signature, members in (
         ("protected void EnsureAIRegistry()", ("m_AIGroups",)),
+        ("protected void AIClearEmoteAutoCancel(EmoteManager emotes)", ()),
         (
             "protected bool AIGroupGone(MCPAIGroupRecord record)",
             (),
@@ -1229,7 +1273,7 @@ def _adapter_namespace() -> dict:
             signature,
             namespace,
             members=members,
-            class_types=("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIGroup", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "Object"),
+            class_types=("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIGroup", "MCPLeaseCloseCensus", "MCPLeaseCloseEntry", "Object", "EmoteManager", "ScriptCallQueue"),
         )
     return namespace
 
@@ -1359,6 +1403,55 @@ class ExpansionReleaseDispatchTest(unittest.TestCase):
         result = self._release(namespace, "c" * 32)
         self.assertTrue(result.ok)
         self.assertEqual(result.ai_group.released, 0)
+
+    def test_e6_release_clears_the_queued_emote_cancel_before_the_despawn(self) -> None:
+        # PX3 c: a static pose queues ServerRequestEmoteCancel on the member's
+        # EmoteManager (eAIBase.c:10914). Releasing the group, by
+        # ai_group_release or by the lease-close stop, removes that call
+        # before eAI_Despawn, so it cannot reach the deleted member
+        # (4_world/classes/emotemanager.c:1280). A cancel queued for a
+        # member of a group that is not released stays.
+        for path in ("ai_group_release", "lease_close_stop"):
+            with self.subTest(path=path):
+                namespace = self._namespace()
+                queue = namespace["_system_queue"]
+                released_emotes, kept_emotes = _FakeEmoteManager(), _FakeEmoteManager()
+                released = _FakeMember(released_emotes)
+                record = _record(namespace, members=[_member(11, released)], group=_FakeGroup())
+                namespace["m_AIGroups"] = EnforceArray([record])
+                queue.CallLater(released_emotes.ServerRequestEmoteCancel, 10000)
+                queue.CallLater(kept_emotes.ServerRequestEmoteCancel, 10000)
+                if path == "ai_group_release":
+                    self.assertTrue(self._release(namespace, TOKEN).ok)
+                else:
+                    namespace["LeaseCloseExtensionStop"]()
+                self.assertEqual(released.despawns, 1)
+                queue.run_due()
+                self.assertEqual(released_emotes.cancel_calls, 0)
+                self.assertEqual(kept_emotes.cancel_calls, 1)
+
+    def test_e6_release_clears_the_cancel_mutant_without_the_call(self) -> None:
+        # Negative control: the same release without the AIClearEmoteAutoCancel
+        # call leaves the cancel queued for the deleted member.
+        source = ADAPTER.read_text(encoding="utf-8")
+        call = "AIClearEmoteAutoCancel(memberRecord.member.GetEmoteManager());"
+        self.assertEqual(source.count(call), 1)
+        namespace = self._namespace()
+        translate(
+            source.replace(call, "", 1),
+            "protected bool AIGroupRequestRelease(MCPAIGroupRecord record)",
+            namespace,
+            members=("m_RuntimeObjects",),
+            class_types=("MCPAIGroupRecord", "MCPAIGroupMemberRecord", "eAIGroup", "Object", "EmoteManager"),
+        )
+        emotes = _FakeEmoteManager()
+        member = _FakeMember(emotes)
+        record = _record(namespace, members=[_member(11, member)], group=_FakeGroup())
+        namespace["m_AIGroups"] = EnforceArray([record])
+        namespace["_system_queue"].CallLater(emotes.ServerRequestEmoteCancel, 10000)
+        namespace["LeaseCloseExtensionStop"]()
+        namespace["_system_queue"].run_due()
+        self.assertEqual(emotes.cancel_calls, 1)
 
     def test_e6_stop_requests_every_group_once(self) -> None:
         namespace = self._namespace()

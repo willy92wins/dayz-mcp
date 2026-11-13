@@ -3905,6 +3905,152 @@ def _scan_log_for_pattern(
     return None, scanned, truncated
 
 
+def _steam_auth_login(line: str) -> tuple[str, str | None] | None:
+    """Classify one server RPT login line and extract its dpnid.
+
+    A kick in WaitAuthPlayerLoginState is the server giving up on a Steam
+    ticket; an Entering ...LoginState line is a (new) login attempt. Each
+    is classified by its structure, anchored to the event at the end of
+    the line: a kick is ``(<id>) kicked from server: <code>
+    (...(WaitAuthPlayerLoginState))``, whatever sits between its
+    parentheses, and an Entering line is
+    ``[StateMachine]: Player ... Entering <...LoginState>``, with or
+    without its parenthesised field, so text
+    inside the player name, between ``Player`` and the real field, can
+    turn neither kind into the other. The dpnid is taken from the last
+    structural field anchored to the line's real state: the ``(dpnid
+    <digits> uid ...)`` group right before the final
+    `` Entering <...LoginState>`` at the end of an Entering line, whose
+    uid field may not cross an opening parenthesis, and the
+    ``(<digits>)`` right before `` kicked
+    from server`` on a kick line, so a player name that itself spells
+    that field (``dpnid``, digits, parentheses, even the whole delimiter)
+    cannot supply or shadow the id. A kick whose id is empty or not
+    digits carries no dpnid. Returns ``(kind, dpnid)`` with dpnid
+    None when the line carries no structural dpnid.
+    """
+    kind: str | None = None
+    if re.search(
+        r"\([^()]*\)\s+kicked from server[:]\s*\d+\s*\(.*"
+        r"\(WaitAuthPlayerLoginState\)\)?\s*$",
+        line,
+    ):
+        kind = "kick"
+    elif re.search(
+        r"\[StateMachine\]: Player .+ Entering\s+\S*LoginState\s*$",
+        line,
+    ):
+        kind = "entering"
+    if kind is None:
+        return None
+    if kind == "kick":
+        matches = re.findall(r"\(([^()]*)\)\s+kicked from server", line)
+        candidate = matches[-1] if matches else None
+        return kind, (
+            candidate if candidate and candidate.isdigit() else None
+        )
+    matches = re.findall(
+        r"\(dpnid\s+(\d+)\s+uid(?:\s[^()]*)?\)\s+Entering\s+"
+        r"\S*LoginState\s*$",
+        line,
+    )
+    return kind, (matches[-1] if matches else None)
+
+
+def _steam_auth_state_for_lines(
+    lines: Any,
+    state: dict[str, tuple[str, str | None]],
+    last_kick_line: str | None,
+    unknown_login: bool,
+) -> tuple[dict[str, tuple[str, str | None]], str | None, bool]:
+    """Fold login lines, in file order, into per-dpnid last-line state."""
+    for line in lines:
+        found = _steam_auth_login(line)
+        if found is None:
+            continue
+        kind, dpnid = found
+        if dpnid is None:
+            unknown_login = True
+            continue
+        state[dpnid] = (kind, line if kind == "kick" else None)
+        if kind == "kick":
+            last_kick_line = line
+    return state, last_kick_line, unknown_login
+
+
+def _steam_auth_kick_if_all_kicked(
+    state: dict[str, tuple[str, str | None]],
+    last_kick_line: str | None,
+    unknown_login: bool,
+) -> str | None:
+    """The kick line to abort with, when every seen dpnid was kicked.
+
+    A dpnid whose last login line is an Entering is an attempt in course,
+    a new attempt or a player already inside, and blocks the abort; so
+    does a login line that carried no dpnid, whose attempt is untracked.
+    """
+    if unknown_login or not state or last_kick_line is None:
+        return None
+    if all(kind == "kick" for kind, _line in state.values()):
+        return last_kick_line
+    return None
+
+
+def _scan_log_for_steam_auth(
+    path: str, max_bytes: int
+) -> tuple[dict[str, tuple[str, str | None]], str | None, bool, bool]:
+    """Per-dpnid login state of ``path``, scanning from byte 0.
+
+    Streams in chunks like ``_scan_log_for_pattern``; the last return is
+    True when the read was cut by ``max_bytes`` or the file ends in a
+    final line without its line feed. Raises
+    ``log_tail.LogTailError`` when the file cannot be read.
+    """
+    state: dict[str, tuple[str, str | None]] = {}
+    last_kick_line: str | None = None
+    unknown_login = False
+    truncated = False
+    consumed = 0
+    carry = b""
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                budget = max_bytes - consumed
+                if budget <= 0:
+                    # Measured, not assumed: only truncated if bytes remain.
+                    truncated = bool(handle.read(1))
+                    break
+                chunk = handle.read(min(_LAUNCH_SCAN_CHUNK_BYTES, budget))
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                carry += chunk
+                start = 0
+                while True:
+                    end = carry.find(b"\n", start)
+                    if end == -1:
+                        break
+                    line = carry[start:end].decode("utf-8", errors="replace")
+                    state, last_kick_line, unknown_login = (
+                        _steam_auth_state_for_lines(
+                            [line.rstrip("\r")],
+                            state,
+                            last_kick_line,
+                            unknown_login,
+                        )
+                    )
+                    start = end + 1
+                carry = carry[start:]
+    except OSError as error:
+        raise log_tail.LogTailError("log_unavailable") from error
+    if carry and not truncated:
+        # A final fragment without its line feed is incomplete history:
+        # it may be the Entering that decides another attempt, so it is
+        # reported as a cut read and never classified as a login line.
+        truncated = True
+    return state, last_kick_line, unknown_login, truncated
+
+
 def _wait_for_response(
     *,
     condition: str,
@@ -4856,6 +5002,100 @@ async def execute_wait_for(
     unreadable: set[str] = set()
     scan_truncated = False
     scan_mode = "marker" if marker_state is not None else lookback_from
+    # players_at_least only (fb-20261112-163422-f09e): watch this launch's
+    # server RPT for a kick in WaitAuthPlayerLoginState. Resolving the logs
+    # can fail (no live run, no server profile); then the check stays off
+    # for this call and wait_for behaves exactly as before.
+    steam_auth_paths: list[str] = []
+    steam_auth_markers: dict[str, log_tail.TailMarker] = {}
+    steam_auth_state: dict[str, tuple[str, str | None]] = {}
+    steam_auth_kick_line: str | None = None
+    steam_auth_unknown_login = False
+    steam_auth_force_first_probe = False
+
+    def _disable_steam_auth_check() -> None:
+        """Switch the WaitAuth abort check off for the rest of this call.
+
+        The one reset every failed, cut or marker-less log read of the
+        check goes through: without the complete launch history a later
+        kick alone cannot decide the abort, so the call can then only
+        end by success or timeout, never by the steam-auth abort.
+        """
+        nonlocal steam_auth_paths, steam_auth_markers, steam_auth_state
+        nonlocal steam_auth_kick_line, steam_auth_unknown_login
+        steam_auth_paths = []
+        steam_auth_markers = {}
+        steam_auth_state = {}
+        steam_auth_kick_line = None
+        steam_auth_unknown_login = False
+
+    if condition == "players_at_least":
+        # The resolution is bounded by this call's budget: if it does not
+        # fit, the check stays off for this call and the wait still makes
+        # the players_at_least probe it would have made today.
+        resolved_paths: list[str] = []
+        resolution_remaining = deadline - time.monotonic()
+        if resolution_remaining > 0.0:
+            try:
+                resolved_paths = await asyncio.wait_for(
+                    _wait_for_script_log_paths(runtime, "server"),
+                    timeout=resolution_remaining,
+                )
+            except (ToolError, TimeoutError):
+                resolved_paths = []
+        steam_auth_paths = [
+            path
+            for path in resolved_paths
+            if Path(path).suffix.casefold() == ".rpt"
+        ]
+        if steam_auth_paths:
+            # Markers FIRST, then the whole-file scan, as in the log_matches
+            # launch scan: a line written between the two is read twice,
+            # which costs nothing; the other order could drop it.
+            try:
+                steam_auth_markers = _log_markers_at_end(steam_auth_paths)
+            except log_tail.LogTailError:
+                _disable_steam_auth_check()
+            if steam_auth_paths and any(
+                steam_path not in steam_auth_markers
+                for steam_path in steam_auth_paths
+            ):
+                # _log_markers_at_end silently omits a path whose read
+                # failed; without its marker the launch history of that
+                # RPT cannot be followed, so the check stays off.
+                _disable_steam_auth_check()
+            for steam_path in steam_auth_paths:
+                try:
+                    found_state, found_kick, found_unknown, found_cut = (
+                        _scan_log_for_steam_auth(
+                            steam_path, WAIT_FOR_LAUNCH_SCAN_MAX_BYTES
+                        )
+                    )
+                except log_tail.LogTailError:
+                    # Without the launch history an Entering of another
+                    # dpnid may be missing, so a later kick alone cannot
+                    # decide the abort: the check stays off for this call.
+                    _disable_steam_auth_check()
+                    break
+                if found_cut:
+                    # A cut read may have lost the line that decides an
+                    # attempt: the check stays off for the rest of the call.
+                    _disable_steam_auth_check()
+                    break
+                steam_auth_state.update(found_state)
+                if found_kick is not None:
+                    steam_auth_kick_line = found_kick
+                steam_auth_unknown_login = (
+                    steam_auth_unknown_login or found_unknown
+                )
+        # One deadline check for the whole start -- resolution, markers,
+        # the initial scan and every early exit above (a failed or empty
+        # resolution, an unreadable or cut RPT): if the deadline has
+        # passed by here, the check stays off for this call and the wait
+        # still makes its first players_at_least probe.
+        if time.monotonic() >= deadline:
+            _disable_steam_auth_check()
+            steam_auth_force_first_probe = True
 
     def scan_summary() -> dict[str, Any] | None:
         if condition != "log_matches":
@@ -4950,16 +5190,22 @@ async def execute_wait_for(
                             scanned=scan_summary(),
                         )
 
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline or (
+        steam_auth_force_first_probe and probes == 0
+    ):
         async with _tool_lock_until(runtime, deadline) as held:
             if not held:
                 last_error = _TOOL_LOCK_BUSY
                 break
             # The while test can pass and this lock still be taken: a free
             # lock does not yield, so the timeout cannot fire first. A probe
-            # must not start once the deadline has passed.
+            # must not start once the deadline has passed, except the one
+            # probe a players_at_least wait whose log resolution overran
+            # its budget still owes (steam_auth_force_first_probe).
             remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
+            if remaining <= 0.0 and not (
+                steam_auth_force_first_probe and probes == 0
+            ):
                 break
             probes += 1
             if condition == "entity_state":
@@ -5063,6 +5309,70 @@ async def execute_wait_for(
                 not_ready_probes=not_ready_probes,
                 last_error=last_error,
             )
+        if condition == "players_at_least" and steam_auth_paths:
+            # Only what is new since the last probe; the wait itself
+            # carries on in silence when an RPT cannot be read, as
+            # before. Read per file here, not via _new_log_lines, so a
+            # read cut by its byte ceiling is seen: it may have lost
+            # the Entering that decides an attempt, so the check stays
+            # off for the rest of this call.
+            steam_auth_cut = False
+            for steam_path in list(steam_auth_paths):
+                try:
+                    steam_result = log_tail.read_since(
+                        steam_path, steam_auth_markers.get(steam_path)
+                    )
+                except log_tail.LogTailError:
+                    # A failed incremental read may have lost the
+                    # Entering that decides an attempt, so a kick
+                    # recorded earlier alone cannot decide the abort.
+                    _disable_steam_auth_check()
+                    break
+                steam_marker: Any = steam_result["marker"]
+                steam_auth_markers[steam_path] = steam_marker
+                try:
+                    steam_pending = (
+                        os.path.getsize(steam_path) > steam_marker.offset
+                    )
+                except OSError:
+                    # A failed re-stat is a failed read of the check.
+                    _disable_steam_auth_check()
+                    break
+                if bool(steam_result["truncated"]) or steam_pending:
+                    # log_tail withholds a trailing partial line, and its
+                    # marker size is taken before its read, so only this
+                    # re-stat sees bytes appended in between: pending
+                    # bytes mean the history is incomplete, like a cut
+                    # read, and may hide the deciding Entering.
+                    steam_auth_cut = True
+                    continue
+                (
+                    steam_auth_state,
+                    steam_auth_kick_line,
+                    steam_auth_unknown_login,
+                ) = _steam_auth_state_for_lines(
+                    steam_result["lines"],
+                    steam_auth_state,
+                    steam_auth_kick_line,
+                    steam_auth_unknown_login,
+                )
+            if steam_auth_cut:
+                _disable_steam_auth_check()
+            elif steam_auth_paths:
+                abort_kick = _steam_auth_kick_if_all_kicked(
+                    steam_auth_state,
+                    steam_auth_kick_line,
+                    steam_auth_unknown_login,
+                )
+                if abort_kick is not None:
+                    now = time.monotonic()
+                    raise ToolError(
+                        f"wait_for aborted waiting for {condition}; "
+                        f"reason=steam_auth_timeout; "
+                        f"kicked={abort_kick}; "
+                        f"elapsed_s={now - started:.3f}; "
+                        f"timeout_s={timeout_s:g}"
+                    )
         # Sleep outside the lock. Do not wrap this loop in tool_lock. The sleep
         # is bounded by the single deadline: a poll interval longer than the
         # remaining budget must not extend the call past timeout_s.
@@ -5821,8 +6131,14 @@ def _lease_renewal_contract(ttl_s: float) -> str:
         f"{ttl_s:g} s the lease expires; an adopted run then becomes "
         "ownerless RUNNING_IDLE and the next client verb on that run "
         "returns run_not_owned. session_heartbeat keeps the lease across "
-        "a longer pause. An owner read renews only on a daemon that still "
-        "has the previous behaviour; this process does not."
+        "a longer pause. With a RUNNING run bound to the bridge, "
+        "session_heartbeat stops renewing the lease after 1800 s with no "
+        "command or read under its lease, no human input on that run, and "
+        "the input signal good, without gaps, for those 1800 s; the lease "
+        "then expires like any other, and wait_for(file_matches), which "
+        "renews by heartbeat, does not count either. An owner read "
+        "renews only on a daemon that still has the previous behaviour; "
+        "this process does not."
     )
 
 
@@ -10617,8 +10933,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "the managed client through EmoteManager.CreateEmoteCBFromMenu, the "
             "call the gestures menu makes: the client asks the server, which "
             "checks it and plays it on every peer as it does a person's "
-            "gesture. Only the local player, by this tool's scope: there is no "
-            "object_id. emote "
+            "gesture. Without object_id, only the local player. With "
+            "object_id (an ai_group_spawn member), the same call goes to the "
+            "server as ai_emote with a lease instead (plan 3.5): it is "
+            "refused with bad_target when the id is not a living member of "
+            "an active group, with npc_dormant when the member's simulation "
+            "is disabled or its FSM state is Dormant (refused before any "
+            "emote request is written, so no request stays pending), and "
+            "its states gain cancelled (end with only "
+            "an Expansion request pending) and every answer carries "
+            "emote_pending, true while a request in either emote layer is "
+            "still pending (on an error answer it travels in the message "
+            "text as emote_pending=true or emote_pending=false); a member "
+            "that dies or vanishes mid-wait answers emote_interrupted, and "
+            "a lease close answers the open job as at wait_s (started or "
+            "emote_timed_out), and that answer never proves the close. emote "
             f"is one of {', '.join(ACTOR_EMOTES)}, or {ACTOR_EMOTE_END}, which "
             "asks the server to end the emote that is playing (a looping one, "
             "such as sita), as the client does to end one. wait_s (default 10, "
@@ -10635,7 +10964,10 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "request, each absent when not reached (end has no "
             "started_after_s). What the client sees after wait_s changes "
             "nothing. A looping emote (greeting, sita, salute...) "
-            "answers started and plays until emote='end'; a one-time one (nod, "
+            "answers started and plays until emote='end'; on a member a "
+            "static pose also ends by itself about wait_s after it starts "
+            "(Expansion's autoCancel); temporary gestures are not cancelled; "
+            "a one-time one (nod, "
             "clap, shrug...) answers finished when it ends within wait_s. "
             "emote_timed_out, "
             "observed=emote_state=timed_out, also at the first client tick "
@@ -10665,15 +10997,25 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "there. Errors: bad_args "
             "(it lists the allowed names), client_not_in_game, no_player, "
             "no_emote_manager, emote_rejected, no_emote_playing, "
-            "emote_timed_out, and bridge_capability_missing from a PBO "
-            "without the verb, which is never handed it."
+            "emote_timed_out, bridge_capability_missing from a PBO "
+            "without the verb, which is never handed it, and, with "
+            "object_id only, bad_target, npc_dormant, emote_interrupted and "
+            "expansion_unavailable; detail=adapter_not_loaded|"
+            "adapter_contract_mismatch|lease_close_not_supported."
         )
     )
     async def actor_emote(
         emote: StrictStr,
         wait_s: StrictFloat = 10.0,
+        object_id: StrictInt | None = None,
         timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
     ) -> dict[str, Any]:
+        if object_id is not None and (
+            isinstance(object_id, bool)
+            or not isinstance(object_id, int)
+            or object_id <= 0
+        ):
+            raise ToolError(_bad_args("object_id", object_id, "be a positive int"))
         if emote not in ACTOR_EMOTES and emote != ACTOR_EMOTE_END:
             raise ToolError(
                 _bad_args(
@@ -10695,6 +11037,21 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
         # transport waits wait_s plus the slack, as player_move does for
         # hold_s.
         timeout = max(_timeout(timeout_s), wait + ACTOR_EMOTE_WAIT_SLACK_S)
+        if object_id is not None:
+            # With object_id the same catalog and bounds go to the server as
+            # ai_emote, with a lease; the states gain cancelled and every
+            # answer carries emote_pending (plan 3.5/4).
+            args = {"object_id": int(object_id), "emote": emote, "wait_s": wait}
+            async with runtime.tool_lock:
+                result = await runtime.call_bridge(
+                    "ai_emote", args, "server", timeout
+                )
+            state = result.get("emote_state")
+            if state not in ("started", "finished") or emote == ACTOR_EMOTE_END:
+                result.pop("started_after_s", None)
+            if state != "finished":
+                result.pop("finished_after_s", None)
+            return result
         args = {"emote": emote, "wait_s": wait}
         async with runtime.tool_lock:
             result = await runtime.call_bridge("actor_emote", args, "client", timeout)
@@ -12192,6 +12549,24 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "players_* probes are server reads and need no client: while a "
             "client loads they count the players the server has, so a client "
             "that never joins ends the wait at timeout_s with satisfied false. "
+            "players_at_least also watches the current launch's server RPT: "
+            "login lines are grouped by dpnid, and if every dpnid seen has "
+            "a kick in WaitAuthPlayerLoginState as its last login line, it "
+            "aborts with reason=steam_auth_timeout and the last such kick "
+            "line, instead of waiting out timeout_s. That means the server "
+            "kicked the client because Steam did not validate its ticket "
+            "in time; check that the PC's Steam client is signed in (after "
+            "a 'Session Replaced' it does not reconnect by itself). A "
+            "dpnid whose last login line is an Entering -- an attempt in "
+            "course, a later attempt or a player already inside -- blocks "
+            "the abort, as does a login line with no dpnid; a cut, "
+            "unterminated or unreadable RPT read, a start marker missing "
+            "for the RPT, or resolving, marking or initially scanning "
+            "the logs past "
+            "timeout_s, turns the watch off for that call, which still "
+            "makes its players_at_least probe. "
+            "players_at_most and the other conditions do not watch the "
+            "RPT this way. "
             "A probe refused with run_not_owned (the run has no owner) aborts on "
             "the first probe with the daemon's hint: adopt the run first with "
             "session_acquire_wait, whose grant adopts the single ownerless "

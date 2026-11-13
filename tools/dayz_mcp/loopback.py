@@ -141,6 +141,7 @@ SERVER_COMMANDS = {
     "ai_group_order",
     "ai_group_release",
     "ai_group_state",
+    "ai_emote",
 }
 CLIENT_COMMANDS = {
     "camera_set",
@@ -1502,6 +1503,7 @@ _CAPABILITY_ADMISSION_COMMANDS = frozenset({
     "ai_group_release",
     "ai_group_spawn",
     "ai_group_state",
+    "ai_emote",
 })
 # Expansion AI adapter verbs (plan 2.2): the specific refusal replaces the
 # generic missing-verb one for these, after the common census and ach guards.
@@ -1512,6 +1514,7 @@ _EXPANSION_ADMISSION_COMMANDS = frozenset({
     "ai_group_release",
     "ai_group_spawn",
     "ai_group_state",
+    "ai_emote",
 })
 # New adapter mutations are gated on real lease-close support (plan 5.1):
 # while no peer announces lease_close they stay inert. Internal releases
@@ -1520,6 +1523,7 @@ _EXPANSION_ADMISSION_COMMANDS = frozenset({
 _EXPANSION_NEW_MUTATION_COMMANDS = frozenset({
     "ai_group_order",
     "ai_group_spawn",
+    "ai_emote",
 })
 _XAI_HASH = re.compile(r"\A[0-9a-f]{16}\Z")
 # Client verbs an older PBO must not be handed, each with the error it is
@@ -2713,6 +2717,23 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
             validators={
                 "command_id": _integer_in_range(minimum=1),
                 "object_id": _integer_in_range(minimum=1),
+            },
+        )
+    ),
+    # ai_emote (36fa NPC): actor_emote with object_id, on the server. The
+    # tool always sends all three keys; the catalog and wait bounds are
+    # actor_emote's.
+    "ai_emote": _command_schema(
+        _schema_variant(
+            required=("object_id", "emote", "wait_s"),
+            validators={
+                "object_id": _integer_in_range(minimum=1),
+                "emote": _one_of(*ACTOR_EMOTES, ACTOR_EMOTE_END),
+                "wait_s": _reject_numeric_errors(
+                    _real_in_range(
+                        minimum=ACTOR_EMOTE_WAIT_MIN_S, maximum=ACTOR_EMOTE_WAIT_MAX_S
+                    )
+                ),
             },
         )
     ),
@@ -4171,6 +4192,9 @@ class ServerState:
             f"{runs_path.name}.bak-preprune.{index}"
             for index in range(2, _PREPRUNE_SLOT_COUNT + 1)
         ]
+        # A full set of slots is compacted into this file before the slots are
+        # freed (process_lifecycle RunManifestStore._compact_preprune_backups).
+        names.append(runs_path.name + ".bak-preprune.targets")
         found: list[dict[str, object]] = []
         for name in names:
             backup = runs_path.with_name(name)

@@ -1,0 +1,113 @@
+17:18:46.288   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.288 [44] VehicleCivilianSedan
+17:18:46.288   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.288 [45] VehicleHatchback02
+17:18:46.288   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.288 [46] VehicleMotorbike
+17:18:46.289   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.289 [47] VehicleOffroad02
+17:18:46.290   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.290 [48] VehicleOffroadHatchback
+17:18:46.291   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.293 [49] VehicleSedan02
+17:18:46.294   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.294 [50] VehicleTruck01
+17:18:46.295   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:18:46.295 [CE][Hive] :: Initializing of spawners done.
+17:18:46.302 [CE][Hive] :: Init sequence finished.
+17:18:46.303 Player connect enabled
+17:18:46.454 [Login]: Adding player Dev (18127079) to login queue at position 0
+17:18:46.455 [LoginMachine]: Add player Dev (18127079 127.0.0.1:2316)
+17:18:46.456 [StateMachine]: Player Dev (dpnid 18127079 uid ) Entering AuthPlayerLoginState
+17:18:48.600 WORLD        : Create entity type 'SurvivorM_Denis'
+17:18:48.600  AUDIO        : Loading SoundSet 'Gag_Drowning_SoundVoice_Char_SoundSet'
+17:18:48.600   AUDIO     (E): Sound set 'Gag_Drowning_SoundVoice_Char_SoundSet' references missing sound shader 'Drowning_male_2_gag_SoundVoice_Char_SoundShader'
+17:18:48.601  AUDIO        : Loading SoundSet 'Gag_UnderwaterBreathHold_SoundVoice_Char_SoundSet'
+17:18:48.601   AUDIO     (E): Sound set 'Gag_UnderwaterBreathHold_SoundVoice_Char_SoundSet' references missing sound shader 'UnderwaterBreathHold_male_2_gag_SoundVoice_Char_SoundShader'
+17:18:48.601  AUDIO        : Loading SoundSet 'Motohelmet_pushHeavy_SoundVoice_Char_SoundSet'
+17:18:48.601   AUDIO     (E): Sound set 'Motohelmet_pushHeavy_SoundVoice_Char_SoundSet' references missing sound shader 'pushHeavy_female_1_motohelmet_SoundVoice_Char_SoundShader'
+17:18:48.614 PLAYER    (E): Can't load 
+17:18:48.614 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.630 PLAYER    (E): Can't load 
+17:18:48.630 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.643 PLAYER    (E): Can't load 
+17:18:48.643 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.652 PLAYER    (E): Can't load 
+17:18:48.652 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.655 WORLD        : Create entity type 'Radio'
+17:18:48.655  ENTITY    (E): Type 'Inventory_BaseType' must be inherited from class 'ItemRadioType'
+17:18:48.667 PLAYER    (E): Can't load 
+17:18:48.667 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.679 PLAYER    (E): Can't load 
+17:18:48.862 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.874 PLAYER    (E): Can't load 
+17:18:48.874 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.884 PLAYER    (E): Can't load 
+17:18:48.884 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.894 PLAYER    (E): Can't load 
+17:18:48.894 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.901 PLAYER    (E): Can't load 
+17:18:48.901 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.905 PLAYER    (E): Can't load 
+17:18:48.905 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.918 PLAYER    (E): Can't load 
+17:18:48.918 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.924 PLAYER    (E): Can't load 
+17:18:48.924 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.929 PLAYER    (E): Can't load 
+17:18:48.929 PLAYER    (E): Failed to open file, line 0, column 0
+17:18:48.982 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:48.984 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:49.715 [IdleMode] Entering IN - save processed
+17:18:49.719 [StateMachine]: Player Dev (dpnid 18127079 uid ) Entering WaitAuthPlayerLoginState
+17:18:49.723 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:50.24  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_01_moss.p3d)
+17:18:50.27  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_38_04_moss.p3d)
+17:18:50.51  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:50.51  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:50.51  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:50.321 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_04_moss.p3d)
+17:18:50.321 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_03_moss.p3d)
+17:18:50.592 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_26_moss.p3d)
+17:18:50.592 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_25_moss.p3d)
+17:18:50.615 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:50.619 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_small_02.p3d)
+17:18:51.90  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:51.104 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:51.456 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:51.465 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:51.700 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:51.812 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_small_21.p3d)
+17:18:51.906 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:51.908 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:52.15  El jugador Dev se está conectando.
+17:18:52.35  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_50x50_moss.p3d)
+17:18:52.127 [StateMachine]: Player Dev (dpnid 18127079 uid ) Entering WaitPlayerAssignedLoginState
+17:18:52.381 [StateMachine]: Player Dev (dpnid 18127079 uid ) Entering PlayerAssignedLoginState
+17:18:52.445 [StateMachine]: Player Dev (dpnid 18127079 uid <uid>) Entering CreateNetObjectsLoginState
+17:18:52.494 [StateMachine]: Player Dev (dpnid 18127079 uid <uid>) Entering PreloadCamLoginState
+17:18:52.496 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:52.501 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:18:52.532 [StateMachine]: Player Dev (dpnid 18127079 uid <uid>) Entering WaitPreloadCamLoginState
+17:18:57.354 [IdleMode] Leaving OUT
+17:19:01.277 [StateMachine]: Player Dev (dpnid 18127079 uid <uid>) Entering GetNewCharLoginState
+17:19:01.279 NETWORK      : Network simulation
+17:19:01.279  PLAYER    (E): Can't load 
+17:19:01.279  PLAYER    (E): Failed to open file, line 0, column 0
+17:19:01.287 El jugador Dev (id=<uid> pos=<14833.1, 14575.6, 72.0>) se ha conectado.
+17:19:01.288 Player "Dev" (steamID=<steamid> pos=<14833.1, 14575.6, 72.0>) is connected
+17:19:01.292 <CREATE NEW CHAR>:
+    charID 0
+    playerID 0
+    dpnid 18127079
+    uid <uid>
+17:19:02.883 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_03_moss.p3d)
+17:19:02.883 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_01_moss.p3d)
+17:19:02.883 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_04_moss.p3d)
+17:19:02.883 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_02_moss.p3d)
+17:19:03.795 WORLD        : Create entity type 'Animal_GallusGallusDomesticus'
+17:19:03.795  ENTITY    (E): Type 'ManType' must be inherited from class 'DayZAnimalType'
+17:19:03.961 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_29_02_moss.p3d)
+17:19:03.961 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_28_03_moss.p3d)
+17:19:03.962 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_29_04_moss.p3d)
+17:19:03.962 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_28_01_moss.p3d)

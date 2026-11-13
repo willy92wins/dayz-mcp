@@ -171,6 +171,7 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
 2. Un solo job de emote por miembro: con otro abierto sobre él, también para `end`, `emote_rejected`, como #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
 3. Con una petición de Expansion pendiente, o con `IsEmotePlaying()` cierto (emotemanager.c:1328, que cuenta la petición vanilla y la reproducción), `emote_rejected`, como #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge). Así nada suena al pedir, y lo que vea el job después es suyo.
 4. Con `m_eAI_IsFightingFSM` (`eAIBase.c:71`), `group.IsInCombat()` o `GetThreatToSelf(true) > 0.2` (`eAIBase.c:2028`; la guarda de `eAIState_PlayEmote.c:13`, con el umbral en :27), `emote_rejected` y no pide nada.
+4b. Con la simulación del miembro desactivada (`GetIsSimulationDisabled()`, vanilla `3_game/entities/entity.c:6`) o con su FSM en `Dormant` (leído con `GetFSM()`, `GetState()` y `GetName()`, la cadena de `ai_group_state`), `npc_dormant` y no pide nada. Desde `Dormant` no hay transición a `PlayEmote` (`Master.xml:432-433`), ese estado desactiva la simulación (`eAIState_Dormant.c:8`) y una petición de emote no lo despierta, así que una petición escrita aquí seguiría pendiente pasado `wait_s` (ronda en el juego, caso 48). La respuesta lleva `emote_pending: false`, porque el punto 3 ya excluye las dos capas.
 5. La única escritura: `Expansion_SetEmote(id, true, wait_s × 1000)` (`eAIBase.c:10862`). No se llama a `Expansion_PlayEmote`, que se saltaría la guarda (informe §6). El retraso solo cancela poses estáticas (§8, pregunta 1).
 
 **El job solo lee el `EmoteManager` del miembro** (`GetEmoteManager()`, vanilla `playerbase.c:1892`) y su petición de Expansion:
@@ -186,6 +187,8 @@ Es de solo lectura: entra en `READ_ONLY_COMMANDS` (§4), no lleva lease, no camb
 - si no reproduce pero hay una petición de Expansion: `Expansion_SetEmote(0)` la deja a cero (respuesta 4) y contesta en el dispatch `emote_state: "cancelled"`, con `emote_pending` leído después de escribir;
 - si solo queda la petición vanilla, que está en vuelo: `emote_rejected` con `emote_pending: true`, sin escribir nada; el `end` se puede repetir;
 - si no hay nada: `no_emote_playing` (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
+
+El dispatch retira el autocancel pendiente del miembro en la call queue de sistema (`ScriptCallQueue.Remove`, vanilla `2_gamelib/tools.c:65`; `eAIBase.c:10914`) antes de un `end` o de un emote nuevo.
 
 **Los ids de emote** son los de `EmoteConstants` (vanilla `3_game/constants.c:366`; `ID_EMOTE_NOD` en :404), con los mismos nombres que `ActorEmoteId` de #266 (MCPClientBridge.c, #266 @c4502d1, pendiente de merge).
 

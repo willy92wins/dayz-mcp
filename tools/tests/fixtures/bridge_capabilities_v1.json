@@ -8,6 +8,7 @@
   "peers": {
     "server": {
       "action_cursor_ids": null,
+      "ai_emote": "actor_emote",
       "ai_group_order": "ai_group_order",
       "ai_group_release": null,
       "ai_group_spawn": "ai_group_spawn",
