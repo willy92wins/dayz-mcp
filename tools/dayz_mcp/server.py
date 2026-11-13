@@ -6125,8 +6125,14 @@ def _lease_renewal_contract(ttl_s: float) -> str:
         f"{ttl_s:g} s the lease expires; an adopted run then becomes "
         "ownerless RUNNING_IDLE and the next client verb on that run "
         "returns run_not_owned. session_heartbeat keeps the lease across "
-        "a longer pause. An owner read renews only on a daemon that still "
-        "has the previous behaviour; this process does not."
+        "a longer pause. With a RUNNING run bound to the bridge, "
+        "session_heartbeat stops renewing the lease after 1800 s with no "
+        "command or read under its lease, no human input on that run, and "
+        "the input signal good, without gaps, for those 1800 s; the lease "
+        "then expires like any other, and wait_for(file_matches), which "
+        "renews by heartbeat, does not count either. An owner read "
+        "renews only on a daemon that still has the previous behaviour; "
+        "this process does not."
     )
 
 

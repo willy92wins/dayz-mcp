@@ -7469,6 +7469,22 @@ class ProcessLifecycle:
         with self._activity_lock:
             return self._human_input_at.get(self._activity_key(run_id))
 
+    def uncertain_input_at(self, run_id: str) -> float | None:
+        with self._activity_lock:
+            return self._uncertain_input_at.get(self._activity_key(run_id))
+
+    def input_signal_good_since(self, now: float) -> float | None:
+        """Since when the input signal has been good without a gap, or None.
+
+        None with no sampling, a signal stale at ``now`` or one never good.
+        """
+
+        with self._activity_lock:
+            good_at = self._input_good_at
+            if good_at is None or not 0.0 <= now - good_at <= INPUT_SIGNAL_STALE_S:
+                return None
+            return self._signal_recovered_at
+
     def human_input_block(
         self,
         session_id: object,
@@ -7911,6 +7927,10 @@ class ProcessLifecycle:
         except Exception:
             return True
         if "human_at" in guard and self.human_input_at(run_id) != guard.get("human_at"):
+            return True
+        if "uncertain_at" in guard and self.uncertain_input_at(run_id) != guard.get(
+            "uncertain_at"
+        ):
             return True
         if (
             "launcher_at" in guard
