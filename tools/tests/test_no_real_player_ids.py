@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import os
 import re
 import sys
@@ -476,8 +477,20 @@ class WalkHelpersTest(unittest.TestCase):
             any("PermissionError" in problem for problem in problems)
         )
 
-    def test_tests_dir_is_built_without_resolve(self) -> None:
-        self.assertEqual(_TESTS_DIR, Path(__file__).parent)
+    def test_import_does_not_resolve_paths(self) -> None:
+        secret = _derive_uid("7656119" + "8123456789")
+        spec = importlib.util.spec_from_file_location(
+            "_scanner_import_probe", __file__
+        )
+        module = importlib.util.module_from_spec(spec)
+
+        def fake_resolve(self: Path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", secret)
+
+        with mock.patch.object(Path, "resolve", fake_resolve):
+            spec.loader.exec_module(module)
+
+        self.assertEqual(module._TESTS_DIR, Path(__file__).parent)
 
     def test_scan_masks_file_name_in_temp_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
