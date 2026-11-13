@@ -3253,8 +3253,10 @@ class ProcessLifecycle:
         reused pid never attributes input. An identity the guard cannot read
         is a doubt, kept apart as uncertain input (the run reads unknown).
         A sample that is not ok never refreshes the signal; the first good one
-        after a stale stretch restarts the clocks from that instant. Returns
-        the run ids the input went to.
+        after a stale stretch restarts the clocks from that instant. Only
+        records whose role is in _PLAYER_ROLES can attribute input; any other
+        registered role is skipped before exclusions or identity are consulted.
+        Returns the run ids the input went to.
         """
 
         runs = [
@@ -3265,6 +3267,8 @@ class ProcessLifecycle:
             for run in runs:
                 for record in run.processes:
                     if record.pid != pid:
+                        continue
+                    if record.role not in _PLAYER_ROLES:
                         continue
                     record_key = (
                         *self._activity_key(run.run_id),
