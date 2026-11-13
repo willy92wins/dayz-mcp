@@ -34,8 +34,10 @@ through. Inputs are the production ones: the key install-mcp.ps1 mints
 (32 random bytes, base64url without padding: 43 characters), a UUID instance,
 the game version of those runs, and the longest base IsLoopbackBridgeUrl
 accepts (a five-digit port). The bounds hold for those inputs only. A longer
-key spends the margin: pinned_keyfile accepts up to 1024 characters, and 41
-more than the 43 minted take the saturated server poll to 1025.
+key spends the margin: pinned_keyfile accepts up to 1024 characters
+(tools/dayz_mcp/pinned_keyfile.py), and a hand-made key of several hundred
+characters can still pass 1024 even with the compact cm= announcement.
+This file does not change key handling.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ import unittest
 from urllib.parse import parse_qs, urlparse
 
 from dayz_mcp import loopback
-from dayz_mcp.bridge_readiness import EXPANSION_AI_VERB_BITS
+from dayz_mcp.bridge_readiness import EXPANSION_AI_VERB_BITS, parse_capability_mask
 from tests.poll_harness_helpers import _MISSION, _bridge_harness, _dispatch_branches
 
 
@@ -164,14 +166,38 @@ class PollUrlEngineLimitTest(unittest.TestCase):
         self.assertLessEqual(len(_saturated_url("MCPBridge.c")) + extra,
                              ENGINE_URL_MAX)
 
+    def test_full_256_bit_mask_stays_within_the_limit(self) -> None:
+        # Every verb the tables can ever hold: a 256-bit mask is 64 hex
+        # digits. Replacing the announced cm value in the saturated poll
+        # gives, from the base measurements (server 996 / client 1017 with
+        # the old caps list): server 345, client 336, and server plus the
+        # widest adapter xai 369 characters -- all far below 1024 for the
+        # production inputs named in the module docstring (43-character
+        # minted key, UUID instance, five-digit port).
+        full = "cm=1." + "f" * 64
+        for name in ("MCPBridge.c", "MCPClientBridge.c"):
+            with self.subTest(bridge=name):
+                url = re.sub(r"cm=[^&]*", full, _saturated_url(name))
+                self.assertLessEqual(
+                    len(url), ENGINE_URL_MAX, f"{name} poll URL is {len(url)} characters"
+                )
+        adapter = (_MISSION.parents[2] / "addon_expansion_ai" / "scripts" / "5_Mission"
+                   / "MCPExpansionAI.c").read_text(encoding="utf-8")
+        hash_ = re.search(r'EXPANSION_AI_ARG_CONTRACT_HASH = "([0-9a-f]{16})"', adapter)
+        self.assertIsNotNone(hash_)
+        widest = len(str((1 << len(EXPANSION_AI_VERB_BITS)) - 1))
+        extra = len("&xai=") + len(hash_.group(1)) + 1 + widest
+        url = re.sub(r"cm=[^&]*", full, _saturated_url("MCPBridge.c"))
+        self.assertLessEqual(len(url) + extra, ENGINE_URL_MAX)
+
     def test_daemon_reads_the_saturated_server_poll(self) -> None:
         # The reads Handler.do_GET and _handle_poll make of the query.
         url = _saturated_url("MCPBridge.c")
         qs = parse_qs(urlparse(url).query, keep_blank_values=True)
-        names, reason = loopback.parse_poll_caps(qs.get("caps", [""])[0])
+        names, reason = parse_capability_mask("server", qs.get("cm", [""])[0])
         self.assertEqual(reason, "ok")
         source = (_MISSION / "MCPBridge.c").read_text(encoding="utf-8")
-        self.assertEqual(list(names), _dispatch_branches(source))
+        self.assertEqual(set(names), set(_dispatch_branches(source)))
         load = loopback._load_from_poll_query(qs)
         self.assertIsNotNone(load)
         self.assertEqual(load["polls"], COUNTER_CAP)

@@ -72,13 +72,20 @@ class MCPBridge : Managed
 	// survivor_drive heading bound, compass degrees either way. Mirrors
 	// SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG in tools/dayz_mcp/loopback.py.
 	protected const float SURVIVOR_DRIVE_HEADING_ABS_MAX_DEG = 360.0;
-	// Capability census announced on every poll (caps=). Sorted ascending,
-	// comma separated; one entry per branch of Dispatch() before unknown_command.
-	// The daemon crosses this list against its registered tools; keep it in
-	// lockstep with the dispatcher and never derive it from the daemon side.
+	// Capability census of Dispatch(). Sorted ascending, comma separated; one
+	// entry per branch of Dispatch() before unknown_command. Kept in lockstep
+	// with the dispatcher and mirrored by the capability tests, but no longer
+	// sent on the poll: the poll sends SERVER_CAPABILITIES_MASK instead.
 	// Short literals joined by + (the vanilla form for a const string built from
 	// pieces); the longest single literal in the vanilla scripts is about 240 chars.
 	protected const string SERVER_CAPABILITIES = "action_cursor_ids,bot_start,bot_stop,entities_query,exec_enforce,hands_attach,hands_take,infected_drive,inventory_attach,inventory_give,inventory_move," + "lease_close,loadout_apply,loadout_clear,loadout_get,nav_path_query,notify_players,object_anim,object_delete,object_doors,object_inspect," + "object_resolve,object_set_health,player_godmode,player_heal,player_kill,player_teleport," + "players_visibility,query_all_players,query_get_in_condition,query_player_state,scene_clear,scene_entities,scene_raycast,server_perf,surface_query,survivor_drive,survivor_drive_release," + "telemetry_read,vehicle_door,vehicle_enter,vehicle_prepare_fixture,weapon_state,world_spawn," + "world_spawn_batch,world_time_get,world_time_set,world_weather_set";
+	// Compact announcement sent on every poll as cm=<epoch>.<hex>: the census
+	// above as a bitmask. Bit order is bridge_readiness.SERVER_CAPABILITY_BITS
+	// in tools/dayz_mcp/bridge_readiness.py (append only, never reorder);
+	// bit i set means the census name at index i is dispatched. Precomputed:
+	// no runtime code computes it, and the tests tie it bit for bit to
+	// SERVER_CAPABILITIES and to Dispatch().
+	protected const string SERVER_CAPABILITIES_MASK = "1.ffffffffffff";
 	// Arg-contract hash (fb-20260924-235528-0878). 16-hex sha256 prefix of the
 	// canonical server arg contract; must equal EXPECTED_SERVER_ARG_CONTRACT_HASH
 	// in tools/dayz_mcp/server.py. Announced as poll ach= so a stale PBO that
@@ -88,9 +95,12 @@ class MCPBridge : Managed
 	// Extension hooks (expansion-ai-adapter plan 2.1): no Expansion types and
 	// no ifdef here, so the base PBO compiles and polls byte-identically
 	// without the adapter. A modded MCPBridge in the adapter overrides them.
+	// Now the compact announcement (cm=), not the name list: an adapter that
+	// overrides this hook announces the mask, while ExtensionPollParams()
+	// carries any extra parameters such as the adapter's xai mask.
 	protected string ServerCapabilities()
 	{
-		return SERVER_CAPABILITIES;
+		return SERVER_CAPABILITIES_MASK;
 	}
 
 	protected string ExtensionPollParams()
@@ -112,7 +122,7 @@ class MCPBridge : Managed
 	protected string m_Key;
 	protected string m_PeerInstance;
 	protected string m_PollVersion;
-	// Built once from SERVER_CAPABILITIES (as is) and SERVER_ARG_CONTRACT_HASH (encoded); key and inst are not cached.
+	// Built once from SERVER_CAPABILITIES_MASK (as is) and SERVER_ARG_CONTRACT_HASH (encoded); key and inst are not cached.
 	// The poll sends ServerCapabilities(), which returns the same constant; this cached copy is
 	// never reassigned after construction and is what the capability tests audit.
 	protected string m_PollCapabilities;
@@ -194,11 +204,9 @@ class MCPBridge : Managed
 		m_TickPollSent = 0;
 		m_TickPollCallback = 0;
 		m_PollVersion = "";
-		// Sent as is. The names are [a-z0-9_], and a query may carry a literal
-		// comma (RFC 3986 3.4). %2C on every separator pushed this poll past 1024
-		// characters, the longest URL the engine was seen to send
-		// (fb-20261103-133622-3e7a).
-		m_PollCapabilities = SERVER_CAPABILITIES;
+		// Sent as is: the mask is [0-9a-f.], all unreserved, so it needs no
+		// encoding and keeps the poll far below the engine URL limit.
+		m_PollCapabilities = SERVER_CAPABILITIES_MASK;
 		m_PollArgContractHash = EncodeQueryValue(SERVER_ARG_CONTRACT_HASH);
 		m_PeerInstance = "";
 		m_PollInFlight = false;
@@ -455,7 +463,7 @@ class MCPBridge : Managed
 		m_CallbackRefs.Insert(cb);
 		string request = "poll?key=" + m_Key;
 		request = request + "&ver=" + GetPollVersion();
-		request = request + "&caps=" + ServerCapabilities();
+		request = request + "&cm=" + ServerCapabilities();
 		request = request + "&ach=" + m_PollArgContractHash;
 		request = request + LoadCounterQuery();
 		if (m_PeerInstance != "")

@@ -7279,6 +7279,7 @@ class ServerState:
         load: dict[str, int | float] | None = None,
         wait_s: float = 0.0,
         xai: str | None = None,
+        cm: str | None = None,
     ) -> tuple[int, dict]:
         if peer not in VALID_PEERS:
             return 400, {"error": "bad_peer"}
@@ -7428,7 +7429,7 @@ class ServerState:
             # After the whole binding chain: the census belongs to THIS poll,
             # so it needs this poll's accreditation, not the previous one's.
             self._record_poll_caps_locked(
-                peer, caps, accredited, ach=ach, instance=token, now=decision_at, xai=xai
+                peer, caps, accredited, ach=ach, instance=token, now=decision_at, xai=xai, cm=cm
             )
             if load is not None and self._load_reading_applies_locked(
                 peer, token, accredited
@@ -8840,6 +8841,7 @@ class ServerState:
         instance: str | None = None,
         now: float | None = None,
         xai: str | None = None,
+        cm: str | None = None,
     ) -> None:
         """Keep only the last accredited announcement, tagged with its generation.
 
@@ -8851,21 +8853,35 @@ class ServerState:
         """
 
         if accredited:
-            names, reason = parse_poll_caps(raw)
             ach_value = ach if isinstance(ach, str) and ach else None
             # H3 (#321): the adapter announces verbs as an xai bitmask, not
             # as caps names. Expand it here so the stored census, admission
             # and the comparator all keep seeing names.
-            from dayz_mcp.bridge_readiness import parse_xai
+            from dayz_mcp.bridge_readiness import parse_capability_mask, parse_xai
 
             xai_value, xai_verbs = parse_xai(xai)
-            if names is not None and xai_verbs:
-                if set(names) & set(xai_verbs):
-                    names, reason = None, "duplicate"
-                elif len(names) + len(xai_verbs) > POLL_CAPS_MAX_NAMES:
-                    names, reason = None, "too_many"
+            if isinstance(cm, str) and cm:
+                # capsbits: the census travels as cm=<epoch>.<hex>. No PBO
+                # sends both forms; fail closed when one does.
+                if isinstance(raw, str) and raw:
+                    names, reason = None, "ambiguous"
                 else:
-                    names = (*names, *xai_verbs)
+                    names, reason = parse_capability_mask(peer, cm)
+                    if names is not None and xai_verbs:
+                        if set(names) & set(xai_verbs):
+                            names, reason = None, "duplicate"
+                        else:
+                            # Bounded by its table, not POLL_CAPS_MAX_NAMES.
+                            names = (*names, *xai_verbs)
+            else:
+                names, reason = parse_poll_caps(raw)
+                if names is not None and xai_verbs:
+                    if set(names) & set(xai_verbs):
+                        names, reason = None, "duplicate"
+                    elif len(names) + len(xai_verbs) > POLL_CAPS_MAX_NAMES:
+                        names, reason = None, "too_many"
+                    else:
+                        names = (*names, *xai_verbs)
             announced_at = now if isinstance(now, (int, float)) else self._now()
             announced_instance = instance if isinstance(instance, str) else None
         else:
@@ -10482,6 +10498,7 @@ class Handler(BaseHTTPRequestHandler):
         inst_raw = qs.get("inst", [""])[0]
         instance = inst_raw if inst_raw else None
         caps_raw = qs.get("caps", [""])[0]
+        cm_raw = qs.get("cm", [""])[0]
         ach_raw = qs.get("ach", [""])[0]
         xai_raw = qs.get("xai", [""])[0]
         load = _load_from_poll_query(qs)
@@ -10497,6 +10514,7 @@ class Handler(BaseHTTPRequestHandler):
             caps=caps_raw,
             ach=ach_raw,
             xai=xai_raw,
+            cm=cm_raw,
             load=load,
             wait_s=wait_s,
         )
@@ -10511,9 +10529,11 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(delay_ms / 1000.0)
 
         inst8 = instance_prefix(instance) or "-"
+        census = "cm" if cm_raw else "caps" if caps_raw else "none"
         self._log(
             f"HIT GET /poll peer={peer} inst8={inst8} bind={bind} "
-            f"commands={len(commands)} delay_ms={delay_ms}"
+            f"commands={len(commands)} delay_ms={delay_ms} "
+            f"census={census} plen={len(getattr(self, 'path', '') or '')}"
         )
         self._json(200, {"commands": commands})
 
