@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import stat
 import sys
 import tempfile
 import unittest
@@ -110,8 +111,28 @@ def _display_path(path: Path, root: Path | None = None) -> str:
     return _mask_path_text(str(relative))
 
 
-def _walk_problem(display: str, exc: OSError) -> str:
+def _walk_problem(display: str, exc: BaseException) -> str:
     return f"{display}: unreadable ({type(exc).__name__})"
+
+
+def _lstat(path: Path | os.DirEntry) -> os.stat_result:
+    return os.lstat(path)
+
+
+def _is_redirect(entry_or_path: Path | os.DirEntry) -> bool:
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None and isjunction(entry_or_path):
+        return True
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if reparse_point:
+        attributes = getattr(_lstat(entry_or_path), "st_file_attributes", 0)
+        if attributes & reparse_point:
+            return True
+    return False
+
+
+def _skip_reason(exc: BaseException) -> str:
+    return f"cannot create symlink ({type(exc).__name__})"
 
 
 def _entry_is_symlink(entry: os.DirEntry) -> bool:
@@ -132,23 +153,32 @@ def _iter_test_files_with_problems(
     """Return ``(files, problems)`` for the tree under *root*.
 
     The walk is an explicit iterative ``os.scandir`` traversal (sorted
-    for determinism). Every step is guarded: an OSError from resolving
-    the root, from ``os.scandir`` (opening or iterating a directory),
-    or from an entry metadata call (``_entry_is_symlink``, or
+    for determinism). Every step is guarded: an OSError or RuntimeError
+    from resolving the root, from ``os.scandir`` (opening or iterating
+    a directory), or from an entry metadata call (``_entry_is_symlink``,
     ``_entry_is_dir`` / ``_entry_is_file`` with
-    ``follow_symlinks=False``) becomes a masked problem
-    string (masked display path plus the exception class name only),
-    so nothing is ever skipped silently and no raw path or exception
-    text can leak. Symlink entries are skipped and never descended
-    into, so the walk never follows links out of the resolved root,
-    and ``__pycache__`` directories are not descended into. A sibling
-    wrapper keeps the historical files-only view for callers that do
-    not report problems.
+    ``follow_symlinks=False``, ``_lstat`` or ``_is_redirect``) becomes
+    a masked problem string (masked display path plus the exception
+    class name only), so nothing is ever skipped silently and no raw
+    path or exception text can leak. Symlink entries are skipped and
+    never descended into, so the walk never follows links out of the
+    resolved root, and ``__pycache__`` directories are not descended
+    into. Junctions and other reparse points are reported as masked
+    redirected problems and are neither descended into nor read.
+    Entries whose DirEntry type is unknown (all three ``_entry_is_*``
+    helpers return False) are classified through ``_lstat``: a regular
+    file is scanned, a directory is descended into, a link is skipped
+    like any symlink, and anything else (socket, device, fifo) is
+    skipped explicitly. If that ``_lstat`` fails the entry has vanished
+    or is denied and a masked problem is recorded. After the walk,
+    every collected file is resolved and must stay inside the resolved
+    root. A sibling wrapper keeps the historical files-only view for
+    callers that do not report problems.
     """
     raw_base = _TESTS_DIR if root is None else root
     try:
         base = raw_base.resolve()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         display = _mask_path_text(raw_base.name or ".")
         return [], [_walk_problem(display, exc)]
     files: list[Path] = []
@@ -160,7 +190,7 @@ def _iter_test_files_with_problems(
         try:
             with os.scandir(directory) as iterator:
                 entries = list(iterator)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             problems.append(_walk_problem(display_dir, exc))
             continue
         entries.sort(key=lambda entry: entry.name)
@@ -172,17 +202,57 @@ def _iter_test_files_with_problems(
                 if _entry_is_symlink(entry):
                     continue
                 if _entry_is_dir(entry):
+                    is_directory = True
+                elif _entry_is_file(entry):
+                    is_directory = False
+                else:
+                    try:
+                        entry_stat = _lstat(path)
+                    except (OSError, RuntimeError) as exc:
+                        problems.append(_walk_problem(display, exc))
+                        continue
+                    if stat.S_ISLNK(entry_stat.st_mode):
+                        continue
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        is_directory = True
+                    elif stat.S_ISREG(entry_stat.st_mode):
+                        is_directory = False
+                    else:
+                        # Socket, device, fifo or other non-regular
+                        # entry: skipped explicitly, never read.
+                        continue
+                if _is_redirect(path):
+                    problems.append(
+                        f"{display}: redirected "
+                        "(junction or reparse point)"
+                    )
+                    continue
+                if is_directory:
                     if entry.name != "__pycache__":
                         subdirectories.append(path)
                     continue
-                if not _entry_is_file(entry):
-                    continue
-            except OSError as exc:
+                files.append(path)
+            except (OSError, RuntimeError) as exc:
                 problems.append(_walk_problem(display, exc))
                 continue
-            files.append(path)
         stack.extend(reversed(subdirectories))
-    return sorted(files), problems
+    checked_files: list[Path] = []
+    for path in files:
+        display = _display_path(path, base)
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError) as exc:
+            problems.append(_walk_problem(display, exc))
+            continue
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            problems.append(
+                f"{display}: redirected (junction or reparse point)"
+            )
+            continue
+        checked_files.append(path)
+    return sorted(checked_files), problems
 
 
 def _iter_test_files(root: Path | None = None) -> list[Path]:
@@ -194,7 +264,7 @@ def _scan_directory(root: Path | None = None) -> list[str]:
     raw_base = _TESTS_DIR if root is None else root
     try:
         base = raw_base.resolve()
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         display = _mask_path_text(raw_base.name or ".")
         return [_walk_problem(display, exc)]
     files, problems = _iter_test_files_with_problems(base)
@@ -242,13 +312,13 @@ class FindViolationsTest(unittest.TestCase):
         self.assertNotIn(fake_uid, masked)
 
     def test_allowed_steam_ids_are_not_flagged(self) -> None:
-        for steam_id in ALLOWED_STEAM_IDS:
-            with self.subTest(steam_id=steam_id):
+        for index, steam_id in enumerate(ALLOWED_STEAM_IDS):
+            with self.subTest(index=index):
                 self.assertEqual(find_violations(steam_id.encode("ascii")), [])
 
     def test_allowed_uids_are_not_flagged(self) -> None:
-        for steam_id in ALLOWED_STEAM_IDS:
-            with self.subTest(steam_id=steam_id):
+        for index, steam_id in enumerate(ALLOWED_STEAM_IDS):
+            with self.subTest(index=index):
                 uid = _derive_uid(steam_id)
                 self.assertEqual(find_violations(uid.encode("ascii")), [])
 
@@ -269,6 +339,24 @@ class FindViolationsTest(unittest.TestCase):
 
 
 class WalkHelpersTest(unittest.TestCase):
+    def _write_bytes(self, path: Path, data: bytes) -> None:
+        failure: str | None = None
+        try:
+            path.write_bytes(data)
+        except (OSError, RuntimeError) as exc:
+            failure = type(exc).__name__
+        if failure is not None:
+            self.fail(f"write failed: {failure}")
+
+    def _make_dir(self, path: Path, parents: bool = False) -> None:
+        failure: str | None = None
+        try:
+            path.mkdir(parents=parents)
+        except (OSError, RuntimeError) as exc:
+            failure = type(exc).__name__
+        if failure is not None:
+            self.fail(f"mkdir failed: {failure}")
+
     def test_masked_display_path_hides_ids_in_file_name(self) -> None:
         fake_uid = _derive_uid(_FAKE_STEAM_ID)
         name = _FAKE_STEAM_ID + "." + fake_uid + ".txt"
@@ -308,14 +396,14 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             named = root / (_FAKE_STEAM_ID + ".txt")
-            named.write_bytes(b"clean\n")
+            self._write_bytes(named, b"clean\n")
             plain = root / "plain.txt"
-            plain.write_bytes(b"clean\n")
+            self._write_bytes(plain, b"clean\n")
             real_read_bytes = Path.read_bytes
 
             def fake_read_bytes(self: Path) -> bytes:
                 if self.name == named.name:
-                    raise PermissionError("denied: " + str(self))
+                    raise PermissionError(13, "Permission denied")
                 return real_read_bytes(self)
 
             with mock.patch.object(Path, "read_bytes", fake_read_bytes):
@@ -331,9 +419,9 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             named = root / (secret + ".txt")
-            named.write_bytes(b"clean\n")
+            self._write_bytes(named, b"clean\n")
             plain = root / "plain.txt"
-            plain.write_bytes(b"clean\n")
+            self._write_bytes(plain, b"clean\n")
             real_helper = _entry_is_symlink
 
             def fake_helper(entry: os.DirEntry) -> bool:
@@ -356,9 +444,9 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             named = root / (secret + ".txt")
-            named.write_bytes(b"clean\n")
+            self._write_bytes(named, b"clean\n")
             plain = root / "plain.txt"
-            plain.write_bytes(b"clean\n")
+            self._write_bytes(plain, b"clean\n")
             real_helper = _entry_is_file
 
             def fake_helper(entry: os.DirEntry) -> bool:
@@ -381,9 +469,9 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             named = root / (secret + ".txt")
-            named.write_bytes(b"clean\n")
+            self._write_bytes(named, b"clean\n")
             plain = root / "plain.txt"
-            plain.write_bytes(b"clean\n")
+            self._write_bytes(plain, b"clean\n")
             real_helper = _entry_is_dir
 
             def fake_helper(entry: os.DirEntry) -> bool:
@@ -406,7 +494,7 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plain = root / "plain.txt"
-            plain.write_bytes(b"clean\n")
+            self._write_bytes(plain, b"clean\n")
 
             def fake_scandir(path: Path) -> object:
                 raise PermissionError(13, "Permission denied", secret)
@@ -428,11 +516,11 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             blocked = root / secret
-            blocked.mkdir()
+            self._make_dir(blocked)
             hidden = blocked / "hidden.txt"
-            hidden.write_bytes(b"clean\n")
+            self._write_bytes(hidden, b"clean\n")
             sibling = root / "sibling.txt"
-            sibling.write_bytes(b"clean\n")
+            self._write_bytes(sibling, b"clean\n")
             real_scandir = os.scandir
 
             def fake_scandir(path: Path) -> object:
@@ -462,7 +550,7 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plain = root / "plain.txt"
-            plain.write_bytes(b"clean\n")
+            self._write_bytes(plain, b"clean\n")
 
             def fake_resolve(self: Path, *args: object, **kwargs: object):
                 raise PermissionError(13, "Permission denied", secret)
@@ -487,8 +575,14 @@ class WalkHelpersTest(unittest.TestCase):
         def fake_resolve(self: Path, *args, **kwargs):
             raise PermissionError(13, "Permission denied", secret)
 
+        import_failure: str | None = None
         with mock.patch.object(Path, "resolve", fake_resolve):
-            spec.loader.exec_module(module)
+            try:
+                spec.loader.exec_module(module)
+            except Exception as exc:
+                import_failure = type(exc).__name__
+        if import_failure is not None:
+            self.fail(f"import failed: {import_failure}")
 
         self.assertEqual(module._TESTS_DIR, Path(__file__).parent)
 
@@ -496,9 +590,11 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             named = root / (_FAKE_STEAM_ID + ".txt")
-            named.write_bytes(("id=" + _FAKE_STEAM_ID).encode("ascii"))
+            self._write_bytes(
+                named, ("id=" + _FAKE_STEAM_ID).encode("ascii")
+            )
             plain = root / "plain.txt"
-            plain.write_bytes(b"no player identifiers here\n")
+            self._write_bytes(plain, b"no player identifiers here\n")
 
             files = _iter_test_files(root)
             problems = _scan_directory(root)
@@ -516,14 +612,16 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             root = base / "tests"
-            root.mkdir()
+            self._make_dir(root)
             outside = base / "outside.txt"
-            outside.write_bytes(("id=" + _FAKE_STEAM_ID).encode("ascii"))
+            self._write_bytes(
+                outside, ("id=" + _FAKE_STEAM_ID).encode("ascii")
+            )
             link = root / "fixture.txt"
             try:
                 link.symlink_to(outside)
             except (OSError, NotImplementedError) as exc:
-                self.skipTest(f"cannot create symlink: {exc}")
+                self.skipTest(_skip_reason(exc))
 
             files = _iter_test_files(root)
             problems = _scan_directory(root)
@@ -535,16 +633,302 @@ class WalkHelpersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "__pycache__" / "scan"
             cached = root / "__pycache__"
-            cached.mkdir(parents=True)
+            self._make_dir(cached, parents=True)
             plain = root / "plain.txt"
-            plain.write_bytes(b"no player identifiers here\n")
+            self._write_bytes(plain, b"no player identifiers here\n")
             skipped = cached / "cached.txt"
-            skipped.write_bytes(b"no player identifiers here\n")
+            self._write_bytes(skipped, b"no player identifiers here\n")
 
             files = _iter_test_files(root)
 
         self.assertIn("plain.txt", {path.name for path in files})
         self.assertNotIn("cached.txt", {path.name for path in files})
+
+    def test_unknown_type_regular_file_is_scanned(self) -> None:
+        secret = _FAKE_STEAM_ID
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            named = root / (secret + ".txt")
+            self._write_bytes(
+                named, ("id=" + secret).encode("ascii")
+            )
+            plain = root / "plain.txt"
+            self._write_bytes(plain, b"clean\n")
+            real_is_symlink = _entry_is_symlink
+            real_is_dir = _entry_is_dir
+            real_is_file = _entry_is_file
+            real_lstat = os.lstat
+
+            def fake_is_symlink(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_symlink(entry)
+
+            def fake_is_dir(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_dir(entry)
+
+            def fake_is_file(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_file(entry)
+
+            def fake_lstat(path: Path) -> os.stat_result:
+                return real_lstat(path)
+
+            module = sys.modules[__name__]
+            with mock.patch.object(
+                module, "_entry_is_symlink", fake_is_symlink
+            ), mock.patch.object(
+                module, "_entry_is_dir", fake_is_dir
+            ), mock.patch.object(
+                module, "_entry_is_file", fake_is_file
+            ), mock.patch.object(
+                module, "_lstat", fake_lstat
+            ), mock.patch.object(
+                module, "_is_redirect", lambda path: False
+            ):
+                problems = _scan_directory(root)
+
+        self.assertTrue(problems)
+        self.assertEqual(len(problems), 1)
+        for problem in problems:
+            self.assertNotIn(secret, problem)
+        self.assertIn("7656119" + "x" * 10, problems[0])
+
+    def test_unknown_type_vanished_entry_is_masked_problem(self) -> None:
+        secret = "7656119" + "8123456789"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            named = root / (secret + ".txt")
+            self._write_bytes(named, b"clean\n")
+            plain = root / "plain.txt"
+            self._write_bytes(plain, b"clean\n")
+            real_lstat = os.lstat
+
+            def fake_lstat(path: Path) -> os.stat_result:
+                if Path(path).name == named.name:
+                    raise FileNotFoundError(2, "gone", secret)
+                return real_lstat(path)
+
+            real_is_symlink = _entry_is_symlink
+            real_is_dir = _entry_is_dir
+            real_is_file = _entry_is_file
+
+            def fake_is_symlink(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_symlink(entry)
+
+            def fake_is_dir(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_dir(entry)
+
+            def fake_is_file(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_file(entry)
+
+            module = sys.modules[__name__]
+            with mock.patch.object(
+                module, "_entry_is_symlink", fake_is_symlink
+            ), mock.patch.object(
+                module, "_entry_is_dir", fake_is_dir
+            ), mock.patch.object(
+                module, "_entry_is_file", fake_is_file
+            ), mock.patch.object(
+                module, "_lstat", fake_lstat
+            ), mock.patch.object(
+                module, "_is_redirect", lambda path: False
+            ):
+                problems = _scan_directory(root)
+
+        self.assertTrue(problems)
+        self.assertEqual(len(problems), 1)
+        for problem in problems:
+            self.assertNotIn(secret, problem)
+        self.assertTrue(
+            any("FileNotFoundError" in problem for problem in problems)
+        )
+
+    def test_unknown_type_socket_is_skipped_without_problem(self) -> None:
+        secret = _FAKE_STEAM_ID
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            named = root / (secret + ".txt")
+            self._write_bytes(
+                named, ("id=" + secret).encode("ascii")
+            )
+            plain = root / "plain.txt"
+            self._write_bytes(plain, b"clean\n")
+            real_lstat = os.lstat
+
+            def fake_lstat(path: Path) -> os.stat_result:
+                if Path(path).name == named.name:
+                    return os.stat_result(
+                        (
+                            stat.S_IFSOCK | 0o777,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        )
+                    )
+                return real_lstat(path)
+
+            real_is_symlink = _entry_is_symlink
+            real_is_dir = _entry_is_dir
+            real_is_file = _entry_is_file
+
+            def fake_is_symlink(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_symlink(entry)
+
+            def fake_is_dir(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_dir(entry)
+
+            def fake_is_file(entry: os.DirEntry) -> bool:
+                if entry.name == named.name:
+                    return False
+                return real_is_file(entry)
+
+            module = sys.modules[__name__]
+            with mock.patch.object(
+                module, "_entry_is_symlink", fake_is_symlink
+            ), mock.patch.object(
+                module, "_entry_is_dir", fake_is_dir
+            ), mock.patch.object(
+                module, "_entry_is_file", fake_is_file
+            ), mock.patch.object(
+                module, "_lstat", fake_lstat
+            ), mock.patch.object(
+                module, "_is_redirect", lambda path: False
+            ):
+                files, walk_problems = _iter_test_files_with_problems(root)
+                problems = _scan_directory(root)
+
+        self.assertNotIn(named.name, {path.name for path in files})
+        self.assertIn(plain.name, {path.name for path in files})
+        self.assertEqual(walk_problems, [])
+        self.assertEqual(problems, [])
+
+    def test_redirected_subdir_is_not_descended_and_reported(self) -> None:
+        secret = _FAKE_STEAM_ID
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subdir = root / "sub"
+            self._make_dir(subdir)
+            inner = subdir / "inner.txt"
+            self._write_bytes(inner, ("id=" + secret).encode("ascii"))
+            plain = root / "plain.txt"
+            self._write_bytes(plain, b"clean\n")
+
+            def fake_redirect(path: Path) -> bool:
+                return Path(path).name == subdir.name
+
+            module = sys.modules[__name__]
+            with mock.patch.object(module, "_is_redirect", fake_redirect):
+                files, walk_problems = _iter_test_files_with_problems(root)
+                problems = _scan_directory(root)
+
+        self.assertNotIn(inner.name, {path.name for path in files})
+        self.assertIn(plain.name, {path.name for path in files})
+        self.assertTrue(walk_problems)
+        self.assertEqual(len(walk_problems), 1)
+        self.assertIn("redirected", walk_problems[0])
+        for problem in walk_problems + problems:
+            self.assertNotIn(secret, problem)
+            self.assertNotIn("7656119" + "x" * 10, problem)
+        self.assertTrue(
+            any("redirected" in problem for problem in problems)
+        )
+
+    def test_redirect_helper_error_is_masked_problem(self) -> None:
+        secret = _derive_uid("7656119" + "8123456789")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subdir = root / "sub"
+            self._make_dir(subdir)
+            inner = subdir / "inner.txt"
+            self._write_bytes(inner, b"clean\n")
+            plain = root / "plain.txt"
+            self._write_bytes(plain, b"clean\n")
+
+            def fake_redirect(path: Path) -> bool:
+                if Path(path).name == subdir.name:
+                    raise PermissionError(13, "Permission denied", secret)
+                return False
+
+            module = sys.modules[__name__]
+            with mock.patch.object(module, "_is_redirect", fake_redirect):
+                files, walk_problems = _iter_test_files_with_problems(root)
+                problems = _scan_directory(root)
+
+        self.assertNotIn(inner.name, {path.name for path in files})
+        self.assertTrue(walk_problems)
+        for problem in walk_problems + problems:
+            self.assertNotIn(secret, problem)
+        self.assertTrue(
+            any("PermissionError" in problem for problem in walk_problems)
+        )
+        self.assertTrue(
+            any("PermissionError" in problem for problem in problems)
+        )
+
+    def test_resolve_runtime_error_is_masked_problem(self) -> None:
+        secret = _derive_uid(_FAKE_STEAM_ID)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plain = root / "plain.txt"
+            self._write_bytes(plain, b"clean\n")
+
+            def fake_resolve(
+                self: Path, *args: object, **kwargs: object
+            ) -> Path:
+                raise RuntimeError("Symlink loop from " + secret)
+
+            with mock.patch.object(Path, "resolve", fake_resolve):
+                problems = _scan_directory(root)
+                files, walk_problems = _iter_test_files_with_problems(root)
+
+        self.assertTrue(problems)
+        self.assertEqual(files, [])
+        self.assertTrue(walk_problems)
+        for problem in problems + walk_problems:
+            self.assertNotIn(secret, problem)
+        self.assertTrue(
+            any("RuntimeError" in problem for problem in problems)
+        )
+        self.assertTrue(
+            any("RuntimeError" in problem for problem in walk_problems)
+        )
+
+    def test_skip_reason_uses_class_name_only(self) -> None:
+        secret = "7656119" + "8123456789"
+        reason = _skip_reason(
+            PermissionError(13, "Permission denied", secret)
+        )
+
+        self.assertEqual(
+            reason, "cannot create symlink (PermissionError)"
+        )
+        self.assertNotIn(secret, reason)
+        self.assertNotIn("Permission denied", reason)
+        other = _skip_reason(FileNotFoundError(2, "gone", secret))
+        self.assertEqual(
+            other, "cannot create symlink (FileNotFoundError)"
+        )
+        self.assertNotIn(secret, other)
 
 
 class TestsTreeScanTest(unittest.TestCase):
