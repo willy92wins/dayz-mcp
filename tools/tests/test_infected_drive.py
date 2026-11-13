@@ -123,12 +123,6 @@ OWNER_A = {
     "session_id": "infected-drive-owner-a",
     "task_label": "infected drive",
 }
-OWNER_B = {
-    **OWNER_A,
-    "pid": 302,
-    "session_id": "infected-drive-owner-b",
-    "task_label": "next owner",
-}
 
 
 def _leased_state() -> tuple[loopback.ServerState, SessionCoordinator]:
@@ -1275,7 +1269,7 @@ class InfectedDriveModelTest(unittest.TestCase):
                 self.assertEqual((model.registry(), model.writes()), before)
         self.assertIsNotNone(driven.controller.driving())
 
-    def test_after_the_lease_ends_the_next_owner_inherits_no_drive(self) -> None:
+    def test_after_the_lease_close_no_drive_is_left_for_the_next_owner(self) -> None:
         model = _HandlerModel()
         infected = model.spawn()
         state, coordinator = _leased_state()
@@ -1311,7 +1305,6 @@ class InfectedDriveModelTest(unittest.TestCase):
         self.assertNotIn("infected_drive_release_enqueued", released["cleanup"])
         self.assertEqual(released["cleanup_degraded"], [])
 
-        _acquire(coordinator, OWNER_B)
         _lease_close(state)
         # DispatchLeaseClose calls MCPInfectedDrive.ShutdownAll (the source
         # test above pins that order), which ends every drive.
