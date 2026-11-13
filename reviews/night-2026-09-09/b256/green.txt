@@ -1,8 +1,8 @@
-Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
+Set-Location -LiteralPath '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools'
 $env:PYTHONIOENCODING='utf-8'
 $env:PYTHONDONTWRITEBYTECODE='1'
-$env:PYTHONPATH='C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
-& 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_inventory_inspect -v
+$env:PYTHONPATH='%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+& '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe' -m unittest tests.test_night0909_inventory_inspect -v
 
 test_existing_public_tool_forwards_inventory_and_keeps_both_payloads (tests.test_night0909_inventory_inspect.InventoryInspectPublicTest.test_existing_public_tool_forwards_inventory_and_keeps_both_payloads) ... ok
 test_ingress_and_lease_contract_remain_read_only (tests.test_night0909_inventory_inspect.InventoryInspectStructureTest.test_ingress_and_lease_contract_remain_read_only) ... ok

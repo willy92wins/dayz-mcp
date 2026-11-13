@@ -6,7 +6,7 @@ VERDICT: CHANGES_REQUIRED
 
 **F3 — P2 — A delayed death observation still replaces previously recorded death evidence.**
 
-Location: [tools/dayz_mcp/process_lifecycle.py:816](C:/Users/guill/dzmcp_gauntlet/g4_client_lifecycle/r3/ws/tools/dayz_mcp/process_lifecycle.py:816), with the timestamp captured before probing at [line 2443](C:/Users/guill/dzmcp_gauntlet/g4_client_lifecycle/r3/ws/tools/dayz_mcp/process_lifecycle.py:2443).
+Location: [tools/dayz_mcp/process_lifecycle.py:816](%USERPROFILE%/dzmcp_gauntlet/g4_client_lifecycle/r3/ws/tools/dayz_mcp/process_lifecycle.py:816), with the timestamp captured before probing at [line 2443](%USERPROFILE%/dzmcp_gauntlet/g4_client_lifecycle/r3/ws/tools/dayz_mcp/process_lifecycle.py:2443).
 
 The merge is atomic, but `min(stamps)` allows an older incoming observation to change the first-death timestamp already published by another reader. Clamping `observed_at_utc` afterward does not preserve that evidence.
 
@@ -36,7 +36,7 @@ retained exit_time_utc        = 00:00:00.900Z
 
 The recorded first death changes permanently and precedes the exact exit time.
 
-The same merge also preserves exact exit fields only when incoming fields are null ([line 818](C:/Users/guill/dzmcp_gauntlet/g4_client_lifecycle/r3/ws/tools/dayz_mcp/process_lifecycle.py:818)). In the same harness, supplying older non-null values `process_exit_code=2`, `exit_time_utc=00:00:00.400Z` replaces B’s recorded `(1, 00:00:00.900Z)`. This violates the directive’s retention rule; conflicting producer evidence should not silently overwrite recorded fields.
+The same merge also preserves exact exit fields only when incoming fields are null ([line 818](%USERPROFILE%/dzmcp_gauntlet/g4_client_lifecycle/r3/ws/tools/dayz_mcp/process_lifecycle.py:818)). In the same harness, supplying older non-null values `process_exit_code=2`, `exit_time_utc=00:00:00.400Z` replaces B’s recorded `(1, 00:00:00.900Z)`. This violates the directive’s retention rule; conflicting producer evidence should not silently overwrite recorded fields.
 
 **Suggested correction:** retain an existing first-death timestamp and recorded exact exit fields, filling only missing evidence. Apply observation ordering to the merged evidence, not merely its displayed timestamp. Add the delayed-`dead` interleaving regression.
 

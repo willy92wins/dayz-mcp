@@ -6,7 +6,7 @@ VERDICT: CHANGES_REQUIRED
 
 ### F8 — P2 — Selector validation still permits inconsistent or silently ignored selections
 
-Anchors: [server_cli.py:223](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/server_cli.py:223), [install_mcp.py:835](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/install_mcp.py:835), [p0s_gate.py:310](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/p0s_gate.py:310), [secure_launcher.py:291](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/secure_launcher.py:291), [install-mcp.ps1:61](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/install-mcp.ps1:61), [install-mcp.ps1:66](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/install-mcp.ps1:66).
+Anchors: [server_cli.py:223](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/server_cli.py:223), [install_mcp.py:835](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/install_mcp.py:835), [p0s_gate.py:310](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/p0s_gate.py:310), [secure_launcher.py:291](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/secure_launcher.py:291), [install-mcp.ps1:61](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/install-mcp.ps1:61), [install-mcp.ps1:66](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/install-mcp.ps1:66).
 
 **Executable scenarios:** Python entry points were executed with downstream effects mocked. PowerShell ran this tree’s script with `-NoProfile -ExecutionPolicy Bypass -File … -ValidateOnly`. Selector environment variables were absent.
 
@@ -28,7 +28,7 @@ Argparse accepts abbreviations that the shared selector scanner does not consume
 
 ### F1 — P3 — Unknown interpreter flags still bypass conservative classification
 
-Anchor: [identity_migration.py:719](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:719).
+Anchor: [identity_migration.py:719](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:719).
 
 Supplying process metadata for:
 

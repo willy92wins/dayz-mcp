@@ -98,16 +98,16 @@ Traceback (most recent call last):
   File "C:\Python314\Lib\http\server.py", line 484, in handle_one_request
     method()
     ~~~~~~^^
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\loopback.py", line 2997, in do_POST
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\loopback.py", line 2997, in do_POST
     self._handle_session(session_action)
     ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\loopback.py", line 3266, in _handle_session
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\loopback.py", line 3266, in _handle_session
     payload = self._adopt_on_grant(client, payload)
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\loopback.py", line 3155, in _adopt_on_grant
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\loopback.py", line 3155, in _adopt_on_grant
     result = lifecycle.adopt_run(client, token, run_id)
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
     run = self.manifest.get(run_id)
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 645, in broken_get
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 645, in broken_get
     raise OSError("manifest read failed inside adopt_run")
 OSError: manifest read failed inside adopt_run
 ----------------------------------------
@@ -118,7 +118,7 @@ test_adopt_run_dependency_failure_after_authorize_closes_reservation (tests.test
 ERROR: test_acquire_survives_adopt_run_manifest_get_failure (tests.test_daemon.DaemonEndpointTest.test_acquire_survives_adopt_run_manifest_get_failure)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 649, in test_acquire_survives_adopt_run_manifest_get_failure
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 649, in test_acquire_survives_adopt_run_manifest_get_failure
     status, acquired = _http(
                        ~~~~~^
         srv.base,
@@ -128,7 +128,7 @@ Traceback (most recent call last):
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     )
     ^
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 83, in _http
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 83, in _http
     with urllib.request.urlopen(req, timeout=timeout) as response:
          ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
   File "C:\Python314\Lib\urllib\request.py", line 187, in urlopen
@@ -161,7 +161,7 @@ http.client.RemoteDisconnected: Remote end closed connection without response
 FAIL: test_acquire_list_runs_failure_declares_run_state_unavailable (tests.test_daemon.DaemonEndpointTest.test_acquire_list_runs_failure_declares_run_state_unavailable)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 634, in test_acquire_list_runs_failure_declares_run_state_unavailable
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_daemon.py", line 634, in test_acquire_list_runs_failure_declares_run_state_unavailable
     self.assertEqual(
     ~~~~~~~~~~~~~~~~^
         acquired.get("adopted_run"),
@@ -176,20 +176,20 @@ AssertionError: None != {'ok': False, 'run_id': None, 'error': 'run_state_unavai
 FAIL: test_adopt_run_dependency_failure_after_authorize_closes_reservation (tests.test_process_lifecycle.ProcessLifecycleTest.test_adopt_run_dependency_failure_after_authorize_closes_reservation)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_process_lifecycle.py", line 1715, in test_adopt_run_dependency_failure_after_authorize_closes_reservation
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_process_lifecycle.py", line 1715, in test_adopt_run_dependency_failure_after_authorize_closes_reservation
     result = self.lifecycle.adopt_run(
         IDENTITY_A, self.token_a, "run-existing"
     )
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\dayz_mcp\process_lifecycle.py", line 2505, in adopt_run
     run = self.manifest.get(run_id)
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_process_lifecycle.py", line 1711, in _boom
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_process_lifecycle.py", line 1711, in _boom
     raise OSError("manifest read failed")
 OSError: manifest read failed
 
 During handling of the above exception, another exception occurred:
 
 Traceback (most recent call last):
-  File "C:\Users\guill\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_process_lifecycle.py", line 1719, in test_adopt_run_dependency_failure_after_authorize_closes_reservation
+  File "%USERPROFILE%\AppData\Local\Temp\tmp.fAVKGbJcoS\tests\test_process_lifecycle.py", line 1719, in test_adopt_run_dependency_failure_after_authorize_closes_reservation
     self.fail(f"adopt_run propagated {type(exc).__name__}: {exc}")
     ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: adopt_run propagated OSError: manifest read failed

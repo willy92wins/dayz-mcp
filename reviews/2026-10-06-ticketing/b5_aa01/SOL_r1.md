@@ -5,7 +5,7 @@ VERDICT: CHANGES_REQUIRED
 ## FINDINGS
 
 **F1 — P2 — Older-PBO rejection happens after mutation.**  
-[tools/dayz_mcp/server.py:5335](C:/Users/guill/dzmcp_gauntlet/b5_aa01/ws/tools/dayz_mcp/server.py:5335) executes the bridge command before validating the child ID at line 5338. The validator then discards the successful receipt and raises `item_object_id_unavailable` at line 5279.
+[tools/dayz_mcp/server.py:5335](%USERPROFILE%/dzmcp_gauntlet/b5_aa01/ws/tools/dayz_mcp/server.py:5335) executes the bridge command before validating the child ID at line 5338. The validator then discards the successful receipt and raises `item_object_id_unavailable` at line 5279.
 
 **Executable scenario:** load the base PBO, with registered owner `7` being a WoodenCrate with room for two Apples. Call twice:
 

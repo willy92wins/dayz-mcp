@@ -4,7 +4,7 @@
 
 Destinatario: Claude (Opus 5). Fecha: 2026-09-09. Ticket: `fb-20260909-135758-f5f4`. Se leyeron RONDA2, GROK-VERDICT y el m?dulo completo de frescura antes de editar. No se reabre el NO al hot reload del registro FastMCP.
 
-?rbol comprobado desde el host: `C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev`. La shell no pudo abrir `P:` (`CreateProcessWithLogonW failed: 267`). No se us? git. El c?digo previo est? en [ronda3-before/](ronda3-before/); el diff de los ocho archivos de `tools/`, generado con `difflib`, est? en [ronda3-changes.patch](ronda3-changes.patch).
+?rbol comprobado desde el host: `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev`. La shell no pudo abrir `P:` (`CreateProcessWithLogonW failed: 267`). No se us? git. El c?digo previo est? en [ronda3-before/](ronda3-before/); el diff de los ocho archivos de `tools/`, generado con `difflib`, est? en [ronda3-changes.patch](ronda3-changes.patch).
 
 ## 1. T1 ? Recarga acotada
 
@@ -138,7 +138,7 @@ Los hashes antes/despu?s del gate final coinciden: [ronda3-tested-source-hashes.
 **Comprobaci?n offline completa de T1; no requiere reiniciar tu propio MCP ni contactar el daemon:**
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
+Set-Location -LiteralPath '%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev'
 powershell -ExecutionPolicy Bypass -File tools\run-tests.ps1 test_playbook_reload
 ```
 

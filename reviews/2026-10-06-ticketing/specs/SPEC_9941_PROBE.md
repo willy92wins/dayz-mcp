@@ -10,7 +10,7 @@ Precisión verificada: `DEFAULT_PLACE=0`. No alterar esa duración para producir
 
 **Verified anchors**
 
-Rutas relativas al candidato. `V29/` representa `C:/Users/guill/OneDrive/Documentos/DayZ Projects/scripts/`; `U/` representa `V29/4_world/classes/useractionscomponent/`. Todos los siguientes fragmentos fueron abiertos:
+Rutas relativas al candidato. `V29/` representa `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/scripts/`; `U/` representa `V29/4_world/classes/useractionscomponent/`. Todos los siguientes fragmentos fueron abiertos:
 
 - `tools/dayz_mcp/server_cli.py:57`: `"--enable-exec-enforce", action="store_true"`; `server.py:600,6519-6524`: `enable_exec_enforce: bool = False`, registro bajo `if config.enable_exec_enforce`.
 - `tools/dayz_mcp/loopback.py:3283-3287`: whitelist ampliada condicionalmente; `:2752-2753`: rechazo `{"error": "not_whitelisted"}`.

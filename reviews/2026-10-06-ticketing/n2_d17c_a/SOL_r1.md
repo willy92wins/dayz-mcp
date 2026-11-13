@@ -5,14 +5,14 @@ VERDICT: CHANGES_REQUIRED
 ## FINDINGS
 
 **F1 — P2 — A live replacement can inherit the old client’s death verdict.**  
-[tools/dayz_mcp/loopback.py:2680](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/loopback.py:2680), [tools/dayz_mcp/process_lifecycle.py:4292](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/process_lifecycle.py:4292).
+[tools/dayz_mcp/loopback.py:2680](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/loopback.py:2680), [tools/dayz_mcp/process_lifecycle.py:4292](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/process_lifecycle.py:4292).
 
 The probe receives only `run_id`; its result is never tied to the pinned destination’s PID/creation time or the manifest records actually observed.
 
 Executable scenario:
 
 1. Run `run-race` contains server PID 9100 and an old client record for PID 9101. PID 9101 has a complete, mismatching native identity.
-2. Reattach client PID 9102. Production replacement retains the foreign record ([process_lifecycle.py:4397](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/process_lifecycle.py:4397)). Production confirms the new binding **before** publishing its manifest record ([process_lifecycle.py:3741](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/process_lifecycle.py:3741)).
+2. Reattach client PID 9102. Production replacement retains the foreign record ([process_lifecycle.py:4397](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/process_lifecycle.py:4397)). Production confirms the new binding **before** publishing its manifest record ([process_lifecycle.py:3741](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r1/ws/tools/dayz_mcp/process_lifecycle.py:3741)).
 3. Invoke `state.enqueue_command("camera_get", {}, peer="client")` during that interval.
 4. The helper clones the old manifest. While it probes PID 9101, reattachment publishes PID 9102 and restores `RUNNING`.
 5. The binding pin remains unchanged, so admission accepts the obsolete `dead` result.
@@ -32,7 +32,7 @@ Expected: discard this death observation and retain existing admission for the l
 **Suggested fix:** associate death evidence with the registered identities actually probed and the pinned destination. If the pinned client was absent from that snapshot, treat the observation as unknown. Add a regression covering confirmation before manifest publication; keep native probing outside the loopback lock.
 
 **F2 — P3 — Required contract documentation is missing.**  
-[product-spec.md:141](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r1/ws/product-spec.md:141), [product-spec.md:148](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r1/ws/product-spec.md:148).
+[product-spec.md:141](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r1/ws/product-spec.md:141), [product-spec.md:148](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r1/ws/product-spec.md:148).
 
 H6/H13 remain unchanged. This is a documentary omission without an executable runtime failure scenario. The implementation report acknowledges it; the conflicting edit boundary is addressed below.
 

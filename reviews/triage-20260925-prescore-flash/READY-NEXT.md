@@ -23,7 +23,7 @@ Decide classes are authoritative **as classes only**; `confianza=DUDOSA` on all 
 5. Do **not** spawn Opus/fix lanes from this decide alone.
 
 ## Pointers
-- Decide: `C:\Users\guill\AppData\Local\Temp\orq-dispatch\mcp-triaje-sol-decide-20260925\decide.jsonl`
+- Decide: `%USERPROFILE%\AppData\Local\Temp\orq-dispatch\mcp-triaje-sol-decide-20260925\decide.jsonl`
 - RESUMEN: `...\mcp-triaje-sol-decide-20260925\RESUMEN.md`
 - Mirror: `P:\DayZ_MCP_dev\reviews\triage-20260925-prescore-flash\decide.jsonl`
 - Prior Flash: `...\mcp-triaje-prescore-flash-20260925\` (CLOSED 43/43)

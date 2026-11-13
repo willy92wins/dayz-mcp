@@ -8,7 +8,7 @@ Approval is limited to round 5’s closure scope. F8 is closed; the exact F1 `-z
 
 ### F1 — P3 — Unknown-option handling remains incomplete
 
-Anchors: [identity_migration.py:718](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:718), [identity_migration.py:732](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:732).
+Anchors: [identity_migration.py:718](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:718), [identity_migration.py:732](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:732).
 
 **Executed metadata scenarios**, using executable `C:\fixture\legacy\.venv\Scripts\python.exe`, cwd `C:\fixture\legacy`, PID `8786`, and migration token `130`:
 
@@ -26,7 +26,7 @@ The new helper stops at long options or recognized value-taking options instead 
 
 ### F2 — P3 — Terminal short options now produce false blockers
 
-Anchors: [identity_migration.py:734](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:734), [identity_migration.py:780](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:780).
+Anchors: [identity_migration.py:734](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:734), [identity_migration.py:780](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/dayz_mcp/identity_migration.py:780).
 
 **Executed metadata scenario**, with the same fixture:
 
@@ -52,7 +52,7 @@ Coverage follows the binding round 5 directive.
 | F1’s exact `-z -m dayz_mcp --daemon` metadata blocks migration | **done**, verified |
 | General unknown-interpreter-flag rule | **wrong** for F1’s variants above; P3 |
 | Preserve previously completed changes | **done** in the round 4-to-5 patch comparison; prior features were not re-audited |
-| Add `ROUND 5 FIXES` | **done**, [REPORT.md:84](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/REPORT.md:84) |
+| Add `ROUND 5 FIXES` | **done**, [REPORT.md:84](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/REPORT.md:84) |
 | Update affected source pins | **done**; measured hashes and size match |
 | No installation, pip or registration effects | **done** |
 
@@ -60,7 +60,7 @@ Coverage follows the binding round 5 directive.
 
 The new F1 test covers a leading standalone `-z`. It misses unknown long options, unknown flags after value-taking prefixes, and terminal short options.
 
-An existing assertion explicitly expects `--unknown -mdayz_mcp` to be absent: [test_identity_migration.py:742](C:/Users/guill/dzmcp_gauntlet/g5_instances/ws/tools/tests/test_identity_migration.py:742). Thus a passing gate preserves part of the remaining directive mismatch.
+An existing assertion explicitly expects `--unknown -mdayz_mcp` to be absent: [test_identity_migration.py:742](%USERPROFILE%/dzmcp_gauntlet/g5_instances/ws/tools/tests/test_identity_migration.py:742). Thus a passing gate preserves part of the remaining directive mismatch.
 
 ## PREMISE
 
