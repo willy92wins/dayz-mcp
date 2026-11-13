@@ -312,6 +312,10 @@ def assert_lease_close_turns_the_free_camera_off(release_body: str) -> None:
     The block sits at the method's top level (not inside the
     ``if (!m_Shutdown)`` early-return block), after FinishCameraHandoff()
     and before DeleteOwnedCamera(), guarded only by ``if (freeCam)``.
+    The only early exits are the two ``return;`` statements inside
+    ``if (!m_Shutdown)``, guarded by ``m_CameraHandoffPending`` and
+    ``BeginCameraHandoff()`` respectively; any other early exit would
+    skip the turn-off when the bridge holds no camera of its own.
     """
     code = _without_comments(release_body)
     normalized = _normalize_pinned(release_body)
@@ -352,6 +356,34 @@ def assert_lease_close_turns_the_free_camera_off(release_body: str) -> None:
         raise AssertionError(
             "ReleaseCamera's free-camera block must sit at the method's top level, not inside if (!m_Shutdown)"
         )
+    returns = len(re.findall(r"\breturn\b", stripped))
+    if returns != 2:
+        raise AssertionError(
+            "ReleaseCamera must contain exactly the two permitted early exits inside if (!m_Shutdown) "
+            "(guarded by m_CameraHandoffPending and BeginCameraHandoff()); "
+            f"found {returns} 'return' token(s): an early exit before the free-camera block "
+            "would skip its SetActive(false)"
+        )
+    try:
+        shutdown_stripped = _if_body(stripped, "!m_Shutdown")
+    except AssertionError:
+        raise AssertionError("ReleaseCamera's if (!m_Shutdown) block is missing or not unique") from None
+    if len(re.findall(r"\breturn\b", shutdown_stripped)) != 2:
+        raise AssertionError(
+            "ReleaseCamera has an early exit outside if (!m_Shutdown): the only permitted early exits "
+            "are the two inside that block, guarded by m_CameraHandoffPending and BeginCameraHandoff()"
+        )
+    for condition in ("m_CameraHandoffPending", "BeginCameraHandoff()"):
+        try:
+            guard_body = _if_body(shutdown_stripped, condition)
+        except AssertionError:
+            raise AssertionError(
+                f"ReleaseCamera's permitted early exit guarded by if ({condition}) is missing or not unique"
+            ) from None
+        if guard_body.strip() != "return;":
+            raise AssertionError(
+                f"ReleaseCamera's permitted early exit guarded by if ({condition}) must be exactly 'return;'"
+            )
 
 
 def _retail_view(source: str) -> str:
@@ -679,6 +711,16 @@ class DevFreeCameraEnforceTest(unittest.TestCase):
         self.assertNotEqual(wrapped, self.release, "wrapping the block in if (m_ActiveCam) did not change ReleaseCamera")
         with self.assertRaises(AssertionError):
             assert_lease_close_turns_the_free_camera_off(wrapped)
+        anchor = 'ClearCameraDOF("release");'
+        self.assertEqual(self.release.count(anchor), 1, "the ClearCameraDOF anchor does not have the expected shape")
+        early = self.release.replace(anchor, anchor + "\n\t\tif (!m_ActiveCam)\n\t\t{\n\t\t\treturn;\n\t\t}", 1)
+        self.assertNotEqual(early, self.release, "the braced early exit did not change ReleaseCamera")
+        with self.assertRaises(AssertionError):
+            assert_lease_close_turns_the_free_camera_off(early)
+        early_braceless = self.release.replace(anchor, anchor + "\n\t\tif (!m_ActiveCam) return;", 1)
+        self.assertNotEqual(early_braceless, self.release, "the brace-less early exit did not change ReleaseCamera")
+        with self.assertRaises(AssertionError):
+            assert_lease_close_turns_the_free_camera_off(early_braceless)
 
     def test_dispatch_answers_bad_args_before_the_in_game_gate(self) -> None:
         chain = _method_body(self.source, DISPATCH_CHAIN)
