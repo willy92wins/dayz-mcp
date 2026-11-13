@@ -171,6 +171,7 @@ CLIENT_COMMANDS = {
     "ui_reload_layout",
     "ui_focus",
     "ui_pause",
+    "dev_free_camera_set",
     "ui_dialog",
     "action_hold",
     "action_hold_cancel",
@@ -1565,6 +1566,7 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "hud_set": "bridge_capability_missing",
     "player_view_set": "bridge_capability_missing",
     "ui_pause": "bridge_capability_missing",
+    "dev_free_camera_set": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
 # could not be sent camera_path_release is not handed a play (d026).
@@ -2612,6 +2614,10 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # hud_set (f427): the tool always sends visible.
     "hud_set": _command_schema(
         _schema_variant(required=("visible",), validators={"visible": _is_strict_bool})
+    ),
+    # dev_free_camera_set (beb3): the tool always sends active, a JSON bool.
+    "dev_free_camera_set": _command_schema(
+        _schema_variant(required=("active",), validators={"active": _is_strict_bool})
     ),
     # camera_get sends {} when cam_mode is empty.
     "camera_get": _command_schema(

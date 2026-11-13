@@ -1068,7 +1068,7 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
 
     def test_a_moved_line_number_keeps_the_pin(self) -> None:
         explicit = self._release_paragraphs()[0]
-        moved = explicit.replace("loopback.py:8378-8387", "loopback.py:9378-9390")
+        moved = explicit.replace("loopback.py:8384-8393", "loopback.py:9378-9390")
         self.assertNotEqual(moved, explicit)
         self.assertEqual(_servermod_release_digest(moved), _SERVERMOD_RELEASE_SHA256[0])
 
@@ -1095,9 +1095,9 @@ class ServerModVehicleReleaseRoundDocsTest(unittest.TestCase):
             # The release left queued with a round.
             (1, "Sin ronda, el release queda", "Con ronda, el release queda"),
             # A citation's path stays pinned; only its line numbers move.
-            (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/server.py:3257`"),
+            (0, "`tools/dayz_mcp/loopback.py:3263`", "`tools/dayz_mcp/server.py:3257`"),
             # PX9 e: a citation that loses its line numbers, in each paragraph.
-            (0, "`tools/dayz_mcp/loopback.py:3257`", "`tools/dayz_mcp/loopback.py`"),
+            (0, "`tools/dayz_mcp/loopback.py:3263`", "`tools/dayz_mcp/loopback.py`"),
             (
                 1,
                 "`tools/dayz_mcp/session_coordination.py:2366-2368`",
