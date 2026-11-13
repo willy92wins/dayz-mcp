@@ -1466,7 +1466,8 @@ class UiMenuToolTest(unittest.IsolatedAsyncioTestCase):
 # real bodies of DispatchUiMenuSet, ProcessUiMenuJob, PostUiMenuJob,
 # FillUiMenuRead, UiMenuId, DispatchUiMapSet, ProcessUiMapJob,
 # PostUiMapJob, FillUiMapRead and UiMapMatches (plus UiMapWidget,
-# FindMapWidgetByClass, StopLeaseCloseMap and MaintainMCPMapMenu) with
+# FindMapWidgetByClass, StopLeaseCloseMap, MaintainMCPMapMenu and
+# IsFiniteFloat) with
 # tests.enforce_subset_helpers.translate and runs them against doubles,
 # asserting reply fields, double calls, error codes and Log lines.
 # Two call shapes the translator cannot render are rewritten in memory
@@ -1496,6 +1497,7 @@ UI_MENU_ID_FN = "protected bool UiMenuId(string menu, out int menuId)"
 FILL_MENU_READ_FN = "protected void FillUiMenuRead(MCPUiMenu reply, int menuId)"
 FILL_MAP_READ_FN = "protected void FillUiMapRead(MCPUiMap reply, MapWidget widget)"
 UI_MAP_MATCHES_FN = "protected bool UiMapMatches(MCPUiMap reply, MCPJob job)"
+IS_FINITE_FN = "protected bool IsFiniteFloat(float value)"
 _EXEC_CLASS_TYPES = (
     "MissionGameplay", "UIManager", "UIScriptedMenu", "MapMenu", "Widget",
     "MapWidget", "MCPUiMenu", "MCPUiMap", "MCPJob", "MCPResult", "MCPCommand",
@@ -1504,7 +1506,7 @@ _EXEC_FUNCTIONS = (
     UI_MENU_ID_FN, FILL_MENU_READ_FN, DISPATCH_UI_MENU, PROCESS_UI_MENU,
     POST_UI_MENU, FIND_WIDGET, WIDGET_ROUTE, FILL_MAP_READ_FN,
     UI_MAP_MATCHES_FN, DISPATCH_UI_MAP, PROCESS_UI_MAP, POST_UI_MAP,
-    STOP_MAP, MAINTAIN_MAP,
+    STOP_MAP, MAINTAIN_MAP, IS_FINITE_FN,
 )
 _FLOAT_UNSET = 3.4028234663852886e38
 
@@ -1773,9 +1775,6 @@ def _exec_model(source: str, messages: str) -> _ExecWorld:
             "MAP_EXCLUDES": EnforceArray([EnforceString.of("map")]),
             "CAMERA_JOB_TIMEOUT_S": 5.0,
             "MCP_ARG_FLOAT_UNSET": _FLOAT_UNSET,
-            "IsFiniteFloat": lambda v: isinstance(v, (int, float))
-            and not isinstance(v, bool)
-            and math.isfinite(float(v)),
             "Vector": lambda x, y, z: EnforceVector((x, y, z)),
             "array": EnforceArray,
             "Log": lambda line: world.logs.append(_txt(line)),
@@ -1805,6 +1804,10 @@ def _exec_model(source: str, messages: str) -> _ExecWorld:
     ns["UiMenuIdFromArgs"] = _from_args
     ns["UiMapWidgetOut"] = _widget_out
     ns["LastUiMapMenu"] = lambda: holder.get("menu")
+    # IsFiniteFloat is not substituted here: its real body is translated
+    # below with the other functions. It only rejects NaN (MCPClientBridge.c
+    # IsFiniteFloat: `if (value != value) return false; return true;`), so
+    # +inf passes it; the old math.isfinite substitution rejected +inf too.
     for signature in _EXEC_FUNCTIONS:
         translate(
             _standalone_exec(source, signature),
@@ -2262,11 +2265,13 @@ class UiMenuExecutedTest(unittest.TestCase):
 
     # -- DispatchUiMapSet, executed over its branches --------------------
     def test_ui_map_dispatch_branches_executed(self) -> None:
+        # +inf is not bad_args at the bridge: the real IsFiniteFloat only
+        # rejects NaN. Its cases are in
+        # test_r11_ui_map_nonfinite_bridge_behaviour_executed below.
         bad = (
             _exec_args(scale=0.0), _exec_args(scale=-1.0),
-            _exec_args(scale=math.inf), _exec_args(scale=math.nan),
+            _exec_args(scale=math.nan),
             _exec_args(center=[1.0]), _exec_args(center=[1.0, 2.0, 3.0]),
-            _exec_args(center=[1.0, math.inf]),
             _exec_args(center=[math.nan, 2.0]),
             _exec_args(), None,
         )
@@ -2322,6 +2327,150 @@ class UiMenuExecutedTest(unittest.TestCase):
         world.ns["DispatchUiMapSet"](_exec_command(_exec_args(scale=1.0)), result)
         self.assertEqual(_txt(result.error), "ui_map_widget_missing")
         self.assertEqual(_txt(result.ui_map.class_name), "")
+
+    # -- Round 11: the real IsFiniteFloat only rejects NaN ---------------
+    def _assert_map_scale_inf_open(self, world: _ExecWorld) -> None:
+        _menu, widget = _map_layout(world)
+        result = _exec_result(world)
+        result.ok = False
+        returned = world.ns["DispatchUiMapSet"](
+            _exec_command(_exec_args(scale=math.inf)), result
+        )
+        self.assertTrue(returned)
+        self.assertTrue(result.ok)
+        self.assertEqual(widget.set_scale_calls, [math.inf])
+        self.assertEqual(widget.set_pos_calls, [])
+        reply = result.ui_map
+        self.assertIsNotNone(reply)
+        self.assertAlmostEqual(reply.scale_before, 0.33)
+        self.assertTrue(math.isinf(reply.scale_after))
+        self.assertGreater(reply.scale_after, 0.0)
+        self.assertEqual(list(reply.center_before), [10.0, 20.0])
+        self.assertEqual(list(reply.center_after), [10.0, 20.0])
+        self.assertEqual(_txt(reply.class_name), "MapMenu")
+        self.assertEqual(world.runner.jobs, [])
+        self.assertEqual(world.logs, ["ui_map_set ok=1 class=MapMenu"])
+
+    def _assert_map_center_inf_open(self, world: _ExecWorld) -> None:
+        _menu, widget = _map_layout(world)
+        result = _exec_result(world)
+        result.ok = False
+        returned = world.ns["DispatchUiMapSet"](
+            _exec_command(_exec_args(center=[1.0, math.inf])), result
+        )
+        self.assertTrue(returned)
+        self.assertTrue(result.ok)
+        self.assertEqual(widget.set_scale_calls, [])
+        self.assertEqual(widget.set_pos_calls, [[1.0, 0.0, math.inf]])
+        reply = result.ui_map
+        self.assertIsNotNone(reply)
+        self.assertAlmostEqual(reply.scale_before, 0.33)
+        self.assertAlmostEqual(reply.scale_after, 0.33)
+        self.assertEqual(list(reply.center_before), [10.0, 20.0])
+        center_after = list(reply.center_after)
+        self.assertEqual(center_after[0], 1.0)
+        self.assertTrue(math.isinf(center_after[1]))
+        self.assertGreater(center_after[1], 0.0)
+        self.assertEqual(_txt(reply.class_name), "MapMenu")
+        self.assertEqual(world.runner.jobs, [])
+        self.assertEqual(world.logs, ["ui_map_set ok=1 class=MapMenu"])
+
+    def test_r11_ui_map_nonfinite_bridge_behaviour_executed(self) -> None:
+        # The Python ingress rejects +inf before the bridge (see
+        # test_ui_map_set_bad_args_never_reach_the_bridge), so these cases
+        # only exist at the bridge. The real IsFiniteFloat (translated
+        # above, not substituted) is `value != value` -> false, else true:
+        # it rejects NaN and accepts +inf. For scale, `scale <= 0.0` is
+        # also false for +inf, so +inf passes both bridge checks.
+        is_finite = self.ns["IsFiniteFloat"]
+        self.assertTrue(is_finite(1.0))
+        self.assertTrue(is_finite(math.inf))
+        self.assertTrue(is_finite(-math.inf))
+        self.assertFalse(is_finite(math.nan))
+        # Map closed: +inf scale and +inf centre pass bad_args and reach
+        # the open check, so both answer ui_map_not_open, not bad_args.
+        for args in (
+            _exec_args(scale=math.inf),
+            _exec_args(center=[1.0, math.inf]),
+        ):
+            with self.subTest(args=args):
+                world = _exec_model(self.source, self.messages)
+                result = _exec_result(world)
+                returned = world.ns["DispatchUiMapSet"](
+                    _exec_command(args), result
+                )
+                self.assertTrue(returned)
+                self.assertFalse(result.ok)
+                self.assertEqual(_txt(result.error), "ui_map_not_open")
+                self.assertIsNotNone(result.ui_map)
+                self.assertEqual(
+                    world.logs, ["ui_map_set ok=0 error=ui_map_not_open"]
+                )
+                self.assertEqual(world.runner.jobs, [])
+        # Map open, scale=+inf: SetScale(inf) is called and the reply is
+        # ok. What the model proves: the widget double stores +inf
+        # verbatim, GetScale reads +inf back, and the real UiMapMatches
+        # runs on it (scale_after - scale is inf - inf = NaN, and
+        # NaN > 0.001 * inf is false), so the real dispatch answers ok
+        # immediately with no job. It does not prove a retail MapWidget
+        # stores +inf: any clamping inside the engine SetScale is
+        # outside this model.
+        self._assert_map_scale_inf_open(
+            _exec_model(self.source, self.messages)
+        )
+        # Map open, centre=[1, +inf]: SetMapPos with (1, 0, +inf) is
+        # called and the reply is ok, by the same read-back: GetMapPos
+        # returns +inf in z, centre dz is inf - inf = NaN, and
+        # NaN >= 1.0 is false in the real UiMapMatches. The same
+        # retail-MapWidget caveat as for scale applies.
+        self._assert_map_center_inf_open(
+            _exec_model(self.source, self.messages)
+        )
+        # NaN is what the real helper does reject: bad_args, before the
+        # widget is touched, for NaN scale and for a NaN centre element.
+        for args in (
+            _exec_args(scale=math.nan),
+            _exec_args(center=[1.0, math.nan]),
+            _exec_args(center=[math.nan, 2.0]),
+        ):
+            with self.subTest(args=args):
+                world = _exec_model(self.source, self.messages)
+                _menu, widget = _map_layout(world)
+                result = _exec_result(world)
+                returned = world.ns["DispatchUiMapSet"](
+                    _exec_command(args), result
+                )
+                self.assertTrue(returned)
+                self.assertFalse(result.ok)
+                self.assertEqual(_txt(result.error), "bad_args")
+                self.assertEqual(
+                    world.logs, ["ui_map_set ok=0 error=bad_args"]
+                )
+                self.assertEqual(widget.set_scale_calls, [])
+                self.assertEqual(widget.set_pos_calls, [])
+                self.assertEqual(world.runner.jobs, [])
+
+    def test_r11_old_isfinite_substitution_fails_on_inf(self) -> None:
+        # Negative control: putting the old math.isfinite substitution
+        # back (in memory only) must make the +inf open cases above
+        # fail. Under that substitution both answer bad_args and never
+        # reach SetScale/SetMapPos, so the assertions do not hold.
+        def old_is_finite(v: Any) -> bool:
+            return (
+                isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and math.isfinite(float(v))
+            )
+        for assert_open in (
+            self._assert_map_scale_inf_open,
+            self._assert_map_center_inf_open,
+        ):
+            with self.subTest(assert_open=assert_open.__name__):
+                mutant = _exec_model(self.source, self.messages)
+                mutant.ns["IsFiniteFloat"] = old_is_finite
+                self.assertFalse(mutant.ns["IsFiniteFloat"](math.inf))
+                with self.assertRaises(AssertionError):
+                    assert_open(mutant)
 
     def test_ui_map_set_and_deferred_executed(self) -> None:
         # Scale only, immediate: SetScale called, SetMapPos not, the
