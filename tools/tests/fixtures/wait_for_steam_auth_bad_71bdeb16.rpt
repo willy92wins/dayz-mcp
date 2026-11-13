@@ -1,0 +1,84 @@
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [44] VehicleCivilianSedan
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [45] VehicleHatchback02
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [46] VehicleMotorbike
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [47] VehicleOffroad02
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [48] VehicleOffroadHatchback
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [49] VehicleSedan02
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [50] VehicleTruck01
+17:31:36.152   Primary Spawner: "Vehicle", active: yes, repeat: 1
+17:31:36.152 [CE][Hive] :: Initializing of spawners done.
+17:31:36.165 [CE][Hive] :: Init sequence finished.
+17:31:36.166 Player connect enabled
+17:31:36.329 [Login]: Adding player Dev (14933939) to login queue at position 0
+17:31:36.329 [LoginMachine]: Add player Dev (14933939 127.0.0.1:2316)
+17:31:36.329 [StateMachine]: Player Dev (dpnid 14933939 uid ) Entering AuthPlayerLoginState
+17:31:37.181 [IdleMode] Entering IN - save processed
+17:31:37.186 [StateMachine]: Player Dev (dpnid 14933939 uid ) Entering WaitAuthPlayerLoginState
+17:31:37.201 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_03_moss.p3d)
+17:31:37.201 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_06_moss.p3d)
+17:31:37.219 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_small_02.p3d)
+17:31:37.225 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:37.231 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:37.409 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_02_moss.p3d)
+17:31:37.409 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_29_03_moss.p3d)
+17:31:37.409 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_29_01_moss.p3d)
+17:31:37.410 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_05_moss.p3d)
+17:31:37.410 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_33_01_moss.p3d)
+17:31:37.410 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_33_02_moss.p3d)
+17:31:37.410 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_18_moss.p3d)
+17:31:37.413 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_37_04_moss.p3d)
+17:31:37.413 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_37_02_moss.p3d)
+17:31:37.414 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_38_04_moss.p3d)
+17:31:37.631 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_41_02_moss.p3d)
+17:31:37.631 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_41_04_moss.p3d)
+17:31:37.631 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_41_05_moss.p3d)
+17:31:37.631 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_37_04_moss.p3d)
+17:31:37.631 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_37_03_moss.p3d)
+17:31:38.911 ENTITY    (W): Unknown object class 'building' (dz\structures\military\airfield\mil_reinforcedtank1_grass.p3d)
+17:31:38.912 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:38.982 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:38.985 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_small_27.p3d)
+17:31:39.58  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.59  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.64  ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\lake_50x50.p3d)
+17:31:39.233 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.233 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.234 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.242 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_small_09.p3d)
+17:31:39.381 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_29_02_moss.p3d)
+17:31:39.381 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_28_03_moss.p3d)
+17:31:39.381 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_29_04_moss.p3d)
+17:31:39.386 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.393 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_small_27.p3d)
+17:31:39.470 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.470 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:39.519 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\pond_50x50.p3d)
+17:31:44.576 [IdleMode] Leaving OUT
+17:31:47.186 Player Dev (14933939) kicked from server: 49 (El tiempo de espera de inicio de sesión se ha agotado. (WaitAuthPlayerLoginState))
+17:31:47.186 [StateMachine]: Kick player Dev (dpnid 14933939 uid ) State WaitAuthPlayerLoginState
+17:31:47.195 [Disconnect]: Client 14933939 early disconnect
+17:31:47.195 [Disconnect]: No player -> remove player info 14933939 
+17:31:47.195 [Disconnect]: DisconnectPlayerFinish 14933939
+17:31:47.195 [Disconnect]: Remove player info 14933939
+17:31:47.195 [Disconnect]: Player destroy 14933939 
+17:31:47.195 NETWORK      : Network simulation
+17:31:47.195  NETWORK   (E): server: Player dpid=14933939 index not removed
+17:31:48.331 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_50x50_moss.p3d)
+17:31:48.628 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_50x50_moss.p3d)
+17:31:48.952 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_50x50_moss.p3d)
+17:31:48.952 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_50x50_moss.p3d)
+17:31:59.407 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_small_01_moss.p3d)
+17:31:59.407 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_28_04_moss.p3d)
+17:31:59.407 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_28_02_moss.p3d)
+17:31:59.759 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_40_02_moss.p3d)
+17:31:59.759 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_40_01_moss.p3d)
+17:31:59.759 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_40_04_moss.p3d)
+17:31:59.759 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_40_03_moss.p3d)
+17:32:04.712 ENTITY    (W): Unknown object class 'pond' (dz\water\ponds\moss\pond_big_30_03_moss.p3d)
