@@ -2829,6 +2829,17 @@ _COMMAND_CASES: dict[str, tuple[_Case, ...]] = {
         ("missing_visible", {}, (False, "bad_args")),
         ("extra_key", {"visible": True, "extra": None}, (False, "bad_args")),
     ),
+    # beb3: active is a JSON bool and the only key.
+    "dev_free_camera_set": (
+        ("valid_on", {"active": True}, (True, None)),
+        ("valid_off", {"active": False}, (True, None)),
+        ("int_one", {"active": 1}, (False, "bad_args")),
+        ("int_zero", {"active": 0}, (False, "bad_args")),
+        ("string_true", {"active": "true"}, (False, "bad_args")),
+        ("null", {"active": None}, (False, "bad_args")),
+        ("missing_active", {}, (False, "bad_args")),
+        ("extra_key", {"active": True, "extra": None}, (False, "bad_args")),
+    ),
     "engine_set": (
         ("valid_start", {"mode": "start"}, (True, None)),
         ("valid_stop", {"mode": "stop"}, (True, None)),

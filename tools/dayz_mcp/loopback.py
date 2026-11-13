@@ -173,6 +173,7 @@ CLIENT_COMMANDS = {
     "ui_map_set",
     "ui_menu_set",
     "ui_pause",
+    "dev_free_camera_set",
     "ui_dialog",
     "action_hold",
     "action_hold_cancel",
@@ -756,8 +757,34 @@ def _is_true(value: object) -> bool:
     return value is True
 
 
+# notify_players strings (title, detail, icon): the bridge passes each to
+# NotificationSystem.SendNotificationToPlayerIdentityExtended, which writes
+# them into one ScriptRPC. Knowledge Pack
+# knowledge/script-network-limits.md (willy92wins/DayZ-Modding-Knowledge-Pack,
+# main 9863927d, section "ScriptRPC string payload", claims CLAIM-NET-RPC-ASCII
+# and CLAIM-NET-RPC-UTF8; DayZDiag 1.30.164289.70, loopback) measured that a
+# ScriptRPC string of 1023 ASCII bytes is read and 1024 fails, and with
+# two-byte UTF-8 "ñ" 511 chars (Length() = 1022 bytes) are read and 512 chars
+# (1024 bytes) fail. Length() returns UTF-8 bytes, so the limit is in BYTES,
+# not characters. That probe sent one string per RPC: the notification RPC
+# itself and whether the budget is per string or for the whole RPC were not
+# measured, so each field is refused conservatively at the per-string bound.
+NOTIFY_STRING_MAX_BYTES = 1023
+
+
 def _is_string(value: object) -> bool:
     return isinstance(value, str)
+
+
+def _is_notify_string(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8", "surrogatepass")) <= NOTIFY_STRING_MAX_BYTES
+    )
+
+
+def _is_non_empty_notify_string(value: object) -> bool:
+    return isinstance(value, str) and value != "" and _is_notify_string(value)
 
 
 def _is_non_empty_string(value: object) -> bool:
@@ -1548,6 +1575,7 @@ _CLIENT_ANNOUNCED_COMMANDS: dict[str, str] = {
     "ui_map_set": "bridge_capability_missing",
     "ui_menu_set": "bridge_capability_missing",
     "ui_pause": "bridge_capability_missing",
+    "dev_free_camera_set": "bridge_capability_missing",
 }
 # A verb whose census must also name the command that stops it: a client that
 # could not be sent camera_path_release is not handed a play (d026).
@@ -2144,9 +2172,9 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
                     minimum=0.0,
                     minimum_inclusive=False,
                 ),
-                "title": _is_non_empty_string,
-                "detail": _is_string,
-                "icon": _is_string,
+                "title": _is_non_empty_notify_string,
+                "detail": _is_notify_string,
+                "icon": _is_notify_string,
                 "uid": _is_string,
             },
         )
@@ -2619,6 +2647,10 @@ _COMMAND_ARG_SCHEMAS: dict[str, _CommandSchema] = {
     # hud_set (f427): the tool always sends visible.
     "hud_set": _command_schema(
         _schema_variant(required=("visible",), validators={"visible": _is_strict_bool})
+    ),
+    # dev_free_camera_set (beb3): the tool always sends active, a JSON bool.
+    "dev_free_camera_set": _command_schema(
+        _schema_variant(required=("active",), validators={"active": _is_strict_bool})
     ),
     # camera_get sends {} when cam_mode is empty.
     "camera_get": _command_schema(

@@ -1691,7 +1691,7 @@ class PlayerMovePayloadTest(unittest.TestCase):
         self.assertIn(FIELD, result_prune.PRUNABLE_FIELDS)
         # The 165a/5a21/7f5d scene refs follow cursor_ids.
         self.assertEqual(
-            result_prune.PRUNABLE_FIELDS[-24:],
+            result_prune.PRUNABLE_FIELDS[-25:],
             (
                 FIELD,
                 "player_trace",
@@ -1717,6 +1717,7 @@ class PlayerMovePayloadTest(unittest.TestCase):
                 "ui_menu",
                 "ui_map",
                 "lease_close",
+                "dev_free_camera",
             ),
         )
         self.assertEqual(

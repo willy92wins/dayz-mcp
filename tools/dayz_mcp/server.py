@@ -131,6 +131,7 @@ from dayz_mcp.loopback import (
     INPUT_TRIGGER_HOLD_MAX_S,
     INPUT_TRIGGER_PRESS_MAX_TTL_S,
     MAX_CLIENT_DUMP_RUN_IDS,
+    NOTIFY_STRING_MAX_BYTES,
     SCENE_ID_MAX_CHARS,
     SPAWN_BATCH_ITEMS_MAX,
     SPAWN_BATCH_PER_TICK_MAX,
@@ -7709,7 +7710,13 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "call. Each item is an object with type, pos and optional flags and "
             "rotation, as in world_spawn (rotation an RF_* int from -2147483648 "
             "to 2147483647), except that pos [x, y, z] takes y null to put the "
-            "item on the ground surface_query reads at (x, z), and that ypr "
+            "item on the first surface the game finds at (x, z) (the game "
+            "places it with ECE_PLACE_ON_SURFACE, which carries ECE_TRACE, "
+            "\"trace under entity when being placed\" from the point of "
+            "creation, so a rock, a wall or another object counts), which "
+            "can be higher than the terrain height surface_query reads at "
+            "(x, z) (clear ground: within 1 cm; on a rock wall: 0.22 to "
+            "0.99 m above), and that ypr "
             "[yaw, pitch, roll] in degrees may replace rotation (not both): the "
             "object is turned to it once created. flags takes world_spawn's "
             "allowlist; an item whose class is a DayZInfected gets ECE_INITAI "
@@ -8083,7 +8090,11 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "non-empty uid targets that identity. Returns error=no_players "
             "when the server reports zero connected players. timeout_s is "
             "the total budget for the player check plus send; a failed "
-            "player query still attempts the notification."
+            "player query still attempts the notification. title, detail "
+            "and icon each must be at most 1023 UTF-8 bytes (not "
+            "characters); that bound comes from a one-string ScriptRPC "
+            "probe, and the combined size of the three strings in one RPC "
+            "was not measured."
         )
     )
     async def notify_players(
@@ -8110,6 +8121,17 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             raise ToolError(_bad_args("icon", icon, "be a string"))
         if not isinstance(uid, str):
             raise ToolError(_bad_args("uid", uid, "be a string"))
+        for field, value in (("title", title), ("detail", detail), ("icon", icon)):
+            byte_length = len(value.encode("utf-8", "surrogatepass"))
+            if byte_length > NOTIFY_STRING_MAX_BYTES:
+                raise ToolError(
+                    f"bad_args: {field} must be at most "
+                    f"{NOTIFY_STRING_MAX_BYTES} UTF-8 bytes; it is "
+                    f"{byte_length} UTF-8 bytes (the limit counts UTF-8 "
+                    "bytes, not characters; it comes from a one-string "
+                    "ScriptRPC probe and the combined size of the three "
+                    "strings in one RPC was not measured)"
+                )
         _require_admin_uid(uid)
         args: dict[str, Any] = {
             "show_time": show_time_value,
@@ -10909,8 +10931,8 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             "script_camera while camera_set's camera is mounted "
             "(restore_gameplay first) and busy while an exclusive client job "
             "runs, such as camera_set or player_look_at (a ui_dialog, "
-            "weapon_action, input_trigger, player_move, actor_emote, ui_menu "
-            "or ui_map job does not count). "
+            "weapon_action, input_trigger, player_move, actor_emote, ui_menu, "
+            "ui_map or dev_free_camera_set job does not count). "
             "After the settle the view is already set, and no_player answers "
             "when the player is gone by then, script_camera when camera_set's "
             "camera is mounted by then."
@@ -12282,6 +12304,45 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
             )
 
     @app.tool(description=(
+        f"{LEASE_TOOL_LINE} Turn DayZDiag's developer free camera on "
+        "(active=true) or off (active=false) as its numpad divide key does: "
+        "the client calls PluginDeveloper.ToggleFreeCameraBackPos, the method "
+        "DayZDiag binds to KC_DIVIDE, only when the free camera is not already "
+        "in the requested state, and that toggle never teleports the player. "
+        "This is not camera_set's free mode: the bridge does not own this "
+        "camera and does not move it (the real keyboard and mouse move it), so "
+        "turning it on ends a playing camera_path_play aborted on a following "
+        "client tick. "
+        "restore_gameplay turns it off; the lease close turns it off as "
+        "restore_gameplay does, both through ReleaseCamera, also when the "
+        "player turned it on with the key. The "
+        "answer is dev_free_camera {active_before, active_after}, read on the "
+        "client right after the toggle or, when that read does not show the "
+        "requested state yet, on the next client tick. Errors: an active that "
+        "is not a bool is refused with bad_args before anything is sent, and "
+        "the daemon refuses it with bad_args too; client_not_in_game (no local "
+        "player); dev_free_camera_unavailable (no PluginDeveloper or no free "
+        "camera, as on a client that is not DayZDiag; the reason is in the "
+        "client log); dev_free_camera_bridge_owned (camera_set's free mode or "
+        "a camera release holds the free camera); busy (an exclusive client "
+        "job, such as a camera_set that is still settling, is running); these "
+        "change nothing. dev_free_camera_not_switched: the next client tick "
+        "still reads the other state. bridge_capability_missing: the client "
+        "bridge bound to the run does not announce dev_free_camera_set, as "
+        "one older than this release does not; nothing is sent."
+    ))
+    async def dev_free_camera_set(
+        active: StrictBool,
+        timeout_s: StrictFloat = DEFAULT_TOOL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if not isinstance(active, bool):
+            raise ToolError(_bad_args("active", active, "be a bool"))
+        async with runtime.tool_lock:
+            return await runtime.call_bridge(
+                "dev_free_camera_set", {"active": active}, "client", _timeout(timeout_s)
+            )
+
+    @app.tool(description=(
         f"{LEASE_TOOL_LINE} Client modal (acknowledge/confirm/form). "
         "Blocks up to timeout_s for the local player's answer; "
         "cancelled and timed_out are valid."
@@ -12808,6 +12869,7 @@ def build_app(config: ServerConfig) -> tuple[FastMCP, Any]:
     _patch_public_argument_alias(app, "nav_path_query", "from_pos", "from")
     _patch_optional_focus_bool_bad_args(app, "camera_set")
     _patch_optional_focus_bool_bad_args(app, "camera_set_focus")
+    _patch_strict_bool_bad_args(app, "dev_free_camera_set", "active")
     tool_pack_mod.apply_tool_pack(app._tool_manager, config.tool_pack)
     _all_tools = app._tool_manager.list_tools
 
@@ -12941,6 +13003,26 @@ def _patch_optional_focus_bool_bad_args(app: FastMCP, tool_name: str) -> None:
                 value = arguments_to_validate.get(field)
                 if isinstance(value, bool) and camera_path_contract.focus_blur(value) is None:
                     raise ToolError(_bad_args(field, value, _OPTIONAL_FOCUS_REQUIREMENT))
+        return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
+
+    object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)
+
+
+def _patch_strict_bool_bad_args(app: FastMCP, tool_name: str, field: str) -> None:
+    # beb3: keep StrictBool in the published schema and answer a value of
+    # `field` that is not a bool (1, 0, "true", null) with bad_args before
+    # Pydantic validation, the code the daemon's ingress gives it
+    # (loopback._is_strict_bool). A missing field is left to Pydantic.
+    tool = app._tool_manager.get_tool(tool_name)  # type: ignore[attr-defined]
+    if tool is None:
+        raise RuntimeError(f"missing tool {tool_name}")
+    original = tool.fn_metadata.call_fn_with_arg_validation
+
+    async def patched(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly):
+        if isinstance(arguments_to_validate, dict) and field in arguments_to_validate:
+            value = arguments_to_validate[field]
+            if not isinstance(value, bool):
+                raise ToolError(_bad_args(field, value, "be a bool"))
         return await original(fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly)
 
     object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", patched)

@@ -2099,14 +2099,14 @@ class SampleMapGeneric
             self.assertIn(f"EDayZProfilesOptions.{option}", self.chat_log_src)
 
         # MCPArgs reuses max_lines once and adds marker once; MCPResult ends with chat_read, then
-        # ui_pause, ui_menu and ui_map, then the lease close census (§2.16).
+        # ui_pause, ui_menu and ui_map, then the lease close census (§2.16), then dev_free_camera (beb3).
         cleaned_msgs = _strip_comments(self.messages_src)
         args_body = _class_body(cleaned_msgs, r"^\s*class\s+MCPArgs\b")
         self.assertEqual(len(re.findall(r"^\tint max_lines;$", args_body, re.M)), 1)
         self.assertEqual(len(re.findall(r"^\tint marker;$", args_body, re.M)), 1)
         result_body = _class_body(cleaned_msgs, r"^\s*class\s+MCPResult\b")
         ref_fields = re.findall(r"^\tref\s+(?:array<[^>]+>|\w+)\s+(\w+);$", result_body, re.M)
-        self.assertEqual(ref_fields[-5:], ["chat_read", "ui_pause", "ui_menu", "ui_map", "lease_close"])
+        self.assertEqual(ref_fields[-6:], ["chat_read", "ui_pause", "ui_menu", "ui_map", "lease_close", "dev_free_camera"])
         self.assertEqual(tuple(ref_fields), result_prune.PRUNABLE_FIELDS)
 
 

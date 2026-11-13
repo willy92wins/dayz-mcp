@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
+from dayz_mcp.runtime_state import bounded_text, valid_utc_timestamp
+
 
 SESSION_TTL_S = 120.0
 LEASE_WORK_IDLE_S = 1800.0
@@ -176,9 +178,22 @@ class ClientIdentity:
             or not session_id
         ):
             raise ValueError("invalid_identity")
+        # Same predicates CoordinationFaultStore.validate applies to the WAL
+        # marker in runtime_state.py: refuse at admission an identity the WAL
+        # would refuse at grant, instead of queueing it to fail wal_arm. The
+        # marker carries public_payload(), so session is checked as its
+        # first 12 characters (what the WAL receives), not the raw id.
+        candidate = cls(platform, pid, ppid, started, session_id, label)
+        public = candidate.public_payload()
+        if (
+            not bounded_text(public["session"], 200)
+            or not bounded_text(public["started_at_utc"], 64)
+            or not valid_utc_timestamp(str(public["started_at_utc"]))
+        ):
+            raise ValueError("invalid_identity")
         if not isinstance(label, str) or len(label) > 120:
             raise ValueError("invalid_identity")
-        return cls(platform, pid, ppid, started, session_id, label)
+        return candidate
 
     def to_payload(self) -> dict[str, object]:
         return dataclasses.asdict(self)

@@ -144,12 +144,14 @@ class NumericBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # + 6 from 702f OverrideDOF (camera_set and camera_set_focus focus_length/focus_length_near/focus_depth_offset).
         # + 4 from d4b4 (ui_menu_set timeout_s; ui_map_set scale/center/timeout_s;
         # menu is a string and open a bool, not in this census).
-        self.assertEqual(len(rows), 258)
+        # + 1 from beb3 (dev_free_camera_set timeout_s; active is a bool).
+        self.assertEqual(len(rows), 259)
         self.assertIn(("actor_emote", "object_id", "int"), rows)
         self.assertIn(("ai_group_order", "group_id", "int"), rows)
         self.assertIn(("ai_group_order", "timeout_s", "float"), rows)
         self.assertIn(("ai_group_state", "group_id", "int"), rows)
         self.assertIn(("ai_group_state", "timeout_s", "float"), rows)
+        self.assertIn(("dev_free_camera_set", "timeout_s", "float"), rows)
         self.assertIn(("chat_read", "marker", "int"), rows)
         self.assertIn(("chat_read", "max_lines", "int"), rows)
         self.assertIn(("chat_read", "timeout_s", "float"), rows)
