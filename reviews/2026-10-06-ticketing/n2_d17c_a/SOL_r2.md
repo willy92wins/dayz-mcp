@@ -5,13 +5,13 @@ VERDICT: APPROVED
 ## FINDINGS
 
 **F2 — P3 — Required contract documentation remains missing.**  
-[product-spec.md:141](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r2/ws/product-spec.md:141), [product-spec.md:148](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r2/ws/product-spec.md:148).
+[product-spec.md:141](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r2/ws/product-spec.md:141), [product-spec.md:148](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r2/ws/product-spec.md:148).
 
 H6/H13 still omit the new client-process admission contract. The changelog documents it, but does not satisfy the explicit requirement to update those rows.
 
 **Executable failure scenario:** none; this is a documentation omission, so it does not block approval. Suggested fix: update H6/H13 when the document is included in the authorized edit scope.
 
-**F1 is fixed.** The gate passes the pinned PID/creation time to the helper; a death verdict whose snapshot lacks that identity becomes `unknown`. See [loopback.py:2677](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r2/ws/tools/dayz_mcp/loopback.py:2677) and [process_lifecycle.py:4329](C:/Users/guill/dzmcp_gauntlet/n2_d17c_a/r2/ws/tools/dayz_mcp/process_lifecycle.py:4329).
+**F1 is fixed.** The gate passes the pinned PID/creation time to the helper; a death verdict whose snapshot lacks that identity becomes `unknown`. See [loopback.py:2677](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r2/ws/tools/dayz_mcp/loopback.py:2677) and [process_lifecycle.py:4329](%USERPROFILE%/dzmcp_gauntlet/n2_d17c_a/r2/ws/tools/dayz_mcp/process_lifecycle.py:4329).
 
 Independent in-memory checks used the production classification, replacement, confirmation and admission methods:
 

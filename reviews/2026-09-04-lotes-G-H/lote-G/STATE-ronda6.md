@@ -2,7 +2,7 @@
 
 La caja se deriva de una foto inmutable y una función pura. `_with_live_activity` desapareció.
 
-- Foto: `_BoxSnapshot` (`clock`, `runs`, `activity`, `unknown`, `revision`) en `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\ws\tools\dayz_mcp\process_lifecycle.py:212`.
+- Foto: `_BoxSnapshot` (`clock`, `runs`, `activity`, `unknown`, `revision`) en `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\ws\tools\dayz_mcp\process_lifecycle.py:212`.
 - Derivador puro: `_derive_box(snapshot, probes)` en `:243`. No lee memoria viva.
 - Toma de foto: `_take_box_snapshot` `:2668` — `manifest.list_runs()` y, pegado, `_last_activity` / `_activity_unknown` / revisión bajo `_activity_lock`. Sin E/S entre medias. Sin `_operation_lock`.
 - `box_occupancy` `:2651`: «The box is derived from one snapshot; live state is never re-read after it.» Suelta, sondea (`_collect_probes` `:2695`) y deriva. El caché de 1,5 s guarda sólo `foreign` / `ports_in_use` / `scan_known` (`_probes_for_snapshot` `:2753`); las filas no se cachean.

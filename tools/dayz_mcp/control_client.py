@@ -14,12 +14,63 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterator
 
 from dayz_mcp import accredited_daemon_transport as transport
-from dayz_mcp import daemon_credential, window_foreground
+from dayz_mcp import daemon_credential, host_config, window_foreground
 from dayz_mcp.daemon_policy_contract import AccreditedDaemonPolicy
 from dayz_mcp.session_coordination import public_audit_stage
 
 
 _monotonic = time.monotonic
+
+
+def _revalidation_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+# A pinned host config is opened with FILE_SHARE_READ only, so a writer that
+# holds it for a moment fails the open with ERROR_SHARING_VIOLATION (32). The
+# likely holder is a host tool rewriting its own config, but that attribution
+# and the collision's duration are not measured, so the revalidation is
+# retried only briefly before the request is refused; every other failure
+# stays fail-fast. The budget bounds when a new attempt may start, not how
+# long an attempt itself takes: an attempt that starts inside the budget
+# and passes is accepted whenever it returns, so the worst case is the
+# budget plus one attempt's own duration. Every attempt is still a full
+# revalidation.
+_REVALIDATION_RETRY_BUDGET_S = 0.5
+_REVALIDATION_RETRY_INTERVAL_S = 0.05
+
+
+def _is_sharing_violation(exc: Exception) -> bool:
+    return isinstance(exc, host_config.HostConfigError) and exc.winerror == 32
+
+
+def _is_daemon_provenance_error(exc: Exception) -> bool:
+    return isinstance(
+        exc, host_config.HostConfigError
+    ) and str(exc).startswith("daemon_provenance_")
+
+
+def _revalidate_with_sharing_retry(revalidate: Callable[[], None]) -> None:
+    deadline = _monotonic() + _REVALIDATION_RETRY_BUDGET_S
+    while True:
+        try:
+            revalidate()
+            return
+        except Exception as exc:
+            if not _is_sharing_violation(exc):
+                raise
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                raise
+            wait = min(_REVALIDATION_RETRY_INTERVAL_S, remaining)
+            _revalidation_sleep(wait)
+            # No new attempt starts once the budget is spent: a wait clamped
+            # to the remaining budget ends at the deadline, and a wait that
+            # overshoots it (a slow attempt or a long sleep) ends past it,
+            # however long the failed attempt itself took.
+            if wait >= remaining or _monotonic() >= deadline:
+                raise
+
 
 # The untrusted rejection hint crosses the MCP wire, so the registration stamp is
 # echoed only in its canonical UTC shape: ASCII digits and ISO separators, nothing
@@ -310,7 +361,7 @@ class ControlClient:
     ) -> dict[str, object]:
         allow_stale_policy = self._h14_stale_allowed(path)
         try:
-            self.policy.revalidate()
+            _revalidate_with_sharing_retry(self.policy.revalidate)
         except Exception as exc:
             if not allow_stale_policy:
                 policy_cause = _policy_revalidation_cause(exc)
@@ -321,11 +372,15 @@ class ControlClient:
                         registered = f"client registered at {started}. "
                 except Exception:
                     registered = ""
-                if policy_cause.startswith("HostConfigError:daemon_provenance_"):
+                if _is_daemon_provenance_error(exc) or policy_cause.startswith(
+                    "HostConfigError:daemon_provenance_"
+                ):
                     # A server_reload replacement repeats this validation, so it
                     # dies at startup too while the same problem affects it
                     # (fb-20261102-134653-e0ce). _conflict also covers a failed
-                    # read, and a failed check of this process's own executable
+                    # read (which carries a winerror, so its policy_cause is
+                    # HostConfigError:32 and never names the code), and a failed
+                    # check of this process's own executable
                     # with both registrations intact, which the replacement
                     # repeats for its own process and may pass: hence "could not
                     # be validated", and a reload only once both registrations

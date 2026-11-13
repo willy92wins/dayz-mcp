@@ -32,10 +32,10 @@ by narrowing the infrastructure to its minimum (abandon by id and the complete t
 receipt-attribution machinery), then give B and C a final round on top.
 
 ## Where the work is (not merged; kept for the next session)
-- Infra: `C:\Users\guill\dzmcp_gauntlet\r2i_broker\ws`, reviews `r1..r3\SOL.md`.
-- B: `C:\Users\guill\dzmcp_gauntlet\r2b_9941\ws`, reviews `r1..r3\SOL.md`.
-- C: `C:\Users\guill\dzmcp_gauntlet\r2c_86a3\ws`, reviews `r1..r4\SOL.md`.
-- 2986: `C:\Users\guill\dzmcp_gauntlet\r2a_855c_2986\ws` (orchestrator round: `r5_orchestrator.diff`, `SOL_r5.md`).
+- Infra: `%USERPROFILE%\dzmcp_gauntlet\r2i_broker\ws`, reviews `r1..r3\SOL.md`.
+- B: `%USERPROFILE%\dzmcp_gauntlet\r2b_9941\ws`, reviews `r1..r3\SOL.md`.
+- C: `%USERPROFILE%\dzmcp_gauntlet\r2c_86a3\ws`, reviews `r1..r4\SOL.md`.
+- 2986: `%USERPROFILE%\dzmcp_gauntlet\r2a_855c_2986\ws` (orchestrator round: `r5_orchestrator.diff`, `SOL_r5.md`).
 
 Grok spend for the round, summed from each batch's `PROGRESS.txt` (`cost` of every implementer run): A 6.12 USD
 (4 runs), B 7.27 USD (3), C 8.03 USD (4), infrastructure 7.90 USD (3); total 29.32 USD. Triage round 3's A and B
