@@ -135,9 +135,9 @@ def _is_wire_number(value: object) -> bool:
 def _spawn_batch_item_args(index: int, item: object) -> dict[str, Any]:
     """The wire form of one world_spawn_batch item, or bad_args naming it.
 
-    y null travels as 0.0 with ground true, the bridge's flag for "the ground
-    surface_query reads"; an explicit y travels as world_spawn's does. ypr
-    travels with ypr_set true, in place of rotation.
+    y null travels as 0.0 with ground true, the bridge's flag for "the first
+    surface"; an explicit y travels as world_spawn's does. ypr travels with
+    ypr_set true, in place of rotation.
     """
     field = f"items[{index}]"
     if not isinstance(item, dict):
@@ -165,7 +165,7 @@ def _spawn_batch_item_args(index: int, item: object) -> dict[str, Any]:
             _bad_args(
                 f"{field}.pos",
                 pos,
-                "be [x, y, z] finite numbers, y null for the ground",
+                "be [x, y, z] finite numbers, y null for the first surface",
             )
         )
     flags = item.get("flags", 0)
