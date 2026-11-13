@@ -6,6 +6,7 @@ synthetic pinned config, as in test_shareconflict_windows.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -23,8 +24,46 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 from dayz_mcp import control_client, daemon_policy, host_config
+from dayz_mcp.daemon_policy import AccreditedDaemonPolicy
 from tests._tiers import slow_test
-from tests.test_control_client import _policy
+
+
+def _policy(keyfile: Path) -> AccreditedDaemonPolicy:
+    # Same fake accredited policy as tests/test_control_client.py: a test module
+    # does not import another one (tests/test_suite_structure.py ratchet).
+    authority = {
+        "argv": [
+            r"P:\Runtime\python.exe",
+            "-m",
+            "dayz_mcp",
+            "--daemon",
+            "--port",
+            "8765",
+        ],
+        "cwd": r"P:\DayZ_MCP_dev\tools",
+        "host": "127.0.0.1",
+        "keyfile": str(keyfile),
+        "kind": "normal",
+        "native_executable": r"P:\Runtime\python.exe",
+        "port": 8765,
+        "security_build_id": None,
+    }
+    authority_sha256 = hashlib.sha256(
+        json.dumps(
+            authority, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
+    return AccreditedDaemonPolicy(
+        kind="normal",
+        host="127.0.0.1",
+        port=8765,
+        keyfile=str(keyfile),
+        native_executable=r"P:\Runtime\python.exe",
+        argv=tuple(authority["argv"]),
+        cwd=r"P:\DayZ_MCP_dev\tools",
+        security_build_id=None,
+        authority_sha256=authority_sha256,
+    )
 
 
 def _identity():
