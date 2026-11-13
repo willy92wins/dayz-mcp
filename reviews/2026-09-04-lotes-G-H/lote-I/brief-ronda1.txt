@@ -109,7 +109,7 @@ WRITE-SET, y nada fuera de él:
     tools/tests/test_session_e2e.py
     tools/tests/fence_helpers.py
 
-Intérprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
+Intérprete: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`,
 desde `tools/` con `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1`.
 
 ===============================================================================

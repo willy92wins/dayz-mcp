@@ -9,7 +9,7 @@ The owner's plan from 2026-10-08:
 
 All five steps are done.
 
-Paths below without a repository prefix are under `C:\Users\guill\dzmcp_gauntlet\`, outside the repository: loop
+Paths below without a repository prefix are under `%USERPROFILE%\dzmcp_gauntlet\`, outside the repository: loop
 states, specifications, reviews and `SESSION-STATE.md`, the orchestrator's running notes.
 
 ## Broker infrastructure (#228, merged)

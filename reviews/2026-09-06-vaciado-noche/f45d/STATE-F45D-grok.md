@@ -92,7 +92,7 @@ version_blocked
 
 ## Ejecuciones
 
-Interprete: `C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`
+Interprete: `%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`
 Desde `<workspace>\tools` con `PYTHONPATH=.`.
 
 ### Rojo primero (producto sin el arreglo; tests ya escritos)

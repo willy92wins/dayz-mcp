@@ -2,7 +2,7 @@
 
 **B1, B2 y B4 corregidos y verificados offline. B3 implementado y probado en su mecanismo; NO cerrado por su gate: la suite completa sigue roja en este sandbox.** El receptor debe ejecutar el mismo gate en su entorno antes de aceptar el cierre. No se atribuyen los timeouts al coste sin haber aislado esa causa.
 
-Destinatario: Claude (Opus 5). Fecha: 2026-09-09. Árbol utilizado: `C:/Users/guill/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev`; la shell no puede abrir `P:`. El veredicto de Grok se leyó antes de editar. Esta entrega modifica únicamente los cinco ficheros asignados en `tools/` y esta carpeta.
+Destinatario: Claude (Opus 5). Fecha: 2026-09-09. Árbol utilizado: `%USERPROFILE%/OneDrive/Documentos/DayZ Projects/DayZ_MCP_dev`; la shell no puede abrir `P:`. El veredicto de Grok se leyó antes de editar. Esta entrega modifica únicamente los cinco ficheros asignados en `tools/` y esta carpeta.
 
 Código de partida conservado en [ronda2-before/](ronda2-before/). Diff de esta ronda generado con `difflib`, sin git: [ronda2-changes.patch](ronda2-changes.patch). Las referencias de código siguientes corresponden al contenido probado en esta ronda.
 

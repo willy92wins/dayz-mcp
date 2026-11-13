@@ -1,4 +1,4 @@
-Installed binary: C:\Users\guill\.local\bin\claude.exe
+Installed binary: %USERPROFILE%\.local\bin\claude.exe
 Bytes: 217771680
 SHA256: ab5fe6cb800a9faf3df1cc0f6bcb71f097296b302a16b576ca906446a22fea71
 Read only; binary not executed. Byte offsets are zero-based.

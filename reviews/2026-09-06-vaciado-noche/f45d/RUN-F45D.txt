@@ -28,7 +28,7 @@ Ran 337 tests in 28.196s
 
 OK
 === 5. STATE.md (cabecera y secciones) ===
-13057 /c/Users/guill/AppData/Local/Temp/claude/C--Users-guill-OneDrive-Documentos-DayZ-Projects/2adef081-e055-49c6-9d06-f5c167808be8/scratchpad/lote-f45d/ws/STATE.md
+13057 %USERPROFILE%/AppData/Local/Temp/claude/C--Users-<user>-OneDrive-Documentos-DayZ-Projects/2adef081-e055-49c6-9d06-f5c167808be8/scratchpad/lote-f45d/ws/STATE.md
 1:# STATE.md — lote f45d (enqueue refusal reason)
 7:## Qué cambió
 9:### `tools/dayz_mcp/server.py`

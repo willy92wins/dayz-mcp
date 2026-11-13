@@ -129,7 +129,7 @@ def _healthy(
                 "allowFilePatching = 1;\nvppDisablePassword = 1;\n"
             ),
             ntpath.join(vpp, "SuperAdmins", "SuperAdmins.txt"): (
-                "76561198141021937\n"
+                "76561198000000101\n"
             ),
             ntpath.join(vpp, "credentials.txt"): "seeded\n",
         },
@@ -872,7 +872,7 @@ class VppPreflightDecisionTest(unittest.TestCase):
                     "SuperAdmins.txt",
                 )
             )
-        ] = "7656119814102193776561199641705881\n"
+        ] = "7656119800000010176561198000000104\n"
         result = self._result(
             policy=policy,
             files=files,

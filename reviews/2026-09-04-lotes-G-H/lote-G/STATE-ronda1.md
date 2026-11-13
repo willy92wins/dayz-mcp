@@ -2,7 +2,7 @@
 
 P1. `box.runs` publica por run `activity_state` (`recent` / `stale` / `unknown`, umbral 900 s) y `last_activity_age_s` (número, o `None` si `unknown`).
 
-- Umbral: `C:\Users\guill\AppData\Local\Temp\claude\C--Users-guill-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\ws\tools\dayz_mcp\process_lifecycle.py:38` (`_ACTIVITY_STALE_S = 900.0`) y `:1064`.
+- Umbral: `%USERPROFILE%\AppData\Local\Temp\claude\C--Users-<user>-OneDrive-Documentos-DayZ-Projects\938664ff-361c-4575-aa56-c7c06c7ca2a8\scratchpad\lote-G\ws\tools\dayz_mcp\process_lifecycle.py:38` (`_ACTIVITY_STALE_S = 900.0`) y `:1064`.
 - Cálculo: `_run_activity` en `:1036-1066`.
 - Fila de ocupación: `:2647-2657` (`activity_state` / `last_activity_age_s` junto a las seis claves previas). La decisión `occupied` no usa actividad (`:2687`).
 
@@ -63,7 +63,7 @@ SUITE-ACOTADA OK
 ```
 
 `bash gate/run.sh` (Git Bash) y `bash gate/suite.sh`, intérprete
-`C:\Users\guill\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`.
+`%USERPROFILE%\OneDrive\Documentos\DayZ Projects\DayZ_MCP_dev\tools\.venv-mcp\Scripts\python.exe`.
 
 ## CONTROL POSITIVO
 

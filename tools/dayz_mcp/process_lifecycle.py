@@ -3253,8 +3253,10 @@ class ProcessLifecycle:
         reused pid never attributes input. An identity the guard cannot read
         is a doubt, kept apart as uncertain input (the run reads unknown).
         A sample that is not ok never refreshes the signal; the first good one
-        after a stale stretch restarts the clocks from that instant. Returns
-        the run ids the input went to.
+        after a stale stretch restarts the clocks from that instant. Only
+        records whose role is in _PLAYER_ROLES can attribute input; any other
+        registered role is skipped before exclusions or identity are consulted.
+        Returns the run ids the input went to.
         """
 
         runs = [
@@ -3265,6 +3267,8 @@ class ProcessLifecycle:
             for run in runs:
                 for record in run.processes:
                     if record.pid != pid:
+                        continue
+                    if record.role not in _PLAYER_ROLES:
                         continue
                     record_key = (
                         *self._activity_key(run.run_id),
@@ -7469,6 +7473,22 @@ class ProcessLifecycle:
         with self._activity_lock:
             return self._human_input_at.get(self._activity_key(run_id))
 
+    def uncertain_input_at(self, run_id: str) -> float | None:
+        with self._activity_lock:
+            return self._uncertain_input_at.get(self._activity_key(run_id))
+
+    def input_signal_good_since(self, now: float) -> float | None:
+        """Since when the input signal has been good without a gap, or None.
+
+        None with no sampling, a signal stale at ``now`` or one never good.
+        """
+
+        with self._activity_lock:
+            good_at = self._input_good_at
+            if good_at is None or not 0.0 <= now - good_at <= INPUT_SIGNAL_STALE_S:
+                return None
+            return self._signal_recovered_at
+
     def human_input_block(
         self,
         session_id: object,
@@ -7911,6 +7931,10 @@ class ProcessLifecycle:
         except Exception:
             return True
         if "human_at" in guard and self.human_input_at(run_id) != guard.get("human_at"):
+            return True
+        if "uncertain_at" in guard and self.uncertain_input_at(run_id) != guard.get(
+            "uncertain_at"
+        ):
             return True
         if (
             "launcher_at" in guard
