@@ -4979,6 +4979,8 @@ class SessionCoordinator:
         if row.peer == "server":
             reasons = self._server_clean_reasons_locked(row, outcome)
             if reasons:
+                if reasons != row.reasons:
+                    self._set_row_owed_locked(row, reasons)
                 return True
             self._remember_server_floors_locked(row, outcome)
         self._settle_row_locked(row)
