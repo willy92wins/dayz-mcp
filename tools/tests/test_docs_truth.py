@@ -608,7 +608,11 @@ class ProjectMapEncodingDocsTest(unittest.TestCase):
 class ProjectMapSizesDocsTest(unittest.TestCase):
     """PROJECT-MAP's docs-section size claims must match os.stat of the
     real files, within the rounding the map uses (KB = KiB, +/- 1; B exact).
-    Dates in the same lines are deliberately not checked (clock, not tree)."""
+    Dates in the same lines are deliberately not checked (clock, not tree).
+    HANDOFF.md and CHANGELOG.md are exempt: HANDOFF's live block grows on
+    every close and CHANGELOG.md is append-only and grows on every PR, so
+    a pinned size for either is stale by construction; the map names a
+    marker instead, and test_changelog_size_is_not_pinned guards that."""
 
     def test_doc_size_claims_within_rounding(self) -> None:
         path = _doc_path("PROJECT-MAP.md")
@@ -618,9 +622,11 @@ class ProjectMapSizesDocsTest(unittest.TestCase):
         offenders = []
         for name, value, unit in re.findall(
                 r"^- `([^`]+)` - ~?(\d+) (KB|B), touched", text, re.M):
-            if name == "HANDOFF.md":
-                # Size is not a stable claim (LIVE-STATE grows every close).
-                # ProjectMapHandoffCountsDocsTest forbids pinning it.
+            if name in ("HANDOFF.md", "CHANGELOG.md"):
+                # Size is not a stable claim (LIVE-STATE grows every close;
+                # CHANGELOG.md is append-only and grows on every PR).
+                # ProjectMapHandoffCountsDocsTest forbids pinning HANDOFF's,
+                # and test_changelog_size_is_not_pinned forbids CHANGELOG's.
                 continue
             target = REPO / name
             if not target.is_file():
@@ -639,6 +645,23 @@ class ProjectMapSizesDocsTest(unittest.TestCase):
             offenders, [],
             f"PROJECT-MAP size claims drifted: {offenders}. "
             f"Update PROJECT-MAP.md by hand")
+
+    def test_changelog_size_is_not_pinned(self) -> None:
+        path = _doc_path("PROJECT-MAP.md")
+        if not path.is_file():
+            self.skipTest("PROJECT-MAP.md not present (public clone)")
+        text = _unmojibake(path.read_text(encoding="utf-8", errors="replace"))
+        self.assertTrue(
+            re.search(r"^- `CHANGELOG\.md` - ", text, re.M),
+            "PROJECT-MAP must list CHANGELOG.md in its Docs section; "
+            "the entry is marker-only, not absent",
+        )
+        self.assertIsNone(
+            re.search(r"^- `CHANGELOG\.md` - ~?\d+ (KB|B)", text, re.M),
+            "PROJECT-MAP pins a CHANGELOG.md byte size; CHANGELOG.md "
+            "grows on every PR so the figure is stale by construction "
+            "-- name the append-only marker instead",
+        )
 
 
 class WorldSpawnNopersistFlagDocsTest(unittest.TestCase):

@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - README's "Not tested" list now states what was measured in game on 2026-11-11 (DayZDiag 1.30.164289, v1.5, runs `9b4390c2`, `44497a99` and `d47db64b`) and what is still not tested, and the descriptions of `nav_path_query`, `infected_drive`, `survivor_drive` and `bot_start` state the measured behaviour and the known defects (inbox d5d6, 6b52, 851c and 7c86). The same runs saw `actor_emote` refuse `rps_r` on a crouched player (`emote_rejected`, `reason=can_play_emote`, `stance=crouch`), and `players_visibility` and `query_all_players` answer ok with an empty list on a server-only run. Documentation only: no behaviour, addon or PBO change.
+- PROJECT-MAP no longer pins CHANGELOG.md's size (or its date): its Docs entry is marker-only, like HANDOFF.md's, because this file is append-only and grows with every change, so a pinned figure was stale by construction and conflicted between changes. The docs-truth test exempts CHANGELOG.md from the size check like HANDOFF.md and now fails if a pinned size for it returns, while every other doc's figure is still checked; the map generator emits the same marker line. Documentation and tests only: no behaviour, addon or PBO change.
 
 ### Fixed
 
